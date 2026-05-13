@@ -1,0 +1,546 @@
+"""FastAPI app.
+
+M1 routes:
+  GET  /api/health
+  POST /api/sessions                          → create empty session
+  GET  /api/sessions                          → list sessions
+  GET  /api/sessions/{sid}                    → session info + EDL summary + ops
+  POST /api/sessions/{sid}/upload             → upload + ingest a video
+  POST /api/sessions/{sid}/dispatch           → call a tool { tool, args }
+  GET  /api/sessions/{sid}/edl                → full EDL JSON
+  GET  /api/sessions/{sid}/ops                → ops log
+  GET  /api/sessions/{sid}/transcript         → transcript (first source)
+  POST /api/sessions/{sid}/preview            → render preview, returns path
+  GET  /api/sessions/{sid}/preview.mp4        → stream current preview
+  POST /api/sessions/{sid}/export             → render export, returns path
+  GET  /api/sessions/{sid}/files/{kind}/{name}→ stream session-scoped media
+
+M2 routes:
+  POST /api/sessions/{sid}/chat               → SSE-stream a Claude chat turn
+  GET  /api/sessions/{sid}/history            → chat history
+"""
+from __future__ import annotations
+import json
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .config import WORKDIR, DEFAULT_CANVAS
+from .storage import (new_session_id, session_dir, session_exists,
+                       list_sessions, write_meta, read_meta)
+from .edl import EDLStore
+from .edl.schema import Canvas
+from .ingest import ingest_upload
+from .render import render_preview, render_export
+from .agent.dispatch import dispatch, list_tools
+from .agent.loop import chat_turn
+
+app = FastAPI(title="video-ai-editor")
+
+# Production hardening: request IDs, structured JSON logging, error envelope,
+# /livez + /readyz + /metrics, sliding-window rate limit. Idempotent.
+from .api.hardening import install as _install_hardening, METRICS, get_logger
+_install_hardening(app)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
+
+
+# Single in-memory store cache so we don't reload EDL on every request.
+_STORES: dict[str, EDLStore] = {}
+
+
+def _safe_filename(name: str | None, fallback: str) -> str:
+    """Strip ffmpeg-hostile characters from a user-supplied filename.
+
+    ffmpeg passes paths to filter sub-modules (lut3d=, subtitles=, drawtext=
+    text from file, even some demuxer probes) by interpolating them into the
+    filter_complex string. Special chars in those paths break the parser
+    even when the file is referenced via a separate `-i` argv. Easier to
+    strip the chars at upload than to escape every downstream codepath.
+
+    Strips: : ' [ ] , ; ` $ ( ) * ? & < > | \\ \" + spaces.
+    Keeps: A-Z a-z 0-9 . _ - and one final extension.
+    """
+    raw = Path(name or fallback).name  # path-traversal guard
+    stem = Path(raw).stem
+    suffix = Path(raw).suffix.lower()
+    import re as _re
+    stem_clean = _re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._- ")
+    # Collapse runs of underscore/dash that the sub above can leave behind.
+    stem_clean = _re.sub(r"[_-]{2,}", "_", stem_clean).strip("._- ")
+    suffix_clean = _re.sub(r"[^A-Za-z0-9.]+", "", suffix)
+    if not stem_clean:
+        # Falls back to fallback's stem + a short hash of the original so two
+        # all-non-ASCII filenames (Hindi/CJK) don't collide on disk.
+        import hashlib as _h
+        sig = _h.sha1((name or "").encode("utf-8")).hexdigest()[:6]
+        stem_clean = f"{Path(fallback).stem}_{sig}"
+    return f"{stem_clean}{suffix_clean}" or fallback
+
+
+def _store(sid: str) -> EDLStore:
+    if sid not in _STORES:
+        if not session_exists(sid):
+            raise HTTPException(404, f"session {sid} not found")
+        # OK to create the dir tree now (subdirs etc.); we already proved the
+        # session was real.
+        _STORES[sid] = EDLStore(session_dir(sid))
+    return _STORES[sid]
+
+
+# --- shared models ---
+
+class DispatchRequest(BaseModel):
+    tool: str
+    args: dict[str, Any] = {}
+
+
+class CreateSessionRequest(BaseModel):
+    name: str | None = None
+
+
+class ExportRequest(BaseModel):
+    height: int | None = None
+    fps: int | None = None
+    crf: int = 18
+
+
+# --- routes ---
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
+@app.get("/api/tools")
+def tools():
+    return {"tools": list_tools()}
+
+
+@app.post("/api/sessions")
+def create_session(body: CreateSessionRequest | None = None):
+    sid = new_session_id()
+    d = session_dir(sid)
+    name = (body.name if body and body.name else sid)
+    write_meta(sid, {"name": name})
+    # Initialize the EDL store so edl.json exists
+    store = EDLStore(d)
+    store.commit("init", {}, "Initial empty project")
+    _STORES[sid] = store
+    return {"id": sid, "name": name}
+
+
+@app.get("/api/sessions")
+def list_all():
+    return {"sessions": list_sessions()}
+
+
+@app.get("/api/sessions/{sid}")
+def get_session(sid: str):
+    store = _store(sid)
+    meta = read_meta(sid)
+    return {
+        "id": sid,
+        "name": meta.get("name", sid),
+        "summary": dispatch(store, "get_timeline", {"summary": True}),
+        "ops": [op.model_dump() for op in store.ops.ops[-25:]],
+    }
+
+
+@app.post("/api/sessions/{sid}/vo_record")
+async def vo_record(sid: str, file: UploadFile = File(...),
+                    start: float = Form(0.0), gain_db: float = Form(0.0)):
+    """Receive a recorded mic blob (WebM/Opus or WAV) and add it to the vo track.
+
+    Browser MediaRecorder typically produces audio/webm;codecs=opus. We trans-
+    code to a session-local AAC mp4 for clean playback in the timeline pipeline.
+    """
+    sd = session_dir(sid)
+    vo_dir = sd / "uploads" / "vo"
+    vo_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(file.filename, "vo.webm")
+    raw = vo_dir / f"raw_{safe_name}"
+    with raw.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+
+    # Normalize to AAC mp4 so the audio mixer can splice it cleanly
+    norm = vo_dir / f"vo_{int(time.time())}.m4a"
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(raw),
+         "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+         str(norm)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise HTTPException(422, {"error": f"vo transcode failed: {proc.stderr[-800:]}"})
+    raw.unlink(missing_ok=True)
+
+    # Probe duration
+    from .ingest.probe import probe as _probe
+    try:
+        p = _probe(norm)
+    except Exception as e:
+        raise HTTPException(422, {"error": str(e)})
+
+    store = _store(sid)
+    from .edl.schema import Track, Clip, AudioProps
+    track = store.edl.get_track("vo")
+    if not track:
+        track = Track(id="vo", type="vo", z=0, label="Voiceover")
+        store.edl.tracks.append(track)
+    clip = Clip(
+        src=str(norm), in_=0.0, out=p.duration, start=float(start),
+        audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
+    )
+    track.clips.append(clip)
+    summary = f"Voiceover {p.duration:.1f}s @ {start:.1f}s ({float(gain_db):+.1f} dB)"
+    store.commit("vo_record", {"start": start, "gain_db": gain_db}, summary)
+    return {"clip_id": clip.id, "src": str(norm), "duration": p.duration,
+            "summary": summary, "edl_hash": store.edl.hash()}
+
+
+@app.post("/api/sessions/{sid}/sticker_upload")
+async def sticker_upload(sid: str, file: UploadFile = File(...),
+                         add_at_playhead: bool = Form(False),
+                         playhead: float = Form(0.0)):
+    """Upload a PNG (or other image) and optionally drop it as a sticker."""
+    sd = session_dir(sid)
+    sticker_dir = sd / "uploads" / "stickers"
+    sticker_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(file.filename, "sticker.png")
+    dst = sticker_dir / safe_name
+    with dst.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    info = {"src": str(dst), "filename": safe_name}
+    if add_at_playhead:
+        store = _store(sid)
+        canvas = store.edl.canvas
+        dispatch(store, "add_sticker", {
+            "src": str(dst),
+            "start": float(playhead),
+            "end": float(playhead) + 3.0,
+            "position": [canvas.w / 2, canvas.h * 0.55],
+            "scale": 1.0,
+        })
+        info["edl_hash"] = store.edl.hash()
+    return info
+
+
+@app.post("/api/sessions/{sid}/audio_upload")
+async def audio_upload(sid: str, file: UploadFile = File(...),
+                       add_to_music: bool = Form(True),
+                       duck: bool = Form(True),
+                       volume_db: float = Form(-12.0)):
+    """Upload an audio file (mp3/wav/m4a) and optionally append to the music track."""
+    store = _store(sid)
+    sd = session_dir(sid)
+    audio_dir = sd / "uploads" / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(file.filename, "audio.mp3")
+    dst = audio_dir / safe_name
+    with dst.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    # Probe to get duration
+    from .ingest.probe import probe as _probe
+    try:
+        p = _probe(dst)
+    except Exception as e:
+        raise HTTPException(422, {"file": safe_name, "error": str(e)})
+
+    if add_to_music:
+        store.edl.recompute_duration()
+        # Place at start of timeline; loop or trim to project duration if needed
+        start = 0.0
+        out = min(p.duration, max(store.edl.duration, p.duration))
+        dispatch(store, "add_music", {
+            "src": str(dst), "start": start, "in": 0.0, "out": out,
+            "duck": duck, "volume_db": volume_db,
+        })
+
+    return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash()}
+
+
+@app.post("/api/sessions/{sid}/upload")
+async def upload(sid: str, background_tasks: BackgroundTasks,
+                 file: UploadFile = File(...),
+                 add_to_timeline: bool = Form(True),
+                 transcribe: bool = Form(True),
+                 whisper_model: str = Form("")):
+    store = _store(sid)
+    sd = session_dir(sid)
+    uploads = sd / "uploads"
+    uploads.mkdir(exist_ok=True)
+    safe_name = _safe_filename(file.filename, "upload.mp4")
+    dst = uploads / safe_name
+    with dst.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+
+    # Normalize is unavoidable for the timeline to work — it's relatively fast.
+    # Whisper transcription is the slow part (10-60s on CPU); push it to a
+    # background task so the upload response returns immediately and the UI is
+    # responsive. Transcript becomes available later via the transcript endpoint.
+    try:
+        res = ingest_upload(dst, uploads / dst.stem, transcribe_audio=False)
+    except RuntimeError as e:
+        raise HTTPException(status_code=422, detail={"file": safe_name, "error": str(e)})
+
+    if add_to_timeline:
+        store.edl.recompute_duration()
+        start = store.edl.duration
+        dispatch(store, "add_clip", {
+            "track": "v1",
+            "src": str(res.normalized),
+            "in": 0.0,
+            "out": res.probe.duration,
+            "start": start,
+        })
+
+    if transcribe:
+        # Run whisper after we've returned. Writes to ingest.json so subsequent
+        # get_transcript / add_caption_track calls find it. `whisper_model`
+        # opts the user into a smaller model — `tiny.en` is ~5× faster than
+        # `small` for English-only content; `small` (default) is multilingual.
+        from .ingest.transcribe import transcribe as _transcribe
+        out_dir = uploads / dst.stem
+        normalized_path = Path(res.normalized)
+        chosen_model = whisper_model.strip() or None
+
+        def _bg_transcribe() -> None:
+            try:
+                tx = _transcribe(normalized_path, model_size=chosen_model)
+                ingest_json = out_dir / "ingest.json"
+                if ingest_json.exists():
+                    data = json.loads(ingest_json.read_text())
+                    data["transcript"] = tx.model_dump()
+                    ingest_json.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
+
+        background_tasks.add_task(_bg_transcribe)
+
+    return {
+        "src": str(dst),
+        "normalized": str(res.normalized),
+        "duration": res.probe.duration,
+        "probe": res.probe.model_dump(),
+        "edl_hash": store.edl.hash(),
+        "transcript_pending": bool(transcribe),
+    }
+
+
+@app.post("/api/sessions/{sid}/dispatch")
+def dispatch_tool(sid: str, body: DispatchRequest):
+    store = _store(sid)
+    try:
+        result = dispatch(store, body.tool, body.args)
+    except KeyError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        # External-tool / setup errors bubble up here (pyannote token missing,
+        # ffmpeg failure, model not found, etc.) — give the user the message.
+        raise HTTPException(422, str(e))
+    last_op = store.ops.last()
+    return {
+        "result": result,
+        "edl_hash": store.edl.hash(),
+        "op": last_op.model_dump() if last_op else None,
+    }
+
+
+@app.get("/api/sessions/{sid}/edl")
+def get_edl(sid: str):
+    store = _store(sid)
+    return JSONResponse(json.loads(store.edl.to_json()))
+
+
+@app.get("/api/sessions/{sid}/ops")
+def get_ops(sid: str, since: int = 0):
+    store = _store(sid)
+    return {"ops": [op.model_dump() for op in store.ops.ops[since:]]}
+
+
+@app.get("/api/sessions/{sid}/transcript")
+def get_transcript(sid: str):
+    store = _store(sid)
+    return dispatch(store, "get_transcript", {})
+
+
+@app.post("/api/sessions/{sid}/preview")
+def make_preview(sid: str):
+    store = _store(sid)
+    res = render_preview(store.edl, store.dir)
+    return {
+        "path": str(res.path),
+        "cached": res.cached,
+        "edl_hash": res.edl_hash,
+        "url": f"/api/sessions/{sid}/preview.mp4?h={res.edl_hash}",
+    }
+
+
+@app.get("/api/sessions/{sid}/preview.mp4")
+def stream_preview(sid: str, h: str | None = None):
+    store = _store(sid)
+    target_hash = h or store.edl.hash()
+    p = store.dir / "previews" / f"{target_hash}.mp4"
+    if not p.exists():
+        # Render on demand if missing
+        res = render_preview(store.edl, store.dir)
+        p = res.path
+    return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
+
+
+@app.post("/api/sessions/{sid}/export")
+def make_export(sid: str, body: ExportRequest | None = None):
+    store = _store(sid)
+    body = body or ExportRequest()
+    res = render_export(store.edl, store.dir, height=body.height, fps=body.fps, crf=body.crf)
+    return {"path": str(res.path), "filename": res.path.name,
+            "url": f"/api/sessions/{sid}/files/exports/{res.path.name}"}
+
+
+# --- M2: chat ---
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+def _history_path(sid: str) -> Path:
+    return session_dir(sid) / "chat.json"
+
+
+def _load_history(sid: str) -> list[dict]:
+    p = _history_path(sid)
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return []
+
+
+def _save_history(sid: str, history: list[dict]) -> None:
+    _history_path(sid).write_text(json.dumps(history, indent=2, default=str))
+
+
+@app.get("/api/sessions/{sid}/history")
+def get_history(sid: str):
+    return {"history": _load_history(sid)}
+
+
+@app.post("/api/sessions/{sid}/chat")
+async def chat(sid: str, body: ChatRequest):
+    """SSE-stream a Claude chat turn (text deltas + tool calls + ops)."""
+    store = _store(sid)
+    history = _load_history(sid)
+
+    async def gen():
+        try:
+            async for evt in chat_turn(store, body.message, history):
+                yield f"data: {json.dumps(evt)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+        finally:
+            _save_history(sid, history)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/sessions/{sid}/waveform")
+def get_waveform(sid: str, src: str, peaks_per_sec: int = 50):
+    """Return downsampled audio peaks for a source path used in this session.
+
+    `src` must lie within the session workdir (defends against path traversal).
+    """
+    store = _store(sid)
+    sd = session_dir(sid)
+    target = Path(src).resolve()
+    sd_resolved = sd.resolve()
+    if not str(target).startswith(str(sd_resolved)):
+        raise HTTPException(403, "src must be inside the session workdir")
+    if not target.exists():
+        raise HTTPException(404, "src not found")
+    from .render.waveform import waveform_peaks
+    return waveform_peaks(target, sd / "cache" / "waveforms",
+                          peaks_per_sec=peaks_per_sec)
+
+
+# --- M6: project save/load ---
+
+@app.post("/api/sessions/{sid}/save_project")
+def save_project_endpoint(sid: str):
+    sd = session_dir(sid)
+    from .storage_project import save_project
+    out = sd / "exports" / f"{sd.name}.vae"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    save_project(sid, out)
+    return {"path": str(out), "filename": out.name,
+            "url": f"/api/sessions/{sid}/files/exports/{out.name}",
+            "size": out.stat().st_size}
+
+
+@app.post("/api/load_project")
+async def load_project_endpoint(file: UploadFile = File(...)):
+    """Upload a .vae and open it as a new session."""
+    name = Path(file.filename or "project.vae").name
+    if not name.endswith(".vae") and not name.endswith(".zip"):
+        raise HTTPException(415, "expected a .vae project file")
+    tmp = WORKDIR / f"_import_{name}"
+    with tmp.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    try:
+        from .storage_project import load_project
+        sid = load_project(tmp)
+    except Exception as e:
+        raise HTTPException(422, f"failed to load project: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"id": sid}
+
+
+@app.get("/api/sessions/{sid}/files/{kind}/{name}")
+def serve_session_file(sid: str, kind: str, name: str):
+    if kind not in {"uploads", "previews", "exports"}:
+        raise HTTPException(404, "not found")
+    sd = session_dir(sid)
+    # `name` may include subdirs (e.g. "Outfit.../Outfit....normalized.mp4")
+    candidate = (sd / kind / name).resolve()
+    # Prevent path traversal
+    if not str(candidate).startswith(str(sd.resolve())):
+        raise HTTPException(403, "forbidden")
+    if not candidate.exists():
+        # Try one level deeper for ingest output (uploaded clips live under uploads/<stem>/)
+        for sub in (sd / kind).rglob(name):
+            candidate = sub
+            break
+    if not candidate.exists():
+        raise HTTPException(404, "file not found")
+    return FileResponse(candidate)
+
+
+# Mount the built frontend at the root, so the desktop wrap can open
+# http://localhost:8000/ as a single self-contained app.
+_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if _FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")

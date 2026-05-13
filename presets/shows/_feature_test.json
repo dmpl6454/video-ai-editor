@@ -1,0 +1,30 @@
+{
+  "canvas": {
+    "w": 1080,
+    "h": 1920,
+    "fps": 30,
+    "bg": "#000000"
+  },
+  "brand_kit": {
+    "handle": "@test.handle",
+    "hashtags": [
+      "#test"
+    ],
+    "end_card": null,
+    "palette": [],
+    "font": null
+  },
+  "captions": {
+    "enabled": true,
+    "style": "ig_chunky",
+    "position": "bottom",
+    "lang": null
+  },
+  "music_seed": {
+    "src": "/Users/sudhanshu/video-ai-editor/workdir/s_4b69f389a5/uploads/audio/test_music.wav",
+    "volume_db": -12.0,
+    "fade_in": 0.5,
+    "fade_out": 1.0,
+    "duck": true
+  }
+}

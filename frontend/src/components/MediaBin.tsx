@@ -1,0 +1,191 @@
+import { useRef, useState } from 'react'
+import { useStore } from '../store'
+import { isMediaClip } from '../types'
+import { StickerPanel } from './StickerPanel'
+import { VoRecorder } from './VoRecorder'
+
+const AUDIO_EXTS = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|aif|aiff)$/i
+
+export function MediaBin() {
+  const upload = useStore((s) => s.upload)
+  const uploadAudio = useStore((s) => s.uploadAudio)
+  const uploading = useStore((s) => s.uploading)
+  const progress = useStore((s) => s.uploadProgress)
+  const uploadError = useStore((s) => s.uploadError)
+  const clearUploadError = useStore((s) => s.clearUploadError)
+  const edl = useStore((s) => s.edl)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const audioRef = useRef<HTMLInputElement>(null)
+  const [dragOver, setDragOver] = useState(false)
+
+  const onFiles = async (files: FileList | null) => {
+    if (!files) return
+    for (const f of Array.from(files)) {
+      // Route audio files to the music endpoint, video to the timeline.
+      if (AUDIO_EXTS.test(f.name) || f.type.startsWith('audio/')) {
+        await uploadAudio(f)
+      } else {
+        await upload(f)
+      }
+    }
+  }
+
+  // Unique source paths used on the timeline
+  const sources = new Map<string, number>()
+  for (const t of edl?.tracks ?? []) {
+    for (const c of t.clips) {
+      if (isMediaClip(c)) sources.set(c.src, (sources.get(c.src) ?? 0) + 1)
+    }
+  }
+
+  return (
+    <div className="media-bin">
+      <h2>Media</h2>
+      <div
+        className={`dropzone${dragOver ? ' over' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); void onFiles(e.dataTransfer.files) }}
+        onClick={() => fileRef.current?.click()}
+      >
+        {uploading ? `Uploading ${progress}…` : 'Drop video or audio · or click'}
+        {/* Wider accept list so HEIC/HEVC/.mov sources from iPhone & cameras pass the picker. */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="video/*,audio/*,.mov,.MOV,.mp4,.MP4,.m4v,.mkv,.webm,.avi,.MTS,.mp3,.wav,.m4a,.aac,.flac"
+          hidden
+          onChange={(e) => onFiles(e.target.files)}
+        />
+      </div>
+      <button
+        style={{ width: '100%', marginBottom: 10, fontSize: 11 }}
+        onClick={() => audioRef.current?.click()}
+        disabled={uploading}
+      >
+        🎵 Add music…
+      </button>
+      <input
+        ref={audioRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void uploadAudio(f)
+        }}
+      />
+
+      {uploadError && (
+        <div style={{
+          background: '#311',
+          border: '1px solid #533',
+          color: '#fbb',
+          padding: '8px 10px',
+          borderRadius: 6,
+          fontSize: 11,
+          marginBottom: 10,
+          whiteSpace: 'pre-wrap',
+          maxHeight: 220,
+          overflow: 'auto',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+            <b style={{ color: '#fcc' }}>Upload failed</b>
+            <button
+              onClick={clearUploadError}
+              style={{ background: 'transparent', border: 'none', color: '#fbb', padding: 0, cursor: 'pointer' }}
+            >
+              ×
+            </button>
+          </div>
+          {uploadError}
+        </div>
+      )}
+
+      {[...sources.entries()].map(([src, n]) => (
+        <div
+          key={src}
+          className="item"
+          title={`${src}\n\nDrag onto the timeline to add another instance.`}
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = 'copy'
+            e.dataTransfer.setData('application/x-vai-src', src)
+            e.dataTransfer.setData('text/plain', src)  // fallback for sniffers
+          }}
+          style={{ cursor: 'grab' }}
+        >
+          {src.split('/').pop()}
+          <div style={{ color: 'var(--text-dim)', fontSize: 10, marginTop: 4 }}>
+            ×{n} on timeline · drag to add
+          </div>
+        </div>
+      ))}
+
+      <VoRecorder />
+      <MusicPanel />
+      <StickerPanel />
+    </div>
+  )
+}
+
+function MusicPanel() {
+  const edl = useStore((s) => s.edl)
+  const dispatch = useStore((s) => s.dispatch)
+  const music = edl?.tracks.find((t) => t.id === 'music')
+  const clip = music?.clips.find((c) => 'src' in c) as { id: string; src: string } | undefined
+  const ducking = !!(music as unknown as { duck?: unknown })?.duck
+
+  if (!clip) return null
+  // Approximate current gain by reading the (typed-loose) audio.gain_db
+  const gain = (clip as unknown as { audio?: { gain_db?: number } }).audio?.gain_db ?? -12
+
+  return (
+    <div className="item" style={{ background: 'var(--bg-3)', borderColor: '#3a3a44' }}>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>🎵 Music</div>
+      <div style={{ wordBreak: 'break-all' }}>{clip.src.split('/').pop()}</div>
+      <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-dim)', minWidth: 38 }}>Vol</label>
+        <input
+          type="range" min={-30} max={6} step={0.5} value={gain}
+          onChange={(e) => dispatch('set_volume', { target: 'music', db: Number(e.target.value) })}
+          style={{ flex: 1 }}
+        />
+        <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', minWidth: 36, textAlign: 'right' }}>
+          {gain.toFixed(0)} dB
+        </span>
+      </div>
+      <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
+        <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          <input
+            type="checkbox" checked={ducking}
+            onChange={async (e) => {
+              // Toggling duck is a bit awkward without a dedicated tool;
+              // re-add the music with the new flag (cheap, replaces clip).
+              const wasDucked = ducking
+              await dispatch('add_music', {
+                src: clip.src,
+                start: 0,
+                in: 0,
+                out: 0,
+                volume_db: gain,
+                duck: !wasDucked,
+              })
+              // remove the duplicate
+              await dispatch('ripple_delete', { clip_id: clip.id })
+              void e
+            }}
+            style={{ marginRight: 4 }}
+          />
+          Duck under speech
+        </label>
+      </div>
+      <button
+        style={{ marginTop: 6, width: '100%', fontSize: 11 }}
+        onClick={() => dispatch('ripple_delete', { clip_id: clip.id })}
+      >
+        Remove music
+      </button>
+    </div>
+  )
+}

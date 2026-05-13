@@ -1,0 +1,68 @@
+[project]
+name = "video-ai-editor"
+version = "0.1.0"
+description = "Local AI video editor — chat-driven, CapCut-class"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.8",
+    "anthropic>=0.40",
+    "faster-whisper>=1.0",
+    "ffmpeg-python>=0.2",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "sse-starlette>=2.1",
+    "aiofiles>=24.0",
+    "librosa>=0.11.0",
+    "piper-tts>=1.4.2",
+    "mediapipe>=0.10.35",
+    "demucs>=4.0.1",
+    "pywebview>=6.2.1",
+    "torchcodec>=0.11.1",
+    "argostranslate>=1.11.0",
+    "simple-lama-inpainting>=0.1.0",
+    "rembg>=2.0.75",
+    "noisereduce>=3.0.3",
+    "soundfile>=0.13.1",
+    "pyannote-audio>=4.0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+# heavier AI deps loaded on demand in later milestones
+ai = [
+    "movis>=0.7",
+    "librosa>=0.10",
+    "opencv-python>=4.10",
+    "mediapipe>=0.10",
+    "noisereduce>=3.0",
+    "rembg>=2.0",
+]
+
+[project.scripts]
+video-ai-editor = "video_ai_editor.desktop:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_ai_editor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "playwright>=1.59.0",
+    "py2app>=0.28.10",
+    "pyinstaller>=6.20.0",
+]

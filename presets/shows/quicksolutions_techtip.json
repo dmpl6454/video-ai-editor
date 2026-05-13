@@ -1,0 +1,25 @@
+{
+  "canvas": {
+    "w": 1080,
+    "h": 1920,
+    "fps": 30,
+    "bg": "#000000"
+  },
+  "brand_kit": {
+    "handle": "@quicksolutions.in",
+    "hashtags": [
+      "#techtips",
+      "#tech"
+    ],
+    "end_card": null,
+    "palette": [],
+    "font": null
+  },
+  "captions": {
+    "enabled": true,
+    "style": "ig_chunky",
+    "position": "bottom",
+    "lang": null
+  },
+  "music_seed": null
+}
