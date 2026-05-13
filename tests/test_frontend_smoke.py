@@ -4,6 +4,7 @@ console errors / unhandled rejections / blank page.
 """
 from __future__ import annotations
 import http.server
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -26,9 +27,18 @@ def _free_port() -> int:
 
 
 def _ensure_built() -> Path:
-    """Build (or reuse) the production frontend bundle."""
+    """Build (or reuse) the production frontend bundle.
+
+    Skips cleanly when Node tooling isn't available (CI's backend job, fresh
+    clones without `npm install`). The dedicated frontend CI job covers the
+    actual build.
+    """
     if (DIST / "index.html").exists():
         return DIST
+    if not shutil.which("npx"):
+        pytest.skip("npx not on PATH; frontend build covered by frontend CI job")
+    if not (FRONTEND_DIR / "node_modules").exists():
+        pytest.skip("frontend/node_modules absent; run `npm install` in frontend/")
     proc = subprocess.run(
         ["npx", "vite", "build"],
         cwd=str(FRONTEND_DIR), capture_output=True, text=True,
