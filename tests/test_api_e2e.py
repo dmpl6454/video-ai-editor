@@ -13,7 +13,9 @@ def test_full_workflow_create_upload_cut_export(monkeypatch, tmp_path):
     from video_ai_editor import config, storage, main
     monkeypatch.setattr(config, "WORKDIR", tmp_path)
     monkeypatch.setattr(storage, "WORKDIR", tmp_path)
-    monkeypatch.setattr(main, "_STORES", {})
+    from collections import OrderedDict
+    # Mirror the production type — _store() uses OrderedDict.move_to_end for LRU.
+    monkeypatch.setattr(main, "_STORES", OrderedDict())
 
     c = TestClient(app)
 

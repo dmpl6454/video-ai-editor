@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -59,8 +60,29 @@ app.add_middleware(
 )
 
 
-# Single in-memory store cache so we don't reload EDL on every request.
-_STORES: dict[str, EDLStore] = {}
+# LRU-bounded in-memory store cache. Without a bound, every distinct session ID
+# the server has ever seen stays in memory forever; a long-running multi-user
+# instance leaks ~MB per session indefinitely. OrderedDict gives us O(1) LRU
+# semantics with the same `dict`-shaped API the rest of the file expects.
+#
+# Lock guards the get-or-create — without it, two concurrent requests for the
+# same session can both see "missing", both build an EDLStore, and the loser's
+# in-memory edits get silently overwritten on the next dispatch. FastAPI runs
+# sync endpoints in a threadpool so this is reachable under any real load.
+import os as _os
+from collections import OrderedDict
+_STORES_MAX = int(_os.environ.get("VAI_STORES_CACHE_MAX", "64"))
+_STORES: OrderedDict[str, EDLStore] = OrderedDict()
+_STORES_LOCK = threading.Lock()
+
+
+def _stores_evict_if_full() -> None:
+    """Caller must hold _STORES_LOCK. Evicts the LRU entry if at cap."""
+    while len(_STORES) >= _STORES_MAX:
+        evicted_sid, _ = _STORES.popitem(last=False)
+        # No flush needed — every commit() already wrote to disk; the in-memory
+        # store is just a cache. Re-loaded lazily on next access.
+        del evicted_sid
 
 
 def _safe_filename(name: str | None, fallback: str) -> str:
@@ -93,13 +115,19 @@ def _safe_filename(name: str | None, fallback: str) -> str:
 
 
 def _store(sid: str) -> EDLStore:
-    if sid not in _STORES:
+    # Fast path: already cached. Mark as recently used.
+    with _STORES_LOCK:
+        cached = _STORES.get(sid)
+        if cached is not None:
+            _STORES.move_to_end(sid)
+            return cached
         if not session_exists(sid):
             raise HTTPException(404, f"session {sid} not found")
         # OK to create the dir tree now (subdirs etc.); we already proved the
         # session was real.
+        _stores_evict_if_full()
         _STORES[sid] = EDLStore(session_dir(sid))
-    return _STORES[sid]
+        return _STORES[sid]
 
 
 # --- shared models ---
@@ -140,7 +168,9 @@ def create_session(body: CreateSessionRequest | None = None):
     # Initialize the EDL store so edl.json exists
     store = EDLStore(d)
     store.commit("init", {}, "Initial empty project")
-    _STORES[sid] = store
+    with _STORES_LOCK:
+        _stores_evict_if_full()
+        _STORES[sid] = store
     return {"id": sid, "name": name}
 
 
@@ -385,16 +415,67 @@ def get_transcript(sid: str):
     return dispatch(store, "get_transcript", {})
 
 
-@app.post("/api/sessions/{sid}/preview")
-def make_preview(sid: str):
-    store = _store(sid)
-    res = render_preview(store.edl, store.dir)
+def _preview_payload(sid: str, res) -> dict:
     return {
         "path": str(res.path),
         "cached": res.cached,
         "edl_hash": res.edl_hash,
         "url": f"/api/sessions/{sid}/preview.mp4?h={res.edl_hash}",
     }
+
+
+@app.post("/api/sessions/{sid}/preview")
+def make_preview(sid: str, wait: int = 1):
+    """Render a preview.
+
+    `wait=1` (default): blocks until done. Backwards-compatible with the
+    existing frontend.
+    `wait=0`: returns 202 + `{job_id, status_url}` immediately. Poll
+    `/api/jobs/{job_id}` for progress; the result field gets the same
+    payload the sync path returns. Use this for hosted/multi-user setups
+    where the request thread shouldn't block on a 30s render.
+    """
+    store = _store(sid)
+    if wait:
+        res = render_preview(store.edl, store.dir)
+        return _preview_payload(sid, res)
+    from .api.jobs import JOB_MANAGER
+    edl_snapshot = store.edl  # safe — render_preview only reads
+    session_dir_snapshot = store.dir
+
+    def _job() -> dict:
+        res = render_preview(edl_snapshot, session_dir_snapshot)
+        return _preview_payload(sid, res)
+
+    job = JOB_MANAGER.submit(kind="preview", fn=_job, session_id=sid)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job.id, "status": job.status,
+                 "status_url": f"/api/jobs/{job.id}"},
+    )
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    """Poll a background job. Returns the full job state.
+
+    `result` is null until `status == "completed"`; `error` is null
+    unless `status == "failed"`. Clients should poll until status is
+    in {completed, failed}.
+    """
+    from .api.jobs import JOB_MANAGER
+    job = JOB_MANAGER.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"job {job_id} not found")
+    return job.to_dict()
+
+
+@app.get("/api/sessions/{sid}/jobs")
+def list_session_jobs(sid: str):
+    """Recent jobs scoped to a session. Useful for a UI 'Renders' panel."""
+    _store(sid)  # 404 if session doesn't exist
+    from .api.jobs import JOB_MANAGER
+    return {"jobs": [j.to_dict() for j in JOB_MANAGER.list(session_id=sid)]}
 
 
 @app.get("/api/sessions/{sid}/preview.mp4")
@@ -409,13 +490,39 @@ def stream_preview(sid: str, h: str | None = None):
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
 
 
-@app.post("/api/sessions/{sid}/export")
-def make_export(sid: str, body: ExportRequest | None = None):
-    store = _store(sid)
-    body = body or ExportRequest()
-    res = render_export(store.edl, store.dir, height=body.height, fps=body.fps, crf=body.crf)
+def _export_payload(sid: str, res) -> dict:
     return {"path": str(res.path), "filename": res.path.name,
             "url": f"/api/sessions/{sid}/files/exports/{res.path.name}"}
+
+
+@app.post("/api/sessions/{sid}/export")
+def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
+    """Render an export at canvas resolution. `wait=0` returns 202 + job_id
+    immediately (poll `/api/jobs/{job_id}`); default keeps the sync shape
+    for backward compat. Exports can take minutes — use `wait=0` from any
+    client where the request might time out (most browsers/proxies)."""
+    store = _store(sid)
+    body = body or ExportRequest()
+    if wait:
+        res = render_export(store.edl, store.dir, height=body.height,
+                            fps=body.fps, crf=body.crf)
+        return _export_payload(sid, res)
+    from .api.jobs import JOB_MANAGER
+    edl_snapshot = store.edl
+    session_dir_snapshot = store.dir
+    height, fps, crf = body.height, body.fps, body.crf
+
+    def _job() -> dict:
+        res = render_export(edl_snapshot, session_dir_snapshot,
+                            height=height, fps=fps, crf=crf)
+        return _export_payload(sid, res)
+
+    job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job.id, "status": job.status,
+                 "status_url": f"/api/jobs/{job.id}"},
+    )
 
 
 # --- M2: chat ---

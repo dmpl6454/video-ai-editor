@@ -118,9 +118,19 @@ def get_transcript(store: EDLStore, args: dict) -> dict:
 
 # ---------- edits ----------
 
+def _safe_src(p: str | Path) -> str:
+    """Run a user-supplied filesystem path through the path-restriction
+    allowlist. Returns the resolved absolute path as a string. Raises
+    ValueError when restriction is on and the path escapes the allowlist;
+    no-op (just resolves) when restriction is off."""
+    from ..config import assert_path_allowed
+    return str(assert_path_allowed(p))
+
+
 def add_clip(store: EDLStore, args: dict) -> dict:
     track = _v_track(store.edl, args["track"])
-    clip = Clip(src=args["src"], in_=float(args["in"]), out=float(args["out"]), start=float(args["start"]))
+    clip = Clip(src=_safe_src(args["src"]), in_=float(args["in"]),
+                out=float(args["out"]), start=float(args["start"]))
     # Sensible default PiP placement for non-V1 video tracks. The PIP renderer
     # scales by 35% of the canvas long edge × `scale`. We can't know the
     # source aspect without probing, so we center the PIP and use a smaller
@@ -479,7 +489,7 @@ def audit_aesthetic(store: EDLStore, args: dict) -> dict:
 # ---------- M3: audio (music, fades, volumes), auto-trim, beats, reframe ----------
 
 def add_music(store: EDLStore, args: dict) -> dict:
-    src = str(args["src"])
+    src = _safe_src(args["src"])
     start = float(args.get("start", 0.0))
     in_ = float(args.get("in", 0.0))
     out = float(args.get("out", 0.0))
@@ -730,7 +740,7 @@ def find_moments(store: EDLStore, args: dict) -> dict:
 
 def match_style(store: EDLStore, args: dict) -> dict:
     """Extract a style fingerprint from a reference video."""
-    ref_path = Path(str(args["reference"]))
+    ref_path = Path(_safe_src(args["reference"]))
     if not ref_path.exists():
         raise ValueError(f"reference not found: {ref_path}")
     from ..ai.style_match import style_fingerprint
@@ -802,7 +812,7 @@ def apply_lut(store: EDLStore, args: dict) -> dict:
     src_arg = args.get("src") or args.get("lut_path")
     if not src_arg:
         raise ValueError("apply_lut needs `src` or `lut_path`")
-    src = str(src_arg)
+    src = _safe_src(src_arg)
     intensity = float(args.get("intensity", 1.0))
     cid = args.get("clip_id")
     target_clips: list[Clip] = []
@@ -1715,6 +1725,9 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
         if not png_path:
             raise ValueError(f"could not fetch emoji PNG for {emoji_arg!r}")
         src_arg = str(png_path)
+    else:
+        # User-supplied PNG path goes through the allowlist guard.
+        src_arg = _safe_src(src_arg)
 
     start = float(args.get("start", 0.0))
     end = float(args.get("end", start + 3.0))
@@ -1952,7 +1965,7 @@ def record_voiceover(store: EDLStore, args: dict) -> dict:
     capture happens in the browser via MediaRecorder; this tool ingests the
     saved file path returned from the /vo_record endpoint.
     """
-    src = Path(args["src"])
+    src = Path(_safe_src(args["src"]))
     if not src.exists():
         raise ValueError(f"voiceover file not found: {src}")
     start = float(args.get("start", 0.0))
@@ -2073,19 +2086,34 @@ def generate_hook(store: EDLStore, args: dict) -> dict:
     )
     out_text = "".join(b.text for b in resp.content if b.type == "text").strip()
     import json as _json, re
-    candidates: list[str] = []
+    raw: list = []
     try:
-        candidates = _json.loads(out_text)
+        raw = _json.loads(out_text)
     except Exception:
         # Try to pull a JSON array out of code-block formatting
         m = re.search(r"\[[^\]]+\]", out_text, re.S)
         if m:
             try:
-                candidates = _json.loads(m.group(0))
+                raw = _json.loads(m.group(0))
             except Exception:
-                candidates = [out_text]
+                raw = [out_text]
         else:
-            candidates = [out_text]
+            raw = [out_text]
+    # Trust-boundary guard: the LLM can return null, dicts, numbers, anything.
+    # Coerce to non-empty stripped strings so downstream UI never gets null/dict
+    # in a "list of hook strings" field.
+    candidates: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    candidates.append(s)
+            elif isinstance(item, (int, float, bool)):
+                candidates.append(str(item))
+            # Drop dicts, None, nested lists silently — they're never valid hooks.
+    elif isinstance(raw, str) and raw.strip():
+        candidates = [raw.strip()]
     return {"candidates": candidates[:3], "source": "claude"}
 
 
