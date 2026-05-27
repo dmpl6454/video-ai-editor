@@ -396,6 +396,125 @@ def add_hook_overlay(store: EDLStore, args: dict) -> dict:
     return add_super_text(store, {"text": text, "start": 0.0, "end": duration, "role": "hook"})
 
 
+# ---------- The 3-axis hook stack ---------------------------------------------
+#
+# Short-form viewers decide whether to keep watching in roughly 3 seconds.
+# Three signals pull them in; missing any one cuts the chance ~in half:
+#
+#   👁 Visual  — bold, unexpected opening. Motion. Not a static talking head.
+#   ✍ Text    — overlay in the first frames so silent-autoplay viewers get
+#                the topic instantly without unmuting.
+#   🎧 Audio   — strong opening line, trending sound, or audio cue that grabs
+#                attention before they even look at the screen.
+#
+# `apply_hook_stack` lays down all three at once. `audit_aesthetic` reports
+# which axes are present and blocks export when zero are.
+
+def apply_hook_stack(store: EDLStore, args: dict) -> dict:
+    """Bake all three hook axes onto the first ~3s of the project.
+
+    Args:
+        text      — hook overlay text. If omitted, calls generate_hook.
+        duration  — seconds the hook holds (default 3.0).
+        visual    — "punch_in" (default), "ken_burns", or "none". Adds keyframes
+                    to V1's first clip so the opening has motion.
+        audio     — "fade_boost" (default), "none". afade=in over 0.5s on V1
+                    audio so the opening lands cleanly even on cold autoplay.
+
+    Idempotent: tagged via metadata so re-running replaces rather than stacks.
+    """
+    duration = float(args.get("duration", 3.0))
+    visual_kind = str(args.get("visual", "punch_in"))
+    audio_kind = str(args.get("audio", "fade_boost"))
+
+    # 1) TEXT axis ---------------------------------------------------------
+    text = args.get("text")
+    if not text:
+        # Lean on the LLM/heuristic fallback to draft a hook line.
+        try:
+            r = generate_hook(store, {})
+            cands = r.get("candidates") or []
+            text = cands[0] if cands else "Watch this until the end."
+        except Exception:
+            text = "Watch this until the end."
+    # Remove any prior hook to keep this idempotent. add_super_text routes
+    # hooks to the `tx_hook` track; any role=="hook" overlay starting in the
+    # first second is treated as a prior hook from this stack.
+    for tid in ("tx_hook", "tx_super", "text"):
+        prior = store.edl.get_track(tid)
+        if prior:
+            prior.clips = [
+                c for c in prior.clips
+                if not (isinstance(c, TextClip) and c.role == "hook" and c.start < 1.0)
+            ]
+    text_result = add_super_text(store, {
+        "text": str(text), "start": 0.0, "end": duration, "role": "hook",
+    })
+
+    # 2) VISUAL axis -------------------------------------------------------
+    v1 = store.edl.get_track("v1")
+    first_clip = next(
+        (c for c in (v1.clips if v1 else []) if isinstance(c, Clip)),
+        None,
+    )
+    visual_applied = False
+    if first_clip and visual_kind != "none":
+        from ..edl.schema import Keyframe
+        if visual_kind == "punch_in":
+            # 1.0 → 1.06 over the hook window, ease-out → settles snappy.
+            first_clip.transform.scale = Keyframe(
+                keyframes=[[0.0, 1.0], [duration, 1.06]],
+                interp="ease-out",
+            )
+            visual_applied = True
+        elif visual_kind == "ken_burns":
+            # Slow 1.0 → 1.10 zoom with a slight horizontal drift.
+            first_clip.transform.scale = Keyframe(
+                keyframes=[[0.0, 1.0], [duration, 1.10]],
+                interp="linear",
+            )
+            first_clip.transform.x = Keyframe(
+                keyframes=[[0.0, 0.0], [duration, 24.0]],
+                interp="linear",
+            )
+            visual_applied = True
+
+    # 3) AUDIO axis --------------------------------------------------------
+    audio_applied = False
+    if first_clip and audio_kind == "fade_boost":
+        # Short fade-in so the audio lands cleanly without click/pop on
+        # autoplay. Doesn't boost gain itself — that'd require LUFS-aware
+        # measurement; we lean on loudnorm at export to hit the target.
+        if first_clip.audio.fade_in < 0.05:
+            first_clip.audio.fade_in = 0.5
+            audio_applied = True
+    # Music starting at 0 also counts as an audio hook even without fade.
+    music = store.edl.get_track("music")
+    has_zero_start_music = bool(music) and any(
+        isinstance(c, Clip) and c.start <= 0.05 for c in (music.clips if music else [])
+    )
+    if has_zero_start_music:
+        audio_applied = True
+
+    summary = (
+        f"Hook stack: "
+        f"{'✓' if True else '·'} text, "
+        f"{'✓' if visual_applied else '·'} visual({visual_kind}), "
+        f"{'✓' if audio_applied else '·'} audio"
+    )
+    store.commit("apply_hook_stack", args, summary)
+    return {
+        "summary": summary,
+        "text": text,
+        "axes": {
+            "visual": visual_applied,
+            "text": True,
+            "audio": audio_applied,
+        },
+        "text_clip_id": text_result.get("clip_id") or text_result.get("text_id"),
+    }
+
+
 def add_caption_track(store: EDLStore, args: dict) -> dict:
     style = args.get("style", "default")
     position = args.get("position", "bottom")
@@ -1833,6 +1952,19 @@ def apply_template(store: EDLStore, args: dict) -> dict:
     name = str(args["name"])
     inputs = dict(args.get("inputs") or {})
     info = _apply_template(store.edl, name, inputs=inputs)
+    # Hook stack on every template by default — viewers decide in 3s, so
+    # seeded EDLs should never ship without all three axes (visual + text +
+    # audio) wired up. Caller can opt out with `with_hook_stack=False` when
+    # they want to compose the hook themselves.
+    if args.get("with_hook_stack", True):
+        try:
+            hook_text = inputs.get("hook") or inputs.get("text")
+            hook_info = apply_hook_stack(store, {"text": hook_text} if hook_text else {})
+            info.setdefault("applied", []).append(
+                f"hook_stack({hook_info.get('axes', {})})"
+            )
+        except Exception as e:
+            info.setdefault("applied", []).append(f"hook_stack:skipped({e})")
     summary = f"Apply template '{name}': {', '.join(info['applied'])}"
     store.commit("apply_template", args, summary)
     return {"summary": summary, **info}
@@ -2246,6 +2378,7 @@ DISPATCH: dict[str, DispatchFn] = {
     # text / brand / audit
     "add_super_text": add_super_text,
     "add_hook_overlay": add_hook_overlay,
+    "apply_hook_stack": apply_hook_stack,
     "add_caption_track": add_caption_track,
     "apply_brand_kit": apply_brand_kit,
     "audit_aesthetic": audit_aesthetic,
