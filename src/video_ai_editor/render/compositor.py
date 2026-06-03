@@ -290,8 +290,17 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
             if tr_for_left:
                 ttype, tdur = tr_for_left
                 offset = max(0.0, cur_dur - tdur)
+                # Resolve the friendly name to a real xfade transition (or a
+                # custom-expr spec). Keeps glitch/whip/spin/slide/zoom from
+                # crashing the render the way the raw passthrough used to.
+                from .transitions import resolve_transition
+                xf_name, xf_expr = resolve_transition(ttype)
+                xf = f"xfade=transition={xf_name}:duration={tdur}:offset={offset:.3f}"
+                if xf_expr:
+                    # expr is wrapped in single quotes; it contains no quotes itself.
+                    xf += f":expr='{xf_expr}'"
                 fc_parts.append(
-                    f"{cur_v}{v_labels[i]}xfade=transition={ttype}:duration={tdur}:offset={offset:.3f}{new_v}"
+                    f"{cur_v}{v_labels[i]}{xf}{new_v}"
                 )
                 fc_parts.append(
                     f"{cur_a}{a_labels[i]}acrossfade=d={tdur}{new_a}"

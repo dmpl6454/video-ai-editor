@@ -113,8 +113,12 @@ class Sticker(BaseModel):
 
 
 class Transition(BaseModel):
+    # `type` is any name in render/transitions.py (NATIVE + ALIASES + custom).
+    # Kept as a plain str instead of a Literal so the ~45-name catalog can grow
+    # without touching the schema; the renderer resolves unknowns to `fade`
+    # rather than crashing, and add_transition validates with a helpful error.
     at: float
-    type: Literal["fade", "dissolve", "slide", "zoom", "glitch", "whip", "spin"] = "fade"
+    type: str = "fade"
     duration: float = 0.5
 
 

@@ -960,13 +960,23 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     between two clips). Adjacent clips around `at` will be xfaded.
     """
     from ..edl.schema import Transition
+    from ..render.transitions import is_valid, all_names, resolve_transition
     v1 = store.edl.get_track("v1")
     if not v1:
         raise ValueError("v1 track not found")
-    tr = Transition(at=float(args["at"]), type=str(args.get("type", "fade")),
+    ttype = str(args.get("type", "fade")).strip().lower()
+    if not is_valid(ttype):
+        raise ValueError(
+            f"unknown transition {ttype!r}. {len(all_names())} available — "
+            f"call list_transitions to see them. Common: fade, dissolve, "
+            f"slideleft, zoomin, circleopen, radial, pixelize, glitch, whip, spin"
+        )
+    tr = Transition(at=float(args["at"]), type=ttype,
                     duration=float(args.get("duration", 0.5)))
     v1.transitions.append(tr)
-    summary = f"Add {tr.type} transition at {tr.at:.2f}s ({tr.duration:.2f}s)"
+    resolved, _ = resolve_transition(ttype)
+    note = "" if resolved == ttype else f" → {resolved}"
+    summary = f"Add {tr.type}{note} transition at {tr.at:.2f}s ({tr.duration:.2f}s)"
     store.commit("add_transition", args, summary)
     return {"summary": summary}
 
@@ -2130,8 +2140,14 @@ def list_filters(store: EDLStore, args: dict) -> dict:
 
 
 def list_transitions(store: EDLStore, args: dict) -> dict:
-    """All transition types `add_transition` understands."""
-    return {"transitions": ["fade", "dissolve", "slide", "zoom", "glitch", "whip", "spin"]}
+    """The full transition catalog — categories, aliases, descriptions, count.
+
+    `transitions` is the flat list (kept for backward compat with callers that
+    just want names); `catalog` is the structured grouping for UI/chat.
+    """
+    from ..render.transitions import catalog, all_names
+    cat = catalog()
+    return {"transitions": all_names(), "catalog": cat, "count": cat["count"]}
 
 
 def list_text_styles(store: EDLStore, args: dict) -> dict:
