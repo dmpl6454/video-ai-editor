@@ -1,3 +1,4 @@
+import React from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
 
@@ -27,6 +28,7 @@ export function Properties() {
   // here at the top so the count stays stable across the early-return paths
   // below (selecting a clip would otherwise add a hook → React #310).
   const playhead = useStore((s) => s.playhead)
+  const setLiveTransform = useStore((s) => s.setLiveTransform)
 
   if (!sel || !edl) return (
     <div className="props">
@@ -117,7 +119,8 @@ export function Properties() {
       </Section>
 
       <Section label="Speed">
-        <Slider label={`${speed.toFixed(2)}×`} min={0.25} max={4} step={0.05} value={speed}
+        <Slider min={0.25} max={4} step={0.05} value={speed}
+          format={(v) => `${v.toFixed(2)}×`}
           onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
       </Section>
 
@@ -126,7 +129,8 @@ export function Properties() {
       </Section>
 
       <Section label="Audio">
-        <Slider label={`${gain.toFixed(1)} dB`} min={-30} max={6} step={0.5} value={gain}
+        <Slider min={-30} max={6} step={0.5} value={gain}
+          format={(v) => `${v.toFixed(1)} dB`}
           onChange={(v) => dispatch('set_volume', { target: c.id, db: v })} />
         <div className="row">
           <div className="field">
@@ -153,18 +157,24 @@ export function Properties() {
       <Section label="Transform">
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="scale" value={tx?.scale} fallback={1} />
-          <Slider label={`scale ${scale.toFixed(2)}`} min={0.1} max={4} step={0.05} value={scale}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v })} />
+          <Slider min={0.1} max={4} step={0.05} value={scale}
+            format={(v) => `scale ${v.toFixed(2)}`}
+            onLive={(v) => setLiveTransform({ clipId: c.id, scale: v })}
+            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, scale: v }) }} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="rotation" value={tx?.rotation} fallback={0} />
-          <Slider label={`rotation ${rotation.toFixed(0)}°`} min={-180} max={180} step={1} value={rotation}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v })} />
+          <Slider min={-180} max={180} step={1} value={rotation}
+            format={(v) => `rotation ${v.toFixed(0)}°`}
+            onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
+            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, rotation: v }) }} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="opacity" value={tx?.opacity} fallback={1} />
-          <Slider label={`opacity ${opacity.toFixed(2)}`} min={0} max={1} step={0.05} value={opacity}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v })} />
+          <Slider min={0} max={1} step={0.05} value={opacity}
+            format={(v) => `opacity ${v.toFixed(2)}`}
+            onLive={(v) => setLiveTransform({ clipId: c.id, opacity: v })}
+            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, opacity: v }) }} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="x" value={tx?.x} fallback={xVal} />
@@ -196,17 +206,39 @@ function Section({ label, children }: { label: string; children: React.ReactNode
   )
 }
 
-function Slider({ label, min, max, step, value, onChange }: {
-  label: string; min: number; max: number; step: number; value: number;
-  onChange: (v: number) => void;
+function Slider({ label, min, max, step, value, onChange, onLive, format }: {
+  label?: string; min: number; max: number; step: number; value: number;
+  onChange: (v: number) => void;        // committed value — dispatched to server
+  onLive?: (v: number) => void;         // live value during drag — client-side only
+  format?: (v: number) => string;       // optional live label formatter
 }) {
+  // Commit-on-release: the thumb + label track every drag tick locally (0ms),
+  // but the server `onChange` fires ONCE on pointer-up / blur / key-release.
+  // Dragging used to fire a dispatch + full preview render per tick — dozens of
+  // HTTP round-trips and render jobs for one gesture. Now it's exactly one.
+  const [local, setLocal] = React.useState(value)
+  const dragging = React.useRef(false)
+  // Keep local in sync when the prop changes from outside (undo, chat, etc.)
+  // but never stomp the value mid-drag.
+  React.useEffect(() => { if (!dragging.current) setLocal(value) }, [value])
+
+  const commit = (v: number) => { if (v !== value) onChange(v) }
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-      <input type="range" min={min} max={max} step={step} value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+      <input type="range" min={min} max={max} step={step} value={local}
+        onChange={(e) => {
+          const v = Number(e.target.value)
+          dragging.current = true
+          setLocal(v)
+          onLive?.(v)
+        }}
+        onPointerUp={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
+        onPointerCancel={() => { dragging.current = false }}
+        onKeyUp={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
+        onBlur={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
         style={{ flex: 1 }} />
       <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 70, textAlign: 'right' }}>
-        {label}
+        {format ? format(local) : label}
       </span>
     </div>
   )

@@ -25,7 +25,13 @@ interface State {
   exporting: boolean
   exportUrl: string | null
 
+  // Client-side live transform: set while a transform slider is being dragged
+  // so Preview applies a CSS transform to the <video> for instant feedback,
+  // without a server render. Cleared (null) the moment the drag commits.
+  liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number } | null
+
   // setters
+  setLiveTransform(t: State['liveTransform']): void
   setSelection(id: string | null): void
   toggleSelection(id: string): void
   clearSelection(): void
@@ -63,6 +69,7 @@ export const useStore = create<State>((set, get) => ({
   inMark: null,
   outMark: null,
   playbackRate: 1,
+  liveTransform: null,
   uploading: false,
   uploadProgress: null,
   uploadError: null,
@@ -99,6 +106,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setPlaying: (p) => set({ isPlaying: p }),
   setPlaybackRate: (r) => set({ playbackRate: r }),
+  setLiveTransform: (t) => set({ liveTransform: t }),
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),

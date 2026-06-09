@@ -25,6 +25,7 @@ export function Preview() {
   const isPlaying = useStore((s) => s.isPlaying)
   const setPlayhead = useStore((s) => s.setPlayhead)
   const setPlaying = useStore((s) => s.setPlaying)
+  const liveTransform = useStore((s) => s.liveTransform)
 
   const ref = useRef<HTMLVideoElement>(null)
   const [rendering, setRendering] = useState(false)
@@ -220,7 +221,17 @@ export function Preview() {
           src={url}
           controls={false}
           preload="auto"
-          style={{ width: '100%', height: '100%', objectFit: 'fill' }}
+          style={{
+            width: '100%', height: '100%', objectFit: 'fill',
+            // Live transform preview: while a transform slider is being dragged,
+            // apply it as a pure CSS transform (GPU-composited, 0ms) instead of
+            // waiting on a server re-render. Commits to the real render on release.
+            transform: liveTransform
+              ? `scale(${liveTransform.scale ?? 1}) rotate(${liveTransform.rotation ?? 0}deg)`
+              : undefined,
+            opacity: liveTransform?.opacity ?? 1,
+            transition: liveTransform ? 'none' : 'transform 60ms linear',
+          }}
           onTimeUpdate={(e) => setPlayhead((e.target as HTMLVideoElement).currentTime)}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}

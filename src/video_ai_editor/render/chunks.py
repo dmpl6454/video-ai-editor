@@ -17,10 +17,40 @@ Caveats:
 from __future__ import annotations
 import hashlib
 import json
+import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 from ..edl.schema import Clip
+
+
+def _chunk_workers(n_clips: int) -> int:
+    """How many chunk renders to run at once.
+
+    VideoToolbox encode is GPU-bound but the decode + CPU filter graph (scale,
+    pad, transform, effects) is the real cost, and that parallelizes across the
+    P-cores. Cap at the physical performance-core count so we don't thrash the
+    E-cores or oversubscribe the single hardware encode queue. Override with
+    VAI_CHUNK_WORKERS.
+    """
+    env = os.environ.get("VAI_CHUNK_WORKERS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    # hw.perflevel0.physicalcpu = performance cores (10 on M4 Max). Fall back
+    # to half of logical CPUs elsewhere.
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+            capture_output=True, text=True, timeout=2,
+        )
+        p_cores = int(out.stdout.strip())
+    except Exception:
+        p_cores = max(2, (os.cpu_count() or 4) // 2)
+    return max(1, min(p_cores, n_clips))
 
 
 def _canonical(obj):
@@ -153,24 +183,51 @@ def get_or_build_chunks(
     build_video_chain: Callable[..., str],
     build_audio_chain: Callable[..., str],
 ) -> list[Path]:
-    """Return one cached chunk path per clip; render any that are missing."""
-    paths: list[Path] = []
-    for c in clips:
+    """Return one cached chunk path per clip; render any that are missing.
+
+    Missing chunks render in parallel across the P-cores — on a cold multi-clip
+    timeline this is the difference between "8 clips × 0.5s = 4s serial" and
+    "~0.6s wall" because the decode + filter graph runs concurrently. Cache hits
+    are free (no render), so warm re-renders stay instant regardless.
+    """
+    # First pass: resolve every clip's chunk path + decide which need building.
+    chunk_paths: list[Path] = []
+    to_build: list[tuple[int, Clip, Path]] = []
+    for i, c in enumerate(clips):
         fp = fingerprint_clip(c, canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
                               encoder_args=encoder_args)
         chunk = chunk_path_for(cache_dir, fp)
+        chunk_paths.append(chunk)
         if not chunk_is_valid(chunk):
-            # Corrupt or missing — wipe and rebuild.
-            try: chunk.unlink()
-            except FileNotFoundError: pass
-            render_clip_to_chunk(
-                c, dst=chunk,
-                canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
-                encoder_args=encoder_args,
-                build_video_chain=build_video_chain,
-                build_audio_chain=build_audio_chain,
-                cache_dir=cache_dir,
-            )
-        paths.append(chunk)
+            try:
+                chunk.unlink()
+            except FileNotFoundError:
+                pass
+            to_build.append((i, c, chunk))
+
+    def _build(item: tuple[int, Clip, Path]) -> None:
+        _, clip, dst = item
+        render_clip_to_chunk(
+            clip, dst=dst,
+            canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
+            encoder_args=encoder_args,
+            build_video_chain=build_video_chain,
+            build_audio_chain=build_audio_chain,
+            cache_dir=cache_dir,
+        )
+
+    if len(to_build) == 1:
+        # Single missing chunk (the common edit-one-clip case): no thread
+        # pool overhead, render inline.
+        _build(to_build[0])
+    elif to_build:
+        workers = _chunk_workers(len(to_build))
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="vae-chunk") as ex:
+            # list() forces every future to resolve and re-raises the first
+            # exception so a failed chunk still surfaces (caller falls back to
+            # the monolithic render).
+            list(ex.map(_build, to_build))
+
     evict_old_chunks(cache_dir, keep=200)
-    return paths
+    return chunk_paths
