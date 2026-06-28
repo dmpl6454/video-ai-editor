@@ -127,6 +127,9 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "get_transcript": {},
         "audit_aesthetic": {},
         "find_broll": {"bin": str(tmp_path), "query": "anything"},
+        # search_media: spoken scope avoids loading the heavy CLIP model in the
+        # generic smoke pass; the visual path has its own gated test.
+        "search_media": {"query": "anything", "scope": "spoken"},
         "pyannote_status": {},
         # List tools
         "list_filters": {},

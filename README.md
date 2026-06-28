@@ -12,10 +12,34 @@ to edit it. Everything runs on your machine — only Claude API calls leave it.
   with librosa fallback, Demucs, RIFE smooth slow-mo, Real-ESRGAN upscale,
   LaMa object erase, MediaPipe auto-reframe, OpenCV motion tracker, vidstab,
   rembg, noisereduce, Argos Translate, Piper TTS.
+- **MCP server** — drive the editor from Claude Code / Cursor / Codex over
+  HTTP (see below).
+- **Local CLIP visual search** — `search_media` finds footage by visual
+  content ("a sunset over water") with an on-device CLIP model, no transcript
+  or cloud needed.
 - **Frame-accurate scrub** via WebCodecs + mp4box.js (falls back to
   `<video>.currentTime` when the codec rejects).
 - **VideoToolbox H.264** on Apple Silicon (libx264 fallback).
-- **163 backend tests + Playwright frontend smoke**, full suite in ~68 s.
+- **240+ backend tests + Playwright frontend smoke**, full suite in ~75 s.
+
+## Drive it from your agent (MCP)
+
+The backend exposes an MCP server at `http://127.0.0.1:8000/mcp`, so Claude
+Code / Cursor / Codex can edit the timeline directly — the same way
+palmier-pro works. Start the backend, then:
+
+```bash
+# Claude Code
+claude mcp add --transport http video-ai-editor http://127.0.0.1:8000/mcp
+
+# Codex
+codex mcp add video-ai-editor --url http://127.0.0.1:8000/mcp
+```
+
+The agent gets all 48 schema'd tools (cut, transitions, captions, color,
+`search_media`, export, …). The MCP server drives one "active" session by
+default; pass `session_id` in any tool's arguments to target a specific
+project.
 
 ## Setup
 

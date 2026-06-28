@@ -857,6 +857,58 @@ def find_moments(store: EDLStore, args: dict) -> dict:
     return {"matches": matches, "query": query}
 
 
+def search_media(store: EDLStore, args: dict) -> dict:
+    """Search the project's footage by content (palmier-pro style).
+
+    scope:
+      - "visual" — local CLIP model matches frames to the text query
+                   ("a sunset over water"); no transcript needed.
+      - "spoken" — searches the transcript for the phrase.
+      - "both"   — merges visual + spoken (default).
+
+    Returns {visual: [...], spoken: [...]} ranked by relevance.
+    """
+    query = str(args["query"]).strip()
+    if not query:
+        raise ValueError("search_media: query is empty")
+    scope = str(args.get("scope", "both"))
+    if scope not in ("visual", "spoken", "both"):
+        raise ValueError("search_media: scope must be visual|spoken|both")
+    limit = max(1, min(int(args.get("limit", 10)), 50))
+
+    v1 = store.edl.get_track("v1")
+    clips = [c for c in (v1.clips if v1 else []) if isinstance(c, Clip)]
+    out: dict = {"query": query, "scope": scope}
+
+    if scope in ("visual", "both"):
+        from ..ai import clip_search
+        if not clip_search.available():
+            out["visual"] = {"status": "unavailable",
+                             "message": "CLIP not installed (uv add open_clip_torch)"}
+        elif not clips:
+            out["visual"] = {"status": "empty", "results": []}
+        else:
+            payload = [{"id": c.id, "src": c.src, "in": c.in_, "out": c.out}
+                       for c in clips]
+            results = clip_search.search(query, payload,
+                                         store.dir / "cache" / "clip_index", limit=limit)
+            out["visual"] = {"status": "ok", "results": results}
+
+    if scope in ("spoken", "both"):
+        tx = get_transcript(store, {})
+        q_low = query.lower()
+        hits = []
+        for seg in (tx.get("segments") or []):
+            text = (seg.get("text") or "")
+            if q_low in text.lower():
+                hits.append({"start": round(float(seg.get("start", 0)), 2),
+                             "end": round(float(seg.get("end", 0)), 2),
+                             "text": text.strip()})
+        out["spoken"] = {"status": "ok", "results": hits[:limit]}
+
+    return out
+
+
 def match_style(store: EDLStore, args: dict) -> dict:
     """Extract a style fingerprint from a reference video."""
     ref_path = Path(_safe_src(args["reference"]))
@@ -2443,6 +2495,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "chroma_key": chroma_key,
     # M5: vision-driven find + style match
     "find_moments": find_moments,
+    "search_media": search_media,
     "match_style": match_style,
     # TTS voiceover (Piper)
     "tts_voiceover": tts_voiceover,

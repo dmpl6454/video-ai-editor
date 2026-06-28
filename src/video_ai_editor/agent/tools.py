@@ -355,6 +355,17 @@ VISION_TOOLS = [
        "vision",
        {"query": {"type": "string"}, "top_k": {"type": "integer", "default": 3}},
        ["query"]),
+    _t("search_media",
+       "Search the project's footage by content. scope='visual' uses a LOCAL CLIP "
+       "model to match keyframes to the text query (e.g. 'a sunset over water') with "
+       "no transcript needed; scope='spoken' searches the transcript; 'both' merges "
+       "them. Returns clips ranked by relevance with timestamps. Frame embeddings "
+       "are cached so repeat searches are instant.",
+       "vision",
+       {"query": {"type": "string"},
+        "scope": {"type": "string", "enum": ["visual", "spoken", "both"], "default": "both"},
+        "limit": {"type": "integer", "default": 10}},
+       ["query"]),
     _t("match_style",
        "Analyze a reference video and return its style fingerprint: cuts/min, median "
        "shot length, BPM, dominant color palette. Use this to seed a new edit that "

@@ -27,6 +27,7 @@ dependencies = [
     "noisereduce>=3.0.3",
     "soundfile>=0.13.1",
     "pyannote-audio>=4.0.4",
+    "open-clip-torch>=3.3.0",
 ]
 
 [project.optional-dependencies]

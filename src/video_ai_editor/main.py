@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -157,6 +157,61 @@ def health():
 @app.get("/api/tools")
 def tools():
     return {"tools": list_tools()}
+
+
+# ---- MCP server: let external agents (Claude Code / Cursor / Codex) drive the
+# editor over HTTP. Connect with:
+#   claude mcp add --transport http video-ai-editor http://127.0.0.1:8000/mcp
+from .agent import mcp_server as _mcp
+
+# The single "active" session the MCP server drives, created lazily. An agent
+# can also target any session by passing session_id in a tool's arguments.
+_MCP_ACTIVE_SESSION: dict[str, str] = {}
+
+
+def _mcp_resolve_store(session_id: str | None):
+    """(EDLStore, resolved_sid). None session_id → the active MCP session,
+    created on first use so an agent can connect and start editing immediately."""
+    if session_id:
+        return _store(session_id), session_id
+    sid = _MCP_ACTIVE_SESSION.get("id")
+    if sid and session_exists(sid):
+        return _store(sid), sid
+    # Create a fresh MCP session.
+    sid = new_session_id()
+    d = session_dir(sid)
+    write_meta(sid, {"name": "MCP session"})
+    store = EDLStore(d)
+    store.commit("init", {}, "Initial empty project")
+    with _STORES_LOCK:
+        _stores_evict_if_full()
+        _STORES[sid] = store
+    _MCP_ACTIVE_SESSION["id"] = sid
+    return store, sid
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None,
+             "error": {"code": -32700, "message": "parse error"}},
+            status_code=400,
+        )
+    resp = _mcp.handle_request(body, resolve_store=_mcp_resolve_store)
+    if resp is None:
+        # All notifications → MCP spec says return 202 with no body.
+        return Response(status_code=202)
+    return JSONResponse(resp)
+
+
+@app.get("/mcp")
+def mcp_probe():
+    """Some MCP clients GET the endpoint to check liveness before POSTing."""
+    return {"server": _mcp.SERVER_INFO, "protocolVersion": _mcp.PROTOCOL_VERSION,
+            "transport": "http", "active_session": _MCP_ACTIVE_SESSION.get("id")}
 
 
 @app.post("/api/sessions")
