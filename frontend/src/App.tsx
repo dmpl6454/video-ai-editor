@@ -8,6 +8,7 @@ import { Properties } from './components/Properties'
 import { OpsLog } from './components/OpsLog'
 import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
+import { FileDropOverlay } from './components/FileDropOverlay'
 import { useShortcuts } from './shortcuts'
 
 export default function App() {
@@ -35,6 +36,7 @@ export default function App() {
       </aside>
       <ChatOverlay />
       <Help />
+      <FileDropOverlay />
     </div>
   )
 }

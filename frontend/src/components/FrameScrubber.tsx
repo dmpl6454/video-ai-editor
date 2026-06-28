@@ -81,7 +81,13 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
     // Load + demux the mp4 whenever `src` changes
     useEffect(() => {
       let cancelled = false
-      stateRef.current.decoder?.close?.()
+      // Guard: calling close() on an already-closed VideoDecoder throws
+      // ("Cannot call 'close' on a closed codec"). The cleanup may have
+      // already closed it before this re-run, so check state first.
+      const prev = stateRef.current.decoder
+      if (prev && prev.state !== 'closed') {
+        try { prev.close() } catch {}
+      }
       stateRef.current = {
         decoder: null, samples: [], keyIdx: [], timescale: 1,
         lastDecodedCts: -1, pendingTarget: null, lastSeekKey: -1,
@@ -212,7 +218,10 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
 
       return () => {
         cancelled = true
-        try { stateRef.current.decoder?.close() } catch {}
+        const d = stateRef.current.decoder
+        if (d && d.state !== 'closed') {
+          try { d.close() } catch {}
+        }
       }
     }, [src])
 
