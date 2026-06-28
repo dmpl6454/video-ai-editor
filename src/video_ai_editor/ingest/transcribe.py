@@ -98,6 +98,9 @@ def _whisper_cpp_model_path(name: str) -> Path:
         "small":   "ggml-small.bin",
         "medium":  "ggml-medium.bin",
         "large":   "ggml-large-v3.bin",
+        "large-v3": "ggml-large-v3.bin",
+        "large-v3-turbo": "ggml-large-v3-turbo.bin",
+        "turbo":   "ggml-large-v3-turbo.bin",
     }
     fname = aliases.get(name, f"ggml-{name}.bin")
     for d in _WHISPER_CPP_MODEL_DIRS:
@@ -133,55 +136,69 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
         # default is `-l en` (not auto-detect), which force-decodes Hindi /
         # any non-English audio as English garbage. faster-whisper
         # auto-detects when language=None; this keeps the backends consistent.
+        #
+        # Anti-hallucination flags (the difference between clean captions and
+        # the "लिए भी लिए लिए" repetition-loop garbage weak models emit on
+        # music/ambient):
+        #   -et 2.8  entropy threshold → fall back to a higher temperature when
+        #            the decode looks degenerate, breaking repetition loops.
+        #   -mc 0    max-context 0 → don't condition on previous text, so a
+        #            hallucinated phrase can't snowball across segments.
+        #
+        # We do NOT use `-ml 1` (one token per segment): on Devanagari it splits
+        # multibyte characters at token boundaries, writing invalid UTF-8 into
+        # the JSON ('कौन' → 'क' + two broken bytes + 'न'). Segment mode keeps
+        # each segment's `text` field whole and valid; we synthesize word-level
+        # timing below by spreading the segment duration across its words.
         cmd = [_WHISPER_CPP_BIN, "-m", str(model_path), "-f", str(wav),
-               "-of", str(out_prefix), "-oj", "-ml", "1",
+               "-of", str(out_prefix), "-oj",
+               "-et", "2.8", "-mc", "0",
                "-l", language if language else "auto"]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        # errors="replace" on the captured pipes (progress meter can split a
+        # multibyte char across buffers).
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
         json_path = Path(f"{out_prefix}.json")
         if not json_path.exists():
             raise RuntimeError(f"whisper-cli produced no JSON output:\n{proc.stdout[-500:]}")
-        data = json.loads(json_path.read_text())
+        # Read bytes + decode with errors="replace": the per-token array in the
+        # JSON can carry split-multibyte garbage, but each segment's `text`
+        # field is valid UTF-8 and survives intact (only the already-broken
+        # token bytes become U+FFFD, which we never read).
+        data = json.loads(json_path.read_bytes().decode("utf-8", "replace"))
 
-    # whisper.cpp's transcription JSON has top-level `transcription` entries
-    # with offsets in milliseconds. With `-ml 1` each entry is ONE TOKEN —
-    # perfect word timing, but the faster-whisper backend returns sentence
-    # segments with word lists, and captions are built from segments. Merge
-    # tokens into sentence-ish segments so both backends produce the same
-    # shape: break on sentence punctuation, a ≥0.8s gap, or ~12 words.
-    words_all: list[Word] = []
+    # Segment mode: each `transcription` entry is a whole sentence/segment with
+    # millisecond offsets and a clean `text`. Build Segment objects directly and
+    # synthesize even word timing across each segment so word_emphasis captions
+    # and word-level tools still work.
+    segments: list[Segment] = []
     for seg in data.get("transcription", []) or []:
         offsets = seg.get("offsets") or {}
         start = float(offsets.get("from", 0)) / 1000.0
         end = float(offsets.get("to", 0)) / 1000.0
-        text = (seg.get("text") or "").strip()
-        if text:
-            words_all.append(Word(start=start, end=end, word=text))
-
-    _SENT_END = ("।", ".", "!", "?", "॥")  # incl. Devanagari danda
-    segments: list[Segment] = []
-    bucket: list[Word] = []
-
-    def _flush() -> None:
-        if not bucket:
-            return
-        segments.append(Segment(
-            id=len(segments),
-            start=bucket[0].start,
-            end=bucket[-1].end,
-            text=" ".join(w.word for w in bucket),
-            words=list(bucket),
-        ))
-        bucket.clear()
-
-    for w in words_all:
-        if bucket and (w.start - bucket[-1].end) >= 0.8:
-            _flush()  # long silence → new segment
-        bucket.append(w)
-        if w.word.endswith(_SENT_END) or len(bucket) >= 12:
-            _flush()
-    _flush()
+        text = (seg.get("text") or "")
+        # Drop U+FFFD replacement chars left by any rare segment-text byte split,
+        # then collapse the whitespace they leave behind.
+        text = text.replace("�", "").strip().lstrip("-").strip()
+        text = " ".join(text.split())
+        # whisper emits "[Music]" / "[_TT_*]" style non-speech markers; drop them.
+        if not text or (text.startswith("[") and text.endswith("]")):
+            continue
+        # Drop degenerate zero/near-zero-duration fragments (a sub-character
+        # split occasionally produces a 14.2→14.2 stub).
+        if end - start < 0.06:
+            continue
+        toks = [t for t in text.split(" ") if t]
+        words: list[Word] = []
+        if toks and end > start:
+            step = (end - start) / len(toks)
+            for j, tok in enumerate(toks):
+                words.append(Word(start=start + j * step,
+                                  end=start + (j + 1) * step, word=tok))
+        segments.append(Segment(id=len(segments), start=start, end=end,
+                                text=text, words=words))
 
     duration = segments[-1].end if segments else 0.0
     detected_lang = data.get("result", {}).get("language") if isinstance(data.get("result"), dict) else None

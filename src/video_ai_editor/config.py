@@ -33,6 +33,12 @@ PRESETS_DIR = PROJECT_ROOT / "presets"
 FONTS_DIR = PROJECT_ROOT / "fonts"
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+# Captions get the heavy, best-quality model by default — uploads stay fast on
+# `small`, then auto_caption re-transcribes with large-v3 for broadcast-quality
+# Hindi/English. large-v3 is the only model that handles Hindi cleanly without
+# the repetition-loop hallucination weaker models fall into (measured); turbo
+# mangles Hindi into English, so it is NOT the caption default.
+WHISPER_CAPTION_MODEL = os.environ.get("WHISPER_CAPTION_MODEL", "large-v3")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")

@@ -587,6 +587,110 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "lines": seg_count}
 
 
+def auto_caption(store: EDLStore, args: dict) -> dict:
+    """One-call, best-quality auto captions for Hindi + English.
+
+    Re-transcribes the V1 source with the large-v3 Whisper model (Metal-
+    accelerated, anti-hallucination flags) — far better than the fast `small`
+    model used at upload — then formats the words into broadcast-quality cues
+    (≤2 lines, reading-speed limited) and lays down a caption track.
+
+    Args:
+      style    — "default" | "ig_chunky" | "word_emphasis" (default ig_chunky)
+      position — "bottom" | "center" | "top"
+      language — force a language (e.g. "hi", "en"); omit to auto-detect
+                 (handles Hinglish code-switching).
+      model    — override the model (default WHISPER_CAPTION_MODEL = large-v3).
+      max_chars / max_cps — caption length + reading-speed knobs.
+    """
+    from ..config import WHISPER_CAPTION_MODEL
+    from ..ingest.transcribe import transcribe
+    from ..ingest.caption_format import cues_from_segments
+
+    style = str(args.get("style", "ig_chunky"))
+    position = str(args.get("position", "bottom"))
+    language = args.get("language")  # None → auto-detect (Hinglish-friendly)
+    model = str(args.get("model") or WHISPER_CAPTION_MODEL)
+
+    v1 = store.edl.get_track("v1")
+    src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
+    if not src_clip:
+        raise ValueError("auto_caption: no clip on v1 to caption")
+    src = Path(src_clip.src)
+    if not src.exists():
+        raise ValueError(f"auto_caption: source not found: {src}")
+
+    # High-quality re-transcription. backend="auto" picks Metal whisper.cpp.
+    tx = transcribe(src, language=language, model_size=model, backend="auto")
+    tx_dict = tx.model_dump()
+
+    # Persist so get_transcript / translate / export_srt see the upgraded text.
+    import json as _json
+    ingest_json = None
+    for cand in store.dir.glob("uploads/**/ingest.json"):
+        ingest_json = cand
+        break
+    if ingest_json is None:
+        ingest_json = store.dir / "uploads" / "auto_caption" / "ingest.json"
+        ingest_json.parent.mkdir(parents=True, exist_ok=True)
+        ingest_json.write_text(_json.dumps({"transcript": tx_dict}, ensure_ascii=False))
+    else:
+        data = _json.loads(ingest_json.read_text())
+        data["transcript"] = tx_dict
+        ingest_json.write_text(_json.dumps(data, ensure_ascii=False))
+
+    # Build readable cues from the word stream.
+    cues = cues_from_segments(
+        tx_dict.get("segments", []),
+        max_chars=int(args.get("max_chars", 42)),
+        max_cps=float(args.get("max_cps", 17.0)),
+    )
+
+    # Lay down the caption track from the cues.
+    cap = store.edl.get_track("captions")
+    if not cap:
+        cap = ensure_track(store.edl, "captions", "captions", z=13)
+    from ..edl.schema import CaptionsConfig
+    if cap.config is None:
+        cap.config = CaptionsConfig()
+    cap.config.enabled = True
+    cap.config.style = style  # type: ignore
+    cap.config.position = position  # type: ignore
+    cap.config.lang = tx.language
+
+    canvas = store.edl.canvas
+    y_pos = canvas.h * (0.85 if position == "bottom"
+                        else 0.5 if position == "center" else 0.15)
+    cap.clips = []
+    if style == "word_emphasis":
+        chunk = int(args.get("chunk_size", 2))
+        words = [w for seg in tx_dict.get("segments", []) for w in (seg.get("words") or [])]
+        for i in range(0, len(words), chunk):
+            grp = words[i:i + chunk]
+            text = " ".join((w.get("word") or "").strip() for w in grp).strip()
+            if not text:
+                continue
+            cap.clips.append(TextClip(
+                text=text.upper(), start=float(grp[0]["start"]), end=float(grp[-1]["end"]),
+                role="hook", transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5),
+            ))
+    else:
+        for cue in cues:
+            cap.clips.append(TextClip(
+                text=cue.text, start=cue.start, end=cue.end, role="caption",
+                transform=Transform(x=canvas.w / 2, y=y_pos),
+            ))
+
+    n = len(cap.clips)
+    preview = " / ".join(c.text.replace("\n", " ") for c in cap.clips[:2])
+    summary = (f"Auto-captioned ({model}, {tx.language}): {n} {style} cues. "
+               f"e.g. “{preview[:60]}”")
+    store.commit("auto_caption", args, summary)
+    return {"summary": summary, "language": tx.language, "model": model,
+            "cues": n, "style": style,
+            "sample": [c.as_dict() for c in cues[:3]]}
+
+
 def apply_brand_kit(store: EDLStore, args: dict) -> dict:
     kit = BrandKit(
         handle=args.get("handle"),
@@ -2448,6 +2552,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "add_hook_overlay": add_hook_overlay,
     "apply_hook_stack": apply_hook_stack,
     "add_caption_track": add_caption_track,
+    "auto_caption": auto_caption,
     "apply_brand_kit": apply_brand_kit,
     "audit_aesthetic": audit_aesthetic,
     # M3: audio + auto-trim + reframe

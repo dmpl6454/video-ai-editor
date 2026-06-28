@@ -8,10 +8,16 @@ to edit it. Everything runs on your machine — only Claude API calls leave it.
 - **88 dispatch tools** covering every CapCut feature pillar (multi-track
   timeline, keyframes, effects, masks, chroma key, transitions, color grading,
   ducked audio mix, captions in 3 styles, brand kits, show templates).
-- **Local AI**: faster-whisper + whisper.cpp (Metal), pyannote diarization
-  with librosa fallback, Demucs, RIFE smooth slow-mo, Real-ESRGAN upscale,
-  LaMa object erase, MediaPipe auto-reframe, OpenCV motion tracker, vidstab,
-  rembg, noisereduce, Argos Translate, Piper TTS.
+- **Best-in-class auto captions (Hindi + English + Hinglish)** — the
+  `auto_caption` tool re-transcribes with **Whisper large-v3 on Metal** (the
+  only model that handles Hindi cleanly without hallucination loops; turbo
+  mangles it to English), then formats words into broadcast-grade cues
+  (≤2 lines, reading-speed-limited, sentence-aware). Auto-detects language,
+  handles code-switching.
+- **Local AI**: faster-whisper + whisper.cpp (Metal, tiny→large-v3), pyannote
+  diarization with librosa fallback, Demucs, RIFE smooth slow-mo, Real-ESRGAN
+  upscale, LaMa object erase, MediaPipe auto-reframe, OpenCV motion tracker,
+  vidstab, rembg, noisereduce, Argos Translate, Piper TTS.
 - **MCP server** — drive the editor from Claude Code / Cursor / Codex over
   HTTP (see below).
 - **Local CLIP visual search** — `search_media` finds footage by visual

@@ -129,6 +129,22 @@ TEXT_TOOLS = [
            "style": {"type": "string", "enum": ["default", "ig_chunky", "word_emphasis"], "default": "default"},
            "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
        }),
+    _t("auto_caption",
+       "BEST-QUALITY auto captions for Hindi + English (and Hinglish). Re-transcribes "
+       "the video with the large-v3 Whisper model on Metal (far better than the fast "
+       "upload model — clean Hindi, no hallucination loops), then formats the words "
+       "into broadcast-grade cues (≤2 lines, reading-speed limited) and lays down a "
+       "caption track. Auto-detects language by default; pass language='hi' or 'en' to "
+       "force. This is the tool to use when the user asks for accurate captions.",
+       "text",
+       {
+           "style": {"type": "string", "enum": ["default", "ig_chunky", "word_emphasis"], "default": "ig_chunky"},
+           "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
+           "language": {"type": "string", "description": "Force 'hi'/'en'; omit to auto-detect (Hinglish-friendly)"},
+           "model": {"type": "string", "description": "Override Whisper model (default large-v3)"},
+           "max_chars": {"type": "integer", "default": 42},
+           "max_cps": {"type": "number", "default": 17.0},
+       }),
     _t("apply_brand_kit",
        "Set the project's brand kit and auto-apply persistent watermark + end-card.",
        "brand",
