@@ -385,8 +385,25 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
     # responsive. Transcript becomes available later via the transcript endpoint.
     try:
         res = ingest_upload(dst, uploads / dst.stem, transcribe_audio=False)
-    except RuntimeError as e:
-        raise HTTPException(status_code=422, detail={"file": safe_name, "error": str(e)})
+    except HTTPException:
+        raise
+    except Exception as e:
+        # ANY ingest failure (unreadable container, exotic codec, corrupt
+        # file, ffprobe/ffmpeg error, JSON parse, etc.) must be a clean 422 —
+        # never a bare 500. This is the "video import failed" path users hit
+        # with files that aren't really valid video.
+        import logging
+        logging.getLogger("video_ai_editor").warning(
+            "upload ingest failed for %s: %s", safe_name, e)
+        msg = str(e)
+        raise HTTPException(status_code=422, detail={
+            "file": safe_name,
+            "error": "couldn't_import",
+            "message": "Couldn't import this file — it may not be a valid video, "
+                       "or it uses a codec/container we can't read. Try exporting "
+                       "it as a standard H.264 .mp4 and re-importing.",
+            "detail": msg[-300:] if len(msg) > 300 else msg,
+        })
 
     if add_to_timeline:
         store.edl.recompute_duration()
@@ -493,7 +510,18 @@ def make_preview(sid: str, wait: int = 1):
     """
     store = _store(sid)
     if wait:
-        res = render_preview(store.edl, store.dir)
+        try:
+            res = render_preview(store.edl, store.dir)
+        except RuntimeError as e:
+            # ffmpeg render failure → actionable 422, not a bare 500. Surface a
+            # short tail of ffmpeg's reason so the UI can show something useful.
+            msg = str(e)
+            tail = msg[-400:] if len(msg) > 400 else msg
+            raise HTTPException(422, {"error": "render_failed",
+                                      "message": "Couldn't render a preview for "
+                                      "this clip — it may have corrupt frames or "
+                                      "an unusual codec.",
+                                      "ffmpeg": tail})
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl  # safe — render_preview only reads
