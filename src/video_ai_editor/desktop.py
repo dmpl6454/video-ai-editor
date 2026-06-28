@@ -25,7 +25,17 @@ def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
 
 
 def _ensure_frontend_built() -> None:
-    """Make sure frontend/dist exists. If not, run `npm run build` for the user."""
+    """Make sure frontend/dist exists.
+
+    In a PyInstaller .app the frontend is bundled under sys._MEIPASS, so there
+    is nothing to build (npm isn't available) — just return. In dev, build it
+    on first run if missing."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        if (Path(meipass) / "frontend" / "dist" / "index.html").exists():
+            return
+        print("[desktop] bundled frontend missing — rebuild the .app", file=sys.stderr)
+        sys.exit(1)
     repo = Path(__file__).resolve().parents[2]
     dist = repo / "frontend" / "dist"
     if dist.exists() and (dist / "index.html").exists():

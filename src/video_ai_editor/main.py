@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -703,6 +704,23 @@ def serve_session_file(sid: str, kind: str, name: str):
 
 # Mount the built frontend at the root, so the desktop wrap can open
 # http://localhost:8000/ as a single self-contained app.
-_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
-if _FRONTEND_DIST.exists():
+def _find_frontend_dist() -> Path | None:
+    """Locate frontend/dist in dev (repo) AND inside a PyInstaller .app bundle.
+
+    PyInstaller unpacks --add-data files under sys._MEIPASS, NOT next to the
+    source tree, so the repo-relative path is wrong in the shipped app. Check
+    the bundle dir first, then the dev path."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "frontend" / "dist")
+    candidates.append(Path(__file__).resolve().parents[2] / "frontend" / "dist")
+    for c in candidates:
+        if (c / "index.html").exists():
+            return c
+    return None
+
+
+_FRONTEND_DIST = _find_frontend_dist()
+if _FRONTEND_DIST is not None:
     app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")

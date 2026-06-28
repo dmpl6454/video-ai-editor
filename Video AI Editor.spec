@@ -17,7 +17,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'torchcodec', 'torchvision', 'mediapipe', 'demucs', 'faster_whisper', 'librosa', 'scipy', 'matplotlib', 'tkinter', 'pyannote'],
+    excludes=['torch', 'torchcodec', 'torchvision', 'torchaudio', 'open_clip', 'timm', 'transformers', 'mediapipe', 'demucs', 'faster_whisper', 'librosa', 'scipy', 'matplotlib', 'tkinter', 'pyannote', 'pandas', 'sklearn', 'rembg', 'simple_lama_inpainting', 'noisereduce'],
     noarchive=False,
     optimize=0,
 )

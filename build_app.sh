@@ -46,7 +46,18 @@ uv run pyinstaller \
   --exclude-module matplotlib \
   --exclude-module tkinter \
   --exclude-module pyannote \
+  --exclude-module torchaudio \
+  --exclude-module open_clip \
+  --exclude-module timm \
+  --exclude-module transformers \
+  --exclude-module pandas \
+  --exclude-module sklearn \
+  --exclude-module rembg \
+  --exclude-module simple_lama_inpainting \
+  --exclude-module noisereduce \
   src/video_ai_editor/desktop.py
 
 echo ""
-echo "[build] Done. Open: open 'dist/Video AI Editor.app'"
+echo "[build] .app done — now wrap it in a DMG for distribution:"
+echo "        bash build_dmg.sh"
+echo "[build] Or just run it: open 'dist/Video AI Editor.app'"
