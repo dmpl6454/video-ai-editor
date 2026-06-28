@@ -5,7 +5,9 @@ from PyInstaller.utils.hooks import collect_submodules
 datas = [('frontend/dist', 'frontend/dist'), ('fonts', 'fonts'), ('presets', 'presets')]
 hiddenimports = ['uvicorn.lifespan.on', 'uvicorn.protocols.websockets.auto', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.logging', 'video_ai_editor.main']
 datas += collect_data_files('webview')
+datas += collect_data_files('open_clip')
 hiddenimports += collect_submodules('video_ai_editor')
+hiddenimports += collect_submodules('open_clip')
 
 
 a = Analysis(
@@ -17,7 +19,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'torchcodec', 'torchvision', 'torchaudio', 'open_clip', 'timm', 'transformers', 'mediapipe', 'demucs', 'faster_whisper', 'librosa', 'scipy', 'matplotlib', 'tkinter', 'pyannote', 'pandas', 'sklearn', 'rembg', 'simple_lama_inpainting', 'noisereduce'],
+    excludes=['mediapipe', 'demucs', 'pyannote', 'librosa', 'matplotlib', 'tkinter', 'pandas', 'sklearn', 'rembg', 'simple_lama_inpainting', 'noisereduce', 'transformers'],
     noarchive=False,
     optimize=0,
 )

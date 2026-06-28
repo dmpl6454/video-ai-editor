@@ -28,9 +28,42 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-WORKDIR = PROJECT_ROOT / os.environ.get("WORKDIR", "workdir")
-PRESETS_DIR = PROJECT_ROOT / "presets"
-FONTS_DIR = PROJECT_ROOT / "fonts"
+
+def _default_workdir() -> Path:
+    """Where per-session uploads/previews/exports/caches live.
+
+    Dev: `<repo>/workdir`. But a shipped .app runs from a READ-ONLY location
+    (the DMG, then /Applications), so writing next to the bundle fails — the
+    first session-create would blow up. When frozen, store under the user's
+    Application Support dir instead.
+    """
+    env = os.environ.get("WORKDIR")
+    if env:
+        # Relative env → under repo (dev convenience); absolute → as-is.
+        p = Path(env)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+    import sys as _sys
+    if getattr(_sys, "frozen", False) or getattr(_sys, "_MEIPASS", None):
+        base = Path.home() / "Library" / "Application Support" / "Video AI Editor"
+        return base / "workdir"
+    return PROJECT_ROOT / "workdir"
+
+
+def _asset_root() -> Path:
+    """Root of the read-only bundled assets (presets, fonts).
+
+    Frozen: they're unpacked under sys._MEIPASS (via --add-data). Dev: repo."""
+    import sys as _sys
+    meipass = getattr(_sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return PROJECT_ROOT
+
+
+WORKDIR = _default_workdir()
+_ASSETS = _asset_root()
+PRESETS_DIR = _ASSETS / "presets"
+FONTS_DIR = _ASSETS / "fonts"
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 # Captions get the heavy, best-quality model by default — uploads stay fast on

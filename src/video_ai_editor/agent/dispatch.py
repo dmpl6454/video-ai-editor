@@ -2309,9 +2309,9 @@ def list_transitions(store: EDLStore, args: dict) -> dict:
 def list_text_styles(store: EDLStore, args: dict) -> dict:
     """Built-in text/role presets + any user JSONs in presets/text_styles/."""
     from ..render.text_overlay import ROLE_STYLES
-    from ..config import PROJECT_ROOT
+    from ..config import PRESETS_DIR
     extra: list[str] = []
-    presets_dir = PROJECT_ROOT / "presets" / "text_styles"
+    presets_dir = PRESETS_DIR / "text_styles"
     if presets_dir.exists():
         extra = sorted(p.stem for p in presets_dir.glob("*.json"))
     return {"roles": sorted(ROLE_STYLES.keys()), "presets": extra}
@@ -2323,8 +2323,8 @@ def list_shows(store: EDLStore, args: dict) -> dict:
 
 def list_luts(store: EDLStore, args: dict) -> dict:
     """All .cube LUTs in presets/luts/."""
-    from ..config import PROJECT_ROOT
-    luts_dir = PROJECT_ROOT / "presets" / "luts"
+    from ..config import PRESETS_DIR
+    luts_dir = PRESETS_DIR / "luts"
     if not luts_dir.exists():
         return {"luts": []}
     return {"luts": sorted(p.name for p in luts_dir.glob("*.cube"))}

@@ -51,6 +51,19 @@ def _vf_for_height(height: int | None) -> str:
     return f"scale=-2:{height}" if height is not None else ""
 
 
+def _has_audio(src: Path) -> bool:
+    """True if `src` has at least one audio stream."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=20,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return True  # assume audio; the render has its own fallbacks
+
+
 def _attempts(src: Path, dst: Path, fps: int, sample_rate: int, channels: int,
               height: int | None, hdr: bool) -> list[list[str]]:
     """Ordered list of ffmpeg arg-sets to try, simplest-likely-to-work last."""
@@ -58,9 +71,20 @@ def _attempts(src: Path, dst: Path, fps: int, sample_rate: int, channels: int,
     common_video = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-fps_mode", "cfr", "-r", str(fps)]
     tail = ["-movflags", "+faststart", str(dst)]
+    has_audio = _has_audio(src)
 
     def with_vf(vf: str) -> list[str]:
-        a = ["ffmpeg", "-y", "-i", str(src), *common_video]
+        # When the source has no audio (silent screen recordings, GIF-style
+        # clips), inject a silent stereo track so EVERY normalized file has
+        # audio. The renderer concats per-clip [i:a] streams; a missing audio
+        # stream there fails the whole filtergraph ("':a' matches no streams").
+        if has_audio:
+            a = ["ffmpeg", "-y", "-i", str(src), *common_video]
+        else:
+            a = ["ffmpeg", "-y", "-i", str(src),
+                 "-f", "lavfi", "-i",
+                 f"anullsrc=channel_layout=stereo:sample_rate={sample_rate}",
+                 "-map", "0:v:0", "-map", "1:a:0", "-shortest", *common_video]
         if vf:
             a += ["-vf", vf]
         else:

@@ -26,7 +26,25 @@ to edit it. Everything runs on your machine — only Claude API calls leave it.
 - **Frame-accurate scrub** via WebCodecs + mp4box.js (falls back to
   `<video>.currentTime` when the codec rejects).
 - **VideoToolbox H.264** on Apple Silicon (libx264 fallback).
-- **240+ backend tests + Playwright frontend smoke**, full suite in ~75 s.
+- **250+ backend tests + Playwright frontend smoke**, full suite in ~75 s.
+
+## Build a macOS app (.app / .dmg)
+
+```bash
+uv run bash build_app.sh   # → dist/Video AI Editor.app
+bash build_dmg.sh          # → dist/Video-AI-Editor.dmg (drag-to-install)
+```
+
+The DMG bundles the editor UI, ffmpeg-based editing, the MCP server, **CLIP
+visual search**, and torch — so semantic footage search works offline (the
+CLIP model auto-downloads once). First launch is ad-hoc signed, so right-click
+→ Open the first time (or `xattr -dr com.apple.quarantine` the installed app).
+
+Runtime needs `ffmpeg` on PATH. The heaviest models (Whisper large-v3 ggml for
+auto-captions, RIFE/Real-ESRGAN binaries) download to `~/.local/share` on first
+use and aren't in the DMG. Per-session data lives in
+`~/Library/Application Support/Video AI Editor/`. Not notarized — that needs an
+Apple Developer account.
 
 ## Drive it from your agent (MCP)
 
