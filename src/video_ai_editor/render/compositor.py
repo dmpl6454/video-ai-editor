@@ -345,10 +345,19 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     v1 = edl.get_track("v1")
     transitions = (v1.transitions if v1 else []) or []
 
-    # Chunk cache: when no V1 transitions, render each clip ONCE to a
-    # canvas-resolution mp4 and cache by fingerprint. Subsequent renders that
+    # Chunk cache: when no V1 transitions, render each clip ONCE to an
+    # OUTPUT-resolution mp4 and cache by fingerprint. Subsequent renders that
     # don't change the clip skip straight to a fast concat. Disabled when
     # transitions are present (xfade needs both streams in one filter graph).
+    #
+    # Output res, not canvas res: the assembly passes chunks through with a
+    # `null` filter (no rescale), so chunk dimensions ARE the final preview
+    # dimensions. Rendering preview chunks at full 1080x1920 made the cold
+    # first preview ~3x slower than needed and shipped megabytes of extra
+    # video to the <video> tag. Export calls _render with height=canvas.h, so
+    # export chunks stay full-res; the fingerprint includes the dims, keeping
+    # preview/export chunks cached separately (they already differed by
+    # encoder args anyway).
     chunk_paths: list[Path] | None = None
     if cache_dir is not None and not transitions:
         try:
@@ -356,7 +365,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             chunk_paths = get_or_build_chunks(
                 clips,
                 cache_dir=cache_dir / "chunks",
-                canvas_w=canvas.w, canvas_h=canvas.h, fps=fps,
+                canvas_w=w_out, canvas_h=h_out, fps=fps,
                 encoder_args=enc_args,
                 build_video_chain=_build_clip_video_chain,
                 build_audio_chain=_build_clip_audio_chain,
@@ -486,6 +495,12 @@ def _video_only_fingerprint(edl: EDL) -> str:
 def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int = 30) -> RenderResult:
     """Render a preview keyed by EDL hash, with an audio-only-remux fast path.
 
+    `height` is the SHORT edge of the preview. On a portrait 9:16 canvas a
+    literal output-height of 540 produces a 304x540 frame — visibly soft in
+    the editor's phone-shaped preview box. Treating 540 as the short edge
+    gives 540x960 portrait / 960x540 landscape: crisp at retina box sizes,
+    still ~3x fewer pixels than full canvas.
+
     Strategy:
       1. Full hash hit → return cached preview (instant).
       2. Else compute video-only fingerprint. If a cached video at that fp
@@ -493,6 +508,12 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
          skips the expensive video re-encode when only music/vo changed.
       3. Else do the full render and cache by both video-fp and full hash.
     """
+    canvas = edl.canvas
+    if canvas.h > canvas.w:
+        # Portrait: short edge is the WIDTH → scale height so width ≈ `height`.
+        height = min(canvas.h, int(round(height * canvas.h / max(1, canvas.w))))
+    else:
+        height = min(canvas.h, height)
     h = edl.hash()
     out_dir = session_dir / "previews"
     out_dir.mkdir(parents=True, exist_ok=True)

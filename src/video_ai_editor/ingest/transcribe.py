@@ -129,10 +129,13 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
             capture_output=True, check=True,
         )
         out_prefix = Path(td) / "out"
+        # `-l auto` is REQUIRED when no language is given: whisper-cli's
+        # default is `-l en` (not auto-detect), which force-decodes Hindi /
+        # any non-English audio as English garbage. faster-whisper
+        # auto-detects when language=None; this keeps the backends consistent.
         cmd = [_WHISPER_CPP_BIN, "-m", str(model_path), "-f", str(wav),
-               "-of", str(out_prefix), "-oj", "-ml", "1"]
-        if language:
-            cmd += ["-l", language]
+               "-of", str(out_prefix), "-oj", "-ml", "1",
+               "-l", language if language else "auto"]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -141,18 +144,45 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
             raise RuntimeError(f"whisper-cli produced no JSON output:\n{proc.stdout[-500:]}")
         data = json.loads(json_path.read_text())
 
-    # whisper.cpp's transcription JSON has top-level `transcription` (segments)
-    # with offsets in milliseconds. Convert to our Segment/Word model.
-    segments: list[Segment] = []
-    for i, seg in enumerate(data.get("transcription", []) or []):
+    # whisper.cpp's transcription JSON has top-level `transcription` entries
+    # with offsets in milliseconds. With `-ml 1` each entry is ONE TOKEN —
+    # perfect word timing, but the faster-whisper backend returns sentence
+    # segments with word lists, and captions are built from segments. Merge
+    # tokens into sentence-ish segments so both backends produce the same
+    # shape: break on sentence punctuation, a ≥0.8s gap, or ~12 words.
+    words_all: list[Word] = []
+    for seg in data.get("transcription", []) or []:
         offsets = seg.get("offsets") or {}
         start = float(offsets.get("from", 0)) / 1000.0
         end = float(offsets.get("to", 0)) / 1000.0
         text = (seg.get("text") or "").strip()
-        # whisper-cli with -ml 1 emits one segment per token, which is great for
-        # word-level timing. Treat each segment as a single-word unit.
-        words = [Word(start=start, end=end, word=text)] if text else []
-        segments.append(Segment(id=i, start=start, end=end, text=text, words=words))
+        if text:
+            words_all.append(Word(start=start, end=end, word=text))
+
+    _SENT_END = ("।", ".", "!", "?", "॥")  # incl. Devanagari danda
+    segments: list[Segment] = []
+    bucket: list[Word] = []
+
+    def _flush() -> None:
+        if not bucket:
+            return
+        segments.append(Segment(
+            id=len(segments),
+            start=bucket[0].start,
+            end=bucket[-1].end,
+            text=" ".join(w.word for w in bucket),
+            words=list(bucket),
+        ))
+        bucket.clear()
+
+    for w in words_all:
+        if bucket and (w.start - bucket[-1].end) >= 0.8:
+            _flush()  # long silence → new segment
+        bucket.append(w)
+        if w.word.endswith(_SENT_END) or len(bucket) >= 12:
+            _flush()
+    _flush()
+
     duration = segments[-1].end if segments else 0.0
     detected_lang = data.get("result", {}).get("language") if isinstance(data.get("result"), dict) else None
     return Transcript(language=str(detected_lang or language or "en"),
@@ -165,12 +195,21 @@ def transcribe(audio_path: Path, language: str | None = None,
     """Run whisper. `language=None` triggers auto-detect.
 
     `backend`:
-      - "faster_whisper" (default) — CPU int8 via faster-whisper
-      - "whisper_cpp"             — whisper-cli with Metal on Apple Silicon
-
-    Falls back to faster_whisper if whisper_cpp is requested but unavailable.
+      - "auto" (default)  — whisper-cli (Metal-accelerated) when the binary
+        AND the ggml model for the requested size are present; otherwise
+        faster-whisper. On Apple Silicon this is ~4-5x faster (measured:
+        12s vs 54s for 40s of Hindi audio) — the difference between
+        captions feeling instant and feeling stuck.
+      - "faster_whisper"  — force CPU int8 via faster-whisper
+      - "whisper_cpp"     — force whisper-cli (falls back if unavailable)
     """
-    backend = backend or os.environ.get("WHISPER_BACKEND") or "faster_whisper"
+    backend = backend or os.environ.get("WHISPER_BACKEND") or "auto"
+    if backend == "auto":
+        name = model_size or WHISPER_MODEL
+        if _whisper_cpp_available() and _whisper_cpp_model_path(name).exists():
+            backend = "whisper_cpp"
+        else:
+            backend = "faster_whisper"
     if backend == "whisper_cpp" and _whisper_cpp_available():
         return _transcribe_via_whisper_cpp(audio_path, language, model_size)
     model = _get_model(model_size)
