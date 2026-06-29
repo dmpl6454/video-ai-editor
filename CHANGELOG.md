@@ -3,6 +3,16 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.3
+
+### Added
+- **`ANTHROPIC_API_KEY` for the shipped app.** The dev server reads the repo
+  `.env`, but a double-clicked `.app` can't (its project root is inside the
+  read-only bundle). Config now also loads `.env` from a stable user-writable
+  location — `~/Library/Application Support/Video AI Editor/.env` — so the
+  in-app Claude chat works from the DMG. Repo `.env` still wins for dev; the
+  shell env still wins over both. Keys are never bundled or committed.
+
 ## 0.2.2
 
 ### Fixed

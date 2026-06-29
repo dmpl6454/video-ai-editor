@@ -50,12 +50,15 @@ APP_VERSION = _read_version()
 # Auto-load .env at the project root. Last assignment wins (POSIX-style) so
 # stale duplicates higher up in the file are overridden by newer entries
 # appended at the bottom.
-def _load_dotenv() -> None:
-    env_path = PROJECT_ROOT / ".env"
+def _apply_env_file(env_path: Path) -> None:
     if not env_path.exists():
         return
     parsed: dict[str, str] = {}
-    for line in env_path.read_text().splitlines():
+    try:
+        lines = env_path.read_text().splitlines()
+    except Exception:
+        return
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -64,10 +67,25 @@ def _load_dotenv() -> None:
         if k and v:
             parsed[k] = v  # later entries overwrite earlier ones
     for k, v in parsed.items():
-        # The shell env always wins over .env (so an explicit `export` or an
-        # inline launch still beats stale .env entries).
+        # The shell env always wins over .env, and an earlier-loaded file wins
+        # over a later one (so the dev repo .env beats the user-level one).
         if k not in os.environ:
             os.environ[k] = v
+
+
+def _user_config_dir() -> Path:
+    """Stable, user-writable config dir that BOTH the dev server and the shipped
+    .app can reach. The frozen app's PROJECT_ROOT points inside the read-only
+    bundle, so a repo-relative .env is invisible to it — this is where a
+    double-clicked app picks up its ANTHROPIC_API_KEY."""
+    return Path.home() / "Library" / "Application Support" / "Video AI Editor"
+
+
+def _load_dotenv() -> None:
+    # Order = precedence (first wins): dev repo .env, then the user-level config
+    # dir used by the shipped app.
+    for env_path in (PROJECT_ROOT / ".env", _user_config_dir() / ".env"):
+        _apply_env_file(env_path)
 
 
 _load_dotenv()
