@@ -3,6 +3,24 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.8
+
+### Fixed
+- **Properties panel overflowed its fixed-width column.** Several issues, all in
+  the right sidebar:
+  - The In/Out and Fade-in/out rows used flex with non-shrinking number inputs;
+    they're now a `1fr 1fr` grid with `min-width: 0` inputs so they stay equal
+    and fit.
+  - `.props input { width: 100% }` was stretching the *Mute* checkbox and
+    blowing out its label — the rule now excludes checkbox/radio.
+  - Long filenames (`a_b_c.normalized.mp4`) and clip ids are unbreakable tokens
+    that painted past the panel edge; `overflow-wrap: anywhere` lets them wrap.
+  - Flex rows (sliders, Transform x/y, action buttons) wrap instead of
+    overflowing; the sidebar is `min-width: 0` + `overflow-x: hidden`.
+- Verified live by measuring the DOM: the Timing row is a grid of two equal
+  125.5px columns, all inputs are `border-box`, and the 280px sidebar reports
+  **zero** horizontal overflow with a clip selected.
+
 ## 0.2.7
 
 ### Added

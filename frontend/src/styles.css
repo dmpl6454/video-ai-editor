@@ -73,7 +73,9 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 .sidebar {
   background: var(--bg-1);
   border-right: 1px solid var(--line);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;   /* fixed-width panel — content fits, never scrolls sideways */
+  min-width: 0;
   padding: 10px;
 }
 .sidebar.right { border-right: none; border-left: 1px solid var(--line); }
@@ -294,10 +296,25 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   word-break: break-all;
 }
 
-.props .field { margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
+/* Break long unbreakable tokens (filenames like a_b_c.normalized.mp4) so they
+   wrap inside the fixed-width panel instead of painting past its edge. */
+.props { min-width: 0; overflow-wrap: anywhere; }
+.props .field { margin: 6px 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .props label { font-size: 11px; color: var(--text-dim); }
-.props .row { display: flex; gap: 6px; }
-.props input { width: 100%; }
+/* Flex rows (sliders, x/y, action buttons) wrap instead of overflowing the
+   fixed-width panel when their content can't shrink (e.g. the x/y spans). */
+.props .row { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Two-field rows (In/Out, Fade in/out) → equal columns that shrink to fit the
+   fixed-width Properties panel instead of overflowing it. Slider/x-y rows keep
+   the default flex so the slider can still grow. */
+.props .row.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+/* Full-width for text/number fields only — a checkbox/radio must keep its
+   intrinsic size, else `width:100%` stretches it and blows out its label. */
+.props input:not([type="checkbox"]):not([type="radio"]) {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
 
 .ops-log {
   font-size: 11px;
@@ -308,7 +325,7 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   max-height: 240px;
   overflow: auto;
 }
-.ops-log .op { padding: 3px 0; }
+.ops-log .op { padding: 3px 0; overflow-wrap: anywhere; }
 .ops-log .op b { color: var(--text); font-weight: 500; }
 
 .dropzone {

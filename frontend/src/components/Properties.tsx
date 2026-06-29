@@ -99,7 +99,7 @@ export function Properties() {
       </div>
 
       <Section label="Timing">
-        <div className="row">
+        <div className="row two">
           <div className="field">
             <label>In (s)</label>
             <input type="number" step="0.1" defaultValue={c.in.toFixed(2)}
@@ -132,7 +132,7 @@ export function Properties() {
         <Slider min={-30} max={6} step={0.5} value={gain}
           format={(v) => `${v.toFixed(1)} dB`}
           onChange={(v) => dispatch('set_volume', { target: c.id, db: v })} />
-        <div className="row">
+        <div className="row two">
           <div className="field">
             <label>Fade in</label>
             <input type="number" step="0.05" min={0} max={5} defaultValue={fadeIn.toFixed(2)}

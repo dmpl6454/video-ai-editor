@@ -1,6 +1,6 @@
 [project]
 name = "video-ai-editor"
-version = "0.2.7"
+version = "0.2.8"
 description = "Local AI video editor — chat-driven, CapCut-class"
 requires-python = ">=3.11"
 dependencies = [
