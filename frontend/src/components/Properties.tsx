@@ -43,6 +43,9 @@ export function Properties() {
   )
 
   const c = clip.c
+  if (clip.t.type === 'sticker') {
+    return <StickerProps c={c as unknown as StickerLike} dispatch={dispatch} />
+  }
   if (!isMediaClip(c)) {
     // Text clip — minimal view
     return (
@@ -190,6 +193,83 @@ export function Properties() {
 
       <div className="row" style={{ marginTop: 8 }}>
         <button onClick={() => dispatch('duplicate_clip', { clip_id: c.id })}>Duplicate</button>
+        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+      </div>
+    </div>
+  )
+}
+
+interface StickerLike {
+  id: string
+  label?: string | null
+  start: number
+  end: number
+  transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
+}
+
+function StickerProps({ c, dispatch }: {
+  c: StickerLike
+  dispatch: ReturnType<typeof useStore.getState>['dispatch']
+}) {
+  const tx = c.transform ?? {}
+  const x = asScalar(tx.x, 0), y = asScalar(tx.y, 0)
+  const scale = asScalar(tx.scale, 1)
+  const rotation = asScalar(tx.rotation, 0)
+  const opacity = asScalar(tx.opacity, 1)
+  const start = c.start ?? 0
+  const duration = Math.max(0.1, (c.end ?? start + 3) - start)
+  const setTx = (p: Record<string, number>) => dispatch('set_clip_transform', { clip_id: c.id, ...p })
+  const setTiming = (p: { start?: number; end?: number }) =>
+    dispatch('set_clip_timing', { clip_id: c.id, ...p })
+
+  return (
+    <div className="props">
+      <h2>Properties</h2>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+        {c.label ? `${c.label} ` : ''}Sticker · {c.id}
+      </div>
+
+      <Section label="Position">
+        {/* keys force the input to re-seed when canvas drag changes x/y */}
+        <div className="row two">
+          <div className="field">
+            <label>X</label>
+            <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
+              onBlur={(e) => setTx({ x: Number(e.target.value) })} />
+          </div>
+          <div className="field">
+            <label>Y</label>
+            <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
+              onBlur={(e) => setTx({ y: Number(e.target.value) })} />
+          </div>
+        </div>
+      </Section>
+
+      <Section label="Transform">
+        <Slider label min={0.1} max={4} step={0.05} value={scale}
+          format={(v) => `scale ${v.toFixed(2)}`} onChange={(v) => setTx({ scale: v })} />
+        <Slider min={-180} max={180} step={1} value={rotation}
+          format={(v) => `rotation ${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
+        <Slider min={0} max={1} step={0.05} value={opacity}
+          format={(v) => `opacity ${v.toFixed(2)}`} onChange={(v) => setTx({ opacity: v })} />
+      </Section>
+
+      <Section label="Timing">
+        <div className="row two">
+          <div className="field">
+            <label>Start (s)</label>
+            <input type="number" step="0.1" key={`s${start.toFixed(2)}`} defaultValue={start.toFixed(2)}
+              onBlur={(e) => { const ns = Math.max(0, Number(e.target.value)); setTiming({ start: ns, end: ns + duration }) }} />
+          </div>
+          <div className="field">
+            <label>Duration (s)</label>
+            <input type="number" step="0.1" min={0.1} key={`d${duration.toFixed(2)}`} defaultValue={duration.toFixed(2)}
+              onBlur={(e) => { const nd = Math.max(0.1, Number(e.target.value)); setTiming({ end: start + nd }) }} />
+          </div>
+        </div>
+      </Section>
+
+      <div className="row" style={{ marginTop: 8 }}>
         <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
       </div>
     </div>

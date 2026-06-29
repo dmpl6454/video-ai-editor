@@ -1234,14 +1234,15 @@ def set_speed(store: EDLStore, args: dict) -> dict:
 
 
 def set_clip_transform(store: EDLStore, args: dict) -> dict:
-    """Adjust transform on a clip: rotation (deg), scale, x, y, opacity."""
+    """Adjust transform on a clip or sticker: rotation (deg), scale, x, y, opacity."""
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
     _, c = res
-    if not isinstance(c, Clip):
-        raise ValueError("set_clip_transform only supports media clips")
+    # Media clips and stickers both carry a Transform; text clips don't.
+    if not hasattr(c, "transform"):
+        raise ValueError("set_clip_transform needs a media clip or sticker (it has no transform)")
     for k in ("x", "y", "scale", "rotation", "opacity"):
         if k in args and args[k] is not None:
             setattr(c.transform, k, float(args[k]))
@@ -2038,6 +2039,32 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
     return {"sticker_id": sticker.id, "summary": summary, "src": src_arg}
 
 
+def set_clip_timing(store: EDLStore, args: dict) -> dict:
+    """Set start and/or end (seconds) of an OVERLAY clip — a sticker or text.
+
+    Media clips have a computed `end`; they use trim_clip / move_clip instead.
+    Drives the Properties panel's Start / Duration fields for stickers.
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    track, c = res
+    if isinstance(c, Clip):
+        raise ValueError("set_clip_timing is for overlays (sticker/text); "
+                         "use trim_clip / move_clip for media clips")
+    if args.get("start") is not None:
+        c.start = max(0.0, float(args["start"]))
+    if args.get("end") is not None:
+        c.end = float(args["end"])
+    if c.end <= c.start:                      # never allow a zero/negative span
+        c.end = c.start + 0.1
+    track.clips.sort(key=lambda x: getattr(x, "start", 0))
+    summary = f"Timing {cid}: {c.start:.2f}–{c.end:.2f}s"
+    store.commit("set_clip_timing", args, summary)
+    return {"summary": summary}
+
+
 def vocal_isolate(store: EDLStore, args: dict) -> dict:
     """Run Demucs to extract a vocals-only WAV from a clip's source. Adds the
     resulting stem as a new clip on the `vo` track and mutes the original V1
@@ -2583,6 +2610,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_track_locked": set_track_locked,
     "set_speed": set_speed,
     "set_clip_transform": set_clip_transform,
+    "set_clip_timing": set_clip_timing,
     "bulk_delete": bulk_delete,
     "bulk_duplicate": bulk_duplicate,
     "add_marker": add_marker,

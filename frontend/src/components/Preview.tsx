@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
 import { TextLayer } from './TextLayer'
+import { StickerLayer } from './StickerLayer'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
 import { ErrorBoundary } from './ErrorBoundary'
 
@@ -265,6 +266,12 @@ export function Preview() {
               visible={scrubbing && !isPlaying}
             />
           </ErrorBoundary>
+        )}
+        {/* Interactive stickers (draw + select + drag + resize). Sits under the
+            text layer so text stays on top, but captures clicks because the
+            text layer is pointer-events:none. */}
+        {edl && boxSize.w > 0 && (
+          <StickerLayer edl={edl} videoEl={ref.current} width={boxSize.w} height={boxSize.h} />
         )}
         {/* Realtime text overlay — no server roundtrip per edit */}
         {edl && boxSize.w > 0 && (

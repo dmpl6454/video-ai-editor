@@ -3,6 +3,30 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.0
+
+### Added
+- **Direct sticker manipulation on the canvas.** Stickers are now interactive,
+  not just rendered:
+  - Click a sticker to select it (canvas hit-testing, rotation-aware).
+  - Drag the body to move it; drag a corner handle to resize. A dashed bounding
+    box + corner handles show on the selected sticker. Live feedback during the
+    gesture; the server is hit once on release (`set_clip_transform`).
+  - The Properties panel gains a **Sticker** inspector — X, Y, Scale, Rotation,
+    Opacity, Start and Duration — all editable, with the canvas and panel kept
+    in sync.
+  - New `StickerLayer` owns sticker drawing + interaction; `TextLayer` is now
+    text-only. Shared geometry/keyframe helpers live in `lib/overlay.ts` so the
+    hit-box always matches the painted glyph.
+- **Backend:** `set_clip_transform` now works on stickers (not just media
+  clips); new `set_clip_timing` sets start/end on overlay clips (stickers/text).
+- Verified live: insert → select → drag (Δx/Δy exact) → corner-resize (1×→2×) →
+  edit Duration (3s→1.5s, start preserved), all committing to the EDL. Backend
+  suite 259 passed.
+
+> Stickers already inserted at the playhead with a 3-second default and rendered
+> on a dedicated Stickers track; this release makes them directly editable.
+
 ## 0.2.9
 
 ### Added
