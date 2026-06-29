@@ -1,6 +1,32 @@
 import os
 from pathlib import Path
 
+
+def _augment_path_for_gui_launch() -> None:
+    """Make Homebrew/MacPorts CLIs (ffmpeg, ffprobe, whisper-cli, …) resolvable
+    no matter how the app was started.
+
+    A double-clicked macOS .app inherits launchd's minimal PATH
+    (``/usr/bin:/bin:/usr/sbin:/sbin``) — it does NOT see ``/opt/homebrew/bin``.
+    Everything that shells out to ffmpeg then dies with
+    ``FileNotFoundError: 'ffmpeg'``, which silently breaks import, preview,
+    waveform, export and captions. Launched from a terminal the binaries are on
+    PATH, so this only bites the bundled .app. Append (don't prepend) the common
+    locations so we never override a deliberately-chosen binary.
+    """
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+             "/usr/local/sbin", str(Path.home() / ".local" / "bin")]
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    additions = [d for d in extra if d and d not in current and os.path.isdir(d)]
+    if additions:
+        os.environ["PATH"] = os.pathsep.join([*current, *additions])
+
+
+# Run at import time — config is imported before any subprocess fires, and by
+# every entrypoint (desktop .app, `uvicorn …:app`, tests), so this is the one
+# universal chokepoint.
+_augment_path_for_gui_launch()
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 

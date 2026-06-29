@@ -3,6 +3,24 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.2
+
+### Fixed
+- **The shipped `.app` couldn't find `ffmpeg` — so import, preview, scrubbing,
+  export and captions all failed when launched by double-click.** A
+  Finder-launched macOS app inherits launchd's minimal `PATH`
+  (`/usr/bin:/bin:/usr/sbin:/sbin`), which excludes `/opt/homebrew/bin` where
+  `ffmpeg`, `ffprobe` and `whisper-cli` live — every shell-out died with
+  `FileNotFoundError: 'ffmpeg'`. (Running from a terminal masked it, because the
+  shell supplies Homebrew's `PATH`.) The app now appends the common Homebrew /
+  MacPorts / `~/.local/bin` locations to `PATH` at startup, so those binaries
+  resolve no matter how it's launched. Verified end-to-end under a simulated
+  launchd environment: upload, preview, and waveform all succeed.
+
+> Note: this resolves the binaries on a machine that already has them
+> (e.g. `brew install ffmpeg whisper-cpp`). A fully self-contained build that
+> bundles `ffmpeg` for machines without Homebrew is tracked separately.
+
 ## 0.2.1
 
 ### Fixed
