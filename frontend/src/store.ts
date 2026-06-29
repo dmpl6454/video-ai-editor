@@ -260,6 +260,18 @@ export const useStore = create<State>((set, get) => ({
     // Use the debounced refresh: chained tool calls (chat storms) coalesce
     // into one EDL fetch instead of N.
     get().refreshSoon()
+    // Offer a quick Undo on destructive deletes — covers every entry point
+    // (keyboard, Properties Delete, timeline context menu) in one spot. The
+    // backend's own undo is the restore; 'undo' isn't a delete so it can't loop.
+    if (tool === 'ripple_delete' || tool === 'bulk_delete') {
+      const count = tool === 'bulk_delete'
+        ? ((args.clip_ids as unknown[] | undefined)?.length ?? 0)
+        : 1
+      toast.action(
+        count > 1 ? `${count} clips deleted` : 'Clip deleted',
+        { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
+      )
+    }
   },
 
   renderPreview: async () => {

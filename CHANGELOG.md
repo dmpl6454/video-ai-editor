@@ -3,6 +3,20 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.5
+
+### Added
+- **Undo toast on delete.** Deleting a clip now shows a bottom-center toast —
+  "Clip deleted" (or "N clips deleted") with an **Undo** button — that
+  auto-dismisses after ~4s. The toast system gained inline action buttons, and
+  the prompt fires from the store's dispatch on `ripple_delete` / `bulk_delete`,
+  so it covers every delete path (keyboard, Properties Delete, timeline context
+  menu) from one place. Undo uses the app's own backend undo.
+- Toasts moved to bottom-center (out from under the chat panel) and gained an
+  explicit ✕ dismiss.
+- Verified live: delete (2→1 clips) → "Clip deleted" + Undo → click Undo →
+  restored (1→2); toast auto-dismisses.
+
 ## 0.3.4
 
 ### Changed

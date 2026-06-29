@@ -8,15 +8,21 @@ export function ToastHost() {
   return (
     <div className="toast-host" role="status" aria-live="polite">
       {toasts.map((t) => (
-        <button
-          key={t.id}
-          className={`toast toast-${t.kind}`}
-          onClick={() => dismiss(t.id)}
-          title="Dismiss"
-        >
+        <div key={t.id} className={`toast toast-${t.kind}`}>
           <span className="toast-dot" aria-hidden="true" />
           <span className="toast-msg">{t.message}</span>
-        </button>
+          {t.action && (
+            <button
+              className="toast-action"
+              onClick={() => { t.action!.onClick(); dismiss(t.id) }}
+            >
+              {t.action.label}
+            </button>
+          )}
+          <button className="toast-x" onClick={() => dismiss(t.id)} title="Dismiss" aria-label="Dismiss">
+            ✕
+          </button>
+        </div>
       ))}
     </div>
   )
