@@ -18,16 +18,28 @@ export function VoRecorder() {
   const [error, setError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const recRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const startedAtRef = useRef<number>(0)
   const tickRef = useRef<number | null>(null)
 
+  // Release the mic + stop the elapsed ticker. Idempotent — safe to call on any
+  // exit path (stop, error, unmount). Leaving the stream open keeps the OS mic
+  // indicator lit, which reads as "stuck recording" even when the button isn't.
+  const teardown = () => {
+    if (tickRef.current) { window.clearInterval(tickRef.current); tickRef.current = null }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
+    }
+  }
+
   useEffect(() => () => {
     // cleanup on unmount
-    if (tickRef.current) window.clearInterval(tickRef.current)
     if (recRef.current && recRef.current.state !== 'inactive') {
       recRef.current.stop()
     }
+    teardown()
   }, [])
 
   const start = async () => {
@@ -39,6 +51,7 @@ export function VoRecorder() {
     setRequesting(true)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
       const mime = (window as unknown as { MediaRecorder: typeof MediaRecorder })
         .MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -47,10 +60,11 @@ export function VoRecorder() {
       chunksRef.current = []
       rec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
       rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop())
-        if (tickRef.current) window.clearInterval(tickRef.current)
+        teardown()                 // release mic + ticker
+        setRecording(false)        // ← always return to idle, every path below
         const blob = new Blob(chunksRef.current, { type: mime })
-        if (!sid || blob.size < 256) return
+        if (!sid) return
+        if (blob.size < 256) { setError('Recording too short — nothing captured.'); return }
         setSubmitting(true)
         try {
           await api.voRecord(sid, blob, startedAtRef.current, 0)
@@ -60,6 +74,11 @@ export function VoRecorder() {
         } finally {
           setSubmitting(false)
         }
+      }
+      rec.onerror = () => {
+        teardown()
+        setRecording(false)
+        setError('Recording failed.')
       }
       rec.start(250)
       recRef.current = rec
@@ -72,6 +91,11 @@ export function VoRecorder() {
         setElapsed((e) => e + 0.1)
       }, 100) as unknown as number
     } catch (e) {
+      // Any start failure (mic denied, unsupported recorder, throw after the mic
+      // was acquired) → fully reset to idle AND release the mic so its indicator
+      // doesn't stay lit.
+      teardown()
+      setRecording(false)
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setRequesting(false)
@@ -80,8 +104,11 @@ export function VoRecorder() {
 
   const stop = () => {
     setRecording(false)
-    if (recRef.current && recRef.current.state !== 'inactive') {
-      recRef.current.stop()
+    const rec = recRef.current
+    if (rec && rec.state !== 'inactive') {
+      rec.stop()        // → onstop runs teardown + upload
+    } else {
+      teardown()        // already inactive: release the mic/ticker ourselves
     }
   }
 

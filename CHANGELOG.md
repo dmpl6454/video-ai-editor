@@ -3,6 +3,23 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.3
+
+### Fixed
+- **Voiceover recorder could get stuck / leave the mic hot.** The button now
+  returns to idle (and releases the microphone) on every exit path:
+  - `onstop` unconditionally tears down (stops the mic stream + elapsed ticker)
+    and sets `recording = false` before any early-return, so a too-short or
+    empty capture can't strand the UI — and a too-short capture now says so
+    instead of failing silently.
+  - If recording fails *after* the mic was granted (unsupported recorder, a
+    throw past `getUserMedia`), the start handler releases the stream so the OS
+    mic indicator doesn't stay lit looking like it's "still recording."
+  - Added a `MediaRecorder.onerror` handler and mic release on unmount.
+- Verified live: with mic permission denied, the button falls back to
+  "🎙 Record voiceover" with an error instead of hanging on "Requesting mic
+  access…".
+
 ## 0.3.2
 
 ### Fixed
