@@ -37,7 +37,10 @@ export function Timeline() {
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [zoom, setZoom] = useState(80) // px per second
+  // Zoom + snap live in the store so keyboard shortcuts can drive them.
+  const zoom = useStore((s) => s.timelineZoom)
+  const setZoomStore = useStore((s) => s.setTimelineZoom)
+  const snapEnabled = useStore((s) => s.snapEnabled)
   const [dpr] = useState(window.devicePixelRatio || 1)
   const [size, setSize] = useState({ w: 800, h: 240 })
   const [waveTick, setWaveTick] = useState(0)  // bump to force redraw when peaks arrive
@@ -376,6 +379,7 @@ export function Timeline() {
   // to within `snapPx` pixels; converts to seconds via the current zoom.
   const SNAP_PX = 8
   function snapTime(t: number, ignoreClipId?: string): number {
+    if (!snapEnabled) return t   // snapping toggled off (keyboard shortcut)
     const candidates: number[] = [0, playhead]
     for (const tk of edl?.tracks ?? []) {
       for (const c of tk.clips) {
@@ -532,7 +536,7 @@ export function Timeline() {
   function onWheel(e: React.WheelEvent) {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault()
-      setZoom((z) => Math.max(8, Math.min(400, z * (e.deltaY < 0 ? 1.15 : 1 / 1.15))))
+      setZoomStore(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))
     } else if (wrapRef.current) {
       wrapRef.current.scrollLeft += e.deltaX
     }
@@ -542,7 +546,7 @@ export function Timeline() {
     <>
       <div className="timeline-toolbar">
         <span className="small">Zoom</span>
-        <input type="range" min={8} max={400} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} style={{ width: 120 }} />
+        <input type="range" min={10} max={600} value={zoom} onChange={(e) => setZoomStore(Number(e.target.value))} style={{ width: 120 }} />
         <span className="small">{zoom}px/s</span>
         <div style={{ flex: 1 }} />
         <span className="small">⌘+scroll to zoom · ⌘B split · ⌫ delete · ⌘D duplicate</span>

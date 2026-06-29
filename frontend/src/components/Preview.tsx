@@ -172,33 +172,9 @@ export function Preview() {
     }
   }, [setPlayhead])
 
-  // Frame-step shortcuts: `,` back one frame, `.` forward one frame. Hold
-  // Shift for a 10-frame jump (matches CapCut/Premiere convention).
-  useEffect(() => {
-    if (!edl) return
-    const fps = edl.canvas.fps || 30
-    const dt = 1 / fps
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
-      if (e.key === ',' || e.key === '.') {
-        e.preventDefault()
-        const sign = e.key === ',' ? -1 : 1
-        const step = (e.shiftKey ? 10 : 1) * sign * dt
-        const v = ref.current
-        if (!v) return
-        v.pause()
-        // Snap to the nearest frame boundary FROM the current frame's
-        // start (ceil/floor instead of round) so a tap of `.` is always +1.
-        const cur = v.currentTime
-        const curFrame = Math.round(cur * fps)
-        const newTime = (curFrame + (e.shiftKey ? 10 * sign : sign)) * dt
-        v.currentTime = Math.max(0, Math.min(edl.duration, newTime))
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [edl])
+  // Frame-step is owned by the keymap (keymap/commands.ts → frameBack /
+  // frameForward), which moves the store playhead; the <video> follows via the
+  // playhead-sync effect above. Keeping it in one place avoids double-stepping.
 
   if (!sid) return <div className="preview-empty">Loading…</div>
   if (!edl?.duration) {

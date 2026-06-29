@@ -9,12 +9,13 @@ import { OpsLog } from './components/OpsLog'
 import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
-import { useShortcuts } from './shortcuts'
+import { ShortcutsSettings } from './components/ShortcutsSettings'
+import { useKeymap } from './keymap/engine'
 
 export default function App() {
   const init = useStore((s) => s.init)
   useEffect(() => { void init() }, [init])
-  useShortcuts()
+  useKeymap()  // customizable CapCut / Premiere / Final Cut keymaps
 
   return (
     <div className="app">
@@ -36,6 +37,7 @@ export default function App() {
       </aside>
       <ChatOverlay />
       <Help />
+      <ShortcutsSettings />
       <FileDropOverlay />
     </div>
   )

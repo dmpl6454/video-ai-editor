@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { openHelp } from './Help'
+import { openShortcuts } from './ShortcutsSettings'
 
 interface SessionRow { id: string; name: string }
 
@@ -152,6 +153,7 @@ export function TopBar() {
         </button>
       ))}
       <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
+      <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
       <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save the project as a .vae bundle (EDL + media)">
         {saving ? 'Saving…' : '💾 Save'}
       </button>

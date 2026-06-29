@@ -42,6 +42,20 @@ interface State {
   setOutMark(t: number | null): void
   clearUploadError(): void
 
+  // --- timeline view + shortcut-driven actions ---
+  timelineZoom: number              // px per second
+  snapEnabled: boolean
+  clipboard: string[]               // copied clip ids (for paste)
+  setTimelineZoom(z: number): void
+  zoomTimeline(factor: number): void   // multiply zoom (in/out)
+  toggleSnap(): void
+  selectAll(): void
+  copySelection(): void
+  pasteClipboard(): Promise<void>
+  goToStart(): void
+  goToEnd(): void
+  nudgeSelection(deltaSeconds: number): Promise<void>
+
   // workflow
   init(): Promise<void>
   refresh(): Promise<void>
@@ -110,6 +124,56 @@ export const useStore = create<State>((set, get) => ({
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
+
+  // --- timeline view + shortcut-driven actions ---
+  timelineZoom: 80,
+  snapEnabled: true,
+  clipboard: [],
+  setTimelineZoom: (z) => set({ timelineZoom: Math.max(10, Math.min(600, z)) }),
+  zoomTimeline: (factor) => {
+    const z = get().timelineZoom
+    set({ timelineZoom: Math.max(10, Math.min(600, z * factor)) })
+  },
+  toggleSnap: () => set({ snapEnabled: !get().snapEnabled }),
+  selectAll: () => {
+    const edl = get().edl
+    if (!edl) return
+    const ids: string[] = []
+    for (const t of edl.tracks) for (const c of t.clips) if ('src' in c) ids.push(c.id)
+    set({ selection: ids[0] ?? null, multiSelection: ids.slice(1) })
+  },
+  copySelection: () => {
+    const s = get()
+    const ids = Array.from(new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[]))
+    set({ clipboard: ids })
+  },
+  pasteClipboard: async () => {
+    const s = get()
+    // Paste = duplicate each clipboard clip (the dispatch duplicates with an
+    // offset). Reuses the existing duplicate path so undo/ops work.
+    for (const id of s.clipboard) {
+      await s.dispatch('duplicate_clip', { clip_id: id })
+    }
+  },
+  goToStart: () => set({ playhead: 0 }),
+  goToEnd: () => {
+    const dur = get().edl?.duration ?? 0
+    set({ playhead: dur })
+  },
+  nudgeSelection: async (deltaSeconds) => {
+    const s = get()
+    if (!s.selection || !s.edl) return
+    // Find the clip's current start, move by delta.
+    for (const t of s.edl.tracks) {
+      for (const c of t.clips) {
+        if (c.id === s.selection && 'start' in c) {
+          const newStart = Math.max(0, (c.start as number) + deltaSeconds)
+          await s.dispatch('move_clip', { clip_id: s.selection, new_start: newStart })
+          return
+        }
+      }
+    }
+  },
 
   init: async () => {
     // Try to recover the most recent session, else create a new one.
