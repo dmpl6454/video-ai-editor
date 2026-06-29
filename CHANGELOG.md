@@ -3,6 +3,19 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.4
+
+### Changed
+- **Stale download links are now flagged "(outdated)" instead of vanishing.**
+  Each export/`.vae` link is stamped with the history length (`ops.length`) it
+  was made at. When you edit past that point, the link stays — you can still
+  grab the last render — but shows **↓ MP4 (outdated)** / **↓ .vae (outdated)**
+  in amber with a strike-through, so nobody ships a stale file by mistake.
+  Re-exporting (or re-saving) refreshes the stamp and the link goes green again.
+  Supersedes the 0.2.7 behavior, which hard-cleared the link on any edit.
+- Verified live: export → fresh "↓ MP4" → an edit advances history → "↓ MP4
+  (outdated)" (strike-through) → re-export → fresh again.
+
 ## 0.3.3
 
 ### Fixed

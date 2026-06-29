@@ -69,6 +69,9 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 .topbar h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .topbar .grow { flex: 1; }
 .topbar .pill { background: var(--bg-3); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--text-dim); }
+/* A download link that no longer matches the current edit — kept but flagged. */
+.stale-dl { color: var(--warn) !important; text-decoration: line-through; opacity: 0.85; }
+.stale-dl:hover { opacity: 1; }
 
 .sidebar {
   background: var(--bg-1);

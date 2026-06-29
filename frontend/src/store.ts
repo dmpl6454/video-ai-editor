@@ -29,6 +29,7 @@ interface State {
   exportError: string | null
   exportProgress: number        // 0..1 live ffmpeg progress
   exportJobId: string | null    // current export job (for cancel)
+  exportGen: number             // ops.length when the current export finished (staleness check)
 
   // Client-side live transform: set while a transform slider is being dragged
   // so Preview applies a CSS transform to the <video> for instant feedback,
@@ -100,6 +101,7 @@ export const useStore = create<State>((set, get) => ({
   exportError: null,
   exportProgress: 0,
   exportJobId: null,
+  exportGen: 0,
 
   setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
   toggleSelection: (id) => {
@@ -252,9 +254,8 @@ export const useStore = create<State>((set, get) => ({
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
     if (!sid) return
-    // Any new edit invalidates the previous export — drop its stale download
-    // link so the navbar can't offer an out-of-date "↓ MP4".
-    if (get().exportUrl) set({ exportUrl: null, exportProgress: 0 })
+    // We KEEP the previous export's download link after an edit, but the UI
+    // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
     await api.dispatch(sid, tool, args)
     // Use the debounced refresh: chained tool calls (chat storms) coalesce
     // into one EDL fetch instead of N.
@@ -295,7 +296,10 @@ export const useStore = create<State>((set, get) => ({
           continue
         }
         if (job.status === 'completed' && job.result) {
-          set({ exportUrl: job.result.url, exportStatus: null, exportProgress: 1 })
+          // Stamp the export with the current history length so the UI can flag
+          // it "outdated" once the user edits past this point.
+          set({ exportUrl: job.result.url, exportStatus: null, exportProgress: 1,
+                exportGen: get().ops.length })
           triggerDownload(job.result.url, job.result.filename)
           toast.success('Export complete — downloading…')
           return

@@ -11,6 +11,8 @@ export function TopBar() {
   const dispatch = useStore((s) => s.dispatch)
   const exporting = useStore((s) => s.exporting)
   const exportUrl = useStore((s) => s.exportUrl)
+  const exportGen = useStore((s) => s.exportGen)
+  const opsLen = useStore((s) => s.ops.length)
   const exportStatus = useStore((s) => s.exportStatus)
   const exportError = useStore((s) => s.exportError)
   const clearExportError = useStore((s) => s.clearExportError)
@@ -21,6 +23,12 @@ export function TopBar() {
   const refresh = useStore((s) => s.refresh)
   const [saving, setSaving] = useState(false)
   const [savedUrl, setSavedUrl] = useState<string | null>(null)
+  const [savedGen, setSavedGen] = useState(0)
+  // A download link is "outdated" once history advances past the generation it
+  // was made at. We keep the link (you can still grab the last render) but mark
+  // it so nobody ships a stale file by mistake.
+  const exportStale = !!exportUrl && opsLen > exportGen
+  const savedStale = !!savedUrl && opsLen > savedGen
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -49,6 +57,7 @@ export function TopBar() {
     try {
       const r = await api.saveProject(sid)
       setSavedUrl(r.url)
+      setSavedGen(useStore.getState().ops.length)
     } finally {
       setSaving(false)
     }
@@ -197,8 +206,11 @@ export function TopBar() {
       <input ref={importRef} type="file" accept=".vae,.zip" hidden
         onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
       {savedUrl && (
-        <a href={savedUrl} download style={{ color: 'var(--good)', fontSize: 12 }}>
-          ↓ .vae
+        <a href={savedUrl} download
+          className={savedStale ? 'stale-dl' : ''}
+          title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
+          style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
+          ↓ .vae{savedStale ? ' (outdated)' : ''}
         </a>
       )}
       <button className="primary" onClick={() => doExport()} disabled={exporting || !edl?.duration}>
@@ -207,8 +219,11 @@ export function TopBar() {
           : 'Export'}
       </button>
       {exportUrl && !exporting && (
-        <a href={exportUrl} download style={{ color: 'var(--good)', fontSize: 12 }}>
-          ↓ MP4
+        <a href={exportUrl} download
+          className={exportStale ? 'stale-dl' : ''}
+          title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : 'Download exported MP4'}
+          style={{ color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
+          ↓ MP4{exportStale ? ' (outdated)' : ''}
         </a>
       )}
       {exportError && (
