@@ -62,6 +62,10 @@ interface MP4BoxFile {
 export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
   function FrameScrubber({ src, width, height, visible }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null)
+    // Hidden <video> used only when mp4box/WebCodecs can't demux the file
+    // (malformed/torn mp4, edit lists, an unsupported codec). It still scrubs —
+    // just by keyframe-snapped `currentTime` seeks instead of frame-exact.
+    const fallbackVideoRef = useRef<HTMLVideoElement>(null)
     const [ready, setReady] = useState(false)
     const stateRef = useRef<{
       decoder: VideoDecoder | null
@@ -72,10 +76,11 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       pendingTarget: number | null // seconds
       lastSeekKey: number          // the keyframe-sample index used last seek
       decoderConfig: VideoDecoderConfig | null
+      useFallback: boolean         // mp4box failed → drive the hidden <video>
     }>({
       decoder: null, samples: [], keyIdx: [], timescale: 1,
       lastDecodedCts: -1, pendingTarget: null, lastSeekKey: -1,
-      decoderConfig: null,
+      decoderConfig: null, useFallback: false,
     })
 
     // Load + demux the mp4 whenever `src` changes
@@ -91,18 +96,44 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       stateRef.current = {
         decoder: null, samples: [], keyIdx: [], timescale: 1,
         lastDecodedCts: -1, pendingTarget: null, lastSeekKey: -1,
-        decoderConfig: null,
+        decoderConfig: null, useFallback: false,
       }
+      // Detach any prior fallback <video> source so a stale clip can't paint.
+      const fv0 = fallbackVideoRef.current
+      if (fv0) { try { fv0.removeAttribute('src'); fv0.load() } catch {} }
       setReady(false)
       if (!src) return
+
+      // Switch to the hidden-<video> fallback. Idempotent, and a no-op once the
+      // WebCodecs path is already producing frames (so a late, benign mp4box
+      // onError can't tear down a working scrubber).
+      function enableFallback(reason: string): void {
+        const st = stateRef.current
+        if (cancelled || st.useFallback) return
+        if (st.decoder && st.samples.length > 0) return  // WebCodecs already works
+        console.warn('[FrameScrubber] mp4box failed, falling back to <video> seek:', reason)
+        st.useFallback = true
+        const d = st.decoder
+        if (d && d.state !== 'closed') { try { d.close() } catch {} }
+        st.decoder = null
+        const v = fallbackVideoRef.current
+        if (!v) return
+        v.src = src
+        try { v.load() } catch {}
+        const onLoaded = () => { if (!cancelled) setReady(true) }
+        v.addEventListener('loadeddata', onLoaded, { once: true })
+        // Some browsers fire 'canplay' but not 'loadeddata' for short clips.
+        v.addEventListener('canplay', onLoaded, { once: true })
+      }
 
       const mp4 = createFile() as MP4BoxFile
 
       mp4.onError = (e: string) => {
-        // mp4box.js emits these on abort + on real parse errors. We surface
-        // both via console — the caller falls back to <video>.currentTime
-        // if scrubber says not ready.
+        // mp4box.js emits these on abort + on real parse errors. A real parse
+        // error means it can't demux this file — switch to the <video> fallback
+        // so scrubbing still works instead of silently disabling it.
         console.warn('[FrameScrubber] mp4box error:', e)
+        enableFallback('onError: ' + e)
       }
 
       let trackId: number | null = null
@@ -120,8 +151,7 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
           try {
             description = extractDescription(mp4, vt.id)
           } catch (e) {
-            console.warn('[FrameScrubber] could not extract codec description; '
-                       + 'scrubber disabled, fallback to <video>:', e)
+            enableFallback('codec description: ' + e)
             return
           }
           const config: VideoDecoderConfig = {
@@ -141,16 +171,15 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
           try {
             decoder.configure(config)
           } catch (e) {
-            console.warn('[FrameScrubber] VideoDecoder.configure rejected codec '
-                       + `${vt.codec}; scrubber disabled:`, e)
             try { decoder.close() } catch {}
+            enableFallback(`configure rejected codec ${vt.codec}: ${e}`)
             return
           }
           stateRef.current.decoder = decoder
           mp4.setExtractionOptions(vt.id, null, { nbSamples: vt.nb_samples })
           mp4.start()
         } catch (e) {
-          console.warn('[FrameScrubber] onReady failed:', e)
+          enableFallback('onReady: ' + e)
         }
       }
 
@@ -201,15 +230,16 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
             buf.fileStart = offset
             try { mp4.appendBuffer(buf) }
             catch (e) {
-              // mp4box throws on truncated / malformed boxes. Bail out — the
-              // caller falls back to the plain <video> currentTime path.
-              console.warn('[FrameScrubber] appendBuffer failed:', e)
+              // mp4box throws on truncated / malformed boxes (e.g. an invalid
+              // box in a torn preview). Stop feeding it and switch the scrubber
+              // to the <video> fallback for this file.
+              enableFallback('appendBuffer: ' + e)
               return
             }
             offset += value.byteLength
           }
           try { mp4.flush() } catch (e) {
-            console.warn('[FrameScrubber] flush failed:', e)
+            enableFallback('flush: ' + e)
           }
         } catch (e) {
           if (!cancelled) console.warn('[FrameScrubber] fetch failed:', e)
@@ -222,6 +252,8 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
         if (d && d.state !== 'closed') {
           try { d.close() } catch {}
         }
+        const v = fallbackVideoRef.current
+        if (v) { try { v.removeAttribute('src'); v.load() } catch {} }
       }
     }, [src])
 
@@ -229,6 +261,22 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       isReady: () => ready,
       async seek(timeSeconds: number) {
         const st = stateRef.current
+
+        // Fallback path: drive the hidden <video> and paint the seeked frame.
+        if (st.useFallback) {
+          const v = fallbackVideoRef.current
+          if (!v) return
+          if (v.readyState < 2) {
+            await new Promise<void>((res) => {
+              v.addEventListener('loadeddata', () => res(), { once: true })
+              v.addEventListener('canplay', () => res(), { once: true })
+            })
+          }
+          await seekVideoElement(v, timeSeconds)
+          paintVideoFrame(v, canvasRef.current)
+          return
+        }
+
         if (!st.decoder || !st.samples.length) return
         const targetUs = timeSeconds * 1_000_000
 
@@ -276,20 +324,60 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
     }), [ready])
 
     return (
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={height}
-        style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          objectFit: 'fill', pointerEvents: 'none',
-          opacity: visible && ready ? 1 : 0,
-          transition: 'opacity 60ms linear',
-        }}
-      />
+      <>
+        <canvas
+          ref={canvasRef}
+          width={width}
+          height={height}
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: 'fill', pointerEvents: 'none',
+            opacity: visible && ready ? 1 : 0,
+            transition: 'opacity 60ms linear',
+          }}
+        />
+        {/* Hidden decode surface for the fallback path. `src` is set only when
+            mp4box fails, so we never double-fetch the file when WebCodecs works.
+            muted + playsInline so a frame can be decoded without user gesture. */}
+        <video
+          ref={fallbackVideoRef}
+          muted
+          playsInline
+          preload="auto"
+          crossOrigin="anonymous"
+          style={{ display: 'none' }}
+        />
+      </>
     )
   }
 )
+
+
+// Seek a <video> to `t` and resolve once the frame is ready. A no-op seek (we're
+// already there) won't emit 'seeked', so short-circuit that case.
+function seekVideoElement(video: HTMLVideoElement, t: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (video.readyState >= 2 && Math.abs(video.currentTime - t) < 1e-3) {
+      resolve(); return
+    }
+    video.addEventListener('seeked', () => resolve(), { once: true })
+    try { video.currentTime = Math.max(0, t) }
+    catch { resolve() }
+  })
+}
+
+// Paint the current <video> frame onto the scrubber canvas, scaled to fit.
+function paintVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement | null): void {
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const w = video.videoWidth, h = video.videoHeight
+  if (w && h) {
+    if (canvas.width !== w) canvas.width = w
+    if (canvas.height !== h) canvas.height = h
+  }
+  try { ctx.drawImage(video, 0, 0, canvas.width, canvas.height) } catch {}
+}
 
 
 // mp4box stores codec descriptions as `entries[0].avcC` / `hvcC` etc.

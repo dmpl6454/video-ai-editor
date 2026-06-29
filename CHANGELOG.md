@@ -3,6 +3,27 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.4
+
+### Fixed
+- **Preview scrubbing broke on torn/half-written files ("mp4box invalid box").**
+  Two root causes:
+  1. *Non-atomic renders.* ffmpeg wrote preview/export output straight to the
+     served path; `-y` truncates first, so a render that was killed or fetched
+     mid-write left a 0-byte or partial `.mp4` that mp4box rejected. Renders now
+     go to a temp sibling and `os.replace()` into place atomically — readers
+     only ever see a complete file or none. The serving endpoint also treats a
+     0-byte leftover as missing and re-renders.
+  2. *No demux fallback.* When mp4box/WebCodecs can't parse a file (edit lists,
+     unusual codecs, a genuinely odd box), the `FrameScrubber` now falls back to
+     a hidden `<video>` it seeks via `currentTime` and paints to the canvas on
+     `seeked` — so scrubbing keeps working instead of silently disabling. The
+     fallback `<video>` carries no `src` until mp4box actually fails (no
+     double-fetch on the happy path).
+- Verified live: atomic render emits a valid `ftyp` file with zero `.part`/
+  0-byte leaks, and the fallback paints a real frame (100% non-black) from the
+  served preview.
+
 ## 0.2.3
 
 ### Added

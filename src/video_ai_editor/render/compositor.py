@@ -8,6 +8,7 @@ GPU encoding: when VideoToolbox is available (Apple Silicon), preview + export
 encode via h264_videotoolbox for ~5–10× the throughput of libx264.
 """
 from __future__ import annotations
+import os
 import shutil
 import subprocess
 import threading
@@ -22,6 +23,20 @@ from .audio_mix import build_audio_mix
 from .effects import effect_chain, render_mask_png, build_chromakey_filter
 from .pip import build_pip_overlay_chain
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
+
+
+def _part_path(dst: Path) -> Path:
+    """A unique sibling temp path for an in-progress render of `dst`.
+
+    ffmpeg's `-y` truncates its output to 0 bytes and writes progressively, so
+    pointing it straight at the served path means a concurrent fetch (the
+    <video>/FrameScrubber polling preview.mp4) — or a render killed mid-write —
+    sees a 0-byte or torn file, which mp4box reports as "invalid box". Render to
+    this temp path, then os.replace() it into place (atomic on one filesystem),
+    so readers only ever see a complete file or none at all. PID+thread id keep
+    concurrent renders of the same hash from clobbering each other's temp file.
+    """
+    return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part.mp4")
 
 
 @lru_cache(maxsize=1)
@@ -473,6 +488,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         fc = fc + ";" + audio_chain
     extra_inputs += audio_inputs
 
+    tmp = _part_path(dst)
     args = ["ffmpeg", "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
@@ -480,10 +496,12 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             *enc_args,
             *_AAC_OUT,
             "-movflags", "+faststart",
-            str(dst)]
+            str(tmp)]
     proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise RuntimeError(f"ffmpeg render failed (rc={proc.returncode}):\n{proc.stderr[-2000:]}")
+    os.replace(tmp, dst)  # atomic swap — readers never see a partial file
     return dst
 
 
@@ -607,14 +625,20 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     Video is `-c:v copy` so this is essentially I/O bound.
     """
     clips = _video_clips(edl)
+    tmp = _part_path(dst)
     if not clips:
         # No V1 audio source to feed the mixer — copy video, generate silence.
-        subprocess.run([
-            "ffmpeg", "-y", "-i", str(video_only),
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-c:v", "copy", *_AAC_OUT, "-shortest",
-            "-movflags", "+faststart", str(dst),
-        ], capture_output=True, check=True)
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(video_only),
+                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                "-c:v", "copy", *_AAC_OUT, "-shortest",
+                "-movflags", "+faststart", str(tmp),
+            ], capture_output=True, check=True)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, dst)  # atomic swap — never serve a partial file
         return
 
     # Build per-clip audio chains with the same input order as the main render.
@@ -655,10 +679,12 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             *_AAC_OUT,
             "-r", str(fps),
             "-movflags", "+faststart",
-            str(dst)]
+            str(tmp)]
     proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
+    os.replace(tmp, dst)  # atomic swap — never serve a partial file
 
 
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,

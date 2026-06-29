@@ -602,8 +602,10 @@ def stream_preview(sid: str, h: str | None = None):
     store = _store(sid)
     target_hash = h or store.edl.hash()
     p = store.dir / "previews" / f"{target_hash}.mp4"
-    if not p.exists():
-        # Render on demand if missing
+    # Treat a 0-byte leftover (from a killed render that predates atomic writes)
+    # as missing — serving it would hand the client a torn file that mp4box
+    # rejects with "invalid box". Re-render instead.
+    if not p.exists() or p.stat().st_size == 0:
         res = render_preview(store.edl, store.dir)
         p = res.path
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
