@@ -3,6 +3,16 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.6
+
+### Fixed
+- **Sticker/emoji picker now closes on outside click.** The picker stayed open
+  until you toggled it again; it now dismisses when you click anywhere outside.
+  The ref wraps the toggle button too, so clicking the toggle to close it
+  doesn't fall through the outside handler and immediately re-open.
+- Verified live: opens on toggle, closes on an outside mousedown, stays open
+  when picking an emoji inside, and the toggle still closes cleanly.
+
 ## 0.3.5
 
 ### Added

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 
@@ -41,7 +41,22 @@ export function StickerPanel() {
   const [recent, setRecent] = useState<string[]>(loadRecent())
   const [open, setOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const pickerRef = useRef<HTMLDivElement>(null)
   const [uploadErr, setUploadErr] = useState<string | null>(null)
+
+  // Close the picker when clicking anywhere outside it. The ref wraps the
+  // toggle button too, so clicking the toggle to close it doesn't fall through
+  // here and immediately re-open.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
 
   const insert = async (emoji: string) => {
     const w = edl?.canvas.w ?? 1080
@@ -57,7 +72,7 @@ export function StickerPanel() {
   }
 
   return (
-    <div style={{ marginTop: 16 }}>
+    <div ref={pickerRef} className="sticker-picker" style={{ marginTop: 16 }}>
       <button
         style={{ width: '100%', fontSize: 11 }}
         onClick={() => setOpen((o) => !o)}
