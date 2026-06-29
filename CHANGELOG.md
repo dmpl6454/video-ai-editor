@@ -3,6 +3,20 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.9
+
+### Added
+- **Live value readouts on the Color sliders.** Brightness, Contrast,
+  Saturation, Temp and Tint now show their current value (right-aligned, like
+  the Speed and Audio sliders), updating live as you drag — the slider is
+  controlled now, while still committing to the server only on release. Formats:
+  Brightness `±0.00`, Contrast/Saturation `0.00×`, Temp `±N` (−100..+100), Tint
+  `±0.00`. (Transform sliders already showed `scale 1.00 / rotation 0° /
+  opacity 1.00`.)
+- Verified live: each color slider shows the correct initial value, the readout
+  tracks a drag (e.g. Brightness `+0.30` / `−0.24`), and the 280px panel stays
+  overflow-free.
+
 ## 0.2.8
 
 ### Fixed

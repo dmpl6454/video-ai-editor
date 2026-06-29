@@ -269,29 +269,44 @@ function ColorPanel({ clipId, dispatch }: {
   }
   return (
     <>
-      <ColorSlider label="Brightness" min={-0.5} max={0.5} step={0.02} commit={(v) => commit({ brightness: v })} />
-      <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })} init={1} />
-      <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })} init={1} />
-      <ColorSlider label="Temp"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ temp: v })} />
-      <ColorSlider label="Tint"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ tint: v })} />
+      <ColorSlider label="Brightness" min={-0.5} max={0.5} step={0.02} commit={(v) => commit({ brightness: v })}
+        format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
+      <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })} init={1}
+        format={(v) => `${v.toFixed(2)}×`} />
+      <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })} init={1}
+        format={(v) => `${v.toFixed(2)}×`} />
+      <ColorSlider label="Temp"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ temp: v })}
+        format={(v) => `${v >= 0 ? '+' : ''}${Math.round(v * 100)}`} />
+      <ColorSlider label="Tint"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ tint: v })}
+        format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
     </>
   )
 }
 
-function ColorSlider({ label, min, max, step, commit, init = 0 }: {
+function ColorSlider({ label, min, max, step, commit, init = 0, format }: {
   label: string; min: number; max: number; step: number;
-  commit: (v: number) => void; init?: number;
+  commit: (v: number) => void; init?: number; format?: (v: number) => string;
 }) {
-  // Slider that reports only on release (mouse up / touch end / blur) so we
-  // don't dispatch hundreds of effect chains while dragging.
+  // Controlled so the value readout tracks the thumb live; commit only fires on
+  // release (mouse up / touch end / key up / blur) so we don't dispatch hundreds
+  // of effect chains while dragging.
+  const [local, setLocal] = React.useState(init)
+  const release = (e: { target: EventTarget | null }) =>
+    commit(Number((e.target as HTMLInputElement).value))
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-      <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 70 }}>{label}</span>
-      <input type="range" min={min} max={max} step={step} defaultValue={init}
-        onMouseUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
-        onTouchEnd={(e) => commit(Number((e.target as HTMLInputElement).value))}
-        onBlur={(e) => commit(Number((e.target as HTMLInputElement).value))}
+      <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 64 }}>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={local}
+        onChange={(e) => setLocal(Number(e.target.value))}
+        onMouseUp={release}
+        onTouchEnd={release}
+        onKeyUp={release}
+        onBlur={release}
         style={{ flex: 1 }} />
+      <span style={{ fontSize: 10, color: 'var(--text)', minWidth: 46, textAlign: 'right',
+                     fontVariantNumeric: 'tabular-nums' }}>
+        {format ? format(local) : local.toFixed(2)}
+      </span>
     </div>
   )
 }
