@@ -3,6 +3,18 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.1
+
+### Added
+- **📂 Open .vae… inside the project switcher dropdown.** The `{project} ▾`
+  switcher already had ＋ New project, the recent-sessions list (current one
+  highlighted), and click-outside-to-close — it was just missing an in-dropdown
+  way to open a saved `.vae` bundle (it existed only as a separate toolbar
+  button). Added it next to ＋ New project, reusing the existing file picker.
+- Verified live: dropdown shows current (highlighted) + ＋ New project + 📂 Open
+  .vae… + recents; switching projects works; opens on click and closes on
+  outside mousedown.
+
 ## 0.3.0
 
 ### Added

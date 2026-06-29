@@ -110,12 +110,20 @@ export function TopBar() {
           >
             <div
               onClick={newSession}
+              style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 12, borderRadius: 3 }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              ＋ New project
+            </div>
+            <div
+              onClick={() => { setPickerOpen(false); importRef.current?.click() }}
               style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 12, borderRadius: 3,
                        borderBottom: '1px solid var(--line)' }}
               onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
               onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
             >
-              ＋ New project
+              📂 Open .vae…
             </div>
             {sessions.length === 0 && (
               <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--text-dim)' }}>
