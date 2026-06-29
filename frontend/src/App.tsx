@@ -11,6 +11,8 @@ import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
+import { ExportModal } from './components/ExportModal'
+import { ToastHost } from './components/Toast'
 import { useKeymap } from './keymap/engine'
 
 // The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
@@ -79,6 +81,8 @@ export default function App() {
       <ShortcutsSettings />
       <FileDropOverlay />
     </div>
+    <ExportModal />
+    <ToastHost />
     </>
   )
 }

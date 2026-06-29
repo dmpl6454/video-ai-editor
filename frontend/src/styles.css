@@ -118,6 +118,112 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 }
 .narrow-warning .nw-dismiss:hover { background: rgba(0, 0, 0, 0.24); }
 
+/* ---- Export progress modal ------------------------------------------------ */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 10, 0.62);
+  backdrop-filter: blur(3px);
+}
+.export-modal {
+  width: min(440px, 92vw);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.export-modal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.export-modal-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.export-modal-phase { font-size: 12px; color: var(--text-dim); }
+
+.export-progress-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  overflow: hidden;
+  position: relative;
+}
+.export-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transition: width 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Indeterminate sweep while the job is queued / before real progress lands. */
+.export-progress-track.indeterminate .export-progress-fill {
+  width: 38%;
+  animation: export-sweep 1.15s ease-in-out infinite;
+}
+@keyframes export-sweep {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+
+.export-modal-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.export-pct { font-size: 18px; font-weight: 600; }
+.export-eta { font-size: 12px; color: var(--text-dim); align-self: flex-end; }
+
+.export-modal-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+.export-cancel {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  padding: 7px 16px;
+}
+.export-cancel:hover:not(:disabled) { color: var(--text); border-color: var(--accent); background: rgba(255, 77, 109, 0.08); }
+
+/* ---- Toasts --------------------------------------------------------------- */
+.toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 340px;
+  text-align: left;
+  padding: 10px 13px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  animation: toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+.toast-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+.toast-success .toast-dot { background: var(--good); }
+.toast-error .toast-dot { background: var(--accent); }
+.toast-info .toast-dot { background: var(--accent-2); }
+.toast-msg { line-height: 1.35; }
+
 .preview-pane {
   display: flex;
   align-items: center;

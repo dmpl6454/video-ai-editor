@@ -4,13 +4,13 @@ import type { EDL, SessionInfo, Op } from './types'
 
 const BASE = '/api'
 
-export type JobStatus = 'queued' | 'running' | 'completed' | 'failed'
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface Job {
   id: string
   kind: string
   status: JobStatus
-  progress: number          // 0..1, best-effort (renders only report 0 or 1)
+  progress: number          // 0..1; export reports live ffmpeg progress
   result: { path: string; filename: string; url: string } | null
   error: string | null
   created_at: number
@@ -127,6 +127,8 @@ export const api = {
     ),
 
   getJob: (jobId: string) => http<Job>('GET', `/jobs/${jobId}`),
+
+  cancelJob: (jobId: string) => http<Job>('POST', `/jobs/${jobId}/cancel`),
 
   waveform: (sid: string, src: string, peaksPerSec = 50) =>
     http<{ peaks: number[]; peaks_per_sec: number; duration: number }>(

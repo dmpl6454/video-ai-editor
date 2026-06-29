@@ -589,6 +589,17 @@ def get_job(job_id: str):
     return job.to_dict()
 
 
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Request cancellation of a running/queued job (e.g. a long export). The
+    job's ffmpeg is terminated and its status becomes 'cancelled'."""
+    from .api.jobs import JOB_MANAGER
+    job = JOB_MANAGER.cancel(job_id)
+    if job is None:
+        raise HTTPException(404, f"job {job_id} not found")
+    return job.to_dict()
+
+
 @app.get("/api/sessions/{sid}/jobs")
 def list_session_jobs(sid: str):
     """Recent jobs scoped to a session. Useful for a UI 'Renders' panel."""
@@ -633,9 +644,10 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     session_dir_snapshot = store.dir
     height, fps, crf = body.height, body.fps, body.crf
 
-    def _job() -> dict:
+    def _job(set_progress=None, cancel_event=None) -> dict:
         res = render_export(edl_snapshot, session_dir_snapshot,
-                            height=height, fps=fps, crf=crf)
+                            height=height, fps=fps, crf=crf,
+                            on_progress=set_progress, cancel_event=cancel_event)
         return _export_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)

@@ -16,6 +16,7 @@ Trade-offs we picked:
   doesn't help). Override with VAI_JOB_WORKERS.
 """
 from __future__ import annotations
+import inspect
 import os
 import threading
 import time
@@ -26,7 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 
-JobStatus = Literal["queued", "running", "completed", "failed"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+
+
+class JobCancelled(Exception):
+    """Raised inside a job fn (via its cancel_event) to abort cleanly. The
+    JobManager maps it to status='cancelled' rather than 'failed'."""
 
 
 @dataclass
@@ -41,6 +47,7 @@ class Job:
     completed_at: float | None = None
     created_at: float = field(default_factory=time.time)
     session_id: str | None = None              # for permission scoping
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _future: Future | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
@@ -73,25 +80,71 @@ class JobManager:
             self._jobs.move_to_end(job.id)
             self._evict_old_completed_locked()
 
+        def _set_progress(p: float) -> None:
+            # Single float assignment — atomic under the GIL, so no lock needed
+            # on the hot path (progress fires many times per render).
+            job.progress = 0.0 if p < 0 else 1.0 if p > 1 else float(p)
+
+        # Cooperative hooks are opt-in: only passed to fns that declare them,
+        # so existing zero-arg job fns keep working unchanged.
+        inject: dict[str, Any] = {}
+        try:
+            params = inspect.signature(fn).parameters
+            if "set_progress" in params:
+                inject["set_progress"] = _set_progress
+            if "cancel_event" in params:
+                inject["cancel_event"] = job.cancel_event
+        except (TypeError, ValueError):
+            pass
+
         def _run() -> None:
+            if job.cancel_event.is_set():       # cancelled before it started
+                with self._lock:
+                    job.status = "cancelled"
+                    job.completed_at = time.time()
+                return
             with self._lock:
                 job.status = "running"
                 job.started_at = time.time()
             try:
-                out = fn(**kwargs)
+                out = fn(**kwargs, **inject)
                 with self._lock:
                     job.status = "completed"
                     job.result = out
                     job.completed_at = time.time()
                     job.progress = 1.0
+            except JobCancelled:
+                with self._lock:
+                    job.status = "cancelled"
+                    job.completed_at = time.time()
             except Exception as e:  # noqa: BLE001 (we want to capture *anything*)
                 with self._lock:
-                    job.status = "failed"
-                    job.error = f"{type(e).__name__}: {e}"
+                    # A failure that lands while a cancel is pending is a cancel,
+                    # not an error (e.g. ffmpeg killed mid-write).
+                    if job.cancel_event.is_set():
+                        job.status = "cancelled"
+                    else:
+                        job.status = "failed"
+                        job.error = f"{type(e).__name__}: {e}"
                     job.completed_at = time.time()
 
         job._future = self._executor.submit(_run)
         return job
+
+    def cancel(self, job_id: str) -> Job | None:
+        """Signal a job to stop. A running job's fn observes `cancel_event` and
+        bails (→ 'cancelled'); a still-queued job is marked cancelled outright."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            job.cancel_event.set()
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.completed_at = time.time()
+                if job._future is not None:
+                    job._future.cancel()
+            return job
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:

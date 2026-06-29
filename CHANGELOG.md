@@ -3,6 +3,30 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.7
+
+### Added
+- **Export progress modal.** Export now opens a modal with a **live progress
+  bar** (real ffmpeg progress, not a fake animation), an **ETA**, a **Cancel**
+  button, and a success **toast** + auto-download on completion. Progress comes
+  from ffmpeg `-progress` streamed into the background job; the bar shows an
+  indeterminate sweep until the first real sample lands.
+- **Cancellable exports.** `POST /api/jobs/{id}/cancel` terminates the running
+  ffmpeg and marks the job `cancelled` (no orphan processes, no partial files —
+  the atomic `.part` write is cleaned up). The job system gained cooperative
+  `set_progress` / `cancel_event` hooks, injected only into job fns that opt in.
+- **Toast notifications** (`toast.success/error/info`) with a bottom-right host.
+
+### Changed
+- A new edit clears the previous export's stale **↓ MP4** download link, so the
+  navbar never offers an out-of-date render.
+
+### Notes
+- Verified live: progress climbed 9 → 39 → 69%, ETA counted down ~10s → ~2s,
+  Cancel produced a "cancelled" toast and closed the modal, completion fired the
+  success toast + download, and the stale link cleared after an edit. Backend
+  suite 258 passed; preview render path is untouched (progress is export-only).
+
 ## 0.2.6
 
 ### Changed

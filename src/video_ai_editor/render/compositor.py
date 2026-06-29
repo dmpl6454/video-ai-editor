@@ -39,6 +39,56 @@ def _part_path(dst: Path) -> Path:
     return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part.mp4")
 
 
+def _run_ffmpeg_progress(args: list[str], total_s: float,
+                         on_progress, cancel_event) -> tuple[int, str]:
+    """Run ffmpeg streaming `-progress`, reporting 0..1 against `total_s` and
+    honouring `cancel_event`. Returns (returncode, stderr). Used by the export
+    path; preview keeps the plain blocking `subprocess.run`.
+
+    ffmpeg emits `out_time_us=<microseconds>` lines on the progress pipe; we
+    divide by the known timeline duration for a real percentage. stderr is
+    drained on a thread so a full pipe can't deadlock the progress reader.
+    """
+    out = args[-1]
+    full = [*args[:-1], "-progress", "pipe:1", "-nostats", out]
+    proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    err_chunks: list[str] = []
+
+    def _drain_err() -> None:
+        try:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                err_chunks.append(line)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_drain_err, daemon=True)
+    t.start()
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                from ..api.jobs import JobCancelled
+                raise JobCancelled()
+            line = raw.strip()
+            if on_progress and total_s and line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    on_progress(us / 1_000_000 / total_s)
+                except (ValueError, ZeroDivisionError):
+                    pass
+    finally:
+        rc = proc.wait()
+        t.join(timeout=1)
+    return rc, "".join(err_chunks)
+
+
 @lru_cache(maxsize=1)
 def _has_videotoolbox() -> bool:
     try:
@@ -352,7 +402,8 @@ _AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
 
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
-            cache_dir: Path | None = None) -> Path:
+            cache_dir: Path | None = None, on_progress=None,
+            cancel_event=None) -> Path:
     canvas = edl.canvas
     h_out = height
     w_out = int(round(canvas.w * (h_out / canvas.h) / 2) * 2)
@@ -497,10 +548,20 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             *_AAC_OUT,
             "-movflags", "+faststart",
             str(tmp)]
-    proc = subprocess.run(args, capture_output=True, text=True)
-    if proc.returncode != 0:
+    # Export streams progress (and can be cancelled); preview keeps the plain
+    # blocking path so nothing about its hot loop changes.
+    if on_progress is not None or cancel_event is not None:
+        try:
+            rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    else:
+        proc = subprocess.run(args, capture_output=True, text=True)
+        rc, err = proc.returncode, proc.stderr
+    if rc != 0:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg render failed (rc={proc.returncode}):\n{proc.stderr[-2000:]}")
+        raise RuntimeError(f"ffmpeg render failed (rc={rc}):\n{(err or '')[-2000:]}")
     os.replace(tmp, dst)  # atomic swap — readers never see a partial file
     return dst
 
@@ -689,8 +750,13 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
 
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
                   fps: int | None = None, crf: int = 18, preset: str = "medium",
-                  filename: str | None = None) -> RenderResult:
-    """Final export at canvas resolution (or override) with higher quality."""
+                  filename: str | None = None, on_progress=None,
+                  cancel_event=None) -> RenderResult:
+    """Final export at canvas resolution (or override) with higher quality.
+
+    `on_progress(p)` (0..1) and `cancel_event` (threading.Event) let a background
+    job stream progress and abort the underlying ffmpeg mid-render.
+    """
     h = edl.hash()
     out_dir = session_dir / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -699,5 +765,6 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     h_out = height or edl.canvas.h
     f_out = fps or edl.canvas.fps
     _render(edl, dst, height=h_out, fps=f_out, preview=False,
-            cache_dir=session_dir / "cache")
+            cache_dir=session_dir / "cache",
+            on_progress=on_progress, cancel_event=cancel_event)
     return RenderResult(path=dst, cached=False, edl_hash=h)

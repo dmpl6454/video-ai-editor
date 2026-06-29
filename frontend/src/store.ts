@@ -4,6 +4,7 @@
 
 import { create } from 'zustand'
 import { api } from './api'
+import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 
 interface State {
@@ -26,6 +27,8 @@ interface State {
   exportUrl: string | null
   exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
   exportError: string | null
+  exportProgress: number        // 0..1 live ffmpeg progress
+  exportJobId: string | null    // current export job (for cancel)
 
   // Client-side live transform: set while a transform slider is being dragged
   // so Preview applies a CSS transform to the <video> for instant feedback,
@@ -68,6 +71,7 @@ interface State {
   dispatch(tool: string, args?: Record<string, unknown>): Promise<void>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number }): Promise<void>
+  cancelExport(): Promise<void>
   splitAtPlayhead(): Promise<void>
   rippleDeleteSelection(): Promise<void>
   duplicateSelection(): Promise<void>
@@ -94,6 +98,8 @@ export const useStore = create<State>((set, get) => ({
   exportUrl: null,
   exportStatus: null,
   exportError: null,
+  exportProgress: 0,
+  exportJobId: null,
 
   setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
   toggleSelection: (id) => {
@@ -246,6 +252,9 @@ export const useStore = create<State>((set, get) => ({
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
     if (!sid) return
+    // Any new edit invalidates the previous export — drop its stale download
+    // link so the navbar can't offer an out-of-date "↓ MP4".
+    if (get().exportUrl) set({ exportUrl: null, exportProgress: 0 })
     await api.dispatch(sid, tool, args)
     // Use the debounced refresh: chained tool calls (chat storms) coalesce
     // into one EDL fetch instead of N.
@@ -263,23 +272,22 @@ export const useStore = create<State>((set, get) => ({
   doExport: async (opts = {}) => {
     const sid = get().sessionId
     if (!sid) return
-    set({ exporting: true, exportUrl: null, exportStatus: 'queued', exportError: null })
-    const POLL_MS = 1500
-    const MAX_MS = 30 * 60 * 1000  // 30-min ceiling so we never poll forever
+    set({
+      exporting: true, exportUrl: null, exportStatus: 'queued',
+      exportError: null, exportProgress: 0, exportJobId: null,
+    })
+    const POLL_MS = 500           // tight enough that the bar feels live
+    const MAX_MS = 30 * 60 * 1000 // 30-min ceiling so we never poll forever
     try {
       const { job_id } = await api.exportAsync(sid, opts)
+      set({ exportJobId: job_id })
       const startedAt = Date.now()
-      // Poll the background render job until it reaches a terminal state.
-      // The old flow awaited a single blocking request with no progress, no
-      // completion signal, and no error path — so a slow render looked like a
-      // permanent hang.
       for (;;) {
         await new Promise((r) => setTimeout(r, POLL_MS))
         let job
         try {
           job = await api.getJob(job_id)
         } catch {
-          // Transient network hiccup — keep polling until the ceiling.
           if (Date.now() - startedAt > MAX_MS) {
             set({ exportError: 'Export timed out while checking status.' })
             return
@@ -287,15 +295,22 @@ export const useStore = create<State>((set, get) => ({
           continue
         }
         if (job.status === 'completed' && job.result) {
-          set({ exportUrl: job.result.url, exportStatus: null })
+          set({ exportUrl: job.result.url, exportStatus: null, exportProgress: 1 })
           triggerDownload(job.result.url, job.result.filename)
+          toast.success('Export complete — downloading…')
           return
         }
         if (job.status === 'failed') {
           set({ exportError: job.error ?? 'Export failed.', exportStatus: null })
+          toast.error('Export failed.')
           return
         }
-        set({ exportStatus: job.status })
+        if (job.status === 'cancelled') {
+          set({ exportStatus: null })
+          toast.info('Export cancelled.')
+          return
+        }
+        set({ exportStatus: job.status, exportProgress: job.progress ?? 0 })
         if (Date.now() - startedAt > MAX_MS) {
           set({ exportError: 'Export is taking unusually long; it may have stalled.' })
           return
@@ -304,7 +319,18 @@ export const useStore = create<State>((set, get) => ({
     } catch (e) {
       set({ exportError: e instanceof Error ? e.message : String(e) })
     } finally {
-      set({ exporting: false, exportStatus: null })
+      set({ exporting: false, exportStatus: null, exportJobId: null })
+    }
+  },
+
+  cancelExport: async () => {
+    const id = get().exportJobId
+    if (!id) return
+    try {
+      await api.cancelJob(id)
+      // The poll loop sees status 'cancelled' and tears down the rest.
+    } catch {
+      // Best-effort; the export will still finish or time out on its own.
     }
   },
 
