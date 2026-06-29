@@ -3,6 +3,22 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.2
+
+### Fixed
+- **Space didn't play/pause when a slider was focused.** The keymap skipped
+  every focused `INPUT`, so after nudging a color/transform/zoom slider, Space
+  was swallowed instead of toggling playback. The handler now only bows out for
+  genuine **text-entry** fields (textarea, contentEditable, text/number/date/…
+  inputs); for non-text controls (range, checkbox, button, select) global
+  shortcuts win — above all Space → play/pause. It runs in the **capture phase**
+  and `preventDefault`s, so the focused control doesn't also react (e.g. a
+  button "clicking" on Space). A focused slider still keeps its own arrow / Home
+  / End / PageUp / PageDown keys for stepping.
+- Verified live: Space with a focused range slider plays; with a text field it's
+  ignored (typing preserved); ArrowRight on a focused slider isn't hijacked;
+  Space on the page still plays.
+
 ## 0.3.1
 
 ### Added

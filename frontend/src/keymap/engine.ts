@@ -130,13 +130,39 @@ let _captureMode = false
 /** While true, the keymap listener is suspended (the rebind UI is capturing). */
 export function setCaptureMode(on: boolean) { _captureMode = on }
 
+// Input types where the user is genuinely typing — keep every key for them.
+// (number/date/etc. included: you type + arrow-step values in those.)
+const TEXT_INPUT_TYPES = new Set([
+  'text', 'search', 'email', 'url', 'password', 'tel', 'number',
+  'date', 'time', 'datetime-local', 'month', 'week',
+])
+// Keys a focused non-text control (slider/checkbox/select) needs for itself —
+// arrows step a range slider, Home/End jump it. Don't hijack those.
+const CONTROL_NAV_KEYS = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown',
+])
+
 export function useKeymap() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (_captureMode) return
       const tgt = e.target as HTMLElement | null
       const tag = tgt?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
+      const isTextEntry =
+        tag === 'TEXTAREA' ||
+        !!tgt?.isContentEditable ||
+        (tag === 'INPUT' && TEXT_INPUT_TYPES.has((tgt as HTMLInputElement).type || 'text'))
+      // Genuine text fields keep every key for typing.
+      if (isTextEntry) return
+
+      // A focused non-text control (range slider, checkbox, button, select)
+      // still keeps its own navigation keys, but global shortcuts — above all
+      // Space → play/pause — must win so a quick slider tweak doesn't swallow
+      // them. Capture phase + preventDefault below stop the control from also
+      // reacting (e.g. a button "clicking" on Space).
+      const onFormControl =
+        tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT'
+      if (onFormControl && CONTROL_NAV_KEYS.has(e.code)) return
 
       const chord = chordFromEvent(e)
       if (!chord) return
@@ -147,7 +173,8 @@ export function useKeymap() {
       e.preventDefault()
       void cmd.run(useStore.getState())
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    // Capture phase so this runs before the focused control's own key handling.
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
   }, [])
 }
