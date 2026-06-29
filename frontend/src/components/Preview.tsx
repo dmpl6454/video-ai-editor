@@ -37,6 +37,9 @@ export function Preview() {
   const scrubberRef = useRef<FrameScrubberHandle>(null)
   const [scrubbing, setScrubbing] = useState(false)
   const scrubTimer = useRef<number | null>(null)
+  // Authoritative playback time (seconds). The rAF clock owns this while
+  // playing; kept in a ref so the loop never reads a stale `playhead` closure.
+  const clockRef = useRef(0)
 
   // A fingerprint that changes only for video-relevant edits. Text edits do
   // NOT change this, so the server preview is reused while client overlays
@@ -128,9 +131,17 @@ export function Preview() {
   }, [isPlaying, playbackRate])
 
   useEffect(() => {
-    if (!ref.current) return
-    if (Math.abs(ref.current.currentTime - playhead) > 0.05) {
-      ref.current.currentTime = playhead
+    const v = ref.current
+    if (!v) return
+    // Sync the <video> to an EXTERNAL playhead move (scrub while paused, or a
+    // deliberate jump during playback). While playing, the rAF clock already
+    // mirrors the video, so only a large gap warrants a seek — small free-run
+    // drift must not trigger a per-frame seek storm.
+    const gap = Math.abs(v.currentTime - playhead)
+    if (gap > (isPlaying ? 0.35 : 0.05)) {
+      // A failed/odd <video> can throw on a seek — never let that break the UI.
+      try { v.currentTime = playhead } catch { /* non-fatal */ }
+      clockRef.current = playhead   // keep the clock in step with the jump
     }
     // While paused, also drive the WebCodecs scrubber so frame-step keys land
     // on the exact frame even when the underlying <video> snapped to a keyframe.
@@ -145,39 +156,59 @@ export function Preview() {
     }
   }, [playhead, isPlaying])
 
-  // Frame-accurate playhead sync via requestVideoFrameCallback. The vanilla
-  // `timeupdate` event fires at ~250 ms intervals — way too coarse for a
-  // scrubber that needs to land on the right frame. rVFC fires once per
-  // decoded frame with the exact mediaTime, so the playhead UI tracks the
-  // video down to <1 frame of jitter on Chrome/Safari.
+  // Playback clock — decoupled from frame rendering.
+  //
+  // The clock used to be driven by `requestVideoFrameCallback`, which only
+  // fires when the <video> actually DECODES a frame. If the preview file can't
+  // decode (an odd/torn mp4), rVFC never fires and the playhead freezes even
+  // though playback is "running" — the timeline and time readout just stop.
+  //
+  // Now a rAF wall clock owns the playhead while playing. When the <video> is
+  // genuinely advancing we follow its `currentTime` (exact A/V sync); when it
+  // stalls or can't render we free-run on wall time so the playhead, time
+  // readout and red timeline line keep moving. Render failures are non-fatal.
   useEffect(() => {
-    const v = ref.current
-    if (!v || typeof (v as unknown as { requestVideoFrameCallback?: unknown })
-              .requestVideoFrameCallback !== 'function') return
-    let handle = 0
-    const tick = (_now: number, meta: { mediaTime: number }) => {
-      setPlayhead(meta.mediaTime)
-      handle = (v as unknown as {
-        requestVideoFrameCallback: (cb: typeof tick) => number
-      }).requestVideoFrameCallback(tick)
-    }
-    handle = (v as unknown as {
-      requestVideoFrameCallback: (cb: typeof tick) => number
-    }).requestVideoFrameCallback(tick)
-    return () => {
-      // cancelVideoFrameCallback is a native method on HTMLVideoElement and
-      // relies on its `this` being the element. Calling a detached reference
-      // (`const fn = v.cancelVideoFrameCallback; fn(handle)`) throws
-      // "TypeError: Illegal invocation" during React's unmount cleanup. Invoke
-      // it as a method (or .call(v, …)) so `this` stays bound to the element.
-      const vc = v as unknown as {
-        cancelVideoFrameCallback?: (h: number) => void
+    if (!isPlaying) return
+    const duration = edl?.duration ?? 0
+    let raf = 0
+    let last = performance.now()
+    clockRef.current = useStore.getState().playhead
+    let lastVideoTime = ref.current ? ref.current.currentTime : -1
+
+    const loop = (now: number) => {
+      const dt = (now - last) / 1000
+      last = now
+      const rate = useStore.getState().playbackRate
+      const vid = ref.current
+      // Follow the media clock when it's really advancing; otherwise keep the
+      // wall clock running so a stalled/failed renderer can't freeze playback.
+      if (vid && !vid.paused && !vid.ended &&
+          Math.abs(vid.currentTime - lastVideoTime) > 1e-4) {
+        clockRef.current = vid.currentTime
+        lastVideoTime = vid.currentTime
+      } else {
+        clockRef.current += dt * Math.max(-4, Math.min(4, rate || 1))
       }
-      if (typeof vc.cancelVideoFrameCallback === 'function') {
-        vc.cancelVideoFrameCallback(handle)
+
+      let t = clockRef.current
+      // Clamp to [0, duration] and stop at the ends. Advancing the playhead is
+      // never gated on a frame render succeeding.
+      if (duration && t >= duration) {
+        try { setPlayhead(duration) } catch { /* non-fatal */ }
+        setPlaying(false)
+        return
       }
+      if (t <= 0 && rate < 0) {
+        try { setPlayhead(0) } catch { /* non-fatal */ }
+        setPlaying(false)
+        return
+      }
+      try { setPlayhead(Math.max(0, t)) } catch { /* non-fatal */ }
+      raf = requestAnimationFrame(loop)
     }
-  }, [setPlayhead])
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [isPlaying, edl?.duration, setPlayhead, setPlaying])
 
   // Frame-step is owned by the keymap (keymap/commands.ts → frameBack /
   // frameForward), which moves the store playhead; the <video> follows via the

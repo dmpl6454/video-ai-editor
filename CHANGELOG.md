@@ -3,6 +3,22 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.5
+
+### Fixed
+- **Playback froze when the preview couldn't decode.** The playhead clock was
+  driven by `requestVideoFrameCallback`, which only fires when the `<video>`
+  actually decodes a frame — so an undecodable preview stopped the timeline, the
+  red playhead line, and the time readout even though playback was "running."
+  The clock is now an independent rAF wall clock: it follows the video's
+  `currentTime` for exact A/V sync when the video is advancing, and free-runs on
+  wall time when the video stalls or can't render — clamping to the clip
+  duration and stopping cleanly at the end. Per-frame work is wrapped so a
+  render failure is non-fatal.
+- Verified live: normal playback advances then freezes on pause; with the video
+  deliberately sabotaged so it can never decode a frame, the playhead still
+  advances (free-run) instead of freezing.
+
 ## 0.2.4
 
 ### Fixed
