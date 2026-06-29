@@ -21,6 +21,10 @@
   --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
 }
 html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var(--text); font-family: var(--font-ui); font-size: 13px; -webkit-font-smoothing: antialiased; }
+/* Below the editor's minimum width the 3-pane layout scrolls horizontally here
+   rather than collapsing. The .app holds the 900px floor; #root is the viewport-
+   width scroll container that lets you pan to it. */
+#root { overflow-x: auto; }
 button { font: inherit; color: inherit; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 button:hover:not(:disabled) { background: #2f2f37; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -37,12 +41,13 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
     "left center right";
   height: 100vh;
   width: 100%;
-  /* Without min-width:0 the grid items refuse to shrink below their content's
-     intrinsic width, forcing a ~1292px page floor that overflows on tablet/phone. */
-  min-width: 0;
-  overflow-x: hidden;
+  /* A pro 3-pane editor needs width. Rather than collapsing on narrow windows,
+     hold a 900px floor and let #root scroll horizontally to it (with a banner
+     nudging the user to a wider window). */
+  min-width: 900px;
 }
-/* Let every grid child shrink instead of forcing the whole page wider. */
+/* Let every grid child shrink to the 900px floor instead of forcing it wider
+   (the panes' intrinsic min-content would otherwise push it to ~1292px). */
 .app > * { min-width: 0; }
 
 .topbar {
@@ -53,8 +58,9 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   padding: 0 14px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
-  /* Scroll the toolbar internally on narrow screens rather than letting its
-     buttons push the page wider. */
+  /* Keep the toolbar on one line and scroll it internally rather than wrapping
+     or pushing the page wider. */
+  white-space: nowrap;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
@@ -81,42 +87,36 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   overflow: hidden;
 }
 
-/* ---------------------------------------------------------------------------
-   Responsive: tablet / phone (iPad, iOS Safari).
-   The 3-column desktop grid (220 + 1fr + 280) has a hard ~1292px content floor
-   that spills off-screen below that width. Below 1024px we reflow to a single
-   column that scrolls vertically, so nothing overflows horizontally. A video
-   timeline still needs width, so the editor pane keeps a usable fixed height
-   and the timeline scrolls horizontally inside its own pane.
-   ------------------------------------------------------------------------- */
-@media (max-width: 1024px) {
-  .app {
-    grid-template-columns: 1fr;
-    grid-template-rows: 44px 60vh auto auto;
-    grid-template-areas:
-      "topbar"
-      "center"
-      "left"
-      "right";
-    height: auto;
-    min-height: 100vh;
-  }
-  .sidebar,
-  .sidebar.right {
-    border-left: none;
-    border-right: none;
-    border-top: 1px solid var(--line);
-    max-height: 50vh;
-  }
-  .center { min-height: 320px; }
+/* Narrow-window banner. The editor stays usable (horizontal scroll) below its
+   minimum width, but we nudge the user toward a wider window. Fixed to the
+   viewport so it rides above the scrollable .app, dismissible. */
+.narrow-warning {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: #1a1206;
+  background: linear-gradient(90deg, var(--warn), #ffd35c);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
 }
-
-@media (max-width: 640px) {
-  .app { grid-template-rows: 44px 52vh auto auto; }
-  .center { min-height: 260px; }
-  /* Stack preview over a shorter timeline so both stay usable on a phone. */
-  .center { grid-template-rows: 1fr 200px; }
+.narrow-warning .nw-icon { font-size: 14px; }
+.narrow-warning .nw-msg { flex: 1; font-weight: 500; }
+.narrow-warning .nw-dismiss {
+  background: rgba(0, 0, 0, 0.14);
+  border: none;
+  color: #1a1206;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
+.narrow-warning .nw-dismiss:hover { background: rgba(0, 0, 0, 0.24); }
 
 .preview-pane {
   display: flex;

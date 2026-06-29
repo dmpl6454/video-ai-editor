@@ -3,6 +3,20 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.2.6
+
+### Changed
+- **Narrow-window strategy: hold-and-scroll instead of reflow.** A pro 3-pane
+  editor needs width, so rather than collapsing the panes into a single column
+  on small windows, the layout now holds a **900px minimum width** and scrolls
+  horizontally (`#root`) below that. The toolbar stays on one line and scrolls
+  internally. A dismissible banner appears under 900px nudging the user to a
+  wider window. This supersedes the 0.2.1 reflow (which stacked panes vertically
+  under 1024px). Modal dialogs keep their `min(…, 92vw)` sizing.
+- Verified live across widths: at 1280px the 3-pane grid is intact with no
+  banner and no scroll; at 700px the layout holds at 900px (panes don't
+  collapse), `#root` scrolls horizontally, and the banner shows and dismisses.
+
 ## 0.2.5
 
 ### Fixed

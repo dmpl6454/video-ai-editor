@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from './store'
 import { TopBar } from './components/TopBar'
 import { MediaBin } from './components/MediaBin'
@@ -13,12 +13,38 @@ import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
 import { useKeymap } from './keymap/engine'
 
+// The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
+// horizontally below it; this banner nudges the user to a wider window.
+const MIN_EDITOR_WIDTH = 900
+
 export default function App() {
   const init = useStore((s) => s.init)
   useEffect(() => { void init() }, [init])
   useKeymap()  // customizable CapCut / Premiere / Final Cut keymaps
 
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === 'undefined' ? MIN_EDITOR_WIDTH : window.innerWidth)
+  const [narrowDismissed, setNarrowDismissed] = useState(false)
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const showNarrowWarning = viewportWidth < MIN_EDITOR_WIDTH && !narrowDismissed
+
   return (
+    <>
+      {showNarrowWarning && (
+        <div className="narrow-warning" role="status">
+          <span className="nw-icon" aria-hidden="true">↔</span>
+          <span className="nw-msg">
+            Please use a wider window (min {MIN_EDITOR_WIDTH}px) for the best experience.
+          </span>
+          <button className="nw-dismiss" onClick={() => setNarrowDismissed(true)}>
+            Dismiss
+          </button>
+        </div>
+      )}
     <div className="app">
       <TopBar />
       <aside className="sidebar left">
@@ -53,5 +79,6 @@ export default function App() {
       <ShortcutsSettings />
       <FileDropOverlay />
     </div>
+    </>
   )
 }
