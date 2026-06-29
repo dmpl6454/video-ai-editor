@@ -44,6 +44,10 @@ export function Timeline() {
   const [dpr] = useState(window.devicePixelRatio || 1)
   const [size, setSize] = useState({ w: 800, h: 240 })
   const [waveTick, setWaveTick] = useState(0)  // bump to force redraw when peaks arrive
+  // Brief flash highlight on a newly-added clip (e.g. a fresh voiceover). The
+  // highlight is drawn in the heavy canvas while flashClipId is set; the store
+  // clears it after ~600ms, which redraws without it (a flash, no per-frame RAF).
+  const flashClipId = useStore((s) => s.flashClipId)
 
   // drag state for moving / trimming clips
   const dragRef = useRef<null | {
@@ -245,6 +249,22 @@ export function Timeline() {
           ctx.lineWidth = 1.5
           ctx.strokeRect(x + 0.5, y + 4 + 0.5, w - 1, trackHeight - 8 - 1)
         }
+        // new-clip flash: a bright highlight while the clip is flashing. The
+        // store clears flashClipId after ~600ms, which redraws without it — so
+        // the highlight appears then disappears (a flash) with no per-frame RAF.
+        if (c.id === flashClipId) {
+          ctx.save()
+          ctx.globalAlpha = 0.45
+          ctx.fillStyle = '#ffffff'
+          roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
+          ctx.fill()
+          ctx.globalAlpha = 1
+          ctx.lineWidth = 2.5
+          ctx.strokeStyle = '#5b8dff'
+          roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
+          ctx.stroke()
+          ctx.restore()
+        }
       }
     }
 
@@ -284,10 +304,10 @@ export function Timeline() {
 
     // (playhead drawn on a separate cheap overlay canvas — see playheadCanvasRef)
     // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps)
-  }, [edl, selection, multiSelection, zoom, size, dpr, waveTick, inMark, outMark])
+  }, [edl, selection, multiSelection, zoom, size, dpr, waveTick, inMark, outMark, flashClipId])
 
-  // Cheap playhead-only overlay redraw on RAF — avoids re-tessellating the
-  // whole timeline 60 times per second while the video plays.
+  // Cheap playhead-only overlay redraw — avoids re-tessellating the whole
+  // timeline 60×/s while the video plays.
   const playheadCanvasRef = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const cv = playheadCanvasRef.current
@@ -314,6 +334,7 @@ export function Timeline() {
     ctx.closePath()
     ctx.fill()
   }, [playhead, zoom, size, dpr])
+
 
   // mouse → seek / select / drag
   function onMouseDown(e: React.MouseEvent) {

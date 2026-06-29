@@ -67,8 +67,15 @@ export function VoRecorder() {
         if (blob.size < 256) { setError('Recording too short — nothing captured.'); return }
         setSubmitting(true)
         try {
-          await api.voRecord(sid, blob, startedAtRef.current, 0)
+          const res = await api.voRecord(sid, blob, startedAtRef.current, 0)
           await refresh()
+          // Draw attention to the freshly-added voiceover clip: select it (so the
+          // Properties panel + selection border show) and flash it on the timeline.
+          const cid = (res as { clip_id?: string } | undefined)?.clip_id
+          if (cid) {
+            useStore.getState().setSelection(cid)
+            useStore.getState().flashClip(cid)
+          }
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e))
         } finally {

@@ -3,6 +3,23 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.3.7
+
+### Added
+- **A freshly-recorded voiceover is now highlighted on the timeline.** When a
+  voiceover finishes encoding, its clip is selected (selection ring) and briefly
+  flashed (a white-over + blue border that clears after ~0.6s) so you can see
+  where it landed. Generic `flashClip(id)` lives in the store for reuse.
+
+### Notes
+- The timeline is canvas-rendered (no DOM clip nodes), so the literal
+  `scrollIntoView`/CSS-keyframe approach doesn't apply; the flash is drawn on the
+  canvas instead. The VO track sits in the visible track stack, so no scroll is
+  needed. The flash auto-clear is guarded by the flash timestamp so re-flashing
+  the same clip restarts rather than self-cancels.
+- Verified live by pixel-diffing the timeline canvas: the highlight draws over
+  the clip during the window (Δ7.1M) and reverts exactly to baseline (Δ0) after.
+
 ## 0.3.6
 
 ### Fixed

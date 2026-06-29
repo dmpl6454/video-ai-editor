@@ -53,6 +53,9 @@ interface State {
   timelineZoom: number              // px per second
   snapEnabled: boolean
   clipboard: string[]               // copied clip ids (for paste)
+  flashClipId: string | null        // clip to briefly flash on the timeline
+  flashAt: number                   // timestamp the flash started (ms)
+  flashClip(id: string): void       // draw attention to a newly-added clip
   setTimelineZoom(z: number): void
   zoomTimeline(factor: number): void   // multiply zoom (in/out)
   toggleSnap(): void
@@ -143,6 +146,19 @@ export const useStore = create<State>((set, get) => ({
   timelineZoom: 80,
   snapEnabled: true,
   clipboard: [],
+  flashClipId: null,
+  flashAt: 0,
+  flashClip: (id) => {
+    const at = Date.now()
+    set({ flashClipId: id, flashAt: at })
+    // Auto-clear after the animation. Guard on `flashAt` (not just id) so a
+    // stale timeout from an earlier flash of the SAME clip can't cancel a fresh
+    // one — re-flashing within the window must restart, not abort.
+    setTimeout(() => {
+      const s = get()
+      if (s.flashClipId === id && s.flashAt === at) set({ flashClipId: null })
+    }, 700)
+  },
   setTimelineZoom: (z) => set({ timelineZoom: Math.max(10, Math.min(600, z)) }),
   zoomTimeline: (factor) => {
     const z = get().timelineZoom
