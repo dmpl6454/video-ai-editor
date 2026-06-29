@@ -323,6 +323,19 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     return ";".join(fc_parts), inputs, ["[vout]", "[aout]"], extra_inputs
 
 
+# AAC output args. Pinning the sample rate (48 kHz) and channel layout
+# (stereo) on the *output stream* — not just inside the filtergraph — guards
+# against ffmpeg's native AAC encoder rejecting a negotiated PCM format with
+# "Task finished with error code: -22 (Invalid argument)". This was observed on
+# preview re-renders after an aspect-ratio change (Reels/Shorts/TikTok): the
+# aac encoder thread died with EINVAL and the muxer wrote zero packets
+# ("Nothing was written into output file, streams received no packets").
+# Forcing -ar/-ac makes ffmpeg insert an implicit resampler so the encoder
+# always receives a layout it supports. The /vo_record transcode in main.py
+# already does this; the render pipeline now matches.
+_AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+
+
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None) -> Path:
     canvas = edl.canvas
@@ -337,7 +350,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             "ffmpeg", "-y",
             "-f", "lavfi", "-i", f"color=c=black:s={w_out}x{h_out}:r={fps}:d={dur}",
             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
-            "-shortest", *enc_args, "-c:a", "aac", str(dst),
+            "-shortest", *enc_args, *_AAC_OUT, str(dst),
         ], check=True, capture_output=True)
         return dst
 
@@ -465,7 +478,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             "-map", v_label, "-map", final_audio_label,
             "-r", str(fps),
             *enc_args,
-            "-c:a", "aac", "-b:a", "192k",
+            *_AAC_OUT,
             "-movflags", "+faststart",
             str(dst)]
     proc = subprocess.run(args, capture_output=True, text=True)
@@ -599,7 +612,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         subprocess.run([
             "ffmpeg", "-y", "-i", str(video_only),
             "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-c:v", "copy", "-c:a", "aac", "-shortest",
+            "-c:v", "copy", *_AAC_OUT, "-shortest",
             "-movflags", "+faststart", str(dst),
         ], capture_output=True, check=True)
         return
@@ -639,7 +652,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
+            *_AAC_OUT,
             "-r", str(fps),
             "-movflags", "+faststart",
             str(dst)]

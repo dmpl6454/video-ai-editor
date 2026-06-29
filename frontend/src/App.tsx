@@ -3,6 +3,7 @@ import { useStore } from './store'
 import { TopBar } from './components/TopBar'
 import { MediaBin } from './components/MediaBin'
 import { Preview } from './components/Preview'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { Timeline } from './components/Timeline'
 import { Properties } from './components/Properties'
 import { OpsLog } from './components/OpsLog'
@@ -25,7 +26,19 @@ export default function App() {
       </aside>
       <main className="center">
         <div className="preview-pane">
-          <Preview />
+          <ErrorBoundary
+            fallback={(err) => (
+              <div className="preview-empty" style={{ padding: 16, textAlign: 'center' }}>
+                <div style={{ fontSize: 24, marginBottom: 6 }}>⚠️</div>
+                <div>Preview hit an error and was paused.</div>
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)' }}>
+                  {err.message}
+                </div>
+              </div>
+            )}
+          >
+            <Preview />
+          </ErrorBoundary>
         </div>
         <div className="timeline-pane">
           <Timeline />

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
@@ -44,7 +45,13 @@ from .render import render_preview, render_export
 from .agent.dispatch import dispatch, list_tools
 from .agent.loop import chat_turn
 
-app = FastAPI(title="video-ai-editor")
+@asynccontextmanager
+async def _lifespan(_app: "FastAPI"):
+    _validate_ai_config()
+    yield
+
+
+app = FastAPI(title="video-ai-editor", lifespan=_lifespan)
 
 # Production hardening: request IDs, structured JSON logging, error envelope,
 # /livez + /readyz + /metrics, sliding-window rate limit. Idempotent.
@@ -59,6 +66,27 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+
+
+def _validate_ai_config() -> None:
+    """Warn loudly (but don't crash) if the AI chat backend isn't usable.
+
+    The editor works fine without Claude — only the chat pane needs it — so a
+    missing key is a warning, not a fatal. Surfacing it at boot saves users a
+    confusing first chat that fails with a billing/auth error mid-conversation.
+    """
+    from .config import ANTHROPIC_API_KEY
+    log = get_logger()
+    if not ANTHROPIC_API_KEY:
+        log.warning(
+            "ANTHROPIC_API_KEY is not set — the 'Tell Claude what to do' chat "
+            "pane will be disabled. Add it to .env to enable AI features."
+        )
+    elif not ANTHROPIC_API_KEY.startswith("sk-"):
+        log.warning(
+            "ANTHROPIC_API_KEY does not look like a valid key (expected an "
+            "'sk-' prefix). AI chat may fail with an authentication error."
+        )
 
 
 # LRU-bounded in-memory store cache. Without a bound, every distinct session ID
@@ -152,7 +180,14 @@ class ExportRequest(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    from .config import APP_VERSION
+    return {"ok": True, "version": APP_VERSION}
+
+
+@app.get("/api/version")
+def version():
+    from .config import APP_VERSION
+    return {"version": APP_VERSION}
 
 
 @app.get("/api/tools")

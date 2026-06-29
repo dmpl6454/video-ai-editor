@@ -3,6 +3,24 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+
+def _read_version() -> str:
+    """App version — single source of truth is the VERSION file at the repo
+    root (also bundled under sys._MEIPASS in the .app)."""
+    import sys as _sys
+    for base in (getattr(_sys, "_MEIPASS", None), PROJECT_ROOT):
+        if base:
+            vf = Path(base) / "VERSION"
+            if vf.exists():
+                try:
+                    return vf.read_text().strip() or "0.0.0"
+                except Exception:
+                    pass
+    return "0.0.0"
+
+
+APP_VERSION = _read_version()
+
 # Auto-load .env at the project root. Last assignment wins (POSIX-style) so
 # stale duplicates higher up in the file are overridden by newer entries
 # appended at the bottom.

@@ -13,6 +13,7 @@ export function VoRecorder() {
   const refresh = useStore((s) => s.refresh)
   const setPlaying = useStore((s) => s.setPlaying)
   const [recording, setRecording] = useState(false)
+  const [requesting, setRequesting] = useState(false)  // mic-permission prompt in flight
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
@@ -32,6 +33,10 @@ export function VoRecorder() {
   const start = async () => {
     setError(null)
     if (!sid) return
+    // Flip to a "requesting" state synchronously so the very first click gives
+    // immediate visual feedback. getUserMedia can block for seconds behind the
+    // browser's mic-permission prompt; without this the button looks dead.
+    setRequesting(true)
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mime = (window as unknown as { MediaRecorder: typeof MediaRecorder })
@@ -61,12 +66,15 @@ export function VoRecorder() {
       startedAtRef.current = playhead
       setPlaying(false)  // pause playback while recording
       setRecording(true)
+      setRequesting(false)
       setElapsed(0)
       tickRef.current = window.setInterval(() => {
         setElapsed((e) => e + 0.1)
       }, 100) as unknown as number
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRequesting(false)
     }
   }
 
@@ -83,10 +91,12 @@ export function VoRecorder() {
         <button
           style={{ width: '100%', fontSize: 11 }}
           onClick={start}
-          disabled={submitting || !sid}
+          disabled={submitting || requesting || !sid}
           title="Record a voiceover from your mic at the current playhead"
         >
-          {submitting ? '⌛ Encoding…' : '🎙 Record voiceover'}
+          {submitting ? '⌛ Encoding…'
+            : requesting ? '🎤 Requesting mic access…'
+            : '🎙 Record voiceover'}
         </button>
       ) : (
         <button

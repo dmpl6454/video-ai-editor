@@ -36,8 +36,14 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
     "topbar topbar topbar"
     "left center right";
   height: 100vh;
-  width: 100vw;
+  width: 100%;
+  /* Without min-width:0 the grid items refuse to shrink below their content's
+     intrinsic width, forcing a ~1292px page floor that overflows on tablet/phone. */
+  min-width: 0;
+  overflow-x: hidden;
 }
+/* Let every grid child shrink instead of forcing the whole page wider. */
+.app > * { min-width: 0; }
 
 .topbar {
   grid-area: topbar;
@@ -47,7 +53,13 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   padding: 0 14px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
+  /* Scroll the toolbar internally on narrow screens rather than letting its
+     buttons push the page wider. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
+.topbar > * { flex-shrink: 0; }
 .topbar h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .topbar .grow { flex: 1; }
 .topbar .pill { background: var(--bg-3); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--text-dim); }
@@ -67,6 +79,43 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   grid-template-rows: 1fr 280px;
   background: var(--bg-0);
   overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive: tablet / phone (iPad, iOS Safari).
+   The 3-column desktop grid (220 + 1fr + 280) has a hard ~1292px content floor
+   that spills off-screen below that width. Below 1024px we reflow to a single
+   column that scrolls vertically, so nothing overflows horizontally. A video
+   timeline still needs width, so the editor pane keeps a usable fixed height
+   and the timeline scrolls horizontally inside its own pane.
+   ------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 44px 60vh auto auto;
+    grid-template-areas:
+      "topbar"
+      "center"
+      "left"
+      "right";
+    height: auto;
+    min-height: 100vh;
+  }
+  .sidebar,
+  .sidebar.right {
+    border-left: none;
+    border-right: none;
+    border-top: 1px solid var(--line);
+    max-height: 50vh;
+  }
+  .center { min-height: 320px; }
+}
+
+@media (max-width: 640px) {
+  .app { grid-template-rows: 44px 52vh auto auto; }
+  .center { min-height: 260px; }
+  /* Stack preview over a shorter timeline so both stay usable on a phone. */
+  .center { grid-template-rows: 1fr 200px; }
 }
 
 .preview-pane {

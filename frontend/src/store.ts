@@ -24,6 +24,8 @@ interface State {
   uploadError: string | null
   exporting: boolean
   exportUrl: string | null
+  exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
+  exportError: string | null
 
   // Client-side live transform: set while a transform slider is being dragged
   // so Preview applies a CSS transform to the <video> for instant feedback,
@@ -41,6 +43,7 @@ interface State {
   setInMark(t: number | null): void
   setOutMark(t: number | null): void
   clearUploadError(): void
+  clearExportError(): void
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
@@ -89,6 +92,8 @@ export const useStore = create<State>((set, get) => ({
   uploadError: null,
   exporting: false,
   exportUrl: null,
+  exportStatus: null,
+  exportError: null,
 
   setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
   toggleSelection: (id) => {
@@ -124,6 +129,7 @@ export const useStore = create<State>((set, get) => ({
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
+  clearExportError: () => set({ exportError: null }),
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: 80,
@@ -257,12 +263,48 @@ export const useStore = create<State>((set, get) => ({
   doExport: async (opts = {}) => {
     const sid = get().sessionId
     if (!sid) return
-    set({ exporting: true, exportUrl: null })
+    set({ exporting: true, exportUrl: null, exportStatus: 'queued', exportError: null })
+    const POLL_MS = 1500
+    const MAX_MS = 30 * 60 * 1000  // 30-min ceiling so we never poll forever
     try {
-      const r = await api.export(sid, opts)
-      set({ exportUrl: r.url })
+      const { job_id } = await api.exportAsync(sid, opts)
+      const startedAt = Date.now()
+      // Poll the background render job until it reaches a terminal state.
+      // The old flow awaited a single blocking request with no progress, no
+      // completion signal, and no error path — so a slow render looked like a
+      // permanent hang.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, POLL_MS))
+        let job
+        try {
+          job = await api.getJob(job_id)
+        } catch {
+          // Transient network hiccup — keep polling until the ceiling.
+          if (Date.now() - startedAt > MAX_MS) {
+            set({ exportError: 'Export timed out while checking status.' })
+            return
+          }
+          continue
+        }
+        if (job.status === 'completed' && job.result) {
+          set({ exportUrl: job.result.url, exportStatus: null })
+          triggerDownload(job.result.url, job.result.filename)
+          return
+        }
+        if (job.status === 'failed') {
+          set({ exportError: job.error ?? 'Export failed.', exportStatus: null })
+          return
+        }
+        set({ exportStatus: job.status })
+        if (Date.now() - startedAt > MAX_MS) {
+          set({ exportError: 'Export is taking unusually long; it may have stalled.' })
+          return
+        }
+      }
+    } catch (e) {
+      set({ exportError: e instanceof Error ? e.message : String(e) })
     } finally {
-      set({ exporting: false })
+      set({ exporting: false, exportStatus: null })
     }
   },
 
@@ -284,6 +326,19 @@ export const useStore = create<State>((set, get) => ({
     await get().dispatch('duplicate_clip', { clip_id: sel })
   },
 }))
+
+// Programmatically click a temporary <a download> so a finished export lands
+// in the user's downloads without them hunting for a link. Kept module-scoped
+// (not in a component) so it can fire from the store's polling loop.
+function triggerDownload(url: string, filename: string): void {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
 
 // Helper used by the timeline to find the clip under a given timeline time.
 export function clipAt(edl: EDL | null, trackId: string, t: number): AnyClip | null {

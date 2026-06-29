@@ -4,6 +4,21 @@ import type { EDL, SessionInfo, Op } from './types'
 
 const BASE = '/api'
 
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed'
+
+export interface Job {
+  id: string
+  kind: string
+  status: JobStatus
+  progress: number          // 0..1, best-effort (renders only report 0 or 1)
+  result: { path: string; filename: string; url: string } | null
+  error: string | null
+  created_at: number
+  started_at: number | null
+  completed_at: number | null
+  session_id: string | null
+}
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -99,6 +114,19 @@ export const api = {
       `/sessions/${sid}/export`,
       opts
     ),
+
+  // Async export: returns a job id immediately (202) instead of blocking the
+  // request until the render finishes. Poll `getJob` until status is terminal.
+  // Exports of long clips take minutes — the sync path can outlive a browser's
+  // fetch timeout, which is exactly what made Export appear to "hang forever".
+  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number } = {}) =>
+    http<{ job_id: string; status: JobStatus; status_url: string }>(
+      'POST',
+      `/sessions/${sid}/export?wait=0`,
+      opts
+    ),
+
+  getJob: (jobId: string) => http<Job>('GET', `/jobs/${jobId}`),
 
   waveform: (sid: string, src: string, peaksPerSec = 50) =>
     http<{ peaks: number[]; peaks_per_sec: number; duration: number }>(

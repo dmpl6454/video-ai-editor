@@ -59,7 +59,7 @@ export function Help() {
         onClick={(e) => e.stopPropagation()}
         style={{
           background: 'var(--bg-1)', border: '1px solid var(--line)',
-          borderRadius: 10, padding: 24, width: 540, maxHeight: '80vh', overflow: 'auto',
+          borderRadius: 10, padding: 24, width: 'min(540px, 92vw)', maxHeight: '80vh', overflow: 'auto',
           boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
         }}
       >

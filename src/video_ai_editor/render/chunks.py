@@ -164,7 +164,9 @@ def render_clip_to_chunk(
             "-map", v_label, "-map", "[a]",
             "-r", str(fps),
             *encoder_args,
-            "-c:a", "aac", "-b:a", "192k",
+            # Pin AAC output rate/channels so the encoder never hits EINVAL
+            # (-22) on a negotiated PCM layout. See compositor._AAC_OUT.
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart",
             str(dst)]
     proc = subprocess.run(args, capture_output=True, text=True)

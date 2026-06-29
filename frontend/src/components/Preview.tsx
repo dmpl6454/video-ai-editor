@@ -165,10 +165,17 @@ export function Preview() {
       requestVideoFrameCallback: (cb: typeof tick) => number
     }).requestVideoFrameCallback(tick)
     return () => {
-      const cancelFn = (v as unknown as {
+      // cancelVideoFrameCallback is a native method on HTMLVideoElement and
+      // relies on its `this` being the element. Calling a detached reference
+      // (`const fn = v.cancelVideoFrameCallback; fn(handle)`) throws
+      // "TypeError: Illegal invocation" during React's unmount cleanup. Invoke
+      // it as a method (or .call(v, …)) so `this` stays bound to the element.
+      const vc = v as unknown as {
         cancelVideoFrameCallback?: (h: number) => void
-      }).cancelVideoFrameCallback
-      if (cancelFn) cancelFn(handle)
+      }
+      if (typeof vc.cancelVideoFrameCallback === 'function') {
+        vc.cancelVideoFrameCallback(handle)
+      }
     }
   }, [setPlayhead])
 

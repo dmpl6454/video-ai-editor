@@ -27,6 +27,7 @@ uv run pyinstaller \
   --add-data "frontend/dist:frontend/dist" \
   --add-data "fonts:fonts" \
   --add-data "presets:presets" \
+  --add-data "VERSION:." \
   --hidden-import "uvicorn.lifespan.on" \
   --hidden-import "uvicorn.protocols.websockets.auto" \
   --hidden-import "uvicorn.loops.auto" \

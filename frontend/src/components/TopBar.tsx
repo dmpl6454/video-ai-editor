@@ -11,7 +11,11 @@ export function TopBar() {
   const dispatch = useStore((s) => s.dispatch)
   const exporting = useStore((s) => s.exporting)
   const exportUrl = useStore((s) => s.exportUrl)
+  const exportStatus = useStore((s) => s.exportStatus)
+  const exportError = useStore((s) => s.exportError)
+  const clearExportError = useStore((s) => s.clearExportError)
   const doExport = useStore((s) => s.doExport)
+  const [exportElapsed, setExportElapsed] = useState(0)
   const edl = useStore((s) => s.edl)
   const sid = useStore((s) => s.sessionId)
   const refresh = useStore((s) => s.refresh)
@@ -20,6 +24,23 @@ export function TopBar() {
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
+
+  useEffect(() => {
+    fetch('/api/version').then((r) => r.json())
+      .then((d) => setAppVersion(d.version || '')).catch(() => {})
+  }, [])
+
+  // Tick an elapsed-seconds counter while an export is running so the button
+  // shows live progress instead of a frozen "Exporting…".
+  useEffect(() => {
+    if (!exporting) { setExportElapsed(0); return }
+    const startedAt = Date.now()
+    const id = window.setInterval(() => {
+      setExportElapsed(Math.floor((Date.now() - startedAt) / 1000))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [exporting])
 
   const onSaveProject = async () => {
     if (!sid) return
@@ -154,6 +175,11 @@ export function TopBar() {
       ))}
       <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
       <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
+      {appVersion && (
+        <span title="App version" style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
+          v{appVersion}
+        </span>
+      )}
       <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save the project as a .vae bundle (EDL + media)">
         {saving ? 'Saving…' : '💾 Save'}
       </button>
@@ -168,12 +194,23 @@ export function TopBar() {
         </a>
       )}
       <button className="primary" onClick={() => doExport()} disabled={exporting || !edl?.duration}>
-        {exporting ? 'Exporting…' : 'Export'}
+        {exporting
+          ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
+          : 'Export'}
       </button>
-      {exportUrl && (
+      {exportUrl && !exporting && (
         <a href={exportUrl} download style={{ color: 'var(--good)', fontSize: 12 }}>
           ↓ MP4
         </a>
+      )}
+      {exportError && (
+        <span
+          style={{ color: 'var(--accent)', fontSize: 12, cursor: 'pointer' }}
+          title={`${exportError} (click to dismiss)`}
+          onClick={() => clearExportError()}
+        >
+          ⚠ Export failed ✕
+        </span>
       )}
     </header>
   )

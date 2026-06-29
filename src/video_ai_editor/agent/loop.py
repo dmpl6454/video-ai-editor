@@ -21,6 +21,35 @@ from .tools import list_tools as _list_tools
 from .system_prompt import SYSTEM_PROMPT
 
 
+def _friendly_anthropic_error(e: Exception) -> str:
+    """Map a raw Anthropic SDK exception to a user-facing message.
+
+    The editor surfaces this string directly in the chat pane, so it must read
+    like product copy — never a stack trace or a raw `Error code: 400 {...}`.
+    The most common operational failure is an exhausted credit balance (a 400
+    whose body says "credit balance is too low"); auth and rate-limit errors get
+    their own copy. Anything unrecognised falls back to a generic-but-honest
+    "temporarily unavailable" line.
+    """
+    status = getattr(e, "status_code", None)
+    text = str(e).lower()
+
+    if "credit balance is too low" in text or "plans & billing" in text:
+        return ("AI features are temporarily unavailable — the Anthropic API "
+                "credit balance is exhausted. Add credits at "
+                "console.anthropic.com (Plans & Billing) and try again.")
+    if status == 401 or "authentication" in text or "invalid x-api-key" in text:
+        return ("AI features are unavailable — the Anthropic API key is missing "
+                "or invalid. Check ANTHROPIC_API_KEY in your .env and restart.")
+    if status == 429 or "rate limit" in text:
+        return ("AI is busy right now (rate limited). Wait a few seconds and "
+                "try again.")
+    if status == 529 or "overloaded" in text:
+        return "Claude is temporarily overloaded. Please try again in a moment."
+    return ("AI features are temporarily unavailable. Please try again shortly. "
+            f"(details: {e})")
+
+
 # Tool list cached — same Anthropic-format spec lives in tools.py.
 def _anthropic_tools(categories: list[str] | None = None) -> list[dict]:
     return [
@@ -63,7 +92,14 @@ async def chat_turn(
                 messages=history,
             )
         except Exception as e:
-            yield {"type": "error", "message": f"Anthropic call failed: {e}"}
+            # Roll back the trailing user message we appended before this call.
+            # If we leave it, the persisted history ends on a user turn; the next
+            # chat appends a second user message and the API rejects the whole
+            # conversation ("roles must alternate") — so one credit failure would
+            # wedge every subsequent message even after credits are restored.
+            if turn == 0 and history and history[-1].get("role") == "user":
+                history.pop()
+            yield {"type": "error", "message": _friendly_anthropic_error(e)}
             yield {"type": "done"}
             return
 
