@@ -15,6 +15,12 @@ at the repo root, surfaced at `/api/version` and in the editor's top bar.
   now `min(540px, 92vw)`.
 - Verified clean across a 5-environment matrix: WebKit @ iPhone portrait +
   landscape, iPad, macOS Safari desktop, and Chromium desktop.
+- **macOS `.dmg` packaging shipped stale code.** PyInstaller was reusing a
+  cached analysis, so the bundle carried an old `main.py` (no `/api/version`)
+  and an old frontend build. Builds now run `--clean`, the spec bundles the
+  `VERSION` file, and `Info.plist` (`CFBundleShortVersionString`) tracks
+  `VERSION` automatically. The shipped `.app` now reports 0.2.1 at runtime and
+  in Finder, verified end-to-end from the mounted DMG volume.
 
 ## 0.2.0
 
