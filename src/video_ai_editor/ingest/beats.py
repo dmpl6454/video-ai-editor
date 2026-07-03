@@ -10,13 +10,17 @@ import json
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
-    """Return beat onsets in seconds. Cached at `~/.cache/.../beats_<hash>.json`.
+    """Return beat onsets in seconds. Cached at `<user cache dir>/beats_<hash>.json`.
 
     `src` may be a video or audio file; we extract the audio first.
     """
-    cache_root = Path.home() / ".cache" / "video-ai-editor" / "beats"
+    _legacy_root = Path.home() / ".cache" / "video-ai-editor" / "beats"
+    cache_root = _legacy_root if _legacy_root.exists() else \
+        _pu.user_cache_dir("Video AI Editor") / "beats"
     cache_root.mkdir(parents=True, exist_ok=True)
     sig = hashlib.sha256(
         f"{src.resolve()}|{src.stat().st_mtime}|{sr}".encode()

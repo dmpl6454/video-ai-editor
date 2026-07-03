@@ -8,7 +8,11 @@ import hashlib
 import wave
 from pathlib import Path
 
-VOICES_DIR = Path.home() / ".cache" / "video-ai-editor" / "voices"
+from .. import platformutil as _pu
+
+_LEGACY_VOICES_DIR = Path.home() / ".cache" / "video-ai-editor" / "voices"
+VOICES_DIR = _LEGACY_VOICES_DIR if _LEGACY_VOICES_DIR.exists() else \
+    _pu.user_cache_dir("Video AI Editor") / "voices"
 
 
 def voice_paths(name: str) -> tuple[Path, Path]:

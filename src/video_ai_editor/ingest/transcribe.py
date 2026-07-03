@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..config import WHISPER_MODEL, WHISPER_DEVICE
+from .. import platformutil as _pu
 
 
 class Word(BaseModel):
@@ -69,12 +70,15 @@ def _get_model(model_size: str | None = None):
 
 _WHISPER_CPP_BIN = shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
 
-# Hunt for ggml-* models in user cache, brew share, and ~/.cache.
+# Hunt for ggml-* models in the per-OS data dir, legacy XDG/brew locations, and
+# ~/.cache. The per-OS dir is checked first; legacy paths are kept so an
+# existing macOS install keeps finding its models.
 _WHISPER_CPP_MODEL_DIRS = [
     Path(os.environ.get("WHISPER_CPP_MODELS", ""))
         if os.environ.get("WHISPER_CPP_MODELS") else None,
-    Path.home() / ".local" / "share" / "video-ai-editor" / "whisper-cpp",
-    Path("/opt/homebrew/share/whisper-cpp/ggml-models"),
+    _pu.user_data_dir("Video AI Editor") / "whisper-cpp",   # new, per-OS
+    Path.home() / ".local" / "share" / "video-ai-editor" / "whisper-cpp",  # legacy mac/linux
+    Path("/opt/homebrew/share/whisper-cpp/ggml-models"),    # legacy brew (harmless on win)
     Path("/opt/homebrew/share/whisper-cpp"),
     Path.home() / ".cache" / "whisper-cpp",
 ]

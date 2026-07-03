@@ -28,6 +28,14 @@ DispatchFn = Callable[[EDLStore, dict], dict]
 
 # ---------- helpers ----------
 
+def _default_broll_dir() -> Path:
+    """Default library folder for b-roll footage: ~/Videos/broll on Windows,
+    ~/Movies/broll on macOS/Linux (Movies is the mac convention)."""
+    from .. import platformutil as _pu
+    root = "Videos" if _pu.IS_WINDOWS else "Movies"
+    return Path.home() / root / "broll"
+
+
 def _v_track(edl: EDL, track_id: str) -> Track:
     t = edl.get_track(track_id)
     if not t:
@@ -1536,7 +1544,7 @@ def find_broll(store: EDLStore, args: dict) -> dict:
     candidates the agent can `add_clip` from. The folder is set per-call via
     `bin` (env var `VAI_BROLL_BIN` is the default)."""
     bin_dir = Path(args.get("bin") or os.environ.get("VAI_BROLL_BIN") or
-                   (Path.home() / "Movies" / "broll"))
+                   _default_broll_dir())
     query = str(args.get("query", "")).strip()
     if not query:
         raise ValueError("find_broll requires a 'query' argument")

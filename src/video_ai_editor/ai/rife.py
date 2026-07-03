@@ -10,12 +10,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def _rife_dir() -> Path:
     candidates = [
+        _pu.user_data_dir("Video AI Editor") / "models" / "rife",             # new, per-OS
         Path.home() / ".local" / "share" / "video-ai-editor" / "models" / "rife"
-            / "rife-ncnn-vulkan-20221029-macos",
-        Path(__file__).resolve().parents[3] / "models" / "rife",
+            / "rife-ncnn-vulkan-20221029-macos",                              # legacy
+        Path(__file__).resolve().parents[3] / "models" / "rife",              # repo
     ]
     for c in candidates:
         if (c / "rife-ncnn-vulkan").exists():

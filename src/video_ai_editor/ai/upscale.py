@@ -9,12 +9,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 def _esrgan_dir() -> Path:
-    """Find the Real-ESRGAN install. Look first in the user cache, then in the
-    project's models/ directory."""
+    """Find the Real-ESRGAN install. Look first in the per-OS user data dir,
+    then legacy XDG location, then the project's models/ directory."""
     candidates = [
-        Path.home() / ".local" / "share" / "video-ai-editor" / "models" / "realesrgan",
-        Path(__file__).resolve().parents[3] / "models" / "realesrgan",
+        _pu.user_data_dir("Video AI Editor") / "models" / "realesrgan",       # new
+        Path.home() / ".local" / "share" / "video-ai-editor" / "models" / "realesrgan",  # legacy
+        Path(__file__).resolve().parents[3] / "models" / "realesrgan",        # repo
     ]
     for c in candidates:
         if (c / "realesrgan-ncnn-vulkan").exists():

@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+from .. import platformutil as _pu
+
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
@@ -30,7 +32,8 @@ def _slug(s: str) -> list[str]:
 
 def _index_path(bin_dir: Path) -> Path:
     h = hashlib.sha256(str(bin_dir.resolve()).encode()).hexdigest()[:12]
-    cache = Path.home() / ".cache" / "video-ai-editor"
+    legacy = Path.home() / ".cache" / "video-ai-editor"
+    cache = legacy if legacy.exists() else _pu.user_cache_dir("Video AI Editor")
     cache.mkdir(parents=True, exist_ok=True)
     return cache / f"broll_index_{h}.json"
 
