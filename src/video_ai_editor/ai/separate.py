@@ -12,6 +12,8 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def _audio_extract(src: Path, dst: Path) -> Path:
     """Pull the audio out of a video into a WAV (cached)."""
@@ -19,7 +21,7 @@ def _audio_extract(src: Path, dst: Path) -> Path:
         return dst
     dst.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-vn", "-acodec", "pcm_s16le",
+        [_pu.FFMPEG, "-y", "-i", str(src), "-vn", "-acodec", "pcm_s16le",
          "-ar", "44100", "-ac", "2", str(dst)],
         capture_output=True, check=True,
     )
@@ -86,7 +88,7 @@ def _mix(stems: list[Path], dst: Path) -> Path:
         inputs += ["-i", str(s)]
     fc = "".join(f"[{i}:a]" for i in range(len(stems))) + f"amix=inputs={len(stems)}:normalize=0[out]"
     subprocess.run(
-        ["ffmpeg", "-y", *inputs, "-filter_complex", fc, "-map", "[out]",
+        [_pu.FFMPEG, "-y", *inputs, "-filter_complex", fc, "-map", "[out]",
          "-c:a", "pcm_s16le", str(dst)],
         capture_output=True, check=True,
     )

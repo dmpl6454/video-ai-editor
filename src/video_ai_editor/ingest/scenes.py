@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from pydantic import BaseModel
 
+from .. import platformutil as _pu
+
 
 class Shot(BaseModel):
     index: int
@@ -20,7 +22,7 @@ def detect_shots(src: Path, threshold: float = 0.3) -> list[Shot]:
     """Return shot boundaries (first shot starts at 0; last ends at media duration)."""
     proc = subprocess.run(
         [
-            "ffmpeg", "-i", str(src),
+            _pu.FFMPEG, "-i", str(src),
             "-vf", f"select='gt(scene,{threshold})',showinfo",
             "-f", "null", "-",
         ],

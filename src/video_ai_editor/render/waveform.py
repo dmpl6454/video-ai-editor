@@ -10,6 +10,8 @@ import struct
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 DEFAULT_PEAKS_PER_SEC = 50
 MAX_PEAKS = 4000  # Cap total peaks regardless of source length so JSON stays small.
 
@@ -50,7 +52,7 @@ def waveform_peaks(src: Path, cache_dir: Path,
 
     sr = peaks_per_sec * 200  # 200 samples per peak; gives clean RMS-ish bars
     proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(src),
+        [_pu.FFMPEG, "-v", "error", "-i", str(src),
          "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
         capture_output=True,
     )

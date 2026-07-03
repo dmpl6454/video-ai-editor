@@ -18,6 +18,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 PYANNOTE_PIPELINES = (
     "pyannote/speaker-diarization-community-1",
     "pyannote/speaker-diarization-3.1",
@@ -77,7 +79,7 @@ def _audio_extract(src: Path, dst: Path) -> Path:
         return dst
     dst.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-vn",
+        [_pu.FFMPEG, "-y", "-i", str(src), "-vn",
          "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(dst)],
         capture_output=True,
     )
@@ -199,7 +201,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
 
     # 1) Silence detect
     proc = subprocess.run(
-        ["ffmpeg", "-i", str(audio_wav), "-af",
+        [_pu.FFMPEG, "-i", str(audio_wav), "-af",
          "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"],
         capture_output=True, text=True,
     )
@@ -220,7 +222,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
     # 2) Probe duration
     try:
         dur = float(subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nokey=1:noprint_wrappers=1", str(audio_wav)],
             capture_output=True, text=True, check=True,
         ).stdout.strip())

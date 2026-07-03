@@ -19,6 +19,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 MODEL_NAME = os.environ.get("VAI_CLIP_MODEL", "ViT-B-32")
 PRETRAINED = os.environ.get("VAI_CLIP_PRETRAINED", "laion2b_s34b_b79k")
 FRAMES_PER_CLIP = int(os.environ.get("VAI_CLIP_FRAMES", "4"))
@@ -101,7 +103,7 @@ def _extract_frames(src: str, in_: float, out: float, n: int, work: Path) -> lis
         fp = work / f"f{i}.jpg"
         # -ss before -i = fast seek; scale down for cheap embedding.
         subprocess.run(
-            ["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", src,
+            [_pu.FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", src,
              "-frames:v", "1", "-vf", "scale=320:-2", str(fp)],
             capture_output=True,
         )

@@ -131,7 +131,7 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "in.wav"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(audio_path),
+            [_pu.FFMPEG, "-y", "-i", str(audio_path),
              "-vn", "-ac", "1", "-ar", "16000", str(wav)],
             capture_output=True, check=True,
         )

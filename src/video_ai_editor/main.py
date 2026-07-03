@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
 from .storage import (new_session_id, session_dir, session_exists,
                        list_sessions, write_meta, read_meta)
@@ -302,7 +303,7 @@ async def vo_record(sid: str, file: UploadFile = File(...),
     # Normalize to AAC mp4 so the audio mixer can splice it cleanly
     norm = vo_dir / f"vo_{int(time.time())}.m4a"
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(raw),
+        [_pu.FFMPEG, "-y", "-i", str(raw),
          "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
          str(norm)],
         capture_output=True, text=True,

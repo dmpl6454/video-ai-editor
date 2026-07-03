@@ -15,6 +15,7 @@ from typing import Iterable
 from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from ..ingest.scenes import detect_shots, Shot
 from ..ingest.probe import probe
+from .. import platformutil as _pu
 
 
 def _shot_key(src: Path, idx: int) -> str:
@@ -44,7 +45,7 @@ def extract_keyframe(src: Path, t: float, dst: Path, max_w: int = 384) -> Path:
     if dst.exists():
         return dst
     subprocess.run(
-        ["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", str(src),
+        [_pu.FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", str(src),
          "-vf", f"scale={max_w}:-2", "-frames:v", "1", "-q:v", "3",
          str(dst)],
         capture_output=True, check=False,

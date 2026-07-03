@@ -88,3 +88,8 @@ def test_whisper_cpp_bin_uses_exe_name(monkeypatch):
     importlib.reload(t)
     assert t._WHISPER_CPP_BIN == "C:/tools/whisper-cli.exe"
     importlib.reload(t)
+
+
+def test_ffmpeg_constants_exist():
+    assert pu.FFMPEG in ("ffmpeg", "ffmpeg.exe")
+    assert pu.FFPROBE in ("ffprobe", "ffprobe.exe")

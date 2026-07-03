@@ -11,12 +11,13 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
+from .. import platformutil as _pu
 
 _FFMPEG_CANDIDATES = [
-    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+    _pu.FFMPEG,                                       # PATH (works on Windows/Linux/Mac)
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",       # mac brew ffmpeg-full (has vidstab)
     "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
     "/opt/homebrew/bin/ffmpeg",
-    "ffmpeg",
 ]
 
 
@@ -46,8 +47,9 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     ff = _ffmpeg_with_vidstab()
     if not ff:
         raise RuntimeError(
-            "Stabilization needs ffmpeg with libvidstab. Install with:\n"
-            "  brew install ffmpeg-full\n"
+            "Stabilization needs ffmpeg with libvidstab. Install a full build:\n"
+            "  macOS:   brew install ffmpeg-full\n"
+            "  Windows: winget install Gyan.FFmpeg  (the 'full' variant)\n"
             "and retry."
         )
     cache_dir.mkdir(parents=True, exist_ok=True)

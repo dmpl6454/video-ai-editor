@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def available() -> bool:
     try:
@@ -52,7 +54,7 @@ def denoise_clip(src: Path, cache_dir: Path, *,
         wav_out = Path(td) / "out.wav"
         # Extract audio to mono 48k float wav for noisereduce
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src),
+            [_pu.FFMPEG, "-y", "-i", str(src),
              "-vn", "-ac", "1", "-ar", str(sample_rate),
              "-c:a", "pcm_s16le", str(wav_in)],
             capture_output=True,
@@ -75,7 +77,7 @@ def denoise_clip(src: Path, cache_dir: Path, *,
 
         # Mux back: keep original video, swap in the cleaned audio.
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src), "-i", str(wav_out),
+            [_pu.FFMPEG, "-y", "-i", str(src), "-i", str(wav_out),
              "-map", "0:v", "-map", "1:a",
              "-c:v", "copy", "-c:a", "aac", "-shortest", str(dst)],
             capture_output=True,

@@ -262,7 +262,8 @@ def install(app: FastAPI) -> None:
     @app.get("/readyz", include_in_schema=False)
     def readyz() -> Response:
         import shutil as _shutil
-        ffmpeg = _shutil.which("ffmpeg")
+        from .. import platformutil as _pu
+        ffmpeg = _shutil.which(_pu.FFMPEG)
         if not ffmpeg:
             return JSONResponse(status_code=503,
                                 content={"ok": False, "missing": ["ffmpeg"]})

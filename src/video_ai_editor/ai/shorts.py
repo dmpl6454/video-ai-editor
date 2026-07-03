@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..ingest.probe import probe
 from ..ingest.scenes import detect_shots, Shot
+from .. import platformutil as _pu
 
 
 def _audio_levels(src: Path, *, n_buckets: int = 200) -> list[float]:
@@ -27,7 +28,7 @@ def _audio_levels(src: Path, *, n_buckets: int = 200) -> list[float]:
         return []
     sr = 8000  # cheap mono extraction
     proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", str(sr),
+        [_pu.FFMPEG, "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", str(sr),
          "-f", "s16le", "-"],
         capture_output=True,
     )

@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from pydantic import BaseModel
 
+from .. import platformutil as _pu
+
 
 class ProbeStream(BaseModel):
     index: int
@@ -48,7 +50,7 @@ class ProbeResult(BaseModel):
 def probe(path: Path) -> ProbeResult:
     out = subprocess.run(
         [
-            "ffprobe", "-v", "error",
+            _pu.FFPROBE, "-v", "error",
             "-show_format", "-show_streams",
             "-of", "json", str(path),
         ],

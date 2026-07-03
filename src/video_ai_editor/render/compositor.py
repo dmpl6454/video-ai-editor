@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from .. import platformutil as _pu
 from ..config import FONTS_DIR
 from ..edl import EDL
 from ..edl.schema import Clip, Track
@@ -413,7 +414,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     if not clips:
         dur = max(1.0, edl.duration)
         subprocess.run([
-            "ffmpeg", "-y",
+            _pu.FFMPEG, "-y",
             "-f", "lavfi", "-i", f"color=c=black:s={w_out}x{h_out}:r={fps}:d={dur}",
             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
             "-shortest", *enc_args, *_AAC_OUT, str(dst),
@@ -540,7 +541,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     extra_inputs += audio_inputs
 
     tmp = _part_path(dst)
-    args = ["ffmpeg", "-y", *inputs, *extra_inputs,
+    args = [_pu.FFMPEG, "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
             "-r", str(fps),
@@ -656,7 +657,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
         # full preview — `-c:v copy -an` is essentially free).
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", str(dst), "-c:v", "copy", "-an",
+                [_pu.FFMPEG, "-y", "-i", str(dst), "-c:v", "copy", "-an",
                  "-movflags", "+faststart", str(cached_video)],
                 capture_output=True, check=True,
             )
@@ -691,7 +692,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         # No V1 audio source to feed the mixer — copy video, generate silence.
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-i", str(video_only),
+                _pu.FFMPEG, "-y", "-i", str(video_only),
                 "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
                 "-c:v", "copy", *_AAC_OUT, "-shortest",
                 "-movflags", "+faststart", str(tmp),
@@ -733,7 +734,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     if audio_chain:
         fc = fc + ";" + audio_chain
 
-    args = ["ffmpeg", "-y", *inputs, *audio_inputs,
+    args = [_pu.FFMPEG, "-y", *inputs, *audio_inputs,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
             "-c:v", "copy",

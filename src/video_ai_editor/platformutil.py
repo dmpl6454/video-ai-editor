@@ -22,6 +22,12 @@ def exe_name(name: str) -> str:
     return name
 
 
+# Resolved once at import. Bare names are fine when on PATH; exe_name makes the
+# Windows form explicit so callers can also feed these to find_binary.
+FFMPEG = exe_name("ffmpeg")
+FFPROBE = exe_name("ffprobe")
+
+
 def find_binary(name: str, extra_dirs: list[Path]) -> str | None:
     """Locate a native binary cross-platform.
 

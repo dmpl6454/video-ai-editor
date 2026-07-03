@@ -38,7 +38,7 @@ def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "in.wav"
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src),
+            [_pu.FFMPEG, "-y", "-i", str(src),
              "-vn", "-ac", "1", "-ar", str(sr),
              "-c:a", "pcm_s16le", str(wav)],
             capture_output=True,

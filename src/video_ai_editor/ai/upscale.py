@@ -54,7 +54,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
 
     # Extract frames at source fps
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
+        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
         capture_output=True, check=True,
     )
     # Upscale each frame. The binary segfaults if it can't find models/ on a
@@ -72,7 +72,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
         raise RuntimeError(f"realesrgan failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}\n{proc.stdout[-500:]}")
     # Probe original audio + fps
     fps = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
     ).stdout.strip()
@@ -83,7 +83,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
         fps_val = 30.0
     # Re-encode upscaled frames + original audio
     subprocess.run(
-        ["ffmpeg", "-y",
+        [_pu.FFMPEG, "-y",
          "-framerate", f"{fps_val:.3f}", "-i", str(frames_out / "f%05d.png"),
          "-i", str(src),
          "-map", "0:v", "-map", "1:a?",

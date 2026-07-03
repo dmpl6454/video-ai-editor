@@ -22,6 +22,7 @@ from ..show.templates import (
     ShowSnapshot,
 )
 from .tools import list_tools as _list_tools
+from .. import platformutil as _pu
 
 DispatchFn = Callable[[EDLStore, dict], dict]
 
@@ -31,7 +32,6 @@ DispatchFn = Callable[[EDLStore, dict], dict]
 def _default_broll_dir() -> Path:
     """Default library folder for b-roll footage: ~/Videos/broll on Windows,
     ~/Movies/broll on macOS/Linux (Movies is the mac convention)."""
-    from .. import platformutil as _pu
     root = "Videos" if _pu.IS_WINDOWS else "Movies"
     return Path.home() / root / "broll"
 
@@ -820,7 +820,7 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
         if not isinstance(c, Clip):
             continue
         proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-nostats",
+            [_pu.FFMPEG, "-hide_banner", "-nostats",
              "-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src,
              "-af", f"silencedetect=noise={threshold_db}dB:d={min_dur}",
              "-f", "null", "-"],
@@ -2315,7 +2315,7 @@ def record_voiceover(store: EDLStore, args: dict) -> dict:
 def _probe_audio_duration(p: Path) -> float:
     import subprocess as sp
     try:
-        out = sp.run(["ffprobe", "-v", "error", "-show_entries",
+        out = sp.run([_pu.FFPROBE, "-v", "error", "-show_entries",
                       "format=duration", "-of",
                       "default=nokey=1:noprint_wrappers=1", str(p)],
                      capture_output=True, text=True, check=True).stdout.strip()

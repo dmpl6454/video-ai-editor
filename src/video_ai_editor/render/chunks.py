@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 from ..edl.schema import Clip
+from .. import platformutil as _pu
 
 
 def _chunk_workers(n_clips: int) -> int:
@@ -101,7 +102,7 @@ def chunk_is_valid(p: Path) -> bool:
         if not p.exists() or p.stat().st_size < 1024:
             return False
         proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of",
              "default=nokey=1:noprint_wrappers=1", str(p)],
             capture_output=True, text=True, timeout=10,
@@ -159,7 +160,7 @@ def render_clip_to_chunk(
     a_chain = build_audio_chain(c, input_label="[0:a]", label_out="[a]")
     fc = f"{v_chain};{a_chain}"
 
-    args = ["ffmpeg", "-y", *inputs, *extras,
+    args = [_pu.FFMPEG, "-y", *inputs, *extras,
             "-filter_complex", fc,
             "-map", v_label, "-map", "[a]",
             "-r", str(fps),
