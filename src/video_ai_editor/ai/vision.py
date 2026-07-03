@@ -15,6 +15,7 @@ from typing import Iterable
 from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from ..ingest.scenes import detect_shots, Shot
 from ..ingest.probe import probe
+from .. import platformutil as _pu
 
 
 def _shot_key(src: Path, idx: int) -> str:
@@ -29,12 +30,12 @@ def shot_index_for(src: Path, cache_dir: Path) -> list[Shot]:
     idx_path = cache_dir / f"shots_{key}.json"
     if idx_path.exists():
         try:
-            data = json.loads(idx_path.read_text())
+            data = json.loads(idx_path.read_text(encoding="utf-8"))
             return [Shot(**s) for s in data]
         except Exception:
             pass
     shots = detect_shots(src)
-    idx_path.write_text(json.dumps([s.model_dump() for s in shots], indent=2))
+    idx_path.write_text(json.dumps([s.model_dump() for s in shots], indent=2), encoding="utf-8")
     return shots
 
 
@@ -44,7 +45,7 @@ def extract_keyframe(src: Path, t: float, dst: Path, max_w: int = 384) -> Path:
     if dst.exists():
         return dst
     subprocess.run(
-        ["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", str(src),
+        [_pu.FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", str(src),
          "-vf", f"scale={max_w}:-2", "-frames:v", "1", "-q:v", "3",
          str(dst)],
         capture_output=True, check=False,
@@ -58,7 +59,7 @@ def describe_shot(src: Path, shot: Shot, cache_dir: Path) -> str:
     key = _shot_key(src, shot.index)
     desc_path = cache_dir / f"desc_{key}.txt"
     if desc_path.exists():
-        return desc_path.read_text()
+        return desc_path.read_text(encoding="utf-8")
     if not ANTHROPIC_API_KEY:
         return ""
 
@@ -84,7 +85,7 @@ def describe_shot(src: Path, shot: Shot, cache_dir: Path) -> str:
         }],
     )
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
-    desc_path.write_text(text)
+    desc_path.write_text(text, encoding="utf-8")
     return text
 
 

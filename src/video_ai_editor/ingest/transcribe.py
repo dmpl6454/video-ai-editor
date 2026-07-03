@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..config import WHISPER_MODEL, WHISPER_DEVICE
+from .. import platformutil as _pu
 
 
 class Word(BaseModel):
@@ -67,18 +68,21 @@ def _get_model(model_size: str | None = None):
     return cached
 
 
-_WHISPER_CPP_BIN = shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
-
-# Hunt for ggml-* models in user cache, brew share, and ~/.cache.
+# Hunt for ggml-* models in the per-OS data dir, legacy XDG/brew locations, and
+# ~/.cache. The per-OS dir is checked first; legacy paths are kept so an
+# existing macOS install keeps finding its models.
 _WHISPER_CPP_MODEL_DIRS = [
     Path(os.environ.get("WHISPER_CPP_MODELS", ""))
         if os.environ.get("WHISPER_CPP_MODELS") else None,
-    Path.home() / ".local" / "share" / "video-ai-editor" / "whisper-cpp",
-    Path("/opt/homebrew/share/whisper-cpp/ggml-models"),
+    _pu.user_data_dir("Video AI Editor") / "whisper-cpp",   # new, per-OS
+    Path.home() / ".local" / "share" / "video-ai-editor" / "whisper-cpp",  # legacy mac/linux
+    Path("/opt/homebrew/share/whisper-cpp/ggml-models"),    # legacy brew (harmless on win)
     Path("/opt/homebrew/share/whisper-cpp"),
     Path.home() / ".cache" / "whisper-cpp",
 ]
 _WHISPER_CPP_MODEL_DIRS = [p for p in _WHISPER_CPP_MODEL_DIRS if p is not None]
+
+_WHISPER_CPP_BIN = _pu.find_binary("whisper-cli", _WHISPER_CPP_MODEL_DIRS) or _pu.exe_name("whisper-cli")
 
 
 def _whisper_cpp_available() -> bool:
@@ -117,17 +121,17 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
     name = model_size or WHISPER_MODEL
     model_path = _whisper_cpp_model_path(name)
     if not model_path.exists():
-        raise RuntimeError(
-            f"whisper-cpp model not found at {model_path}. "
-            f"Try `brew reinstall whisper-cpp` or download with "
-            f"`/opt/homebrew/share/whisper-cpp/download-ggml-model.sh {name}`."
-        )
+        hint = ("Download it with whisper.cpp's download-ggml-model script "
+                "(models/download-ggml-model.cmd on Windows, .sh on macOS), or "
+                "fetch https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+                f"ggml-{name}.bin into {_WHISPER_CPP_MODEL_DIRS[0]}")
+        raise RuntimeError(f"whisper-cpp model not found at {model_path}. {hint}")
     # whisper-cli wants 16k mono wav input
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "in.wav"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(audio_path),
+            [_pu.FFMPEG, "-y", "-i", str(audio_path),
              "-vn", "-ac", "1", "-ar", "16000", str(wav)],
             capture_output=True, check=True,
         )

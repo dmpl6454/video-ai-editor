@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+from .. import platformutil as _pu
+
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
@@ -30,7 +32,8 @@ def _slug(s: str) -> list[str]:
 
 def _index_path(bin_dir: Path) -> Path:
     h = hashlib.sha256(str(bin_dir.resolve()).encode()).hexdigest()[:12]
-    cache = Path.home() / ".cache" / "video-ai-editor"
+    legacy = Path.home() / ".cache" / "video-ai-editor"
+    cache = legacy if legacy.exists() else _pu.user_cache_dir("Video AI Editor")
     cache.mkdir(parents=True, exist_ok=True)
     return cache / f"broll_index_{h}.json"
 
@@ -70,13 +73,13 @@ def _load_or_build(bin_dir: Path, *, force: bool = False) -> dict:
     idx_p = _index_path(bin_dir)
     if force or not idx_p.exists():
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
         return idx
     try:
-        idx = json.loads(idx_p.read_text())
+        idx = json.loads(idx_p.read_text(encoding="utf-8"))
     except Exception:
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
         return idx
     # Lightweight staleness check: if any entry's file is gone or has a newer mtime, rebuild.
     needs_rebuild = False
@@ -89,7 +92,7 @@ def _load_or_build(bin_dir: Path, *, force: bool = False) -> dict:
             needs_rebuild = True; break
     if needs_rebuild:
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
     return idx
 
 

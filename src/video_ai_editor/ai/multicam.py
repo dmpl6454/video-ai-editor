@@ -23,12 +23,14 @@ import subprocess
 from pathlib import Path
 from typing import Iterable
 
+from .. import platformutil as _pu
+
 
 def _probe_duration(p: Path) -> float:
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+        [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nokey=1:noprint_wrappers=1", str(p)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     ).stdout.strip()
     return float(out) if out else 0.0
 

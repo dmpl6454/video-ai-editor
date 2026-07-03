@@ -11,7 +11,7 @@ def _store_with_video() -> EDLStore:
     tmp = tempfile.mkdtemp()
     store = EDLStore(Path(tmp))
     dispatch(store, "add_clip", {
-        "track": "v1", "src": "/dev/null/x.mp4",
+        "track": "v1", "src": str(Path(tmp) / "nonexistent" / "x.mp4"),
         "in": 0.0, "out": 30.0, "start": 0.0,
     })
     return store

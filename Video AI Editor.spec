@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -14,6 +15,10 @@ datas += collect_data_files('webview')
 datas += collect_data_files('open_clip')
 hiddenimports += collect_submodules('video_ai_editor')
 hiddenimports += collect_submodules('open_clip')
+
+if sys.platform == "win32":
+    # pywebview's EdgeChromium/WebView2 backend loads .NET via pythonnet ('clr').
+    hiddenimports += ['clr']
 
 
 a = Analysis(
@@ -57,15 +62,16 @@ coll = COLLECT(
     upx_exclude=[],
     name='Video AI Editor',
 )
-app = BUNDLE(
-    coll,
-    name='Video AI Editor.app',
-    icon=None,
-    bundle_identifier='com.user.videoaieditor',
-    version=_APP_VERSION,
-    info_plist={
-        'CFBundleShortVersionString': _APP_VERSION,
-        'CFBundleVersion': _APP_VERSION,
-        'NSHighResolutionCapable': True,
-    },
-)
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name='Video AI Editor.app',
+        icon=None,
+        bundle_identifier='com.user.videoaieditor',
+        version=_APP_VERSION,
+        info_plist={
+            'CFBundleShortVersionString': _APP_VERSION,
+            'CFBundleVersion': _APP_VERSION,
+            'NSHighResolutionCapable': True,
+        },
+    )

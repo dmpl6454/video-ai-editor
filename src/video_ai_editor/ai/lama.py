@@ -15,6 +15,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from .. import platformutil as _pu
+
 
 def available() -> bool:
     try:
@@ -48,9 +50,9 @@ def object_erase(src: Path, cache_dir: Path, *,
 
     # Probe duration + size
     probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,avg_frame_rate", "-of", "json", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     import json as _json
     s = _json.loads(probe.stdout)["streams"][0]
@@ -70,7 +72,7 @@ def object_erase(src: Path, cache_dir: Path, *,
     in_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-q:v", "2", str(in_dir / "f%05d.png")],
+        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(in_dir / "f%05d.png")],
         capture_output=True, check=True,
     )
 
@@ -121,7 +123,7 @@ def object_erase(src: Path, cache_dir: Path, *,
 
     # Re-encode preserving original audio
     subprocess.run(
-        ["ffmpeg", "-y",
+        [_pu.FFMPEG, "-y",
          "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
          "-i", str(src),
          "-map", "0:v", "-map", "1:a?",

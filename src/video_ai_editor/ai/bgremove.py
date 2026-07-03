@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def available() -> bool:
     try:
@@ -56,10 +58,10 @@ def remove_background(src: Path, cache_dir: Path, *,
 
     # Probe fps so the re-encode keeps timing
     probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of",
          "default=nokey=1:noprint_wrappers=1", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     fps_str = probe.stdout.strip()
     if "/" in fps_str:
@@ -70,7 +72,7 @@ def remove_background(src: Path, cache_dir: Path, *,
 
     # Extract source frames
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-q:v", "2",
+        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2",
          str(in_dir / "f%05d.png")],
         capture_output=True, check=True,
     )
@@ -97,7 +99,7 @@ def remove_background(src: Path, cache_dir: Path, *,
     if keep_alpha:
         # Use qtrle / .mov to preserve alpha through the encode
         subprocess.run(
-            ["ffmpeg", "-y",
+            [_pu.FFMPEG, "-y",
              "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
              "-i", str(src),
              "-map", "0:v", "-map", "1:a?",
@@ -107,7 +109,7 @@ def remove_background(src: Path, cache_dir: Path, *,
         )
     else:
         subprocess.run(
-            ["ffmpeg", "-y",
+            [_pu.FFMPEG, "-y",
              "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
              "-i", str(src),
              "-map", "0:v", "-map", "1:a?",

@@ -10,13 +10,17 @@ import json
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
-    """Return beat onsets in seconds. Cached at `~/.cache/.../beats_<hash>.json`.
+    """Return beat onsets in seconds. Cached at `<user cache dir>/beats_<hash>.json`.
 
     `src` may be a video or audio file; we extract the audio first.
     """
-    cache_root = Path.home() / ".cache" / "video-ai-editor" / "beats"
+    _legacy_root = Path.home() / ".cache" / "video-ai-editor" / "beats"
+    cache_root = _legacy_root if _legacy_root.exists() else \
+        _pu.user_cache_dir("Video AI Editor") / "beats"
     cache_root.mkdir(parents=True, exist_ok=True)
     sig = hashlib.sha256(
         f"{src.resolve()}|{src.stat().st_mtime}|{sr}".encode()
@@ -24,7 +28,7 @@ def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
     cache = cache_root / f"beats_{sig}.json"
     if cache.exists():
         try:
-            return list(json.loads(cache.read_text()))
+            return list(json.loads(cache.read_text(encoding="utf-8")))
         except Exception:
             pass
 
@@ -34,7 +38,7 @@ def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "in.wav"
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src),
+            [_pu.FFMPEG, "-y", "-i", str(src),
              "-vn", "-ac", "1", "-ar", str(sr),
              "-c:a", "pcm_s16le", str(wav)],
             capture_output=True,
@@ -47,5 +51,5 @@ def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
         y, sr_loaded = librosa.load(str(wav), sr=sr, mono=True)
     _, beat_frames = librosa.beat.beat_track(y=y, sr=sr_loaded)
     times = librosa.frames_to_time(beat_frames, sr=sr_loaded).tolist()
-    cache.write_text(json.dumps(times))
+    cache.write_text(json.dumps(times), encoding="utf-8")
     return times

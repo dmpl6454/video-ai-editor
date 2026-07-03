@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 import json
 
+from .. import platformutil as _pu
+
 # Sample 2 frames per second for tracking
 SAMPLE_HZ = 2.0
 
@@ -93,9 +95,9 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
 
     # Probe source size
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,r_frame_rate", "-of", "json", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     info = json.loads(proc.stdout)
     s = info["streams"][0]
@@ -125,7 +127,7 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
         x = max(0, min(src_w - cw, cx_px - cw // 2))
         y = max(0, min(src_h - ch, cy_px - ch // 2))
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src),
+            [_pu.FFMPEG, "-y", "-i", str(src),
              "-vf", f"crop={cw}:{ch}:{x}:{y},scale={target_w}:{target_h}",
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
              "-c:a", "aac", str(dst)],
@@ -143,16 +145,19 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
         x = max(0, min(src_w - cw, int(cx_px - cw / 2)))
         y = max(0, min(src_h - ch, int(cy_px - ch / 2)))
         lines.append(f"{t:.3f} crop x {x}, crop y {y};")
-    cmd_path.write_text("\n".join(lines))
+    cmd_path.write_text("\n".join(lines), encoding="utf-8")
 
-    cmd_arg = str(cmd_path).replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
+    # The sendcmd file path is embedded in the filtergraph (f=...), not an -i
+    # argv, so it needs filtergraph escaping. The old ad-hoc \\/\: escaping broke
+    # on Windows drive-letter paths; route through the tested helper instead.
+    cmd_arg = _pu.ffmpeg_filter_path(cmd_path)
     vf = f"sendcmd=f={cmd_arg},crop={cw}:{ch}:0:0,scale={target_w}:{target_h}"
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src),
+        [_pu.FFMPEG, "-y", "-i", str(src),
          "-vf", vf,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", str(dst)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg reframe failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

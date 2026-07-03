@@ -29,12 +29,12 @@ def _persist_token(token: str) -> None:
     """Write/replace HUGGINGFACE_TOKEN= in .env, preserving every other key."""
     lines: list[str] = []
     if ENV_PATH.exists():
-        for ln in ENV_PATH.read_text().splitlines():
+        for ln in ENV_PATH.read_text(encoding="utf-8").splitlines():
             if ln.strip().startswith("HUGGINGFACE_TOKEN=") or ln.strip().startswith("HF_TOKEN="):
                 continue
             lines.append(ln)
     lines.append(f"HUGGINGFACE_TOKEN={token}")
-    ENV_PATH.write_text("\n".join(lines).rstrip() + "\n")
+    ENV_PATH.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def _verify_pipelines(token: str) -> tuple[bool, str | None]:

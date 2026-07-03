@@ -11,12 +11,13 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
+from .. import platformutil as _pu
 
 _FFMPEG_CANDIDATES = [
-    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+    _pu.FFMPEG,                                       # PATH (works on Windows/Linux/Mac)
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",       # mac brew ffmpeg-full (has vidstab)
     "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
     "/opt/homebrew/bin/ffmpeg",
-    "ffmpeg",
 ]
 
 
@@ -33,7 +34,7 @@ def _ffmpeg_with_vidstab() -> str | None:
             continue
         try:
             out = subprocess.run([cand, "-hide_banner", "-filters"],
-                                 capture_output=True, text=True, check=True)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             if "vidstabdetect" in out.stdout:
                 return cand
         except Exception:
@@ -46,8 +47,9 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     ff = _ffmpeg_with_vidstab()
     if not ff:
         raise RuntimeError(
-            "Stabilization needs ffmpeg with libvidstab. Install with:\n"
-            "  brew install ffmpeg-full\n"
+            "Stabilization needs ffmpeg with libvidstab. Install a full build:\n"
+            "  macOS:   brew install ffmpeg-full\n"
+            "  Windows: winget install Gyan.FFmpeg  (the 'full' variant)\n"
             "and retry."
         )
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -56,13 +58,17 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     if dst.exists() and dst.stat().st_size > 0:
         return dst
     transforms = cache_dir / f"stable_{h}.trf"
+    # The .trf path is embedded inside the -vf filtergraph (result=/input=), not
+    # passed as an -i argv, so it needs filtergraph escaping — a raw Windows
+    # `C:\...` path breaks the parser (drive colon + backslashes).
+    trf_filt = _pu.ffmpeg_filter_path(transforms)
 
     # Pass 1: detect motion
     p1 = subprocess.run(
         [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={transforms}",
+         "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={trf_filt}",
          "-f", "null", "-"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if p1.returncode != 0:
         raise RuntimeError(f"vidstabdetect failed (rc={p1.returncode}):\n{p1.stderr[-1200:]}")
@@ -70,10 +76,10 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     # Pass 2: apply transforms
     p2 = subprocess.run(
         [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabtransform=input={transforms}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
+         "-vf", f"vidstabtransform=input={trf_filt}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-c:a", "copy", str(dst)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if p2.returncode != 0:
         raise RuntimeError(f"vidstabtransform failed (rc={p2.returncode}):\n{p2.stderr[-1200:]}")

@@ -10,21 +10,24 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import platformutil as _pu
+
 
 def _rife_dir() -> Path:
     candidates = [
+        _pu.user_data_dir("Video AI Editor") / "models" / "rife",             # new, per-OS
         Path.home() / ".local" / "share" / "video-ai-editor" / "models" / "rife"
-            / "rife-ncnn-vulkan-20221029-macos",
-        Path(__file__).resolve().parents[3] / "models" / "rife",
+            / "rife-ncnn-vulkan-20221029-macos",                              # legacy
+        Path(__file__).resolve().parents[3] / "models" / "rife",              # repo
     ]
     for c in candidates:
-        if (c / "rife-ncnn-vulkan").exists():
+        if (c / _pu.exe_name("rife-ncnn-vulkan")).exists():
             return c
     return candidates[0]
 
 
 RIFE_DIR = _rife_dir()
-RIFE_BIN = RIFE_DIR / "rife-ncnn-vulkan"
+RIFE_BIN = RIFE_DIR / _pu.exe_name("rife-ncnn-vulkan")
 
 
 def available() -> bool:
@@ -56,9 +59,10 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
 
     # Probe source fps
     fps_str = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
+        encoding="utf-8", errors="replace",
     ).stdout.strip()
     if "/" in fps_str:
         n, d = fps_str.split("/")
@@ -68,20 +72,27 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
 
     # Extract frames
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
+        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
         capture_output=True, check=True,
     )
     n_in = len(list(frames_in.glob("*.png")))
     if n_in < 2:
         raise RuntimeError("RIFE needs at least 2 frames")
 
-    # RIFE wants total target frame count; -j flag controls threads
+    # RIFE wants total target frame count; -j flag controls threads.
+    # Windows CreateProcess resolves argv[0] against PATH + the PARENT cwd, NOT
+    # the `cwd=` we pass — so a bare exe name fails even with cwd set. Use the
+    # absolute binary path on Windows. On POSIX the "./exe" form works because
+    # the child chdir's into cwd before exec.
     target = n_in * factor
+    exe = _pu.exe_name("rife-ncnn-vulkan")
+    argv0 = str(RIFE_BIN) if _pu.IS_WINDOWS else f"./{exe}"
     proc = subprocess.run(
-        ["./rife-ncnn-vulkan",
+        [argv0,
          "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
          "-m", model, "-n", str(target), "-f", "f%05d.png"],
         cwd=str(RIFE_DIR), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rife failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -90,7 +101,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     # Audio is dropped — slow motion of speech is rarely useful and stretching
     # audio cleanly is a separate concern.
     subprocess.run(
-        ["ffmpeg", "-y",
+        [_pu.FFMPEG, "-y",
          "-framerate", f"{fps_val:.4f}", "-i", str(frames_out / "f%05d.png"),
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-an", str(dst)],

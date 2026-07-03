@@ -53,6 +53,29 @@ Notes:
 
 **Always launch with `bash run.sh`**, which runs `PYTHONPATH="$PWD/src" .venv/bin/python -m video_ai_editor.desktop` and bypasses the `.pth` mechanism entirely. Diagnose the flag with `ls -lO <file>.pth` (shows `hidden`); confirm the culprit with `launchctl list | grep mdflagwriter`. Do **not** fight the Spotlight daemon directly. (`pytest` is unaffected — it uses `pythonpath = ["src"]` in `pyproject.toml`.)
 
+### Running on Windows
+
+- Setup: `winget install Gyan.FFmpeg` (the **full** variant — includes libvidstab + libass + the nvenc/qsv/amf encoders). Then `uv sync --python 3.13 --all-extras --group dev` and `cd frontend && npm install`.
+  - **winget-PATH caveat:** Gyan.FFmpeg is known to NOT put `ffmpeg.exe` on PATH. The app probes `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\...\bin` automatically (config.py), but if `ffmpeg -version` fails in a fresh shell, add that `bin` dir to PATH or use a BtbN static build.
+- Launch: `powershell -ExecutionPolicy Bypass -File run.ps1` (the parallel of `run.sh`; uses `PYTHONPATH=src` + `.venv\Scripts\python.exe`). The macOS `.pth` hidden-flag bug does NOT occur on Windows.
+- GUI: pywebview uses the **Edge WebView2** runtime (preinstalled on Win11 / most Win10; else install the Evergreen runtime). It ships H.264/AAC + WebCodecs, so the frame scrubber and preview work.
+- Encoder: on Windows the render pipeline probes `h264_nvenc` → `h264_qsv` → `h264_amf` → `libx264` (a real null-encode probe, since `ffmpeg -encoders` lists HW encoders even without the GPU).
+- Native AI binaries (optional features): `whisper-cli.exe` from whisper.cpp `whisper-bin-x64.zip`, `realesrgan-ncnn-vulkan.exe` from `realesrgan-ncnn-vulkan-*-windows.zip` — drop into `%APPDATA%\Video AI Editor\...` or `models\`. TTS (Piper) works from the pure-Python wheel with no extra binary.
+- Packaging: `powershell -ExecutionPolicy Bypass -File build_win.ps1` → `dist\Video AI Editor\` (wrap in Inno Setup/WiX for distribution).
+
+## Cross-platform layer — `platformutil.py` (the ONE place OS differences live)
+
+The app runs on both macOS and Windows from one codebase. **All OS-conditional logic routes through `src/video_ai_editor/platformutil.py`** — no raw inline `sys.platform` checks elsewhere (design rule; a test enforces the encoding side). On macOS every Windows branch is dead code (`IS_WINDOWS` is False, `exe_name()` is a no-op), so macOS behavior is preserved byte-for-byte. Helpers: `IS_WINDOWS`/`IS_MAC`, `exe_name(name)` (adds `.exe` on Windows), `find_binary(name, extra_dirs)`, `user_data_dir`/`user_cache_dir` (per-OS `%APPDATA%`/`%LOCALAPPDATA%` vs `~/Library`), `read_text_utf8`/`write_text_utf8`, `replace_with_retry`/`unlink_with_retry`, `FFMPEG`/`FFPROBE` constants, `ffmpeg_filter_path(path)`.
+
+Four Windows footguns are non-obvious and were only caught by the `windows-latest` CI job — respect them when touching render/AI/subprocess code:
+
+1. **ffmpeg *filtergraph* paths ≠ *argv* paths.** A path passed as an `-i` argv element needs NO escaping. But a path embedded INSIDE a `-vf`/`-filter_complex` option value (`vidstabdetect=result=…`, `sendcmd=f=…`, `lut3d=…`, `movie=filename=…`) hits ffmpeg's filtergraph parser, where `:` separates options and `\` escapes — so a raw Windows `C:\Users\x.trf` is mangled. **Always wrap such paths in `_pu.ffmpeg_filter_path()`** (converts `\`→`/` and escapes the drive colon as `\\:` — the only form that survives ffmpeg's two-pass parser; single-backslash and single-quoting both fail, verified empirically).
+2. **`subprocess(..., text=True)` MUST pass `encoding="utf-8", errors="replace"`.** Windows defaults to cp1252-strict, so decoding ffmpeg stderr that echoes a Devanagari media path raises `UnicodeDecodeError` and crashes — even on a *successful* ffmpeg run (the decode happens in `communicate()` before the returncode check). `-hide_banner`/`-v error` do NOT suppress the input-filename line. Byte-mode captures (no `text=`) are exempt.
+3. **Bare exe name + `cwd=` fails on Windows.** `CreateProcess` resolves argv[0] against PATH + the *parent* cwd, not the passed `cwd=`. rife/realesrgan (`ncnn-vulkan` binaries that need `cwd` for their `models/` dir) use the **absolute** binary path (`RIFE_BIN`/`ESRGAN_BIN`) on Windows; the `./exe` form only works on POSIX (child chdir's before exec).
+4. **Windows-illegal filename chars** (`< > : " | ? *`) can't exist on NTFS — tests that create on-disk fixtures must use Windows-legal names (`_safe_filename` handles user uploads; `repair_media_paths` sanitizes only the leaf stem, which is already Windows-safe).
+
+Windows launch/build: `run.ps1` (parallel of `run.sh`, uses `PYTHONPATH=src`) and `build_win.ps1` (drives the `.spec` directly via `pyinstaller "Video AI Editor.spec"`). See "Running on Windows" above.
+
 ## The one idea that unlocks the codebase
 
 **The EDL is the program; `dispatch()` is the only way to change it.** Every feature is a variation on one loop: something produces a tool call → `dispatch(store, tool, args)` mutates the EDL Pydantic tree in place → `store.commit()` persists it → the render pipeline re-derives video/audio from the EDL. There is no diff/patch layer and no inverse-op undo — the EDL tree *is* the timeline, on-disk snapshots *are* the history, and render output is a pure function of `edl.hash()`.
@@ -82,7 +105,7 @@ Sends tool schemas (projected from `tools.py`, dropping the internal `category` 
 - **`edl.hash()` (sha256[:16] of canonical JSON) drives the render cache.** Preview keys output by hash and returns instantly on a hit; an `_INFLIGHT` dict collapses concurrent identical renders.
 - **Chunk cache** (`render/chunks.py`): with no V1 transitions, each clip renders once to a content-fingerprinted mp4 and the timeline becomes a fast `concat` — editing one clip re-renders only that chunk. Disabled under transitions (xfade needs both streams in one graph).
 - **Audio-only remux fast path**: a `_video_only_fingerprint` lets a music/vo/gain-only change re-mux a cached video-only mp4 with `-c:v copy` instead of re-encoding.
-- Encoder is **VideoToolbox-first** (`h264_videotoolbox`, detected by grepping `ffmpeg -encoders`), libx264 fallback. Preview vs export is a quality/resolution split, not a different pipeline. `loudnorm` runs **export-only** (its 192k internal rate yields 96k AAC that Safari rejects in mp4). Renders write to a PID/thread-scoped `.part.mp4` then `os.replace()` in, so a polling `<video>` never sees a torn file.
+- Encoder selection is a **probe-based ladder** (`compositor._usable_encoder`, `@lru_cache`): VideoToolbox → NVENC → QSV → AMF → libx264, picking the first that passes a real ~0.1s null-encode (a *listing* grep of `ffmpeg -encoders` is not enough — it lists `h264_nvenc`/`qsv`/`amf` even with no matching GPU). On a Mac this still resolves to VideoToolbox with byte-identical args as before. Preview vs export is a quality/resolution split, not a different pipeline. `loudnorm` runs **export-only** (its 192k internal rate yields 96k AAC that Safari rejects in mp4). Renders write to a PID/thread-scoped `.part.mp4` then swap in via `_pu.replace_with_retry()` (retries on Windows `PermissionError` when a Starlette `FileResponse` still holds the preview open; first-try-succeeds on macOS), so a polling `<video>` never sees a torn file.
 - **Text/stickers are NOT ffmpeg drawtext.** Brew ffmpeg 8 lacks libass/libfreetype, so `render/text_overlay.py` rasterizes each `TextClip`/`Sticker` to an RGBA PNG via Pillow (role fonts, Noto fallback for non-Latin), caches by content hash, and composites via `overlay=` gated on `enable='between(t,start,end)'`. `ass_writer.py` is a dormant alternate path.
 
 ## Desktop app assembly
@@ -94,9 +117,10 @@ Sends tool schemas (projected from `tools.py`, dropping the internal `category` 
 ## Import-time config chokepoint — `config.py`
 
 Importing `config` runs side effects and every entry point hits it before shelling out:
-- **Augments `PATH`** with Homebrew/MacPorts bins so a double-clicked `.app` (inheriting launchd's minimal PATH) can find `ffmpeg`/`ffprobe`/`whisper-cli`.
-- **Loads `.env` with non-standard precedence:** real shell env always wins; among files the **first loaded wins** (only sets keys not already set), order `<repo>/.env` then `~/Library/Application Support/Video AI Editor/.env`. The user-level dir is how a shipped `.app` picks up `ANTHROPIC_API_KEY` (the repo `.env` is invisible inside the read-only bundle). Note: `.env` values are read literally — inline `# comments` after a value become part of the value.
-- **Creates `WORKDIR`** (dev `<repo>/workdir`; frozen `~/Library/Application Support/Video AI Editor/workdir`).
+- **Augments `PATH`** so shelled-out binaries resolve regardless of launch method: on macOS the Homebrew/MacPorts bins (a double-clicked `.app` inherits launchd's minimal PATH); on Windows the winget-ffmpeg package dir (`%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\...\bin`, since Gyan.FFmpeg famously isn't put on PATH).
+- **Loads `.env` with non-standard precedence:** real shell env always wins; among files the **first loaded wins** (only sets keys not already set), order `<repo>/.env` then the per-OS user config dir's `.env` (`_pu.user_data_dir("Video AI Editor")` — `~/Library/Application Support/…` on Mac, `%APPDATA%\…` on Windows). The user-level dir is how a shipped app picks up `ANTHROPIC_API_KEY` (the repo `.env` is invisible inside the read-only bundle). Note: `.env` values are read literally — inline `# comments` after a value become part of the value.
+- **Creates `WORKDIR`** (dev `<repo>/workdir`; frozen `<user data dir>/workdir`, per-OS).
+- **`VAI_ALLOWED_ROOTS` splits on `os.pathsep`** (`;` on Windows, `:` on POSIX) — not a hardcoded `:`, which would shred `C:\` paths.
 - Key vars: `CLAUDE_MODEL=claude-sonnet-4-6`, `WHISPER_MODEL=small` (fast, for uploads) vs `WHISPER_CAPTION_MODEL=large-v3` (captions), and `VAI_RESTRICT_PATHS` (default **OFF**) — flip on for hosted deployments to force tool path args under `WORKDIR`/`VAI_ALLOWED_ROOTS`.
 
 ## Storage — the filesystem is the database
@@ -131,8 +155,10 @@ Distinct from `ai/` (models) and `ingest/` (media prep). `audit.py` is a **pre-e
 
 - `pyproject.toml` sets `pythonpath = ["src"]` (import `video_ai_editor.*` without install) and `asyncio_mode = "auto"`. There is **no `conftest.py`** — fixtures are per-file, typically building an `EDLStore` in `tmp_path` with ffmpeg-lavfi-synthesized media.
 - `test_all_tools_smoke.py` parametrizes over `sorted(DISPATCH.keys())` — a new tool is auto-covered by a smoke test.
-- CI (`.github/workflows/ci.yml`) runs backend pytest (ubuntu, Python 3.11, ffmpeg via apt) and frontend `tsc + vite build` in parallel, **forcing `ANTHROPIC_API_KEY`/`HUGGINGFACE_TOKEN` empty** so tests never hit real endpoints and heavy-AI tests skip cleanly.
+- CI (`.github/workflows/ci.yml`) runs three jobs in parallel: backend pytest on **ubuntu** (Python 3.11, ffmpeg via apt), backend pytest on **windows-latest** (Python 3.13, ffmpeg-full via Chocolatey — the real cross-platform gate), and frontend `tsc + vite build`. All **force `ANTHROPIC_API_KEY`/`HUGGINGFACE_TOKEN` empty** so tests never hit real endpoints and heavy-AI tests skip cleanly. The Windows runner has no local AI binaries/models, so a few more tests skip there (e.g. torchcodec-dependent) — that's expected. **Windows-only regressions surface here, not locally on a Mac** — the CI job is the source of truth for Windows behavior.
 
 ## Packaging
 
-The macOS `.app` is built via PyInstaller (`build_app.sh` / `Video AI Editor.spec`, entry `desktop.py`, `--windowed`), **excluding heavy ML libs** (torch/pyannote/faster-whisper/librosa/demucs) to stay ~150MB — those users run `uv run video-ai-editor` instead. `ffmpeg`/`piper`/`realesrgan` must be on PATH at runtime. Version is single-sourced from the repo-root `VERSION` file (baked into Info.plist and served at `/api/version`).
+The macOS `.app` is built via PyInstaller (`build_app.sh`, entry `desktop.py`, `--windowed`), **excluding heavy ML libs** (torch/pyannote/faster-whisper/librosa/demucs) to stay ~150MB — those users run `uv run video-ai-editor` instead. `ffmpeg`/`piper`/`realesrgan` must be on PATH at runtime. Version is single-sourced from the repo-root `VERSION` file (baked into Info.plist and served at `/api/version`).
+
+**`build_app.sh` does NOT use `Video AI Editor.spec`** — it invokes `pyinstaller` with CLI flags, and PyInstaller's CLI mode *regenerates/overwrites* the `.spec` as a side effect. So editing the `.spec` has no effect on the macOS build, and running `build_app.sh` silently clobbers any hand-maintained `.spec` content. The `.spec` IS used by the Windows build (`build_win.ps1` → `pyinstaller "Video AI Editor.spec"`), where it is darwin-guarded around `BUNDLE` and adds the `clr` (pythonnet/WebView2) hidden import. If you need to change the macOS bundle config, edit `build_app.sh`'s flags, not the `.spec`.

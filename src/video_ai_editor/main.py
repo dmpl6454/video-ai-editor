@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
 from .storage import (new_session_id, session_dir, session_exists,
                        list_sessions, write_meta, read_meta)
@@ -302,10 +303,10 @@ async def vo_record(sid: str, file: UploadFile = File(...),
     # Normalize to AAC mp4 so the audio mixer can splice it cleanly
     norm = vo_dir / f"vo_{int(time.time())}.m4a"
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(raw),
+        [_pu.FFMPEG, "-y", "-i", str(raw),
          "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
          str(norm)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise HTTPException(422, {"error": f"vo transcode failed: {proc.stderr[-800:]}"})
@@ -466,9 +467,9 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
                 tx = _transcribe(normalized_path, model_size=chosen_model)
                 ingest_json = out_dir / "ingest.json"
                 if ingest_json.exists():
-                    data = json.loads(ingest_json.read_text())
+                    data = json.loads(ingest_json.read_text(encoding="utf-8"))
                     data["transcript"] = tx.model_dump()
-                    ingest_json.write_text(json.dumps(data, indent=2))
+                    ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
             except Exception:
                 pass
 
@@ -673,13 +674,13 @@ def _load_history(sid: str) -> list[dict]:
     if not p.exists():
         return []
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return []
 
 
 def _save_history(sid: str, history: list[dict]) -> None:
-    _history_path(sid).write_text(json.dumps(history, indent=2, default=str))
+    _history_path(sid).write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
 
 @app.get("/api/sessions/{sid}/history")

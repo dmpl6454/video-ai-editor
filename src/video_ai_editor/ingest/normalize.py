@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 from .probe import probe, ProbeResult
+from .. import platformutil as _pu
 
 
 _HDR_TRANSFERS = {"smpte2084", "smpte428", "arib-std-b67"}
@@ -22,8 +23,8 @@ _HDR_TRANSFERS = {"smpte2084", "smpte428", "arib-std-b67"}
 def _has_filter(name: str) -> bool:
     """Cheap check: is this filter available in the local ffmpeg build?"""
     try:
-        out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
-                             capture_output=True, text=True, check=True)
+        out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-filters"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         return any(line.split()[1:2] == [name] for line in out.stdout.splitlines())
     except Exception:
         return False
@@ -32,10 +33,10 @@ def _has_filter(name: str) -> bool:
 def _color_meta(src: Path) -> dict:
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=color_transfer,color_primaries,color_space,pix_fmt",
              "-of", "json", str(src)],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
         )
         data = json.loads(out.stdout)
         return (data.get("streams") or [{}])[0]
@@ -55,9 +56,9 @@ def _has_audio(src: Path) -> bool:
     """True if `src` has at least one audio stream."""
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", str(src)],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         )
         return bool(out.stdout.strip())
     except Exception:
@@ -79,9 +80,9 @@ def _attempts(src: Path, dst: Path, fps: int, sample_rate: int, channels: int,
         # audio. The renderer concats per-clip [i:a] streams; a missing audio
         # stream there fails the whole filtergraph ("':a' matches no streams").
         if has_audio:
-            a = ["ffmpeg", "-y", "-i", str(src), *common_video]
+            a = [_pu.FFMPEG, "-y", "-i", str(src), *common_video]
         else:
-            a = ["ffmpeg", "-y", "-i", str(src),
+            a = [_pu.FFMPEG, "-y", "-i", str(src),
                  "-f", "lavfi", "-i",
                  f"anullsrc=channel_layout=stereo:sample_rate={sample_rate}",
                  "-map", "0:v:0", "-map", "1:a:0", "-shortest", *common_video]
@@ -111,7 +112,7 @@ def _attempts(src: Path, dst: Path, fps: int, sample_rate: int, channels: int,
 
     # Attempt 4: video-only fallback (drop audio entirely; some sources have
     # weird audio codecs we can't transcode)
-    fallback = ["ffmpeg", "-y", "-i", str(src), "-an", *common_video,
+    fallback = [_pu.FFMPEG, "-y", "-i", str(src), "-an", *common_video,
                 "-pix_fmt", "yuv420p"]
     if scale:
         fallback += ["-vf", scale]
@@ -129,7 +130,7 @@ def normalize(src: Path, dst: Path, fps: int = 30, sample_rate: int = 48000,
     hdr = _is_hdr(meta)
     last_proc: subprocess.CompletedProcess | None = None
     for args in _attempts(src, dst, fps, sample_rate, channels, height, hdr):
-        proc = subprocess.run(args, capture_output=True, text=True)
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
             return probe(dst)
         last_proc = proc

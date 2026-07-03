@@ -51,6 +51,39 @@ jobs:
         # Heavy-AI tests (RIFE, Real-ESRGAN, LaMa, pyannote) skip cleanly on
         # CI because the binaries / models aren't installed — that's by design.
 
+  backend-windows:
+    name: backend (pytest, windows)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      ANTHROPIC_API_KEY: ""
+      HUGGINGFACE_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg (Chocolatey)
+        run: |
+          choco install ffmpeg-full -y --no-progress
+          ffmpeg -version | Select-Object -First 1
+        shell: pwsh
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+        # Note: py2app (dependency-group dev) installs but is mac-only dead code.
+
+      - name: Run pytest
+        run: uv run pytest -q --tb=short
+        # Heavy-AI tests skip cleanly (no binaries/models on the runner).
+
   frontend:
     name: frontend (tsc + vite build)
     runs-on: ubuntu-latest

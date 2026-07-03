@@ -9,6 +9,7 @@
 # PYTHONPATH sidesteps the .pth mechanism entirely, so this launch is immune.
 #
 # Usage:  bash run.sh            (or ./run.sh after chmod +x)
+# Windows users: use run.ps1 instead (powershell -ExecutionPolicy Bypass -File run.ps1).
 
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -10,7 +10,11 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-EMOJI_CACHE = Path.home() / ".cache" / "video-ai-editor" / "emoji"
+from .. import platformutil as _pu
+
+_LEGACY_EMOJI_CACHE = Path.home() / ".cache" / "video-ai-editor" / "emoji"
+EMOJI_CACHE = _LEGACY_EMOJI_CACHE if _LEGACY_EMOJI_CACHE.exists() else \
+    _pu.user_cache_dir("Video AI Editor") / "emoji"
 TWEMOJI_BASE = "https://raw.githubusercontent.com/jdecked/twemoji/main/assets/72x72"
 
 

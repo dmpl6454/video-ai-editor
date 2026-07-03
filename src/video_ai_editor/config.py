@@ -1,21 +1,30 @@
 import os
 from pathlib import Path
 
+from . import platformutil as _pu
+
 
 def _augment_path_for_gui_launch() -> None:
-    """Make Homebrew/MacPorts CLIs (ffmpeg, ffprobe, whisper-cli, …) resolvable
-    no matter how the app was started.
+    """Make CLIs (ffmpeg, ffprobe, whisper-cli, …) resolvable no matter how the
+    app was started.
 
-    A double-clicked macOS .app inherits launchd's minimal PATH
-    (``/usr/bin:/bin:/usr/sbin:/sbin``) — it does NOT see ``/opt/homebrew/bin``.
-    Everything that shells out to ffmpeg then dies with
-    ``FileNotFoundError: 'ffmpeg'``, which silently breaks import, preview,
-    waveform, export and captions. Launched from a terminal the binaries are on
-    PATH, so this only bites the bundled .app. Append (don't prepend) the common
-    locations so we never override a deliberately-chosen binary.
-    """
-    extra = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
-             "/usr/local/sbin", str(Path.home() / ".local" / "bin")]
+    macOS: a double-clicked .app inherits launchd's minimal PATH and can't see
+    /opt/homebrew/bin. Windows: GUI processes inherit the user PATH, but a
+    winget-installed ffmpeg (Gyan.FFmpeg) is famously NOT put on PATH — so we
+    also probe its package dir. Append (don't prepend) so we never override a
+    deliberately-chosen binary."""
+    if _pu.IS_WINDOWS:
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        extra = []
+        if localappdata:
+            # Gyan.FFmpeg / BtbN unzip locations; glob the winget packages dir.
+            wg = Path(localappdata) / "Microsoft" / "WinGet" / "Packages"
+            if wg.is_dir():
+                extra += [str(p) for p in wg.glob("Gyan.FFmpeg*/**/bin") if p.is_dir()]
+            extra.append(str(Path(localappdata) / "Programs" / "ffmpeg" / "bin"))
+    else:
+        extra = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+                 "/usr/local/sbin", str(Path.home() / ".local" / "bin")]
     current = os.environ.get("PATH", "").split(os.pathsep)
     additions = [d for d in extra if d and d not in current and os.path.isdir(d)]
     if additions:
@@ -39,7 +48,7 @@ def _read_version() -> str:
             vf = Path(base) / "VERSION"
             if vf.exists():
                 try:
-                    return vf.read_text().strip() or "0.0.0"
+                    return vf.read_text(encoding="utf-8").strip() or "0.0.0"
                 except Exception:
                     pass
     return "0.0.0"
@@ -55,7 +64,7 @@ def _apply_env_file(env_path: Path) -> None:
         return
     parsed: dict[str, str] = {}
     try:
-        lines = env_path.read_text().splitlines()
+        lines = env_path.read_text(encoding="utf-8").splitlines()
     except Exception:
         return
     for line in lines:
@@ -74,11 +83,10 @@ def _apply_env_file(env_path: Path) -> None:
 
 
 def _user_config_dir() -> Path:
-    """Stable, user-writable config dir that BOTH the dev server and the shipped
-    .app can reach. The frozen app's PROJECT_ROOT points inside the read-only
-    bundle, so a repo-relative .env is invisible to it — this is where a
-    double-clicked app picks up its ANTHROPIC_API_KEY."""
-    return Path.home() / "Library" / "Application Support" / "Video AI Editor"
+    """Stable, user-writable config dir that both dev and the shipped app can
+    reach. Windows: %APPDATA%\\Video AI Editor; macOS: ~/Library/Application
+    Support/Video AI Editor."""
+    return _pu.user_data_dir("Video AI Editor")
 
 
 def _load_dotenv() -> None:
@@ -106,8 +114,7 @@ def _default_workdir() -> Path:
         return p if p.is_absolute() else PROJECT_ROOT / p
     import sys as _sys
     if getattr(_sys, "frozen", False) or getattr(_sys, "_MEIPASS", None):
-        base = Path.home() / "Library" / "Application Support" / "Video AI Editor"
-        return base / "workdir"
+        return _pu.user_data_dir("Video AI Editor") / "workdir"
     return PROJECT_ROOT / "workdir"
 
 
@@ -149,7 +156,7 @@ ALLOWED_PATH_ROOTS: list[Path] = []
 if RESTRICT_PATHS:
     _extra = os.environ.get("VAI_ALLOWED_ROOTS", "")
     ALLOWED_PATH_ROOTS = [WORKDIR.resolve()]
-    for r in _extra.split(":") if _extra else []:
+    for r in _extra.split(os.pathsep) if _extra else []:
         r = r.strip()
         if r:
             try:

@@ -45,7 +45,10 @@ def test_safe_filename_falls_back_for_empty():
 
 def test_repair_media_paths_copies_and_rewrites(tmp_path: Path):
     # Build a session with a music clip whose source has hostile chars.
-    bad = tmp_path / "Lo-fi: 'beats' [chill].mp3"
+    # NB: the leaf must be creatable on every OS — Windows forbids : < > " | ? *
+    # in filenames, so we use only hostile-but-legal chars (' [ ] , space) that
+    # still exercise the ffmpeg-filtergraph-hostile-char repair path.
+    bad = tmp_path / "Lo-fi 'beats' [chill].mp3"
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=f=200:duration=1",
          "-c:a", "mp3", str(bad)],
@@ -88,7 +91,8 @@ def test_repair_then_render_succeeds(tmp_path: Path):
          "-c:v", "copy", "-c:a", "aac", "-shortest", str(src_v)],
         check=True, capture_output=True,
     )
-    bad = tmp_path / "Lo-fi: 'beats' [chill], #1.mp3"
+    # Windows-legal hostile leaf (no : < > " | ? *); still ffmpeg-hostile.
+    bad = tmp_path / "Lo-fi 'beats' [chill] #1.mp3"
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=f=200:duration=2",
          "-c:a", "mp3", str(bad)],

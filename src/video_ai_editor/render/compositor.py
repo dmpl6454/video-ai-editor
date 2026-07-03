@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from .. import platformutil as _pu
 from ..config import FONTS_DIR
 from ..edl import EDL
 from ..edl.schema import Clip, Track
@@ -32,9 +33,11 @@ def _part_path(dst: Path) -> Path:
     pointing it straight at the served path means a concurrent fetch (the
     <video>/FrameScrubber polling preview.mp4) — or a render killed mid-write —
     sees a 0-byte or torn file, which mp4box reports as "invalid box". Render to
-    this temp path, then os.replace() it into place (atomic on one filesystem),
-    so readers only ever see a complete file or none at all. PID+thread id keep
-    concurrent renders of the same hash from clobbering each other's temp file.
+    this temp path, then swap it into place via platformutil.replace_with_retry
+    (atomic on one filesystem; retries on Windows if a reader still holds the
+    destination open), so readers only ever see a complete file or none at all.
+    PID+thread id keep concurrent renders of the same hash from clobbering
+    each other's temp file.
     """
     return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part.mp4")
 
@@ -52,7 +55,7 @@ def _run_ffmpeg_progress(args: list[str], total_s: float,
     out = args[-1]
     full = [*args[:-1], "-progress", "pipe:1", "-nostats", out]
     proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True)
+                            text=True, encoding="utf-8", errors="replace")
     err_chunks: list[str] = []
 
     def _drain_err() -> None:
@@ -89,33 +92,75 @@ def _run_ffmpeg_progress(args: list[str], total_s: float,
     return rc, "".join(err_chunks)
 
 
-@lru_cache(maxsize=1)
-def _has_videotoolbox() -> bool:
+@lru_cache(maxsize=None)
+def _usable_encoder(name: str) -> bool:
+    """True iff ffmpeg can actually ENCODE with `name` on this machine.
+
+    'ffmpeg -encoders' lists h264_nvenc/qsv/amf even with no matching GPU, so a
+    listing grep is not enough — we run a tiny null encode. VideoToolbox is the
+    exception: it's Apple-only and cheap to trust from the listing, but the null
+    encode works for it too, so we use one code path. Cached per process."""
     try:
-        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, check=True)
-        return " h264_videotoolbox " in out.stdout
+        out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        if f" {name} " not in out.stdout:
+            return False
+    except Exception:
+        return False
+    # Functional probe: a ~0.1s black-frame encode to null.
+    try:
+        r = subprocess.run(
+            [_pu.FFMPEG, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+             "-c:v", name, "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+        )
+        return r.returncode == 0
     except Exception:
         return False
 
 
+# Probe order: Apple HW first (only lists on Mac), then the three Windows/Linux
+# HW encoders, then guaranteed software fallback.
+_HW_ENCODER_ORDER = ["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"]
+
+
 def _video_encoder_args(*, preview: bool) -> list[str]:
-    """Pick the fastest H.264 encoder available; fall back to libx264."""
-    if _has_videotoolbox():
-        # VideoToolbox quality scale: lower = better. Preview ~60, export ~50.
-        # Allow_sw=1 lets it transparently fall back if hw queue is busy.
-        q = "60" if preview else "48"
-        return [
-            "-c:v", "h264_videotoolbox",
-            "-q:v", q,
-            "-allow_sw", "1",
-            "-realtime", "1" if preview else "0",
-            "-pix_fmt", "yuv420p",
-        ]
-    # Software fallback
+    """Pick the fastest usable H.264 encoder; fall back to libx264."""
+    for name in _HW_ENCODER_ORDER:
+        if _usable_encoder(name):
+            return _hw_encoder_args(name, preview=preview)
     crf = "30" if preview else "20"
     preset = "ultrafast" if preview else "medium"
     return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
+
+
+def _hw_encoder_args(name: str, *, preview: bool) -> list[str]:
+    """Per-encoder quality-mode args. Values are tuned defaults, not mandates."""
+    if name == "h264_videotoolbox":
+        q = "60" if preview else "48"
+        return ["-c:v", "h264_videotoolbox", "-q:v", q, "-allow_sw", "1",
+                "-realtime", "1" if preview else "0", "-pix_fmt", "yuv420p"]
+    if name == "h264_nvenc":
+        if preview:
+            return ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
+                    "-rc", "vbr", "-cq", "33", "-b:v", "0", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+                "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
+    if name == "h264_qsv":
+        if preview:
+            return ["-c:v", "h264_qsv", "-global_quality", "30",
+                    "-preset", "veryfast", "-pix_fmt", "nv12"]
+        return ["-c:v", "h264_qsv", "-global_quality", "22",
+                "-preset", "slower", "-pix_fmt", "nv12"]
+    if name == "h264_amf":
+        if preview:
+            return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp",
+                    "-qp_i", "30", "-qp_p", "32", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
+                "-qp_i", "20", "-qp_p", "22", "-pix_fmt", "yuv420p"]
+    # Unreachable: only called for names in _HW_ENCODER_ORDER.
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
 
 
 # In-flight render dedup: identical EDL hash → one ffmpeg job, shared result.
@@ -413,7 +458,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     if not clips:
         dur = max(1.0, edl.duration)
         subprocess.run([
-            "ffmpeg", "-y",
+            _pu.FFMPEG, "-y",
             "-f", "lavfi", "-i", f"color=c=black:s={w_out}x{h_out}:r={fps}:d={dur}",
             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
             "-shortest", *enc_args, *_AAC_OUT, str(dst),
@@ -540,7 +585,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     extra_inputs += audio_inputs
 
     tmp = _part_path(dst)
-    args = ["ffmpeg", "-y", *inputs, *extra_inputs,
+    args = [_pu.FFMPEG, "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
             "-r", str(fps),
@@ -554,15 +599,15 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         try:
             rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            _pu.unlink_with_retry(tmp)
             raise
     else:
-        proc = subprocess.run(args, capture_output=True, text=True)
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
         rc, err = proc.returncode, proc.stderr
     if rc != 0:
-        tmp.unlink(missing_ok=True)
+        _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"ffmpeg render failed (rc={rc}):\n{(err or '')[-2000:]}")
-    os.replace(tmp, dst)  # atomic swap — readers never see a partial file
+    _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
     return dst
 
 
@@ -656,7 +701,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
         # full preview — `-c:v copy -an` is essentially free).
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", str(dst), "-c:v", "copy", "-an",
+                [_pu.FFMPEG, "-y", "-i", str(dst), "-c:v", "copy", "-an",
                  "-movflags", "+faststart", str(cached_video)],
                 capture_output=True, check=True,
             )
@@ -665,11 +710,11 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
 
         files = sorted(out_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in files[:-10]:
-            old.unlink(missing_ok=True)
+            _pu.unlink_with_retry(old)
         # Cap the video-only cache too
         vfiles = sorted(videos_dir.glob("video_*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in vfiles[:-15]:
-            old.unlink(missing_ok=True)
+            _pu.unlink_with_retry(old)
     finally:
         with _INFLIGHT_LOCK:
             _INFLIGHT.pop(key, None)
@@ -691,15 +736,15 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         # No V1 audio source to feed the mixer — copy video, generate silence.
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-i", str(video_only),
+                _pu.FFMPEG, "-y", "-i", str(video_only),
                 "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
                 "-c:v", "copy", *_AAC_OUT, "-shortest",
                 "-movflags", "+faststart", str(tmp),
             ], capture_output=True, check=True)
         except Exception:
-            tmp.unlink(missing_ok=True)
+            _pu.unlink_with_retry(tmp)
             raise
-        os.replace(tmp, dst)  # atomic swap — never serve a partial file
+        _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
         return
 
     # Build per-clip audio chains with the same input order as the main render.
@@ -733,7 +778,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     if audio_chain:
         fc = fc + ";" + audio_chain
 
-    args = ["ffmpeg", "-y", *inputs, *audio_inputs,
+    args = [_pu.FFMPEG, "-y", *inputs, *audio_inputs,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
             "-c:v", "copy",
@@ -741,11 +786,11 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-r", str(fps),
             "-movflags", "+faststart",
             str(tmp)]
-    proc = subprocess.run(args, capture_output=True, text=True)
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
-        tmp.unlink(missing_ok=True)
+        _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
-    os.replace(tmp, dst)  # atomic swap — never serve a partial file
+    _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
 
 
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,

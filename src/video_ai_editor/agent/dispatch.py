@@ -22,11 +22,19 @@ from ..show.templates import (
     ShowSnapshot,
 )
 from .tools import list_tools as _list_tools
+from .. import platformutil as _pu
 
 DispatchFn = Callable[[EDLStore, dict], dict]
 
 
 # ---------- helpers ----------
+
+def _default_broll_dir() -> Path:
+    """Default library folder for b-roll footage: ~/Videos/broll on Windows,
+    ~/Movies/broll on macOS/Linux (Movies is the mac convention)."""
+    root = "Videos" if _pu.IS_WINDOWS else "Movies"
+    return Path.home() / root / "broll"
+
 
 def _v_track(edl: EDL, track_id: str) -> Track:
     t = edl.get_track(track_id)
@@ -112,7 +120,7 @@ def get_transcript(store: EDLStore, args: dict) -> dict:
     ingest_files = list(sd.glob("uploads/**/ingest.json"))
     if not ingest_files:
         return {"segments": [], "language": None, "duration": 0.0}
-    data = json.loads(ingest_files[0].read_text())
+    data = json.loads(ingest_files[0].read_text(encoding="utf-8"))
     return data.get("transcript") or {"segments": [], "language": None, "duration": 0.0}
 
 
@@ -536,7 +544,7 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     cap.clips = []
     seg_count = 0
     if ingest_files:
-        data = json.loads(ingest_files[0].read_text())
+        data = json.loads(ingest_files[0].read_text(encoding="utf-8"))
         tx = data.get("transcript") or {}
         canvas = store.edl.canvas
         y_pos = canvas.h * (0.85 if position == "bottom" else 0.5 if position == "center" else 0.15)
@@ -633,11 +641,11 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     if ingest_json is None:
         ingest_json = store.dir / "uploads" / "auto_caption" / "ingest.json"
         ingest_json.parent.mkdir(parents=True, exist_ok=True)
-        ingest_json.write_text(_json.dumps({"transcript": tx_dict}, ensure_ascii=False))
+        ingest_json.write_text(_json.dumps({"transcript": tx_dict}, ensure_ascii=False), encoding="utf-8")
     else:
-        data = _json.loads(ingest_json.read_text())
+        data = _json.loads(ingest_json.read_text(encoding="utf-8"))
         data["transcript"] = tx_dict
-        ingest_json.write_text(_json.dumps(data, ensure_ascii=False))
+        ingest_json.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     # Build readable cues from the word stream.
     cues = cues_from_segments(
@@ -812,11 +820,11 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
         if not isinstance(c, Clip):
             continue
         proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-nostats",
+            [_pu.FFMPEG, "-hide_banner", "-nostats",
              "-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src,
              "-af", f"silencedetect=noise={threshold_db}dB:d={min_dur}",
              "-f", "null", "-"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", proc.stderr)]
         ends = [float(m.group(1)) for m in re.finditer(r"silence_end: ([\d.]+)", proc.stderr)]
@@ -1372,7 +1380,7 @@ def name_speakers(store: EDLStore, args: dict) -> dict:
     # Persist on the EDL via show_template field for now (M3.5 placeholder)
     import json
     p = store.dir / "speakers.json"
-    p.write_text(json.dumps(mapping, indent=2))
+    p.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
     summary = f"Named speakers: {', '.join(f'{k}={v}' for k, v in mapping.items())}"
     return {"summary": summary, "mapping": mapping, "path": str(p)}
 
@@ -1536,7 +1544,7 @@ def find_broll(store: EDLStore, args: dict) -> dict:
     candidates the agent can `add_clip` from. The folder is set per-call via
     `bin` (env var `VAI_BROLL_BIN` is the default)."""
     bin_dir = Path(args.get("bin") or os.environ.get("VAI_BROLL_BIN") or
-                   (Path.home() / "Movies" / "broll"))
+                   _default_broll_dir())
     query = str(args.get("query", "")).strip()
     if not query:
         raise ValueError("find_broll requires a 'query' argument")
@@ -1560,7 +1568,7 @@ def import_srt_tool(store: EDLStore, args: dict) -> dict:
     transcript = import_srt(src, language=str(args.get("language", "en")))
     # Persist as the project transcript so add_caption_track et al. pick it up.
     transcript_path = store.dir / "transcript.json"
-    transcript_path.write_text(transcript.model_dump_json(indent=2))
+    transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
     summary = f"Imported {len(transcript.segments)} segments from {src.name}"
     store.commit("import_srt", args, summary)
     return {"summary": summary, "segments": len(transcript.segments)}
@@ -1609,7 +1617,7 @@ def _load_transcript(store: EDLStore):
     if not p.exists():
         return None
     from ..ingest.transcribe import Transcript
-    return Transcript.model_validate_json(p.read_text())
+    return Transcript.model_validate_json(p.read_text(encoding="utf-8"))
 
 
 def noise_reduce(store: EDLStore, args: dict) -> dict:
@@ -1910,10 +1918,10 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
                 start=0.0,
             ))
             new_edl.recompute_duration()
-            (sd / "edl.json").write_text(new_edl.to_json())
+            (sd / "edl.json").write_text(new_edl.to_json(), encoding="utf-8")
             (sd / "meta.json").write_text(json.dumps({
                 "name": f"{base_name} short {i}", "source": str(src_clip.src),
-            }))
+            }), encoding="utf-8")
             new_sessions.append(sid)
 
     summary = f"Made {len(ranges)} short(s)" + (
@@ -2307,10 +2315,10 @@ def record_voiceover(store: EDLStore, args: dict) -> dict:
 def _probe_audio_duration(p: Path) -> float:
     import subprocess as sp
     try:
-        out = sp.run(["ffprobe", "-v", "error", "-show_entries",
+        out = sp.run([_pu.FFPROBE, "-v", "error", "-show_entries",
                       "format=duration", "-of",
                       "default=nokey=1:noprint_wrappers=1", str(p)],
-                     capture_output=True, text=True, check=True).stdout.strip()
+                     capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout.strip()
         return float(out)
     except Exception:
         return 0.0

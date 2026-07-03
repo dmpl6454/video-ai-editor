@@ -103,9 +103,9 @@ def track_object(
 
 def save_track(track: dict, dst: Path) -> Path:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(json.dumps(track))
+    dst.write_text(json.dumps(track), encoding="utf-8")
     return dst
 
 
 def load_track(src: Path) -> dict:
-    return json.loads(src.read_text())
+    return json.loads(src.read_text(encoding="utf-8"))
