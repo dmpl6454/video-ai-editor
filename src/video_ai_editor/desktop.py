@@ -95,7 +95,16 @@ def main() -> None:
         min_size=(1100, 700),
         easy_drag=False,
     )
-    webview.start()
+    try:
+        webview.start()
+    except Exception as e:  # WebView2 Runtime missing / init failure on Windows
+        if _pu.IS_WINDOWS:
+            print("[desktop] Could not start the WebView2 window. Install the "
+                  "Microsoft Edge WebView2 Runtime (Evergreen) from "
+                  "https://developer.microsoft.com/microsoft-edge/webview2/ "
+                  f"and relaunch.\n  Underlying error: {e}", file=sys.stderr)
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
