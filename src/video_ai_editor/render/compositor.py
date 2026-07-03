@@ -33,9 +33,11 @@ def _part_path(dst: Path) -> Path:
     pointing it straight at the served path means a concurrent fetch (the
     <video>/FrameScrubber polling preview.mp4) — or a render killed mid-write —
     sees a 0-byte or torn file, which mp4box reports as "invalid box". Render to
-    this temp path, then os.replace() it into place (atomic on one filesystem),
-    so readers only ever see a complete file or none at all. PID+thread id keep
-    concurrent renders of the same hash from clobbering each other's temp file.
+    this temp path, then swap it into place via platformutil.replace_with_retry
+    (atomic on one filesystem; retries on Windows if a reader still holds the
+    destination open), so readers only ever see a complete file or none at all.
+    PID+thread id keep concurrent renders of the same hash from clobbering
+    each other's temp file.
     """
     return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part.mp4")
 
@@ -597,15 +599,15 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         try:
             rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            _pu.unlink_with_retry(tmp)
             raise
     else:
         proc = subprocess.run(args, capture_output=True, text=True)
         rc, err = proc.returncode, proc.stderr
     if rc != 0:
-        tmp.unlink(missing_ok=True)
+        _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"ffmpeg render failed (rc={rc}):\n{(err or '')[-2000:]}")
-    os.replace(tmp, dst)  # atomic swap — readers never see a partial file
+    _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
     return dst
 
 
@@ -708,11 +710,11 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
 
         files = sorted(out_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in files[:-10]:
-            old.unlink(missing_ok=True)
+            _pu.unlink_with_retry(old)
         # Cap the video-only cache too
         vfiles = sorted(videos_dir.glob("video_*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in vfiles[:-15]:
-            old.unlink(missing_ok=True)
+            _pu.unlink_with_retry(old)
     finally:
         with _INFLIGHT_LOCK:
             _INFLIGHT.pop(key, None)
@@ -740,9 +742,9 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
                 "-movflags", "+faststart", str(tmp),
             ], capture_output=True, check=True)
         except Exception:
-            tmp.unlink(missing_ok=True)
+            _pu.unlink_with_retry(tmp)
             raise
-        os.replace(tmp, dst)  # atomic swap — never serve a partial file
+        _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
         return
 
     # Build per-clip audio chains with the same input order as the main render.
@@ -786,9 +788,9 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             str(tmp)]
     proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode != 0:
-        tmp.unlink(missing_ok=True)
+        _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
-    os.replace(tmp, dst)  # atomic swap — never serve a partial file
+    _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
 
 
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
