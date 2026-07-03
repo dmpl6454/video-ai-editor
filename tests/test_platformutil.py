@@ -39,3 +39,19 @@ def test_find_binary_returns_none_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(pu, "IS_WINDOWS", False)
     monkeypatch.setattr(pu.shutil, "which", lambda n: None)
     assert pu.find_binary("nope", [tmp_path]) is None
+
+
+def test_user_data_dir_windows_uses_appdata(monkeypatch, tmp_path):
+    monkeypatch.setattr(pu, "IS_WINDOWS", True)
+    monkeypatch.setattr(pu, "IS_MAC", False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    got = pu.user_data_dir("Video AI Editor")
+    assert got == tmp_path / "AppData" / "Roaming" / "Video AI Editor"
+
+
+def test_user_data_dir_mac_uses_app_support(monkeypatch, tmp_path):
+    monkeypatch.setattr(pu, "IS_WINDOWS", False)
+    monkeypatch.setattr(pu, "IS_MAC", True)
+    monkeypatch.setattr(pu.Path, "home", staticmethod(lambda: tmp_path))
+    got = pu.user_data_dir("Video AI Editor")
+    assert got == tmp_path / "Library" / "Application Support" / "Video AI Editor"
