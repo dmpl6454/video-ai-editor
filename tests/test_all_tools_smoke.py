@@ -161,7 +161,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "add_effect": {"clip_id": "c1", "type": "blur", "params": {"radius": 4}},
         "remove_effect": {"clip_id": "c1", "idx": 0},
         "color_grade": {"clip_id": "c1", "brightness": 0.05, "contrast": 1.1, "saturation": 1.1},
-        "apply_lut": {"clip_id": "c1", "lut_path": "/dev/null", "intensity": 0.5},
+        "apply_lut": {"clip_id": "c1", "lut_path": os.devnull, "intensity": 0.5},
         "add_mask": {"clip_id": "c1", "type": "circle", "feather": 8.0},
         "chroma_key": {"clip_id": "c1", "color": "#00FF00", "similarity": 0.4,
                        "smoothness": 0.1, "spill_suppress": 0.4},
