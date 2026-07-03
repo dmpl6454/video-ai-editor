@@ -55,3 +55,24 @@ def test_user_data_dir_mac_uses_app_support(monkeypatch, tmp_path):
     monkeypatch.setattr(pu.Path, "home", staticmethod(lambda: tmp_path))
     got = pu.user_data_dir("Video AI Editor")
     assert got == tmp_path / "Library" / "Application Support" / "Video AI Editor"
+
+
+def test_write_then_read_utf8_roundtrips_devanagari(tmp_path):
+    p = tmp_path / "t.txt"
+    s = "नमस्ते 🙏 hello"
+    pu.write_text_utf8(p, s)
+    assert pu.read_text_utf8(p) == s
+    # bytes on disk are UTF-8 regardless of platform locale
+    assert p.read_bytes().decode("utf-8") == s
+
+
+def test_replace_with_retry_succeeds(tmp_path):
+    src = tmp_path / "a"; dst = tmp_path / "b"
+    src.write_text("new"); dst.write_text("old")
+    pu.replace_with_retry(src, dst)
+    assert dst.read_text() == "new"
+    assert not src.exists()
+
+
+def test_unlink_with_retry_missing_ok(tmp_path):
+    pu.unlink_with_retry(tmp_path / "does-not-exist")  # must not raise

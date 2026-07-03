@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
@@ -66,3 +67,41 @@ def user_cache_dir(app_name: str) -> Path:
     if IS_MAC:
         return Path.home() / "Library" / "Caches" / app_name
     return Path.home() / ".cache" / app_name
+
+
+def read_text_utf8(path: Path | str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def write_text_utf8(path: Path | str, text: str) -> None:
+    Path(path).write_text(text, encoding="utf-8")
+
+
+def replace_with_retry(src: Path | str, dst: Path | str,
+                       attempts: int = 10, delay: float = 0.05) -> None:
+    """os.replace with retry. On Windows, replacing a file another process has
+    open (e.g. a Starlette FileResponse streaming the preview) raises
+    PermissionError; a short backoff lets the reader finish. On POSIX this
+    almost always succeeds on the first try."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # pragma: no cover - Windows-timing path
+            last = e
+            time.sleep(delay * (i + 1))
+    raise last  # type: ignore[misc]
+
+
+def unlink_with_retry(path: Path | str,
+                      attempts: int = 5, delay: float = 0.05) -> None:
+    """Path.unlink(missing_ok=True) with the same Windows open-file retry."""
+    p = Path(path)
+    for i in range(attempts):
+        try:
+            p.unlink(missing_ok=True)
+            return
+        except PermissionError:  # pragma: no cover - Windows-timing path
+            time.sleep(delay * (i + 1))
+    # Best-effort: a leftover cache file is not fatal.
