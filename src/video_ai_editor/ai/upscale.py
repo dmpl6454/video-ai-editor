@@ -20,13 +20,13 @@ def _esrgan_dir() -> Path:
         Path(__file__).resolve().parents[3] / "models" / "realesrgan",        # repo
     ]
     for c in candidates:
-        if (c / "realesrgan-ncnn-vulkan").exists():
+        if (c / _pu.exe_name("realesrgan-ncnn-vulkan")).exists():
             return c
     return candidates[0]  # default for error message
 
 
 ESRGAN_DIR = _esrgan_dir()
-ESRGAN_BIN = ESRGAN_DIR / "realesrgan-ncnn-vulkan"
+ESRGAN_BIN = ESRGAN_DIR / _pu.exe_name("realesrgan-ncnn-vulkan")
 
 
 def available() -> bool:
@@ -59,8 +59,9 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
     )
     # Upscale each frame. The binary segfaults if it can't find models/ on a
     # relative path, so we cd into its directory and pass `-m models`.
+    exe = _pu.exe_name("realesrgan-ncnn-vulkan")
     proc = subprocess.run(
-        ["./realesrgan-ncnn-vulkan",
+        [exe if _pu.IS_WINDOWS else f"./{exe}",
          "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
          "-s", str(factor), "-n", model, "-f", "png",
          "-m", "models"],

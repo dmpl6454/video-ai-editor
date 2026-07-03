@@ -76,3 +76,15 @@ def test_replace_with_retry_succeeds(tmp_path):
 
 def test_unlink_with_retry_missing_ok(tmp_path):
     pu.unlink_with_retry(tmp_path / "does-not-exist")  # must not raise
+
+
+def test_whisper_cpp_bin_uses_exe_name(monkeypatch):
+    """_WHISPER_CPP_BIN resolution must add .exe on Windows and not hardcode a
+    brew path as the win fallback."""
+    monkeypatch.setattr(pu, "IS_WINDOWS", True)
+    monkeypatch.setattr(pu.shutil, "which",
+                        lambda n: "C:/tools/whisper-cli.exe" if n == "whisper-cli.exe" else None)
+    import importlib, video_ai_editor.ingest.transcribe as t
+    importlib.reload(t)
+    assert t._WHISPER_CPP_BIN == "C:/tools/whisper-cli.exe"
+    importlib.reload(t)
