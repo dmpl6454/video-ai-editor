@@ -90,33 +90,75 @@ def _run_ffmpeg_progress(args: list[str], total_s: float,
     return rc, "".join(err_chunks)
 
 
-@lru_cache(maxsize=1)
-def _has_videotoolbox() -> bool:
+@lru_cache(maxsize=None)
+def _usable_encoder(name: str) -> bool:
+    """True iff ffmpeg can actually ENCODE with `name` on this machine.
+
+    'ffmpeg -encoders' lists h264_nvenc/qsv/amf even with no matching GPU, so a
+    listing grep is not enough — we run a tiny null encode. VideoToolbox is the
+    exception: it's Apple-only and cheap to trust from the listing, but the null
+    encode works for it too, so we use one code path. Cached per process."""
     try:
-        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+        out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-encoders"],
                              capture_output=True, text=True, check=True)
-        return " h264_videotoolbox " in out.stdout
+        if f" {name} " not in out.stdout:
+            return False
+    except Exception:
+        return False
+    # Functional probe: a ~0.1s black-frame encode to null.
+    try:
+        r = subprocess.run(
+            [_pu.FFMPEG, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+             "-c:v", name, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=20,
+        )
+        return r.returncode == 0
     except Exception:
         return False
 
 
+# Probe order: Apple HW first (only lists on Mac), then the three Windows/Linux
+# HW encoders, then guaranteed software fallback.
+_HW_ENCODER_ORDER = ["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"]
+
+
 def _video_encoder_args(*, preview: bool) -> list[str]:
-    """Pick the fastest H.264 encoder available; fall back to libx264."""
-    if _has_videotoolbox():
-        # VideoToolbox quality scale: lower = better. Preview ~60, export ~50.
-        # Allow_sw=1 lets it transparently fall back if hw queue is busy.
-        q = "60" if preview else "48"
-        return [
-            "-c:v", "h264_videotoolbox",
-            "-q:v", q,
-            "-allow_sw", "1",
-            "-realtime", "1" if preview else "0",
-            "-pix_fmt", "yuv420p",
-        ]
-    # Software fallback
+    """Pick the fastest usable H.264 encoder; fall back to libx264."""
+    for name in _HW_ENCODER_ORDER:
+        if _usable_encoder(name):
+            return _hw_encoder_args(name, preview=preview)
     crf = "30" if preview else "20"
     preset = "ultrafast" if preview else "medium"
     return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
+
+
+def _hw_encoder_args(name: str, *, preview: bool) -> list[str]:
+    """Per-encoder quality-mode args. Values are tuned defaults, not mandates."""
+    if name == "h264_videotoolbox":
+        q = "60" if preview else "48"
+        return ["-c:v", "h264_videotoolbox", "-q:v", q, "-allow_sw", "1",
+                "-realtime", "1" if preview else "0", "-pix_fmt", "yuv420p"]
+    if name == "h264_nvenc":
+        if preview:
+            return ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
+                    "-rc", "vbr", "-cq", "33", "-b:v", "0", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+                "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
+    if name == "h264_qsv":
+        if preview:
+            return ["-c:v", "h264_qsv", "-global_quality", "30",
+                    "-preset", "veryfast", "-pix_fmt", "nv12"]
+        return ["-c:v", "h264_qsv", "-global_quality", "22",
+                "-preset", "slower", "-pix_fmt", "nv12"]
+    if name == "h264_amf":
+        if preview:
+            return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp",
+                    "-qp_i", "30", "-qp_p", "32", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
+                "-qp_i", "20", "-qp_p", "22", "-pix_fmt", "yuv420p"]
+    # Unreachable: only called for names in _HW_ENCODER_ORDER.
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
 
 
 # In-flight render dedup: identical EDL hash → one ffmpeg job, shared result.
