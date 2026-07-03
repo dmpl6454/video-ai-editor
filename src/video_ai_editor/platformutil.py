@@ -28,6 +28,26 @@ FFMPEG = exe_name("ffmpeg")
 FFPROBE = exe_name("ffprobe")
 
 
+def ffmpeg_filter_path(path: Path | str) -> str:
+    """Escape a filesystem path for embedding inside an ffmpeg *filtergraph*
+    option value (e.g. `vidstabdetect=result=<here>`, `sendcmd=f=<here>`,
+    `movie=filename=<here>`).
+
+    This is NOT the same as passing a path as an ffmpeg `-i` argv element (that
+    needs no escaping). Inside a filtergraph, `:` separates filter options and
+    `\\` is an escape char, so a raw Windows path like `C:\\Users\\x\\a.trf`
+    is mangled by the parser. The robust, empirically-verified form is:
+      1. Convert `\\` to `/` — ffmpeg accepts forward slashes on Windows, which
+         removes every backslash-as-escape hazard.
+      2. Escape each remaining `:` (the drive-letter colon) as `\\\\:` — the
+         only escaping that survives ffmpeg's two-pass filtergraph parser
+         (single-backslash and single-quoting both fail).
+    On POSIX a normal path has no backslashes and no colon, so it passes
+    through unchanged (a rare stray colon is still escaped defensively)."""
+    s = str(path).replace("\\", "/")
+    return s.replace(":", "\\\\:")
+
+
 def find_binary(name: str, extra_dirs: list[Path]) -> str | None:
     """Locate a native binary cross-platform.
 

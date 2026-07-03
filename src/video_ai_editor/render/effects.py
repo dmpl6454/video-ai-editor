@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from ..edl.schema import Effect, Mask, Clip, ChromaKey
+from .. import platformutil as _pu
 
 
 def _hex_to_ffmpeg_color(hex_color: str) -> str:
@@ -76,7 +77,9 @@ def _lut(p: dict) -> str:
     if not src:
         return "null"
     intensity = float(p.get("intensity", 1.0))
-    src_arg = str(src).replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
+    # The LUT path is embedded in the lut3d= filter option, not passed as -i, so
+    # it needs filtergraph escaping (raw Windows C:\ paths break the parser).
+    src_arg = _pu.ffmpeg_filter_path(src)
     if intensity >= 0.999:
         return f"lut3d={src_arg}"
     # Interpolate between the original and LUT-applied version via blend

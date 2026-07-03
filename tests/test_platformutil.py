@@ -93,3 +93,19 @@ def test_whisper_cpp_bin_uses_exe_name(monkeypatch):
 def test_ffmpeg_constants_exist():
     assert pu.FFMPEG in ("ffmpeg", "ffmpeg.exe")
     assert pu.FFPROBE in ("ffprobe", "ffprobe.exe")
+
+
+def test_ffmpeg_filter_path_escapes_windows_drive_path():
+    """A Windows path embedded in an ffmpeg filter option value must have its
+    backslashes turned into forward slashes and its drive colon escaped as
+    '\\\\:' — the only form that survives ffmpeg's two-pass filtergraph parser.
+    Verified empirically against real ffmpeg."""
+    got = pu.ffmpeg_filter_path(r"C:\Users\me\cache\stable.trf")
+    assert got == "C\\\\:/Users/me/cache/stable.trf"
+
+
+def test_ffmpeg_filter_path_leaves_posix_path_untouched_except_colon():
+    """A POSIX path has no backslashes; a stray colon (rare) still gets escaped
+    so the value never breaks the filtergraph parser."""
+    assert pu.ffmpeg_filter_path("/tmp/cache/stable.trf") == "/tmp/cache/stable.trf"
+    assert pu.ffmpeg_filter_path("/tmp/a:b.trf") == "/tmp/a\\\\:b.trf"

@@ -58,11 +58,15 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     if dst.exists() and dst.stat().st_size > 0:
         return dst
     transforms = cache_dir / f"stable_{h}.trf"
+    # The .trf path is embedded inside the -vf filtergraph (result=/input=), not
+    # passed as an -i argv, so it needs filtergraph escaping — a raw Windows
+    # `C:\...` path breaks the parser (drive colon + backslashes).
+    trf_filt = _pu.ffmpeg_filter_path(transforms)
 
     # Pass 1: detect motion
     p1 = subprocess.run(
         [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={transforms}",
+         "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={trf_filt}",
          "-f", "null", "-"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
@@ -72,7 +76,7 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     # Pass 2: apply transforms
     p2 = subprocess.run(
         [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabtransform=input={transforms}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
+         "-vf", f"vidstabtransform=input={trf_filt}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-c:a", "copy", str(dst)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
