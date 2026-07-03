@@ -55,7 +55,7 @@ def _run_ffmpeg_progress(args: list[str], total_s: float,
     out = args[-1]
     full = [*args[:-1], "-progress", "pipe:1", "-nostats", out]
     proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True)
+                            text=True, encoding="utf-8", errors="replace")
     err_chunks: list[str] = []
 
     def _drain_err() -> None:
@@ -102,7 +102,7 @@ def _usable_encoder(name: str) -> bool:
     encode works for it too, so we use one code path. Cached per process."""
     try:
         out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, check=True)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         if f" {name} " not in out.stdout:
             return False
     except Exception:
@@ -113,7 +113,7 @@ def _usable_encoder(name: str) -> bool:
             [_pu.FFMPEG, "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
              "-c:v", name, "-f", "null", "-"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         )
         return r.returncode == 0
     except Exception:
@@ -602,7 +602,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             _pu.unlink_with_retry(tmp)
             raise
     else:
-        proc = subprocess.run(args, capture_output=True, text=True)
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
         rc, err = proc.returncode, proc.stderr
     if rc != 0:
         _pu.unlink_with_retry(tmp)
@@ -786,7 +786,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-r", str(fps),
             "-movflags", "+faststart",
             str(tmp)]
-    proc = subprocess.run(args, capture_output=True, text=True)
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

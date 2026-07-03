@@ -26,6 +26,27 @@ def test_no_bare_read_text_in_state_modules():
     assert not offenders, "bare text I/O:\n" + "\n".join(offenders)
 
 
+def test_no_text_subprocess_without_encoding():
+    """Every subprocess.run/Popen in text mode must pass encoding= — on Windows
+    the default is cp1252 (strict), so decoding ffmpeg stderr that echoes a
+    Devanagari media path raises UnicodeDecodeError and crashes the render.
+    Byte-mode captures (no text=/universal_newlines=) are fine and exempt."""
+    import ast
+    offenders = []
+    root = Path("src/video_ai_editor")
+    for p in sorted(root.rglob("*.py")):
+        tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("run", "Popen")):
+                continue
+            kwargs = {kw.arg for kw in node.keywords if kw.arg}
+            if ("text" in kwargs or "universal_newlines" in kwargs) and "encoding" not in kwargs:
+                offenders.append(f"{p}:{node.lineno}: subprocess.{node.func.attr}(text=...) missing encoding=")
+    assert not offenders, "text-mode subprocess without encoding:\n" + "\n".join(offenders)
+
+
 def test_snapshot_roundtrips_devanagari(tmp_path):
     """A snapshot written then reloaded preserves Hindi text on any locale."""
     from video_ai_editor.edl.snapshot import EDLStore

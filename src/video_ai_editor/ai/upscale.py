@@ -59,14 +59,19 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
     )
     # Upscale each frame. The binary segfaults if it can't find models/ on a
     # relative path, so we cd into its directory and pass `-m models`.
+    # Windows CreateProcess resolves argv[0] against PATH + the PARENT cwd, NOT
+    # the `cwd=` we pass — so a bare exe name fails even with cwd set. Use the
+    # absolute binary path on Windows. On POSIX the "./exe" form works because
+    # the child chdir's into cwd before exec.
     exe = _pu.exe_name("realesrgan-ncnn-vulkan")
+    argv0 = str(ESRGAN_BIN) if _pu.IS_WINDOWS else f"./{exe}"
     proc = subprocess.run(
-        [exe if _pu.IS_WINDOWS else f"./{exe}",
+        [argv0,
          "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
          "-s", str(factor), "-n", model, "-f", "png",
          "-m", "models"],
         cwd=str(ESRGAN_DIR),
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"realesrgan failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}\n{proc.stdout[-500:]}")
@@ -75,6 +80,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
+        encoding="utf-8", errors="replace",
     ).stdout.strip()
     if "/" in fps:
         n, d = fps.split("/")

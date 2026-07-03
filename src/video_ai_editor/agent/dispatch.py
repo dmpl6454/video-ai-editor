@@ -824,7 +824,7 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
              "-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src,
              "-af", f"silencedetect=noise={threshold_db}dB:d={min_dur}",
              "-f", "null", "-"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", proc.stderr)]
         ends = [float(m.group(1)) for m in re.finditer(r"silence_end: ([\d.]+)", proc.stderr)]
@@ -2318,7 +2318,7 @@ def _probe_audio_duration(p: Path) -> float:
         out = sp.run([_pu.FFPROBE, "-v", "error", "-show_entries",
                       "format=duration", "-of",
                       "default=nokey=1:noprint_wrappers=1", str(p)],
-                     capture_output=True, text=True, check=True).stdout.strip()
+                     capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout.strip()
         return float(out)
     except Exception:
         return 0.0

@@ -46,7 +46,7 @@ def _demucs_separate(audio_path: Path, out_dir: Path) -> dict[str, Path]:
             "--filename", "{stem}.{ext}",
             str(audio_path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"demucs failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

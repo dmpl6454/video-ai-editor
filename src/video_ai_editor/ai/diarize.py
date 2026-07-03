@@ -203,7 +203,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
     proc = subprocess.run(
         [_pu.FFMPEG, "-i", str(audio_wav), "-af",
          "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     starts: list[float] = [0.0]
     ends: list[float] = []
@@ -224,7 +224,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
         dur = float(subprocess.run(
             [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nokey=1:noprint_wrappers=1", str(audio_wav)],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
         ).stdout.strip())
     except Exception:
         dur = 0.0

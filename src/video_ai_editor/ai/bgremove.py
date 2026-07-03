@@ -61,7 +61,7 @@ def remove_background(src: Path, cache_dir: Path, *,
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of",
          "default=nokey=1:noprint_wrappers=1", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     fps_str = probe.stdout.strip()
     if "/" in fps_str:

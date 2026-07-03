@@ -52,7 +52,7 @@ def object_erase(src: Path, cache_dir: Path, *,
     probe = subprocess.run(
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,avg_frame_rate", "-of", "json", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     import json as _json
     s = _json.loads(probe.stdout)["streams"][0]

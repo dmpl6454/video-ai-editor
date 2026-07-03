@@ -306,7 +306,7 @@ async def vo_record(sid: str, file: UploadFile = File(...),
         [_pu.FFMPEG, "-y", "-i", str(raw),
          "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
          str(norm)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise HTTPException(422, {"error": f"vo transcode failed: {proc.stderr[-800:]}"})

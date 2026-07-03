@@ -62,6 +62,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
+        encoding="utf-8", errors="replace",
     ).stdout.strip()
     if "/" in fps_str:
         n, d = fps_str.split("/")
@@ -78,14 +79,20 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     if n_in < 2:
         raise RuntimeError("RIFE needs at least 2 frames")
 
-    # RIFE wants total target frame count; -j flag controls threads
+    # RIFE wants total target frame count; -j flag controls threads.
+    # Windows CreateProcess resolves argv[0] against PATH + the PARENT cwd, NOT
+    # the `cwd=` we pass — so a bare exe name fails even with cwd set. Use the
+    # absolute binary path on Windows. On POSIX the "./exe" form works because
+    # the child chdir's into cwd before exec.
     target = n_in * factor
     exe = _pu.exe_name("rife-ncnn-vulkan")
+    argv0 = str(RIFE_BIN) if _pu.IS_WINDOWS else f"./{exe}"
     proc = subprocess.run(
-        [exe if _pu.IS_WINDOWS else f"./{exe}",
+        [argv0,
          "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
          "-m", model, "-n", str(target), "-f", "f%05d.png"],
         cwd=str(RIFE_DIR), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rife failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

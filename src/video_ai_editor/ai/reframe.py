@@ -97,7 +97,7 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
     proc = subprocess.run(
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,r_frame_rate", "-of", "json", str(src)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     info = json.loads(proc.stdout)
     s = info["streams"][0]
@@ -154,7 +154,7 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
          "-vf", vf,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", str(dst)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg reframe failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

@@ -54,7 +54,7 @@ def probe(path: Path) -> ProbeResult:
             "-show_format", "-show_streams",
             "-of", "json", str(path),
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )
     data = json.loads(out.stdout)
     fmt = data.get("format", {})
