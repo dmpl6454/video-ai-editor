@@ -44,3 +44,6 @@ tool-results/
 .vscode/
 *.swp
 *~
+
+# Claude Code transient runtime lock
+.claude/scheduled_tasks.lock
