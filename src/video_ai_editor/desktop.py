@@ -5,11 +5,26 @@ Usage:
 """
 from __future__ import annotations
 import os
+import shutil
 import sys
 import threading
 import time
 import urllib.request
 from pathlib import Path
+
+from . import platformutil as _pu
+
+
+def _npm_cmd() -> str:
+    """Resolve the npm launcher. On Windows npm is npm.cmd (a batch file), so a
+    bare 'npm' FileNotFounds. Try the platform-suffixed names, then fall back to
+    the bare name (subprocess PATHEXT may still find it)."""
+    candidates = ["npm.cmd", "npm"] if _pu.IS_WINDOWS else ["npm"]
+    for c in candidates:
+        found = shutil.which(c)
+        if found:
+            return found
+    return candidates[0]
 
 
 def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
@@ -43,9 +58,9 @@ def _ensure_frontend_built() -> None:
     print("[desktop] frontend/dist missing — running `npm run build`…", flush=True)
     import subprocess
     proc = subprocess.run(
-        ["npm", "run", "build"],
+        [_npm_cmd(), "run", "build"],
         cwd=str(repo / "frontend"),
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         print("[desktop] npm build failed:\n", proc.stderr[-1500:], file=sys.stderr)
