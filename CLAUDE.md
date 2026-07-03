@@ -53,6 +53,16 @@ Notes:
 
 **Always launch with `bash run.sh`**, which runs `PYTHONPATH="$PWD/src" .venv/bin/python -m video_ai_editor.desktop` and bypasses the `.pth` mechanism entirely. Diagnose the flag with `ls -lO <file>.pth` (shows `hidden`); confirm the culprit with `launchctl list | grep mdflagwriter`. Do **not** fight the Spotlight daemon directly. (`pytest` is unaffected — it uses `pythonpath = ["src"]` in `pyproject.toml`.)
 
+### Running on Windows
+
+- Setup: `winget install Gyan.FFmpeg` (the **full** variant — includes libvidstab + libass + the nvenc/qsv/amf encoders). Then `uv sync --python 3.13 --all-extras --group dev` and `cd frontend && npm install`.
+  - **winget-PATH caveat:** Gyan.FFmpeg is known to NOT put `ffmpeg.exe` on PATH. The app probes `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\...\bin` automatically (config.py), but if `ffmpeg -version` fails in a fresh shell, add that `bin` dir to PATH or use a BtbN static build.
+- Launch: `powershell -ExecutionPolicy Bypass -File run.ps1` (the parallel of `run.sh`; uses `PYTHONPATH=src` + `.venv\Scripts\python.exe`). The macOS `.pth` hidden-flag bug does NOT occur on Windows.
+- GUI: pywebview uses the **Edge WebView2** runtime (preinstalled on Win11 / most Win10; else install the Evergreen runtime). It ships H.264/AAC + WebCodecs, so the frame scrubber and preview work.
+- Encoder: on Windows the render pipeline probes `h264_nvenc` → `h264_qsv` → `h264_amf` → `libx264` (a real null-encode probe, since `ffmpeg -encoders` lists HW encoders even without the GPU).
+- Native AI binaries (optional features): `whisper-cli.exe` from whisper.cpp `whisper-bin-x64.zip`, `realesrgan-ncnn-vulkan.exe` from `realesrgan-ncnn-vulkan-*-windows.zip` — drop into `%APPDATA%\Video AI Editor\...` or `models\`. TTS (Piper) works from the pure-Python wheel with no extra binary.
+- Packaging: `powershell -ExecutionPolicy Bypass -File build_win.ps1` → `dist\Video AI Editor\` (wrap in Inno Setup/WiX for distribution).
+
 ## The one idea that unlocks the codebase
 
 **The EDL is the program; `dispatch()` is the only way to change it.** Every feature is a variation on one loop: something produces a tool call → `dispatch(store, tool, args)` mutates the EDL Pydantic tree in place → `store.commit()` persists it → the render pipeline re-derives video/audio from the EDL. There is no diff/patch layer and no inverse-op undo — the EDL tree *is* the timeline, on-disk snapshots *are* the history, and render output is a pure function of `edl.hash()`.

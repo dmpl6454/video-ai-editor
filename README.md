@@ -35,6 +35,17 @@ uv run bash build_app.sh   # → dist/Video AI Editor.app
 bash build_dmg.sh          # → dist/Video-AI-Editor.dmg (drag-to-install)
 ```
 
+### Windows
+
+```powershell
+uv sync --python 3.13 --all-extras --group dev
+cd frontend; npm install; cd ..
+powershell -ExecutionPolicy Bypass -File run.ps1        # launch
+powershell -ExecutionPolicy Bypass -File build_win.ps1  # → dist\Video AI Editor\
+```
+
+See "Running on Windows" in `CLAUDE.md` for ffmpeg setup and WebView2 notes.
+
 The DMG bundles the editor UI, ffmpeg-based editing, the MCP server, **CLIP
 visual search**, and torch — so semantic footage search works offline (the
 CLIP model auto-downloads once). First launch is ad-hoc signed, so right-click
