@@ -65,5 +65,5 @@ def ingest_upload(
         transcript=transcript,
         sidecar_used=sidecar_used,
     )
-    (out_dir / "ingest.json").write_text(result.model_dump_json(indent=2))
+    (out_dir / "ingest.json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
     return result

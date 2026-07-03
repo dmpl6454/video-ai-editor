@@ -145,7 +145,7 @@ def reframe_clip(src: Path, cache_dir: Path, *, target_w: int, target_h: int) ->
         x = max(0, min(src_w - cw, int(cx_px - cw / 2)))
         y = max(0, min(src_h - ch, int(cy_px - ch / 2)))
         lines.append(f"{t:.3f} crop x {x}, crop y {y};")
-    cmd_path.write_text("\n".join(lines))
+    cmd_path.write_text("\n".join(lines), encoding="utf-8")
 
     cmd_arg = str(cmd_path).replace("\\", r"\\").replace(":", r"\:").replace("'", r"\'")
     vf = f"sendcmd=f={cmd_arg},crop={cw}:{ch}:0:0,scale={target_w}:{target_h}"

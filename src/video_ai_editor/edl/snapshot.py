@@ -28,7 +28,7 @@ class EDLStore:
         # because the first snapshot is taken inside commit() AFTER the first op.
         if not list(self.snapshots_dir.glob("*.json")):
             initial_snap = self.snapshots_dir / f"00000_{self.edl.hash()}.json"
-            initial_snap.write_text(self.edl.to_json())
+            initial_snap.write_text(self.edl.to_json(), encoding="utf-8")
 
     @property
     def edl_path(self) -> Path:
@@ -41,7 +41,7 @@ class EDLStore:
     def _load_edl(self) -> EDL:
         if self.edl_path.exists():
             try:
-                return EDL.model_validate_json(self.edl_path.read_text())
+                return EDL.model_validate_json(self.edl_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
         return empty_edl()
@@ -49,7 +49,7 @@ class EDLStore:
     def _load_ops(self) -> OpsLog:
         if self.ops_path.exists():
             try:
-                return OpsLog.model_validate_json(self.ops_path.read_text())
+                return OpsLog.model_validate_json(self.ops_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
         return OpsLog()
@@ -61,10 +61,10 @@ class EDLStore:
         new_hash = self.edl.hash()
 
         self._snapshot(new_hash)
-        self.edl_path.write_text(self.edl.to_json())
+        self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
 
         op = self.ops.append(tool, args, summary, prev_hash, new_hash, by=by)
-        self.ops_path.write_text(self.ops.model_dump_json())
+        self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         self._redo_stack.clear()
         return op
 
@@ -75,7 +75,7 @@ class EDLStore:
         # Keep last MAX_UNDO snapshots; named by op seq + 1 so the initial
         # snapshot (seeded by __init__ as 00000) survives the first commit.
         snap = self.snapshots_dir / f"{len(self.ops.ops) + 1:05d}_{h}.json"
-        snap.write_text(self.edl.to_json())
+        snap.write_text(self.edl.to_json(), encoding="utf-8")
         snaps = sorted(self.snapshots_dir.glob("*.json"))
         for old in snaps[:-self.MAX_UNDO]:
             old.unlink(missing_ok=True)
@@ -88,11 +88,11 @@ class EDLStore:
         self._redo_stack.append(self.edl.model_copy(deep=True))
         # Restore previous snapshot
         prev = snaps[-2]
-        self.edl = EDL.model_validate_json(prev.read_text())
-        self.edl_path.write_text(self.edl.to_json())
+        self.edl = EDL.model_validate_json(prev.read_text(encoding="utf-8"))
+        self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
         # Pop the last op (it's now undone)
         if self.ops.pop():
-            self.ops_path.write_text(self.ops.model_dump_json())
+            self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         # Remove the snapshot we just left
         snaps[-1].unlink(missing_ok=True)
         return True
@@ -107,7 +107,7 @@ class EDLStore:
         self.edl.recompute_duration()
         new_hash = self.edl.hash()
         self._snapshot(new_hash)
-        self.edl_path.write_text(self.edl.to_json())
+        self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
         self.ops.append("redo", {}, "Redo", "", new_hash, by="user")
-        self.ops_path.write_text(self.ops.model_dump_json())
+        self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         return True

@@ -80,7 +80,7 @@ def load_project(src: Path) -> str:
         zf.extractall(sd / "_unpack")
 
     unpack = sd / "_unpack"
-    manifest = json.loads((unpack / "manifest.json").read_text())
+    manifest = json.loads((unpack / "manifest.json").read_text(encoding="utf-8"))
 
     # Move media into imported/, build src remap
     src_remap: dict[str, str] = {}
@@ -97,10 +97,10 @@ def load_project(src: Path) -> str:
         sp = unpack / name
         if not sp.exists():
             continue
-        text = sp.read_text()
+        text = sp.read_text(encoding="utf-8")
         for old, new in src_remap.items():
             text = text.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
-        (sd / name).write_text(text)
+        (sd / name).write_text(text, encoding="utf-8")
 
     shutil.rmtree(unpack, ignore_errors=True)
     return sid

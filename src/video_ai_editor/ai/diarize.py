@@ -107,7 +107,7 @@ def diarize(src: Path, cache_dir: Path, *, fallback: bool = True,
     cache_path = cache_dir / f"diarize_{src.stem}.json"
     if cache_path.exists():
         try:
-            data = json.loads(cache_path.read_text())
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
             # Handle both legacy (list) and current (dict-with-turns) shapes.
             if isinstance(data, list):
                 return data
@@ -162,7 +162,7 @@ def diarize(src: Path, cache_dir: Path, *, fallback: bool = True,
             cache_path.write_text(json.dumps(
                 {"_warning": f"pyannote failed: {last_err}",
                  "_pipeline": "heuristic",
-                 "turns": turns}, indent=2))
+                 "turns": turns}, indent=2), encoding="utf-8")
             return turns
 
         turns: list[dict] = []
@@ -171,14 +171,14 @@ def diarize(src: Path, cache_dir: Path, *, fallback: bool = True,
                           "start": float(turn.start),
                           "end": float(turn.end)})
         cache_path.write_text(json.dumps(
-            {"_pipeline": pipeline_used, "turns": turns}, indent=2))
+            {"_pipeline": pipeline_used, "turns": turns}, indent=2), encoding="utf-8")
         return turns
 
     if not fallback:
         raise RuntimeError(_hf_token_setup_message())
     turns = _heuristic_diarize(src, cache_dir, num_speakers=num_speakers)
     cache_path.write_text(json.dumps(
-        {"_pipeline": "heuristic", "turns": turns}, indent=2))
+        {"_pipeline": "heuristic", "turns": turns}, indent=2), encoding="utf-8")
     return turns
 
 

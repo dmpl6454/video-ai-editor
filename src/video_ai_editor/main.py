@@ -467,9 +467,9 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
                 tx = _transcribe(normalized_path, model_size=chosen_model)
                 ingest_json = out_dir / "ingest.json"
                 if ingest_json.exists():
-                    data = json.loads(ingest_json.read_text())
+                    data = json.loads(ingest_json.read_text(encoding="utf-8"))
                     data["transcript"] = tx.model_dump()
-                    ingest_json.write_text(json.dumps(data, indent=2))
+                    ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
             except Exception:
                 pass
 
@@ -674,13 +674,13 @@ def _load_history(sid: str) -> list[dict]:
     if not p.exists():
         return []
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return []
 
 
 def _save_history(sid: str, history: list[dict]) -> None:
-    _history_path(sid).write_text(json.dumps(history, indent=2, default=str))
+    _history_path(sid).write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
 
 @app.get("/api/sessions/{sid}/history")

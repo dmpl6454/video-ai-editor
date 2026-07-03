@@ -78,11 +78,11 @@ def load_kit(presets_dir: Path, name: str) -> BrandKit | None:
     p = kit_path(presets_dir, name)
     if not p.exists():
         return None
-    return BrandKit(**json.loads(p.read_text()))
+    return BrandKit(**json.loads(p.read_text(encoding="utf-8")))
 
 
 def save_kit(presets_dir: Path, name: str, kit: BrandKit) -> Path:
     p = kit_path(presets_dir, name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(kit.model_dump(), indent=2))
+    p.write_text(json.dumps(kit.model_dump(), indent=2), encoding="utf-8")
     return p

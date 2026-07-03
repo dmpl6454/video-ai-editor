@@ -73,13 +73,13 @@ def _load_or_build(bin_dir: Path, *, force: bool = False) -> dict:
     idx_p = _index_path(bin_dir)
     if force or not idx_p.exists():
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
         return idx
     try:
-        idx = json.loads(idx_p.read_text())
+        idx = json.loads(idx_p.read_text(encoding="utf-8"))
     except Exception:
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
         return idx
     # Lightweight staleness check: if any entry's file is gone or has a newer mtime, rebuild.
     needs_rebuild = False
@@ -92,7 +92,7 @@ def _load_or_build(bin_dir: Path, *, force: bool = False) -> dict:
             needs_rebuild = True; break
     if needs_rebuild:
         idx = _build_index(bin_dir)
-        idx_p.write_text(json.dumps(idx))
+        idx_p.write_text(json.dumps(idx), encoding="utf-8")
     return idx
 
 

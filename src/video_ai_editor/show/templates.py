@@ -197,7 +197,7 @@ class ShowSnapshot:
 def save_show(name: str, edl: EDL) -> Path:
     snap = ShowSnapshot.from_edl(edl)
     p = shows_dir() / f"{name}.json"
-    p.write_text(json.dumps(snap, indent=2))
+    p.write_text(json.dumps(snap, indent=2), encoding="utf-8")
     return p
 
 
@@ -205,4 +205,4 @@ def load_show(name: str) -> dict:
     p = shows_dir() / f"{name}.json"
     if not p.exists():
         raise ValueError(f"show template {name!r} not found in {shows_dir()}")
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))

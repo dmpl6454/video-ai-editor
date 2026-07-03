@@ -46,7 +46,7 @@ def waveform_peaks(src: Path, cache_dir: Path,
     cache_path = cache_dir / f"wave_{_key(src, peaks_per_sec)}.json"
     if cache_path.exists():
         try:
-            return json.loads(cache_path.read_text())
+            return json.loads(cache_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
@@ -85,5 +85,5 @@ def waveform_peaks(src: Path, cache_dir: Path,
 
     duration = n_samples / sr
     out = {"peaks": peaks, "peaks_per_sec": peaks_per_sec, "duration": duration}
-    cache_path.write_text(json.dumps(out))
+    cache_path.write_text(json.dumps(out), encoding="utf-8")
     return out

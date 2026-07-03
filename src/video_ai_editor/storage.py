@@ -42,7 +42,7 @@ def list_sessions() -> list[dict]:
         meta = {}
         if meta_path.exists():
             try:
-                meta = json.loads(meta_path.read_text())
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
         sessions.append({
@@ -56,9 +56,9 @@ def list_sessions() -> list[dict]:
 
 def write_meta(session_id: str, meta: dict) -> None:
     p = session_dir(session_id) / "meta.json"
-    p.write_text(json.dumps(meta, indent=2))
+    p.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
 def read_meta(session_id: str) -> dict:
     p = session_dir(session_id) / "meta.json"
-    return json.loads(p.read_text()) if p.exists() else {}
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
