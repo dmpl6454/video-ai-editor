@@ -42,14 +42,19 @@ def _chunk_workers(n_clips: int) -> int:
         except ValueError:
             pass
     # hw.perflevel0.physicalcpu = performance cores (10 on M4 Max). Fall back
-    # to half of logical CPUs elsewhere.
-    try:
-        out = subprocess.run(
-            ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
-            capture_output=True, text=True, timeout=2,
-        )
-        p_cores = int(out.stdout.strip())
-    except Exception:
+    # to half of logical CPUs elsewhere. sysctl is macOS/BSD-only; skip the
+    # doomed subprocess spawn on other platforms.
+    p_cores = None
+    if _pu.IS_MAC:
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                capture_output=True, text=True, timeout=2,
+            )
+            p_cores = int(out.stdout.strip())
+        except Exception:
+            p_cores = None
+    if p_cores is None:
         p_cores = max(2, (os.cpu_count() or 4) // 2)
     return max(1, min(p_cores, n_clips))
 
