@@ -12,7 +12,11 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import platformutil as _pu
+# Absolute (not `from .`): the frozen PyInstaller EXE runs this file as the
+# top-level `__main__` script, so `__package__` is unset and a relative import
+# has no parent to anchor to. The package is bundled via collect_submodules, so
+# the absolute name resolves in the EXE, under `-m`, and under pytest alike.
+from video_ai_editor import platformutil as _pu
 
 
 def _npm_cmd() -> str:
