@@ -114,6 +114,8 @@ Sends tool schemas (projected from `tools.py`, dropping the internal `category` 
 
 `desktop.py` is an in-process wrapper: it starts uvicorn on a daemon thread in the same process, polls `/api/health`, then opens a pywebview native window (OS webview — no Electron). In dev it auto-runs `npm run build` if `frontend/dist/index.html` is missing; in a frozen `.app` it hard-exits instead. Almost every filesystem lookup (`frontend/dist`, `VERSION`, presets, fonts) is **`sys._MEIPASS`-then-repo** to work both bundled and from source.
 
+**`desktop.py` (the PyInstaller entry) MUST use absolute imports, never `from .`.** PyInstaller freezes the entry script as the top-level `__main__` (the `.spec` and `build_app.sh` both point at the *file path* `src/video_ai_editor/desktop.py`, not `-m`), so `__package__` is unset and any package-relative import raises `ImportError: attempted relative import with no known parent package` in the built EXE/.app — even though the package is bundled. This is **invisible in every dev path** (`run.sh`/`run.ps1` use `python -m …`, which sets `__package__`; pytest uses `pythonpath=["src"]`) and reproduces **only** in the frozen artifact. Use `from video_ai_editor import …` in `desktop.py`; the absolute name resolves regardless of `__package__` because `collect_submodules('video_ai_editor')` bakes the package into the PYZ. (Contrast `main.py`, which *can* use `from .` — it's always loaded via the absolute string `"video_ai_editor.main:app"` passed to `uvicorn.run`, so it's imported *with* a parent package.)
+
 ## Import-time config chokepoint — `config.py`
 
 Importing `config` runs side effects and every entry point hits it before shelling out:
