@@ -4,7 +4,7 @@
 // disappear in real time. This avoids a server round-trip for every text
 // edit — only video-track changes trigger an ffmpeg re-render.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { EDL, TextClip } from '../types'
 
 interface Props {
@@ -15,16 +15,30 @@ interface Props {
   height: number
 }
 
+// `size` here is the SAME fixed pixel value render/text_overlay.py's
+// ROLE_STYLES uses (`style["size"]`, sized against the EDL canvas — see
+// `ImageFont.truetype(..., style["size"])` there). Previously this was a
+// hand-tuned fraction of the on-screen preview height (e.g. 0.075 for
+// "super"), which only approximated the server's `140 / canvas.h` ratio for
+// a canvas.h of ~1920 and drifted for any other canvas size (drifted further
+// after set_canvas/set_aspect_ratio/auto_reframe change canvas.h). Drawing
+// now computes `fontPx = (size / edl.canvas.h) * height`, i.e. the same
+// canvas-relative fraction the server derives, scaled to however big the
+// preview box is actually rendered on screen — so the two stay in lockstep
+// for any canvas size, not just the common vertical default.
+// `stroke` is still a fraction of on-screen height (the server's stroke_w is
+// a small fixed px count with no strong visual sensitivity to canvas size,
+// so an approximate on-screen fraction is fine here).
 const ROLE_STYLES: Record<string, {
   font: string; size: number; weight?: string; stroke: number; upper?: boolean; align: 'top' | 'center' | 'bottom' | 'lower'; opacity?: number;
 }> = {
-  super:       { font: 'Anton',           size: 0.075, stroke: 0.005, upper: true,  align: 'lower' },
-  hook:        { font: 'Bebas Neue',      size: 0.085, stroke: 0.006, upper: true,  align: 'center' },
-  lower_third: { font: 'Montserrat',      size: 0.030, stroke: 0.0025, weight: '700', align: 'lower' },
-  caption:     { font: 'Inter',           size: 0.034, stroke: 0.004, weight: '900', align: 'bottom' },
-  label:       { font: 'Inter',           size: 0.026, stroke: 0.0025, weight: '700', align: 'top' },
-  watermark:   { font: 'Inter',           size: 0.018, stroke: 0.0015, weight: '700', align: 'bottom', opacity: 0.7 },
-  default:     { font: 'Inter',           size: 0.034, stroke: 0.0025, weight: '700', align: 'lower' },
+  super:       { font: 'Anton',           size: 140, stroke: 0.005, upper: true,  align: 'lower' },
+  hook:        { font: 'Bebas Neue',      size: 170, stroke: 0.006, upper: true,  align: 'center' },
+  lower_third: { font: 'Montserrat',      size: 56,  stroke: 0.0025, weight: '700', align: 'lower' },
+  caption:     { font: 'Inter',           size: 64,  stroke: 0.004, weight: '900', align: 'bottom' },
+  label:       { font: 'Inter',           size: 48,  stroke: 0.0025, weight: '700', align: 'top' },
+  watermark:   { font: 'Inter',           size: 32,  stroke: 0.0015, weight: '700', align: 'bottom', opacity: 0.7 },
+  default:     { font: 'Inter',           size: 64,  stroke: 0.0025, weight: '700', align: 'lower' },
 }
 
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu
@@ -51,6 +65,30 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number): string
 
 export function TextLayer({ edl, videoEl, width, height }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // `ctx.font = '"Anton"'` does NOT trigger the browser to actually fetch the
+  // @font-face file — the canvas just silently falls back to system sans
+  // until something else (e.g. text laid out in the DOM) forces the load.
+  // We explicitly kick off the load for every bundled family/weight used by
+  // ROLE_STYLES and gate the first draw on `document.fonts.ready`, so the
+  // preview never draws a frame or two of the wrong font before swapping —
+  // which would itself look like a (transient) preview↔export mismatch.
+  const [fontsReady, setFontsReady] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const specs = [
+      '400 32px Anton',
+      '400 32px "Bebas Neue"',
+      '700 32px Montserrat',
+      '700 32px Inter',
+      '900 32px Inter',
+    ]
+    Promise.all(specs.map((spec) => document.fonts.load(spec)))
+      .catch(() => { /* best-effort: fall through to fonts.ready below */ })
+      .then(() => document.fonts.ready)
+      .then(() => { if (!cancelled) setFontsReady(true) })
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     const cv = canvasRef.current
@@ -102,7 +140,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
 
       for (const { c, role } of active) {
         const s = ROLE_STYLES[role] ?? ROLE_STYLES.default
-        const fontPx = Math.round(s.size * height)
+        // s.size is a fixed px value against the EDL canvas (matches the
+        // server's ROLE_STYLES); rescale it to the on-screen preview box.
+        const fontPx = Math.round((s.size / edl.canvas.h) * height)
         ctx.font = `${s.weight ?? 'bold'} ${fontPx}px "${s.font}", system-ui, sans-serif`
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'center'
@@ -146,7 +186,11 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     }
     draw()
     return () => cancelAnimationFrame(raf)
-  }, [edl, videoEl, width, height])
+    // fontsReady is included so the effect re-runs (resetting `lastTime`,
+    // which forces an immediate redraw) once the real bundled fonts finish
+    // loading — otherwise a frame already drawn with the system-font
+    // fallback would linger until the next playhead move.
+  }, [edl, videoEl, width, height, fontsReady])
 
   return (
     <canvas

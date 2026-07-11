@@ -1,0 +1,12 @@
+/* Bundled TTFs (see repo-root fonts/) mirrored into frontend/public/fonts/ so
+ * the browser can actually load them. Without these @font-face rules,
+ * TextLayer.tsx's `ctx.font = '"Anton"'` etc. silently falls back to the
+ * system sans-serif — a guaranteed preview↔export mismatch, since
+ * render/text_overlay.py bakes the real TTFs server-side via Pillow.
+ * Family names here MUST match the strings TextLayer.tsx puts in ctx.font,
+ * and the files must match render/text_overlay.py's ROLE_STYLES font names. */
+@font-face { font-family: 'Anton';      src: url('/fonts/Anton-Regular.ttf') format('truetype');      font-weight: 400; font-display: block; }
+@font-face { font-family: 'Bebas Neue'; src: url('/fonts/BebasNeue-Regular.ttf') format('truetype');  font-weight: 400; font-display: block; }
+@font-face { font-family: 'Montserrat'; src: url('/fonts/Montserrat-Bold.ttf') format('truetype');     font-weight: 700; font-display: block; }
+@font-face { font-family: 'Inter';      src: url('/fonts/Inter-Bold.ttf') format('truetype');          font-weight: 700; font-display: block; }
+@font-face { font-family: 'Inter';      src: url('/fonts/Inter-Black.ttf') format('truetype');         font-weight: 900; font-display: block; }
