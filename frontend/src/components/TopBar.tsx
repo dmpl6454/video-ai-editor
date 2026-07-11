@@ -303,7 +303,7 @@ export function TopBar() {
           much content is in .topbar-scroll above. Export is always the
           right-most, always-visible element. */}
       <div className="topbar-pinned">
-        <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save the project as a .vae bundle (EDL + media)">
+        <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save an editable project file (.vae) you can reopen later">
           {saving ? 'Saving…' : '💾 Save'}
         </button>
         <button onClick={() => importRef.current?.click()} title="Open a saved .vae project">
@@ -325,6 +325,7 @@ export function TopBar() {
             className="primary"
             onClick={() => setExportOptsOpen((o) => !o)}
             disabled={exporting || !edl?.duration}
+            title="Render the final flattened video (MP4) to share"
           >
             {exporting
               ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
