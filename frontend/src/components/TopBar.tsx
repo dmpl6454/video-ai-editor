@@ -51,7 +51,14 @@ export function TopBar() {
   // defaults. Rendered via the same document.body portal pattern as the
   // session picker above, for the same reason (.topbar clips overflow).
   const [exportOptsOpen, setExportOptsOpen] = useState(false)
-  const [exportHeight, setExportHeight] = useState<number>(edl?.canvas?.h ?? 1080)
+  // 0 = "not yet explicitly chosen" -> falls back to the current canvas height
+  // ("Source") below. Kept as a sentinel rather than initialized straight to
+  // edl.canvas.h and re-synced from a useEffect, so there's no setState call
+  // inside an effect body (react-hooks/set-state-in-effect) and the "Source"
+  // default keeps tracking canvas changes (e.g. aspect-ratio switches) until
+  // the user actually picks a resolution from the <select>.
+  const [exportHeightChoice, setExportHeightChoice] = useState<number>(0)
+  const exportHeight = exportHeightChoice || edl?.canvas?.h || 1080
   const [exportCrf, setExportCrf] = useState<number>(18)
   const exportBtnRef = useRef<HTMLButtonElement>(null)
   const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
@@ -124,12 +131,6 @@ export function TopBar() {
     setTimeout(() => window.addEventListener('mousedown', close), 0)
     return () => window.removeEventListener('mousedown', close)
   }, [exportOptsOpen])
-
-  // Keep the resolution default in sync with the current canvas ("Source")
-  // until the user explicitly picks something else.
-  useEffect(() => {
-    if (edl?.canvas?.h) setExportHeight((h) => h || edl.canvas.h)
-  }, [edl?.canvas?.h])
 
   const confirmExport = () => {
     setExportOptsOpen(false)
@@ -347,7 +348,7 @@ export function TopBar() {
                 Resolution
                 <select
                   value={exportHeight}
-                  onChange={(e) => setExportHeight(Number(e.target.value))}
+                  onChange={(e) => setExportHeightChoice(Number(e.target.value))}
                   style={{ fontSize: 12, padding: '3px 4px' }}
                 >
                   {edl?.canvas?.h && (
