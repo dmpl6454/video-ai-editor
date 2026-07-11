@@ -131,3 +131,31 @@ def unlink_with_retry(path: Path | str,
         except PermissionError:  # pragma: no cover - Windows-timing path
             time.sleep(delay * (i + 1))
     # Best-effort: a leftover cache file is not fatal.
+
+
+def rmtree_with_retry(path: Path | str,
+                      attempts: int = 10, delay: float = 0.1) -> None:
+    """shutil.rmtree with retry/backoff for Windows mandatory file locking.
+
+    On Windows, a directory containing a file with any open handle (e.g. a
+    Starlette FileResponse still streaming a previews/*.mp4 or exports/*.mp4,
+    an in-flight render's *.part.mp4, or a lingering AV/indexer scan) cannot
+    be deleted — shutil.rmtree(ignore_errors=False) raises PermissionError/
+    OSError partway through, leaving the tree partially deleted. A short
+    backoff lets the other handle-holder finish, mirroring
+    replace_with_retry/unlink_with_retry above. On POSIX an open file can be
+    unlinked while still held open, so rmtree normally succeeds on the first
+    try there regardless."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path, ignore_errors=False)
+            return
+        except FileNotFoundError:
+            # Already gone (e.g. a partial previous rmtree finished the job,
+            # or a concurrent delete raced us) — nothing left to remove.
+            return
+        except (PermissionError, OSError) as e:  # pragma: no cover - Windows-timing path
+            last = e
+            time.sleep(delay * (i + 1))
+    raise last  # type: ignore[misc]

@@ -2,9 +2,9 @@
 from __future__ import annotations
 import json
 import re
-import shutil
 from pathlib import Path
 from uuid import uuid4
+from . import platformutil as _pu
 from .config import WORKDIR
 
 # Every session id this code ever generates matches this shape (see
@@ -63,7 +63,14 @@ def delete_session(session_id: str) -> bool:
         return False
     if not d.exists():
         return False
-    shutil.rmtree(d, ignore_errors=False)
+    # Windows enforces mandatory file locking: a still-open handle elsewhere
+    # in the process (a FileResponse mid-stream of a previews/exports mp4, an
+    # in-flight render's *.part.mp4, or a lingering AV/indexer scan) makes a
+    # bare rmtree raise PermissionError/OSError partway through, leaving the
+    # session half-deleted and this route 500ing instead of returning 200/404.
+    # rmtree_with_retry backs off and retries, same pattern as
+    # replace_with_retry/unlink_with_retry.
+    _pu.rmtree_with_retry(d)
     return True
 
 
