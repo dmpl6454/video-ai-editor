@@ -18,9 +18,19 @@ set -euo pipefail
 # otherwise silently ship an old frontend with none of this session's
 # changes (this guard used to be `if [ ! -d frontend/dist ]`, which only
 # built on a first run and thereafter trusted whatever was already there).
+#
+# Deliberately `tsc --noEmit && vite build`, NOT `npm run build` (`tsc -b`).
+# `tsc -b` is project-references incremental build mode and is strictly
+# stricter — it currently fails on this repo (FrameScrubber.tsx mp4box.js
+# type mismatch, Properties.tsx a JSX `label` boolean-shorthand passed where
+# `label?: string` is declared), pre-existing issues unrelated to whatever
+# this script is packaging. This mirrors the documented CI/dev check (see
+# CLAUDE.md); vite build's own esbuild transpile is what actually produces
+# frontend/dist, and tsc --noEmit is a pure typecheck gate that doesn't
+# additionally fail on the tsc -b-only errors.
 echo "[build] rebuilding frontend/dist"
 rm -rf frontend/dist
-(cd frontend && npm run build)
+(cd frontend && npx tsc --noEmit && npx vite build)
 
 uv run pyinstaller \
   --name "Video AI Editor" \
