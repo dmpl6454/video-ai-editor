@@ -43,6 +43,31 @@ def _v_track(edl: EDL, track_id: str) -> Track:
     return t
 
 
+# Track types that can hold a media Clip (an uploaded video/audio file).
+# Sticker/text/captions/effect tracks are for their own dedicated clip kinds
+# only — the renderer's collect_text_clips/collect_stickers/build_pip_overlay
+# etc. each only look at their own track type, so a media Clip parked on e.g.
+# the captions track is not an error, just silently invisible in every render
+# (issues 41/42/43, "anything can be placed anywhere").
+_MEDIA_TRACK_TYPES = frozenset({"video", "audio", "music", "vo"})
+
+
+def _v_track_for_media(edl: EDL, track_id: str) -> Track:
+    """Like _v_track, but additionally rejects a track whose type can't hold
+    a media Clip at all. Used only where a media Clip is actually being
+    PLACED on the named track (add_clip's `track`, move_clip's `new_track`) —
+    cut_range/split_at/remove_silences etc. resolve a track generically for
+    time-based operations on whatever clips it already holds, and must not
+    gain this restriction."""
+    t = _v_track(edl, track_id)
+    if t.type not in _MEDIA_TRACK_TYPES:
+        raise ValueError(
+            f"track '{track_id}' is a '{t.type}' lane and can't hold a media clip "
+            f"(expected one of {sorted(_MEDIA_TRACK_TYPES)})"
+        )
+    return t
+
+
 def _ripple_close_gap(track: Track) -> None:
     """After a removal, slide subsequent clips left to close any gap."""
     track.clips.sort(key=lambda c: getattr(c, "start", 0))
@@ -52,6 +77,114 @@ def _ripple_close_gap(track: Track) -> None:
             continue
         c.start = cursor
         cursor = c.start + c.duration
+
+
+_OVERLAY_TRACK_TYPES = ("text", "sticker", "captions")
+
+
+def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None:
+    """Shift text/sticker/caption overlays to follow a ripple on the video
+    track — the same left-shift `_ripple_close_gap` just applied to V1.
+
+    Without this, cut_range/ripple_delete/trim_clip only re-time the video
+    track they operate on: a Sticker/TextClip is pinned to absolute timeline
+    seconds (schema.py), so shortening the footage (e.g. remove_silences
+    looping cut_range) leaves every overlay at its OLD absolute time — which
+    is now past the shortened content, or over unrelated footage. Reported
+    as "emoji doesn't show up where I put it" / "emojis popped up at the end
+    that were never added there" (issues 31/32/50).
+
+    `removed_start`/`removed_end` is the [start, end) interval that was cut
+    out of the video track's ORIGINAL timeline (before the ripple). Any
+    overlay clip is remapped the same way ripple-delete remaps time:
+      t <= removed_start        -> unchanged (before the cut, untouched)
+      removed_start < t < removed_end -> collapsed to removed_start (the
+                                          content it was pinned to no longer
+                                          exists; snap to the cut point so it
+                                          doesn't silently vanish)
+      t >= removed_end          -> shifted left by (removed_end - removed_start)
+    Applied to both `start` and `end` independently so a clip straddling the
+    cut boundary shrinks rather than teleporting.
+    """
+    shift = removed_end - removed_start
+    if shift <= 0:
+        return
+
+    def remap(t: float) -> float:
+        if t <= removed_start:
+            return t
+        if t < removed_end:
+            return removed_start
+        return t - shift
+
+    for track in edl.tracks:
+        if track.type not in _OVERLAY_TRACK_TYPES:
+            continue
+        for c in track.clips:
+            if not hasattr(c, "start") or not hasattr(c, "end"):
+                continue
+            new_start = remap(c.start)
+            new_end = remap(c.end)
+            if new_end <= new_start:
+                new_end = new_start + 0.1  # keep a minimum visible span
+            c.start = new_start
+            c.end = new_end
+
+
+def _rescale_transform_xy(transform, sx: float, sy: float) -> None:
+    """Rescale a Transform's x/y in place by (sx, sy) — handles both a plain
+    scalar and a keyframed value (list of [time, value] pairs)."""
+    from ..edl.schema import Keyframe
+
+    def _scale_one(value, factor: float):
+        if isinstance(value, Keyframe):
+            value.keyframes = [(t, v * factor) for t, v in value.keyframes]
+            return value
+        return value * factor
+
+    transform.x = _scale_one(transform.x, sx)
+    transform.y = _scale_one(transform.y, sy)
+
+
+def _rescale_overlays_for_canvas_change(edl: EDL, old_w: int, old_h: int, new_w: int, new_h: int) -> None:
+    """Proportionally rescale every clip/sticker/text transform's x/y when the
+    canvas dimensions change.
+
+    set_aspect_ratio/set_canvas used to only touch canvas.w/h — every
+    Sticker/TextClip/Clip transform is positioned in ABSOLUTE canvas pixels
+    (text_overlay.py reads tx.x/tx.y directly as pixel coordinates), so
+    switching e.g. 9:16 (1080x1920) to 16:9 (1920x1080) left a sticker placed
+    at y=1600 (fine in a 1920-tall canvas) sitting far below a now-1080-tall
+    canvas — invisible, reported as "emojis vanished after changing aspect
+    ratio" (issue 37). Rescaling proportionally keeps each overlay at the
+    same RELATIVE position (e.g. "80% down the frame") across the change.
+    """
+    if old_w <= 0 or old_h <= 0 or (old_w == new_w and old_h == new_h):
+        return
+    sx, sy = new_w / old_w, new_h / old_h
+    for track in edl.tracks:
+        for c in track.clips:
+            tx = getattr(c, "transform", None)
+            if tx is not None:
+                _rescale_transform_xy(tx, sx, sy)
+
+
+def _current_v1_ingest_json(store: EDLStore) -> Path | None:
+    """Return the ingest.json for the CURRENT v1 source clip, or None.
+
+    ingest_upload() always writes `ingest.json` as a sibling of the clip's
+    normalized media file (uploads/<stem>/{name.normalized.mp4, ingest.json}),
+    so the correct file is derived directly from the active clip's `src` —
+    never "the first ingest.json glob happens to find," which silently reads
+    a stale transcript from an earlier/different upload in the same session
+    (each upload gets its own uploads/<stem>/ subdirectory).
+    """
+    v1 = store.edl.get_track("v1")
+    src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
+    if not src_clip:
+        return None
+    candidate = Path(src_clip.src).parent / "ingest.json"
+    return candidate if candidate.exists() else None
 
 
 # ---------- inspection ----------
@@ -91,6 +224,7 @@ def get_timeline(store: EDLStore, args: dict) -> dict:
                         "start": getattr(c, "start", 0),
                         "end": getattr(c, "end", 0),
                     })
+            tinfo["clip_count"] = len(tinfo["clips"])
             track_summaries.append(tinfo)
         return {
             "duration": edl.duration,
@@ -113,14 +247,15 @@ def get_clip(store: EDLStore, args: dict) -> dict:
 
 
 def get_transcript(store: EDLStore, args: dict) -> dict:
-    # Transcript lives in the session dir as ingest.json (per source).
-    # M1 punt: read the first ingest.json we can find.
+    # Transcript lives in the session dir as ingest.json, one per uploaded
+    # source. Resolve the file that belongs to the clip CURRENTLY on v1 —
+    # not an arbitrary glob hit — so a stale transcript from a prior upload
+    # in this session is never returned for the video actually on the timeline.
     import json
-    sd = store.dir
-    ingest_files = list(sd.glob("uploads/**/ingest.json"))
-    if not ingest_files:
+    ingest_json = _current_v1_ingest_json(store)
+    if ingest_json is None:
         return {"segments": [], "language": None, "duration": 0.0}
-    data = json.loads(ingest_files[0].read_text(encoding="utf-8"))
+    data = json.loads(ingest_json.read_text(encoding="utf-8"))
     return data.get("transcript") or {"segments": [], "language": None, "duration": 0.0}
 
 
@@ -136,7 +271,7 @@ def _safe_src(p: str | Path) -> str:
 
 
 def add_clip(store: EDLStore, args: dict) -> dict:
-    track = _v_track(store.edl, args["track"])
+    track = _v_track_for_media(store.edl, args["track"])
     clip = Clip(src=_safe_src(args["src"]), in_=float(args["in"]),
                 out=float(args["out"]), start=float(args["start"]))
     # Sensible default PiP placement for non-V1 video tracks. The PIP renderer
@@ -205,6 +340,8 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         # else: fully inside → drop
     track.clips = new_clips
     _ripple_close_gap(track)
+    if track.id == "v1":
+        _ripple_overlays(store.edl, start, end)
     summary = f"Cut {start:.2f}–{end:.2f}s on {track.id} (ripple)"
     store.commit("cut_range", args, summary)
     return {"summary": summary, "clips_after": len(track.clips)}
@@ -247,11 +384,34 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("trim_clip only supports media clips")
+    old_start, old_in, old_duration = c.start, c.in_, c.duration
     if "in" in args:
         c.in_ = float(args["in"])
     if "out" in args:
         c.out = float(args["out"])
+    new_duration = c.duration
     _ripple_close_gap(track)
+    if track.id == "v1" and new_duration < old_duration - 1e-9:
+        # The clip's OWN start doesn't move here (only _ripple_close_gap
+        # repacks positions) — its old timeline footprint was
+        # [old_start, old_start + old_duration). Trimming from the front
+        # (in_ increased) removes the HEAD of that footprint, since the
+        # surviving content still ends at the same `out` and now starts
+        # later: removed = [old_start, old_start + delta_in). Trimming from
+        # the back (out decreased, in_ unchanged) removes the TAIL instead,
+        # since surviving content still starts at the same `in_`: removed =
+        # [old_start + new_duration, old_start + old_duration). These are
+        # genuinely different positions (not the same formula) — e.g. a
+        # clip at start=5 with old_duration=10 trimmed to new_duration=6
+        # removes [5,9) if trimmed from the front but [11,15) if trimmed
+        # from the back.
+        delta_in = c.in_ - old_in
+        if delta_in > 1e-9:
+            removed_start = old_start
+        else:
+            removed_start = old_start + new_duration
+        removed_len = old_duration - new_duration
+        _ripple_overlays(store.edl, removed_start, removed_start + removed_len)
     summary = f"Trim {c.id} → in={c.in_:.2f} out={c.out:.2f}"
     store.commit("trim_clip", args, summary)
     return {"summary": summary, "duration": c.duration}
@@ -264,7 +424,12 @@ def move_clip(store: EDLStore, args: dict) -> dict:
     track, c = res
     new_track_id = args.get("new_track")
     if new_track_id and new_track_id != track.id:
-        new_t = _v_track(store.edl, new_track_id)
+        # Only a media Clip is restricted to video/audio-family lanes — a
+        # Sticker/TextClip crossing between two sticker-type or two
+        # text-type tracks (e.g. moving a caption from tx_super to tx_hook)
+        # is legitimate and must not go through the media-only check.
+        new_t = _v_track_for_media(store.edl, new_track_id) if isinstance(c, Clip) \
+            else _v_track(store.edl, new_track_id)
         track.clips.remove(c)
         new_t.clips.append(c)
         track = new_t
@@ -296,8 +461,14 @@ def ripple_delete(store: EDLStore, args: dict) -> dict:
     if not res:
         raise ValueError("clip not found")
     track, c = res
+    # Capture the removed interval BEFORE the track repacks — only meaningful
+    # (and only applied) when deleting a v1 media clip; deleting a sticker/
+    # text overlay itself must not shift every OTHER overlay.
+    removed_start, removed_end = (c.start, c.start + c.duration) if isinstance(c, Clip) else (None, None)
     track.clips.remove(c)
     _ripple_close_gap(track)
+    if track.id == "v1" and removed_start is not None:
+        _ripple_overlays(store.edl, removed_start, removed_end)
     summary = f"Delete {c.id} (ripple)"
     store.commit("ripple_delete", args, summary)
     return {"summary": summary}
@@ -322,12 +493,14 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
 
 def set_canvas(store: EDLStore, args: dict) -> dict:
     c = store.edl.canvas
+    old_w, old_h = c.w, c.h
     if "w" in args:
         c.w = int(args["w"])
     if "h" in args:
         c.h = int(args["h"])
     if "fps" in args:
         c.fps = int(args["fps"])
+    _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, c.w, c.h)
     summary = f"Canvas → {c.w}×{c.h} @ {c.fps}fps"
     store.commit("set_canvas", args, summary)
     return {"summary": summary}
@@ -339,9 +512,11 @@ _RATIOS = {
 
 
 def set_aspect_ratio(store: EDLStore, args: dict) -> dict:
+    old_w, old_h = store.edl.canvas.w, store.edl.canvas.h
     w, h = _RATIOS[args["ratio"]]
     store.edl.canvas.w = w
     store.edl.canvas.h = h
+    _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, w, h)
     summary = f"Aspect → {args['ratio']} ({w}×{h})"
     store.commit("set_aspect_ratio", args, summary)
     return {"summary": summary}
@@ -349,12 +524,14 @@ def set_aspect_ratio(store: EDLStore, args: dict) -> dict:
 
 def undo_op(store: EDLStore, args: dict) -> dict:
     ok = store.undo()
-    return {"ok": ok, "summary": "Undo" if ok else "Nothing to undo"}
+    return {"ok": ok, "summary": "Undo" if ok else "Nothing to undo",
+            "redo_available": store.redo_available}
 
 
 def redo_op(store: EDLStore, args: dict) -> dict:
     ok = store.redo()
-    return {"ok": ok, "summary": "Redo" if ok else "Nothing to redo"}
+    return {"ok": ok, "summary": "Redo" if ok else "Nothing to redo",
+            "redo_available": store.redo_available}
 
 
 def render_preview_tool(store: EDLStore, args: dict) -> dict:
@@ -392,6 +569,26 @@ def add_super_text(store: EDLStore, args: dict) -> dict:
         text=text, start=start, end=end, role=role,
         transform=Transform(x=canvas.w / 2, y=y_default),
     )
+    # Idempotency: an identical re-run (same text/role/start/end on this track)
+    # must not stack a second overlay — that produced the "double subtitle" bug.
+    def _same(existing) -> bool:
+        return (
+            isinstance(existing, TextClip)
+            and getattr(existing, "text", None) == clip.text
+            and getattr(existing, "role", None) == clip.role
+            and abs(existing.start - clip.start) < 1e-6
+            and abs(existing.end - clip.end) < 1e-6
+        )
+    if any(_same(c) for c in track.clips):
+        summary = f"Text already present: {clip.text!r} @ {clip.start:.2f}s"
+        return {"summary": summary}  # no commit — nothing changed
+    # Optional explicit replace: drop prior same-role overlapping clips.
+    if bool(args.get("replace", False)):
+        track.clips = [
+            c for c in track.clips
+            if not (isinstance(c, TextClip) and getattr(c, "role", None) == clip.role
+                    and c.start < clip.end and c.end > clip.start)
+        ]
     track.clips.append(clip)
     summary = f"Add {role} text “{text[:40]}” at {start:.2f}–{end:.2f}s"
     store.commit("add_super_text", args, summary)
@@ -539,12 +736,11 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     cap.config.position = position  # type: ignore
 
     import json
-    sd = store.dir
-    ingest_files = list(sd.glob("uploads/**/ingest.json"))
+    ingest_json = _current_v1_ingest_json(store)
     cap.clips = []
     seg_count = 0
-    if ingest_files:
-        data = json.loads(ingest_files[0].read_text(encoding="utf-8"))
+    if ingest_json is not None:
+        data = json.loads(ingest_json.read_text(encoding="utf-8"))
         tx = data.get("transcript") or {}
         canvas = store.edl.canvas
         y_pos = canvas.h * (0.85 if position == "bottom" else 0.5 if position == "center" else 0.15)
@@ -633,13 +829,14 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     tx_dict = tx.model_dump()
 
     # Persist so get_transcript / translate / export_srt see the upgraded text.
+    # `src` is the v1 source clip we just re-transcribed — its ingest.json is
+    # always the sibling file ingest_upload() wrote alongside the normalized
+    # media (see _current_v1_ingest_json). Using that clip's own directory,
+    # rather than an arbitrary glob hit, guarantees the upgraded transcript
+    # lands on the file this clip's src actually reads from.
     import json as _json
-    ingest_json = None
-    for cand in store.dir.glob("uploads/**/ingest.json"):
-        ingest_json = cand
-        break
-    if ingest_json is None:
-        ingest_json = store.dir / "uploads" / "auto_caption" / "ingest.json"
+    ingest_json = src.parent / "ingest.json"
+    if not ingest_json.exists():
         ingest_json.parent.mkdir(parents=True, exist_ok=True)
         ingest_json.write_text(_json.dumps({"transcript": tx_dict}, ensure_ascii=False), encoding="utf-8")
     else:
@@ -756,6 +953,35 @@ def add_music(store: EDLStore, args: dict) -> dict:
     summary = f"Add music {src.split('/')[-1]} @ {start:.1f}s, {volume_db:.0f}dB{', ducked' if duck else ''}"
     store.commit("add_music", args, summary)
     return {"clip_id": clip.id, "summary": summary, "duck": duck}
+
+
+def set_duck(store: EDLStore, args: dict) -> dict:
+    """Toggle (or configure) sidechain ducking on the music track — ONLY the
+    duck flag, no clip mutation.
+
+    Before this tool existed, the only way to flip ducking was re-adding the
+    music clip via add_music(duck=...) then ripple_delete-ing the original
+    (MediaBin.tsx's "Duck under speech" checkbox) — which re-probed the full
+    source and reset start/in/out to 0/0/full-duration, discarding any trim
+    or repositioning the user had done, and the ripple_delete + re-add could
+    land on a fresh clip id the panel hadn't captured, making a second toggle
+    silently no-op (issue 39, "clicking again does nothing, stays expanded").
+    """
+    track_id = str(args.get("track", "music"))
+    track = store.edl.get_track(track_id)
+    if not track:
+        raise ValueError(f"track '{track_id}' not found")
+    enabled = bool(args.get("enabled", track.duck is None))
+    if enabled:
+        from ..edl.schema import MusicDuck
+        to_db = float(args.get("to_db", track.duck.to_db if track.duck else -18.0))
+        track_ref = str(args.get("track_ref", track.duck.track_ref if track.duck else "a1"))
+        track.duck = MusicDuck(to_db=to_db, track_ref=track_ref)
+    else:
+        track.duck = None
+    summary = f"Duck {'on' if enabled else 'off'} for {track_id}"
+    store.commit("set_duck", args, summary)
+    return {"summary": summary, "enabled": enabled}
 
 
 def set_volume(store: EDLStore, args: dict) -> dict:
@@ -1084,7 +1310,18 @@ def color_grade(store: EDLStore, args: dict) -> dict:
         target_clips = [c for c in (v1.clips if v1 else []) if isinstance(c, Clip)]
     from ..edl.schema import Effect
     for c in target_clips:
-        c.effects.append(Effect(type="color", params=params))
+        # Merge into the clip's existing "color" effect rather than appending
+        # a new one: each slider release in Properties.tsx sends only the ONE
+        # param the user just moved (e.g. {"brightness": 0.1}), so appending
+        # would stack an independent eq=/colorbalance= filter pass per tweak —
+        # 3 brightness adjustments in a row would compound 3x instead of
+        # settling on the final value, and the effect list would grow
+        # unbounded. A clip has exactly one logical color grade.
+        existing = next((e for e in c.effects if e.type in ("color", "color_grade")), None)
+        if existing is not None:
+            existing.params.update(params)
+        else:
+            c.effects.append(Effect(type="color", params=params))
     summary = f"Color grade {len(target_clips)} clip(s): {params}"
     store.commit("color_grade", args, summary)
     return {"summary": summary, "applied_to": [c.id for c in target_clips]}
@@ -1324,7 +1561,7 @@ def add_marker(store: EDLStore, args: dict) -> dict:
     m = Marker(
         time=float(args["time"]),
         label=str(args.get("label", "")),
-        color=str(args.get("color", "#ff4d6d")),
+        color=str(args.get("color", "#fbbf24")),  # amber — must differ from the playhead red (#ff4d6d)
     )
     store.edl.markers.append(m)
     summary = f"Marker @ {m.time:.2f}s{' — ' + m.label if m.label else ''}"
@@ -2025,6 +2262,15 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
 
     start = float(args.get("start", 0.0))
     end = float(args.get("end", start + 3.0))
+    if end <= start + 0.1:
+        # An explicit end that's <= start (or barely past it) collapses to a
+        # near-invisible/zero-duration sticker — e.g. StickerPanel.tsx clamps
+        # end to edl.duration, so inserting near the very end of the timeline
+        # produced a ~0s window with nothing visibly placed (issue 31b). The
+        # `args.get("end", start+3.0)` default above only covers a MISSING
+        # end, not an explicitly-too-small one, so this is a second, always-
+        # applied floor.
+        end = start + 3.0
     pos = args.get("position") or [canvas.w / 2, canvas.h / 2]
     scale = float(args.get("scale", 1.0))
     rotation = float(args.get("rotation", 0.0))
@@ -2044,7 +2290,11 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
     summary = (f"Sticker {sticker.label or Path(src_arg).name} "
                f"@ ({int(pos[0])},{int(pos[1])}) {start:.2f}–{end:.2f}s")
     store.commit("add_sticker", args, summary)
-    return {"sticker_id": sticker.id, "summary": summary, "src": src_arg}
+    # Ground truth for "how many stickers are there now" — without this the
+    # only way to know is a separate get_timeline call, and an agent that
+    # skips it falls back to counting from memory (reports 17 when 3 exist).
+    return {"sticker_id": sticker.id, "summary": summary, "src": src_arg,
+            "sticker_count": len(track.clips)}
 
 
 def set_clip_timing(store: EDLStore, args: dict) -> dict:
@@ -2243,6 +2493,26 @@ def add_text(store: EDLStore, args: dict) -> dict:
                   role=role, transform=tx, style=style,
                   anim_in=args.get("anim_in"), anim_out=args.get("anim_out"))
     track = ensure_track(store.edl, "text", "text", z=10)
+    # Idempotency: an identical re-run (same text/role/start/end on this track)
+    # must not stack a second overlay — mirrors add_super_text's guard.
+    def _same(existing) -> bool:
+        return (
+            isinstance(existing, TextClip)
+            and getattr(existing, "text", None) == tc.text
+            and getattr(existing, "role", None) == tc.role
+            and abs(existing.start - tc.start) < 1e-6
+            and abs(existing.end - tc.end) < 1e-6
+        )
+    if any(_same(c) for c in track.clips):
+        summary = f"Text already present: {tc.text!r} @ {tc.start:.2f}s"
+        return {"summary": summary}  # no commit — nothing changed
+    # Optional explicit replace: drop prior same-role overlapping clips.
+    if bool(args.get("replace", False)):
+        track.clips = [
+            c for c in track.clips
+            if not (isinstance(c, TextClip) and getattr(c, "role", None) == tc.role
+                    and c.start < tc.end and c.end > tc.start)
+        ]
     track.clips.append(tc)
     summary = f"Added text {role!r} {text!r} ({tc.start:.2f}–{tc.end:.2f}s)"
     store.commit("add_text", args, summary)
@@ -2466,8 +2736,10 @@ def auto_reframe(store: EDLStore, args: dict) -> dict:
     if ratio_arg not in ratios:
         raise ValueError(f"unsupported ratio {ratio_arg!r}; supported: {list(ratios)}")
     w, h = ratios[ratio_arg]
+    old_w, old_h = store.edl.canvas.w, store.edl.canvas.h
     store.edl.canvas.w = w
     store.edl.canvas.h = h
+    _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, w, h)
 
     subject_track = bool(args.get("subject_track", True))
     reframed: list[str] = []
@@ -2592,6 +2864,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "audit_aesthetic": audit_aesthetic,
     # M3: audio + auto-trim + reframe
     "add_music": add_music,
+    "set_duck": set_duck,
     "set_volume": set_volume,
     "add_fade": add_fade,
     "remove_silences": remove_silences,
