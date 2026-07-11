@@ -70,7 +70,13 @@ export default function App() {
       <Splitter
         orientation="vertical"
         style={{ gridArea: 'lsplit' }}
-        onDelta={(d) => setPanelSize('leftW', leftW + d)}
+        // Reads the live value via getState() rather than the `leftW` closed
+        // over by this render: a real drag fires many mousemove events per
+        // React commit, so every one of them would otherwise add its delta
+        // to the SAME stale base — losing all but the last-flushed delta
+        // (verified live: a 10-step 80px drag only moved the panel 8px, and
+        // a genuine Playwright mouse drag could even net-shrink the panel).
+        onDelta={(d) => setPanelSize('leftW', useStore.getState().leftW + d)}
       />
       <main className="center">
         <div className="preview-pane">
@@ -90,7 +96,7 @@ export default function App() {
         </div>
         <Splitter
           orientation="horizontal"
-          onDelta={(d) => setPanelSize('timelineH', timelineH - d)}
+          onDelta={(d) => setPanelSize('timelineH', useStore.getState().timelineH - d)}
         />
         <div className="timeline-pane">
           <Timeline />
@@ -101,7 +107,7 @@ export default function App() {
         style={{ gridArea: 'rsplit' }}
         // Dragging right moves the mouse away from the right sidebar, which
         // should shrink it — the delta sign is negated relative to leftW.
-        onDelta={(d) => setPanelSize('rightW', rightW - d)}
+        onDelta={(d) => setPanelSize('rightW', useStore.getState().rightW - d)}
       />
       <aside className="sidebar right">
         <Properties />
