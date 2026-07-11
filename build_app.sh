@@ -13,11 +13,14 @@
 
 set -euo pipefail
 
-# Make sure the frontend is built first — pywebview opens dist/ directly.
-if [ ! -d frontend/dist ]; then
-  echo "[build] frontend/dist missing — running npm run build"
-  (cd frontend && npm run build)
-fi
+# Always rebuild the frontend before packaging — pywebview opens dist/
+# directly, and a stale-but-present dist/ from a previous build would
+# otherwise silently ship an old frontend with none of this session's
+# changes (this guard used to be `if [ ! -d frontend/dist ]`, which only
+# built on a first run and thereafter trusted whatever was already there).
+echo "[build] rebuilding frontend/dist"
+rm -rf frontend/dist
+(cd frontend && npm run build)
 
 uv run pyinstaller \
   --name "Video AI Editor" \
@@ -57,6 +60,21 @@ uv run pyinstaller \
   --exclude-module simple_lama_inpainting \
   --exclude-module noisereduce \
   src/video_ai_editor/desktop.py
+
+# PyInstaller's CLI mode (used here, not the .spec — see CLAUDE.md) has no
+# flag for arbitrary Info.plist keys, so NSMicrophoneUsageDescription is
+# added as a post-build step. Without it, macOS TCC silently denies mic
+# access and navigator.mediaDevices is undefined in the webview regardless
+# of anything the JS side does (VoRecorder.tsx guards against that case, but
+# Record Voiceover is simply unusable in the packaged app without this key).
+PLIST="dist/Video AI Editor.app/Contents/Info.plist"
+if [ -f "$PLIST" ]; then
+  /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Record a voiceover track for your video.'" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'Record a voiceover track for your video.'" "$PLIST"
+  echo "[build] added NSMicrophoneUsageDescription to Info.plist"
+else
+  echo "[build] WARNING: $PLIST not found — mic usage description NOT added"
+fi
 
 echo ""
 echo "[build] .app done — now wrap it in a DMG for distribution:"
