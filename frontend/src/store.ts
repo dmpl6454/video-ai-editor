@@ -103,7 +103,7 @@ interface State {
   uploadAudio(file: File): Promise<void>
   dispatch(tool: string, args?: Record<string, unknown>): Promise<void>
   renderPreview(): Promise<string>
-  doExport(opts?: { height?: number; crf?: number }): Promise<void>
+  doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
   cancelExport(): Promise<void>
   splitAtPlayhead(): Promise<void>
   rippleDeleteSelection(): Promise<void>

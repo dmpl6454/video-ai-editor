@@ -29,7 +29,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
@@ -177,6 +177,7 @@ class ExportRequest(BaseModel):
     height: int | None = None
     fps: int | None = None
     crf: int = 18
+    container: Literal["mp4", "mov"] = "mp4"
 
 
 # --- routes ---
@@ -715,16 +716,16 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     body = body or ExportRequest()
     if wait:
         res = render_export(store.edl, store.dir, height=body.height,
-                            fps=body.fps, crf=body.crf)
+                            fps=body.fps, crf=body.crf, container=body.container)
         return _export_payload(sid, res)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl
     session_dir_snapshot = store.dir
-    height, fps, crf = body.height, body.fps, body.crf
+    height, fps, crf, container = body.height, body.fps, body.crf, body.container
 
     def _job(set_progress=None, cancel_event=None) -> dict:
         res = render_export(edl_snapshot, session_dir_snapshot,
-                            height=height, fps=fps, crf=crf,
+                            height=height, fps=fps, crf=crf, container=container,
                             on_progress=set_progress, cancel_event=cancel_event)
         return _export_payload(sid, res)
 

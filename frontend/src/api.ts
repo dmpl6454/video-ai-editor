@@ -110,7 +110,7 @@ export const api = {
   previewURL: (sid: string, hash?: string) =>
     `${BASE}/sessions/${sid}/preview.mp4${hash ? `?h=${hash}` : ''}`,
 
-  export: (sid: string, opts: { height?: number; fps?: number; crf?: number } = {}) =>
+  export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' } = {}) =>
     http<{ path: string; filename: string; url: string }>(
       'POST',
       `/sessions/${sid}/export`,
@@ -121,7 +121,7 @@ export const api = {
   // request until the render finishes. Poll `getJob` until status is terminal.
   // Exports of long clips take minutes — the sync path can outlive a browser's
   // fetch timeout, which is exactly what made Export appear to "hang forever".
-  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number } = {}) =>
+  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' } = {}) =>
     http<{ job_id: string; status: JobStatus; status_url: string }>(
       'POST',
       `/sessions/${sid}/export?wait=0`,

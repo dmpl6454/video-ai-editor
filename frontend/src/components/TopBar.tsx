@@ -60,6 +60,7 @@ export function TopBar() {
   const [exportHeightChoice, setExportHeightChoice] = useState<number>(0)
   const exportHeight = exportHeightChoice || edl?.canvas?.h || 1080
   const [exportCrf, setExportCrf] = useState<number>(18)
+  const [exportContainer, setExportContainer] = useState<'mp4' | 'mov'>('mp4')
   const exportBtnRef = useRef<HTMLButtonElement>(null)
   const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
 
@@ -134,7 +135,7 @@ export function TopBar() {
 
   const confirmExport = () => {
     setExportOptsOpen(false)
-    void doExport({ height: exportHeight, crf: exportCrf })
+    void doExport({ height: exportHeight, crf: exportCrf, container: exportContainer })
   }
 
   const switchSession = async (newId: string) => {
@@ -374,6 +375,17 @@ export function TopBar() {
                   <option value={28}>Small file</option>
                 </select>
               </label>
+              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                Format
+                <select
+                  value={exportContainer}
+                  onChange={(e) => setExportContainer(e.target.value as 'mp4' | 'mov')}
+                  style={{ fontSize: 12, padding: '3px 4px' }}
+                >
+                  <option value="mp4">MP4</option>
+                  <option value="mov">MOV</option>
+                </select>
+              </label>
               <button className="primary" onClick={confirmExport} style={{ fontSize: 12, marginTop: 2 }}>
                 Export
               </button>
@@ -384,9 +396,9 @@ export function TopBar() {
         {exportUrl && !exporting && (
           <a href={exportUrl} download
             className={exportStale ? 'stale-dl' : ''}
-            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : 'Download exported MP4'}
+            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : `Download exported ${exportUrl.split('.').pop()?.toUpperCase()}`}
             style={{ color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
-            ↓ MP4{exportStale ? ' (outdated)' : ''}
+            ↓ {exportUrl.split('.').pop()?.toUpperCase()}{exportStale ? ' (outdated)' : ''}
           </a>
         )}
         {exportError && (

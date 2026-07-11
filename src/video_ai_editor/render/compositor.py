@@ -38,8 +38,15 @@ def _part_path(dst: Path) -> Path:
     destination open), so readers only ever see a complete file or none at all.
     PID+thread id keep concurrent renders of the same hash from clobbering
     each other's temp file.
+
+    The temp file's extension MUST match `dst`'s (not a hardcoded `.mp4`) —
+    ffmpeg infers its output muxer from the argv output path's extension, and
+    this temp path is that literal argv output path (see `_render`). A MOV
+    export writing to a `.part.mp4` temp name would get muxed as MP4 and then
+    simply renamed to `.mov`, producing a file with a `.mov` extension but
+    MP4-brand internals.
     """
-    return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part.mp4")
+    return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part{dst.suffix}")
 
 
 def _run_ffmpeg_progress(args: list[str], total_s: float,
@@ -840,9 +847,17 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
 
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
                   fps: int | None = None, crf: int = 18, preset: str = "medium",
-                  filename: str | None = None, on_progress=None,
-                  cancel_event=None) -> RenderResult:
+                  container: str = "mp4", filename: str | None = None,
+                  on_progress=None, cancel_event=None) -> RenderResult:
     """Final export at canvas resolution (or override) with higher quality.
+
+    `container` selects the output file extension ("mp4" or "mov"). Both are
+    QuickTime/ISO-BMFF-family containers muxed by ffmpeg's same `mov` muxer
+    family with identical H.264/AAC encoder args and `-movflags +faststart` —
+    ffmpeg infers the muxer from the destination filename's extension, so no
+    codec/arg branching is needed, only the output name changes. Unknown
+    values fall back to "mp4" (defensive; the API layer already validates
+    against Literal["mp4","mov"]).
 
     `on_progress(p)` (0..1) and `cancel_event` (threading.Event) let a background
     job stream progress and abort the underlying ffmpeg mid-render.
@@ -850,7 +865,8 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     h = edl.hash()
     out_dir = session_dir / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = filename or f"export_{h}.mp4"
+    ext = container if container in ("mp4", "mov") else "mp4"
+    name = filename or f"export_{h}.{ext}"
     dst = out_dir / name
     h_out = height or edl.canvas.h
     f_out = fps or edl.canvas.fps
