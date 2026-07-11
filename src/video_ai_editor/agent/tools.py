@@ -107,13 +107,18 @@ TEXT_TOOLS = [
     _t("add_super_text",
        "Add a bold on-screen text overlay (the 'super' look). Use role='hook' for a "
        "first-3-seconds curiosity hook, role='super' for mid-video punctuation, "
-       "role='lower_third' for guest name/handle.",
+       "role='lower_third' for guest name/handle. Re-running with identical "
+       "text/role/start/end is a no-op (won't stack a duplicate overlay). Pass "
+       "replace=true to instead drop any prior same-role overlay that overlaps "
+       "this one's time window before adding the new one.",
        "text",
        {
            "text": {"type": "string"},
            "start": {"type": "number"},
            "end": {"type": "number"},
            "role": {"type": "string", "enum": ["super", "hook", "lower_third", "label"], "default": "super"},
+           "replace": {"type": "boolean", "default": False,
+                       "description": "Drop prior same-role overlapping overlays before adding this one."},
        },
        ["text", "start", "end"]),
     _t("add_hook_overlay",

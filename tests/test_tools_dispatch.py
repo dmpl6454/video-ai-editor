@@ -243,3 +243,53 @@ def test_add_marker_default_color_is_not_playhead_red():
     assert marker.color.lower() != "#ff4d6d"
 
 
+def test_add_super_text_dedupes_exact_duplicate():
+    """Regression for the "double subtitle" bug: an identical re-run of
+    add_super_text (same text/role/start/end) must not stack a second
+    TextClip on top of the first."""
+    store = _store_with_one_clip()
+    args = {"text": "RIPPLE TEST", "role": "super", "start": 0.0, "end": 3.0}
+    dispatch(store, "add_super_text", dict(args))
+    dispatch(store, "add_super_text", dict(args))  # identical re-run
+    supers = [c for t in store.edl.tracks for c in t.clips
+              if getattr(c, "text", None) == "RIPPLE TEST"]
+    assert len(supers) == 1, "identical add_super_text must not stack duplicates"
+
+
+def test_add_super_text_allows_distinct_text():
+    store = _store_with_one_clip()
+    dispatch(store, "add_super_text", {"text": "A", "role": "super", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_super_text", {"text": "B", "role": "super", "start": 0.0, "end": 3.0})
+    supers = [c for t in store.edl.tracks for c in t.clips if getattr(c, "text", None) in ("A", "B")]
+    assert len(supers) == 2, "distinct captions must both survive"
+
+
+def test_add_super_text_replace_drops_prior_overlapping_same_role():
+    store = _store_with_one_clip()
+    dispatch(store, "add_super_text", {"text": "OLD", "role": "super", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_super_text", {
+        "text": "NEW", "role": "super", "start": 1.0, "end": 4.0, "replace": True,
+    })
+    supers = [c for t in store.edl.tracks for c in t.clips if getattr(c, "role", None) == "super"]
+    assert len(supers) == 1
+    assert supers[0].text == "NEW"
+
+
+def test_add_text_dedupes_exact_duplicate():
+    """Same idempotency guard as add_super_text, applied to add_text's own
+    text/role/start/end fields."""
+    store = _store_with_one_clip()
+    args = {"text": "LOWER THIRD", "role": "lower_third", "start": 0.0, "end": 3.0}
+    dispatch(store, "add_text", dict(args))
+    dispatch(store, "add_text", dict(args))  # identical re-run
+    matches = [c for t in store.edl.tracks for c in t.clips
+               if getattr(c, "text", None) == "LOWER THIRD"]
+    assert len(matches) == 1, "identical add_text must not stack duplicates"
+
+
+def test_add_text_allows_distinct_text():
+    store = _store_with_one_clip()
+    dispatch(store, "add_text", {"text": "A", "role": "caption", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_text", {"text": "B", "role": "caption", "start": 0.0, "end": 3.0})
+    matches = [c for t in store.edl.tracks for c in t.clips if getattr(c, "text", None) in ("A", "B")]
+    assert len(matches) == 2, "distinct text overlays must both survive"
