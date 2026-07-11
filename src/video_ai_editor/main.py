@@ -39,7 +39,8 @@ from pydantic import BaseModel
 from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
 from .storage import (new_session_id, session_dir, session_exists,
-                       list_sessions, write_meta, read_meta, delete_session)
+                       list_sessions, write_meta, read_meta, delete_session,
+                       is_valid_session_id)
 from .edl import EDLStore
 from .edl.schema import Canvas
 from .ingest import ingest_upload
@@ -287,6 +288,12 @@ def get_session(sid: str):
 
 @app.delete("/api/sessions/{sid}")
 def delete_session_route(sid: str):
+    # sid is untrusted path input; reject anything that isn't a well-formed
+    # session id before it ever reaches a filesystem delete (path traversal /
+    # arbitrary directory deletion — see storage.delete_session's own
+    # belt-and-suspenders check for the second layer of defense).
+    if not is_valid_session_id(sid):
+        raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
     with _STORES_LOCK:
         _STORES.pop(sid, None)  # drop the cached store so it can't resurrect the dir
     existed = delete_session(sid)
