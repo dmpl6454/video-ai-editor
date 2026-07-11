@@ -14,6 +14,7 @@ export function MediaBin() {
   const uploadError = useStore((s) => s.uploadError)
   const clearUploadError = useStore((s) => s.clearUploadError)
   const edl = useStore((s) => s.edl)
+  const dispatch = useStore((s) => s.dispatch)
   const fileRef = useRef<HTMLInputElement>(null)
   const audioRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -30,11 +31,15 @@ export function MediaBin() {
     }
   }
 
-  // Unique source paths used on the timeline
-  const sources = new Map<string, number>()
+  // Unique source paths → the clip ids that reference them (for delete + count).
+  const sources = new Map<string, string[]>()
   for (const t of edl?.tracks ?? []) {
     for (const c of t.clips) {
-      if (isMediaClip(c)) sources.set(c.src, (sources.get(c.src) ?? 0) + 1)
+      if (isMediaClip(c)) {
+        const arr = sources.get(c.src) ?? []
+        arr.push(c.id)
+        sources.set(c.src, arr)
+      }
     }
   }
 
@@ -102,7 +107,7 @@ export function MediaBin() {
         </div>
       )}
 
-      {[...sources.entries()].map(([src, n]) => (
+      {[...sources.entries()].map(([src, ids]) => (
         <div
           key={src}
           className="item"
@@ -117,8 +122,17 @@ export function MediaBin() {
         >
           {src.split('/').pop()}
           <div style={{ color: 'var(--text-dim)', fontSize: 10, marginTop: 4 }}>
-            ×{n} on timeline · drag to add
+            ×{ids.length} on timeline · drag to add
           </div>
+          <button
+            className="media-remove"
+            title="Remove this media and all its clips from the timeline"
+            onClick={async (e) => {
+              e.stopPropagation()
+              if (!window.confirm(`Remove ${src.split('/').pop()} and its ${ids.length} clip(s) from the timeline?`)) return
+              await dispatch('bulk_delete', { clip_ids: ids })
+            }}
+          >×</button>
         </div>
       ))}
 
@@ -159,22 +173,7 @@ function MusicPanel() {
         <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
           <input
             type="checkbox" checked={ducking}
-            onChange={async (e) => {
-              // Toggling duck is a bit awkward without a dedicated tool;
-              // re-add the music with the new flag (cheap, replaces clip).
-              const wasDucked = ducking
-              await dispatch('add_music', {
-                src: clip.src,
-                start: 0,
-                in: 0,
-                out: 0,
-                volume_db: gain,
-                duck: !wasDucked,
-              })
-              // remove the duplicate
-              await dispatch('ripple_delete', { clip_id: clip.id })
-              void e
-            }}
+            onChange={() => dispatch('set_duck', { track: 'music', enabled: !ducking })}
             style={{ marginRight: 4 }}
           />
           Duck under speech

@@ -58,14 +58,34 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   padding: 0 14px;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
-  /* Keep the toolbar on one line and scroll it internally rather than wrapping
-     or pushing the page wider. */
   white-space: nowrap;
+  overflow: hidden;
+}
+.topbar > * { flex-shrink: 0; }
+/* The middle preset/aspect-ratio section scrolls internally when it doesn't
+   fit — NOT the whole toolbar — so .topbar-pinned (Save/Open/Export) stays
+   visible regardless of window width. `min-width: 0` lets this flex item
+   actually shrink below its content size instead of forcing the row wider. */
+.topbar-scroll {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
+  min-width: 0;
+  flex-shrink: 1;
 }
-.topbar > * { flex-shrink: 0; }
+.topbar-scroll > * { flex-shrink: 0; }
+/* The pinned cluster is never a flex-shrink target and always renders after
+   .topbar-scroll, so Export — its last child — is always the toolbar's
+   right-most, always-on-screen element. */
+.topbar-pinned {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
 .topbar h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .topbar .grow { flex: 1; }
 .topbar .pill { background: var(--bg-3); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--text-dim); }
@@ -307,7 +327,7 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 
 .timeline-canvas-wrap {
   flex: 1;
-  overflow: hidden;
+  overflow: auto;
   position: relative;
 }
 
@@ -320,7 +340,14 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   cursor: pointer;
   font-size: 12px;
   word-break: break-all;
+  position: relative;
 }
+.media-remove {
+  position: absolute; top: 6px; right: 6px;
+  border: none; background: transparent; color: var(--text-dim);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.media-remove:hover { color: var(--bad, #ff4d6d); }
 
 /* Break long unbreakable tokens (filenames like a_b_c.normalized.mp4) so they
    wrap inside the fixed-width panel instead of painting past its edge. */
