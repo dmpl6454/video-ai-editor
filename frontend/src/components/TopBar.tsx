@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { api } from '../api'
 import { openHelp } from './Help'
@@ -9,6 +10,8 @@ interface SessionRow { id: string; name: string }
 export function TopBar() {
   const name = useStore((s) => s.sessionName)
   const dispatch = useStore((s) => s.dispatch)
+  const redoAvailable = useStore((s) => s.redoAvailable)
+  const pendingOps = useStore((s) => s.pendingOps)
   const exporting = useStore((s) => s.exporting)
   const exportUrl = useStore((s) => s.exportUrl)
   const exportGen = useStore((s) => s.exportGen)
@@ -33,6 +36,14 @@ export function TopBar() {
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [appVersion, setAppVersion] = useState('')
+  // The session-picker dropdown is rendered via a portal to document.body
+  // (positioned from this ref's rect) instead of as a normal absolutely-
+  // positioned child of .topbar. .topbar clips overflow on both axes to keep
+  // the toolbar on one line (see .topbar-scroll/.topbar-pinned), so a child
+  // positioned `top:100%` — below the 44px toolbar row — was always cut off
+  // by that same clip (issue 11, "dropdown is half-cut when clicked").
+  const pickerBtnRef = useRef<HTMLButtonElement>(null)
+  const [pickerPos, setPickerPos] = useState<{ left: number; top: number } | null>(null)
 
   useEffect(() => {
     fetch('/api/version').then((r) => r.json())
@@ -73,6 +84,12 @@ export function TopBar() {
   // Load sessions when picker opens; close on outside click
   useEffect(() => {
     if (!pickerOpen) return
+    // Compute the portal's position here (an effect), not inline during
+    // render — reading a ref's .current mid-render doesn't participate in
+    // React's reactivity model and can read a stale layout on some render
+    // paths (react-hooks/refs flags this for good reason, not just style).
+    const rect = pickerBtnRef.current?.getBoundingClientRect()
+    if (rect) setPickerPos({ left: rect.left, top: rect.bottom + 4 })
     api.listSessions().then((r) => setSessions(r.sessions ?? [])).catch(() => {})
     const close = (e: MouseEvent) => {
       const tgt = e.target as HTMLElement
@@ -85,6 +102,7 @@ export function TopBar() {
   const switchSession = async (newId: string) => {
     setPickerOpen(false)
     if (newId === sid) return
+    useStore.getState().resetTransient()
     useStore.setState({ sessionId: newId, sessionName: newId })
     await refresh()
   }
@@ -101,6 +119,7 @@ export function TopBar() {
       <h1>Video AI Editor</h1>
       <div data-session-picker style={{ position: 'relative' }}>
         <button
+          ref={pickerBtnRef}
           className="pill"
           title="Switch project"
           onClick={() => setPickerOpen((o) => !o)}
@@ -108,10 +127,14 @@ export function TopBar() {
         >
           {name} ▾
         </button>
-        {pickerOpen && (
+        {pickerOpen && pickerPos && createPortal(
           <div
+            data-session-picker
             style={{
-              position: 'absolute', left: 0, top: '100%', marginTop: 4, zIndex: 100,
+              position: 'fixed',
+              left: pickerPos.left,
+              top: pickerPos.top,
+              zIndex: 1000,
               background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 6,
               boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 280, maxHeight: 400,
               overflow: 'auto', padding: 4,
@@ -159,82 +182,103 @@ export function TopBar() {
                 <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>{s.id.slice(0, 10)}</span>
               </div>
             ))}
-          </div>
+          </div>,
+          document.body,
         )}
       </div>
+      {pendingOps > 0 && (
+        <span className="pill" title="An edit is being applied" style={{ color: 'var(--text-dim)' }}>
+          ⋯ Applying
+        </span>
+      )}
       {edl && (
         <span className="pill">
           {edl.canvas.w}×{edl.canvas.h} · {edl.canvas.fps}fps · {edl.duration.toFixed(1)}s
         </span>
       )}
       <div className="grow" />
-      <button onClick={() => dispatch('undo')} title="Cmd+Z">Undo</button>
-      <button onClick={() => dispatch('redo')} title="Cmd+Shift+Z">Redo</button>
-      {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
-        <button key={r} onClick={() => dispatch('set_aspect_ratio', { ratio: r })}>{r}</button>
-      ))}
-      <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
-      {[
-        { label: 'Reels',    title: 'Instagram Reels — 1080×1920 @ 30fps',  w: 1080, h: 1920, fps: 30 },
-        { label: 'Shorts',   title: 'YouTube Shorts — 1080×1920 @ 30fps',   w: 1080, h: 1920, fps: 30 },
-        { label: 'TikTok',   title: 'TikTok — 1080×1920 @ 30fps',           w: 1080, h: 1920, fps: 30 },
-        { label: 'IG 1:1',   title: 'Instagram feed square — 1080×1080',    w: 1080, h: 1080, fps: 30 },
-        { label: 'IG 4:5',   title: 'Instagram feed portrait — 1080×1350',  w: 1080, h: 1350, fps: 30 },
-      ].map((p) => (
-        <button
-          key={p.label}
-          title={p.title}
-          onClick={() => dispatch('set_canvas', { w: p.w, h: p.h, fps: p.fps })}
-          style={{ fontSize: 11 }}
-        >
-          {p.label}
+      {/* Scrollable middle section: aspect-ratio + platform-preset buttons.
+          These can grow without bound (more presets, longer labels) — if this
+          section overflows the window, IT scrolls internally, but the
+          right-side cluster below (Save/Open/Export) never does. Previously
+          every button here shared one flex row with Export at the tail end,
+          so on a ~1280px window (a common 13" laptop size) Export could sit
+          past the visible edge with no visual cue that scrolling the
+          TOOLBAR ITSELF (not the page) would reveal it — issues 9/10. */}
+      <div className="topbar-scroll">
+        <button onClick={() => dispatch('undo')} title="Cmd+Z">Undo</button>
+        <button onClick={() => dispatch('redo')} disabled={!redoAvailable} title="Cmd+Shift+Z">Redo</button>
+        {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
+          <button key={r} onClick={() => dispatch('set_aspect_ratio', { ratio: r })}>{r}</button>
+        ))}
+        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
+        {[
+          { label: 'Reels',    title: 'Instagram Reels — 1080×1920 @ 30fps',  w: 1080, h: 1920, fps: 30 },
+          { label: 'Shorts',   title: 'YouTube Shorts — 1080×1920 @ 30fps',   w: 1080, h: 1920, fps: 30 },
+          { label: 'TikTok',   title: 'TikTok — 1080×1920 @ 30fps',           w: 1080, h: 1920, fps: 30 },
+          { label: 'IG 1:1',   title: 'Instagram feed square — 1080×1080',    w: 1080, h: 1080, fps: 30 },
+          { label: 'IG 4:5',   title: 'Instagram feed portrait — 1080×1350',  w: 1080, h: 1350, fps: 30 },
+        ].map((p) => (
+          <button
+            key={p.label}
+            title={p.title}
+            onClick={() => dispatch('set_canvas', { w: p.w, h: p.h, fps: p.fps })}
+            style={{ fontSize: 11 }}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
+        <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
+        {appVersion && (
+          <span title="App version" style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
+            v{appVersion}
+          </span>
+        )}
+      </div>
+      {/* Pinned right-side cluster: never scrolls away, regardless of how
+          much content is in .topbar-scroll above. Export is always the
+          right-most, always-visible element. */}
+      <div className="topbar-pinned">
+        <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save the project as a .vae bundle (EDL + media)">
+          {saving ? 'Saving…' : '💾 Save'}
         </button>
-      ))}
-      <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
-      <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
-      {appVersion && (
-        <span title="App version" style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
-          v{appVersion}
-        </span>
-      )}
-      <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save the project as a .vae bundle (EDL + media)">
-        {saving ? 'Saving…' : '💾 Save'}
-      </button>
-      <button onClick={() => importRef.current?.click()} title="Open a saved .vae project">
-        📂 Open
-      </button>
-      <input ref={importRef} type="file" accept=".vae,.zip" hidden
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
-      {savedUrl && (
-        <a href={savedUrl} download
-          className={savedStale ? 'stale-dl' : ''}
-          title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
-          style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
-          ↓ .vae{savedStale ? ' (outdated)' : ''}
-        </a>
-      )}
-      <button className="primary" onClick={() => doExport()} disabled={exporting || !edl?.duration}>
-        {exporting
-          ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
-          : 'Export'}
-      </button>
-      {exportUrl && !exporting && (
-        <a href={exportUrl} download
-          className={exportStale ? 'stale-dl' : ''}
-          title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : 'Download exported MP4'}
-          style={{ color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
-          ↓ MP4{exportStale ? ' (outdated)' : ''}
-        </a>
-      )}
-      {exportError && (
-        <span
-          style={{ color: 'var(--accent)', fontSize: 12, cursor: 'pointer' }}
-          title={`${exportError} (click to dismiss)`}
-          onClick={() => clearExportError()}
-        >
-          ⚠ Export failed ✕
-        </span>
-      )}
+        <button onClick={() => importRef.current?.click()} title="Open a saved .vae project">
+          📂 Open
+        </button>
+        <input ref={importRef} type="file" accept=".vae,.zip" hidden
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
+        {savedUrl && (
+          <a href={savedUrl} download
+            className={savedStale ? 'stale-dl' : ''}
+            title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
+            style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
+            ↓ .vae{savedStale ? ' (outdated)' : ''}
+          </a>
+        )}
+        <button className="primary" onClick={() => doExport()} disabled={exporting || !edl?.duration}>
+          {exporting
+            ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
+            : 'Export'}
+        </button>
+        {exportUrl && !exporting && (
+          <a href={exportUrl} download
+            className={exportStale ? 'stale-dl' : ''}
+            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : 'Download exported MP4'}
+            style={{ color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
+            ↓ MP4{exportStale ? ' (outdated)' : ''}
+          </a>
+        )}
+        {exportError && (
+          <span
+            style={{ color: 'var(--accent)', fontSize: 12, cursor: 'pointer' }}
+            title={`${exportError} (click to dismiss)`}
+            onClick={() => clearExportError()}
+          >
+            ⚠ Export failed ✕
+          </span>
+        )}
+      </div>
     </header>
   )
 }

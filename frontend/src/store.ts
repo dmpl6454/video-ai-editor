@@ -12,6 +12,15 @@ interface State {
   sessionName: string
   edl: EDL | null
   ops: Op[]
+  redoAvailable: boolean
+  // Count of in-flight dispatch() calls. >0 means at least one edit is being
+  // applied server-side. Every gesture (drag, click, chat tool call) used to
+  // give NO feedback between the click and the debounced refresh landing —
+  // there was no lock and no busy indicator, so a user could fire overlapping
+  // gestures during that window with no idea anything was in progress
+  // (issues 1/2/3/5, "rendering slow and not apparent", "delay after any
+  // action which can overlap with performing even more actions").
+  pendingOps: number
   selection: string | null   // primary selected clip id
   multiSelection: string[]   // additional selected clip ids (shift+click)
   inMark: number | null      // in/out marks for range selection / export region
@@ -48,6 +57,7 @@ interface State {
   setOutMark(t: number | null): void
   clearUploadError(): void
   clearExportError(): void
+  resetTransient(): void
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
@@ -86,6 +96,8 @@ export const useStore = create<State>((set, get) => ({
   sessionName: '',
   edl: null,
   ops: [],
+  redoAvailable: false,
+  pendingOps: 0,
   selection: null,
   playhead: 0,
   isPlaying: false,
@@ -141,6 +153,17 @@ export const useStore = create<State>((set, get) => ({
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
   clearExportError: () => set({ exportError: null }),
+
+  // Clears per-session view/selection state. Call when switching sessions so a
+  // stale playhead/selection/marks from the previous project don't bleed onto
+  // the new timeline (which read as "a second frozen playhead").
+  resetTransient: () => set({
+    playhead: 0,
+    selection: null,
+    multiSelection: [],
+    inMark: null,
+    outMark: null,
+  }),
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: 80,
@@ -210,6 +233,7 @@ export const useStore = create<State>((set, get) => ({
     const list = await api.listSessions()
     const existing = list.sessions[0]
     const sid = existing?.id ?? (await api.createSession()).id
+    get().resetTransient()
     set({ sessionId: sid, sessionName: existing?.name ?? sid })
     await get().refresh()
   },
@@ -218,7 +242,7 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     const [info, edl] = await Promise.all([api.getSession(sid), api.getEDL(sid)])
-    set({ edl, ops: info.ops, sessionName: info.name })
+    set({ edl, ops: info.ops, sessionName: info.name, redoAvailable: info.redo_available })
   },
 
   // Coalesce many quick refresh() calls (chat tool storms, drag bursts) into a
@@ -241,13 +265,22 @@ export const useStore = create<State>((set, get) => ({
     set({ uploading: true, uploadProgress: file.name, uploadError: null })
     try {
       await api.upload(sid, file, true)
-      await get().refresh()
-      await get().renderPreview()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       set({ uploadError: `${file.name}: ${msg}` })
-    } finally {
       set({ uploading: false, uploadProgress: null })
+      return
+    }
+    set({ uploading: false, uploadProgress: null })
+    // The upload itself succeeded — media is ingested and on the timeline.
+    // A subsequent preview-render failure (e.g. a corrupt cached overlay PNG)
+    // is a SEPARATE concern and must not be reported as "upload failed".
+    await get().refresh()
+    try {
+      await get().renderPreview()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(`Preview render failed: ${msg}`)
     }
   },
 
@@ -257,36 +290,69 @@ export const useStore = create<State>((set, get) => ({
     set({ uploading: true, uploadProgress: file.name, uploadError: null })
     try {
       await api.audioUpload(sid, file, { addToMusic: true, duck: true })
-      await get().refresh()
-      await get().renderPreview()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       set({ uploadError: `${file.name}: ${msg}` })
-    } finally {
       set({ uploading: false, uploadProgress: null })
+      return
+    }
+    set({ uploading: false, uploadProgress: null })
+    await get().refresh()
+    try {
+      await get().renderPreview()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(`Preview render failed: ${msg}`)
     }
   },
 
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
     if (!sid) return
-    // We KEEP the previous export's download link after an edit, but the UI
-    // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
-    await api.dispatch(sid, tool, args)
-    // Use the debounced refresh: chained tool calls (chat storms) coalesce
-    // into one EDL fetch instead of N.
-    get().refreshSoon()
-    // Offer a quick Undo on destructive deletes — covers every entry point
-    // (keyboard, Properties Delete, timeline context menu) in one spot. The
-    // backend's own undo is the restore; 'undo' isn't a delete so it can't loop.
-    if (tool === 'ripple_delete' || tool === 'bulk_delete') {
-      const count = tool === 'bulk_delete'
-        ? ((args.clip_ids as unknown[] | undefined)?.length ?? 0)
-        : 1
-      toast.action(
-        count > 1 ? `${count} clips deleted` : 'Clip deleted',
-        { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
-      )
+    set({ pendingOps: get().pendingOps + 1 })
+    try {
+      // We KEEP the previous export's download link after an edit, but the UI
+      // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
+      const res = await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
+      if (tool === 'undo' || tool === 'redo') {
+        // Undo/redo get an IMMEDIATE (non-debounced) refresh, not the
+        // 120ms-coalesced refreshSoon(): the whole point of Undo/Redo is that
+        // the timeline visibly changes right away, and the debounce (designed
+        // for chat tool-storms) was making rapid undo/redo clicks feel laggy
+        // and non-deterministic about which state actually landed. Also apply
+        // `redo_available` from the response synchronously so the Redo button
+        // disables the instant the stack empties, without waiting on refresh.
+        if (typeof res.result?.redo_available === 'boolean') {
+          set({ redoAvailable: res.result.redo_available })
+        }
+        await get().refresh()
+        return
+      }
+      // Use the debounced refresh: chained tool calls (chat storms) coalesce
+      // into one EDL fetch instead of N.
+      get().refreshSoon()
+      // Offer a quick Undo on destructive deletes — covers every entry point
+      // (keyboard, Properties Delete, timeline context menu) in one spot. The
+      // backend's own undo is the restore; 'undo' isn't a delete so it can't loop.
+      if (tool === 'ripple_delete' || tool === 'bulk_delete') {
+        const count = tool === 'bulk_delete'
+          ? ((args.clip_ids as unknown[] | undefined)?.length ?? 0)
+          : 1
+        toast.action(
+          count > 1 ? `${count} clips deleted` : 'Clip deleted',
+          { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
+        )
+      }
+    } catch (e) {
+      // Edits used to fail SILENTLY here — no catch at all, so a rejected
+      // dispatch (bad args, a validation error like the new lane-type check,
+      // a network hiccup) left the user staring at a UI that looked like
+      // nothing happened, with no error anywhere (issue 15-adjacent: "no
+      // persistent error surface for a failed edit").
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(msg)
+    } finally {
+      set({ pendingOps: Math.max(0, get().pendingOps - 1) })
     }
   },
 
