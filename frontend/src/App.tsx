@@ -13,6 +13,7 @@ import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
 import { ExportModal } from './components/ExportModal'
 import { ToastHost } from './components/Toast'
+import { Splitter } from './components/Splitter'
 import { useKeymap } from './keymap/engine'
 
 // The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
@@ -24,6 +25,14 @@ export default function App() {
   useEffect(() => { void init() }, [init])
   useKeymap()  // customizable CapCut / Premiere / Final Cut keymaps
 
+  // Resizable panel sizes (Task 9) — persisted in the store (localStorage-
+  // backed); drive them onto the .app/.center grids as CSS custom properties
+  // so styles.css's `var(--left-w, 220px)` etc. pick them up.
+  const leftW = useStore((s) => s.leftW)
+  const rightW = useStore((s) => s.rightW)
+  const timelineH = useStore((s) => s.timelineH)
+  const setPanelSize = useStore((s) => s.setPanelSize)
+
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === 'undefined' ? MIN_EDITOR_WIDTH : window.innerWidth)
   const [narrowDismissed, setNarrowDismissed] = useState(false)
@@ -33,6 +42,12 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
   const showNarrowWarning = viewportWidth < MIN_EDITOR_WIDTH && !narrowDismissed
+
+  const appVars = {
+    '--left-w': `${leftW}px`,
+    '--right-w': `${rightW}px`,
+    '--timeline-h': `${timelineH}px`,
+  } as React.CSSProperties
 
   return (
     <>
@@ -47,11 +62,16 @@ export default function App() {
           </button>
         </div>
       )}
-    <div className="app">
+    <div className="app" style={appVars}>
       <TopBar />
       <aside className="sidebar left">
         <MediaBin />
       </aside>
+      <Splitter
+        orientation="vertical"
+        style={{ gridArea: 'lsplit' }}
+        onDelta={(d) => setPanelSize('leftW', leftW + d)}
+      />
       <main className="center">
         <div className="preview-pane">
           <ErrorBoundary
@@ -68,10 +88,21 @@ export default function App() {
             <Preview />
           </ErrorBoundary>
         </div>
+        <Splitter
+          orientation="horizontal"
+          onDelta={(d) => setPanelSize('timelineH', timelineH - d)}
+        />
         <div className="timeline-pane">
           <Timeline />
         </div>
       </main>
+      <Splitter
+        orientation="vertical"
+        style={{ gridArea: 'rsplit' }}
+        // Dragging right moves the mouse away from the right sidebar, which
+        // should shrink it — the delta sign is negated relative to leftW.
+        onDelta={(d) => setPanelSize('rightW', rightW - d)}
+      />
       <aside className="sidebar right">
         <Properties />
         <OpsLog />

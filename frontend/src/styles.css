@@ -35,10 +35,14 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 .app {
   display: grid;
   grid-template-rows: 44px 1fr;
-  grid-template-columns: 220px 1fr 280px;
+  /* Dedicated 5px columns for the left/right drag handles (Task 9) sit
+     between the panes as real grid tracks — not a gap — so Splitter.tsx's
+     <div> can be a normal grid child instead of an absolutely-positioned
+     overlay. */
+  grid-template-columns: var(--left-w, 220px) 5px 1fr 5px var(--right-w, 280px);
   grid-template-areas:
-    "topbar topbar topbar"
-    "left center right";
+    "topbar   topbar   topbar  topbar    topbar"
+    "left     lsplit   center  rsplit    right";
   height: 100vh;
   width: 100%;
   /* A pro 3-pane editor needs width. Rather than collapsing on narrow windows,
@@ -107,10 +111,23 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 .center {
   grid-area: center;
   display: grid;
-  grid-template-rows: 1fr 280px;
+  /* A dedicated 5px row for the horizontal splitter, same rationale as the
+     .app column tracks above. */
+  grid-template-rows: 1fr 5px var(--timeline-h, 280px);
   background: var(--bg-0);
   overflow: hidden;
 }
+
+/* Drag handles for resizable panels (Task 9). Thin, transparent until
+   hovered/dragged, sitting in their own dedicated grid track (see .app and
+   .center above) rather than an absolutely-positioned overlay. Uses
+   window-level mousemove/mouseup (see Splitter.tsx) so a drag that leaves
+   the handle bounds still resolves — same pattern as the timeline playhead
+   drag and the FrameScrubber resync. */
+.splitter { background: transparent; z-index: 5; flex-shrink: 0; }
+.splitter:hover, .splitter:active { background: var(--accent-2, #5b8dff); }
+.splitter-vertical { width: 5px; height: 100%; cursor: col-resize; }
+.splitter-horizontal { width: 100%; height: 5px; cursor: row-resize; }
 
 /* Narrow-window banner. The editor stays usable (horizontal scroll) below its
    minimum width, but we nudge the user toward a wider window. Fixed to the

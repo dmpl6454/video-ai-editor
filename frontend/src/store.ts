@@ -7,6 +7,18 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 
+// Reads a persisted panel size (Task 9's Splitter drag state). Guards against
+// SSR (no `localStorage`), an unset key (`null` -> NaN -> falls through to
+// `fallback`), and a corrupted/non-numeric value the same way. Clamped to the
+// same [160, 640] range setPanelSize enforces, so a stale/tampered value from
+// an older build can't render a broken layout.
+function readStoredPanelSize(key: string, fallback: number): number {
+  if (typeof localStorage === 'undefined') return fallback
+  const raw = Number(localStorage.getItem(key))
+  if (!raw || Number.isNaN(raw)) return fallback
+  return Math.max(160, Math.min(640, raw))
+}
+
 interface State {
   sessionId: string | null
   sessionName: string
@@ -58,6 +70,13 @@ interface State {
   clearUploadError(): void
   clearExportError(): void
   resetTransient(): void
+
+  // --- resizable panel sizes (Task 9), persisted to localStorage so a drag
+  // survives reload. Plain px, clamped in setPanelSize. ---
+  leftW: number
+  rightW: number
+  timelineH: number
+  setPanelSize(key: 'leftW' | 'rightW' | 'timelineH', px: number): void
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
@@ -118,6 +137,13 @@ export const useStore = create<State>((set, get) => ({
   exportJobId: null,
   exportGen: 0,
 
+  // Panel sizes: read from localStorage (falls back to the historical fixed
+  // CSS defaults — 220/280/280 — when unset, invalid, or running server-side
+  // where localStorage doesn't exist).
+  leftW: readStoredPanelSize('vai.leftW', 220),
+  rightW: readStoredPanelSize('vai.rightW', 280),
+  timelineH: readStoredPanelSize('vai.timelineH', 280),
+
   setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
   toggleSelection: (id) => {
     const s = get()
@@ -164,6 +190,17 @@ export const useStore = create<State>((set, get) => ({
     inMark: null,
     outMark: null,
   }),
+
+  // Persists a panel size to localStorage as the drag happens (not just on
+  // commit) so a mid-drag reload can't lose it, then updates the CSS-var-
+  // driving state. Clamped to [160, 640]px — below 160 a panel's own controls
+  // start clipping; above 640 one pane can crowd out the rest of the 900px-
+  // floor layout.
+  setPanelSize: (key, px) => {
+    const clamped = Math.max(160, Math.min(640, px))
+    if (typeof localStorage !== 'undefined') localStorage.setItem(`vai.${key}`, String(clamped))
+    set({ [key]: clamped } as Partial<State>)
+  },
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: 80,
