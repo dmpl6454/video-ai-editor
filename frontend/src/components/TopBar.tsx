@@ -45,6 +45,17 @@ export function TopBar() {
   const pickerBtnRef = useRef<HTMLButtonElement>(null)
   const [pickerPos, setPickerPos] = useState<{ left: number; top: number } | null>(null)
 
+  // Export options popover — resolution + quality. `doExport()` already
+  // forwarded `{height, crf}` all the way to POST /export (store.ts/api.ts),
+  // but this button never passed anything, so every export used the hardcoded
+  // defaults. Rendered via the same document.body portal pattern as the
+  // session picker above, for the same reason (.topbar clips overflow).
+  const [exportOptsOpen, setExportOptsOpen] = useState(false)
+  const [exportHeight, setExportHeight] = useState<number>(edl?.canvas?.h ?? 1080)
+  const [exportCrf, setExportCrf] = useState<number>(18)
+  const exportBtnRef = useRef<HTMLButtonElement>(null)
+  const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
+
   useEffect(() => {
     fetch('/api/version').then((r) => r.json())
       .then((d) => setAppVersion(d.version || '')).catch(() => {})
@@ -98,6 +109,32 @@ export function TopBar() {
     setTimeout(() => window.addEventListener('mousedown', close), 0)
     return () => window.removeEventListener('mousedown', close)
   }, [pickerOpen])
+
+  // Position + outside-click-close for the export options popover — same
+  // pattern as the session picker effect above (compute in an effect, not
+  // inline during render, since reading a ref mid-render can see stale layout).
+  useEffect(() => {
+    if (!exportOptsOpen) return
+    const rect = exportBtnRef.current?.getBoundingClientRect()
+    if (rect) setExportOptsPos({ left: rect.right, top: rect.bottom + 4 })
+    const close = (e: MouseEvent) => {
+      const tgt = e.target as HTMLElement
+      if (!tgt.closest('[data-export-opts]')) setExportOptsOpen(false)
+    }
+    setTimeout(() => window.addEventListener('mousedown', close), 0)
+    return () => window.removeEventListener('mousedown', close)
+  }, [exportOptsOpen])
+
+  // Keep the resolution default in sync with the current canvas ("Source")
+  // until the user explicitly picks something else.
+  useEffect(() => {
+    if (edl?.canvas?.h) setExportHeight((h) => h || edl.canvas.h)
+  }, [edl?.canvas?.h])
+
+  const confirmExport = () => {
+    setExportOptsOpen(false)
+    void doExport({ height: exportHeight, crf: exportCrf })
+  }
 
   const switchSession = async (newId: string) => {
     setPickerOpen(false)
@@ -281,11 +318,67 @@ export function TopBar() {
             ↓ .vae{savedStale ? ' (outdated)' : ''}
           </a>
         )}
-        <button className="primary" onClick={() => doExport()} disabled={exporting || !edl?.duration}>
-          {exporting
-            ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
-            : 'Export'}
-        </button>
+        <div data-export-opts style={{ position: 'relative', display: 'inline-block' }}>
+          <button
+            ref={exportBtnRef}
+            className="primary"
+            onClick={() => setExportOptsOpen((o) => !o)}
+            disabled={exporting || !edl?.duration}
+          >
+            {exporting
+              ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
+              : 'Export ▾'}
+          </button>
+          {exportOptsOpen && exportOptsPos && createPortal(
+            <div
+              data-export-opts
+              style={{
+                position: 'fixed',
+                left: exportOptsPos.left,
+                top: exportOptsPos.top,
+                transform: 'translateX(-100%)',
+                zIndex: 1000,
+                background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 6,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 220,
+                padding: 10, display: 'flex', flexDirection: 'column', gap: 8,
+              }}
+            >
+              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                Resolution
+                <select
+                  value={exportHeight}
+                  onChange={(e) => setExportHeight(Number(e.target.value))}
+                  style={{ fontSize: 12, padding: '3px 4px' }}
+                >
+                  {edl?.canvas?.h && (
+                    <option value={edl.canvas.h}>Source ({edl.canvas.w}×{edl.canvas.h})</option>
+                  )}
+                  <option value={2160}>2160p (4K)</option>
+                  <option value={1440}>1440p (2K)</option>
+                  <option value={1080}>1080p</option>
+                  <option value={720}>720p</option>
+                  <option value={480}>480p</option>
+                </select>
+              </label>
+              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                Quality
+                <select
+                  value={exportCrf}
+                  onChange={(e) => setExportCrf(Number(e.target.value))}
+                  style={{ fontSize: 12, padding: '3px 4px' }}
+                >
+                  <option value={18}>High</option>
+                  <option value={23}>Medium</option>
+                  <option value={28}>Small file</option>
+                </select>
+              </label>
+              <button className="primary" onClick={confirmExport} style={{ fontSize: 12, marginTop: 2 }}>
+                Export
+              </button>
+            </div>,
+            document.body,
+          )}
+        </div>
         {exportUrl && !exporting && (
           <a href={exportUrl} download
             className={exportStale ? 'stale-dl' : ''}
