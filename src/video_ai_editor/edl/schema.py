@@ -173,7 +173,7 @@ class Marker(BaseModel):
     id: str = Field(default_factory=lambda: f"mk_{uuid4().hex[:8]}")
     time: float
     label: str = ""
-    color: str = "#ff4d6d"
+    color: str = "#fbbf24"  # amber — must differ from the playhead red (#ff4d6d, Timeline.tsx)
 
 
 class EDL(BaseModel):

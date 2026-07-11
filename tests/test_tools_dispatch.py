@@ -57,3 +57,189 @@ def test_set_aspect_ratio_changes_canvas():
     dispatch(store, "set_aspect_ratio", {"ratio": "16:9"})
     assert store.edl.canvas.w == 1920
     assert store.edl.canvas.h == 1080
+
+
+def test_add_sticker_returns_a_running_sticker_count(tmp_path):
+    """Regression for issue 51 (agent miscounts stickers): add_sticker must
+    hand back ground truth in its own tool_result rather than forcing the
+    caller to make a separate get_timeline call to find out how many exist."""
+    from PIL import Image
+    png = tmp_path / "sticker.png"
+    Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(png)
+
+    store = _store_with_one_clip()
+    r1 = dispatch(store, "add_sticker", {"src": str(png), "start": 0.0, "end": 1.0})
+    assert r1["sticker_count"] == 1
+    r2 = dispatch(store, "add_sticker", {"src": str(png), "start": 1.0, "end": 2.0})
+    assert r2["sticker_count"] == 2
+    r3 = dispatch(store, "add_sticker", {"src": str(png), "start": 2.0, "end": 3.0})
+    assert r3["sticker_count"] == 3
+
+
+def test_get_timeline_reports_per_track_clip_count(tmp_path):
+    from PIL import Image
+    png = tmp_path / "sticker.png"
+    Image.new("RGBA", (32, 32), (0, 255, 0, 255)).save(png)
+
+    store = _store_with_one_clip()
+    dispatch(store, "add_sticker", {"src": str(png), "start": 0.0, "end": 1.0})
+    dispatch(store, "add_sticker", {"src": str(png), "start": 1.0, "end": 2.0})
+
+    snap = dispatch(store, "get_timeline", {"summary": True})
+    by_id = {t["id"]: t for t in snap["tracks"]}
+    assert by_id["v1"]["clip_count"] == 1
+    assert by_id["stickers"]["clip_count"] == 2
+
+
+def test_color_grade_merges_into_a_single_effect_instead_of_stacking():
+    """Regression for issues 16.4-16.8: each Properties.tsx slider release
+    sends only the ONE param that changed. Before this fix, color_grade
+    appended a brand-new Effect(type='color') every call, so adjusting
+    brightness then contrast then brightness again left 3 independent filter
+    passes on the clip instead of one clip having one color grade."""
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+
+    dispatch(store, "color_grade", {"clip_id": cid, "brightness": 0.1})
+    dispatch(store, "color_grade", {"clip_id": cid, "contrast": 1.3})
+    dispatch(store, "color_grade", {"clip_id": cid, "brightness": 0.25})
+
+    clip = store.edl.tracks[0].clips[0]
+    color_effects = [e for e in clip.effects if e.type == "color"]
+    assert len(color_effects) == 1, "must merge into one effect, not stack"
+    assert color_effects[0].params["brightness"] == 0.25  # last write wins
+    assert color_effects[0].params["contrast"] == 1.3      # earlier params kept
+
+
+def test_color_grade_creates_one_effect_on_first_call():
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+    dispatch(store, "color_grade", {"clip_id": cid, "saturation": 1.5})
+    clip = store.edl.tracks[0].clips[0]
+    assert len([e for e in clip.effects if e.type == "color"]) == 1
+
+
+def test_color_reset_neutralizes_all_params_via_merge():
+    """The Properties.tsx 'Reset' button for Color dispatches color_grade with
+    all-neutral values — confirm the merge path actually neutralizes prior
+    non-default params rather than leaving them mixed in."""
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+    dispatch(store, "color_grade", {"clip_id": cid, "brightness": 0.3, "contrast": 1.8, "tint": 0.5})
+    dispatch(store, "color_grade", {
+        "clip_id": cid, "brightness": 0, "contrast": 1, "saturation": 1, "temp": 0, "tint": 0,
+    })
+    clip = store.edl.tracks[0].clips[0]
+    color_effects = [e for e in clip.effects if e.type == "color"]
+    assert len(color_effects) == 1
+    assert color_effects[0].params == {
+        "brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "temp": 0.0, "tint": 0.0,
+    }
+
+
+def test_transform_reset_restores_identity_transform():
+    """The Properties.tsx 'Reset' button for Transform dispatches
+    set_clip_transform with the schema's identity defaults."""
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+    dispatch(store, "set_clip_transform", {
+        "clip_id": cid, "x": 300, "y": 450, "scale": 2.5, "rotation": 45, "opacity": 0.5,
+    })
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.transform.scale == 2.5  # sanity: the mutation actually applied
+
+    dispatch(store, "set_clip_transform", {
+        "clip_id": cid, "x": 0, "y": 0, "scale": 1, "rotation": 0, "opacity": 1,
+    })
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.transform.x == 0.0
+    assert clip.transform.y == 0.0
+    assert clip.transform.scale == 1.0
+    assert clip.transform.rotation == 0.0
+    assert clip.transform.opacity == 1.0
+
+
+def test_audio_reset_restores_zero_gain_and_no_fades():
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+    dispatch(store, "set_volume", {"target": cid, "db": -12})
+    dispatch(store, "add_fade", {"clip_id": cid, "in_s": 1.5, "out_s": 2.0})
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.audio.gain_db == -12
+
+    dispatch(store, "set_volume", {"target": cid, "db": 0})
+    dispatch(store, "add_fade", {"clip_id": cid, "in_s": 0, "out_s": 0})
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.audio.gain_db == 0.0
+    assert clip.audio.fade_in == 0.0
+    assert clip.audio.fade_out == 0.0
+
+
+def test_speed_reset_restores_1x():
+    store = _store_with_one_clip()
+    cid = store.edl.tracks[0].clips[0].id
+    dispatch(store, "set_speed", {"clip_id": cid, "factor": 1.75})
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.speed == 1.75
+
+    dispatch(store, "set_speed", {"clip_id": cid, "factor": 1})
+    clip = store.edl.tracks[0].clips[0]
+    assert clip.speed == 1.0
+
+
+def test_add_sticker_enforces_a_minimum_span_when_end_collapses_to_start(tmp_path):
+    """Regression for issue 31b: a caller-supplied end <= start (e.g.
+    StickerPanel.tsx clamping end to edl.duration when inserting near the
+    tail of the timeline) must not silently produce a near-zero/inverted
+    sticker window."""
+    from PIL import Image
+    png = tmp_path / "sticker.png"
+    Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(png)
+
+    store = _store_with_one_clip()
+    r = dispatch(store, "add_sticker", {
+        "src": str(png), "start": 58.0, "end": 58.0,  # end == start
+    })
+    sticker = store.edl.get_track("stickers").clips[0]
+    assert sticker.end - sticker.start >= 2.9  # floored to a real ~3s span
+    assert sticker.start == 58.0
+
+
+def test_add_sticker_enforces_a_minimum_span_when_end_is_before_start(tmp_path):
+    from PIL import Image
+    png = tmp_path / "sticker.png"
+    Image.new("RGBA", (32, 32), (0, 255, 0, 255)).save(png)
+
+    store = _store_with_one_clip()
+    dispatch(store, "add_sticker", {
+        "src": str(png), "start": 58.0, "end": 57.5,  # end < start
+    })
+    sticker = store.edl.get_track("stickers").clips[0]
+    assert sticker.end - sticker.start >= 2.9
+
+
+def test_add_sticker_keeps_a_normal_explicit_span_unchanged(tmp_path):
+    from PIL import Image
+    png = tmp_path / "sticker.png"
+    Image.new("RGBA", (32, 32), (0, 0, 255, 255)).save(png)
+
+    store = _store_with_one_clip()
+    dispatch(store, "add_sticker", {"src": str(png), "start": 2.0, "end": 4.5})
+    sticker = store.edl.get_track("stickers").clips[0]
+    assert sticker.start == 2.0
+    assert sticker.end == 4.5
+
+
+def test_add_marker_default_color_is_not_playhead_red():
+    """Regression: add_marker's default color used to be #ff4d6d — the exact
+    playhead stroke color in Timeline.tsx — so a marker with no explicit color
+    was visually indistinguishable from the (static) playhead, reading as
+    "two playheads, one frozen"."""
+    store = _store_with_one_clip()
+    res = dispatch(store, "add_marker", {"time": 1.0})
+    mid = res["marker_id"]
+    marker = next(m for m in store.edl.markers if m.id == mid)
+    # Must not collide with the timeline playhead color (#ff4d6d).
+    assert marker.color.lower() != "#ff4d6d"
+
+
