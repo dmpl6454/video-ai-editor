@@ -105,8 +105,42 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   min-width: 0;
   padding: 10px;
 }
-.sidebar.right { border-right: none; border-left: 1px solid var(--line); }
+.sidebar.right { border-right: none; border-left: 1px solid var(--line); position: relative; }
 .sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 8px 0; }
+
+/* Right-panel collapse toggle (Task 4b) — CapCut-style: a thin tab affixed to
+   the sidebar's outer edge. Fixed position within the sidebar (not affected
+   by its own scroll) so it stays reachable regardless of scroll position. */
+.right-panel-toggle {
+  position: sticky;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 22px;
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-dim);
+  z-index: 2;
+}
+.right-panel-toggle:hover { background: var(--bg-3); color: var(--text); }
+/* Collapsed: the sidebar itself shrinks to a thin rail (--right-w is driven
+   down to RIGHT_RAIL_W by App.tsx); hide the Properties/OpsLog content via
+   display:none (not just visibility) so it doesn't render uselessly while
+   invisible, and let the toggle tab fill the rail as the sole visible thing. */
+.sidebar.right.collapsed { padding: 10px 2px; }
+.sidebar.right.collapsed .right-panel-content { display: none; }
+.sidebar.right.collapsed .right-panel-toggle { writing-mode: vertical-rl; height: 72px; }
+
+/* A disabled splitter (Task 4b: the right splitter while the panel is
+   collapsed) keeps its seam but drops the resize cursor/hover affordance —
+   dragging it is a deliberate no-op; only the explicit toggle re-expands. */
+.splitter-disabled { cursor: default; }
+.splitter-disabled:hover, .splitter-disabled:active { background: var(--line, #2a2a33); }
 
 .center {
   grid-area: center;

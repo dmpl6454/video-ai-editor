@@ -19,6 +19,15 @@ function readStoredPanelSize(key: string, fallback: number): number {
   return Math.max(160, Math.min(640, raw))
 }
 
+// Reads a persisted boolean flag (right-panel open/closed). Guards against
+// SSR and a missing/corrupted key the same way readStoredPanelSize does.
+function readStoredBool(key: string, fallback: boolean): boolean {
+  if (typeof localStorage === 'undefined') return fallback
+  const raw = localStorage.getItem(key)
+  if (raw === null) return fallback
+  return raw === 'true'
+}
+
 interface State {
   sessionId: string | null
   sessionName: string
@@ -77,6 +86,13 @@ interface State {
   rightW: number
   timelineH: number
   setPanelSize(key: 'leftW' | 'rightW' | 'timelineH', px: number): void
+
+  // --- right-panel (Properties/History) collapse toggle, persisted like the
+  // panel sizes above. When false, the sidebar shrinks to a thin rail (see
+  // RIGHT_RAIL_W in App.tsx) instead of removing the grid column outright,
+  // so there's no layout reflow jump on toggle. ---
+  rightPanelOpen: boolean
+  setRightPanelOpen(open: boolean): void
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
@@ -143,6 +159,7 @@ export const useStore = create<State>((set, get) => ({
   leftW: readStoredPanelSize('vai.leftW', 220),
   rightW: readStoredPanelSize('vai.rightW', 280),
   timelineH: readStoredPanelSize('vai.timelineH', 280),
+  rightPanelOpen: readStoredBool('vai.rightPanelOpen', true),
 
   setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
   toggleSelection: (id) => {
@@ -200,6 +217,15 @@ export const useStore = create<State>((set, get) => ({
     const clamped = Math.max(160, Math.min(640, px))
     if (typeof localStorage !== 'undefined') localStorage.setItem(`vai.${key}`, String(clamped))
     set({ [key]: clamped } as Partial<State>)
+  },
+
+  // Toggles the right panel (Properties/History) collapsed/open, persisted
+  // the same way panel sizes are. Does not touch `rightW` — the splitter's
+  // dragged width is preserved underneath the collapse so re-expanding
+  // returns to the same size rather than a fixed default.
+  setRightPanelOpen: (open) => {
+    if (typeof localStorage !== 'undefined') localStorage.setItem('vai.rightPanelOpen', String(open))
+    set({ rightPanelOpen: open })
   },
 
   // --- timeline view + shortcut-driven actions ---

@@ -20,6 +20,11 @@ import { useKeymap } from './keymap/engine'
 // horizontally below it; this banner nudges the user to a wider window.
 const MIN_EDITOR_WIDTH = 900
 
+// Width of the right sidebar's collapsed rail (Task 4b) — just enough for the
+// re-expand tab, so the center pane reclaims the rest without a jarring
+// reflow (the column shrinks to a fixed rail rather than to 0).
+const RIGHT_RAIL_W = 28
+
 export default function App() {
   const init = useStore((s) => s.init)
   useEffect(() => { void init() }, [init])
@@ -32,6 +37,8 @@ export default function App() {
   const rightW = useStore((s) => s.rightW)
   const timelineH = useStore((s) => s.timelineH)
   const setPanelSize = useStore((s) => s.setPanelSize)
+  const rightPanelOpen = useStore((s) => s.rightPanelOpen)
+  const setRightPanelOpen = useStore((s) => s.setRightPanelOpen)
 
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === 'undefined' ? MIN_EDITOR_WIDTH : window.innerWidth)
@@ -45,7 +52,9 @@ export default function App() {
 
   const appVars = {
     '--left-w': `${leftW}px`,
-    '--right-w': `${rightW}px`,
+    // Collapsed: shrink the grid column to a thin rail instead of hiding it
+    // outright — avoids a reflow jump and leaves room for the re-expand tab.
+    '--right-w': rightPanelOpen ? `${rightW}px` : `${RIGHT_RAIL_W}px`,
     '--timeline-h': `${timelineH}px`,
   } as React.CSSProperties
 
@@ -108,10 +117,23 @@ export default function App() {
         // Dragging right moves the mouse away from the right sidebar, which
         // should shrink it — the delta sign is negated relative to leftW.
         onDelta={(d) => setPanelSize('rightW', useStore.getState().rightW - d)}
+        // While collapsed the rail is only 28px — dragging it shouldn't
+        // silently un-collapse the panel; only the explicit tab does that.
+        disabled={!rightPanelOpen}
       />
-      <aside className="sidebar right">
-        <Properties />
-        <OpsLog />
+      <aside className={`sidebar right${rightPanelOpen ? '' : ' collapsed'}`}>
+        <button
+          className="right-panel-toggle"
+          onClick={() => setRightPanelOpen(!rightPanelOpen)}
+          title={rightPanelOpen ? 'Collapse panel' : 'Expand panel'}
+          aria-expanded={rightPanelOpen}
+        >
+          {rightPanelOpen ? '›' : '‹'}
+        </button>
+        <div className="right-panel-content">
+          <Properties />
+          <OpsLog />
+        </div>
       </aside>
       <ChatOverlay />
       <Help />
