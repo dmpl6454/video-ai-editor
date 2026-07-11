@@ -129,45 +129,80 @@ def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
     """Pick the fastest usable H.264 encoder; fall back to libx264.
 
     `crf` is an optional caller-supplied override (e.g. from ExportRequest.crf)
-    for the libx264 quality knob. It's only honored on the libx264 fallback —
-    HW encoders (nvenc/qsv/amf/videotoolbox) keep their own quality ladder
-    (mapping an x264 CRF scale onto their disparate -cq/-q:v/-qp knobs isn't a
-    sensible 1:1, and is explicitly out of scope per the plan). `crf=None`
-    (the default) preserves the exact prior hardcoded values.
+    for the export Quality selector. It's threaded into whichever encoder is
+    actually selected: libx264 takes it directly as `-crf`; HW encoders
+    (nvenc/qsv/amf/videotoolbox) don't have a `-crf` knob, so `_hw_encoder_args`
+    maps it onto each encoder's own quality knob (-q:v / -cq / -global_quality
+    / -qp) — a best-effort approximation, not a calibrated 1:1 (see
+    `_hw_encoder_args`'s docstring). Previously `crf` was silently dropped for
+    HW encoders, making the Quality selector a no-op on e.g. Mac
+    (VideoToolbox). `crf=None` (the default) preserves the exact prior
+    hardcoded values for both branches.
     """
     for name in _HW_ENCODER_ORDER:
         if _usable_encoder(name):
-            return _hw_encoder_args(name, preview=preview)
+            return _hw_encoder_args(name, preview=preview, crf=crf)
     default_crf = 30 if preview else 20
     crf_val = crf if crf is not None else default_crf
     preset = "ultrafast" if preview else "medium"
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf_val), "-pix_fmt", "yuv420p"]
 
 
-def _hw_encoder_args(name: str, *, preview: bool) -> list[str]:
-    """Per-encoder quality-mode args. Values are tuned defaults, not mandates."""
+def _crf_to_videotoolbox_qv(crf: int) -> int:
+    """Map an x264-style crf (0-51, LOWER=better) onto VideoToolbox's -q:v
+    scale (0-100, HIGHER=better) — the two scales run in opposite directions.
+
+    Endpoints chosen so the app's crf presets land in a sensible range
+    around the prior hardcoded default (48 export / 60 preview):
+    crf=18 (High) -> 90, crf=23 (Medium) -> 78, crf=28 (Small/low quality)
+    -> 65. Formula: q = 100 - (crf - 14) * 2.5, clamped to [0, 100].
+    """
+    q = 100 - (crf - 14) * 2.5
+    return int(round(max(0.0, min(100.0, q))))
+
+
+def _hw_encoder_args(name: str, *, preview: bool, crf: int | None = None) -> list[str]:
+    """Per-encoder quality-mode args. Values are tuned defaults, not mandates.
+
+    `crf` (when given) overrides the default quality knob via a best-effort
+    mapping onto each encoder's own scale — HW encoders don't take x264's
+    `-crf` directly:
+      - videotoolbox: `-q:v` (0-100, higher=better) via `_crf_to_videotoolbox_qv`.
+      - nvenc: `-cq` (0-51, lower=better) — same direction/range as crf, used
+        near-identically.
+      - qsv: `-global_quality` (roughly 1-51, lower=better) — used near-identically.
+      - amf: `-qp_i`/`-qp_p` (0-51, lower=better) — crf used directly for `-qp_i`,
+        `-qp_p` offset by +2 to preserve the existing I/P quality gap.
+    These are documented approximations, not a calibrated cross-encoder parity
+    (out of scope per the plan) — the bar is "the knob visibly changes output."
+    `crf=None` reproduces the exact prior hardcoded values.
+    """
     if name == "h264_videotoolbox":
-        q = "60" if preview else "48"
+        q = str(_crf_to_videotoolbox_qv(crf)) if crf is not None else ("60" if preview else "48")
         return ["-c:v", "h264_videotoolbox", "-q:v", q, "-allow_sw", "1",
                 "-realtime", "1" if preview else "0", "-pix_fmt", "yuv420p"]
     if name == "h264_nvenc":
+        cq = str(crf) if crf is not None else ("33" if preview else "21")
         if preview:
             return ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ll",
-                    "-rc", "vbr", "-cq", "33", "-b:v", "0", "-pix_fmt", "yuv420p"]
+                    "-rc", "vbr", "-cq", cq, "-b:v", "0", "-pix_fmt", "yuv420p"]
         return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
-                "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p"]
+                "-rc", "vbr", "-cq", cq, "-b:v", "0", "-pix_fmt", "yuv420p"]
     if name == "h264_qsv":
+        gq = str(crf) if crf is not None else ("30" if preview else "22")
         if preview:
-            return ["-c:v", "h264_qsv", "-global_quality", "30",
+            return ["-c:v", "h264_qsv", "-global_quality", gq,
                     "-preset", "veryfast", "-pix_fmt", "nv12"]
-        return ["-c:v", "h264_qsv", "-global_quality", "22",
+        return ["-c:v", "h264_qsv", "-global_quality", gq,
                 "-preset", "slower", "-pix_fmt", "nv12"]
     if name == "h264_amf":
+        qp_i = crf if crf is not None else (30 if preview else 20)
+        qp_p = qp_i + 2 if crf is not None else (32 if preview else 22)
         if preview:
             return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp",
-                    "-qp_i", "30", "-qp_p", "32", "-pix_fmt", "yuv420p"]
+                    "-qp_i", str(qp_i), "-qp_p", str(qp_p), "-pix_fmt", "yuv420p"]
         return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp",
-                "-qp_i", "20", "-qp_p", "22", "-pix_fmt", "yuv420p"]
+                "-qp_i", str(qp_i), "-qp_p", str(qp_p), "-pix_fmt", "yuv420p"]
     # Unreachable: only called for names in _HW_ENCODER_ORDER.
     return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
 

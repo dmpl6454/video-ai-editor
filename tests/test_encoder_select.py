@@ -45,14 +45,72 @@ def test_crf_none_keeps_existing_default(monkeypatch):
     assert args_preview[args_preview.index("-crf") + 1] == "30"
 
 
-def test_crf_override_ignored_for_hw_encoder(monkeypatch):
-    """HW encoders (nvenc/qsv/amf/videotoolbox) keep their own quality ladder;
-    crf is a libx264-only knob per the plan's explicit scope."""
+def test_crf_override_maps_onto_hw_encoder_quality_knob(monkeypatch):
+    """HW encoders (nvenc/qsv/amf/videotoolbox) don't take -crf, but an
+    explicit crf override must still change their quality knob — otherwise
+    the export Quality selector is a silent no-op on Mac/Windows HW-encoder
+    exports (Task 2c). crf is mapped onto each encoder's own knob
+    (-q:v / -cq / -global_quality / -qp)."""
     monkeypatch.setattr(c, "_usable_encoder", lambda name: name == "h264_nvenc")
     args = c._video_encoder_args(preview=False, crf=28)
     assert "h264_nvenc" in args
     assert "-crf" not in args
-    assert "-cq" in args  # untouched nvenc quality knob
+    assert "-cq" in args
+    cq_default = args[args.index("-cq") + 1]
+
+    args_hi = c._video_encoder_args(preview=False, crf=18)
+    cq_hi = args_hi[args_hi.index("-cq") + 1]
+    assert cq_hi != cq_default
+
+
+def test_hw_encoder_args_default_unchanged_when_crf_none(monkeypatch):
+    """crf=None (the default, e.g. preview renders) must reproduce the exact
+    prior hardcoded per-encoder values byte-for-byte — no regressions to
+    existing preview/export quality when the caller doesn't ask for a
+    specific crf."""
+    assert c._hw_encoder_args("h264_videotoolbox", preview=False, crf=None) == [
+        "-c:v", "h264_videotoolbox", "-q:v", "48", "-allow_sw", "1",
+        "-realtime", "0", "-pix_fmt", "yuv420p",
+    ]
+    assert c._hw_encoder_args("h264_videotoolbox", preview=True, crf=None) == [
+        "-c:v", "h264_videotoolbox", "-q:v", "60", "-allow_sw", "1",
+        "-realtime", "1", "-pix_fmt", "yuv420p",
+    ]
+    assert c._hw_encoder_args("h264_nvenc", preview=False, crf=None) == [
+        "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+        "-rc", "vbr", "-cq", "21", "-b:v", "0", "-pix_fmt", "yuv420p",
+    ]
+
+
+def test_videotoolbox_crf_to_qv_inverse_mapping(monkeypatch):
+    """VideoToolbox -q:v is 0-100, HIGHER=better (opposite of x264 crf, where
+    lower=better). A lower crf (higher quality request) must map to a HIGHER
+    -q:v, and the mapping must be clamped to [0, 100]."""
+    q18 = c._hw_encoder_args("h264_videotoolbox", preview=False, crf=18)
+    q23 = c._hw_encoder_args("h264_videotoolbox", preview=False, crf=23)
+    q28 = c._hw_encoder_args("h264_videotoolbox", preview=False, crf=28)
+
+    def qv(args):
+        return int(args[args.index("-q:v") + 1])
+
+    assert qv(q18) > qv(q23) > qv(q28)
+    # Extreme crf values must stay within ffmpeg's valid 0-100 range.
+    q_extreme_lo = qv(c._hw_encoder_args("h264_videotoolbox", preview=False, crf=0))
+    q_extreme_hi = qv(c._hw_encoder_args("h264_videotoolbox", preview=False, crf=51))
+    assert 0 <= q_extreme_lo <= 100
+    assert 0 <= q_extreme_hi <= 100
+
+
+def test_video_encoder_args_threads_crf_into_hw_encoder(monkeypatch):
+    """_video_encoder_args (the public entry point _render calls) must pass
+    crf through to _hw_encoder_args for the HW branch too, not only libx264."""
+    monkeypatch.setattr(c, "_usable_encoder",
+                        lambda name: name == "h264_videotoolbox")
+    args_18 = c._video_encoder_args(preview=False, crf=18)
+    args_28 = c._video_encoder_args(preview=False, crf=28)
+    qv18 = int(args_18[args_18.index("-q:v") + 1])
+    qv28 = int(args_28[args_28.index("-q:v") + 1])
+    assert qv18 > qv28
 
 
 def test_render_export_threads_crf_into_render(monkeypatch, tmp_path):
