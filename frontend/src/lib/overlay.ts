@@ -71,7 +71,10 @@ export function stickerGeom(
   const scale = override?.scale ?? sampleKF(tx.scale, localT, 1)
   const rot = (sampleKF(tx.rotation, localT, 0) * Math.PI) / 180
   const opa = sampleKF(tx.opacity, localT, 1)
-  const baseSize = Math.min(canvasW, canvasH) * 0.22 * scale
+  // Match the server's sticker sizing (render/text_overlay.py: base = max(w,h)).
+  // Using min() here made the client glyph and the server-baked PNG diverge in
+  // size after an aspect-ratio change (they only agreed on square canvases).
+  const baseSize = Math.max(canvasW, canvasH) * 0.22 * scale
   const size = Math.max(20, baseSize * Math.min(dsx, dsy))
   return { cx: x * dsx, cy: y * dsy, size, rot, opa, scale, x, y }
 }
