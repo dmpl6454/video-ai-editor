@@ -21,7 +21,7 @@ from ..edl import EDL
 from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
-from .effects import effect_chain, render_mask_png, build_chromakey_filter
+from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
 from .pip import build_pip_overlay_chain
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 
@@ -125,14 +125,23 @@ def _usable_encoder(name: str) -> bool:
 _HW_ENCODER_ORDER = ["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"]
 
 
-def _video_encoder_args(*, preview: bool) -> list[str]:
-    """Pick the fastest usable H.264 encoder; fall back to libx264."""
+def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
+    """Pick the fastest usable H.264 encoder; fall back to libx264.
+
+    `crf` is an optional caller-supplied override (e.g. from ExportRequest.crf)
+    for the libx264 quality knob. It's only honored on the libx264 fallback —
+    HW encoders (nvenc/qsv/amf/videotoolbox) keep their own quality ladder
+    (mapping an x264 CRF scale onto their disparate -cq/-q:v/-qp knobs isn't a
+    sensible 1:1, and is explicitly out of scope per the plan). `crf=None`
+    (the default) preserves the exact prior hardcoded values.
+    """
     for name in _HW_ENCODER_ORDER:
         if _usable_encoder(name):
             return _hw_encoder_args(name, preview=preview)
-    crf = "30" if preview else "20"
+    default_crf = 30 if preview else 20
+    crf_val = crf if crf is not None else default_crf
     preset = "ultrafast" if preview else "medium"
-    return ["-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf_val), "-pix_fmt", "yuv420p"]
 
 
 def _hw_encoder_args(name: str, *, preview: bool) -> list[str]:
@@ -355,7 +364,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         ))
         if c.mask is not None and cache_dir is not None:
             mask_path = cache_dir / f"mask_{c.id}_{c.mask.type}_{int(c.mask.feather)}_{canvas_w}x{canvas_h}.png"
-            if not mask_path.exists():
+            if not mask_png_is_valid(mask_path):
                 render_mask_png(c.mask, canvas_w, canvas_h, mask_path)
             pending_masks.append((i, mask_path))
 
@@ -448,11 +457,11 @@ _AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None, on_progress=None,
-            cancel_event=None) -> Path:
+            cancel_event=None, crf: int | None = None) -> Path:
     canvas = edl.canvas
     h_out = height
     w_out = int(round(canvas.w * (h_out / canvas.h) / 2) * 2)
-    enc_args = _video_encoder_args(preview=preview)
+    enc_args = _video_encoder_args(preview=preview, crf=crf)
 
     clips = _video_clips(edl)
     if not clips:
@@ -535,6 +544,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             out_label="[vtxt_final]",
             first_input_index=next_idx,
             out_w=w_out, out_h=h_out,
+            preview=preview,
         )
         if chain:
             fc = fc + ";" + chain
@@ -811,5 +821,5 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     f_out = fps or edl.canvas.fps
     _render(edl, dst, height=h_out, fps=f_out, preview=False,
             cache_dir=session_dir / "cache",
-            on_progress=on_progress, cancel_event=cancel_event)
+            on_progress=on_progress, cancel_event=cancel_event, crf=crf)
     return RenderResult(path=dst, cached=False, edl_hash=h)
