@@ -17,6 +17,7 @@ from pathlib import Path
 # has no parent to anchor to. The package is bundled via collect_submodules, so
 # the absolute name resolves in the EXE, under `-m`, and under pytest alike.
 from video_ai_editor import platformutil as _pu
+from video_ai_editor.storage import is_valid_session_id, session_path
 
 
 def _npm_cmd() -> str:
@@ -79,6 +80,44 @@ def _serve(host: str, port: int) -> None:
                 reload=False, log_level="warning", access_log=False)
 
 
+class _Api:
+    """Bridge exposed to the frontend as `window.pywebview.api`.
+
+    The packaged WKWebView/WebView2 window has no reliable way to surface an
+    OS "Save As" dialog for a plain `<a download>` anchor click (unlike a real
+    browser), so exports silently appear to do nothing. This bridge lets the
+    frontend ask Python — which *can* drive a native file dialog via
+    pywebview — to copy the already-rendered export out of the session's
+    `exports/` dir to a user-chosen location instead.
+    """
+
+    def save_export(self, session_id: str, filename: str) -> str | None:
+        """Copy an exported file to a user-chosen location via the native
+        save dialog. Returns the chosen destination path, or None if the
+        session/file is invalid or the user cancelled the dialog."""
+        if not is_valid_session_id(session_id):
+            return None
+        # Reject any filename that isn't a bare leaf (e.g. "../../etc/passwd")
+        # before it ever touches the filesystem — the same belt-and-suspenders
+        # posture as storage.delete_session's path-traversal guard.
+        if not filename or Path(filename).name != filename:
+            return None
+        src = session_path(session_id) / "exports" / filename
+        if not src.exists():
+            return None
+        import webview  # lazy: mirrors main()'s import, keeps this module
+                         # importable (e.g. under pytest) without a GUI toolkit
+        win = webview.windows[0]
+        dest = win.create_file_dialog(
+            webview.FileDialog.SAVE, save_filename=filename,
+        )
+        if not dest:
+            return None
+        dest_path = dest if isinstance(dest, str) else dest[0]
+        shutil.copy2(src, dest_path)
+        return dest_path
+
+
 def main() -> None:
     _ensure_frontend_built()
     host = os.environ.get("VAE_HOST", "127.0.0.1")
@@ -98,6 +137,7 @@ def main() -> None:
         width=1480, height=920,
         min_size=(1100, 700),
         easy_drag=False,
+        js_api=_Api(),
     )
     try:
         webview.start()

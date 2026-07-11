@@ -431,8 +431,7 @@ export const useStore = create<State>((set, get) => ({
           // it "outdated" once the user edits past this point.
           set({ exportUrl: job.result.url, exportStatus: null, exportProgress: 1,
                 exportGen: get().ops.length })
-          triggerDownload(job.result.url, job.result.filename)
-          toast.success('Export complete — downloading…')
+          await triggerDownload(job.result.url, job.result.filename, sid)
           return
         }
         if (job.status === 'failed') {
@@ -488,10 +487,41 @@ export const useStore = create<State>((set, get) => ({
   },
 }))
 
-// Programmatically click a temporary <a download> so a finished export lands
-// in the user's downloads without them hunting for a link. Kept module-scoped
-// (not in a component) so it can fire from the store's polling loop.
-function triggerDownload(url: string, filename: string): void {
+// Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
+// js_api — only the one method this file calls, not the whole class.
+interface PywebviewBridge {
+  pywebview?: { api?: { save_export?: (sid: string, filename: string) => Promise<string | null> } }
+}
+
+// A finished export needs to reach the user's disk. In a real browser an
+// `<a download>` click does that natively. But the packaged app runs inside
+// pywebview's WKWebView/WebView2 (no Chrome/Safari chrome around it), which
+// has no reliable way to surface an OS "Save As" dialog for that anchor click
+// — the export renders fine but nothing visibly happens (issue: "export
+// can't be downloaded"). When running inside pywebview we instead call the
+// native `save_export` bridge (desktop.py's `_Api`), which drives a real save
+// dialog and copies the file server-side. Browser-dev mode has no
+// `window.pywebview`, so it falls through to the anchor path unchanged.
+// Kept module-scoped (not in a component) so it can fire from the store's
+// polling loop.
+async function triggerDownload(url: string, filename: string, sessionId: string | null): Promise<void> {
+  const py = (window as unknown as PywebviewBridge).pywebview
+  if (py?.api?.save_export && sessionId) {
+    try {
+      const saved = await py.api.save_export(sessionId, filename)
+      if (saved) {
+        toast.success(`Saved to ${saved}`)
+        return
+      }
+      // User cancelled the native dialog — nothing was saved, and falling
+      // through to the anchor click below wouldn't help (same WKWebView/
+      // WebView2 limitation), so just stop here without a false success toast.
+      return
+    } catch {
+      // Bridge call itself failed (e.g. older packaged build without the
+      // bridge) — fall through to the anchor path as a best effort.
+    }
+  }
   const a = document.createElement('a')
   a.href = url
   a.download = filename
@@ -499,6 +529,7 @@ function triggerDownload(url: string, filename: string): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
+  toast.success('Export complete — downloading…')
 }
 
 // Helper used by the timeline to find the clip under a given timeline time.
