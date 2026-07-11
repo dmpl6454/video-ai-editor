@@ -21,6 +21,7 @@ M2 routes:
 """
 from __future__ import annotations
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -38,7 +39,7 @@ from pydantic import BaseModel
 from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
 from .storage import (new_session_id, session_dir, session_exists,
-                       list_sessions, write_meta, read_meta)
+                       list_sessions, write_meta, read_meta, delete_session)
 from .edl import EDLStore
 from .edl.schema import Canvas
 from .ingest import ingest_upload
@@ -280,7 +281,18 @@ def get_session(sid: str):
         "name": meta.get("name", sid),
         "summary": dispatch(store, "get_timeline", {"summary": True}),
         "ops": [op.model_dump() for op in store.ops.ops[-25:]],
+        "redo_available": store.redo_available,
     }
+
+
+@app.delete("/api/sessions/{sid}")
+def delete_session_route(sid: str):
+    with _STORES_LOCK:
+        _STORES.pop(sid, None)  # drop the cached store so it can't resurrect the dir
+    existed = delete_session(sid)
+    if not existed:
+        raise HTTPException(404, {"code": "not_found", "message": "session not found"})
+    return {"deleted": sid}
 
 
 @app.post("/api/sessions/{sid}/vo_record")
@@ -399,6 +411,32 @@ async def audio_upload(sid: str, file: UploadFile = File(...),
     return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash()}
 
 
+def _match_canvas_to_source(store, probe) -> None:
+    """Set the canvas orientation to match the first uploaded source.
+
+    Every fresh session starts with the hardcoded vertical 1080x1920 default
+    (edl/schema.py Canvas, empty_edl()) regardless of what gets uploaded — so
+    a landscape source lands in a portrait canvas and gets pillarboxed (the
+    compositor preserves aspect ratio via scale+pad, so it's letterboxed, not
+    stretched/distorted as sometimes reported, but the thick black bars read
+    just as badly). Only called for the FIRST upload into an empty timeline
+    (see the `was_empty` check at the call site) — a later upload into an
+    existing project must not silently resize the canvas the user is already
+    working in.
+    """
+    video = probe.video
+    if not video or not video.width or not video.height:
+        return
+    w, h = video.width, video.height
+    if w == h:
+        ratio = "1:1"
+    elif w > h:
+        ratio = "16:9"
+    else:
+        ratio = "9:16"
+    dispatch(store, "set_aspect_ratio", {"ratio": ratio})
+
+
 @app.post("/api/sessions/{sid}/upload")
 async def upload(sid: str, background_tasks: BackgroundTasks,
                  file: UploadFile = File(...),
@@ -442,6 +480,10 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
         })
 
     if add_to_timeline:
+        v1 = store.edl.get_track("v1")
+        was_empty = not any(True for _ in (v1.clips if v1 else []))
+        if was_empty:
+            _match_canvas_to_source(store, res.probe)
         store.edl.recompute_duration()
         start = store.edl.duration
         dispatch(store, "add_clip", {
@@ -451,6 +493,15 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
             "out": res.probe.duration,
             "start": start,
         })
+        if was_empty:
+            # This upload starts a brand-new project on an empty timeline —
+            # any chat history is necessarily about DIFFERENT, no-longer-
+            # present footage (or a prior session's resumed project). Replaying
+            # it to Claude is how "describe this video" answers end up
+            # describing a video from a past conversation. A mid-project
+            # upload (b-roll added to existing footage) intentionally keeps
+            # history, since that context is still relevant.
+            _save_history(sid, [])
 
     if transcribe:
         # Run whisper after we've returned. Writes to ingest.json so subsequent
@@ -533,6 +584,27 @@ def _preview_payload(sid: str, res) -> dict:
     }
 
 
+def _render_failure_message(ffmpeg_tail: str) -> str:
+    """Pick a user-facing message for a render_failed 422.
+
+    ffmpeg's stderr names the file it choked on. If that file lives under our
+    own overlay-PNG cache (st_/text_/sa_/mask_ prefixes), the corrupt input is
+    an app-generated rasterized overlay, not the user's uploaded media — say
+    so instead of implying their video/audio file is bad.
+    """
+    # st_/text_/sa_ cache files are named "<prefix><16-hex-char content hash>.png"
+    # (text_overlay.py); mask_ files are "mask_<clip_id>_<type>_<feather>_<w>x<h>.png"
+    # (compositor.py/chunks.py) — a much less regular shape, so it gets its own
+    # alternative rather than trying to force one pattern to fit both.
+    if re.search(r"[\\/](?:st_|text_|sa_)[0-9a-f]+\.png", ffmpeg_tail) or \
+       re.search(r"[\\/]mask_[^\\/]+\.png", ffmpeg_tail):
+        return ("Couldn't render a preview — a cached text/sticker overlay "
+                 "image was corrupted. Retrying will regenerate it; your "
+                 "media is fine.")
+    return ("Couldn't render a preview for this clip — it may have corrupt "
+             "frames or an unusual codec.")
+
+
 @app.post("/api/sessions/{sid}/preview")
 def make_preview(sid: str, wait: int = 1):
     """Render a preview.
@@ -554,9 +626,7 @@ def make_preview(sid: str, wait: int = 1):
             msg = str(e)
             tail = msg[-400:] if len(msg) > 400 else msg
             raise HTTPException(422, {"error": "render_failed",
-                                      "message": "Couldn't render a preview for "
-                                      "this clip — it may have corrupt frames or "
-                                      "an unusual codec.",
+                                      "message": _render_failure_message(tail),
                                       "ffmpeg": tail})
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER

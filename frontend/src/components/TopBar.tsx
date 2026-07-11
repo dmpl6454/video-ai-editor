@@ -114,6 +114,19 @@ export function TopBar() {
     await refresh()
   }
 
+  const removeSession = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()  // don't trigger switchSession
+    if (!window.confirm(`Delete project ${id}? This removes its media and history permanently.`)) return
+    await api.deleteSession(id)
+    const list = await api.listSessions()
+    setSessions(list.sessions)
+    // If we deleted the active session, switch to the newest remaining, or create one.
+    if (id === sid) {
+      const next = list.sessions[0]?.id ?? (await api.createSession()).id
+      await switchSession(next)
+    }
+  }
+
   return (
     <header className="topbar">
       <h1>Video AI Editor</h1>
@@ -176,10 +189,22 @@ export function TopBar() {
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = s.id === sid ? 'var(--bg-3)' : 'transparent')}
               >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                   {s.name || s.id}
                 </span>
                 <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>{s.id.slice(0, 10)}</span>
+                <button
+                  onClick={(e) => removeSession(s.id, e)}
+                  title={`Delete project ${s.id}`}
+                  style={{
+                    background: 'transparent', border: 'none', color: 'var(--text-dim)',
+                    cursor: 'pointer', fontSize: 12, padding: '0 2px', lineHeight: 1,
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = '#ff4d6d')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
+                >
+                  ×
+                </button>
               </div>
             ))}
           </div>,

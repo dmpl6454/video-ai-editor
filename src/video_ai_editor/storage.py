@@ -35,6 +35,16 @@ def session_exists(session_id: str) -> bool:
     return session_path(session_id).exists()
 
 
+def delete_session(session_id: str) -> bool:
+    """Remove a session directory and all its media/state. Returns True if it
+    existed. Idempotent — deleting a missing session is a no-op returning False."""
+    d = session_path(session_id)
+    if not d.exists():
+        return False
+    shutil.rmtree(d, ignore_errors=False)
+    return True
+
+
 def list_sessions() -> list[dict]:
     sessions = []
     for d in sorted(WORKDIR.glob("s_*"), key=lambda p: p.stat().st_mtime, reverse=True):

@@ -42,6 +42,8 @@ export const api = {
 
   getSession: (sid: string) => http<SessionInfo>('GET', `/sessions/${sid}`),
 
+  deleteSession: (sid: string) => http<{ deleted: string }>('DELETE', `/sessions/${sid}`),
+
   getEDL: (sid: string) => http<EDL>('GET', `/sessions/${sid}/edl`),
 
   getOps: (sid: string, since = 0) =>
