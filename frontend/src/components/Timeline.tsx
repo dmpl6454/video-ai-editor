@@ -1,7 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
+import { toast } from '../toast'
 import { isMediaClip, type AnyClip } from '../types'
+
+// Lane compatibility: which track TYPES a given clip kind may live on. Media
+// clips (video/audio files) belong on video-family or audio-family tracks;
+// stickers/text belong on their own dedicated track types. Previously
+// neither the frontend drop handlers nor the backend enforced this at all —
+// dropping a video clip on the captions row, for instance, silently
+// redirected to v1 (reading as "nothing happened" for the row the user
+// actually aimed at) and a cross-track DRAG could park a media clip on a
+// text/sticker/captions track with no feedback, where the renderer then
+// silently ignores it entirely (issues 41/42/43, "anything can be placed
+// anywhere").
+const VIDEO_FAMILY = new Set(['video'])
+const AUDIO_FAMILY = new Set(['audio', 'music', 'vo'])
+function laneAcceptsMediaClip(trackType: string): boolean {
+  return VIDEO_FAMILY.has(trackType) || AUDIO_FAMILY.has(trackType)
+}
 
 // Per-source waveform cache: src path → peaks array. Fetched once, reused on
 // every redraw. The peaks themselves are independent of timeline placement.
@@ -51,7 +68,7 @@ export function Timeline() {
 
   // drag state for moving / trimming clips
   const dragRef = useRef<null | {
-    kind: 'move' | 'trim-l' | 'trim-r'
+    kind: 'move' | 'trim-l' | 'trim-r' | 'playhead'
     clipId: string
     trackId: string
     startX: number
@@ -80,6 +97,26 @@ export function Timeline() {
     ),
     [edl]
   )
+
+  // The canvas is sized to the full timeline CONTENT, not the viewport — the
+  // wrapper scrolls it natively (overflow:auto). Previously the canvas was
+  // sized to the viewport (`size.w`/`size.h`) and anything past that was
+  // simply never drawn (`if (x > size.w) break`), so there was nothing to
+  // scroll to: only ctrl/meta+wheel zoom worked. `Math.max(size.w, …)` keeps
+  // a short timeline filling the visible pane instead of leaving a gap.
+  const labelWidth = 80
+  const trackHeight = 36
+  const headerHeight = 24
+  const contentW = Math.max(size.w, labelWidth + ((edl?.duration ?? 0) + 30) * zoom)
+  // contentH is the CONTENT height only (no `Math.max(size.h, …)`) — the wrap
+  // is `flex:1; overflow:auto` and handles the viewport itself. Clamping to
+  // size.h here used to make contentH transiently equal a stale/large
+  // viewport height right after a panel resize (or whenever there are fewer
+  // rows than fit), which made `wrap.scrollHeight <= wrap.clientHeight` even
+  // when the wrap box was genuinely smaller than the rows — i.e. the browser
+  // never saw real vertical overflow to scroll, which is part of why plain
+  // vertical wheel "did nothing" further down in onWheel.
+  const contentH = headerHeight + tracks.length * (trackHeight + 4) + 4
 
   // Kick off waveform fetches for any clip srcs we haven't loaded yet. Audio/
   // music/vo always show waveforms; video tracks show them too because their
@@ -110,10 +147,6 @@ export function Timeline() {
     }
   }, [sid, edl])
 
-  const trackHeight = 36
-  const headerHeight = 24
-  const labelWidth = 80
-
   function trackY(i: number): number {
     return headerHeight + i * (trackHeight + 4)
   }
@@ -140,21 +173,25 @@ export function Timeline() {
   useEffect(() => {
     const cv = canvasRef.current
     if (!cv) return
-    cv.width = size.w * dpr
-    cv.height = size.h * dpr
-    cv.style.width = `${size.w}px`
-    cv.style.height = `${size.h}px`
+    // Sized to the full CONTENT (contentW/contentH), not the viewport — the
+    // wrapper's native overflow:auto scrolls it. This is what makes the
+    // timeline scrollable at all: previously the canvas was viewport-sized
+    // and anything past the visible edge was never drawn in the first place.
+    cv.width = contentW * dpr
+    cv.height = contentH * dpr
+    cv.style.width = `${contentW}px`
+    cv.style.height = `${contentH}px`
     const ctx = cv.getContext('2d')!
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, size.w, size.h)
+    ctx.clearRect(0, 0, contentW, contentH)
 
     // bg
     ctx.fillStyle = '#16161a'
-    ctx.fillRect(0, 0, size.w, size.h)
+    ctx.fillRect(0, 0, contentW, contentH)
 
     // ruler
     ctx.fillStyle = '#1d1d22'
-    ctx.fillRect(labelWidth, 0, size.w - labelWidth, headerHeight)
+    ctx.fillRect(labelWidth, 0, contentW - labelWidth, headerHeight)
     ctx.font = '10px var(--font-ui)'
     ctx.fillStyle = '#9b9ba5'
     const dur = edl?.duration ?? 0
@@ -162,7 +199,7 @@ export function Timeline() {
     const tickSec = niceTick(pixelsPerTick / zoom)
     for (let t = 0; t <= dur + 30; t += tickSec) {
       const x = labelWidth + t * zoom
-      if (x > size.w) break
+      if (x > contentW) break
       ctx.fillRect(x, headerHeight - 4, 1, 4)
       ctx.fillText(formatTime(t), x + 3, headerHeight - 7)
     }
@@ -190,9 +227,9 @@ export function Timeline() {
 
       // track row bg
       ctx.fillStyle = t.muted ? '#15151a' : '#1a1a1f'
-      ctx.fillRect(labelWidth, y, size.w - labelWidth, trackHeight)
+      ctx.fillRect(labelWidth, y, contentW - labelWidth, trackHeight)
       ctx.strokeStyle = '#22222a'
-      ctx.strokeRect(labelWidth + 0.5, y + 0.5, size.w - labelWidth - 1, trackHeight - 1)
+      ctx.strokeRect(labelWidth + 0.5, y + 0.5, contentW - labelWidth - 1, trackHeight - 1)
 
       // clips
       const showWaveOn = ['video', 'audio', 'music', 'vo'].includes(t.type)
@@ -273,9 +310,9 @@ export function Timeline() {
     const markers = (edl?.markers ?? []) as { id: string; time: number; label: string; color?: string }[]
     for (const m of markers) {
       const mx = labelWidth + m.time * zoom
-      if (mx < labelWidth || mx > size.w) continue
+      if (mx < labelWidth || mx > contentW) continue
       ctx.fillStyle = m.color ?? '#fbbf24'
-      ctx.fillRect(mx, headerHeight, 1.5, size.h - headerHeight)
+      ctx.fillRect(mx, headerHeight, 1.5, contentH - headerHeight)
       // diamond at the ruler line
       ctx.beginPath()
       ctx.moveTo(mx, headerHeight - 6)
@@ -296,35 +333,80 @@ export function Timeline() {
       const a = labelWidth + (inMark ?? 0) * zoom
       const b = labelWidth + (outMark ?? (edl?.duration ?? 0)) * zoom
       ctx.fillStyle = 'rgba(91,141,255,0.15)'
-      ctx.fillRect(a, headerHeight, b - a, size.h - headerHeight)
+      ctx.fillRect(a, headerHeight, b - a, contentH - headerHeight)
       ctx.fillStyle = '#5b8dff'
-      if (inMark != null) ctx.fillRect(a, 0, 1.5, size.h)
-      if (outMark != null) ctx.fillRect(b, 0, 1.5, size.h)
+      if (inMark != null) ctx.fillRect(a, 0, 1.5, contentH)
+      if (outMark != null) ctx.fillRect(b, 0, 1.5, contentH)
     }
 
     // (playhead drawn on a separate cheap overlay canvas — see playheadCanvasRef)
     // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps)
-  }, [edl, selection, multiSelection, zoom, size, dpr, waveTick, inMark, outMark, flashClipId])
+  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, inMark, outMark, flashClipId])
+
+  // Sticky track-label column. The main canvas draws labels at its own x=0,
+  // but that canvas is the thing that SCROLLS (contentW-sized) — so once the
+  // user scrolls right to see later footage, the labels scroll away with it
+  // and there's no way to tell which row is which. This small canvas is
+  // exactly labelWidth wide, `position: absolute` and re-translated to track
+  // wrapRef.scrollLeft on every scroll (see the effect below `onWheel`), so
+  // it stays pinned to the visible left edge while the main canvas scrolls
+  // underneath/behind it.
+  const labelCanvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const cv = labelCanvasRef.current
+    if (!cv) return
+    cv.width = Math.max(1, Math.round(labelWidth * dpr))
+    cv.height = Math.max(1, Math.round(contentH * dpr))
+    cv.style.width = `${labelWidth}px`
+    cv.style.height = `${contentH}px`
+    const ctx = cv.getContext('2d')!
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, labelWidth, contentH)
+    // Ruler-row corner (matches the main canvas's ruler background so the
+    // seam between the two canvases is invisible).
+    ctx.fillStyle = '#1d1d22'
+    ctx.fillRect(0, 0, labelWidth, headerHeight)
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i]
+      const y = trackY(i)
+      ctx.fillStyle = '#1d1d22'
+      ctx.fillRect(0, y, labelWidth, trackHeight)
+      ctx.fillStyle = t.muted ? '#5a5a64' : '#9b9ba5'
+      ctx.font = '11px var(--font-ui)'
+      ctx.fillText(t.label ?? t.id, 22, y + trackHeight / 2 + 4)
+
+      const muteX = 6
+      const muteY = y + trackHeight / 2 - 6
+      ctx.fillStyle = t.muted ? '#ff4d6d' : '#3a3a44'
+      ctx.fillRect(muteX, muteY, 12, 12)
+      ctx.fillStyle = t.muted ? '#fff' : '#9b9ba5'
+      ctx.font = 'bold 9px var(--font-ui)'
+      ctx.fillText('M', muteX + 3, muteY + 9)
+    }
+  }, [tracks, contentH, dpr])
 
   // Cheap playhead-only overlay redraw — avoids re-tessellating the whole
-  // timeline 60×/s while the video plays.
+  // timeline 60×/s while the video plays. Sized to the same full CONTENT
+  // dimensions as the main canvas (not the viewport) so it scrolls in lockstep
+  // with it inside the shared wrapper, instead of the two disagreeing about
+  // where x=0 is once the wrapper is scrolled.
   const playheadCanvasRef = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const cv = playheadCanvasRef.current
     if (!cv) return
-    cv.width = Math.max(1, Math.round(size.w * dpr))
-    cv.height = Math.max(1, Math.round(size.h * dpr))
-    cv.style.width = `${size.w}px`
-    cv.style.height = `${size.h}px`
+    cv.width = Math.max(1, Math.round(contentW * dpr))
+    cv.height = Math.max(1, Math.round(contentH * dpr))
+    cv.style.width = `${contentW}px`
+    cv.style.height = `${contentH}px`
     const ctx = cv.getContext('2d')!
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, size.w, size.h)
+    ctx.clearRect(0, 0, contentW, contentH)
     const ph = labelWidth + playhead * zoom
     ctx.strokeStyle = '#ff4d6d'
     ctx.lineWidth = 1.5
     ctx.beginPath()
     ctx.moveTo(ph, 0)
-    ctx.lineTo(ph, size.h)
+    ctx.lineTo(ph, contentH)
     ctx.stroke()
     ctx.fillStyle = '#ff4d6d'
     ctx.beginPath()
@@ -333,7 +415,7 @@ export function Timeline() {
     ctx.lineTo(ph, 8)
     ctx.closePath()
     ctx.fill()
-  }, [playhead, zoom, size, dpr])
+  }, [playhead, zoom, contentW, contentH, dpr])
 
 
   // mouse → seek / select / drag
@@ -342,27 +424,32 @@ export function Timeline() {
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
 
-    // Click in ruler area → seek. Clamp to [0, duration] so clicking the
-    // empty ruler past the last clip doesn't send the <video> past its end
-    // (which renders as solid black).
-    if (y < headerHeight && x > labelWidth) {
+    // Click in the ruler, OR within a few px of the current playhead line
+    // anywhere in the track area, starts a DRAG (live-scrubbing via
+    // onMouseMove below) rather than a single one-shot seek. Previously the
+    // playhead could only be moved by a click landing in the 24px-tall ruler
+    // strip — a tiny target — and there was no way to drag it at all (the
+    // playhead itself is a separate pointer-events:none overlay canvas, and
+    // onMouseMove was an intentional no-op). Clamp to [0, duration] so
+    // scrubbing past the last clip doesn't send the <video> past its end.
+    const playheadX = labelWidth + playhead * zoom
+    const nearPlayhead = Math.abs(x - playheadX) <= 5
+    if ((y < headerHeight && x > labelWidth) || (x > labelWidth && nearPlayhead)) {
+      dragRef.current = {
+        kind: 'playhead',
+        clipId: '', trackId: '',
+        startX: e.clientX, origStart: 0, origIn: 0, origOut: 0,
+      }
       const raw = Math.max(0, (x - labelWidth) / zoom)
       const dur = edl?.duration ?? raw
       setPlayhead(Math.min(raw, dur))
       return
     }
 
-    // Click on the mute square in a track label
-    if (x >= 6 && x <= 18) {
-      for (let i = 0; i < tracks.length; i++) {
-        const ty = trackY(i)
-        if (y >= ty + trackHeight / 2 - 6 && y <= ty + trackHeight / 2 + 6) {
-          const t = tracks[i]
-          void dispatch('set_track_muted', { track: t.id, muted: !t.muted })
-          return
-        }
-      }
-    }
+    // Note: the mute-toggle click (x < labelWidth) is handled by the sticky
+    // label canvas's own onLabelMouseDown — that canvas sits ON TOP of this
+    // one (z-index) at the label column regardless of scroll position, so a
+    // click there never reaches this handler at all.
 
     // Hit-test clips
     const hit = hits.find((h) => x >= h.x && x <= h.x + h.w && y >= h.y + 4 && y <= h.y + h.h - 4)
@@ -393,8 +480,49 @@ export function Timeline() {
   }
 
   function onMouseMove(_e: React.MouseEvent) {
-    // Optimistic in-flight drag preview is M1-deferred; we commit on mouseup.
+    // Clip move/trim previews are commit-on-release (dt computed in onMouseUp
+    // from the total drag distance) — deliberately unchanged here. Playhead
+    // scrubbing is the one case that needs LIVE feedback while dragging, and
+    // is handled by the window-level listener below so it keeps working even
+    // if the pointer leaves the canvas mid-drag.
   }
+
+  // Window-level drag listeners: a canvas-only onMouseMove/onMouseUp binding
+  // means a drag that leaves the canvas bounds (dragging fast, or wide
+  // gestures on a small viewport) never receives its mouseup and gets stuck.
+  // Binding to `window` for the lifetime of any active drag fixes both that
+  // AND lets playhead scrubbing live-update as the pointer moves.
+  useEffect(() => {
+    function onWindowMouseMove(e: MouseEvent) {
+      const drag = dragRef.current
+      if (!drag || drag.kind !== 'playhead' || !canvasRef.current) return
+      const rect = canvasRef.current.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const raw = Math.max(0, (x - labelWidth) / zoom)
+      const dur = edl?.duration ?? raw
+      setPlayhead(Math.min(raw, dur))
+    }
+    function onWindowMouseUp(e: MouseEvent) {
+      if (dragRef.current?.kind === 'playhead') {
+        dragRef.current = null
+        return
+      }
+      // Non-playhead drags (clip move/trim) are committed by the canvas's own
+      // onMouseUp React handler in the normal case; this only catches the
+      // case where the pointer was released OUTSIDE the canvas, which the
+      // canvas-scoped handler would never see at all.
+      if (dragRef.current && canvasRef.current && !canvasRef.current.contains(e.target as Node)) {
+        void onMouseUp(e as unknown as React.MouseEvent)
+      }
+    }
+    window.addEventListener('mousemove', onWindowMouseMove)
+    window.addEventListener('mouseup', onWindowMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onWindowMouseMove)
+      window.removeEventListener('mouseup', onWindowMouseUp)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom, edl?.duration])
 
   // Collect all snap targets: clip start, clip end, the playhead. Snap edges
   // to within `snapPx` pixels; converts to seconds via the current zoom.
@@ -447,7 +575,26 @@ export function Timeline() {
       const rawNewStart = Math.max(0, drag.origStart + dt)
       const newStart = snapTime(rawNewStart, drag.clipId)
       const args: Record<string, unknown> = { clip_id: drag.clipId, new_start: newStart }
-      if (targetTrackId && targetTrackId !== drag.trackId) args.new_track = targetTrackId
+      if (targetTrackId && targetTrackId !== drag.trackId) {
+        // Only follow the clip onto a track whose TYPE can actually hold it.
+        // The clip's own kind is inferred from its ORIGIN track (a media clip
+        // only ever lives on a video/audio-family track to begin with) —
+        // dragging it onto e.g. the captions/stickers row used to silently
+        // move it there with `move_clip`, where the renderer then just
+        // ignores it entirely (collect_text_clips/collect_stickers only
+        // look at their own track types), reading as "it vanished".
+        const originType = tracks.find((t) => t.id === drag.trackId)?.type
+        const targetType = tracks.find((t) => t.id === targetTrackId)?.type
+        const originIsMediaFamily = originType ? laneAcceptsMediaClip(originType) : true
+        const targetIsCompatible = targetType
+          ? (originIsMediaFamily ? laneAcceptsMediaClip(targetType) : targetType === originType)
+          : true
+        if (targetIsCompatible) {
+          args.new_track = targetTrackId
+        } else {
+          toast.error(`Can't move this clip to the "${targetType}" lane — it stayed on "${originType}".`)
+        }
+      }
       await dispatch('move_clip', args)
     } else if (drag.kind === 'trim-l') {
       // Trim-left snaps the visible clip start (= origStart + delta) to neighbors.
@@ -499,15 +646,27 @@ export function Timeline() {
     const src = e.dataTransfer.getData('application/x-vai-src')
               || e.dataTransfer.getData('text/plain')
     if (!src) return
-    // Track from y: if the user dropped on a video row (v1 OR v2/etc.), use it;
-    // otherwise default to v1.
-    let trackId = 'v1'
+    // Find whichever row the drop actually landed on (any type, not just
+    // video) so we can tell an incompatible-lane drop apart from "dropped
+    // below all rows" and give real feedback instead of a silent redirect.
+    let droppedOnTrackId: string | undefined
+    let droppedOnTrackType: string | undefined
     for (let i = 0; i < tracks.length; i++) {
       const ty = trackY(i)
-      if (y >= ty && y <= ty + trackHeight && tracks[i].type === 'video') {
-        trackId = tracks[i].id
+      if (y >= ty && y <= ty + trackHeight) {
+        droppedOnTrackId = tracks[i].id
+        droppedOnTrackType = tracks[i].type
         break
       }
+    }
+    let trackId = 'v1'
+    if (droppedOnTrackType && laneAcceptsMediaClip(droppedOnTrackType)) {
+      trackId = droppedOnTrackId!
+    } else if (droppedOnTrackType) {
+      // Landed on an incompatible row (text/sticker/captions/effect) — say
+      // so and fall back to v1, rather than silently placing it there with
+      // no indication the drop target was wrong.
+      toast.error(`Media can't go on the "${droppedOnTrackType}" lane — added to the main video track instead.`)
     }
     // Probe duration via a quick HEAD-ish request: we don't have one, so we
     // pass out=0 and let the backend default to the source duration if it can,
@@ -554,12 +713,100 @@ export function Timeline() {
     }
   }, [contextMenu])
 
-  function onWheel(e: React.WheelEvent) {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault()
-      setZoomStore(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))
-    } else if (wrapRef.current) {
-      wrapRef.current.scrollLeft += e.deltaX
+  // Wheel handling is wired as a NATIVE (non-React) listener with
+  // `{ passive: false }`, not a JSX `onWheel` prop. React attaches its
+  // synthetic `wheel`/`touchstart`/`touchmove` root listeners as PASSIVE by
+  // default (matching the browsers' own scroll-performance intervention),
+  // so `e.preventDefault()` inside a JSX `onWheel` handler is a silent
+  // no-op — Chrome logs "Unable to preventDefault inside passive event
+  // listener invocation" and the native scroll/zoom-page gesture still
+  // fires underneath whatever the handler computed. That was already
+  // silently broken for the old plain-wheel→horizontal-pan mapping and the
+  // ⌘/Ctrl+wheel zoom guard; it would have equally broken the new
+  // shift-always-horizontal branch below. A manually-attached listener can
+  // opt out of passive mode, so `preventDefault()` actually suppresses the
+  // browser's native scroll/page-zoom when we want to fully own the gesture
+  // (⌘/Ctrl zoom, shift-pan, and the no-vertical-overflow horizontal-pan
+  // fallback) while still allowing it to fall through untouched for the
+  // vertical-scroll-wins case (we simply don't call preventDefault there).
+  useEffect(() => {
+    const cv = canvasRef.current
+    if (!cv) return
+    function handleWheel(e: WheelEvent) {
+      // ⌘/Ctrl+wheel always zooms, regardless of vertical overflow.
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        setZoomStore(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))
+        return
+      }
+      const wrap = wrapRef.current
+      if (!wrap) return
+      // Shift+wheel is an explicit "pan horizontally" gesture — always honor
+      // it, even when rows overflow vertically (matches every NLE's
+      // shift-scrub convention).
+      if (e.shiftKey) {
+        e.preventDefault()
+        wrap.scrollLeft += e.deltaY || e.deltaX
+        return
+      }
+      // Previously a plain vertical wheel was UNCONDITIONALLY converted to
+      // horizontal `scrollLeft` with `preventDefault()`, so a lower track
+      // row (e.g. captions) was reachable only via scrollbar-drag or an
+      // accidentally-horizontal trackpad gesture — vertical scroll never
+      // won, even when there were more rows than fit. The fix: when the
+      // wrap box genuinely overflows vertically AND the gesture is
+      // vertical-dominant, let the browser's native vertical scroll happen
+      // (no preventDefault) so rows below the fold become reachable. Only
+      // fall back to the horizontal-pan mapping when there's nothing to
+      // scroll vertically to.
+      const canScrollV = wrap.scrollHeight > wrap.clientHeight
+      if (canScrollV && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+        return // native vertical scroll — do not preventDefault
+      }
+      // No vertical overflow (or a horizontal-dominant gesture): map
+      // vertical wheel → horizontal pan, matching every timeline editor's
+      // convention (CapCut, Premiere, FCP all scroll the timeline
+      // horizontally on a plain wheel when there's nothing below the fold
+      // to scroll to).
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault()
+        wrap.scrollLeft += e.deltaY
+      }
+    }
+    cv.addEventListener('wheel', handleWheel, { passive: false })
+    return () => cv.removeEventListener('wheel', handleWheel)
+  }, [zoom, setZoomStore])
+
+  // Keep the sticky label canvas pinned to the wrapper's visible left edge as
+  // it scrolls horizontally (translateX cancels out scrollLeft). A plain CSS
+  // `position: sticky` doesn't work here because the label canvas needs to
+  // OVERLAY the main canvas at the same row positions, not stack after it in
+  // normal flow — so this is a small manual re-implementation of "sticky"
+  // using `position: absolute` + a scroll listener instead.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    const label = labelCanvasRef.current
+    if (!wrap || !label) return
+    const onScroll = () => { label.style.transform = `translateX(${wrap.scrollLeft}px)` }
+    onScroll()
+    wrap.addEventListener('scroll', onScroll)
+    return () => wrap.removeEventListener('scroll', onScroll)
+  }, [contentW])
+
+  // Mute-toggle click on the sticky label canvas. Coordinates here are
+  // already relative to the label canvas's own (unscrolled) origin, so no
+  // scrollLeft adjustment is needed — unlike the main canvas's onMouseDown.
+  function onLabelMouseDown(e: React.MouseEvent) {
+    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    if (x < 6 || x > 18) return
+    for (let i = 0; i < tracks.length; i++) {
+      const ty = trackY(i)
+      if (y >= ty + trackHeight / 2 - 6 && y <= ty + trackHeight / 2 + 6) {
+        void dispatch('set_track_muted', { track: tracks[i].id, muted: !tracks[i].muted })
+        return
+      }
     }
   }
 
@@ -570,7 +817,7 @@ export function Timeline() {
         <input type="range" min={10} max={600} value={zoom} onChange={(e) => setZoomStore(Number(e.target.value))} style={{ width: 120 }} />
         <span className="small">{zoom}px/s</span>
         <div style={{ flex: 1 }} />
-        <span className="small">⌘+scroll to zoom · ⌘B split · ⌫ delete · ⌘D duplicate</span>
+        <span className="small">scroll to pan · ⌘+scroll to zoom · ⌘B split · ⌫ delete · ⌘D duplicate</span>
       </div>
       <div
         className="timeline-canvas-wrap"
@@ -585,12 +832,23 @@ export function Timeline() {
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onContextMenu={onContextMenu}
-          onWheel={onWheel}
           style={{ display: 'block', cursor: 'crosshair' }}
         />
         <canvas
           ref={playheadCanvasRef}
-          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+          style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+        />
+        {/* Sticky label column: absolutely positioned and re-translated to
+            track wrapRef's scrollLeft on every scroll event (see the effect
+            below), so track names + mute toggles stay pinned to the visible
+            left edge while the main canvas scrolls underneath. Handles its
+            own mousedown for the mute toggle (the only interactive control in
+            the label area) since it visually sits on top of the main canvas
+            once scrolled. */}
+        <canvas
+          ref={labelCanvasRef}
+          onMouseDown={onLabelMouseDown}
+          style={{ position: 'absolute', top: 0, left: 0, display: 'block', zIndex: 1, cursor: 'default' }}
         />
       </div>
       {contextMenu && (
