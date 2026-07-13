@@ -7,7 +7,14 @@ import { api } from '../api'
 interface PywebviewVoBridge {
   pywebview?: {
     api?: {
-      vo_start?: (sessionId: string) => Promise<{ ok: boolean; error?: string }>
+      // `unsupported: true` means the native bridge exists (pywebview always
+      // exposes the method) but this platform's vo_start deliberately refuses
+      // to run — currently desktop.py's non-mac branch (Windows/Linux, where
+      // the avfoundation capture path doesn't exist but WebView2's
+      // getUserMedia works fine). Distinguishing this from a real failure
+      // (mic denied, ffmpeg missing, etc.) lets the caller fall through to
+      // getUserMedia instead of dead-ending on an error the user can't act on.
+      vo_start?: (sessionId: string) => Promise<{ ok: boolean; error?: string; unsupported?: boolean }>
       vo_stop?: (sessionId: string, start: number, gainDb: number) =>
         Promise<{ ok: boolean; error?: string; clip_id?: string }>
     }
@@ -32,6 +39,14 @@ interface PywebviewVoBridge {
  *    checking for the bridge methods FIRST (before falling back to
  *    getUserMedia), since a pywebview window may or may not also expose a
  *    (non-functional) `navigator.mediaDevices`.
+ *  - Packaged app on Windows: the pywebview bridge methods exist (same js_api
+ *    class), but desktop.py's `vo_start` immediately returns
+ *    `{ok: false, unsupported: true}` on any non-mac platform — avfoundation
+ *    capture is macOS-only. WebView2 (the Windows pywebview backend) DOES
+ *    implement getUserMedia correctly, so `unsupported: true` must fall
+ *    through to the getUserMedia path below rather than surface an error;
+ *    only a "real" failure (mic denied, ffmpeg missing, TCC denial on mac)
+ *    should stop and show an error to the user.
  */
 export function VoRecorder() {
   const sid = useStore((s) => s.sessionId)
@@ -97,25 +112,36 @@ export function VoRecorder() {
     if (py?.vo_start && py?.vo_stop) {
       try {
         const res = await py.vo_start(sid)
-        if (!res?.ok) {
+        if (res?.ok) {
+          nativeRecordingRef.current = true
+          startedAtRef.current = playhead
+          setPlaying(false)
+          setRecording(true)
+          setRequesting(false)
+          setElapsed(0)
+          tickRef.current = window.setInterval(() => {
+            setElapsed((e) => e + 0.1)
+          }, 100) as unknown as number
+          return
+        }
+        if (!res?.unsupported) {
+          // A real failure on a platform where the native bridge is meant to
+          // work (mac: mic denied, ffmpeg missing, etc.) — surface it rather
+          // than silently falling through, since getUserMedia is unusable in
+          // this window anyway (see module doc comment) and would just fail
+          // again with a less useful message.
           setError(res?.error || 'Could not start native mic recording.')
           setRequesting(false)
           return
         }
-        nativeRecordingRef.current = true
-        startedAtRef.current = playhead
-        setPlaying(false)
-        setRecording(true)
-        setRequesting(false)
-        setElapsed(0)
-        tickRef.current = window.setInterval(() => {
-          setElapsed((e) => e + 0.1)
-        }, 100) as unknown as number
+        // `unsupported: true` — this platform's native bridge deliberately
+        // refuses (e.g. Windows: avfoundation is mac-only). Fall through to
+        // the getUserMedia path below, which WebView2 supports natively.
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
         setRequesting(false)
+        return
       }
-      return
     }
 
     // `navigator.mediaDevices` is undefined in some native-webview contexts
