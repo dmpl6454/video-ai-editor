@@ -146,8 +146,19 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   grid-area: center;
   display: grid;
   /* A dedicated 6px row for the horizontal splitter, same rationale as the
-     .app column tracks above. */
-  grid-template-rows: 1fr 6px var(--timeline-h, 280px);
+     .app column tracks above.
+     Both content rows are wrapped in minmax(0, …) rather than a bare `1fr`
+     or a bare `var(--timeline-h)`: a plain `1fr` track's automatic minimum
+     is its content's min-content size, and a bare fixed-px track never
+     shrinks below that px value — on a window shorter than
+     preview-min-content + 6 + --timeline-h, the grid couldn't satisfy both,
+     so one row won either 0px (collapsing the preview, verified live) or
+     stayed at its full px and overflowed past `overflow:hidden`'s clip box
+     (silently disappearing the timeline, the reported bug). minmax(0, …)
+     lets each row shrink all the way to 0 instead of overflowing, and the
+     floor on the preview row (120px) keeps it from vanishing entirely under
+     normal use while still yielding space before the layout breaks. */
+  grid-template-rows: minmax(120px, 1fr) 6px minmax(0, var(--timeline-h, 280px));
   background: var(--bg-0);
   overflow: hidden;
 }
@@ -341,6 +352,7 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   background: #000;
   position: relative;
   overflow: hidden;
+  min-height: 0;   /* let the grid row's minmax(120px,1fr) actually shrink it */
 }
 .preview-pane video {
   max-height: 100%;
@@ -375,6 +387,7 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   position: relative;
   display: flex;
   flex-direction: column;
+  min-height: 0;   /* let the grid row's minmax(0,var(--timeline-h)) actually shrink it */
 }
 .timeline-toolbar {
   height: 32px;
