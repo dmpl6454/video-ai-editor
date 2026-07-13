@@ -28,6 +28,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "pyannote-audio>=4.0.4",
     "open-clip-torch>=3.3.0",
+    "pyobjc-framework-avfoundation>=11.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
