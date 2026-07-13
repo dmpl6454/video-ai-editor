@@ -476,6 +476,18 @@ export function Timeline() {
       }
     } else {
       setSelection(null)
+      // Empty timeline area click also seeks the playhead to the clicked
+      // position, matching CapCut/Premiere. Only below the ruler (already
+      // guaranteed here — the ruler/near-playhead branch above returns
+      // early) and right of the label column, so clicking the label/mute
+      // area never seeks. Clip clicks (the `if (hit)` branch above) remain
+      // select-only — this is deliberately scoped to empty space per the
+      // approved design (seek-on-empty-space-click only, not on-clip).
+      if (x > labelWidth) {
+        const raw = Math.max(0, (x - labelWidth) / zoom)
+        const dur = edl?.duration ?? raw
+        setPlayhead(Math.min(raw, dur))
+      }
     }
   }
 
