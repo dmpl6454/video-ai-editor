@@ -49,6 +49,7 @@ export function VoRecorder() {
   const startedAtRef = useRef<number>(0)
   const tickRef = useRef<number | null>(null)
   const nativeRecordingRef = useRef(false)  // true while a native (pywebview) capture is in flight
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Release the mic + stop the elapsed ticker. Idempotent — safe to call on any
   // exit path (stop, error, unmount). Leaving the stream open keeps the OS mic
@@ -227,6 +228,39 @@ export function VoRecorder() {
     }
   }
 
+  // Guaranteed-working fallback: if neither the native bridge nor
+  // getUserMedia can capture a mic in this window (TCC denial in the
+  // packaged app, browser permission blocked, etc.), let the user attach
+  // any existing audio file as the voiceover clip instead. This reuses the
+  // exact same /vo_record endpoint + dispatch/commit path as a live
+  // recording — from the backend's perspective an imported file and a
+  // MediaRecorder blob are indistinguishable (`voRecord` just posts a
+  // Blob/File either way) — so it's exercised, not a separate code path.
+  const importFile = async (file: File) => {
+    setError(null)
+    if (!sid) return
+    setSubmitting(true)
+    try {
+      const res = await api.voRecord(sid, file, playhead, 0)
+      await refresh()
+      const cid = (res as { clip_id?: string } | undefined)?.clip_id
+      if (cid) {
+        useStore.getState().setSelection(cid)
+        useStore.getState().flashClip(cid)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const onFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''  // allow re-selecting the same file next time
+    if (file) void importFile(file)
+  }
+
   return (
     <div style={{ marginTop: 12 }}>
       {!recording ? (
@@ -248,6 +282,27 @@ export function VoRecorder() {
           ⏺ Recording ({elapsed.toFixed(1)}s) · click to stop
         </button>
       )}
+      {/* Guaranteed-working fallback: import an existing audio file as the
+          voiceover clip when live mic capture isn't available (native-bridge
+          TCC denial in the packaged app, browser mic permission blocked,
+          etc.) — see the module doc comment and importFile() above. Kept
+          visible at all times, not just after an error, so it's discoverable
+          rather than something the user has to fail first to find. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*"
+        style={{ display: 'none' }}
+        onChange={onFileChosen}
+      />
+      <button
+        style={{ width: '100%', fontSize: 10, marginTop: 4, opacity: 0.8 }}
+        onClick={() => fileInputRef.current?.click()}
+        disabled={submitting || recording || !sid}
+        title="Import an existing audio file as the voiceover track (fallback if mic recording isn't available)"
+      >
+        📁 Import audio file as voiceover
+      </button>
       {error && (
         <div style={{ color: '#fbb', fontSize: 10, marginTop: 4 }}>{error}</div>
       )}

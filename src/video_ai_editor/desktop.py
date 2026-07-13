@@ -87,13 +87,23 @@ def _serve(host: str, port: int) -> None:
 
 
 def _avfoundation_default_audio_index() -> str:
-    """Probe `ffmpeg -f avfoundation -list_devices true -i ""` for the first
-    listed audio input device index. avfoundation numbers audio devices
+    """Probe `ffmpeg -f avfoundation -list_devices true -i ""` for the best
+    audio input device index. avfoundation numbers audio devices
     independently of video devices (e.g. `[0] FaceTime HD Camera` under
     "video devices" and a *separate* `[0] MacBook Air Microphone` under
     "audio devices"), so index 0 is a reasonable default but not guaranteed —
-    probing beats hardcoding. Falls back to "0" if parsing fails for any
-    reason (missing ffmpeg build, unexpected output format, etc.)."""
+    probing beats hardcoding.
+
+    ffmpeg prints the device list to stderr with a *non-zero* return code
+    (it's a probe, not a real capture — there's no "-i \"\"" device to open),
+    so we must NOT gate parsing on `proc.returncode == 0`; only a raised
+    exception (ffmpeg missing entirely, timeout, etc.) falls back to "0".
+    Within the "AVFoundation audio devices:" section, prefer a device whose
+    name contains "microphone" (case-insensitive) — built-in/USB mics
+    consistently self-report that word, whereas aggregate/virtual devices
+    (e.g. "BlackHole", loopback devices) sort first on some Macs and would
+    otherwise silently win by being merely first-in-list. Falls back to the
+    first audio device found, then to "0" if the section is missing/empty."""
     try:
         proc = subprocess.run(
             [_pu.FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
@@ -103,16 +113,90 @@ def _avfoundation_default_audio_index() -> str:
     except Exception:
         return "0"
     in_audio_section = False
+    first_audio_idx: str | None = None
     for line in proc.stderr.splitlines():
+        if "AVFoundation video devices" in line:
+            in_audio_section = False
+            continue
         if "AVFoundation audio devices" in line:
             in_audio_section = True
             continue
-        if in_audio_section:
-            m = re.search(r"\[(\d+)\]", line)
-            if m:
-                return m.group(1)
-            break  # a non-matching line ends the audio-devices section
-    return "0"
+        if not in_audio_section:
+            continue
+        m = re.search(r"\[(\d+)\]\s*(.*)$", line)
+        if not m:
+            # A non-matching line while inside the section ends it (ffmpeg's
+            # device dump has no other content interleaved).
+            if first_audio_idx is not None or line.strip():
+                break
+            continue
+        idx, name = m.group(1), m.group(2)
+        if first_audio_idx is None:
+            first_audio_idx = idx
+        if "microphone" in name.lower():
+            return idx
+    return first_audio_idx if first_audio_idx is not None else "0"
+
+
+def _ensure_mic_authorized_mac() -> tuple[bool, str]:
+    """Request macOS mic authorization from the APP process (via AVFoundation)
+    so TCC attributes the prompt to this bundle, and the ffmpeg subprocess it
+    then spawns inherits the granted permission.
+
+    This is the fix for the classic "works in code, silently denied in the
+    packaged app" failure mode: under an ad-hoc-signed / non-hardened-runtime
+    bundle, TCC's attribution of a *subprocess's* mic request (ffmpeg via
+    avfoundation) is unreliable and can be denied with zero prompt and zero
+    error — it just produces an empty/silent WAV. Requesting authorization
+    here, from the long-lived app process itself, via AVCaptureDevice, makes
+    TCC show (or have already recorded) the decision against "Video AI
+    Editor" specifically, and the child ffmpeg process inherits that grant
+    since it's spawned by (and shares the responsible-process attribution
+    of) this same app.
+
+    Returns (authorized, detail). If pyobjc's AVFoundation bridge is
+    unavailable for any reason, degrades to (True, ...) — i.e. don't block
+    recording on this pre-check; fall through to the subprocess-level prompt/
+    denial as before, which is strictly the pre-existing behavior."""
+    try:
+        import AVFoundation
+    except Exception as e:
+        return True, f"AVFoundation unavailable ({e}); relying on subprocess prompt"
+
+    AVMediaTypeAudio = "soun"
+    try:
+        status = AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
+    except Exception as e:
+        return True, f"AVFoundation authorization check failed ({e}); relying on subprocess prompt"
+
+    # AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
+    if status == 3:
+        return True, "already authorized"
+    if status in (1, 2):
+        return False, ("microphone access denied — enable it in System Settings "
+                        "› Privacy & Security › Microphone, then relaunch the app")
+
+    # notDetermined: request synchronously. The completion handler fires on an
+    # arbitrary AVFoundation-internal queue, not necessarily this thread, so
+    # block on a threading.Event rather than assuming same-thread delivery.
+    result: dict[str, bool] = {"granted": False}
+    done = threading.Event()
+
+    def _cb(granted: bool) -> None:
+        result["granted"] = bool(granted)
+        done.set()
+
+    try:
+        AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+            AVMediaTypeAudio, _cb
+        )
+    except Exception as e:
+        return True, f"AVFoundation request failed ({e}); relying on subprocess prompt"
+
+    if not done.wait(timeout=30):
+        return False, "microphone permission prompt timed out waiting for a response"
+    return (result["granted"],
+            "granted" if result["granted"] else "user dismissed or denied the mic prompt")
 
 
 def _post_multipart_file(url: str, field_name: str, file_path: Path,
@@ -191,7 +275,15 @@ class _Api:
             # avfoundation is macOS-only; Windows/other platforms still rely
             # on getUserMedia (WebView2 has no equivalent secure-context/
             # capture-delegate gap — see CLAUDE.md's Windows section).
-            return {"ok": False, "error": "native mic capture is only implemented on macOS"}
+            return {"ok": False, "unsupported": True,
+                    "error": "native mic capture is only implemented on macOS"}
+
+        # Trigger the TCC prompt from THIS process before spawning ffmpeg —
+        # see _ensure_mic_authorized_mac's docstring for why this is the
+        # single highest-leverage fix for the packaged-app mic-denial bug.
+        authorized, detail = _ensure_mic_authorized_mac()
+        if not authorized:
+            return {"ok": False, "error": detail}
 
         vo_dir = session_dir(session_id) / "uploads" / "vo"
         vo_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +311,7 @@ class _Api:
         if proc is None or out_path is None:
             return {"ok": False, "error": "no recording in progress"}
 
+        stderr_tail = ""
         if proc.poll() is None:
             # SIGINT is ffmpeg's documented graceful-stop signal — unlike
             # kill()/terminate() (SIGTERM), it lets ffmpeg finalize the WAV
@@ -228,15 +321,26 @@ class _Api:
             except Exception:
                 pass
             try:
-                proc.communicate(timeout=10)
+                _, err = proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.communicate(timeout=5)
+                _, err = proc.communicate(timeout=5)
         else:
-            proc.communicate()
+            _, err = proc.communicate()
+        try:
+            stderr_tail = (err or b"").decode("utf-8", errors="replace")[-800:]
+        except Exception:
+            stderr_tail = ""
 
         if not out_path.exists() or out_path.stat().st_size == 0:
-            return {"ok": False, "error": "recording produced no audio (mic may be unavailable or denied)"}
+            # Distinguish a TCC denial from a device-index mismatch from a
+            # genuine no-audio device by surfacing ffmpeg's own stderr tail —
+            # a bare "recording produced no audio" is indistinguishable
+            # across all three causes and gives the user nothing to act on.
+            base = "recording produced no audio (mic may be unavailable or denied)"
+            if stderr_tail.strip():
+                return {"ok": False, "error": f"{base}\nffmpeg said: {stderr_tail.strip()}"}
+            return {"ok": False, "error": base}
 
         url = f"http://{self._host}:{self._port}/api/sessions/{session_id}/vo_record"
         try:

@@ -86,6 +86,81 @@ else
   echo "[build] WARNING: $PLIST not found — mic usage description NOT added"
 fi
 
+# Re-sign with hardened runtime + the mic entitlement. This supersedes
+# PyInstaller's own BUNDLE-stage ad-hoc codesign (which has no entitlements
+# and no --options runtime) and is the second layer of the VO-mic fix: TCC's
+# attribution of a subprocess's (ffmpeg's) mic request is unreliable under a
+# bundle with no hardened runtime / no entitlements — this makes it
+# deterministic. Ad-hoc signing (`--sign -`) is sufficient for local TCC
+# purposes; a paid Developer ID cert is only needed for distribution/
+# notarization, which is out of scope here.
+#
+# Sign in a /tmp staging copy, not in place under dist/ — verified
+# empirically that on a repo checked out under ~/Desktop (as this one is),
+# something in the macOS Finder/LaunchServices bundle-metadata machinery
+# continuously re-stamps a `com.apple.FinderInfo` xattr onto any `.app`
+# bundle DIRECTORY living there, independent of and unrelated to codesign
+# itself (confirmed by: stripping the xattr and waiting with zero commands
+# running still saw it reappear within ~2s; the identical bundle copied to
+# /tmp never got it back, signed or not). `codesign --verify --strict`
+# rejects that xattr as "resource fork, Finder information, or similar
+# detritus not allowed" and can even make the in-place `--force` sign itself
+# fail outright. Staging outside the Desktop-rooted tree sidesteps the
+# daemon entirely instead of racing it (same posture as CLAUDE.md's
+# documented Spotlight/.pth guidance: don't fight the daemon, route around
+# it) — sign in a location it doesn't touch, then move the finished, already
+# -verified bundle into dist/.
+APP_PATH="dist/Video AI Editor.app"
+if [ -f "$APP_PATH/Contents/Info.plist" ]; then
+  STAGE_DIR="$(mktemp -d /tmp/vae_codesign_stage.XXXXXX)"
+  STAGE_APP="$STAGE_DIR/Video AI Editor.app"
+  echo "[build] staging a copy in $STAGE_DIR for signing (avoids Desktop-path xattr re-stamping)"
+  rm -rf "$STAGE_APP"
+  cp -R "$APP_PATH" "$STAGE_APP"
+  xattr -cr "$STAGE_APP" || true
+  echo "[build] signing staged copy with hardened runtime + entitlements.plist"
+  codesign --force --deep --options runtime \
+    --entitlements entitlements.plist \
+    --sign - "$STAGE_APP" \
+    && echo "[build] codesign with hardened runtime + entitlements OK" \
+    || echo "[build] WARNING: codesign failed — VO mic access may be denied by TCC"
+  # codesign itself writes com.apple.FinderInfo onto the bundle root as a
+  # side effect of sealing it (observed even outside Desktop) — harmless
+  # there since /tmp doesn't re-apply it, but strip once more for a
+  # belt-and-suspenders clean verify.
+  xattr -d com.apple.FinderInfo "$STAGE_APP" 2>/dev/null || true
+  if codesign --verify --deep --strict "$STAGE_APP" 2>/tmp/vae_codesign_verify.txt; then
+    echo "[build] codesign --verify --strict passed"
+  else
+    echo "[build] WARNING: codesign --verify --strict still failing:"
+    cat /tmp/vae_codesign_verify.txt
+  fi
+  echo "[build] moving signed bundle back into dist/"
+  rm -rf "$APP_PATH"
+  mv "$STAGE_APP" "$APP_PATH"
+  rm -rf "$STAGE_DIR"
+  # Final check on the artifact where it actually lives. Use the NON-strict
+  # verify here, not --strict: moving/copying the bundle back onto a
+  # Desktop-rooted checkout re-triggers the same FinderInfo re-stamping
+  # described above (confirmed empirically — even a bare `mv` of an
+  # already-`--strict`-clean bundle picks it back up within ~1s on this
+  # path), so `--strict` is expected to fail here again through no fault of
+  # the signature itself. `--verify --deep` (no `--strict`) is what
+  # Gatekeeper/TCC/launch actually rely on and is confirmed to pass
+  # regardless of that stray xattr — `--strict` is a submission-hygiene
+  # linter, not a functional check. If distributing this build from a
+  # non-Desktop path (e.g. CI, or a repo checkout elsewhere), --strict
+  # should also pass on the final artifact.
+  if codesign --verify --deep "$APP_PATH" 2>/tmp/vae_codesign_final.txt; then
+    echo "[build] final codesign --verify (functional check) passed"
+  else
+    echo "[build] WARNING: final codesign --verify failed — VO mic access may be denied by TCC:"
+    cat /tmp/vae_codesign_final.txt
+  fi
+else
+  echo "[build] WARNING: $APP_PATH not found — skipping codesign re-sign"
+fi
+
 echo ""
 echo "[build] .app done — now wrap it in a DMG for distribution:"
 echo "        bash build_dmg.sh"
