@@ -107,18 +107,19 @@ TEXT_TOOLS = [
     _t("add_super_text",
        "Add a bold on-screen text overlay (the 'super' look). Use role='hook' for a "
        "first-3-seconds curiosity hook, role='super' for mid-video punctuation, "
-       "role='lower_third' for guest name/handle. Re-running with identical "
-       "text/role/start/end is a no-op (won't stack a duplicate overlay). Pass "
-       "replace=true to instead drop any prior same-role overlay that overlaps "
-       "this one's time window before adding the new one.",
+       "role='lower_third' for guest name/handle. By default, any prior overlay "
+       "on this track with the same role whose time window overlaps this one's "
+       "is replaced (so re-running with a new caption at the same moment updates "
+       "it instead of stacking a second one on top). Pass allow_stack=true to "
+       "instead keep both overlapping overlays.",
        "text",
        {
            "text": {"type": "string"},
            "start": {"type": "number"},
            "end": {"type": "number"},
            "role": {"type": "string", "enum": ["super", "hook", "lower_third", "label"], "default": "super"},
-           "replace": {"type": "boolean", "default": False,
-                       "description": "Drop prior same-role overlapping overlays before adding this one."},
+           "allow_stack": {"type": "boolean", "default": False,
+                            "description": "Keep prior same-role overlapping overlays instead of replacing them."},
        },
        ["text", "start", "end"]),
     _t("add_hook_overlay",
@@ -180,6 +181,17 @@ AUDIO_TOOLS = [
            "duck": {"type": "boolean", "default": True},
        },
        ["src"]),
+    _t("set_duck",
+       "Turn sidechain ducking (music auto-lowers under speech) on or off for a track "
+       "(default 'music'), without touching any clip's trim/position — use this instead "
+       "of re-adding the music clip just to flip ducking.",
+       "audio",
+       {
+           "track": {"type": "string", "default": "music"},
+           "enabled": {"type": "boolean", "description": "Omit to toggle the current state"},
+           "to_db": {"type": "number", "default": -18.0, "description": "How much to attenuate music under speech, dB"},
+           "track_ref": {"type": "string", "default": "a1", "description": "Sidechain key track id (the speech track)"},
+       }),
     _t("set_volume",
        "Set audio gain (dB) on a track id (e.g. 'a1', 'music', 'vo') or a clip id ('c_xxx').",
        "audio",

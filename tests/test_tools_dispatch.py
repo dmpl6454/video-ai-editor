@@ -301,11 +301,24 @@ def test_add_super_text_dedupes_exact_duplicate():
 
 
 def test_add_super_text_allows_distinct_text():
+    """Distinct captions at genuinely different (non-overlapping) time windows
+    must both survive — only same-track/same-role/overlapping-window clips
+    are replaced (see test_add_super_text_replaces_overlapping_same_role_on_same_track)."""
     store = _store_with_one_clip()
     dispatch(store, "add_super_text", {"text": "A", "role": "super", "start": 0.0, "end": 3.0})
-    dispatch(store, "add_super_text", {"text": "B", "role": "super", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_super_text", {"text": "B", "role": "super", "start": 5.0, "end": 8.0})
     supers = [c for t in store.edl.tracks for c in t.clips if getattr(c, "text", None) in ("A", "B")]
-    assert len(supers) == 2, "distinct captions must both survive"
+    assert len(supers) == 2, "distinct, non-overlapping captions must both survive"
+
+
+def test_add_super_text_allow_stack_opts_out_of_overlap_replace():
+    """allow_stack=True is the escape hatch when two overlapping same-role
+    overlays are genuinely wanted."""
+    store = _store_with_one_clip()
+    dispatch(store, "add_super_text", {"text": "A", "role": "super", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_super_text", {"text": "B", "role": "super", "start": 0.0, "end": 3.0, "allow_stack": True})
+    supers = [c for t in store.edl.tracks for c in t.clips if getattr(c, "text", None) in ("A", "B")]
+    assert len(supers) == 2, "allow_stack=True must permit both overlays to coexist"
 
 
 def test_add_super_text_replace_drops_prior_overlapping_same_role():
@@ -331,9 +344,45 @@ def test_add_text_dedupes_exact_duplicate():
     assert len(matches) == 1, "identical add_text must not stack duplicates"
 
 
+def test_add_text_replaces_overlapping_same_role_on_same_track():
+    """Same "double subtitle" general-overlap fix as add_super_text, applied
+    to add_text: two DIFFERENT texts at the same overlapping window on the
+    same track/role must not stack — the second replaces the first."""
+    store = _store_with_one_clip()
+    dispatch(store, "add_text", {"text": "CAPTION 1", "role": "caption", "start": 16.0, "end": 18.0})
+    dispatch(store, "add_text", {"text": "CAPTION 2", "role": "caption", "start": 16.0, "end": 18.0})
+    matches = [c for t in store.edl.tracks for c in t.clips if getattr(c, "role", None) == "caption"]
+    assert len(matches) == 1
+    assert matches[0].text == "CAPTION 2"
+
+
 def test_add_text_allows_distinct_text():
+    """Distinct text overlays at genuinely different (non-overlapping) time
+    windows must both survive — only same-track/same-role/overlapping-window
+    clips are replaced."""
     store = _store_with_one_clip()
     dispatch(store, "add_text", {"text": "A", "role": "caption", "start": 0.0, "end": 3.0})
-    dispatch(store, "add_text", {"text": "B", "role": "caption", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_text", {"text": "B", "role": "caption", "start": 5.0, "end": 8.0})
     matches = [c for t in store.edl.tracks for c in t.clips if getattr(c, "text", None) in ("A", "B")]
-    assert len(matches) == 2, "distinct text overlays must both survive"
+    assert len(matches) == 2, "distinct, non-overlapping text overlays must both survive"
+
+
+def test_add_super_text_replaces_overlapping_same_role_on_same_track():
+    """Regression for the "double subtitle" bug (general case): two DIFFERENT
+    text clips at the same overlapping time window on the same track/role
+    must not stack — the second replaces the first."""
+    store = _store_with_one_clip()
+    dispatch(store, "add_super_text", {"text": "RIPPLE TEST", "role": "super", "start": 16.0, "end": 18.0})
+    dispatch(store, "add_super_text", {"text": "RIPPLE TEST 2", "role": "super", "start": 16.0, "end": 18.0})
+    supers = [c for t in store.edl.tracks if t.id == "tx_super" for c in t.clips]
+    # Overlapping same-role text on the same track should NOT stack — the second replaces the first.
+    assert len(supers) == 1
+    assert supers[0].text == "RIPPLE TEST 2"
+
+
+def test_add_super_text_keeps_non_overlapping_text():
+    store = _store_with_one_clip()
+    dispatch(store, "add_super_text", {"text": "A", "role": "super", "start": 0.0, "end": 3.0})
+    dispatch(store, "add_super_text", {"text": "B", "role": "super", "start": 10.0, "end": 13.0})
+    supers = [c for t in store.edl.tracks if t.id == "tx_super" for c in t.clips]
+    assert len(supers) == 2  # different time windows — both legitimate

@@ -634,21 +634,14 @@ def add_super_text(store: EDLStore, args: dict) -> dict:
         text=text, start=start, end=end, role=role,
         transform=Transform(x=canvas.w / 2, y=y_default),
     )
-    # Idempotency: an identical re-run (same text/role/start/end on this track)
-    # must not stack a second overlay — that produced the "double subtitle" bug.
-    def _same(existing) -> bool:
-        return (
-            isinstance(existing, TextClip)
-            and getattr(existing, "text", None) == clip.text
-            and getattr(existing, "role", None) == clip.role
-            and abs(existing.start - clip.start) < 1e-6
-            and abs(existing.end - clip.end) < 1e-6
-        )
-    if any(_same(c) for c in track.clips):
-        summary = f"Text already present: {clip.text!r} @ {clip.start:.2f}s"
-        return {"summary": summary}  # no commit — nothing changed
-    # Optional explicit replace: drop prior same-role overlapping clips.
-    if bool(args.get("replace", False)):
+    # Overlap-replace (default): two text clips of the SAME role on the SAME
+    # track whose [start, end) windows overlap must not stack — the new one
+    # replaces the old one(s). This supersedes (and is a superset of) the
+    # narrower exact-match dedupe that only caught identical re-runs — the
+    # "double subtitle" bug also occurs with two DIFFERENT texts at the same
+    # time window. Opt out with allow_stack=True if two overlays are wanted.
+    allow_stack = bool(args.get("allow_stack", False))
+    if not allow_stack:
         track.clips = [
             c for c in track.clips
             if not (isinstance(c, TextClip) and getattr(c, "role", None) == clip.role
@@ -2558,21 +2551,13 @@ def add_text(store: EDLStore, args: dict) -> dict:
                   role=role, transform=tx, style=style,
                   anim_in=args.get("anim_in"), anim_out=args.get("anim_out"))
     track = ensure_track(store.edl, "text", "text", z=10)
-    # Idempotency: an identical re-run (same text/role/start/end on this track)
-    # must not stack a second overlay — mirrors add_super_text's guard.
-    def _same(existing) -> bool:
-        return (
-            isinstance(existing, TextClip)
-            and getattr(existing, "text", None) == tc.text
-            and getattr(existing, "role", None) == tc.role
-            and abs(existing.start - tc.start) < 1e-6
-            and abs(existing.end - tc.end) < 1e-6
-        )
-    if any(_same(c) for c in track.clips):
-        summary = f"Text already present: {tc.text!r} @ {tc.start:.2f}s"
-        return {"summary": summary}  # no commit — nothing changed
-    # Optional explicit replace: drop prior same-role overlapping clips.
-    if bool(args.get("replace", False)):
+    # Overlap-replace (default): mirrors add_super_text's guard — two text
+    # clips of the SAME role on the SAME track whose [start, end) windows
+    # overlap must not stack — the new one replaces the old one(s). Superset
+    # of the narrower exact-match dedupe (still catches identical re-runs).
+    # Opt out with allow_stack=True if two overlays are wanted.
+    allow_stack = bool(args.get("allow_stack", False))
+    if not allow_stack:
         track.clips = [
             c for c in track.clips
             if not (isinstance(c, TextClip) and getattr(c, "role", None) == tc.role
