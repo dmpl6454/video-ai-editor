@@ -68,6 +68,58 @@ def _v_track_for_media(edl: EDL, track_id: str) -> Track:
     return t
 
 
+def _first_free_gap(
+    track: Track, duration: float, preferred_start: float, ignore_clip_id: str | None = None
+) -> float:
+    """Find the first start time >= preferred_start on `track` where a clip of
+    length `duration` fits without overlapping any existing media Clip
+    (excluding `ignore_clip_id`, the clip actually being moved/placed).
+
+    Used by move_clip's cross-track-drop guard: dropping a clip onto an
+    occupied range used to silently stack it on top of whatever was already
+    there (both clips survive in the EDL, so no data loss, but the canvas
+    draws them with identical fill and no distinction — reading as "merged").
+    Snapping to the nearest free gap keeps the drop useful instead of just
+    rejecting it outright.
+
+    Only considers `Clip` (media) siblings — text/sticker/caption tracks have
+    their own independent overlap semantics (see add_super_text's role-based
+    replace) and are never routed through this helper.
+    """
+    occupied = sorted(
+        (c.start, c.start + c.duration)
+        for c in track.clips
+        if isinstance(c, Clip) and c.id != ignore_clip_id
+    )
+    candidate = max(0.0, preferred_start)
+
+    def overlaps(start: float) -> bool:
+        end = start + duration
+        return any(start < o_end - 1e-9 and end > o_start + 1e-9 for o_start, o_end in occupied)
+
+    # If the preferred slot is already free, use it as-is (no snapping needed
+    # for the common non-overlapping case).
+    if not overlaps(candidate):
+        return candidate
+
+    # Otherwise walk forward: for each existing clip whose range the
+    # candidate would collide with, jump to that clip's end and re-check —
+    # this converges because `occupied` is sorted and finite.
+    for o_start, o_end in occupied:
+        if candidate < o_end and candidate + duration > o_start:
+            candidate = o_end
+    # One more pass in case jumping past one clip landed inside another
+    # (dense packing) — bounded by len(occupied) since each pass only moves
+    # candidate forward to the next clip's end.
+    for _ in range(len(occupied)):
+        if not overlaps(candidate):
+            break
+        for o_start, o_end in occupied:
+            if candidate < o_end and candidate + duration > o_start:
+                candidate = o_end
+    return candidate
+
+
 def _ripple_close_gap(track: Track) -> None:
     """After a removal, slide subsequent clips left to close any gap."""
     track.clips.sort(key=lambda c: getattr(c, "start", 0))
@@ -436,7 +488,20 @@ def move_clip(store: EDLStore, args: dict) -> dict:
     if hasattr(c, "start"):
         # Clamp to >= 0; ffmpeg can't address negative timeline positions
         # and the timeline renderer would crash on the next preview.
-        c.start = max(0.0, float(args["new_start"]))
+        requested_start = max(0.0, float(args["new_start"]))
+        if isinstance(c, Clip):
+            # Cross-track (or same-track) drop onto an occupied range used to
+            # silently stack two media clips at the same time — no data loss
+            # (both survive in the EDL) but the canvas draws them with
+            # identical fill and no z-order/outline, reading as "merged".
+            # Snap to the first free gap at-or-after the requested position
+            # instead of allowing the overlap; this is the backend
+            # enforcement so Claude/MCP callers can't create it either (the
+            # Timeline.tsx drop handler mirrors this client-side for instant
+            # feedback, but this is the real guard).
+            c.start = _first_free_gap(track, c.duration, requested_start, ignore_clip_id=c.id)
+        else:
+            c.start = requested_start
     track.clips.sort(key=lambda x: getattr(x, "start", 0))
     summary = f"Move {c.id} → {track.id} @ {c.start:.2f}s"
     store.commit("move_clip", args, summary)

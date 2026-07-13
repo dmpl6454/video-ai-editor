@@ -59,6 +59,50 @@ def test_set_aspect_ratio_changes_canvas():
     assert store.edl.canvas.h == 1080
 
 
+def _add_media_clip(store: EDLStore, track: str, start: float, dur: float) -> str:
+    tmp = Path(store.dir)
+    res = dispatch(store, "add_clip", {
+        "track": track, "src": str(tmp / "nonexistent" / "y.mp4"),
+        "in": 0.0, "out": dur, "start": start,
+    })
+    return res["clip_id"]
+
+
+def test_move_clip_onto_occupied_range_snaps_to_free_gap():
+    # a1 has a clip at [0, 10). vo has an existing (voiceover) clip at [0, 5)
+    # — mirrors "Main audio" clip dragged onto the "Voiceover" row where a
+    # real recorded VO already sits.
+    store = _store_with_one_clip()  # v1 clip [0,10) — unrelated track
+    a1_id = _add_media_clip(store, "a1", 0.0, 10.0)
+    _add_media_clip(store, "vo", 0.0, 5.0)
+
+    dispatch(store, "move_clip", {"clip_id": a1_id, "new_start": 1.0, "new_track": "vo"})
+
+    vo_track = store.edl.get_track("vo")
+    clips = sorted(vo_track.clips, key=lambda c: c.start)
+    assert len(clips) == 2
+    # Both clips still exist and do NOT overlap in time.
+    a, b = clips[0], clips[1]
+    assert a.start + a.duration <= b.start + 1e-6
+    # The pre-existing vo clip [0,5) is untouched; the dropped a1 clip (10s
+    # long) snapped to the first free gap at-or-after the requested time.
+    assert abs(a.start - 0.0) < 1e-6
+    assert abs(a.duration - 5.0) < 1e-6
+    assert abs(b.start - 5.0) < 1e-6
+
+
+def test_move_clip_onto_free_space_is_unaffected():
+    store = _store_with_one_clip()
+    _add_media_clip(store, "vo", 0.0, 5.0)
+    a1_id = _add_media_clip(store, "a1", 0.0, 3.0)
+
+    # Moving into a1's own track, to a spot with no overlap, should land
+    # exactly where requested (no snapping needed).
+    dispatch(store, "move_clip", {"clip_id": a1_id, "new_start": 20.0})
+    c = store.edl.get_clip(a1_id)[1]
+    assert abs(c.start - 20.0) < 1e-6
+
+
 def test_add_sticker_returns_a_running_sticker_count(tmp_path):
     """Regression for issue 51 (agent miscounts stickers): add_sticker must
     hand back ground truth in its own tool_result rather than forcing the

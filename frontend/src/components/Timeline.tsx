@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
-import { isMediaClip, type AnyClip } from '../types'
+import { isMediaClip, type AnyClip, type Track } from '../types'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -18,6 +18,40 @@ const VIDEO_FAMILY = new Set(['video'])
 const AUDIO_FAMILY = new Set(['audio', 'music', 'vo'])
 function laneAcceptsMediaClip(trackType: string): boolean {
   return VIDEO_FAMILY.has(trackType) || AUDIO_FAMILY.has(trackType)
+}
+
+// Client-side mirror of dispatch.py's `_first_free_gap` — same algorithm, so
+// the frontend can show instant feedback (toast) on drop instead of waiting
+// for the round-trip, while the backend in move_clip remains the real
+// enforcement (Claude/MCP callers bypass this file entirely). Only ever
+// called with media clips (isMediaClip) on video/audio-family tracks — a
+// dropped media clip landing on an occupied range used to silently stack on
+// top of whatever was already there (no data loss, but the canvas drew both
+// with identical fill and no distinction, reading as "merged").
+function firstFreeGap(
+  track: Track, duration: number, preferredStart: number, ignoreClipId: string
+): number {
+  const occupied = track.clips
+    .filter(isMediaClip)
+    .filter((c) => c.id !== ignoreClipId)
+    .map((c): [number, number] => [c.start, c.start + (c.out - c.in)])
+    .sort((a, b) => a[0] - b[0])
+  let candidate = Math.max(0, preferredStart)
+  const overlaps = (start: number) => {
+    const end = start + duration
+    return occupied.some(([oStart, oEnd]) => start < oEnd - 1e-9 && end > oStart + 1e-9)
+  }
+  if (!overlaps(candidate)) return candidate
+  for (const [oStart, oEnd] of occupied) {
+    if (candidate < oEnd && candidate + duration > oStart) candidate = oEnd
+  }
+  for (let i = 0; i < occupied.length; i++) {
+    if (!overlaps(candidate)) break
+    for (const [oStart, oEnd] of occupied) {
+      if (candidate < oEnd && candidate + duration > oStart) candidate = oEnd
+    }
+  }
+  return candidate
 }
 
 // Per-source waveform cache: src path → peaks array. Fetched once, reused on
@@ -233,9 +267,22 @@ export function Timeline() {
 
       // clips
       const showWaveOn = ['video', 'audio', 'music', 'vo'].includes(t.type)
+      // Defense-in-depth: track.clips is sorted by start after every backend
+      // mutation and move_clip/add_super_text now actively prevent new
+      // overlaps, but legacy data (an EDL saved before this fix, or a
+      // same-track/role case the guards don't cover) can still carry two
+      // overlapping clips on one track — previously drawn with identical
+      // fill and no distinction at all, reading as silently "merged". Track
+      // each clip's [start,end) as it's drawn and flag one that overlaps any
+      // clip already drawn on this row so it gets a visible warning outline
+      // below, instead of being invisible.
+      const seenRanges: [number, number][] = []
       for (const c of t.clips) {
         const start = isMediaClip(c) ? c.start : c.start
         const dur = isMediaClip(c) ? c.out - c.in : c.end - c.start
+        const end = start + dur
+        const overlapsPrior = seenRanges.some(([s, e]) => start < e - 1e-9 && end > s + 1e-9)
+        seenRanges.push([start, end])
         const x = labelWidth + start * zoom
         const w = Math.max(2, dur * zoom)
         const isSel = c.id === selection || multiSelection.includes(c.id)
@@ -285,6 +332,17 @@ export function Timeline() {
           ctx.strokeStyle = '#fff'
           ctx.lineWidth = 1.5
           ctx.strokeRect(x + 0.5, y + 4 + 0.5, w - 1, trackHeight - 8 - 1)
+        }
+        // Overlap warning: the later clip (in start order) of an overlapping
+        // pair on this track gets a dashed amber border so it's never
+        // invisibly merged with its neighbor, even for legacy/pre-guard data.
+        if (overlapsPrior) {
+          ctx.save()
+          ctx.strokeStyle = '#f59e0b'
+          ctx.lineWidth = 2
+          ctx.setLineDash([4, 3])
+          ctx.strokeRect(x + 1, y + 4 + 1, w - 2, trackHeight - 8 - 2)
+          ctx.restore()
         }
         // new-clip flash: a bright highlight while the clip is flashing. The
         // store clears flashClipId after ~600ms, which redraws without it — so
@@ -585,8 +643,9 @@ export function Timeline() {
 
     if (drag.kind === 'move') {
       const rawNewStart = Math.max(0, drag.origStart + dt)
-      const newStart = snapTime(rawNewStart, drag.clipId)
+      let newStart = snapTime(rawNewStart, drag.clipId)
       const args: Record<string, unknown> = { clip_id: drag.clipId, new_start: newStart }
+      let destTrack = tracks.find((t) => t.id === drag.trackId)
       if (targetTrackId && targetTrackId !== drag.trackId) {
         // Only follow the clip onto a track whose TYPE can actually hold it.
         // The clip's own kind is inferred from its ORIGIN track (a media clip
@@ -603,8 +662,30 @@ export function Timeline() {
           : true
         if (targetIsCompatible) {
           args.new_track = targetTrackId
+          destTrack = tracks.find((t) => t.id === targetTrackId)
         } else {
           toast.error(`Can't move this clip to the "${targetType}" lane — it stayed on "${originType}".`)
+        }
+      }
+      // Cross-track (or same-track) overlap guard, mirrored client-side for
+      // instant feedback. move_clip on the backend is the real enforcement
+      // (Claude/MCP callers reach it directly and bypass this file), but
+      // without this mirror the UI would show the pre-snap position for one
+      // render before the server-computed snapped position arrives — a
+      // visible "jump". Only media clips have this check (drag.origIn/origOut
+      // are only meaningful for a media Clip — see onMouseDown, where a
+      // Sticker/TextClip hit sets them to 0/0); a dropped Sticker/TextClip
+      // has no analogous cross-track drop-overlap path.
+      const originTrack = tracks.find((t) => t.id === drag.trackId)
+      const draggedIsMedia = !!originTrack
+        && originTrack.clips.some((c) => c.id === drag.clipId && isMediaClip(c))
+      if (destTrack && draggedIsMedia) {
+        const dur = drag.origOut - drag.origIn
+        const snapped = firstFreeGap(destTrack, dur, newStart, drag.clipId)
+        if (Math.abs(snapped - newStart) > 1e-6) {
+          newStart = snapped
+          args.new_start = newStart
+          toast.info(`Snapped to the nearest free gap on "${destTrack.label ?? destTrack.id}" (${newStart.toFixed(2)}s) to avoid overlapping an existing clip.`)
         }
       }
       await dispatch('move_clip', args)
