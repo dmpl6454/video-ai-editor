@@ -210,7 +210,18 @@ export function VoRecorder() {
       // doesn't stay lit.
       teardown()
       setRecording(false)
-      setError(e instanceof Error ? e.message : String(e))
+      // getUserMedia rejects with DOMException name 'NotAllowedError' both when
+      // the browser's mic permission is blocked AND when the user dismisses the
+      // native permission prompt without choosing — the raw message in either
+      // case is a terse browser string ("Permission denied" / similar) that gives
+      // no next step. Replace it with an actionable one pointing at the browser's
+      // own site-settings UI, since nothing in this app's code can re-trigger
+      // that prompt once it's been blocked.
+      if (e instanceof DOMException && e.name === 'NotAllowedError') {
+        setError('Microphone access was blocked or the permission prompt was dismissed. Click the lock/site-settings icon in the address bar → Microphone → Allow, then reload the page and try again.')
+      } else {
+        setError(e instanceof Error ? e.message : String(e))
+      }
     } finally {
       setRequesting(false)
     }
