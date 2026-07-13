@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
+import { toast } from '../toast'
 
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the two methods this file calls, not the whole class.
@@ -183,6 +184,7 @@ export function VoRecorder() {
             useStore.getState().setSelection(cid)
             useStore.getState().flashClip(cid)
           }
+          toast.success('Voiceover recorded ✓')
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e))
         } finally {
@@ -249,6 +251,7 @@ export function VoRecorder() {
           useStore.getState().setSelection(res.clip_id)
           useStore.getState().flashClip(res.clip_id)
         }
+        toast.success('Voiceover recorded ✓')
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -285,6 +288,16 @@ export function VoRecorder() {
         useStore.getState().setSelection(cid)
         useStore.getState().flashClip(cid)
       }
+      // Explicit positive confirmation: an import that lands on a small
+      // timeline pane (or one scrolled out of view) is otherwise silent —
+      // the only feedback was the timeline itself updating, easy to miss
+      // and previously literally invisible on short windows (see the
+      // layout fix above). A prior *failed record* attempt's error text
+      // also lingered on screen until this exact moment (setError(null) at
+      // the top of this function only clears it on the NEXT attempt's
+      // start, not visibly confirming the retry actually worked) — this
+      // toast is the "yes, that worked" signal either way.
+      toast.success('Voiceover imported ✓')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -341,7 +354,19 @@ export function VoRecorder() {
         📁 Import audio file as voiceover
       </button>
       {error && (
-        <div style={{ color: '#fbb', fontSize: 10, marginTop: 4 }}>{error}</div>
+        <div style={{ color: '#fbb', fontSize: 10, marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+          <span style={{ flex: 1 }}>{error}</span>
+          {/* A failed-record error otherwise only clears at the START of the
+              next start()/importFile() call — if the user just reads it and
+              moves on (e.g. to try Import, which already clears it on click,
+              or does nothing further), it sits on screen indefinitely with
+              no way to acknowledge it. */}
+          <button
+            onClick={() => setError(null)}
+            style={{ background: 'none', border: 'none', color: '#fbb', cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1 }}
+            title="Dismiss"
+          >×</button>
+        </div>
       )}
     </div>
   )
