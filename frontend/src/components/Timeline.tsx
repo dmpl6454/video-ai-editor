@@ -108,6 +108,11 @@ export function Timeline() {
   const [dragTick, setDragTick] = useState(0)
   const dragRafRef = useRef<number | null>(null)
 
+  // Live drop position for a native HTML5 drag from the media/sticker panels
+  // (separate from pointer-drag `dragRef`). null when no panel drag is over
+  // the canvas. Drives the same insertion-line/target-row overlay.
+  const dndOverRef = useRef<null | { x: number; y: number }>(null)
+
   // drag state for moving / trimming clips
   const dragRef = useRef<null | {
     kind: 'move' | 'trim-l' | 'trim-r' | 'playhead'
@@ -495,8 +500,30 @@ export function Timeline() {
   // only while dragging. The heavy main canvas is never touched here.
   useEffect(() => {
     const drag = dragRef.current
+    const dnd = dndOverRef.current
     const cv = playheadCanvasRef.current
-    if (!cv || !drag || drag.kind === 'playhead') return
+    if (!cv) return
+    if (dnd && (!drag || drag.kind === 'playhead')) {
+      // Native panel drag: draw target-row wash + insertion line at snapTime.
+      const ctx2 = cv.getContext('2d')!
+      ctx2.save(); ctx2.setTransform(dpr, 0, 0, dpr, 0, 0)
+      let ti = -1
+      for (let i = 0; i < tracks.length; i++) {
+        const ty = trackY(i)
+        if (dnd.y >= ty && dnd.y <= ty + trackHeight) { ti = i; break }
+      }
+      if (ti >= 0 && dnd.x > labelWidth) {
+        const ty = trackY(ti)
+        ctx2.fillStyle = dv.DROP_OK
+        ctx2.fillRect(labelWidth, ty, contentW - labelWidth, trackHeight)
+        const lx = labelWidth + Math.max(0, (dnd.x - labelWidth) / zoom) * zoom
+        ctx2.strokeStyle = dv.ACCENT; ctx2.lineWidth = dv.INSERTION_W
+        ctx2.beginPath(); ctx2.moveTo(lx, ty); ctx2.lineTo(lx, ty + trackHeight); ctx2.stroke()
+      }
+      ctx2.restore()
+      return
+    }
+    if (!drag || drag.kind === 'playhead') return
     const ctx = cv.getContext('2d')!
     // The playhead effect already sized + cleared + drew the playhead this
     // frame; do NOT clear (that would erase the playhead). We overlay on top.
@@ -617,6 +644,20 @@ export function Timeline() {
     ctx.restore()
   }, [dragTick, tracks, zoom, contentW, dpr])
 
+  // Escape cancels an in-progress clip drag with NO commit (mousedown captured
+  // state, but we simply drop it and repaint to clear the ghost). Only active
+  // while a non-playhead drag is live.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      const drag = dragRef.current
+      if (!drag || drag.kind === 'playhead') return
+      dragRef.current = null
+      setDragTick((n) => n + 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // mouse → seek / select / drag
   function onMouseDown(e: React.MouseEvent) {
@@ -909,11 +950,24 @@ export function Timeline() {
         || e.dataTransfer.types.includes('text/plain')) {
       e.preventDefault()
       e.dataTransfer.dropEffect = 'copy'
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+      dndOverRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          setDragTick((n) => n + 1)
+        })
+      }
     }
+  }
+  function onCanvasDragLeave() {
+    dndOverRef.current = null
+    setDragTick((n) => n + 1)
   }
 
   async function onCanvasDrop(e: React.DragEvent) {
     e.preventDefault()
+    dndOverRef.current = null
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
@@ -1115,6 +1169,7 @@ export function Timeline() {
         ref={wrapRef}
         style={{ position: 'relative' }}
         onDragOver={onCanvasDragOver}
+        onDragLeave={onCanvasDragLeave}
         onDrop={onCanvasDrop}
       >
         <canvas
