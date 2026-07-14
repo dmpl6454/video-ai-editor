@@ -784,6 +784,7 @@ export function Timeline() {
     const dx = e.clientX - drag.startX
     const dt = dx / zoom
     dragRef.current = null
+    setDragTick((n) => n + 1)  // repaint overlay (clears drag chrome)
     if (Math.abs(dx) < 3) return
 
     // Figure out target track from the drop Y (cross-track drag)
@@ -846,18 +847,51 @@ export function Timeline() {
         }
       }
       await dispatch('move_clip', args)
-    } else if (drag.kind === 'trim-l') {
-      // Trim-left snaps the visible clip start (= origStart + delta) to neighbors.
-      const newClipStart = snapTime(drag.origStart + dt, drag.clipId)
-      const deltaApplied = newClipStart - drag.origStart
-      const newIn = Math.max(0, drag.origIn + deltaApplied)
-      await dispatch('trim_clip', { clip_id: drag.clipId, in: newIn })
-    } else if (drag.kind === 'trim-r') {
-      const origRight = drag.origStart + (drag.origOut - drag.origIn)
-      const newRight = snapTime(origRight + dt, drag.clipId)
-      const deltaApplied = newRight - origRight
-      const newOut = Math.max(drag.origIn + 0.1, drag.origOut + deltaApplied)
-      await dispatch('trim_clip', { clip_id: drag.clipId, out: newOut })
+    } else if (drag.kind === 'trim-l' || drag.kind === 'trim-r') {
+      const side: 'l' | 'r' = drag.kind === 'trim-l' ? 'l' : 'r'
+      // origIn/origOut are only meaningful for a media Clip — onMouseDown sets
+      // them to 0/0 for a Sticker/TextClip (see the hit-test above), so the
+      // media formula `origStart + (origOut - origIn)` collapses to origStart
+      // for an overlay and silently loses its real `end`. Overlay clips look
+      // up their actual end from `hits` instead (same cast pattern as curSpeed
+      // below); media clips keep using the origIn/origOut captured at grab time.
+      const isOverlay = drag.clipKind === 'text' || drag.clipKind === 'sticker'
+      const origEnd = isOverlay
+        ? ((hits.find((h) => h.clip.id === drag.clipId)?.clip as unknown as { end?: number })?.end
+            ?? drag.origStart)
+        : drag.origStart + (drag.origOut - drag.origIn)
+      // The signed edge delta AFTER snapping the moved edge to neighbors.
+      // side='l' → the edge is origStart; side='r' → the edge is origEnd. In
+      // both cases `edgeDelta` is (snapped new edge position − old edge
+      // position), exactly the `deltaSec` contract every resolve* function
+      // expects (positive = edge moved right).
+      const edgeDelta = side === 'l'
+        ? snapTime(drag.origStart + dt, drag.clipId) - drag.origStart
+        : snapTime(origEnd + dt, drag.clipId) - origEnd
+      if (isOverlay) {
+        // Overlay clips have no source to trim — edge-drag retimes the window
+        // (start/end) via set_clip_timing. resolveOverlayTiming clamps end>start.
+        const r = dragResolve.resolveOverlayTiming(
+          { start: drag.origStart, end: origEnd }, side, edgeDelta)
+        if (side === 'l') await dispatch('set_clip_timing', { clip_id: drag.clipId, start: r.start })
+        else await dispatch('set_clip_timing', { clip_id: drag.clipId, end: r.end })
+      } else if (drag.modifier) {
+        // Alt + edge-drag on media = speed retime (keep whole source, change
+        // the timeline footprint). resolveMediaSpeed handles the side→footprint
+        // sign internally, so pass the raw edgeDelta. Clip speed defaults to 1
+        // (types.ts omits `speed`; read via the repo's cast pattern).
+        const sourceDur = drag.origOut - drag.origIn
+        const c = hits.find((h) => h.clip.id === drag.clipId)?.clip
+        const curSpeed = (c as unknown as { speed?: number | null })?.speed ?? 1
+        const factor = dragResolve.resolveMediaSpeed(sourceDur, curSpeed, side, edgeDelta)
+        await dispatch('set_speed', { clip_id: drag.clipId, factor })
+      } else {
+        // Plain media edge-drag = trim (show less/more of the source). Reuse
+        // the same snapped `edgeDelta`; resolveMediaTrim clamps out>in, in>=0.
+        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, edgeDelta)
+        if (side === 'l') await dispatch('trim_clip', { clip_id: drag.clipId, in: r.in })
+        else await dispatch('trim_clip', { clip_id: drag.clipId, out: r.out })
+      }
     }
   }
 
