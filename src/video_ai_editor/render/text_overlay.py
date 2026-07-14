@@ -11,7 +11,9 @@ emoji entirely on non-Mac systems.
 """
 from __future__ import annotations
 import hashlib
+import os
 import re
+import threading
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
@@ -19,6 +21,41 @@ from ..config import FONTS_DIR
 from ..edl import EDL
 from ..edl.schema import TextClip, Sticker
 from ..edl.keyframes import is_keyframed, sample, to_ffmpeg_expr
+from .. import platformutil as _pu
+
+
+def _png_is_valid(p: Path) -> bool:
+    """True if `p` exists and holds a decodable PNG.
+
+    A cache file can exist but be 0-byte or truncated when a prior render was
+    killed mid-write (no atomic rename) or two renders raced on the same
+    content-hash path. ffmpeg fed such a file as `-i` fails with "Invalid data
+    found when processing input" and aborts the whole filter_complex — this
+    guard is what keeps a torn cache file from being reused forever.
+    """
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    try:
+        with Image.open(p) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
+
+
+def _save_png_atomic(img: Image.Image, dst: Path) -> None:
+    """Save `img` as a PNG at `dst` via write-to-temp + atomic rename.
+
+    Mirrors render/compositor.py's `_part_path` + `replace_with_retry` pattern
+    for mp4 outputs: a concurrent reader sees either the old complete file or
+    the new complete file, never a partially-written one.
+    """
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        img.save(tmp, format="PNG")
+        _pu.replace_with_retry(tmp, dst)
+    finally:
+        _pu.unlink_with_retry(tmp)
 
 
 # Emoji Unicode ranges — pragmatic, not exhaustive.
@@ -184,9 +221,9 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
             f"v2|{role}|{canvas.w}x{canvas.h}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
-        if not png.exists():
+        if not _png_is_valid(png):
             img = render_text_png(c.text, role, canvas.w, canvas.h)
-            img.save(png)
+            _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
 
@@ -247,7 +284,7 @@ def _render_sticker_smallpng(sticker: Sticker, canvas_w: int, canvas_h: int,
     img = src.resize((tw, th), Image.LANCZOS)
     if abs(rotation) > 0.01:
         img = img.rotate(-rotation, resample=Image.BICUBIC, expand=True)
-    img.save(dst)
+    _save_png_atomic(img, dst)
     return img.size
 
 
@@ -269,13 +306,15 @@ def cache_animated_sticker_pngs(edl: EDL, cache_dir: Path
             f"sa|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scale:.3f}|{rot:.1f}|{Path(s.src).stat().st_mtime}".encode()
         ).hexdigest()[:16]
         dst = cache_dir / f"sa_{key}.png"
-        if not dst.exists():
+        if not _png_is_valid(dst):
             sz = _render_sticker_smallpng(s, canvas.w, canvas.h, dst)
             if sz is None:
                 continue
-        from PIL import Image as _PIL
-        with _PIL.open(dst) as im:
-            sz = im.size
+        try:
+            with Image.open(dst) as im:
+                sz = im.size
+        except Exception:
+            continue
         out.append((s, dst, sz))
     return out
 
@@ -302,7 +341,7 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
             f"st|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scalar:.3f}|{x:.1f},{y:.1f}|{opacity:.2f}|{rotation:.1f}|{Path(s.src).stat().st_mtime}".encode()
         ).hexdigest()[:16]
         dst = cache_dir / f"st_{key}.png"
-        if not dst.exists():
+        if not _png_is_valid(dst):
             try:
                 src = Image.open(s.src).convert("RGBA")
             except Exception:
@@ -329,7 +368,7 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
             paste_x = int(x - tw / 2)
             paste_y = int(y - th / 2)
             canvas_img.alpha_composite(sticker_img, dest=(paste_x, paste_y))
-            canvas_img.save(dst)
+            _save_png_atomic(canvas_img, dst)
         out.append((s, dst))
     return out
 
@@ -343,13 +382,25 @@ def build_overlay_chain(
     first_input_index: int,
     out_w: int,
     out_h: int,
+    preview: bool = False,
 ) -> tuple[str, list[str], str]:
     """Return (filter_str, extra_inputs, final_label).
 
     `first_input_index` is the index of the first overlay input we'll add (after
     the existing video clip inputs). Each PNG is added as a new `-i` input.
+
+    `preview`: when True, skip baking TEXT/caption clips — the browser's
+    TextLayer already draws every text/captions clip live over the <video>
+    with no ffmpeg round-trip (Preview.tsx's docstring: "no server
+    roundtrip per edit"). Baking them here too used to double them up in the
+    preview (server copy + client copy, at different sizing/position math —
+    "big and small captions simultaneously", issue 40). Export has no
+    TextLayer, so it always bakes text regardless of this flag. Stickers are
+    NOT skipped: unlike text, StickerLayer only draws selection/drag handles,
+    not the sticker image itself, so the server-baked PNG is the only
+    place a sticker's actual pixels come from in preview.
     """
-    text_paired = cache_text_pngs(edl, cache_dir)
+    text_paired = [] if preview else cache_text_pngs(edl, cache_dir)
     static_stickers = cache_sticker_pngs(edl, cache_dir)
     animated_stickers = cache_animated_sticker_pngs(edl, cache_dir)
 
