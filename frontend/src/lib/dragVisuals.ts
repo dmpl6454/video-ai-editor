@@ -5,6 +5,7 @@
 // used for the persisted-overlap dashed border) so nothing clashes.
 
 export const ACCENT = '#5b8dff'            // --accent-2, the interactive blue
+export const ACCENT_BAD = '#ff4d6d'        // --accent red, solid (borders/strokes)
 export const GHOST_ALPHA = 0.6             // dragged-clip ghost opacity
 export const DROP_OK = 'rgba(91,141,255,0.10)'    // compatible drop-target wash
 export const DROP_BAD = 'rgba(255,77,109,0.12)'   // incompatible-lane wash (--accent red)

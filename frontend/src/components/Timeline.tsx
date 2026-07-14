@@ -555,7 +555,7 @@ export function Timeline() {
         const ty = trackY(destIdx)
         ctx.fillStyle = compatible ? dv.DROP_OK : dv.DROP_BAD
         ctx.fillRect(labelWidth, ty, contentW - labelWidth, trackHeight)
-        ctx.strokeStyle = compatible ? dv.ACCENT : '#ff4d6d'
+        ctx.strokeStyle = compatible ? dv.ACCENT : dv.ACCENT_BAD
         ctx.lineWidth = 1
         ctx.strokeRect(labelWidth + 0.5, ty + 0.5, contentW - labelWidth - 1, trackHeight - 1)
       }
