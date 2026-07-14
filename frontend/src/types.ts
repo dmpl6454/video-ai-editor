@@ -77,6 +77,10 @@ export function isMediaClip(c: AnyClip): c is Clip {
   return 'src' in c && 'out' in c
 }
 
+export function isTextClip(c: AnyClip): c is TextClip {
+  return 'text' in c && 'end' in c
+}
+
 export function clipDuration(c: AnyClip): number {
   if (isMediaClip(c)) return c.out - c.in
   return c.end - c.start

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
-import { isMediaClip, type AnyClip, type Track } from '../types'
+import { isMediaClip, isTextClip, type AnyClip, type Track } from '../types'
+import * as dragResolve from '../lib/dragResolve'
+import * as dv from '../lib/dragVisuals'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -109,6 +111,11 @@ export function Timeline() {
     origStart: number
     origIn: number
     origOut: number
+    offsetX: number          // grab point within the clip (px)
+    pointerX: number         // live cursor X (canvas-space px)
+    pointerY: number         // live cursor Y (canvas-space px)
+    modifier: boolean        // altKey at grab-time (media speed vs trim)
+    clipKind: 'media' | 'text' | 'sticker'  // cached from the hit clip
   }>(null)
 
   // Resize observer
@@ -497,6 +504,7 @@ export function Timeline() {
         kind: 'playhead',
         clipId: '', trackId: '',
         startX: e.clientX, origStart: 0, origIn: 0, origOut: 0,
+        offsetX: 0, pointerX: x, pointerY: y, modifier: false, clipKind: 'media',
       }
       const raw = Math.max(0, (x - labelWidth) / zoom)
       const dur = edl?.duration ?? raw
@@ -523,6 +531,9 @@ export function Timeline() {
       if (x < hit.x + edge) kind = 'trim-l'
       else if (x > right - edge) kind = 'trim-r'
       const c = hit.clip
+      const clipKind: 'media' | 'text' | 'sticker' = isMediaClip(c)
+        ? 'media'
+        : (isTextClip(c) ? 'text' : 'sticker')
       dragRef.current = {
         kind,
         clipId: c.id,
@@ -531,6 +542,11 @@ export function Timeline() {
         origStart: 'start' in c ? c.start : 0,
         origIn: isMediaClip(c) ? c.in : 0,
         origOut: isMediaClip(c) ? c.out : 0,
+        offsetX: x - hit.x,
+        pointerX: x,
+        pointerY: y,
+        modifier: e.altKey,
+        clipKind,
       }
     } else {
       setSelection(null)
