@@ -102,6 +102,12 @@ export function Timeline() {
   // clears it after ~600ms, which redraws without it (a flash, no per-frame RAF).
   const flashClipId = useStore((s) => s.flashClipId)
 
+  // Bumped on each pointer move during a clip drag to trigger the drag-overlay
+  // redraw (rAF-coalesced). 0 when idle so no per-frame work happens unless a
+  // drag is active — same "only redraw while interacting" posture as playhead.
+  const [dragTick, setDragTick] = useState(0)
+  const dragRafRef = useRef<number | null>(null)
+
   // drag state for moving / trimming clips
   const dragRef = useRef<null | {
     kind: 'move' | 'trim-l' | 'trim-r' | 'playhead'
@@ -480,7 +486,129 @@ export function Timeline() {
     ctx.lineTo(ph, 8)
     ctx.closePath()
     ctx.fill()
-  }, [playhead, zoom, contentW, contentH, dpr])
+  }, [playhead, zoom, contentW, contentH, dpr, dragTick])
+
+  // Live drag chrome — drawn on the SAME overlay canvas as the playhead (which
+  // this effect runs after, so drag chrome layers on top), gated on an active
+  // clip drag. Idle (no dragRef) → this contributes nothing; the playhead
+  // effect's clearRect already ran. Keyed on dragTick so it re-runs each frame
+  // only while dragging. The heavy main canvas is never touched here.
+  useEffect(() => {
+    const drag = dragRef.current
+    const cv = playheadCanvasRef.current
+    if (!cv || !drag || drag.kind === 'playhead') return
+    const ctx = cv.getContext('2d')!
+    // The playhead effect already sized + cleared + drew the playhead this
+    // frame; do NOT clear (that would erase the playhead). We overlay on top.
+    ctx.save()
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    // Resolve the hovered target track index from live pointerY.
+    let targetIdx = -1
+    for (let i = 0; i < tracks.length; i++) {
+      const ty = trackY(i)
+      if (drag.pointerY >= ty && drag.pointerY <= ty + trackHeight) { targetIdx = i; break }
+    }
+    const originIdx = tracks.findIndex((t) => t.id === drag.trackId)
+
+    if (drag.kind === 'move') {
+      const destIdx = targetIdx >= 0 ? targetIdx : originIdx
+      const destTrack = tracks[destIdx]
+      const originType = tracks[originIdx]?.type
+      const destType = destTrack?.type
+      // Lane compatibility (mirrors onMouseUp): a media clip may only follow
+      // onto a media-family lane; a sticker/text only onto its own type.
+      const originIsMedia = originType ? laneAcceptsMediaClip(originType) : true
+      const compatible = destType
+        ? (originIsMedia ? laneAcceptsMediaClip(destType) : destType === originType)
+        : true
+
+      // 1) Drop-target row wash.
+      if (destIdx >= 0) {
+        const ty = trackY(destIdx)
+        ctx.fillStyle = compatible ? dv.DROP_OK : dv.DROP_BAD
+        ctx.fillRect(labelWidth, ty, contentW - labelWidth, trackHeight)
+        ctx.strokeStyle = compatible ? dv.ACCENT : '#ff4d6d'
+        ctx.lineWidth = 1
+        ctx.strokeRect(labelWidth + 0.5, ty + 0.5, contentW - labelWidth - 1, trackHeight - 1)
+      }
+
+      // Compute the raw (cursor-following) and snapped (landing) starts.
+      const rawLeftX = drag.pointerX - drag.offsetX
+      const rawStart = Math.max(0, (rawLeftX - labelWidth) / zoom)
+      const durSec = drag.origOut - drag.origIn
+      let landStart = rawStart
+      let overlapping = false
+      if (compatible && destTrack && drag.clipKind === 'media') {
+        overlapping = dragResolve.wouldOverlap(destTrack, durSec, rawStart, drag.clipId)
+        landStart = dragResolve.snapToFreeGap(destTrack, durSec, rawStart, drag.clipId)
+      }
+
+      if (destIdx >= 0 && compatible) {
+        const ty = trackY(destIdx)
+        // 2) Overlap tint at the raw (pre-snap) position, if it would collide.
+        if (overlapping) {
+          ctx.fillStyle = dv.OVERLAP_TINT
+          ctx.fillRect(labelWidth + rawStart * zoom, ty + 4, Math.max(2, durSec * zoom), trackHeight - 8)
+        }
+        // 3) Landing / insertion line at the snapped start.
+        const lx = labelWidth + landStart * zoom
+        ctx.strokeStyle = dv.ACCENT
+        ctx.lineWidth = dv.INSERTION_W
+        ctx.beginPath(); ctx.moveTo(lx, ty); ctx.lineTo(lx, ty + trackHeight); ctx.stroke()
+      }
+
+      // 4) Drag ghost at the raw cursor position, on the destination row.
+      const ghostIdx = destIdx >= 0 ? destIdx : originIdx
+      if (ghostIdx >= 0) {
+        const gy = trackY(ghostIdx)
+        const gx = labelWidth + rawStart * zoom
+        const gw = Math.max(2, durSec * zoom)
+        ctx.globalAlpha = dv.GHOST_ALPHA
+        ctx.fillStyle = TRACK_COLORS[tracks[ghostIdx].type] ?? dv.ACCENT
+        roundRect(ctx, gx, gy + 4, gw, trackHeight - 8, 4); ctx.fill()
+        ctx.globalAlpha = 1
+        ctx.strokeStyle = dv.ACCENT
+        ctx.lineWidth = dv.DRAG_BORDER_W
+        roundRect(ctx, gx, gy + 4, gw, trackHeight - 8, 4); ctx.stroke()
+      }
+    } else if (drag.kind === 'trim-l' || drag.kind === 'trim-r') {
+      // Edge-drag: live edge line + mode/result label.
+      const oi = originIdx >= 0 ? originIdx : 0
+      const ty = trackY(oi)
+      const dt = (drag.pointerX - (drag.startX - (canvasRef.current!.getBoundingClientRect().left))) / zoom
+      const side = drag.kind === 'trim-l' ? 'l' : 'r'
+      let edgeSec: number
+      let label: string
+      if (drag.clipKind === 'media' && drag.modifier) {
+        const sourceDur = drag.origOut - drag.origIn
+        // Preview assumes speed=1 (types.ts doesn't expose current speed cheaply here);
+        // Task 7's release reads the clip's real speed, so an already-retimed clip's
+        // committed factor can differ slightly from this label — expected, not a bug.
+        const factor = dragResolve.resolveMediaSpeed(sourceDur, 1, side, dt)
+        const footprint = sourceDur / factor
+        edgeSec = side === 'l' ? drag.origStart : drag.origStart + footprint
+        label = `speed ${factor.toFixed(2)}× · ${footprint.toFixed(2)}s`
+      } else if (drag.clipKind === 'media') {
+        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, dt)
+        const footprint = r.out - r.in
+        edgeSec = side === 'l' ? drag.origStart + (r.in - drag.origIn) : drag.origStart + footprint
+        label = `trim · ${footprint.toFixed(2)}s`
+      } else {
+        const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: drag.origStart + (drag.origOut - drag.origIn) }, side, dt)
+        edgeSec = side === 'l' ? r.start : r.end
+        label = `${(side === 'l' ? r.start : r.start).toFixed(2)}s → ${(side === 'l' ? (drag.origStart + (drag.origOut - drag.origIn)) : r.end).toFixed(2)}s`
+      }
+      const ex = labelWidth + Math.max(0, edgeSec) * zoom
+      ctx.strokeStyle = dv.ACCENT
+      ctx.lineWidth = dv.DRAG_BORDER_W
+      ctx.beginPath(); ctx.moveTo(ex, ty); ctx.lineTo(ex, ty + trackHeight); ctx.stroke()
+      ctx.fillStyle = dv.ACCENT
+      ctx.font = '10px var(--font-ui)'
+      ctx.fillText(label, ex + 4, ty + 12)
+    }
+    ctx.restore()
+  }, [dragTick, tracks, zoom, contentW, dpr])
 
 
   // mouse → seek / select / drag
@@ -581,12 +709,25 @@ export function Timeline() {
   useEffect(() => {
     function onWindowMouseMove(e: MouseEvent) {
       const drag = dragRef.current
-      if (!drag || drag.kind !== 'playhead' || !canvasRef.current) return
+      if (!drag || !canvasRef.current) return
       const rect = canvasRef.current.getBoundingClientRect()
       const x = e.clientX - rect.left
-      const raw = Math.max(0, (x - labelWidth) / zoom)
-      const dur = edl?.duration ?? raw
-      setPlayhead(Math.min(raw, dur))
+      const y = e.clientY - rect.top
+      if (drag.kind === 'playhead') {
+        const raw = Math.max(0, (x - labelWidth) / zoom)
+        const dur = edl?.duration ?? raw
+        setPlayhead(Math.min(raw, dur))
+        return
+      }
+      // Clip move/trim: record live pointer, request one overlay redraw/frame.
+      drag.pointerX = x
+      drag.pointerY = y
+      if (dragRafRef.current == null) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = null
+          setDragTick((n) => n + 1)
+        })
+      }
     }
     function onWindowMouseUp(e: MouseEvent) {
       if (dragRef.current?.kind === 'playhead') {
