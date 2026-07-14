@@ -6,7 +6,7 @@
 // The snap algorithm is identical to Timeline's existing `firstFreeGap` and
 // dispatch.py's `_first_free_gap` (same 1e-9 epsilon), consolidated here.
 
-import type { AnyClip, Track } from '../types'
+import type { Track } from '../types'
 import { isMediaClip } from '../types'
 
 const EPS = 1e-9
@@ -56,5 +56,41 @@ export function snapToFreeGap(
   return candidate
 }
 
-// eslint keeps AnyClip imported for the resolve* functions added in Task 4.
-export type { AnyClip }
+const MIN_SPAN = 0.1
+const SPEED_MIN = 0.25
+const SPEED_MAX = 4
+
+export function resolveMediaTrim(
+  clip: { in: number; out: number }, side: 'l' | 'r', deltaSec: number,
+): { in: number; out: number } {
+  if (side === 'l') {
+    const newIn = Math.min(Math.max(0, clip.in + deltaSec), clip.out - MIN_SPAN)
+    return { in: newIn, out: clip.out }
+  }
+  const newOut = Math.max(clip.out + deltaSec, clip.in + MIN_SPAN)
+  return { in: clip.in, out: newOut }
+}
+
+export function resolveMediaSpeed(
+  sourceDur: number, currentSpeed: number, side: 'l' | 'r', deltaSec: number,
+): number {
+  const currentFootprint = sourceDur / (currentSpeed || 1)
+  // Dragging either edge outward lengthens the footprint; inward shortens it.
+  // deltaSec is signed in timeline space: +delta on the right edge or -delta on
+  // the left edge both lengthen. We pass the already-signed footprint delta.
+  const footprintDelta = side === 'r' ? deltaSec : -deltaSec
+  const newFootprint = Math.max(MIN_SPAN, currentFootprint + footprintDelta)
+  const factor = sourceDur / newFootprint
+  return Math.min(SPEED_MAX, Math.max(SPEED_MIN, factor))
+}
+
+export function resolveOverlayTiming(
+  clip: { start: number; end: number }, side: 'l' | 'r', deltaSec: number,
+): { start: number; end: number } {
+  if (side === 'l') {
+    const newStart = Math.min(Math.max(0, clip.start + deltaSec), clip.end - MIN_SPAN)
+    return { start: newStart, end: clip.end }
+  }
+  const newEnd = Math.max(clip.end + deltaSec, clip.start + MIN_SPAN)
+  return { start: clip.start, end: newEnd }
+}
