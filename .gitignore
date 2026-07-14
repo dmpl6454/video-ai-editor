@@ -47,3 +47,6 @@ tool-results/
 
 # Claude Code transient runtime lock
 .claude/scheduled_tasks.lock
+
+# Local git worktrees (superpowers:using-git-worktrees fallback)
+.worktrees/
