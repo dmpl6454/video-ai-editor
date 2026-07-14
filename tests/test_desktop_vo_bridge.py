@@ -43,6 +43,7 @@ def test_vo_start_rejects_invalid_session_id(monkeypatch):
 
 def test_vo_start_rejects_concurrent_recording(monkeypatch, tmp_path):
     from video_ai_editor import desktop
+    from video_ai_editor import platformutil as _pu
     from video_ai_editor import storage
 
     monkeypatch.setenv("WORKDIR", str(tmp_path))
@@ -54,6 +55,12 @@ def test_vo_start_rejects_concurrent_recording(monkeypatch, tmp_path):
         sid = storage.new_session_id()
         storage.session_dir(sid)
 
+        # vo_start early-returns {unsupported: True} on non-Mac (see
+        # test_vo_start_no_op_on_non_mac); this test exercises the Mac-only
+        # control flow below that gate, so it must force IS_MAC=True to run
+        # correctly on non-Mac CI runners (ubuntu/windows), not just on a
+        # real Mac by coincidence.
+        monkeypatch.setattr(_pu, "IS_MAC", True)
         api = desktop._Api("127.0.0.1", 8765)
         # Mock out the real AVFoundation TCC check — it depends on this
         # machine's actual mic-permission state (and can block on a real
@@ -89,6 +96,7 @@ def test_vo_start_stop_round_trip_uploads_and_cleans_up(monkeypatch, tmp_path):
     upload's response merged with ok:True, and (e) deletes the raw WAV
     afterwards (it's a transfer artifact, not the session's stored copy)."""
     from video_ai_editor import desktop
+    from video_ai_editor import platformutil as _pu
     from video_ai_editor import storage
     import signal as _signal
 
@@ -101,6 +109,7 @@ def test_vo_start_stop_round_trip_uploads_and_cleans_up(monkeypatch, tmp_path):
         sid = storage.new_session_id()
         storage.session_dir(sid)
 
+        monkeypatch.setattr(_pu, "IS_MAC", True)
         api = desktop._Api("127.0.0.1", 8765)
         monkeypatch.setattr(desktop, "_ensure_mic_authorized_mac", lambda: (True, "mocked"))
         monkeypatch.setattr(desktop, "_avfoundation_default_audio_index", lambda: "0")
@@ -158,6 +167,7 @@ def test_vo_start_stop_round_trip_uploads_and_cleans_up(monkeypatch, tmp_path):
 
 def test_vo_stop_reports_upload_failure_but_still_cleans_up(monkeypatch, tmp_path):
     from video_ai_editor import desktop
+    from video_ai_editor import platformutil as _pu
     from video_ai_editor import storage
     import urllib.error
 
@@ -170,6 +180,7 @@ def test_vo_stop_reports_upload_failure_but_still_cleans_up(monkeypatch, tmp_pat
         sid = storage.new_session_id()
         storage.session_dir(sid)
 
+        monkeypatch.setattr(_pu, "IS_MAC", True)
         api = desktop._Api("127.0.0.1", 8765)
         monkeypatch.setattr(desktop, "_ensure_mic_authorized_mac", lambda: (True, "mocked"))
         monkeypatch.setattr(desktop, "_avfoundation_default_audio_index", lambda: "0")
@@ -233,6 +244,7 @@ def test_vo_start_blocked_when_mic_not_authorized(monkeypatch, tmp_path):
     BEFORE spawning ffmpeg, and return its detail message when denied —
     never silently proceed to a doomed subprocess capture."""
     from video_ai_editor import desktop
+    from video_ai_editor import platformutil as _pu
     from video_ai_editor import storage
 
     monkeypatch.setenv("WORKDIR", str(tmp_path))
@@ -244,6 +256,7 @@ def test_vo_start_blocked_when_mic_not_authorized(monkeypatch, tmp_path):
         sid = storage.new_session_id()
         storage.session_dir(sid)
 
+        monkeypatch.setattr(_pu, "IS_MAC", True)
         api = desktop._Api("127.0.0.1", 8765)
         monkeypatch.setattr(
             desktop, "_ensure_mic_authorized_mac",
@@ -270,6 +283,7 @@ def test_vo_stop_includes_ffmpeg_stderr_tail_on_empty_wav(monkeypatch, tmp_path)
     stderr tail so a TCC denial, a bad device index, and a genuinely silent
     device are distinguishable — not a single generic message."""
     from video_ai_editor import desktop
+    from video_ai_editor import platformutil as _pu
     from video_ai_editor import storage
 
     monkeypatch.setenv("WORKDIR", str(tmp_path))
@@ -281,6 +295,7 @@ def test_vo_stop_includes_ffmpeg_stderr_tail_on_empty_wav(monkeypatch, tmp_path)
         sid = storage.new_session_id()
         storage.session_dir(sid)
 
+        monkeypatch.setattr(_pu, "IS_MAC", True)
         api = desktop._Api("127.0.0.1", 8765)
         monkeypatch.setattr(desktop, "_ensure_mic_authorized_mac", lambda: (True, "mocked"))
         monkeypatch.setattr(desktop, "_avfoundation_default_audio_index", lambda: "0")
