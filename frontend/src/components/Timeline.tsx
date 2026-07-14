@@ -595,9 +595,16 @@ export function Timeline() {
         edgeSec = side === 'l' ? drag.origStart + (r.in - drag.origIn) : drag.origStart + footprint
         label = `trim · ${footprint.toFixed(2)}s`
       } else {
-        const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: drag.origStart + (drag.origOut - drag.origIn) }, side, dt)
+        // origIn/origOut are 0/0 for a text/sticker clip (see onMouseDown), so
+        // the media formula `origStart + (origOut - origIn)` collapses to
+        // origStart and silently loses the real end. Look up the clip's actual
+        // current end from `hits` instead — same pattern as the release path's
+        // `origEnd` (Task 7, onMouseUp).
+        const origEnd = (hits.find((h) => h.clip.id === drag.clipId)?.clip as unknown as { end?: number })?.end
+          ?? drag.origStart
+        const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: origEnd }, side, dt)
         edgeSec = side === 'l' ? r.start : r.end
-        label = `${(side === 'l' ? r.start : r.start).toFixed(2)}s → ${(side === 'l' ? (drag.origStart + (drag.origOut - drag.origIn)) : r.end).toFixed(2)}s`
+        label = `${(side === 'l' ? r.start : r.start).toFixed(2)}s → ${(side === 'l' ? origEnd : r.end).toFixed(2)}s`
       }
       const ex = labelWidth + Math.max(0, edgeSec) * zoom
       ctx.strokeStyle = dv.ACCENT
