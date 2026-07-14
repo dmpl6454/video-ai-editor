@@ -11,6 +11,7 @@ import { useEffect, useRef } from 'react'
 import { useStore } from '../store'
 import type { EDL } from '../types'
 import { isSticker, stickerGeom, type StickerClip, type StickerGeom } from '../lib/overlay'
+import * as dv from '../lib/dragVisuals'
 
 interface Props {
   edl: EDL
@@ -112,18 +113,32 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
 
         if (sk.id === selection) {
           const h = g.size / 2
+          const isDragging = dragRef.current?.id === sk.id
           ctx.save()
           ctx.translate(g.cx, g.cy)
           ctx.rotate(g.rot)
           ctx.globalAlpha = 1
-          ctx.strokeStyle = '#5b8dff'
-          ctx.lineWidth = 1.5
-          ctx.setLineDash([4, 3])
+          ctx.strokeStyle = dv.ACCENT
+          if (isDragging) {
+            // Solid, thicker box + soft shadow while actively dragging/resizing
+            // — visually distinct from the resting dashed selection box.
+            ctx.lineWidth = dv.DRAG_BORDER_W
+            ctx.setLineDash([])
+            ctx.shadowColor = 'rgba(0,0,0,0.5)'
+            ctx.shadowBlur = 8
+          } else {
+            ctx.lineWidth = 1.5
+            ctx.setLineDash([4, 3])
+          }
           ctx.strokeRect(-h, -h, g.size, g.size)
           ctx.setLineDash([])
-          ctx.fillStyle = '#5b8dff'
+          ctx.shadowBlur = 0
+          ctx.fillStyle = dv.ACCENT
           for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
-            ctx.fillRect(sx * h - HANDLE, sy * h - HANDLE, HANDLE * 2, HANDLE * 2)
+            // Highlight the corner being resized (brighter/larger).
+            const active = isDragging && dragRef.current?.mode === 'resize'
+            const pad = active ? HANDLE + 1 : HANDLE
+            ctx.fillRect(sx * h - pad, sy * h - pad, pad * 2, pad * 2)
           }
           ctx.restore()
         }
@@ -189,15 +204,34 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current
       if (!d) {
-        // Hover cursor feedback.
+        // Hover cursor feedback: resize cursor over a selected sticker's corner
+        // handle, move cursor over any sticker body, default otherwise.
         const { px, py } = posOf(e)
         const t = now()
-        const hit = activeStickers(t).some((sk) => {
-          const g = geomFor(sk, t)
+        const sel = stateRef.current.selection
+        const stickers = activeStickers(t)
+        let cursor = 'default'
+        const selSk = stickers.find((s) => s.id === sel)
+        if (selSk) {
+          const g = geomFor(selSk, t)
           const { lx, ly } = toLocal(px, py, g)
-          return Math.abs(lx) <= g.size / 2 && Math.abs(ly) <= g.size / 2
-        })
-        cv.style.cursor = hit ? 'move' : 'default'
+          const h = g.size / 2
+          for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+            if (Math.hypot(lx - sx * h, ly - sy * h) <= HANDLE_HIT) {
+              cursor = dv.cursorForCorner(sx, sy)
+              break
+            }
+          }
+        }
+        if (cursor === 'default') {
+          const overBody = stickers.some((sk) => {
+            const g = geomFor(sk, t)
+            const { lx, ly } = toLocal(px, py, g)
+            return Math.abs(lx) <= g.size / 2 && Math.abs(ly) <= g.size / 2
+          })
+          if (overBody) cursor = 'move'
+        }
+        cv.style.cursor = cursor
         return
       }
       const { px, py } = posOf(e)
