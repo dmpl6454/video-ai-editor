@@ -574,8 +574,8 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         fc = fc + ";" + pip_chain
         v_label = pip_v_label
     extra_inputs += pip_inputs
-    # Each PIP clip used 4 args (-ss .. -to .. -i path) → +4 indices each.
-    pip_inputs_count = len(pip_inputs) // 4
+    # Each PIP clip used 6 args (-ss v -to v -i path) → +1 index each.
+    pip_inputs_count = len(pip_inputs) // 6
     next_idx += pip_inputs_count
 
     # Composite text overlay PNGs (rendered by Pillow) via ffmpeg overlay= filter.

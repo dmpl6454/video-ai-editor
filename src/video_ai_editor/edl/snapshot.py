@@ -22,13 +22,45 @@ class EDLStore:
         self.snapshots_dir.mkdir(exist_ok=True)
         self.edl: EDL = self._load_edl()
         self.ops: OpsLog = self._load_ops()
-        self._redo_stack: list[EDL] = []
+        self._redo_stack: list[EDL] = self._load_redo_stack()
         # Seed snapshot 0 = initial state so undo can walk back to it.
         # Without this, undo can never restore "before any ops were applied"
         # because the first snapshot is taken inside commit() AFTER the first op.
         if not list(self.snapshots_dir.glob("*.json")):
             initial_snap = self.snapshots_dir / f"00000_{self.edl.hash()}.json"
             initial_snap.write_text(self.edl.to_json(), encoding="utf-8")
+
+    @property
+    def redo_stack_path(self) -> Path:
+        return self.dir / "redo_stack.json"
+
+    def _load_redo_stack(self) -> list[EDL]:
+        # Redo used to be an in-memory-only list — it silently emptied on a
+        # process restart or eviction from main.py's LRU _STORES cache (the
+        # session itself survives fine via edl.json; only "what can Redo
+        # bring back" was lost), which read as "Redo does nothing" with no
+        # explanation. Persisting it the same way edl.json/ops.json already
+        # are closes that gap.
+        if not self.redo_stack_path.exists():
+            return []
+        try:
+            raw = json.loads(self.redo_stack_path.read_text(encoding="utf-8"))
+            return [EDL.model_validate(item) for item in raw]
+        except Exception:
+            return []
+
+    def _save_redo_stack(self) -> None:
+        if self._redo_stack:
+            payload = json.dumps([e.model_dump(by_alias=True, mode="json") for e in self._redo_stack])
+            self.redo_stack_path.write_text(payload, encoding="utf-8")
+        else:
+            # Nothing to redo — remove the file rather than persist "[]" so a
+            # stale file left behind doesn't need special-casing on load.
+            self.redo_stack_path.unlink(missing_ok=True)
+
+    @property
+    def redo_available(self) -> bool:
+        return bool(self._redo_stack)
 
     @property
     def edl_path(self) -> Path:
@@ -66,6 +98,7 @@ class EDLStore:
         op = self.ops.append(tool, args, summary, prev_hash, new_hash, by=by)
         self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         self._redo_stack.clear()
+        self._save_redo_stack()
         return op
 
     def _last_hash(self) -> str:
@@ -86,6 +119,7 @@ class EDLStore:
             return False
         # Push current onto redo stack
         self._redo_stack.append(self.edl.model_copy(deep=True))
+        self._save_redo_stack()
         # Restore previous snapshot
         prev = snaps[-2]
         self.edl = EDL.model_validate_json(prev.read_text(encoding="utf-8"))
@@ -104,6 +138,7 @@ class EDLStore:
         if not self._redo_stack:
             return False
         self.edl = self._redo_stack.pop()
+        self._save_redo_stack()
         self.edl.recompute_duration()
         new_hash = self.edl.hash()
         self._snapshot(new_hash)

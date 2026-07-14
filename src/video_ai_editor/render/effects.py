@@ -7,11 +7,27 @@ dependencies).
 """
 from __future__ import annotations
 import math
+import os
+import threading
 from pathlib import Path
 from PIL import Image, ImageDraw
 
 from ..edl.schema import Effect, Mask, Clip, ChromaKey
 from .. import platformutil as _pu
+
+
+def mask_png_is_valid(p: Path) -> bool:
+    """True if `p` exists and holds a decodable PNG (see text_overlay._png_is_valid
+    for why a bare exists() check is unsafe: a killed/raced render can leave a
+    0-byte or truncated cache file that `exists()` alone would still reuse)."""
+    if not p.exists() or p.stat().st_size == 0:
+        return False
+    try:
+        with Image.open(p) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
 
 
 def _hex_to_ffmpeg_color(hex_color: str) -> str:
@@ -221,5 +237,10 @@ def render_mask_png(mask: Mask, w: int, h: int, dst: Path) -> Path:
         from PIL import ImageFilter
         img = img.filter(ImageFilter.GaussianBlur(radius=mask.feather))
     dst.parent.mkdir(parents=True, exist_ok=True)
-    img.save(dst)
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        img.save(tmp, format="PNG")
+        _pu.replace_with_retry(tmp, dst)
+    finally:
+        _pu.unlink_with_retry(tmp)
     return dst
