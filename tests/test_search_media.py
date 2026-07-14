@@ -24,18 +24,24 @@ def _mk(path: Path, vf: str):
 
 
 def _store_with_clips(tmp_path: Path, specs: list[tuple[str, str]]) -> EDLStore:
+    # Mirror the real ingest_upload() contract (ingest/pipeline.py): the
+    # normalized media and its ingest.json are siblings in the same
+    # uploads/<stem>/ directory, and a clip's `src` points at that normalized
+    # file. get_transcript()/find_moments() resolve the v1 clip's ingest.json
+    # from Path(src).parent — so the fixture must put them in the same dir,
+    # not an unrelated one, or the "current source" resolution can't find it.
     clips = []
+    ingest_dir = tmp_path / "uploads" / "clip0"
+    ingest_dir.mkdir(parents=True, exist_ok=True)
     for i, (name, vf) in enumerate(specs):
-        p = tmp_path / f"{name}.mp4"
+        p = ingest_dir / f"{name}.normalized.mp4"
         _mk(p, vf)
         clips.append(Clip(src=str(p), in_=0, out=2, start=i * 2, id=name))
     edl = EDL(canvas=Canvas(w=320, h=180, fps=30),
               tracks=[Track(id="v1", type="video", clips=clips)])
     edl.recompute_duration()
     (tmp_path / "edl.json").write_text(edl.model_dump_json())
-    # seed a transcript where get_transcript reads it: uploads/**/ingest.json
-    ingest_dir = tmp_path / "uploads" / "clip0"
-    ingest_dir.mkdir(parents=True, exist_ok=True)
+    # seed a transcript where get_transcript reads it: <v1 clip's dir>/ingest.json
     (ingest_dir / "ingest.json").write_text(json.dumps({
         "transcript": {
             "language": "en", "duration": 6.0,
