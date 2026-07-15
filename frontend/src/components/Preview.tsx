@@ -200,44 +200,48 @@ export function Preview() {
     let raf = 0
     let last = performance.now()
     clockRef.current = useStore.getState().playhead
-    let lastVideoTime = ref.current ? ref.current.currentTime : -1
 
-    // Once a <video> reload is detected (currentTime jumps far from where the
-    // wall clock says playback should be), stop following it until it's
-    // caught back up to WITHIN this tolerance — a single frame of "it moved
-    // forward a little from 0" is not enough evidence it's resynced, since
-    // that's equally true one frame after a reset. RESYNC_TOL is generous
-    // (0.5s) because a fresh render + seek can legitimately take a few
-    // frames to land close to the target time.
-    const RESYNC_TOL = 0.5
-    let resyncing = false
+    // The media clock (<video>.currentTime) is trusted for advancing the
+    // playhead and for the end-of-timeline clamp ONLY on frames where it is
+    // close to the wall clock's OWN currently-running value (TRUST_TOL below).
+    // This is a per-frame, self-re-arming proximity check — no latch, no
+    // one-way state — so it naturally covers two hazards with one rule:
+    //   (a) a mid-playback src reload resets currentTime to ~0 while the wall
+    //       clock is genuinely mid-timeline (e.g. 5.0s) — far apart, so the
+    //       stale-LOW value is never trusted; the wall clock keeps free-
+    //       running from where it legitimately was (this is what the old
+    //       `resyncing` flag was trying to do, but its entry condition only
+    //       fired on a BACKWARD jump — a value that's stale but not
+    //       "backward" relative to the last sample slipped through).
+    //   (b) a replay-from-end whose currentTime=0 seek hasn't landed yet, so
+    //       currentTime briefly sits near the OLD `duration` while the wall
+    //       clock has already been reset to 0 for the new play session — far
+    //       apart, so the stale-HIGH value is never trusted either, and the
+    //       end-clamp (which only ever fires from a wall-clock `t` that was
+    //       never snapped to an untrusted value) cannot fire off it.
+    // Once the real currentTime lands close to the wall clock's current
+    // value (in either hazard, once the seek/reload settles), trust resumes
+    // immediately — no waiting for a permanent flag, no re-arm bookkeeping.
+    // TRUST_TOL is the same 0.35s tolerance the playhead-sync effect already
+    // uses while playing (line ~168) — a fresh seek can legitimately land a
+    // few frames later, this is not a tight equality check.
+    const TRUST_TOL = 0.35
 
     const loop = (now: number) => {
       const dt = (now - last) / 1000
       last = now
       const rate = useStore.getState().playbackRate
       const vid = ref.current
-      if (vid) {
-        const videoDelta = vid.currentTime - lastVideoTime
-        // A jump against the play direction (or a huge jump either way) means
-        // the <video> just reloaded to a new preview render — its src swapped
-        // (a mid-playback edit triggered a re-render) and currentTime reset to
-        // 0, even though the wall-clock-tracked playhead was still mid-
-        // timeline. Blindly following that reset dragged the playhead
-        // backward-then-forward-from-zero (issue 27, "plays in reverse after
-        // adding a clip"). Enter resync mode instead of snapping to it.
-        const wrongDirection = rate >= 0 ? videoDelta < -1e-4 : videoDelta > 1e-4
-        if (wrongDirection) resyncing = true
-        lastVideoTime = vid.currentTime
-        if (resyncing && Math.abs(vid.currentTime - clockRef.current) < RESYNC_TOL) {
-          resyncing = false
-        }
-      }
-      // Follow the media clock only once resynced; otherwise the wall clock
-      // free-runs so a stalled/failed renderer (or a mid-reload video) can't
-      // freeze or yank the playhead.
-      if (vid && !vid.paused && !vid.ended && !resyncing) {
-        clockRef.current = vid.currentTime
+      const trustworthy = !!vid && !vid.paused && !vid.ended &&
+        Math.abs(vid.currentTime - clockRef.current) < TRUST_TOL
+      // Follow the media clock only on trustworthy frames; otherwise the wall
+      // clock free-runs so a stalled/failed renderer, a mid-reload video, or
+      // a not-yet-landed seek can't freeze or yank the playhead. Because
+      // clockRef is NEVER set from an untrusted currentTime, `t >= duration`
+      // below can only ever be true from genuine wall-clock (or genuinely
+      // trusted media-clock) progress — the end-clamp needs no separate gate.
+      if (trustworthy) {
+        clockRef.current = vid!.currentTime
       } else {
         clockRef.current += dt * Math.max(-4, Math.min(4, rate || 1))
       }
