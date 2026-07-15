@@ -26,7 +26,20 @@ const selectedIds = (s: Store): string[] =>
 export const COMMANDS: Command[] = [
   // ---------- Transport ----------
   { id: 'playPause', label: 'Play / Pause', category: 'Transport',
-    run: (s) => { s.setPlaying(!s.isPlaying); s.setPlaybackRate(1) } },
+    run: (s) => {
+      // Pressing play when the playhead is parked at (or within a frame of) the
+      // end rewinds to the start (CapCut/every NLE does this) — shared with the
+      // transport button via replayFromStart(). Only rewinds when STARTING
+      // playback forward from the end; pausing / resuming a rate<0 reverse are
+      // unaffected. Unlike the button, this layer has no <video> ref of its
+      // own to rewind synchronously — it relies on the rAF clock's TRUST_TOL
+      // proximity check (Preview.tsx) to free-run correctly from the fresh
+      // playhead=0 without being fooled by a stale currentTime, plus the
+      // playhead-sync effect's async seek eventually landing.
+      s.replayFromStart()
+      s.setPlaying(!s.isPlaying)
+      s.setPlaybackRate(1)
+    } },
   { id: 'shuttleReverse', label: 'Shuttle reverse (J)', category: 'Transport',
     run: (s) => { const r = s.playbackRate; s.setPlaybackRate(r > 0 ? -1 : Math.max(-8, r * 2)); s.setPlaying(true) } },
   { id: 'shuttleStop', label: 'Shuttle stop (K)', category: 'Transport',
