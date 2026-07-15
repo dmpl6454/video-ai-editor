@@ -27,16 +27,16 @@ export const COMMANDS: Command[] = [
   // ---------- Transport ----------
   { id: 'playPause', label: 'Play / Pause', category: 'Transport',
     run: (s) => {
-      // Pressing play when the playhead is already parked at (or within a
-      // frame of) the end plays for a few ms and immediately re-hits the end
-      // clamp, reading as "stops right away" — CapCut/every NLE instead
-      // rewinds to the start on this gesture. Only applies when STARTING
-      // playback forward from the end; pausing, or resuming a rate<0
-      // reverse-from-end, are unaffected.
-      const duration = s.edl?.duration ?? 0
-      if (!s.isPlaying && duration > 0 && s.playhead >= duration - FRAME) {
-        s.setPlayhead(0)
-      }
+      // Pressing play when the playhead is parked at (or within a frame of) the
+      // end rewinds to the start (CapCut/every NLE does this) — shared with the
+      // transport button via replayFromStart(). Only rewinds when STARTING
+      // playback forward from the end; pausing / resuming a rate<0 reverse are
+      // unaffected. Unlike the button, this layer has no <video> ref of its
+      // own to rewind synchronously — it relies on the rAF clock's TRUST_TOL
+      // proximity check (Preview.tsx) to free-run correctly from the fresh
+      // playhead=0 without being fooled by a stale currentTime, plus the
+      // playhead-sync effect's async seek eventually landing.
+      s.replayFromStart()
       s.setPlaying(!s.isPlaying)
       s.setPlaybackRate(1)
     } },

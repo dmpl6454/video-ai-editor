@@ -72,7 +72,9 @@ function setPlaying(p){if(p===isPlaying)return;isPlaying=p;flips.push(p);documen
   effRaf=requestAnimationFrame(runEffects);}
 function effA(){if(playbackRate>0)v.playbackRate=Math.min(4,playbackRate);else v.playbackRate=1;if(isPlaying&&playbackRate>0)v.play().catch(()=>{});else v.pause();}
 function effB(){const gap=Math.abs(v.currentTime-playhead);if(gap>(isPlaying?0.35:0.05)){try{v.currentTime=playhead}catch{}clock=playhead;}}
-function runEffects(){effA();effB();cancelAnimationFrame(raf);if(!isPlaying)return;
+function runEffects(){
+  if(isPlaying && playhead===0 && v.currentTime>0.05){ try{v.currentTime=0}catch{}; clock=0; }
+  effA();effB();cancelAnimationFrame(raf);if(!isPlaying)return;
   let last=performance.now();clock=playhead;const TRUST_TOL=0.35;
   const loop=(now)=>{const dt=(now-last)/1000;last=now;const rate=playbackRate;
     const trustworthy=v&&!v.paused&&!v.ended&&Math.abs(v.currentTime-clock)<TRUST_TOL;
@@ -94,6 +96,7 @@ window.__state=()=>({playhead,isPlaying,ended:v.ended,ct:+v.currentTime.toFixed(
 window.__flips=()=>flips.length;
 window.__installSlowSeek=(ms)=>{let p=Object.getPrototypeOf(v),d=null;while(p&&!d){d=Object.getOwnPropertyDescriptor(p,'currentTime');if(!d)p=Object.getPrototypeOf(p);}
   Object.defineProperty(v,'currentTime',{configurable:true,get(){return d.get.call(this)},set(val){const s=this;setTimeout(()=>{try{d.set.call(s,val)}catch{}},ms)}});};
+window.__kbRewind=()=>{setPlayhead(0);};
 </script></body></html>
 """
 
@@ -143,5 +146,49 @@ async def test_replay_at_end_does_not_oscillate(tmp_path: Path):
         assert transitions <= 2, (
             f"play/pause oscillated {transitions}x after replay-at-end "
             f"(freeze reproduced); final state={state}")
+    finally:
+        getattr(server_th, "_server").shutdown()
+
+
+@pytest.mark.asyncio
+async def test_replay_at_end_via_keyboard_does_not_oscillate(tmp_path: Path):
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        pytest.skip("playwright python not installed")
+
+    _build_clip(tmp_path / "clip.mp4")
+    (tmp_path / "index.html").write_text(PAGE_HTML)
+    port = _free_port()
+    server_th = _serve(tmp_path, port)
+    try:
+        async with async_playwright() as p:
+            try:
+                browser = await p.chromium.launch(
+                    headless=True, args=["--autoplay-policy=no-user-gesture-required"])
+            except Exception as e:
+                pytest.skip(f"chromium not available: {e}")
+            page = await (await browser.new_context()).new_page()
+            await page.goto(f"http://127.0.0.1:{port}/index.html")
+            await page.wait_for_function("() => document.getElementById('v').readyState >= 1")
+            await page.evaluate("() => window.__startPlay()")
+            await page.wait_for_function("() => window.__state().isPlaying === false", timeout=8000)
+            await page.wait_for_timeout(200)
+            await page.evaluate("() => window.__installSlowSeek(200)")
+            flips_before = await page.evaluate("() => window.__flips()")
+            # Keyboard path: mirror the playPause command — rewind via the same
+            # guard WITHOUT an inline <video> rewind (the page's runEffects gate
+            # must carry the load, like Preview's rAF fix does).
+            await page.evaluate("""() => {
+              const st = window.__state();
+              if (!st.isPlaying && st.playhead >= 2.0 - 1/30) { window.__kbRewind(); }
+              window.__startPlay();
+            }""")
+            await page.wait_for_timeout(2500)
+            transitions = await page.evaluate("() => window.__flips()") - flips_before
+            state = await page.evaluate("() => window.__state()")
+            await browser.close()
+        assert transitions <= 2, (
+            f"keyboard replay oscillated {transitions}x; final state={state}")
     finally:
         getattr(server_th, "_server").shutdown()

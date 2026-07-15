@@ -189,6 +189,27 @@ export function Preview() {
     }
   }, [playhead, isPlaying])
 
+  // When playback STARTS with the playhead freshly at 0 (a replay-from-end via
+  // the Space key, which rewinds through the store's replayFromStart), reset
+  // the <video> to match. The rAF clock's TRUST_TOL proximity check is what
+  // actually prevents a stale currentTime from re-triggering the end-clamp on
+  // this path (same as it does for the button, above) — this synchronous
+  // reset is defense in depth for the keyboard path specifically, giving it
+  // some parity with the button's own rewind even though the keymap layer has
+  // no <video> ref of its own to act on directly. It costs nothing: a genuine
+  // no-op whenever currentTime is already near 0.
+  useEffect(() => {
+    if (!isPlaying) return
+    const v = ref.current
+    if (v && playhead === 0 && v.currentTime > 0.05) {
+      try { v.currentTime = 0 } catch { /* non-fatal */ }
+      clockRef.current = 0
+    }
+    // Intentionally runs only on the isPlaying rising edge; depending on
+    // playhead here would re-fire every frame during playback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying])
+
   // Playback clock — decoupled from frame rendering.
   //
   // The clock used to be driven by `requestVideoFrameCallback`, which only
