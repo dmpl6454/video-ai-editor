@@ -167,6 +167,12 @@ export function Preview() {
     const gap = Math.abs(v.currentTime - playhead)
     if (gap > (isPlaying ? 0.35 : 0.05)) {
       // A failed/odd <video> can throw on a seek — never let that break the UI.
+      // Note: this is the GENERAL sync path (external scrubs, jumps, and the
+      // Space-key replay-from-end command — which has no <video> ref of its
+      // own and relies entirely on this effect plus the rAF clock's TRUST_TOL
+      // check). The transport BUTTON's onClick additionally does a synchronous
+      // currentTime/clockRef rewind as defense-in-depth for its own path; this
+      // effect's async seek is what the keyboard path depends on exclusively.
       try { v.currentTime = playhead } catch { /* non-fatal */ }
       clockRef.current = playhead   // keep the clock in step with the jump
     }
@@ -366,13 +372,19 @@ export function Preview() {
       </div>
       <div className="transport">
         <button onClick={() => {
-          // Mirror the playPause keyboard command's end-of-timeline rewind
-          // (keymap/commands.ts) so clicking this button behaves the same as
-          // pressing Space: starting playback from the very end plays a few
-          // ms and immediately re-hits the end-clamp otherwise, reading as
-          // "does nothing."
-          if (!isPlaying && edl.duration > 0 && playhead >= edl.duration - 1 / 30) {
-            setPlayhead(0)
+          // Replay-from-end: use the shared store action so a click here
+          // behaves the same as the playPause command's end-of-timeline
+          // rewind. The rAF clock's TRUST_TOL proximity check (see the
+          // playback-clock effect below) is what actually prevents a stale
+          // post-rewind <video>.currentTime from re-triggering the end-clamp;
+          // resetting currentTime/clockRef synchronously here is defense in
+          // depth — it makes this button's own path self-contained instead of
+          // relying solely on that effect, and costs nothing since it's a
+          // genuine no-op when nothing needs rewinding.
+          const rewound = useStore.getState().replayFromStart()
+          if (rewound && ref.current) {
+            try { ref.current.currentTime = 0 } catch { /* non-fatal */ }
+            clockRef.current = 0
           }
           setPlaying(!isPlaying)
         }}>{isPlaying ? '⏸' : '▶'}</button>

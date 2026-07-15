@@ -72,16 +72,23 @@ function setPlaying(p){if(p===isPlaying)return;isPlaying=p;flips.push(p);documen
   effRaf=requestAnimationFrame(runEffects);}
 function effA(){if(playbackRate>0)v.playbackRate=Math.min(4,playbackRate);else v.playbackRate=1;if(isPlaying&&playbackRate>0)v.play().catch(()=>{});else v.pause();}
 function effB(){const gap=Math.abs(v.currentTime-playhead);if(gap>(isPlaying?0.35:0.05)){try{v.currentTime=playhead}catch{}clock=playhead;}}
-function runEffects(){effA();effB();cancelAnimationFrame(raf);if(!isPlaying)return;let last=performance.now();clock=playhead;let lastVT=v.currentTime;let resync=false;const TOL=0.5;
+function runEffects(){effA();effB();cancelAnimationFrame(raf);if(!isPlaying)return;
+  let last=performance.now();clock=playhead;const TRUST_TOL=0.35;
   const loop=(now)=>{const dt=(now-last)/1000;last=now;const rate=playbackRate;
-    const d=v.currentTime-lastVT;const wrong=rate>=0?d<-1e-4:d>1e-4;if(wrong)resync=true;lastVT=v.currentTime;
-    if(resync&&Math.abs(v.currentTime-clock)<TOL)resync=false;
-    if(!v.paused&&!v.ended&&!resync)clock=v.currentTime;else clock+=dt*Math.max(-4,Math.min(4,rate||1));
-    let t=clock;if(DURATION&&t>=DURATION){setPlayhead(DURATION);setPlaying(false);return;}
-    if(t<=0&&rate<0){setPlayhead(0);setPlaying(false);return;}setPlayhead(Math.max(0,t));raf=requestAnimationFrame(loop);};
+    const trustworthy=v&&!v.paused&&!v.ended&&Math.abs(v.currentTime-clock)<TRUST_TOL;
+    if(trustworthy){clock=v.currentTime;}else{clock+=dt*Math.max(-4,Math.min(4,rate||1));}
+    let t=clock;
+    if(DURATION&&t>=DURATION){setPlayhead(DURATION);setPlaying(false);return;}
+    if(t<=0&&rate<0){setPlayhead(0);setPlaying(false);return;}
+    setPlayhead(Math.max(0,t));raf=requestAnimationFrame(loop);};
   raf=requestAnimationFrame(loop);}
 v.addEventListener('play',()=>setPlaying(true));v.addEventListener('pause',()=>setPlaying(false));
-document.getElementById('btn').addEventListener('click',()=>{if(!isPlaying&&DURATION>0&&playhead>=DURATION-1/30){setPlayhead(0);}setPlaying(!isPlaying);});
+document.getElementById('btn').addEventListener('click',()=>{
+  let rewound=false;
+  if(!isPlaying&&DURATION>0&&playhead>=DURATION-1/30){setPlayhead(0);rewound=true;}
+  if(rewound){try{v.currentTime=0}catch{}clock=0;}
+  setPlaying(!isPlaying);
+});
 window.__startPlay=()=>setPlaying(true);
 window.__state=()=>({playhead,isPlaying,ended:v.ended,ct:+v.currentTime.toFixed(3),paused:v.paused});
 window.__flips=()=>flips.length;
