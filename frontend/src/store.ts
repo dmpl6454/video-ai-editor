@@ -73,6 +73,10 @@ interface State {
   clearSelection(): void
   setPlayhead(t: number): void
   setPlaying(p: boolean): void
+  /** If the playhead is parked at (or within a frame of) the end, rewind to 0.
+      Shared by the transport button and the playPause keyboard command so both
+      replay-from-end paths behave identically. Returns true if it rewound. */
+  replayFromStart(): boolean
   setPlaybackRate(r: number): void
   setInMark(t: number | null): void
   setOutMark(t: number | null): void
@@ -187,9 +191,28 @@ export const useStore = create<State>((set, get) => ({
     // preview goes black.
     const dur = get().edl?.duration
     const clamped = Math.max(0, dur ? Math.min(t, dur) : t)
+    // No-op guard: during end-of-timeline replay the rAF clock re-asserts the
+    // same clamped value every frame; a redundant set() forces a full re-render
+    // that re-runs the playback effects and feeds the play/pause oscillation.
+    if (get().playhead === clamped) return
     set({ playhead: clamped })
   },
-  setPlaying: (p) => set({ isPlaying: p }),
+  setPlaying: (p) => {
+    // No-op guard — see setPlayhead. onPlay/onPause + the rAF re-clamp otherwise
+    // hammer setPlaying with the same value every frame, re-running effects.
+    if (get().isPlaying === p) return
+    set({ isPlaying: p })
+  },
+  replayFromStart: () => {
+    const s = get()
+    const dur = s.edl?.duration ?? 0
+    // 1/30 = one frame at the timeline's normalised 30fps.
+    if (!s.isPlaying && dur > 0 && s.playhead >= dur - 1 / 30) {
+      s.setPlayhead(0)
+      return true
+    }
+    return false
+  },
   setPlaybackRate: (r) => set({ playbackRate: r }),
   setLiveTransform: (t) => set({ liveTransform: t }),
   setInMark: (t) => set({ inMark: t }),
