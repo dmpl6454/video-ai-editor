@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore } from '../store'
-import { isMediaClip } from '../types'
 import { TextLayer } from './TextLayer'
 import { StickerLayer } from './StickerLayer'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
@@ -27,6 +26,7 @@ export function Preview() {
   const setPlayhead = useStore((s) => s.setPlayhead)
   const setPlaying = useStore((s) => s.setPlaying)
   const liveTransform = useStore((s) => s.liveTransform)
+  const setLiveTransform = useStore((s) => s.setLiveTransform)
 
   const ref = useRef<HTMLVideoElement>(null)
   const [rendering, setRendering] = useState(false)
@@ -45,17 +45,25 @@ export function Preview() {
   // A fingerprint that changes only for video-relevant edits. Text edits do
   // NOT change this, so the server preview is reused while client overlays
   // update in real time.
+  //
+  // Serializes the WHOLE clip object on video/audio-family tracks rather than
+  // hand-picking fields (id/src/in/out/start): the backend Clip schema also
+  // carries speed, effects (color grade, chromakey, mask…), transform
+  // (x/y/scale/rotation/opacity, incl. keyframes) and audio (gain/fade/mute),
+  // which types.ts's frontend Clip interface doesn't declare — Properties.tsx
+  // reaches them via `as unknown as {...}` casts. A hand-picked field list
+  // silently goes stale every time a new video-affecting property is added
+  // (that's exactly how speed/color/transform/audio edits used to commit to
+  // the EDL but never trigger a preview re-render). Hashing the full clip
+  // mirrors how the backend itself decides "did anything render-relevant
+  // change" — edl.hash() in schema.py hashes the entire EDL, not a field
+  // subset — so this fingerprint can't drift out of sync with the schema again.
   const videoFingerprint = useMemo(() => {
     if (!edl) return ''
     const vidTracks = edl.tracks.filter(t => t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
     return JSON.stringify({
       canvas: edl.canvas,
-      tracks: vidTracks.map(t => ({
-        id: t.id,
-        clips: t.clips.map((c) => isMediaClip(c)
-          ? { id: c.id, src: c.src, in: c.in, out: c.out, start: c.start }
-          : { id: c.id, start: (c as { start: number }).start }),
-      })),
+      tracks: vidTracks.map(t => ({ id: t.id, clips: t.clips })),
     })
   }, [edl])
 
@@ -76,6 +84,11 @@ export function Preview() {
         .catch((e) => {
           if (ac.signal.aborted) return
           setError(String(e))
+          // A failed render means the <video> src never changes, so
+          // onLoadedData (which clears liveTransform) never fires either —
+          // fail fast instead of leaving the CSS transform preview stuck
+          // for the full safety-net timeout.
+          setLiveTransform(null)
         })
         .finally(() => {
           if (ac.signal.aborted) return
@@ -85,7 +98,20 @@ export function Preview() {
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current)
     }
-  }, [sid, videoFingerprint, edl?.duration, renderPreview])
+  }, [sid, videoFingerprint, edl?.duration, renderPreview, setLiveTransform])
+
+  // Safety net for the live-transform CSS preview (see the <video> element's
+  // onLoadedData below): if the expected re-render never lands — the render
+  // fails, gets aborted, or the fingerprint didn't actually change — nothing
+  // would otherwise clear liveTransform, leaving the CSS override applied
+  // forever (a stuck, wrong-looking preview is worse than a brief revert).
+  // 250ms debounce + typical render + load latency comfortably fits in 8s;
+  // any liveTransform still set after that is treated as abandoned.
+  useEffect(() => {
+    if (!liveTransform) return
+    const t = window.setTimeout(() => setLiveTransform(null), 8000)
+    return () => window.clearTimeout(t)
+  }, [liveTransform, setLiveTransform])
 
   // Track preview box size for the text overlay layer
   useEffect(() => {
@@ -176,17 +202,42 @@ export function Preview() {
     clockRef.current = useStore.getState().playhead
     let lastVideoTime = ref.current ? ref.current.currentTime : -1
 
+    // Once a <video> reload is detected (currentTime jumps far from where the
+    // wall clock says playback should be), stop following it until it's
+    // caught back up to WITHIN this tolerance — a single frame of "it moved
+    // forward a little from 0" is not enough evidence it's resynced, since
+    // that's equally true one frame after a reset. RESYNC_TOL is generous
+    // (0.5s) because a fresh render + seek can legitimately take a few
+    // frames to land close to the target time.
+    const RESYNC_TOL = 0.5
+    let resyncing = false
+
     const loop = (now: number) => {
       const dt = (now - last) / 1000
       last = now
       const rate = useStore.getState().playbackRate
       const vid = ref.current
-      // Follow the media clock when it's really advancing; otherwise keep the
-      // wall clock running so a stalled/failed renderer can't freeze playback.
-      if (vid && !vid.paused && !vid.ended &&
-          Math.abs(vid.currentTime - lastVideoTime) > 1e-4) {
-        clockRef.current = vid.currentTime
+      if (vid) {
+        const videoDelta = vid.currentTime - lastVideoTime
+        // A jump against the play direction (or a huge jump either way) means
+        // the <video> just reloaded to a new preview render — its src swapped
+        // (a mid-playback edit triggered a re-render) and currentTime reset to
+        // 0, even though the wall-clock-tracked playhead was still mid-
+        // timeline. Blindly following that reset dragged the playhead
+        // backward-then-forward-from-zero (issue 27, "plays in reverse after
+        // adding a clip"). Enter resync mode instead of snapping to it.
+        const wrongDirection = rate >= 0 ? videoDelta < -1e-4 : videoDelta > 1e-4
+        if (wrongDirection) resyncing = true
         lastVideoTime = vid.currentTime
+        if (resyncing && Math.abs(vid.currentTime - clockRef.current) < RESYNC_TOL) {
+          resyncing = false
+        }
+      }
+      // Follow the media clock only once resynced; otherwise the wall clock
+      // free-runs so a stalled/failed renderer (or a mid-reload video) can't
+      // freeze or yank the playhead.
+      if (vid && !vid.paused && !vid.ended && !resyncing) {
+        clockRef.current = vid.currentTime
       } else {
         clockRef.current += dt * Math.max(-4, Math.min(4, rate || 1))
       }
@@ -247,9 +298,30 @@ export function Preview() {
             opacity: liveTransform?.opacity ?? 1,
             transition: liveTransform ? 'none' : 'transform 60ms linear',
           }}
-          onTimeUpdate={(e) => setPlayhead((e.target as HTMLVideoElement).currentTime)}
+          onTimeUpdate={(e) => {
+            // While playing, the rAF clock loop above is the sole owner of
+            // `playhead` (including deciding when to trust vs. ignore the
+            // video's own currentTime across a reload). This native event
+            // fires independently of that loop, so writing straight through
+            // to setPlayhead here would race it — e.g. reasserting the
+            // pre-resync currentTime==0 the clock loop just decided to
+            // distrust. Only let it drive the playhead when paused (scrubbing
+            // via native seek, not our rAF loop).
+            if (isPlaying) return
+            setPlayhead((e.target as HTMLVideoElement).currentTime)
+          }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
+          onLoadedData={() => {
+            // The committed transform (Properties.tsx's onChange) is only
+            // visible once THIS reload finishes — clearing liveTransform any
+            // earlier drops the CSS preview back to the untransformed old
+            // frame for the gap between commit and re-render (the "reverts
+            // the moment you let go" bug). Clearing it here means the CSS
+            // transform stays applied right up until the new, correctly
+            // transformed frame is actually on screen.
+            if (liveTransform) setLiveTransform(null)
+          }}
         />
         {/* WebCodecs frame-accurate scrubber. Sits between <video> and text
             overlays; only opaque while seeking (caller decides). Wrapped in
@@ -289,7 +361,17 @@ export function Preview() {
         )}
       </div>
       <div className="transport">
-        <button onClick={() => setPlaying(!isPlaying)}>{isPlaying ? '⏸' : '▶'}</button>
+        <button onClick={() => {
+          // Mirror the playPause keyboard command's end-of-timeline rewind
+          // (keymap/commands.ts) so clicking this button behaves the same as
+          // pressing Space: starting playback from the very end plays a few
+          // ms and immediately re-hits the end-clamp otherwise, reading as
+          // "does nothing."
+          if (!isPlaying && edl.duration > 0 && playhead >= edl.duration - 1 / 30) {
+            setPlayhead(0)
+          }
+          setPlaying(!isPlaying)
+        }}>{isPlaying ? '⏸' : '▶'}</button>
         <span style={{ fontSize: 12 }}>{playhead.toFixed(2)} / {edl.duration.toFixed(2)}s</span>
       </div>
     </div>

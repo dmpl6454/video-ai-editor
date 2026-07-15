@@ -26,7 +26,20 @@ const selectedIds = (s: Store): string[] =>
 export const COMMANDS: Command[] = [
   // ---------- Transport ----------
   { id: 'playPause', label: 'Play / Pause', category: 'Transport',
-    run: (s) => { s.setPlaying(!s.isPlaying); s.setPlaybackRate(1) } },
+    run: (s) => {
+      // Pressing play when the playhead is already parked at (or within a
+      // frame of) the end plays for a few ms and immediately re-hits the end
+      // clamp, reading as "stops right away" — CapCut/every NLE instead
+      // rewinds to the start on this gesture. Only applies when STARTING
+      // playback forward from the end; pausing, or resuming a rate<0
+      // reverse-from-end, are unaffected.
+      const duration = s.edl?.duration ?? 0
+      if (!s.isPlaying && duration > 0 && s.playhead >= duration - FRAME) {
+        s.setPlayhead(0)
+      }
+      s.setPlaying(!s.isPlaying)
+      s.setPlaybackRate(1)
+    } },
   { id: 'shuttleReverse', label: 'Shuttle reverse (J)', category: 'Transport',
     run: (s) => { const r = s.playbackRate; s.setPlaybackRate(r > 0 ? -1 : Math.max(-8, r * 2)); s.setPlaying(true) } },
   { id: 'shuttleStop', label: 'Shuttle stop (K)', category: 'Transport',
