@@ -61,10 +61,17 @@ export function StickerPanel() {
   const insert = async (emoji: string) => {
     const w = edl?.canvas.w ?? 1080
     const h = edl?.canvas.h ?? 1920
+    const duration = edl?.duration ?? playhead + 3.0
+    // Guarantee a real 3s window: if the playhead is close enough to the end
+    // that a plain [playhead, playhead+3] clamped to duration would collapse
+    // to near-zero, pull start back so the full 3s fits before the end
+    // instead (never before 0). Inserting an emoji right at the tail of the
+    // timeline used to silently produce a near-invisible sticker — issue 31b.
+    const start = Math.max(0, Math.min(playhead, duration - 3.0))
     await dispatch('add_sticker', {
       emoji,
-      start: playhead,
-      end: Math.min(playhead + 3.0, (edl?.duration ?? playhead + 3.0)),
+      start,
+      end: Math.min(start + 3.0, duration),
       position: [w / 2, h * 0.55],
     })
     pushRecent(emoji)

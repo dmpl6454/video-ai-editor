@@ -32,6 +32,13 @@ export const PRESETS = {
       duplicate: ['Mod+KeyD'],
       copy: ['Mod+KeyC'],
       paste: ['Mod+KeyV'],
+      // Comma/Period are already frame-step here (CapCut's own convention),
+      // unlike Premiere/FCP where they're free for nudge — so nudge gets its
+      // own chord instead of silently having no binding at all (a registered
+      // command with zero keys in the default preset is dead on arrival;
+      // issue 55, "many shortcuts work but not completely").
+      nudgeLeft: ['Alt+ArrowLeft'],
+      nudgeRight: ['Alt+ArrowRight'],
       markIn: ['BracketLeft'],
       markOut: ['BracketRight'],
       clearMarks: [],

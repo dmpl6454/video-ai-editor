@@ -150,9 +150,9 @@ def render_clip_to_chunk(
     # Mask: same alphamerge pattern as the monolithic renderer
     v_label = "[v]"
     if c.mask is not None and cache_dir is not None:
-        from .effects import render_mask_png
+        from .effects import render_mask_png, mask_png_is_valid
         mask_path = cache_dir / f"mask_{c.id}_{c.mask.type}_{int(c.mask.feather)}_{canvas_w}x{canvas_h}.png"
-        if not mask_path.exists():
+        if not mask_png_is_valid(mask_path):
             render_mask_png(c.mask, canvas_w, canvas_h, mask_path)
         extras += ["-i", str(mask_path)]
         v_chain += (

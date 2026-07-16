@@ -78,6 +78,10 @@ export function Properties() {
   const fadeOut = audio?.fade_out ?? 0
   const muted = !!audio?.mute
 
+  const effects = (c as unknown as { effects?: { type: string; params?: Record<string, number> }[] }).effects
+  const colorEffect = effects?.find((e) => e.type === 'color' || e.type === 'color_grade')
+  const colorParams = colorEffect?.params ?? {}
+
   const clipStart = (c as unknown as { start?: number }).start ?? 0
   const localT = Math.max(0, playhead - clipStart)
   const KFKey = ({ prop, value, fallback }: { prop: string; value: unknown; fallback: number }) => (
@@ -121,17 +125,22 @@ export function Properties() {
         </div>
       </Section>
 
-      <Section label="Speed">
+      <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
         <Slider min={0.25} max={4} step={0.05} value={speed}
           format={(v) => `${v.toFixed(2)}×`}
           onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
       </Section>
 
-      <Section label="Color">
-        <ColorPanel clipId={c.id} dispatch={dispatch} />
+      <Section label="Color" onReset={() => dispatch('color_grade', {
+        clip_id: c.id, brightness: 0, contrast: 1, saturation: 1, temp: 0, tint: 0,
+      })}>
+        <ColorPanel clipId={c.id} dispatch={dispatch} current={colorParams} />
       </Section>
 
-      <Section label="Audio">
+      <Section label="Audio" onReset={() => {
+        dispatch('set_volume', { target: c.id, db: 0 })
+        dispatch('add_fade', { clip_id: c.id, in_s: 0, out_s: 0 })
+      }}>
         <Slider min={-30} max={6} step={0.5} value={gain}
           format={(v) => `${v.toFixed(1)} dB`}
           onChange={(v) => dispatch('set_volume', { target: c.id, db: v })} />
@@ -157,37 +166,47 @@ export function Properties() {
         </label>
       </Section>
 
-      <Section label="Transform">
+      <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
+        clip_id: c.id, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1,
+      })}>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="scale" value={tx?.scale} fallback={1} />
           <Slider min={0.1} max={4} step={0.05} value={scale}
             format={(v) => `scale ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, scale: v })}
-            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, scale: v }) }} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="rotation" value={tx?.rotation} fallback={0} />
           <Slider min={-180} max={180} step={1} value={rotation}
             format={(v) => `rotation ${v.toFixed(0)}°`}
             onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
-            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, rotation: v }) }} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="opacity" value={tx?.opacity} fallback={1} />
           <Slider min={0} max={1} step={0.05} value={opacity}
             format={(v) => `opacity ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, opacity: v })}
-            onChange={(v) => { setLiveTransform(null); dispatch('set_clip_transform', { clip_id: c.id, opacity: v }) }} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <KFKey prop="x" value={tx?.x} fallback={xVal} />
-          <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80 }}>
-            x: {xVal.toFixed(0)} {isKeyframed(tx?.x) ? '· animated' : ''}
-          </span>
+          <label style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80, display: 'flex', alignItems: 'center', gap: 4 }}>
+            x:
+            <input type="number" key={`mx${xVal.toFixed(0)}`} defaultValue={xVal.toFixed(0)}
+              style={{ width: 56 }}
+              onBlur={(e) => dispatch('set_clip_transform', { clip_id: c.id, x: Number(e.target.value) })} />
+            {isKeyframed(tx?.x) ? '· animated' : ''}
+          </label>
           <KFKey prop="y" value={tx?.y} fallback={yVal} />
-          <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-            y: {yVal.toFixed(0)} {isKeyframed(tx?.y) ? '· animated' : ''}
-          </span>
+          <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            y:
+            <input type="number" key={`my${yVal.toFixed(0)}`} defaultValue={yVal.toFixed(0)}
+              style={{ width: 56 }}
+              onBlur={(e) => dispatch('set_clip_transform', { clip_id: c.id, y: Number(e.target.value) })} />
+            {isKeyframed(tx?.y) ? '· animated' : ''}
+          </label>
         </div>
       </Section>
 
@@ -276,11 +295,27 @@ function StickerProps({ c, dispatch }: {
   )
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+function Section({ label, children, onReset }: {
+  label: string; children: React.ReactNode; onReset?: () => void;
+}) {
   return (
     <div style={{ marginTop: 10 }}>
-      <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.08 * 10 + 'em',
-                    color: 'var(--text-dim)', margin: '8px 0 4px' }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    margin: '8px 0 4px' }}>
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.08 * 10 + 'em',
+                      color: 'var(--text-dim)' }}>{label}</div>
+        {onReset && (
+          <button
+            onClick={onReset}
+            title={`Reset ${label.toLowerCase()} to default`}
+            style={{
+              fontSize: 10, padding: '1px 6px', background: 'transparent',
+              border: '1px solid var(--line)', borderRadius: 3, color: 'var(--text-dim)',
+              cursor: 'pointer',
+            }}
+          >Reset</button>
+        )}
+      </div>
       {children}
     </div>
   )
@@ -334,52 +369,66 @@ function findClip(edl: ReturnType<typeof useStore.getState>['edl'], id: string) 
   return null
 }
 
-function ColorPanel({ clipId, dispatch }: {
+function ColorPanel({ clipId, dispatch, current }: {
   clipId: string;
   dispatch: ReturnType<typeof useStore.getState>['dispatch'];
+  current: Record<string, number>;
 }) {
   // Local sliders for shadows / mids / highlights gain + temp/tint. The
-  // commit-on-release pattern (debounced via onMouseUp) avoids dispatching
-  // a new effect for every pixel of slider drag.
+  // commit-on-release pattern (debounced via onPointerUp) avoids dispatching
+  // a new effect for every pixel of slider drag. The backend merges each
+  // commit into the clip's single "color" effect (dispatch.py color_grade),
+  // so repeated adjustments settle on a final value instead of stacking.
   const commit = (params: Record<string, number>) => {
-    // We add a single new color effect each time. The renderer evaluates the
-    // chain in order, so the latest one wins for non-additive properties. For
-    // an even cleaner UX we'd dedupe — left for a follow-up.
     dispatch('color_grade', { clip_id: clipId, ...params })
   }
   return (
     <>
       <ColorSlider label="Brightness" min={-0.5} max={0.5} step={0.02} commit={(v) => commit({ brightness: v })}
+        value={current.brightness} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
-      <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })} init={1}
+      <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })}
+        value={current.contrast} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
-      <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })} init={1}
+      <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })}
+        value={current.saturation ?? current.sat} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
       <ColorSlider label="Temp"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ temp: v })}
+        value={current.temp} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${Math.round(v * 100)}`} />
       <ColorSlider label="Tint"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ tint: v })}
+        value={current.tint} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
     </>
   )
 }
 
-function ColorSlider({ label, min, max, step, commit, init = 0, format }: {
+function ColorSlider({ label, min, max, step, commit, value, init = 0, format }: {
   label: string; min: number; max: number; step: number;
-  commit: (v: number) => void; init?: number; format?: (v: number) => string;
+  commit: (v: number) => void; value?: number; init?: number; format?: (v: number) => string;
 }) {
-  // Controlled so the value readout tracks the thumb live; commit only fires on
-  // release (mouse up / touch end / key up / blur) so we don't dispatch hundreds
-  // of effect chains while dragging.
-  const [local, setLocal] = React.useState(init)
-  const release = (e: { target: EventTarget | null }) =>
+  // Controlled so the value readout tracks the thumb live; commit only fires
+  // on release. `onPointerUp` (not `onMouseUp`) is the reliable cross-input
+  // release event — mouse-only handlers can silently miss a release on some
+  // touch/pen/trackpad interactions, which used to mean the color change
+  // never got dispatched at all ("brightness works only sometimes").
+  const seeded = value ?? init
+  const [local, setLocal] = React.useState(seeded)
+  const dragging = React.useRef(false)
+  // Re-seed from the stored value when it changes from outside (switching
+  // clips, undo/redo, chat edits) — but never mid-drag.
+  React.useEffect(() => { if (!dragging.current) setLocal(seeded) }, [seeded])
+
+  const release = (e: { target: EventTarget | null }) => {
+    dragging.current = false
     commit(Number((e.target as HTMLInputElement).value))
+  }
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
       <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 64 }}>{label}</span>
       <input type="range" min={min} max={max} step={step} value={local}
-        onChange={(e) => setLocal(Number(e.target.value))}
-        onMouseUp={release}
-        onTouchEnd={release}
+        onChange={(e) => { dragging.current = true; setLocal(Number(e.target.value)) }}
+        onPointerUp={release}
         onKeyUp={release}
         onBlur={release}
         style={{ flex: 1 }} />

@@ -146,6 +146,13 @@ export function useKeymap() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (_captureMode) return
+      // A held key fires a stream of 'keydown' events (OS auto-repeat) with
+      // e.repeat=true from the second one on. Every bound command here is a
+      // one-shot action (add a marker, split, nudge, duplicate…), not a
+      // hold-to-repeat one — without this guard, a slightly-long press of M
+      // appends several markers at the exact same playhead position (issue
+      // 25), and the same would apply to any other single-press shortcut.
+      if (e.repeat) return
       const tgt = e.target as HTMLElement | null
       const tag = tgt?.tagName
       const isTextEntry =

@@ -6,6 +6,8 @@ where the filename is dash-joined hex codepoints with ZWJ/variation selectors
 preserved according to Twemoji's own naming.
 """
 from __future__ import annotations
+import os
+import threading
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -45,7 +47,9 @@ def fetch_emoji_png(emoji: str) -> Path | None:
             data = r.read()
         if not data:
             return None
-        dst.write_bytes(data)
+        tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(data)
+        _pu.replace_with_retry(tmp, dst)
         return dst
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
         return None
