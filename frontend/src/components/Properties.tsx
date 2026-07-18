@@ -379,20 +379,42 @@ function ColorPanel({ clipId, dispatch, current }: {
   // a new effect for every pixel of slider drag. The backend merges each
   // commit into the clip's single "color" effect (dispatch.py color_grade),
   // so repeated adjustments settle on a final value instead of stacking.
+  const setLiveFilter = useStore((s) => s.setLiveFilter)
   const commit = (params: Record<string, number>) => {
     dispatch('color_grade', { clip_id: clipId, ...params })
   }
+  // Live CSS preview during a drag (the Color mirror of liveTransform). The
+  // filter always carries all three mappable params seeded from the clip's
+  // CURRENT grade — with the dragged one overriding — so dragging one slider
+  // doesn't visually drop another's just-committed value while that value's
+  // re-render is still in flight. Values stay in eq-param space; Preview.tsx
+  // converts to CSS.
+  const live = (p: { brightness?: number; contrast?: number; saturation?: number }) =>
+    setLiveFilter({
+      clipId,
+      brightness: current.brightness ?? 0,
+      contrast: current.contrast ?? 1,
+      saturation: current.saturation ?? current.sat ?? 1,
+      ...p,
+    })
   return (
     <>
       <ColorSlider label="Brightness" min={-0.5} max={0.5} step={0.02} commit={(v) => commit({ brightness: v })}
+        onLive={(v) => live({ brightness: v })}
         value={current.brightness} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
       <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })}
+        onLive={(v) => live({ contrast: v })}
         value={current.contrast} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
       <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })}
+        onLive={(v) => live({ saturation: v })}
         value={current.saturation ?? current.sat} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
+      {/* Temp/Tint stay commit-only (no onLive): the backend maps them to
+          band-weighted colorbalance on midtones (render/effects.py), which
+          CSS filter() has no faithful equivalent for — a wrong live preview
+          would be worse than none. */}
       <ColorSlider label="Temp"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ temp: v })}
         value={current.temp} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${Math.round(v * 100)}`} />
@@ -403,9 +425,11 @@ function ColorPanel({ clipId, dispatch, current }: {
   )
 }
 
-function ColorSlider({ label, min, max, step, commit, value, init = 0, format }: {
+function ColorSlider({ label, min, max, step, commit, onLive, value, init = 0, format }: {
   label: string; min: number; max: number; step: number;
-  commit: (v: number) => void; value?: number; init?: number; format?: (v: number) => string;
+  commit: (v: number) => void;          // committed value — dispatched to server
+  onLive?: (v: number) => void;         // live value during drag — client-side only
+  value?: number; init?: number; format?: (v: number) => string;
 }) {
   // Controlled so the value readout tracks the thumb live; commit only fires
   // on release. `onPointerUp` (not `onMouseUp`) is the reliable cross-input
@@ -421,13 +445,22 @@ function ColorSlider({ label, min, max, step, commit, value, init = 0, format }:
 
   const release = (e: { target: EventTarget | null }) => {
     dragging.current = false
-    commit(Number((e.target as HTMLInputElement).value))
+    // Same-value guard (mirrors Slider's `commit`): release fires from
+    // pointerup AND the later blur — without the guard the blur re-commits
+    // the identical value, appending a junk op to undo history.
+    const v = Number((e.target as HTMLInputElement).value)
+    if (v !== seeded) commit(v)
   }
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
       <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 64 }}>{label}</span>
       <input type="range" min={min} max={max} step={step} value={local}
-        onChange={(e) => { dragging.current = true; setLocal(Number(e.target.value)) }}
+        onChange={(e) => {
+          const v = Number(e.target.value)
+          dragging.current = true
+          setLocal(v)
+          onLive?.(v)
+        }}
         onPointerUp={release}
         onKeyUp={release}
         onBlur={release}

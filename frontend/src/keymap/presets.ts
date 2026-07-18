@@ -27,7 +27,10 @@ export const PRESETS = {
       secondForward: ['Shift+ArrowRight'],
       goToStart: ['Home'],
       goToEnd: ['End'],
-      split: ['Mod+KeyB'],
+      // KeyS is free in this preset (only Premiere uses it, for toggleSnap),
+      // so single-key S joins ⌘B as a split binding — the Help panel
+      // advertised "S = split" while nothing actually bound it.
+      split: ['Mod+KeyB', 'KeyS'],
       rippleDelete: ['Delete', 'Backspace'],
       duplicate: ['Mod+KeyD'],
       copy: ['Mod+KeyC'],

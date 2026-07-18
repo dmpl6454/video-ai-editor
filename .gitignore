@@ -50,3 +50,4 @@ tool-results/
 
 # Local git worktrees (superpowers:using-git-worktrees fallback)
 .worktrees/
+.playwright-mcp/

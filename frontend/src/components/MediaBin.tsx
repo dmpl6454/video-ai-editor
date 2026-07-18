@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
 import { StickerPanel } from './StickerPanel'
@@ -150,9 +150,25 @@ function MusicPanel() {
   const clip = music?.clips.find((c) => 'src' in c) as { id: string; src: string } | undefined
   const ducking = !!(music as unknown as { duck?: unknown })?.duck
 
-  if (!clip) return null
   // Approximate current gain by reading the (typed-loose) audio.gain_db
-  const gain = (clip as unknown as { audio?: { gain_db?: number } }).audio?.gain_db ?? -12
+  const gain = clip
+    ? ((clip as unknown as { audio?: { gain_db?: number } }).audio?.gain_db ?? -12)
+    : -12
+  // Commit-on-release, same pattern as Properties' sliders: the thumb +
+  // readout track the drag locally, but set_volume dispatches ONCE on
+  // pointer-up / key-release / blur. This used to dispatch (and kick a
+  // preview re-render) on every onChange tick of the drag.
+  const [localGain, setLocalGain] = useState(gain)
+  const draggingGain = useRef(false)
+  // Re-seed from the stored value when it changes from outside (undo, chat
+  // edits) — but never stomp the value mid-drag.
+  useEffect(() => { if (!draggingGain.current) setLocalGain(gain) }, [gain])
+
+  if (!clip) return null
+
+  const commitGain = (v: number) => {
+    if (v !== gain) dispatch('set_volume', { target: 'music', db: v })
+  }
 
   return (
     <div className="item" style={{ background: 'var(--bg-3)', borderColor: '#3a3a44' }}>
@@ -161,12 +177,16 @@ function MusicPanel() {
       <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
         <label style={{ fontSize: 11, color: 'var(--text-dim)', minWidth: 38 }}>Vol</label>
         <input
-          type="range" min={-30} max={6} step={0.5} value={gain}
-          onChange={(e) => dispatch('set_volume', { target: 'music', db: Number(e.target.value) })}
+          type="range" min={-30} max={6} step={0.5} value={localGain}
+          onChange={(e) => { draggingGain.current = true; setLocalGain(Number(e.target.value)) }}
+          onPointerUp={(e) => { draggingGain.current = false; commitGain(Number((e.target as HTMLInputElement).value)) }}
+          onPointerCancel={() => { draggingGain.current = false }}
+          onKeyUp={(e) => { draggingGain.current = false; commitGain(Number((e.target as HTMLInputElement).value)) }}
+          onBlur={(e) => { draggingGain.current = false; commitGain(Number((e.target as HTMLInputElement).value)) }}
           style={{ flex: 1 }}
         />
         <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', minWidth: 36, textAlign: 'right' }}>
-          {gain.toFixed(0)} dB
+          {localGain.toFixed(0)} dB
         </span>
       </div>
       <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>

@@ -66,8 +66,16 @@ interface State {
   // without a server render. Cleared (null) the moment the drag commits.
   liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number } | null
 
+  // Client-side live color filter — the Color panel's mirror of liveTransform.
+  // Set while a brightness/contrast/saturation slider drags so Preview applies
+  // a CSS filter() approximation instantly; cleared the same way liveTransform
+  // is (the re-rendered <video>'s onLoadedData + safety-net timeout). Values
+  // are the EDL grade params (ffmpeg eq semantics) — Preview converts to CSS.
+  liveFilter: { clipId: string; brightness?: number; contrast?: number; saturation?: number } | null
+
   // setters
   setLiveTransform(t: State['liveTransform']): void
+  setLiveFilter(f: State['liveFilter']): void
   setSelection(id: string | null): void
   toggleSelection(id: string): void
   clearSelection(): void
@@ -146,6 +154,7 @@ export const useStore = create<State>((set, get) => ({
   outMark: null,
   playbackRate: 1,
   liveTransform: null,
+  liveFilter: null,
   uploading: false,
   uploadProgress: null,
   uploadError: null,
@@ -215,6 +224,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setPlaybackRate: (r) => set({ playbackRate: r }),
   setLiveTransform: (t) => set({ liveTransform: t }),
+  setLiveFilter: (f) => set({ liveFilter: f }),
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
@@ -518,8 +528,28 @@ export const useStore = create<State>((set, get) => ({
   },
 
   splitAtPlayhead: async () => {
-    const t = get().playhead
-    await get().dispatch('split_at', { track: 'v1', time: t })
+    const s = get()
+    const t = s.playhead
+    // Split the SELECTED clip's track when the playhead is inside its range —
+    // this used to hardcode v1, cutting the wrong track for a v2/overlay
+    // selection even though the backend (and the timeline's right-click
+    // "Split here") supports any track. Multi-selection: one split per
+    // distinct track that has a selected clip containing the playhead.
+    // No containing selected clip → v1, the historical default.
+    const selected = new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[])
+    const trackIds: string[] = []
+    if (s.edl && selected.size) {
+      for (const tk of s.edl.tracks) {
+        for (const c of tk.clips) {
+          if (!selected.has(c.id)) continue
+          if (c.start <= t && t < clipEnd(c) && !trackIds.includes(tk.id)) trackIds.push(tk.id)
+        }
+      }
+    }
+    if (!trackIds.length) trackIds.push('v1')
+    for (const track of trackIds) {
+      await s.dispatch('split_at', { track, time: t })
+    }
   },
 
   rippleDeleteSelection: async () => {
