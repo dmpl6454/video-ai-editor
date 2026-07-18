@@ -47,6 +47,57 @@ function isText(c: unknown): c is TextClip {
   return !!c && typeof c === 'object' && 'text' in (c as object) && 'end' in (c as object)
 }
 
+// Backend TextStyle defaults act as "use the role style" sentinels — mirror
+// of render/text_overlay.py's two-part rule, so preview and export resolve
+// per-clip styles identically. Font is unset when EITHER: (a) it's the raw
+// schema default 'Inter-Black' (the actual "did the caller touch this
+// field" signal — nothing here tracks per-field set-ness), OR (b) it
+// matches the RESOLVED ROLE'S OWN font (e.g. caption's own role font
+// genuinely IS Inter-Black, so reaffirming it is a semantic no-op). (b)
+// alone is wrong: the 'default' role's real font is Inter, not Inter-Black,
+// so a default-role clip's default-populated style would misread as an
+// explicit override without check (a).
+const SENTINEL_COLOR = '#FFFFFF'
+const SENTINEL_FONT = 'Inter-Black'
+
+function roleFontMatches(role: string, ttf: string): boolean {
+  const want = cssFont(ttf)
+  const roleStyle = ROLE_STYLES[role] ?? ROLE_STYLES.default
+  if (!want) return false
+  return want.family === roleStyle.font && want.weight === (roleStyle.weight ?? '700')
+}
+
+// Bundled ttf name (backend) → CSS family + weight (what @font-face declares).
+function cssFont(ttf: string): { family: string; weight: string } | null {
+  const stem = ttf.replace(/\.ttf$/i, '')
+  const [fam, variant] = stem.split('-')
+  const family = { Anton: 'Anton', BebasNeue: 'Bebas Neue', Montserrat: 'Montserrat', Inter: 'Inter' }[fam]
+  if (!family) return null // Noto/unknown — let the role default stand
+  const weight = variant === 'Black' ? '900' : variant === 'Bold' ? '700' : '400'
+  return { family, weight }
+}
+
+// Animation envelope for anim_in/anim_out presets — the same curves the
+// server bakes (render/text_overlay.py): d = min(0.35, 40% of clip), pop-in
+// overshoots 0.6→1.06→1.0, pop-out shrinks to 0.6, slides travel 4% of the
+// preview height, fades ramp alpha linearly.
+function animEnvelope(c: TextClip, t: number, height: number): { alpha: number; scale: number; dy: number } {
+  const d = Math.min(0.35, Math.max(0.1, (c.end - c.start) * 0.4))
+  const off = height * 0.04
+  const qIn = Math.min(1, Math.max(0, (t - c.start) / d))
+  const qOut = Math.min(1, Math.max(0, (t - (c.end - d)) / d))
+  let alpha = 1, scale = 1, dy = 0
+  if (c.anim_in === 'fade') alpha *= qIn
+  if (c.anim_out === 'fade') alpha *= 1 - qOut
+  if (c.anim_in === 'pop') scale *= qIn < 0.7 ? 0.6 + 0.657 * qIn : 1.06 - 0.2 * (qIn - 0.7)
+  if (c.anim_out === 'pop') scale *= 1 - 0.4 * qOut
+  if (c.anim_in === 'slide_up') dy += off * (1 - qIn)
+  if (c.anim_in === 'slide_down') dy -= off * (1 - qIn)
+  if (c.anim_out === 'slide_up') dy -= off * qOut
+  if (c.anim_out === 'slide_down') dy += off * qOut
+  return { alpha, scale, dy }
+}
+
 function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
   const out: string[] = []
   for (const para of text.split('\n')) {
@@ -140,16 +191,28 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
 
       for (const { c, role } of active) {
         const s = ROLE_STYLES[role] ?? ROLE_STYLES.default
+        // Per-clip style overrides (non-sentinel values only — see cssFont/
+        // roleFontMatches above; mirrors the server's resolve_style_overrides).
+        const styleColor = c.style?.color && c.style.color.toUpperCase() !== SENTINEL_COLOR
+          ? c.style.color : null
+        const styleFont = c.style?.font && c.style.font !== SENTINEL_FONT
+          && !roleFontMatches(role, c.style.font)
+          ? cssFont(c.style.font) : null
         // s.size is a fixed px value against the EDL canvas (matches the
         // server's ROLE_STYLES); rescale it to the on-screen preview box.
         const fontPx = Math.round((s.size / edl.canvas.h) * height)
-        ctx.font = `${s.weight ?? 'bold'} ${fontPx}px "${s.font}", system-ui, sans-serif`
+        const family = styleFont?.family ?? s.font
+        const weight = styleFont?.weight ?? s.weight ?? 'bold'
+        ctx.font = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'center'
         ctx.lineJoin = 'round'
         ctx.lineWidth = Math.max(2, Math.round(s.stroke * height))
+
+        const env = animEnvelope(c, t, height)
         ctx.strokeStyle = 'rgba(0,0,0,0.95)'
-        ctx.fillStyle = `rgba(255,255,255,${s.opacity ?? 1})`
+        ctx.fillStyle = styleColor ?? `rgba(255,255,255,1)`
+        ctx.globalAlpha = (s.opacity ?? 1) * env.alpha
 
         const cleaned = c.text.replace(EMOJI_RE, '').trim()
         if (!cleaned) continue
@@ -165,7 +228,16 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         else if (s.align === 'lower') cy = height * 0.78
         else if (s.align === 'bottom') cy = height - totalH / 2 - height * 0.10
         else cy = height * 0.78
+        cy += env.dy
 
+        ctx.save()
+        // pop: scale around the text's own anchor, like the server's
+        // overlay-position compensation does.
+        if (env.scale !== 1) {
+          ctx.translate(width / 2, cy)
+          ctx.scale(env.scale, env.scale)
+          ctx.translate(-width / 2, -cy)
+        }
         // shadow
         ctx.save()
         ctx.shadowColor = 'rgba(0,0,0,0.5)'
@@ -180,6 +252,8 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           const ly = cy - totalH / 2 + lineH / 2 + i * lineH
           ctx.fillText(lines[i], width / 2, ly)
         }
+        ctx.restore()
+        ctx.globalAlpha = 1
       }
 
       raf = requestAnimationFrame(draw)

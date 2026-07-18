@@ -43,6 +43,7 @@ NETWORK_OR_HEAVY = {
     "instrumental_isolate",
     "tts_voiceover",       # Piper
     "diarize",             # pyannote OR librosa heuristic
+    "assign_caption_speakers",  # runs diarize when no turns given; targeted test exists
     "translate_captions",  # Argos Translate
     "make_shorts",         # heuristic over vision
     "multicam",            # multi-input audio sync

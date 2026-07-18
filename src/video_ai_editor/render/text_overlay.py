@@ -11,6 +11,7 @@ emoji entirely on non-Mac systems.
 """
 from __future__ import annotations
 import hashlib
+import logging
 import os
 import re
 import threading
@@ -92,6 +93,100 @@ def _font_path(name: str) -> Path:
     return p
 
 
+_log = logging.getLogger(__name__)
+
+# ---- per-clip style overrides (TextClip.style) ------------------------------
+# TextStyle is a non-nullable field with schema defaults ("#FFFFFF" /
+# "Inter-Black") — every TextClip carries a populated TextStyle whether or
+# not the caller ever chose one, so those defaults double as "no explicit
+# choice — use the role style" sentinels. Honoring them literally would
+# restyle every existing clip (hooks would drop BebasNeue for Inter-Black).
+#
+# The font sentinel is a TWO-PART check: (1) the raw schema default
+# ("Inter-Black") always means unset — this is the actual "did the caller
+# touch this field" signal, since nothing here tracks Pydantic field-set-ness
+# across dict-based construction; (2) a value equal to the RESOLVED ROLE'S
+# OWN font also means unset, since requesting your own role's font is a
+# semantic no-op regardless of whether the caller "meant" to override.
+# (2) alone is wrong on its own: the "default" role's real font is
+# Inter-Bold, not Inter-Black, so comparing ONLY per-role would misread the
+# schema's default-populated TextStyle on a default-role clip as an explicit
+# Inter-Black override — the opposite bug, and the common case.
+#
+# KNOWN LIMITATION: a caller who explicitly asks for the literal string
+# "Inter-Black" on a role whose own font ISN'T Inter-Black is indistinguishable
+# from "never touched this field" — (1) always wins. In practice this is
+# harmless: that role simply keeps rendering in its own font instead of
+# switching to Inter-Black, a reasonable (not wrong) result, not a crash or a
+# silently-dropped user-visible promise. Fixing it for real needs `font:
+# str | None = None` on TextStyle (a schema migration touching every existing
+# TextClip construction site), which is out of scope for this fix.
+_STYLE_SENTINEL_COLOR = "#FFFFFF"
+_STYLE_SENTINEL_FONT = "Inter-Black"
+
+
+def _parse_hex_color(s: str) -> tuple[int, int, int, int] | None:
+    v = (s or "").strip().lstrip("#")
+    if len(v) == 6:
+        v += "FF"
+    if len(v) != 8:
+        return None
+    try:
+        r, g, b, a = (int(v[i:i + 2], 16) for i in (0, 2, 4, 6))
+    except ValueError:
+        return None
+    return (r, g, b, a)
+
+
+def resolve_style_overrides(c: TextClip, role: str = "default"
+                           ) -> tuple[tuple[int, int, int, int] | None, Path | None]:
+    """Per-clip (fill_rgba, font_path) overrides from TextClip.style, or Nones.
+
+    This is what makes `add_text(color=..., font=...)` and the brand-kit
+    palette/font (materialised into clip styles by show/brand_kit.py) actually
+    render — TextStyle used to be accepted, persisted, and silently ignored.
+
+    `role` resolves the font sentinel PER ROLE (see the module comment above)
+    rather than against a single global default — this matters concretely
+    for role="caption", whose own role font genuinely is "Inter-Black".
+    """
+    st = getattr(c, "style", None)
+    if st is None:
+        return None, None
+    fill = font = None
+    color = (getattr(st, "color", "") or "").strip()
+    if color and color.upper() != _STYLE_SENTINEL_COLOR:
+        fill = _parse_hex_color(color)
+    role_font = ROLE_STYLES.get(role, ROLE_STYLES["default"])["font"].replace(".ttf", "")
+    fname = (getattr(st, "font", "") or "").strip()
+    if fname and fname != _STYLE_SENTINEL_FONT and fname != role_font:
+        p = FONTS_DIR / fname
+        if not p.exists():
+            p = FONTS_DIR / f"{fname}.ttf"
+        if p.exists():
+            font = p
+    return fill, font
+
+
+# ---- text animation presets (TextClip.anim_in / anim_out) -------------------
+# The full accepted set. Names outside it are ignored WITH a log line (never
+# crash a render over a stale EDL) — add_text validates loudly at the tool
+# boundary so new bad names can't get in.
+ANIM_PRESETS = ("pop", "fade", "slide_up", "slide_down")
+ANIM_DUR = 0.35  # seconds, clamped to 40% of the clip at render time
+
+
+def _anim_name(c: TextClip, attr: str) -> str | None:
+    v = (getattr(c, attr, None) or "").strip().lower()
+    if not v:
+        return None
+    if v not in ANIM_PRESETS:
+        _log.warning("unknown text animation %r on clip %s — ignoring "
+                     "(valid: %s)", v, getattr(c, "id", "?"), ", ".join(ANIM_PRESETS))
+        return None
+    return v
+
+
 # Script detection — pick a Noto fallback font when the text uses non-Latin
 # codepoints. PIL's truetype rendering can't auto-fallback, so we switch the
 # whole text's font when its dominant script is non-Latin. Single-script
@@ -153,19 +248,30 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, ma
     return lines
 
 
-def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int) -> Image.Image:
+def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
+                    fill: tuple[int, int, int, int] | None = None,
+                    font_file: Path | None = None) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role.
 
     Emoji are stripped from the text before drawing (bundled fonts have no
     emoji glyphs and would render as boxes).
+
+    `fill` / `font_file` are per-clip TextStyle overrides (see
+    resolve_style_overrides); None means use the role style. An explicit fill
+    with default alpha inherits the role fill's alpha so e.g. a colored
+    watermark keeps its translucency.
     """
     text = _strip_emoji(text)
     if not text:
         return Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     style = ROLE_STYLES.get(role, ROLE_STYLES["default"])
+    if fill is not None:
+        role_alpha = style["fill"][3]
+        style = {**style, "fill": (fill[0], fill[1], fill[2],
+                                   fill[3] if fill[3] != 255 else role_alpha)}
     # Fall back to a Noto script font when the caption isn't Latin
     script_font = _pick_script_font(text)
-    chosen_font = script_font if script_font is not None else _font_path(style["font"])
+    chosen_font = script_font if script_font is not None else (font_file or _font_path(style["font"]))
     font = ImageFont.truetype(str(chosen_font), style["size"])
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -217,12 +323,17 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
     paired: list[tuple[TextClip, str, Path]] = []
     for c, role in collect_text_clips(edl):
         displayable = _strip_emoji(c.text)
+        fill, font_file = resolve_style_overrides(c, role)
+        # Style overrides are part of the pixels, so they are part of the key
+        # (v2→v3 bump also invalidates every pre-style-support cache entry).
+        style_key = f"{fill or ''}|{font_file.name if font_file else ''}"
         key = hashlib.sha256(
-            f"v2|{role}|{canvas.w}x{canvas.h}|{displayable}".encode()
+            f"v3|{role}|{canvas.w}x{canvas.h}|{style_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
-            img = render_text_png(c.text, role, canvas.w, canvas.h)
+            img = render_text_png(c.text, role, canvas.w, canvas.h,
+                                  fill=fill, font_file=font_file)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -406,43 +517,69 @@ def build_overlay_chain(
 
     # Unified item list. Static items get full canvas-sized PNGs that scale to
     # output then overlay at (0,0). Animated stickers get small PNGs overlaid
-    # via x/y expressions. Text with keyframed opacity uses a separate "anim_text"
-    # path that re-uses the canvas-sized PNG but applies geq alpha.
+    # via x/y expressions. Text with keyframed opacity or anim_in/anim_out
+    # presets uses an "anim_text" path (looped input + per-frame filters).
     canvas = edl.canvas
+
+    # Track z per clip id: compositing order is the track z index (the design
+    # rule CLAUDE.md states). Items are sorted by z below — appending text
+    # before stickers unconditionally used to draw every sticker over every
+    # text clip regardless of z (e.g. the brand end-card image, a sticker at
+    # z=12, covered the end-card text at z=15).
+    zmap: dict[str, int] = {}
+    for tr in edl.tracks:
+        for cl in tr.clips:
+            zmap[cl.id] = tr.z
+
     items: list[dict] = []
-    for c, _role, png in text_paired:
-        # Text "transform" exists; check for keyframed opacity
+    for c, role, png in text_paired:
         opa = getattr(c.transform, "opacity", None) if hasattr(c, "transform") else None
-        if is_keyframed(opa):
-            items.append({"kind": "anim_text", "text_clip": c, "png": png})
+        a_in, a_out = _anim_name(c, "anim_in"), _anim_name(c, "anim_out")
+        if is_keyframed(opa) or a_in or a_out:
+            items.append({"kind": "anim_text", "text_clip": c, "png": png, "role": role,
+                          "anim_in": a_in, "anim_out": a_out, "z": zmap.get(c.id, 0)})
         else:
             items.append({"kind": "static", "start": c.start, "end": c.end, "png": png,
-                          "opacity": _scalar_or_last(opa, 1.0) if opa is not None else 1.0})
+                          "opacity": _scalar_or_last(opa, 1.0) if opa is not None else 1.0,
+                          "z": zmap.get(c.id, 0)})
     for s, png in static_stickers:
-        items.append({"kind": "static", "start": s.start, "end": s.end, "png": png, "opacity": 1.0})
+        items.append({"kind": "static", "start": s.start, "end": s.end, "png": png,
+                      "opacity": 1.0, "z": zmap.get(s.id, 0)})
     for s, png, (sw, sh) in animated_stickers:
-        items.append({"kind": "anim", "sticker": s, "png": png, "size": (sw, sh)})
+        items.append({"kind": "anim", "sticker": s, "png": png, "size": (sw, sh),
+                      "z": zmap.get(s.id, 0)})
 
     if not items:
         return "", [], source_label
+
+    # Later overlays composite on top; sort() is stable so same-z items keep
+    # their insertion order (text before stickers, matching prior behavior).
+    items.sort(key=lambda it: it["z"])
 
     extra_inputs: list[str] = []
     parts: list[str] = []
     cur = source_label
     for i, item in enumerate(items):
         idx = first_input_index + i
-        # Animated overlays (sticker with keyframed opacity, or text with
-        # keyframed opacity) need a time-dimension input so the per-pixel `T`
-        # in geq actually ticks. Static items use plain `-i path`. Bound the
-        # looped input with `-t` so ffmpeg knows when to stop reading frames.
+        # Animated overlays (sticker with keyframed opacity, or animated text)
+        # need a time-dimension input so per-frame filters actually tick.
+        # `-itsoffset {start}` places the looped stream's pts at the clip's
+        # ABSOLUTE timeline position: keyframes are clip-local (see
+        # edl/keyframes.sample), so filters convert with (T - start). The old
+        # form (no offset, `-t` = clip duration) only lined up for clips
+        # starting at t≈0 — an animated overlay later on the timeline had
+        # finished its whole animation before its enable-window even opened,
+        # rendering frozen at the final value. Static items use plain `-i`.
         if item["kind"] == "anim" and is_keyframed(item["sticker"].transform.opacity):
             s: Sticker = item["sticker"]
             dur = max(0.5, s.end - s.start) + 0.5
-            extra_inputs += ["-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
+            extra_inputs += ["-itsoffset", f"{s.start:.3f}",
+                             "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
             dur = max(0.5, tc.end - tc.start) + 0.5
-            extra_inputs += ["-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
+            extra_inputs += ["-itsoffset", f"{tc.start:.3f}",
+                             "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
         else:
             extra_inputs += ["-i", str(item["png"])]
         is_last = i == len(items) - 1
@@ -450,23 +587,75 @@ def build_overlay_chain(
 
         if item["kind"] == "static":
             scaled = f"[ov{i}]"
-            parts.append(f"[{idx}:v]scale={out_w}:{out_h}{scaled}")
+            pre = f"[{idx}:v]scale={out_w}:{out_h}"
+            opa = float(item.get("opacity", 1.0))
+            if opa < 0.999:
+                # Static (non-keyframed) opacity used to be collected into the
+                # item dict and then never applied — a text clip at opacity 0.5
+                # baked fully opaque.
+                pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
+            parts.append(pre + scaled)
             parts.append(
                 f"{cur}{scaled}overlay=enable='between(t\\,{item['start']:.3f}\\,{item['end']:.3f})'{next_label}"
             )
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
-            scaled = f"[ovs{i}]"
+            role = item["role"]
+            a_in, a_out = item["anim_in"], item["anim_out"]
+            # Anim duration, clamped so in+out never overlap on short clips.
+            d = min(ANIM_DUR, max(0.1, (tc.end - tc.start) * 0.4))
             preprocessed = f"[ov{i}]"
-            parts.append(f"[{idx}:v]scale={out_w}:{out_h}{scaled}")
-            aexpr = to_ffmpeg_expr(tc.transform.opacity, time_var="T")
+
+            chain = f"[{idx}:v]scale={out_w}:{out_h},format=rgba"
+
+            # Pop: per-frame scale (verified: scale exposes `t` under
+            # eval=frame). In: overshoot 0.6→1.06→1.0; out: shrink to 0.6.
+            if a_in == "pop" or a_out == "pop":
+                s_terms = []
+                if a_in == "pop":
+                    q = f"clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1)"
+                    s_terms.append(f"if(lt({q}\\,0.7)\\,0.6+0.657*{q}\\,1.06-0.2*({q}-0.7))")
+                if a_out == "pop":
+                    q = f"clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)"
+                    s_terms.append(f"(1-0.4*{q})")
+                s_expr = "*".join(s_terms)
+                chain += (f",scale=w='ceil(iw*({s_expr})/2)*2'"
+                          f":h='ceil(ih*({s_expr})/2)*2':eval=frame")
+
+            # Keyframed opacity (the pre-existing path, time-shifted to
+            # clip-local now that the input pts sit at absolute time).
+            if is_keyframed(getattr(tc.transform, "opacity", None)):
+                aexpr = to_ffmpeg_expr(tc.transform.opacity,
+                                       time_var=f"(T-{tc.start:.4f})")
+                chain += f",geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
+
+            # Fades ride the fade filter's alpha mode (cheap, no geq).
+            if a_in == "fade":
+                chain += f",fade=t=in:st={tc.start:.3f}:d={d:.3f}:alpha=1"
+            if a_out == "fade":
+                chain += f",fade=t=out:st={tc.end - d:.3f}:d={d:.3f}:alpha=1"
+            parts.append(chain + preprocessed)
+
+            # Overlay position. x/y center the (possibly pop-scaled) frame on
+            # the text's own anchor: text is horizontally centered in the
+            # canvas-sized PNG, and its vertical center is the role anchor
+            # (recomputed here exactly as render_text_png placed it). For
+            # non-pop clips overlay_w==main_w / overlay_h==main_h, so both
+            # exprs collapse to 0 — identical to the static path.
+            cy = _y_for_role(role, canvas.h * 0.75, canvas.h) * (out_h / max(1, canvas.h))
+            off = out_h * 0.04
+            y_terms = [f"{cy:.2f}*(1-overlay_h/main_h)"]
+            if a_in == "slide_up":
+                y_terms.append(f"+{off:.1f}*(1-clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1))")
+            elif a_in == "slide_down":
+                y_terms.append(f"-{off:.1f}*(1-clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1))")
+            if a_out == "slide_up":
+                y_terms.append(f"-{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
+            elif a_out == "slide_down":
+                y_terms.append(f"+{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
             parts.append(
-                f"{scaled}format=yuva420p,"
-                f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
-                f"{preprocessed}"
-            )
-            parts.append(
-                f"{cur}{preprocessed}overlay=enable='between(t\\,{tc.start:.3f}\\,{tc.end:.3f})'{next_label}"
+                f"{cur}{preprocessed}overlay=x='(main_w-overlay_w)/2':y='{''.join(y_terms)}'"
+                f":enable='between(t\\,{tc.start:.3f}\\,{tc.end:.3f})'{next_label}"
             )
         else:
             s: Sticker = item["sticker"]
@@ -504,7 +693,10 @@ def build_overlay_chain(
             # → cheap colorchannelmixer.
             preprocessed = f"[ov{i}]"
             if is_keyframed(tx.opacity):
-                aexpr = to_ffmpeg_expr(tx.opacity, time_var="T")
+                # Keyframes are clip-local; the looped input's pts sit at
+                # absolute time via -itsoffset (see the input-building comment
+                # above), so shift: local = T - start.
+                aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{s.start:.4f})")
                 parts.append(
                     f"{sticker_stream}format=yuva420p,"
                     f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"

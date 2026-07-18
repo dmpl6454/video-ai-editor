@@ -295,7 +295,7 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         else:
             v_chain += f",crop={canvas_w}:{canvas_h}:(iw-{canvas_w})/2:(ih-{canvas_h})/2"
 
-    ec = effect_chain(c.effects or [])
+    ec = effect_chain(c.effects or [], uid=c.id)
     if ec:
         v_chain += "," + ec
 
@@ -574,8 +574,19 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         fc = fc + ";" + pip_chain
         v_label = pip_v_label
     extra_inputs += pip_inputs
-    # Each PIP clip used 6 args (-ss v -to v -i path) → +1 index each.
-    pip_inputs_count = len(pip_inputs) // 6
+    # Count actual "-i" occurrences rather than assume a fixed arg-width per
+    # item: PIP inputs are a stable 6-arg shape today, but the input-count
+    # math must not silently rot the day any builder's input recipe changes
+    # (this is exactly how the text-overlay side of this same pattern broke
+    # when animated overlays grew from 2 args to 10 — see the fix below).
+    pip_inputs_count = pip_inputs.count("-i")
+    # Capture the PIP inputs' own starting index NOW, before any later block
+    # (text overlays) advances next_idx further — deriving it afterward via
+    # subtraction is exactly the bug this whole fix removes: it silently
+    # assumed next_idx had advanced by ONLY the PIP count since pre_pip's
+    # "true" value, which broke the instant the text-overlay block also
+    # advanced next_idx (PIP clip + any baked text/sticker together).
+    pre_pip = next_idx
     next_idx += pip_inputs_count
 
     # Composite text overlay PNGs (rendered by Pillow) via ffmpeg overlay= filter.
@@ -592,15 +603,27 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             fc = fc + ";" + chain
             v_label = after_label
         extra_inputs += txt_inputs
-        next_idx += len(txt_inputs) // 2  # each overlay PNG adds two args (-i path)
+        # Count actual "-i" occurrences, NOT len(txt_inputs)//2 — a static
+        # overlay is 2 args ("-i", path) but an ANIMATED overlay (keyframed
+        # opacity, or an anim_in/anim_out preset) is 10 args (-itsoffset X
+        # -loop 1 -framerate 30 -t D -i path). The old //2 divisor silently
+        # undercounted every animated item as "2.5 inputs", shifting every
+        # subsequent input index (PIP audio, music, vo) and breaking the
+        # whole downstream audio mix the moment any text clip used an anim
+        # preset — reproduced live: 1 anim clip + 1 music clip → ffmpeg
+        # "Invalid file index" / "matches no streams" on export.
+        next_idx += txt_inputs.count("-i")
 
     # Fold V2 PiP audio into the V1 main audio before the music+vo mixer runs.
     # Each PIP clip's audio is positioned at its timeline start via adelay and
     # amix'd with the main concat audio.
     if pip_audio_clips:
-        # PIP video inputs were added at indices [pre_pip..pre_pip+N-1] where
-        # pre_pip = original next_idx BEFORE pip_inputs_count was added.
-        pre_pip = next_idx - pip_inputs_count
+        # PIP video inputs were added at indices [pre_pip..pre_pip+N-1] —
+        # pre_pip is captured ABOVE, right after pip_inputs_count is known and
+        # before next_idx advances any further (the text-overlay block below
+        # also advances next_idx; re-deriving pre_pip via subtraction here
+        # used to silently assume it hadn't, shifting these indices whenever
+        # a PIP clip AND any baked text/sticker coexisted).
         pa_parts: list[str] = []
         pa_labels: list[str] = []
         for j, c in enumerate(pip_audio_clips):
@@ -669,7 +692,12 @@ def _video_only_fingerprint(edl: EDL) -> str:
     audio gain. Used to cache the encoded video so audio-only edits skip the
     video re-encode."""
     import hashlib, json
+    from ..edl.schema import RENDER_BEHAVIOR_VERSION
     blob = {
+        # See EDL.hash()'s docstring: a version salt so a pre-fix cached
+        # video-only mp4 (e.g. rendered before the LUT-blend or animated-
+        # overlay-timing fixes) can't be remuxed as if still correct.
+        "v": RENDER_BEHAVIOR_VERSION,
         "canvas": edl.canvas.model_dump(),
         "brand": edl.brand_kit.model_dump() if edl.brand_kit else None,
         "tracks": [

@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field
 
 EDL_VERSION = 2
 
+# See EDL.hash()'s docstring — this is a render-cache-busting salt, not a
+# schema-migration version. Bump on any renderer change that makes the same
+# EDL bytes produce different pixels.
+RENDER_BEHAVIOR_VERSION = 2
+
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
 Interp = Literal["linear", "ease-in", "ease-out", "ease-in-out", "step", "back-out", "bounce"]
@@ -189,8 +194,18 @@ class EDL(BaseModel):
         return self.model_dump_json(by_alias=True)
 
     def hash(self) -> str:
+        # RENDER_BEHAVIOR_VERSION is a salt, bumped whenever a code change
+        # makes the SAME EDL fields render to DIFFERENT pixels (not just
+        # when the schema itself changes) — e.g. the LUT-intensity blend
+        # fix, the animated-overlay timing fix, and text-style/z-order
+        # support all changed what an unchanged EDL renders to. Without this,
+        # `render/compositor.py`'s preview cache (keyed by this hash) would
+        # keep serving a pre-fix cached .mp4 for a session that hasn't
+        # touched its EDL since before the fix shipped. Mirrors
+        # render/chunks.py's own _RENDER_BEHAVIOR_VERSION for the same
+        # reason on the per-clip chunk cache.
         canonical = json.dumps(self.model_dump(by_alias=True, mode="json"), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return hashlib.sha256(f"{RENDER_BEHAVIOR_VERSION}|{canonical}".encode()).hexdigest()[:16]
 
     def get_track(self, track_id: str) -> Track | None:
         for t in self.tracks:

@@ -6,6 +6,7 @@ store.commit() so we get free undo, ops log, and snapshot persistence.
 from __future__ import annotations
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 from ..edl import EDLStore
@@ -955,12 +956,38 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
 
 
 def apply_brand_kit(store: EDLStore, args: dict) -> dict:
+    # Validate LOUDLY at the tool boundary: end_card/palette/font used to be
+    # accepted with any value and silently produce nothing. The renderer now
+    # consumes all three, so a value that can't render is an error here, not
+    # a silent no-op later.
+    font = args.get("font")
+    if font:
+        from ..config import FONTS_DIR
+        f = str(font)
+        if not (FONTS_DIR / f).exists() and not (FONTS_DIR / f"{f}.ttf").exists():
+            available = sorted(p.name for p in FONTS_DIR.glob("*.ttf"))
+            raise ValueError(f"brand font {f!r} is not a bundled font. Available: {available}")
+    end_card = args.get("end_card")
+    if end_card:
+        end_card = _safe_src(end_card)
+        from PIL import Image, UnidentifiedImageError
+        try:
+            with Image.open(end_card) as im:
+                im.verify()
+        except (OSError, UnidentifiedImageError) as e:
+            raise ValueError(f"end_card must be a readable image file: {e}")
+    palette = [str(c) for c in args.get("palette", [])]
+    for c in palette:
+        if not re.fullmatch(r"#?[0-9a-fA-F]{6}", c):
+            raise ValueError(f"palette entries must be #RRGGBB hex colors, got {c!r}")
+    palette = [c if c.startswith("#") else f"#{c}" for c in palette]
+
     kit = BrandKit(
         handle=args.get("handle"),
         hashtags=list(args.get("hashtags", [])),
-        end_card=args.get("end_card"),
-        palette=list(args.get("palette", [])),
-        font=args.get("font"),
+        end_card=end_card,
+        palette=palette,
+        font=str(font) if font else None,
     )
     info = _apply_brand_kit(store.edl, kit)
     summary = f"Apply brand kit: {', '.join(info['applied']) or '(empty)'}"
@@ -1390,7 +1417,25 @@ def apply_lut(store: EDLStore, args: dict) -> dict:
     src_arg = args.get("src") or args.get("lut_path")
     if not src_arg:
         raise ValueError("apply_lut needs `src` or `lut_path`")
-    src = _safe_src(src_arg)
+    # Bundled-LUT names first: `list_luts` returns bare names like
+    # "warm.cube" — resolve those against presets/luts so the list→apply
+    # loop actually closes (a bare name is not a user filesystem path, so
+    # it doesn't go through _safe_src; Path(...).name blocks traversal).
+    bare = str(src_arg)
+    if os.sep not in bare and "/" not in bare:
+        from ..config import PRESETS_DIR
+        name = Path(bare).name
+        for candidate in (name, f"{name}.cube"):
+            p = PRESETS_DIR / "luts" / candidate
+            if p.exists():
+                src = str(p)
+                break
+        else:
+            raise ValueError(
+                f"unknown LUT {bare!r} — not a bundled preset (see list_luts) "
+                "and not a path to a .cube file")
+    else:
+        src = _safe_src(src_arg)
     intensity = float(args.get("intensity", 1.0))
     cid = args.get("clip_id")
     target_clips: list[Clip] = []
@@ -1664,6 +1709,62 @@ def diarize(store: EDLStore, args: dict) -> dict:
     speakers = sorted({t["speaker"] for t in turns})
     summary = f"Diarized {src_clip.id}: {len(turns)} turns, {len(speakers)} speaker(s)"
     return {"summary": summary, "turns": turns, "speakers": speakers}
+
+
+def assign_caption_speakers(store: EDLStore, args: dict) -> dict:
+    """Tag caption clips with diarized speakers and color-code them.
+
+    Assigns each caption TextClip the speaker with maximum time-overlap and
+    sets a per-speaker text color (brand palette first, then a built-in
+    cycle) that both renderers honor — this is what makes TextClip.speaker
+    real; `diarize` alone is read-only and never touches the EDL.
+
+    Args:
+        turns: optional pre-computed [{speaker, start, end}, ...] — when
+               omitted, runs `diarize` (cached) on the V1 source.
+        num_speakers / fallback: forwarded to diarize when turns is omitted.
+    """
+    cap = store.edl.get_track("captions")
+    caps = [c for c in (cap.clips if cap else []) if isinstance(c, TextClip)]
+    if not caps:
+        raise ValueError("no caption clips — run auto_caption or add_caption_track first")
+
+    turns = args.get("turns")
+    if not turns:
+        turns = diarize(store, args)["turns"]
+    if not turns:
+        raise ValueError("diarization produced no speaker turns")
+
+    palette = list(store.edl.brand_kit.palette) if store.edl.brand_kit else []
+    # First speaker stays default-white (the renderer's "role style" sentinel);
+    # the rest cycle through brand palette then built-ins.
+    default_cycle = ["#FFFFFF", "#FFD166", "#7FD1FF", "#FF9AA2", "#B5E48C"]
+    speakers = sorted({str(t["speaker"]) for t in turns})
+    colors: dict[str, str] = {}
+    for i, sp in enumerate(speakers):
+        if i == 0:
+            colors[sp] = default_cycle[0]
+        elif palette and (i - 1) < len(palette):
+            colors[sp] = palette[i - 1]
+        else:
+            colors[sp] = default_cycle[i % len(default_cycle)]
+
+    assigned = 0
+    for c in caps:
+        best, best_ov = None, 0.0
+        for t in turns:
+            ov = min(c.end, float(t["end"])) - max(c.start, float(t["start"]))
+            if ov > best_ov:
+                best, best_ov = str(t["speaker"]), ov
+        if best is not None:
+            c.speaker = best
+            c.style.color = colors[best]
+            assigned += 1
+
+    summary = (f"Assigned speakers to {assigned}/{len(caps)} captions "
+               f"({len(speakers)} speaker(s))")
+    store.commit("assign_caption_speakers", args, summary)
+    return {"summary": summary, "speakers": colors, "assigned": assigned}
 
 
 def name_speakers(store: EDLStore, args: dict) -> dict:
@@ -2527,11 +2628,34 @@ def add_text(store: EDLStore, args: dict) -> dict:
         role: one of ROLE_STYLES (super, hook, lower_third, caption, label, watermark, default)
         x, y: canvas pixels (centre)
         scale, rotation, opacity: optional transforms
-        anim_in, anim_out: pop, fade, slide_up, slide_down, etc.
+        anim_in, anim_out: exactly one of pop / fade / slide_up / slide_down
     """
     from ..edl.schema import TextClip, Transform, TextStyle
+    from ..render.text_overlay import ANIM_PRESETS
     text = str(args["text"])
-    role = args.get("role", "default")
+    # TextClip.role is a Literal WITHOUT "default" — None is how the schema
+    # spells it (collect_text_clips maps None → the "default" role style).
+    # add_text used to pass the string "default" straight through and crash
+    # on pydantic validation for every call that omitted role.
+    role = args.get("role") or None
+    if role == "default":
+        role = None
+    # Normalize (not just validate) anim names to lowercase BEFORE storing:
+    # _anim_name on the render side already lowercases defensively, but the
+    # frontend preview (TextLayer.tsx) compares strictly against the lower-
+    # case preset names — a caller passing "Pop" would validate, render
+    # correctly server-side, and silently not animate in the browser preview.
+    anim_in = anim_out = None
+    for k, dst in (("anim_in", "anim_in"), ("anim_out", "anim_out")):
+        v = args.get(k)
+        if v is not None:
+            norm = str(v).strip().lower()
+            if norm not in ANIM_PRESETS:
+                raise ValueError(f"{k} must be one of {'/'.join(ANIM_PRESETS)}, got {v!r}")
+            if dst == "anim_in":
+                anim_in = norm
+            else:
+                anim_out = norm
     canvas = store.edl.canvas
     tx = Transform(
         x=float(args.get("x", canvas.w / 2)),
@@ -2540,16 +2664,25 @@ def add_text(store: EDLStore, args: dict) -> dict:
         rotation=float(args.get("rotation", 0.0)),
         opacity=float(args.get("opacity", 1.0)),
     )
+    # `color` is validated as #RRGGBB[AA] (or the sentinel "#FFFFFF") — the
+    # same rigor apply_brand_kit's palette validation uses. An invalid value
+    # used to be accepted, stored, and silently dropped at render time
+    # (resolve_style_overrides -> _parse_hex_color returns None -> role
+    # style), while the browser preview would still pass it straight to
+    # ctx.fillStyle and render SOME color — a silent preview/export mismatch.
+    color = str(args.get("color", "#FFFFFF"))
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", color):
+        raise ValueError(f"color must be #RRGGBB or #RRGGBBAA hex, got {color!r}")
     style = TextStyle(
         font=str(args.get("font", "Inter-Black")),
         size=float(args.get("size", 96)),
-        color=str(args.get("color", "#FFFFFF")),
+        color=color,
         stroke=str(args.get("stroke", "#000000")),
         stroke_w=float(args.get("stroke_w", 4)),
     )
     tc = TextClip(text=text, start=float(args["start"]), end=float(args["end"]),
                   role=role, transform=tx, style=style,
-                  anim_in=args.get("anim_in"), anim_out=args.get("anim_out"))
+                  anim_in=anim_in, anim_out=anim_out)
     track = ensure_track(store.edl, "text", "text", z=10)
     # Overlap-replace (default): mirrors add_super_text's guard — two text
     # clips of the SAME role on the SAME track whose [start, end) windows
@@ -2990,6 +3123,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "object_erase": object_erase,
     # M3 deferred: pyannote diarization (gated by HF token)
     "diarize": diarize,
+    "assign_caption_speakers": assign_caption_speakers,
     "pyannote_status": pyannote_status,
     "name_speakers": name_speakers,
 }

@@ -22,7 +22,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
-from ..edl.schema import Clip
+from ..edl.schema import Clip, RENDER_BEHAVIOR_VERSION
 from .. import platformutil as _pu
 
 
@@ -75,6 +75,13 @@ def _canonical(obj):
 def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
                      encoder_args: list[str]) -> str:
     payload = {
+        # RENDER_BEHAVIOR_VERSION (edl/schema.py) is shared with EDL.hash()
+        # and the video-only fingerprint — one salt for every render cache,
+        # bumped whenever the same clip fields would render to different
+        # pixels than before (e.g. apply_lut intensity now actually blends;
+        # a pre-fix cached chunk baked full-strength pixels for any partial
+        # intensity).
+        "v": RENDER_BEHAVIOR_VERSION,
         "src": str(c.src),
         "in": float(c.in_),
         "out": float(c.out),

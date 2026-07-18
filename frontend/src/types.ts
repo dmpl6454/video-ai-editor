@@ -21,6 +21,13 @@ export interface TextClip {
   text: string
   start: number
   end: number
+  role?: string
+  // Per-clip style overrides; backend defaults ('#FFFFFF' / 'Inter-Black')
+  // mean "use the role style" — TextLayer mirrors that sentinel rule.
+  style?: { font?: string; size?: number; color?: string; stroke?: string; stroke_w?: number }
+  anim_in?: string | null
+  anim_out?: string | null
+  speaker?: string | null
 }
 
 export type AnyClip = Clip | TextClip

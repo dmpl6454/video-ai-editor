@@ -22,6 +22,9 @@ Two things it fixes / provides:
   - custom:  ("custom", "<expr string>") → xfade=transition=custom:expr='...'
 """
 from __future__ import annotations
+import logging
+
+_log = logging.getLogger(__name__)
 
 # --- custom-expr transitions --------------------------------------------------
 # xfade expr vars: X Y (pixel), W H (dims), P (progress 0→1), A B (the two
@@ -217,7 +220,12 @@ def resolve_transition(name: str) -> tuple[str, str | None]:
         return NATIVE.get(canon, canon), None
     if n in NATIVE:
         return NATIVE[n], None
-    # unknown → safe default
+    # Unknown → safe default, but never SILENTLY: an unknown name can only
+    # reach here by bypassing add_transition's validation (direct EDL edits,
+    # stale project files), and a silent fade turns that into "my transition
+    # doesn't work" with zero signal anywhere.
+    _log.warning("unknown transition %r — rendering as 'fade' "
+                 "(valid names: render.transitions.all_names())", name)
     return "fade", None
 
 

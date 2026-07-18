@@ -12,6 +12,13 @@ from typing import Callable
 ToolSchema = dict
 
 
+def _transition_names() -> list[str]:
+    """The transition `type` enum, generated from the render catalog so the
+    schema can never drift stale again (it used to hardcode 12 of 45+ names)."""
+    from ..render.transitions import all_names
+    return all_names()
+
+
 def _t(name: str, description: str, category: str, properties: dict, required: list[str] | None = None) -> ToolSchema:
     return {
         "name": name,
@@ -35,6 +42,15 @@ INSPECTION_TOOLS = [
     _t("get_clip", "Return one clip's full state by id.", "inspection",
        {"clip_id": {"type": "string"}}, ["clip_id"]),
     _t("get_transcript", "Return the word-level transcript for the project.", "inspection", {}),
+    _t("find_broll",
+       "Keyword-search the local b-roll folder (filenames, folder names, sidecar "
+       ".txt tags). Returns ranked candidate clips to add_clip onto v2.",
+       "inspection",
+       {"query": {"type": "string"},
+        "bin": {"type": "string", "description": "Override the b-roll folder path"},
+        "top_k": {"type": "integer", "default": 8},
+        "max_duration": {"type": "number", "description": "Skip candidates longer than this"}},
+       ["query"]),
 ]
 
 # --- Timeline edits ---
@@ -82,6 +98,12 @@ EDIT_TOOLS = [
     _t("duplicate_clip", "Duplicate a clip; the copy is appended right after the original.",
        "edit",
        {"clip_id": {"type": "string"}}, ["clip_id"]),
+    _t("set_speed",
+       "Set a media clip's playback speed factor (1.0 = normal, 2.0 = double, "
+       "0.5 = half). Constant speed only — no per-clip speed curves yet.",
+       "edit",
+       {"clip_id": {"type": "string"}, "factor": {"type": "number"}},
+       ["clip_id", "factor"]),
 ]
 
 # --- Project / canvas ---
@@ -165,6 +187,53 @@ TEXT_TOOLS = [
        "Run the house-style quality check. Returns a list of issues + a 0–100 score. "
        "Call this before declaring done.",
        "quality", {}),
+    _t("add_text",
+       "Full-control text overlay (vs add_super_text's canonical defaults): role, "
+       "position, per-clip color/font, and entrance/exit animation presets.",
+       "text",
+       {
+           "text": {"type": "string"},
+           "start": {"type": "number"},
+           "end": {"type": "number"},
+           "role": {"type": "string",
+                    "enum": ["super", "hook", "lower_third", "caption", "label", "watermark", "default"]},
+           "x": {"type": "number"}, "y": {"type": "number"},
+           "color": {"type": "string", "description": "#RRGGBB text fill override"},
+           "font": {"type": "string", "description": "Bundled font file, e.g. BebasNeue-Regular"},
+           "anim_in": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
+           "anim_out": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
+       },
+       ["text", "start", "end"]),
+    _t("apply_text_template",
+       "Render a text overlay from a named preset bundle. Options: hashtag_chunky, "
+       "callout_arrow, big_question, end_card_handle, countdown_3_2_1, watermark_handle.",
+       "text",
+       {
+           "name": {"type": "string",
+                    "enum": ["hashtag_chunky", "callout_arrow", "big_question",
+                             "end_card_handle", "countdown_3_2_1", "watermark_handle"]},
+           "fields": {"type": "object",
+                      "description": "Slot values: {text}, {handle}, {hashtag}"},
+           "start": {"type": "number", "default": 0.0},
+           "end": {"type": "number"},
+       },
+       ["name"]),
+    _t("list_text_styles",
+       "Text roles the renderer styles (super/hook/caption/…) + saved text presets.",
+       "text", {}),
+    _t("add_sticker",
+       "Add a sticker overlay: an emoji character (fetched as Twemoji artwork) or a "
+       "PNG file path, at a canvas position for a time window.",
+       "text",
+       {
+           "emoji": {"type": "string", "description": "Emoji character, e.g. 🔥"},
+           "src": {"type": "string", "description": "PNG path (alternative to emoji)"},
+           "start": {"type": "number", "default": 0.0},
+           "end": {"type": "number"},
+           "position": {"type": "array", "items": {"type": "number"},
+                        "description": "[x, y] canvas px, default center"},
+           "scale": {"type": "number", "default": 1.0},
+       }),
 ]
 
 AUDIO_TOOLS = [
@@ -317,17 +386,20 @@ EFFECT_TOOLS = [
        {"clip_id": {"type": "string"}, "src": {"type": "string"}, "intensity": {"type": "number"}},
        ["src"]),
     _t("add_transition",
-       "Add a transition at a timeline boundary (t in seconds, between two adjacent V1 clips).",
+       "Add a transition at a timeline boundary (t in seconds, between two adjacent V1 clips). "
+       "Call list_transitions for the categorized catalog with descriptions.",
        "effects",
        {
            "at": {"type": "number"},
-           "type": {"type": "string", "enum": [
-               "fade", "fadeblack", "fadewhite", "wiperight", "wipeleft", "slideright", "slideleft",
-               "circleopen", "circleclose", "dissolve", "pixelize", "radial",
-           ]},
+           # Enum generated from the render catalog — the previous hardcoded
+           # 12-name list silently hid 45+ working transitions from the LLM.
+           "type": {"type": "string", "enum": _transition_names()},
            "duration": {"type": "number", "default": 0.5},
        },
        ["at"]),
+    _t("list_transitions",
+       "The full transition catalog: categories, aliases, and descriptions.",
+       "effects", {}),
     _t("add_mask",
        "Add a vector mask to a clip (everything outside is hidden / black-padded).",
        "effects",
@@ -339,6 +411,18 @@ EFFECT_TOOLS = [
            "invert": {"type": "boolean", "default": False},
        },
        ["clip_id", "type"]),
+    _t("chroma_key",
+       "Green/blue-screen key on a media clip (works on V1 and PIP clips). "
+       "Pass color=null to clear an existing key.",
+       "effects",
+       {
+           "clip_id": {"type": "string"},
+           "color": {"type": ["string", "null"], "default": "#00FF00"},
+           "similarity": {"type": "number", "default": 0.4},
+           "smoothness": {"type": "number", "default": 0.1},
+           "spill_suppress": {"type": "number", "default": 0.5},
+       },
+       ["clip_id"]),
 ]
 
 
@@ -377,6 +461,67 @@ HEAVY_AI_TOOLS = [
        "ai",
        {"clip_id": {"type": "string"}, "factor": {"type": "integer", "default": 2, "enum": [2, 4]}},
        ["clip_id"]),
+    _t("stabilize",
+       "Two-pass libvidstab stabilization; replaces the clip's source with the "
+       "stabilized render. Slow (two full passes over the clip).",
+       "ai",
+       {"clip_id": {"type": "string"}},
+       ["clip_id"]),
+    _t("remove_background",
+       "Strip a clip's background (rembg/u2net, downloads ~170MB model on first "
+       "use). By default flattens onto green so a follow-up chroma_key composites "
+       "it; pass bg_color=null for true alpha.",
+       "ai",
+       {"clip_id": {"type": "string"},
+        "bg_color": {"type": ["string", "null"], "default": "#00FF00"}},
+       ["clip_id"]),
+    _t("object_erase",
+       "LaMa inpaint: erase a bbox region across a time window on a clip "
+       "(downloads ~196MB model on first use).",
+       "ai",
+       {"clip_id": {"type": "string"},
+        "bbox": {"type": "array", "items": {"type": "number"},
+                 "description": "[x, y, w, h] normalized 0..1"},
+        "t_start": {"type": "number", "default": 0.0},
+        "t_end": {"type": "number"}},
+       ["clip_id", "bbox"]),
+    _t("motion_track",
+       "Track a bounding box through a video clip and write the path as x/y "
+       "keyframes on a target overlay (sticker recommended — sticker x/y "
+       "keyframes animate in the render).",
+       "ai",
+       {"clip_id": {"type": "string"},
+        "target_id": {"type": "string"},
+        "bbox": {"type": "array", "items": {"type": "number"},
+                 "description": "[x, y, w, h] normalized 0..1 in the source frame"},
+        "method": {"type": "string", "enum": ["mil", "vit"], "default": "mil"},
+        "sample_every": {"type": "integer", "default": 2}},
+       ["clip_id", "target_id", "bbox"]),
+    _t("multicam",
+       "Multi-cam switcher: audio-sync N angle files, pick the best take per "
+       "window, and rewrite V1 as the resulting cuts.",
+       "ai",
+       {"srcs": {"type": "array", "items": {"type": "string"},
+                 "description": "Paths to the angle files; first = sync reference"},
+        "window_s": {"type": "number", "default": 2.0},
+        "replace_v1": {"type": "boolean", "default": True}},
+       ["srcs"]),
+    _t("diarize",
+       "Speaker diarization of the V1 source (pyannote with an HF token, else a "
+       "local heuristic). Read-only: returns speaker turns; use "
+       "assign_caption_speakers to apply them to captions.",
+       "ai",
+       {"num_speakers": {"type": "integer", "default": 2},
+        "fallback": {"type": "boolean", "default": True}},
+       []),
+    _t("assign_caption_speakers",
+       "Tag caption clips with diarized speakers and color-code each speaker's "
+       "captions (brand palette first). Runs diarize when `turns` is omitted.",
+       "ai",
+       {"num_speakers": {"type": "integer", "default": 2},
+        "turns": {"type": "array", "items": {"type": "object"},
+                  "description": "Optional pre-computed [{speaker,start,end}] turns"}},
+       []),
 ]
 
 
