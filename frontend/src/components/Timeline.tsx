@@ -5,6 +5,7 @@ import { toast } from '../toast'
 import { isMediaClip, isTextClip, type AnyClip, type Track } from '../types'
 import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
+import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -61,6 +62,18 @@ function firstFreeGap(
 const WAVE_CACHE = new Map<string, { peaks: number[]; peaks_per_sec: number; duration: number }>()
 const WAVE_INFLIGHT = new Map<string, Promise<void>>()
 
+// Filmstrip thumbnail cache: `${src}|${t.toFixed(2)}|${h}` → loaded image, or
+// a 'loading'/'error' sentinel. `t` is SOURCE time (clip.in + offset), rounded
+// to 0.5s steps by the caller so zooming can't mint unbounded distinct URLs
+// for the same footage; 'error' entries are never retried in-session. Backed
+// by GET /api/sessions/{sid}/thumb (JPEG, Cache-Control 1h server-side).
+const THUMB_H = 72          // 2× the 36px row height for retina; server caps at 270
+const MAX_THUMB_TILES = 12  // per-clip cap on distinct thumb URLs
+const THUMB_CACHE = new Map<string, HTMLImageElement | 'loading' | 'error'>()
+// src → natural aspect (w/h) of its thumbs, learned from the first loaded
+// image so portrait sources get proportionally narrower tiles (no letterbox).
+const THUMB_ASPECT = new Map<string, number>()
+
 const TRACK_COLORS: Record<string, string> = {
   video: '#5b8dff',
   audio: '#4ade80',
@@ -97,6 +110,13 @@ export function Timeline() {
   const [dpr] = useState(window.devicePixelRatio || 1)
   const [size, setSize] = useState({ w: 800, h: 240 })
   const [waveTick, setWaveTick] = useState(0)  // bump to force redraw when peaks arrive
+  const [thumbTick, setThumbTick] = useState(0)  // bump to force redraw when a filmstrip tile loads
+  // Transition popover: opened by clicking a cut-point affordance on v1.
+  // x/y are VIEWPORT coords (e.clientX/Y — the popover is position:fixed,
+  // same convention as contextMenu below); `at` is the cut's timeline second.
+  const [transPopover, setTransPopover] = useState<null | {
+    x: number; y: number; at: number; existing: TransitionInfo | null
+  }>(null)
   // Brief flash highlight on a newly-added clip (e.g. a fresh voiceover). The
   // highlight is drawn in the heavy canvas while flashClipId is set; the store
   // clears it after ~600ms, which redraws without it (a flash, no per-frame RAF).
@@ -201,6 +221,56 @@ export function Timeline() {
 
   function trackY(i: number): number {
     return headerHeight + i * (trackHeight + 4)
+  }
+
+  // Cut points on v1: each pair of temporally-adjacent media clips (next.start
+  // ≈ current end within 0.05s). `tr` is the transition already at that cut,
+  // matched by |tr.at − cutTime| < 0.05 — the same tolerance the render
+  // compositor uses. The match loop deliberately takes the LAST hit, because
+  // add_transition APPENDS (it never replaces) and the compositor's own
+  // boundary matcher iterates the full list letting later entries overwrite
+  // earlier ones — so "last wins" is what actually renders. types.ts's Track
+  // doesn't declare `transitions` (hand-mirrored schema, incomplete on
+  // purpose), so it's read via the repo's established cast pattern.
+  const v1Cuts = useMemo(() => {
+    const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
+    if (!v1) return [] as { at: number; tr: TransitionInfo | null }[]
+    const trs = (v1 as unknown as { transitions?: TransitionInfo[] }).transitions ?? []
+    const media = v1.clips.filter(isMediaClip).slice().sort((a, b) => a.start - b.start)
+    const cuts: { at: number; tr: TransitionInfo | null }[] = []
+    for (let i = 0; i < media.length - 1; i++) {
+      const end = media[i].start + (media[i].out - media[i].in)
+      if (Math.abs(media[i + 1].start - end) <= 0.05) {
+        let match: TransitionInfo | null = null
+        for (const tr of trs) if (Math.abs(tr.at - end) < 0.05) match = tr
+        cuts.push({ at: end, tr: match })
+      }
+    }
+    return cuts
+  }, [edl])
+
+  // Filmstrip tile loader. Returns the image when cached; otherwise kicks off
+  // a fetch (once per key — failed loads are marked 'error' and never retried
+  // this session) and returns null so the caller keeps the flat fill for that
+  // tile. On load it bumps thumbTick, which is in the main draw effect's deps
+  // — the exact repaint mechanism the waveform cache already uses (waveTick),
+  // not a second loop. `tSec` must arrive already rounded/clamped.
+  function thumbImage(src: string, tSec: number): HTMLImageElement | null {
+    if (!sid) return null
+    const key = `${src}|${tSec.toFixed(2)}|${THUMB_H}`
+    const cached = THUMB_CACHE.get(key)
+    if (cached instanceof HTMLImageElement) return cached
+    if (cached) return null  // 'loading' | 'error'
+    THUMB_CACHE.set(key, 'loading')
+    const img = new Image()
+    img.onload = () => {
+      THUMB_CACHE.set(key, img)
+      if (!THUMB_ASPECT.has(src) && img.height > 0) THUMB_ASPECT.set(src, img.width / img.height)
+      setThumbTick((n) => n + 1)
+    }
+    img.onerror = () => { THUMB_CACHE.set(key, 'error') }
+    img.src = `/api/sessions/${sid}/thumb?src=${encodeURIComponent(src)}&t=${tSec}&h=${THUMB_H}`
+    return null
   }
 
   // Build hit list each render so we can do clip hit-testing on click.
@@ -311,6 +381,42 @@ export function Timeline() {
         ctx.fill()
         ctx.globalAlpha = 1
 
+        // Filmstrip thumbnails on video-track media clips: tiles across the
+        // clip rect, each sampling SOURCE time c.in + (k+0.5)·srcDur/n
+        // (rounded to 0.5s steps, clamped inside [in, out)) — NOT timeline
+        // time. Unloaded/errored tiles fall through to the flat fill above;
+        // loaded ones are cover-cropped (aspect-preserving) into a fixed
+        // tile grid, clipped to the clip's rounded rect.
+        let drewThumbs = false
+        if (t.type === 'video' && isMediaClip(c) && w > 24 && sid) {
+          const clipH = trackHeight - 8
+          const srcDur = Math.max(0.01, c.out - c.in)
+          const idealW = Math.max(20, clipH * (THUMB_ASPECT.get(c.src) ?? 16 / 9))
+          const n = Math.min(MAX_THUMB_TILES, Math.max(1, Math.ceil(w / idealW)))
+          const tileW = w / n
+          ctx.save()
+          roundRect(ctx, x, y + 4, w, clipH, 4)
+          ctx.clip()
+          if (t.muted) ctx.globalAlpha = 0.35
+          for (let k = 0; k < n; k++) {
+            let ts = c.in + ((k + 0.5) * srcDur) / n
+            ts = Math.round(ts * 2) / 2  // 0.5s steps → bounded URL count across zooms
+            ts = Math.min(Math.max(ts, c.in), Math.max(c.in, c.out - 0.05))
+            const img = thumbImage(c.src, ts)
+            if (!img) continue
+            // Cover-crop the source frame into the tile (no distortion).
+            const ia = img.width / Math.max(1, img.height)
+            const ta = tileW / clipH
+            let sx = 0, sy = 0, sw = img.width, sh = img.height
+            if (ia > ta) { sw = img.height * ta; sx = (img.width - sw) / 2 }
+            else { sh = img.width / ta; sy = (img.height - sh) / 2 }
+            ctx.drawImage(img, sx, sy, sw, sh, x + k * tileW, y + 4, tileW, clipH)
+            drewThumbs = true
+          }
+          ctx.globalAlpha = 1
+          ctx.restore()
+        }
+
         // Waveform inside the clip rect
         if (showWaveOn && isMediaClip(c) && w > 12) {
           const wave = WAVE_CACHE.get(c.src)
@@ -339,11 +445,29 @@ export function Timeline() {
           }
         }
 
-        // label inside (drawn on top of the waveform so it stays readable)
-        ctx.fillStyle = t.type === 'video' ? '#0e0e10' : 'rgba(0,0,0,0.85)'
+        // label inside (drawn on top of the waveform so it stays readable).
+        // Over a filmstrip the dark-on-fill text is unreadable on bright
+        // frames, so when thumbnails were drawn we first lay a subtle
+        // left-edge scrim (clipped to the rounded clip rect) and switch to
+        // light text.
         ctx.font = '10px var(--font-ui)'
         const label = isMediaClip(c) ? (c.src.split('/').pop() ?? '') : ('text' in c ? c.text : '')
         const txt = label.slice(0, Math.max(0, Math.floor(w / 6)))
+        if (txt && drewThumbs) {
+          ctx.save()
+          roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
+          ctx.clip()
+          const scrimW = Math.min(w, txt.length * 6 + 18)
+          const grad = ctx.createLinearGradient(x, 0, x + scrimW, 0)
+          grad.addColorStop(0, 'rgba(0,0,0,0.65)')
+          grad.addColorStop(1, 'rgba(0,0,0,0)')
+          ctx.fillStyle = grad
+          ctx.fillRect(x, y + 4, scrimW, trackHeight - 8)
+          ctx.restore()
+          ctx.fillStyle = '#e6e6eb'
+        } else {
+          ctx.fillStyle = t.type === 'video' ? '#0e0e10' : 'rgba(0,0,0,0.85)'
+        }
         if (txt) ctx.fillText(txt, x + 6, y + trackHeight / 2 + 3)
         // selection ring
         if (isSel) {
@@ -376,6 +500,43 @@ export function Timeline() {
           ctx.strokeStyle = '#5b8dff'
           roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
           ctx.stroke()
+          ctx.restore()
+        }
+      }
+
+      // Transition affordances at v1 cut points: a small circle with a bowtie
+      // glyph centered on each boundary between temporally-adjacent clips.
+      // Accent-filled when a transition exists at that cut, hollow otherwise.
+      // Drawn after this track's clips so it sits on top of both neighbors.
+      // Click handling lives in onMouseDown (hit-tested BEFORE clip hits).
+      if (t.id === 'v1') {
+        for (const cut of v1Cuts) {
+          const cx = labelWidth + cut.at * zoom
+          const cy = y + trackHeight / 2
+          ctx.save()
+          ctx.beginPath()
+          ctx.arc(cx, cy, 7, 0, Math.PI * 2)
+          if (cut.tr) {
+            ctx.fillStyle = '#5b8dff'
+            ctx.fill()
+            ctx.strokeStyle = '#fff'
+            ctx.lineWidth = 1
+            ctx.stroke()
+          } else {
+            ctx.fillStyle = '#16161a'
+            ctx.fill()
+            ctx.strokeStyle = '#9b9ba5'
+            ctx.lineWidth = 1.25
+            ctx.stroke()
+          }
+          const glyph = cut.tr ? '#fff' : '#9b9ba5'
+          ctx.fillStyle = glyph
+          ctx.beginPath()
+          ctx.moveTo(cx - 4, cy - 3); ctx.lineTo(cx - 1, cy); ctx.lineTo(cx - 4, cy + 3)
+          ctx.closePath(); ctx.fill()
+          ctx.beginPath()
+          ctx.moveTo(cx + 4, cy - 3); ctx.lineTo(cx + 1, cy); ctx.lineTo(cx + 4, cy + 3)
+          ctx.closePath(); ctx.fill()
           ctx.restore()
         }
       }
@@ -416,8 +577,10 @@ export function Timeline() {
     }
 
     // (playhead drawn on a separate cheap overlay canvas — see playheadCanvasRef)
-    // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps)
-  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, inMark, outMark, flashClipId])
+    // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps.
+    //  `thumbTick` repaints as filmstrip tiles load — waveTick's mechanism;
+    //  `sid` feeds thumbImage's URLs; `v1Cuts` derives from `edl` via useMemo.)
+  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, inMark, outMark, flashClipId])
 
   // Sticky track-label column. The main canvas draws labels at its own x=0,
   // but that canvas is the thing that SCROLLS (contentW-sized) — so once the
@@ -664,6 +827,40 @@ export function Timeline() {
     const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
+    // x/y are canvas-CONTENT coords (the canvas itself is content-sized and
+    // scrolls inside the wrap, so its bounding rect moves with scrollLeft) —
+    // the same space the draw loop uses. Viewport coords for the popover come
+    // from e.clientX/Y directly.
+
+    // Transition-affordance hit-test FIRST — before the near-playhead grab
+    // and before clip hit-testing. The affordance is a small (r≈8) target
+    // centered on a v1 cut line; after a split the playhead often sits
+    // exactly on that cut, and the near-playhead branch below would swallow
+    // the click and start a playhead drag instead of opening the popover.
+    // The playhead stays draggable everywhere else along its line.
+    {
+      const v1Idx = tracks.findIndex((tk) => tk.id === 'v1')
+      if (v1Idx >= 0) {
+        const cy = trackY(v1Idx) + trackHeight / 2
+        for (const cut of v1Cuts) {
+          const cx = labelWidth + cut.at * zoom
+          const dx = x - cx
+          const dy = y - cy
+          if (dx * dx + dy * dy <= 8 * 8) {
+            // stopPropagation so an ALREADY-OPEN popover's window-level
+            // mousedown close listener (which fires AFTER this synthetic
+            // handler — the React root sits below window in the bubble path)
+            // doesn't immediately null the popover state we just set when
+            // switching between two cut points. That listener also closes
+            // the context menu, so close it explicitly here instead.
+            e.stopPropagation()
+            setContextMenu(null)
+            setTransPopover({ x: e.clientX, y: e.clientY, at: cut.at, existing: cut.tr })
+            return
+          }
+        }
+      }
+    }
 
     // Click in the ruler, OR within a few px of the current playhead line
     // anywhere in the track area, starts a DRAG (live-scrubbing via
@@ -1197,6 +1394,26 @@ export function Timeline() {
           style={{ position: 'absolute', top: 0, left: 0, display: 'block', zIndex: 1, cursor: 'default' }}
         />
       </div>
+      {transPopover && sid && (
+        <TransitionPopover
+          x={transPopover.x}
+          y={transPopover.y}
+          at={transPopover.at}
+          existing={transPopover.existing}
+          sessionId={sid}
+          onApply={(type, duration) => {
+            const at = transPopover.at
+            setTransPopover(null)
+            // add_transition APPENDS (no replace; no remove tool exists in
+            // DISPATCH). The compositor's boundary matcher iterates the whole
+            // transitions list and the LAST entry within 0.05s of a cut wins,
+            // so re-adding at the same `at` is the effective update — the
+            // superseded entry stays in the EDL as inert data.
+            void dispatch('add_transition', { at, type, duration })
+          }}
+          onClose={() => setTransPopover(null)}
+        />
+      )}
       {contextMenu && (
         <div
           onMouseDown={(e) => e.stopPropagation()}

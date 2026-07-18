@@ -7,6 +7,40 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 
+// Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
+// `result` is the tool handler's own return dict (e.g. add_text returns
+// {summary, id}; auto_caption returns {summary, cues, language, ...}) — typed
+// unknown here because each tool's payload differs; callers narrow it.
+export interface DispatchResponse {
+  result: unknown
+  edl_hash: string
+  op: Op | null
+}
+
+// api.ts's http() throws `Error("422 Unprocessable Entity: {json envelope}")`
+// with the raw response body appended. The body is usually the hardening
+// error envelope ({error:{message}}) or a FastAPI detail — pull the human-
+// readable message out so toasts show e.g. "auto_caption: no clip on v1 to
+// caption" instead of a wall of JSON.
+function errorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const jsonStart = raw.indexOf('{')
+  if (jsonStart !== -1) {
+    try {
+      const body = JSON.parse(raw.slice(jsonStart)) as {
+        error?: { message?: string }
+        detail?: string | { error?: string }
+      }
+      const msg = body.error?.message
+        ?? (typeof body.detail === 'string' ? body.detail : body.detail?.error)
+      if (msg) return msg
+    } catch {
+      // not a JSON tail — fall through to the raw text
+    }
+  }
+  return raw
+}
+
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
 // SSR (no `localStorage`), an unset key (`null` -> NaN -> falls through to
 // `fallback`), and a corrupted/non-numeric value the same way. Clamped to the
@@ -129,7 +163,11 @@ interface State {
   refreshSoon(): void
   upload(file: File): Promise<void>
   uploadAudio(file: File): Promise<void>
-  dispatch(tool: string, args?: Record<string, unknown>): Promise<void>
+  // Resolves with the dispatch response on success (so callers can read the
+  // tool's own result, e.g. add_text's new clip id or auto_caption's cue
+  // count) or null on failure — the failure is already surfaced via
+  // toast.error here, so callers just need to know it didn't land.
+  dispatch(tool: string, args?: Record<string, unknown>): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
   cancelExport(): Promise<void>
@@ -404,7 +442,7 @@ export const useStore = create<State>((set, get) => ({
 
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
-    if (!sid) return
+    if (!sid) return null
     set({ pendingOps: get().pendingOps + 1 })
     try {
       // We KEEP the previous export's download link after an edit, but the UI
@@ -422,7 +460,7 @@ export const useStore = create<State>((set, get) => ({
           set({ redoAvailable: res.result.redo_available })
         }
         await get().refresh()
-        return
+        return res
       }
       // Use the debounced refresh: chained tool calls (chat storms) coalesce
       // into one EDL fetch instead of N.
@@ -439,14 +477,15 @@ export const useStore = create<State>((set, get) => ({
           { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
         )
       }
+      return res
     } catch (e) {
       // Edits used to fail SILENTLY here — no catch at all, so a rejected
       // dispatch (bad args, a validation error like the new lane-type check,
       // a network hiccup) left the user staring at a UI that looked like
       // nothing happened, with no error anywhere (issue 15-adjacent: "no
       // persistent error surface for a failed edit").
-      const msg = e instanceof Error ? e.message : String(e)
-      toast.error(msg)
+      toast.error(errorMessage(e))
+      return null
     } finally {
       set({ pendingOps: Math.max(0, get().pendingOps - 1) })
     }

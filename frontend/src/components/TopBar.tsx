@@ -4,6 +4,8 @@ import { useStore } from '../store'
 import { api } from '../api'
 import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
+import { TextTool } from './TextTool'
+import { CaptionsButton } from './CaptionsButton'
 
 interface SessionRow { id: string; name: string }
 
@@ -275,6 +277,9 @@ export function TopBar() {
         {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
           <button key={r} onClick={() => dispatch('set_aspect_ratio', { ratio: r })}>{r}</button>
         ))}
+        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
+        <TextTool />
+        <CaptionsButton />
         <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
         {[
           { label: 'Reels',    title: 'Instagram Reels — 1080×1920 @ 30fps',  w: 1080, h: 1920, fps: 30 },

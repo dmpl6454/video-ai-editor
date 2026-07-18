@@ -47,19 +47,14 @@ export function Properties() {
     return <StickerProps c={c as unknown as StickerLike} dispatch={dispatch} />
   }
   if (!isMediaClip(c)) {
-    // Text clip — minimal view
+    // Text clip (sticker tracks were handled above) — full editable inspector.
     return (
-      <div className="props">
-        <h2>Properties</h2>
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{clip.t.label} · {c.id}</div>
-        <div className="field">
-          <label>Text</label>
-          <input value={('text' in c ? c.text : '') as string} readOnly />
-        </div>
-        <div className="row">
-          <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
-        </div>
-      </div>
+      <TextProps
+        c={c as unknown as TextClipLike}
+        trackLabel={clip.t.label ?? clip.t.id}
+        canvas={edl.canvas}
+        dispatch={dispatch}
+      />
     )
   }
 
@@ -284,6 +279,151 @@ function StickerProps({ c, dispatch }: {
             <label>Duration (s)</label>
             <input type="number" step="0.1" min={0.1} key={`d${duration.toFixed(2)}`} defaultValue={duration.toFixed(2)}
               onBlur={(e) => { const nd = Math.max(0.1, Number(e.target.value)); setTiming({ end: start + nd }) }} />
+          </div>
+        </div>
+      </Section>
+
+      <div className="row" style={{ marginTop: 8 }}>
+        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+      </div>
+    </div>
+  )
+}
+
+// The backend TextClip schema (edl/schema.py) always carries style/transform
+// (pydantic default factories), so the dotted set_property paths below always
+// resolve — including on auto_caption's caption cues. types.ts's TextClip
+// interface deliberately omits transform ("M1 frontend ignores transform"),
+// hence the local cast shape.
+interface TextClipLike {
+  id: string
+  text: string
+  start: number
+  end: number
+  role?: string | null
+  style?: { font?: string; size?: number; color?: string }
+  transform?: { x?: unknown; y?: unknown }
+}
+
+function TextProps({ c, trackLabel, canvas, dispatch }: {
+  c: TextClipLike
+  trackLabel: string
+  canvas: { w: number; h: number }
+  dispatch: ReturnType<typeof useStore.getState>['dispatch']
+}) {
+  const x = asScalar(c.transform?.x, canvas.w / 2)
+  const y = asScalar(c.transform?.y, canvas.h * 0.85)
+  const size = c.style?.size ?? 96
+  const rawColor = c.style?.color ?? '#FFFFFF'
+  // <input type=color> only speaks #rrggbb — drop an alpha suffix if present.
+  const color = /^#[0-9a-fA-F]{6}/.test(rawColor) ? rawColor.slice(0, 7) : '#ffffff'
+  const start = c.start
+  const end = c.end
+
+  // Editing an existing TextClip = `set_property` (dispatch.py's generic
+  // dotted-path mutator): paths `text`, `style.size`, `style.color`,
+  // `transform.x`, `transform.y`. Timing goes through `set_clip_timing`
+  // instead — it enforces end > start (clamps to a 0.1s minimum span) and
+  // re-sorts the track, which a raw set_property on start/end would skip.
+  const setProp = (path: string, value: unknown) =>
+    dispatch('set_property', { clip_id: c.id, path, value })
+  const setTiming = (p: { start?: number; end?: number }) =>
+    dispatch('set_clip_timing', { clip_id: c.id, ...p })
+
+  const commitText = (v: string) => {
+    // Skip blank commits — an empty TextClip renders nothing everywhere and
+    // is only recoverable through this same (now-empty-looking) inspector.
+    if (v.trim() && v !== c.text) void setProp('text', v)
+  }
+  // Shared number-commit guard: NaN-proof, optional floor, and same-value
+  // skip against the SEEDED display value (mirrors Slider's `commit` guard)
+  // so a focus-then-blur without edits never appends a junk op to history.
+  const commitNumber = (path: string, raw: string, seeded: number, min?: number) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) return
+    const v = min != null ? Math.max(min, n) : n
+    if (v !== seeded) void setProp(path, v)
+  }
+
+  return (
+    <div className="props">
+      <h2>Properties</h2>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+        {trackLabel} · {c.role ?? 'default'} · {c.id}
+      </div>
+
+      <Section label="Text">
+        {/* Uncontrolled + key-seeded like the sticker inputs: typing stays
+            local; commit fires once on blur (or Cmd/Ctrl+Enter, routed
+            through blur so there's a single commit path); an external change
+            (chat edit, undo) re-seeds via the key. */}
+        <textarea
+          key={`t${c.id}:${c.text}`}
+          defaultValue={c.text}
+          rows={3}
+          onBlur={(e) => commitText(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault()
+              ;(e.target as HTMLTextAreaElement).blur()
+            }
+          }}
+          style={{ width: '100%', resize: 'vertical', fontSize: 12,
+                   fontFamily: 'inherit', boxSizing: 'border-box' }}
+        />
+      </Section>
+
+      <Section label="Style">
+        <div className="row two">
+          <div className="field">
+            <label>Size (px)</label>
+            <input type="number" step="1" min={8} key={`sz${size}`} defaultValue={size}
+              onBlur={(e) => commitNumber('style.size', e.target.value, size, 8)} />
+          </div>
+          <div className="field">
+            <label>Color</label>
+            <input type="color" key={`c${color}`} defaultValue={color}
+              title="Text fill color (#ffffff means: use the role's preset style)"
+              onBlur={(e) => { const v = e.target.value; if (v !== color) void setProp('style.color', v) }}
+              style={{ width: '100%', padding: 0, height: 24 }} />
+          </div>
+        </div>
+      </Section>
+
+      <Section label={`Position (canvas px, ${canvas.w}×${canvas.h})`}>
+        {/* TextClip transform x/y are ABSOLUTE CANVAS PIXELS (clip centre),
+            not relative units — 540/1700 is bottom-centre on a 1080×1920. */}
+        <div className="row two">
+          <div className="field">
+            <label>X</label>
+            <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
+              onBlur={(e) => commitNumber('transform.x', e.target.value, Math.round(x))} />
+          </div>
+          <div className="field">
+            <label>Y</label>
+            <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
+              onBlur={(e) => commitNumber('transform.y', e.target.value, Math.round(y))} />
+          </div>
+        </div>
+      </Section>
+
+      <Section label="Timing">
+        <div className="row two">
+          <div className="field">
+            <label>Start (s)</label>
+            <input type="number" step="0.1" min={0} key={`s${start.toFixed(2)}`} defaultValue={start.toFixed(2)}
+              onBlur={(e) => {
+                const n = Number(e.target.value)
+                if (Number.isFinite(n) && n !== start) void setTiming({ start: Math.max(0, n) })
+              }} />
+          </div>
+          <div className="field">
+            <label>End (s)</label>
+            <input type="number" step="0.1" key={`e${end.toFixed(2)}`} defaultValue={end.toFixed(2)}
+              onBlur={(e) => {
+                const n = Number(e.target.value)
+                if (Number.isFinite(n) && n !== end) void setTiming({ end: n })
+              }} />
           </div>
         </div>
       </Section>

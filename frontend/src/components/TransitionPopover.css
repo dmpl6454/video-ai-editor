@@ -1,0 +1,96 @@
+/* TransitionPopover — dark-theme popover matching the app's token palette
+   (styles.css :root vars, with literal fallbacks for safety). Buttons/inputs
+   inherit the app-wide base styles from styles.css. */
+
+.transition-popover {
+  position: fixed;
+  z-index: 120;
+  width: 240px;
+  background: var(--bg-2, #1d1d22);
+  border: 1px solid var(--line, #2c2c34);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text, #e6e6eb);
+}
+
+.tp-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-weight: 600;
+}
+
+.tp-at {
+  color: var(--text-dim, #9b9ba5);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tp-row > span:first-child {
+  width: 56px;
+  flex: 0 0 auto;
+  color: var(--text-dim, #9b9ba5);
+}
+
+.tp-row select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: var(--bg-3, #25252c);
+  border: 1px solid var(--line, #2c2c34);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.tp-row input[type='number'] {
+  width: 70px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+}
+
+.tp-unit {
+  color: var(--text-dim, #9b9ba5);
+}
+
+.tp-more {
+  align-self: flex-start;
+  margin-left: 64px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent-2, #5b8dff);
+  cursor: pointer;
+  font-size: 11px;
+}
+.tp-more:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
+}
+
+.tp-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.tp-apply {
+  background: var(--accent-2, #5b8dff);
+  border-color: var(--accent-2, #5b8dff);
+  color: #fff;
+}
+.tp-apply:hover:not(:disabled) {
+  background: #6d9aff;
+}

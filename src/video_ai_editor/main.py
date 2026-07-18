@@ -804,6 +804,30 @@ def get_waveform(sid: str, src: str, peaks_per_sec: int = 50):
                           peaks_per_sec=peaks_per_sec)
 
 
+@app.get("/api/sessions/{sid}/thumb")
+def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
+    """One scaled JPEG frame of a session source at time `t`.
+
+    Feeds the timeline filmstrip / media-bin previews. Same trust posture as
+    /waveform: `src` is untrusted and must resolve inside the session workdir.
+    """
+    _store(sid)  # validates sid shape before any filesystem work
+    sd = session_dir(sid)
+    target = Path(src).resolve()
+    if not str(target).startswith(str(sd.resolve())):
+        raise HTTPException(403, "src must be inside the session workdir")
+    if not target.exists():
+        raise HTTPException(404, "src not found")
+    h = max(16, min(int(h), 270))
+    from .render.thumbs import thumbnail_for
+    try:
+        p = thumbnail_for(target, sd / "cache" / "thumbs", t=float(t), height=h)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    return FileResponse(p, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+
 # --- M6: project save/load ---
 
 @app.post("/api/sessions/{sid}/save_project")

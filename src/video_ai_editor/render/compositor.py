@@ -336,21 +336,32 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str
             remaining /= 0.5
         if abs(remaining - 1.0) > 0.001:
             a_chain += f",atempo={remaining:.4f}"
+    a_chain += _audio_props_filters(c)
+    a_chain += label_out
+    return a_chain
+
+
+def _audio_props_filters(c: Clip) -> str:
+    """`,volume=…,afade=…` fragment for a clip's gain/fade/mute (no labels).
+
+    Fade times are clip-LOCAL (the source is -ss/-to-trimmed and starts at
+    t=0), so callers must apply this BEFORE any adelay repositioning.
+    """
+    frag = ""
     if c.audio:
         if abs(c.audio.gain_db) > 0.01:
-            a_chain += f",volume={c.audio.gain_db:.2f}dB"
+            frag += f",volume={c.audio.gain_db:.2f}dB"
         if c.audio.fade_in > 0.001:
             # fade-in starts at local t=0 and runs for fade_in seconds.
-            a_chain += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
+            frag += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
         if c.audio.fade_out > 0.001:
             # fade-out ends at clip duration; start at duration - fade_out.
             fade_out_start = max(0.0, c.duration - c.audio.fade_out)
-            a_chain += (f",afade=t=out:st={fade_out_start:.3f}"
-                        f":d={c.audio.fade_out:.3f}")
+            frag += (f",afade=t=out:st={fade_out_start:.3f}"
+                     f":d={c.audio.fade_out:.3f}")
         if c.audio.mute:
-            a_chain += ",volume=0"
-    a_chain += label_out
-    return a_chain
+            frag += ",volume=0"
+    return frag
 
 
 def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
@@ -556,6 +567,14 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     v_label = labels[0]
     a_label = labels[1]
 
+    # Track-level v1 mute: audio-only (v1 is the base video layer — unlike a
+    # muted V2 track, which also hides its overlay). Was a dead control: the
+    # render pipeline never read v1.muted. Applied BEFORE the PIP fold so it
+    # mutes only v1's own audio, not overlay/music/vo.
+    if v1 is not None and v1.muted:
+        fc += f";{a_label}volume=0[a_v1muted]"
+        a_label = "[a_v1muted]"
+
     extra_inputs: list[str] = list(mask_inputs)
     # Each clip + each mask are separate inputs; track the running input index
     next_idx = len(clips) + (len(mask_inputs) // 2)
@@ -648,6 +667,10 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             delay_ms = max(0, int(round(c.start * 1000)))
             chain = (f"[{input_idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
+            # PIP clips' own gain/fade/mute (was ignored — the v2 volume
+            # slider did nothing). No atempo: the PIP video chain doesn't
+            # apply speed either, and audio must stay in sync with it.
+            chain += _audio_props_filters(c)
             if delay_ms > 0:
                 chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
             pa_label = f"[pa{j}]"
@@ -724,15 +747,24 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
         lines.append(f"file '{esc}'")
     _pu.write_text_utf8(list_path, "\n".join(lines) + "\n")
     try:
+        # Track-level v1 mute — mirror of the main render path (audio-only).
+        main_label = "[0:a]"
+        pre = ""
+        v1_track = edl.get_track("v1")
+        if v1_track is not None and v1_track.muted:
+            pre = "[0:a]volume=0[amain]"
+            main_label = "[amain]"
         audio_chain, audio_inputs, final_audio_label = build_audio_mix(
-            edl, main_audio_label="[0:a]", first_input_index=1,
+            edl, main_audio_label=main_label, first_input_index=1,
             apply_loudnorm=False,
         )
         args = [_pu.FFMPEG, "-y", "-f", "concat", "-safe", "0",
                 "-i", str(list_path), *audio_inputs]
-        if audio_chain:
-            args += ["-filter_complex", audio_chain,
-                     "-map", "0:v", "-map", final_audio_label,
+        fc_all = ";".join(x for x in (pre, audio_chain) if x)
+        if fc_all:
+            final_lbl = final_audio_label if audio_chain else main_label
+            args += ["-filter_complex", fc_all,
+                     "-map", "0:v", "-map", final_lbl,
                      "-c:v", "copy", *_AAC_OUT]
         else:
             args += ["-map", "0:v", "-map", "0:a", "-c", "copy"]
@@ -764,9 +796,12 @@ def _video_only_fingerprint(edl: EDL) -> str:
         d = t.model_dump(by_alias=True, mode="json")
         # Per-clip audio (gain/fade/mute) never changes pixels; leaving it in
         # forced a full video re-encode on every volume edit instead of the
-        # cheap remux. Track-level `muted` stays: for V2 it hides the overlay.
+        # cheap remux. Track-level `muted` stays for V2/text/sticker (it hides
+        # the overlay) but is stripped for v1, where mute is audio-only.
         for c in d.get("clips", []):
             c.pop("audio", None)
+        if t.id == "v1":
+            d.pop("muted", None)
         tracks.append(d)
     blob = {
         # See EDL.hash()'s docstring: a version salt so a pre-fix cached
@@ -918,11 +953,17 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "".join(a_labels) + f"concat=n={len(a_labels)}:v=0:a=1[aout]"
         )
 
-    # Fold V2/PIP audio the same way the full render does (aresample + adelay
-    # + amix; deliberately no per-clip gain — parity with the main path).
-    # Skipping this dropped every PIP clip's audio from the remuxed preview.
-    next_idx = 1 + len(clips)
+    # Track-level v1 mute — mirror of the main render path (audio-only).
     a_main = "[aout]"
+    v1_track = edl.get_track("v1")
+    if v1_track is not None and v1_track.muted:
+        fc_parts.append(f"{a_main}volume=0[aout_m]")
+        a_main = "[aout_m]"
+
+    # Fold V2/PIP audio the same way the full render does (aresample +
+    # per-clip gain/fade/mute + adelay + amix). Skipping this dropped every
+    # PIP clip's audio from the remuxed preview.
+    next_idx = 1 + len(clips)
     pip_clips = [c for _tid, c in collect_pip_clips(edl)]
     if pip_clips:
         pa_labels: list[str] = []
@@ -932,6 +973,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             delay_ms = max(0, int(round(c.start * 1000)))
             chain = (f"[{idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
+            chain += _audio_props_filters(c)
             if delay_ms > 0:
                 chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
             pa_label = f"[rpa{j}]"

@@ -65,7 +65,15 @@ export function Preview() {
     const vidTracks = edl.tracks.filter(t => t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
     return JSON.stringify({
       canvas: edl.canvas,
-      tracks: vidTracks.map(t => ({ id: t.id, clips: t.clips })),
+      // Track-LEVEL props matter too: transitions and mute live on the track,
+      // not a clip — omitting them left the preview stale after adding a
+      // transition (surfaced the day transitions got a UI).
+      tracks: vidTracks.map(t => ({
+        id: t.id,
+        muted: t.muted,
+        transitions: (t as unknown as { transitions?: unknown }).transitions,
+        clips: t.clips,
+      })),
     })
   }, [edl])
 

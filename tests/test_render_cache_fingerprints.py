@@ -95,6 +95,15 @@ def test_video_only_fingerprint_ignores_v1_clip_audio():
     assert _video_only_fingerprint(edl) == base
 
 
+def test_video_only_fingerprint_ignores_v1_track_mute():
+    """v1 mute is audio-only (the base layer stays visible) — it must not
+    force a video re-encode. V2 mute hides the overlay, so it stays."""
+    edl = _one_clip_edl(Path("x.mp4"))
+    base = _video_only_fingerprint(edl)
+    edl.tracks[0].muted = True
+    assert _video_only_fingerprint(edl) == base
+
+
 def test_video_only_fingerprint_tracks_visual_changes():
     edl = _one_clip_edl(Path("x.mp4"))
     base = _video_only_fingerprint(edl)
