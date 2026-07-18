@@ -59,6 +59,24 @@ def test_thumb_rejects_src_outside_session(client, tmp_path: Path):
     assert r.status_code == 403
 
 
+def test_thumb_rejects_prefix_sibling_session(client, tmp_path: Path):
+    """s_ab must not grant access to s_abcd — a bare startswith() path check
+    admits any sibling whose directory name extends the session's."""
+    sid = client.post("/api/sessions").json()["id"]
+    sibling = tmp_path / f"{sid}x" / "uploads" / "clip.mp4"
+    _make_video(sibling)
+    r = client.get(f"/api/sessions/{sid}/thumb",
+                   params={"src": str(sibling), "t": 0.0})
+    assert r.status_code == 403
+
+
+def test_thumb_rejects_relative_src(client, tmp_path: Path):
+    sid = client.post("/api/sessions").json()["id"]
+    r = client.get(f"/api/sessions/{sid}/thumb",
+                   params={"src": "uploads/clip.mp4", "t": 0.0})
+    assert r.status_code == 403
+
+
 def test_thumb_404_for_missing_source(client, tmp_path: Path):
     sid = client.post("/api/sessions").json()["id"]
     r = client.get(f"/api/sessions/{sid}/thumb",
