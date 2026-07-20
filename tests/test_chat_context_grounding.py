@@ -48,6 +48,21 @@ def test_context_block_without_ui_state_has_no_selection_line(store: EDLStore):
     assert "selected" not in block.lower()
 
 
+def test_src_name_is_basename_for_windows_paths(tmp_path: Path):
+    """get_timeline's src_name must be the leaf name on BOTH separators —
+    a POSIX-only split('/') returned the whole D:\\... path on Windows,
+    which the context block then truncated into an unrecognizable prefix."""
+    from video_ai_editor.agent.dispatch import dispatch
+    s = EDLStore(tmp_path)
+    s.edl.get_track("v1").clips = [
+        Clip(src=r"D:\media\projects\intro.mp4", in_=0, out=2, start=0, id="c_w"),
+    ]
+    s.edl.recompute_duration()
+    snap = dispatch(s, "get_timeline", {"summary": True})
+    v1 = next(t for t in snap["tracks"] if t["id"] == "v1")
+    assert v1["clips"][0]["src_name"] == "intro.mp4"
+
+
 def test_chat_request_accepts_ui_state_fields():
     from video_ai_editor.main import ChatRequest
     req = ChatRequest(message="speed this up", selection="c_two",

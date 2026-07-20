@@ -256,7 +256,11 @@ def get_timeline(store: EDLStore, args: dict) -> dict:
                 if isinstance(c, Clip):
                     tinfo["clips"].append({
                         "id": c.id,
-                        "src_name": str(c.src).split("/")[-1],
+                        # Both separators: split('/') alone returned the whole
+                        # D:\... path on Windows (and for .vae projects moved
+                        # across OSes, the stored path's separator can differ
+                        # from the host's — Path(...).name can't handle that).
+                        "src_name": str(c.src).replace("\\", "/").split("/")[-1],
                         "in": c.in_,
                         "out": c.out,
                         "start": c.start,
