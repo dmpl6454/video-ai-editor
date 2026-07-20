@@ -1,0 +1,126 @@
+/* EffectsPanel — Filters / Effects / LUT looks section in the media bin.
+   Uses only the app's dark-theme tokens from styles.css (:root). */
+
+.effects-panel .fx-subhead {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 8px 0 4px;
+}
+
+.effects-panel .fx-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.effects-panel .fx-error {
+  font-size: 10px;
+  color: #fbb;
+  background: #311;
+  border: 1px solid #533;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+.effects-panel .fx-error button { font-size: 10px; flex-shrink: 0; }
+
+.effects-panel .fx-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.effects-panel .fx-slider-row label {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 48px;
+}
+.effects-panel .fx-slider-row input[type='range'] { flex: 1; min-width: 0; }
+.effects-panel .fx-slider-row span {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+.effects-panel .fx-lut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.effects-panel .fx-lut-row.applied { border-color: var(--accent-2); }
+.effects-panel .fx-lut-row .fx-lut-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.effects-panel .fx-lut-row button {
+  font-size: 10px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+}
+
+.effects-panel .fx-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+.effects-panel .fx-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  text-align: left;
+  min-width: 0;
+}
+.effects-panel .fx-btn:hover:not(:disabled) { border-color: var(--accent-2); }
+.effects-panel button:disabled { opacity: 0.5; cursor: not-allowed; }
+.effects-panel .fx-icon { font-size: 14px; line-height: 1; }
+
+.effects-panel .fx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.effects-panel .fx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 2px 4px 2px 8px;
+  color: var(--text);
+}
+.effects-panel .fx-chip button {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.effects-panel .fx-chip button:hover { color: var(--accent); }

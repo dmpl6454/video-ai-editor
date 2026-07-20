@@ -86,6 +86,10 @@ def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
         "in": float(c.in_),
         "out": float(c.out),
         "speed": _canonical(c.speed),
+        # The chunk bakes gain/fade/mute (build_audio_chain runs at chunk
+        # render time), so audio props are part of the chunk's identity —
+        # omitting them served stale audio on every volume/fade edit.
+        "audio": _canonical(c.audio),
         "transform": _canonical(c.transform),
         "effects": _canonical(c.effects),
         "mask": _canonical(c.mask) if c.mask else None,

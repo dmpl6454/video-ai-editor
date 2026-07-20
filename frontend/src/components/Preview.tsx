@@ -27,6 +27,8 @@ export function Preview() {
   const setPlaying = useStore((s) => s.setPlaying)
   const liveTransform = useStore((s) => s.liveTransform)
   const setLiveTransform = useStore((s) => s.setLiveTransform)
+  const liveFilter = useStore((s) => s.liveFilter)
+  const setLiveFilter = useStore((s) => s.setLiveFilter)
 
   const ref = useRef<HTMLVideoElement>(null)
   const [rendering, setRendering] = useState(false)
@@ -63,7 +65,15 @@ export function Preview() {
     const vidTracks = edl.tracks.filter(t => t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
     return JSON.stringify({
       canvas: edl.canvas,
-      tracks: vidTracks.map(t => ({ id: t.id, clips: t.clips })),
+      // Track-LEVEL props matter too: transitions and mute live on the track,
+      // not a clip — omitting them left the preview stale after adding a
+      // transition (surfaced the day transitions got a UI).
+      tracks: vidTracks.map(t => ({
+        id: t.id,
+        muted: t.muted,
+        transitions: (t as unknown as { transitions?: unknown }).transitions,
+        clips: t.clips,
+      })),
     })
   }, [edl])
 
@@ -85,10 +95,11 @@ export function Preview() {
           if (ac.signal.aborted) return
           setError(String(e))
           // A failed render means the <video> src never changes, so
-          // onLoadedData (which clears liveTransform) never fires either —
-          // fail fast instead of leaving the CSS transform preview stuck
+          // onLoadedData (which clears liveTransform/liveFilter) never fires
+          // either — fail fast instead of leaving the CSS preview stuck
           // for the full safety-net timeout.
           setLiveTransform(null)
+          setLiveFilter(null)
         })
         .finally(() => {
           if (ac.signal.aborted) return
@@ -98,20 +109,20 @@ export function Preview() {
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current)
     }
-  }, [sid, videoFingerprint, edl?.duration, renderPreview, setLiveTransform])
+  }, [sid, videoFingerprint, edl?.duration, renderPreview, setLiveTransform, setLiveFilter])
 
-  // Safety net for the live-transform CSS preview (see the <video> element's
-  // onLoadedData below): if the expected re-render never lands — the render
-  // fails, gets aborted, or the fingerprint didn't actually change — nothing
-  // would otherwise clear liveTransform, leaving the CSS override applied
-  // forever (a stuck, wrong-looking preview is worse than a brief revert).
-  // 250ms debounce + typical render + load latency comfortably fits in 8s;
-  // any liveTransform still set after that is treated as abandoned.
+  // Safety net for the live-transform/live-filter CSS previews (see the
+  // <video> element's onLoadedData below): if the expected re-render never
+  // lands — the render fails, gets aborted, or the fingerprint didn't
+  // actually change — nothing would otherwise clear them, leaving the CSS
+  // override applied forever (a stuck, wrong-looking preview is worse than a
+  // brief revert). 250ms debounce + typical render + load latency comfortably
+  // fits in 8s; anything still set after that is treated as abandoned.
   useEffect(() => {
-    if (!liveTransform) return
-    const t = window.setTimeout(() => setLiveTransform(null), 8000)
+    if (!liveTransform && !liveFilter) return
+    const t = window.setTimeout(() => { setLiveTransform(null); setLiveFilter(null) }, 8000)
     return () => window.clearTimeout(t)
-  }, [liveTransform, setLiveTransform])
+  }, [liveTransform, liveFilter, setLiveTransform, setLiveFilter])
 
   // Track preview box size for the text overlay layer
   useEffect(() => {
@@ -328,6 +339,16 @@ export function Preview() {
               : undefined,
             opacity: liveTransform?.opacity ?? 1,
             transition: liveTransform ? 'none' : 'transform 60ms linear',
+            // Live color preview: same idea for the Color panel's brightness/
+            // contrast/saturation drags. liveFilter carries the backend's eq
+            // params (render/effects.py _color): eq brightness is ADDITIVE in
+            // −0.5..0.5 → CSS brightness(1+v); eq contrast and saturation are
+            // multiplicative around 1 → CSS contrast(v)/saturate(v). Clamped
+            // ≥0 to stay CSS-valid. Applies to the whole preview video — a
+            // per-clip approximation, same caveat class as liveTransform.
+            filter: liveFilter
+              ? `brightness(${Math.max(0, 1 + (liveFilter.brightness ?? 0))}) contrast(${Math.max(0, liveFilter.contrast ?? 1)}) saturate(${Math.max(0, liveFilter.saturation ?? 1)})`
+              : undefined,
           }}
           onTimeUpdate={(e) => {
             // While playing, the rAF clock loop above is the sole owner of
@@ -350,8 +371,10 @@ export function Preview() {
             // frame for the gap between commit and re-render (the "reverts
             // the moment you let go" bug). Clearing it here means the CSS
             // transform stays applied right up until the new, correctly
-            // transformed frame is actually on screen.
+            // transformed frame is actually on screen. liveFilter follows the
+            // identical lifecycle.
             if (liveTransform) setLiveTransform(null)
+            if (liveFilter) setLiveFilter(null)
           }}
         />
         {/* WebCodecs frame-accurate scrubber. Sits between <video> and text

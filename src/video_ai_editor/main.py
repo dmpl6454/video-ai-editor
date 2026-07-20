@@ -793,15 +793,50 @@ def get_waveform(sid: str, src: str, peaks_per_sec: int = 50):
     """
     store = _store(sid)
     sd = session_dir(sid)
-    target = Path(src).resolve()
-    sd_resolved = sd.resolve()
-    if not str(target).startswith(str(sd_resolved)):
+    target = Path(src)
+    # Same boundary semantics as /thumb: absolute-only + is_relative_to (a
+    # startswith() prefix check also admitted sibling sessions whose id
+    # extends this one, e.g. s_ab matching s_abcd).
+    if not target.is_absolute():
+        raise HTTPException(403, "src must be an absolute path")
+    target = target.resolve()
+    if not target.is_relative_to(sd.resolve()):
         raise HTTPException(403, "src must be inside the session workdir")
     if not target.exists():
         raise HTTPException(404, "src not found")
     from .render.waveform import waveform_peaks
     return waveform_peaks(target, sd / "cache" / "waveforms",
                           peaks_per_sec=peaks_per_sec)
+
+
+@app.get("/api/sessions/{sid}/thumb")
+def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
+    """One scaled JPEG frame of a session source at time `t`.
+
+    Feeds the timeline filmstrip / media-bin previews. Same trust posture as
+    /waveform: `src` is untrusted and must resolve inside the session workdir.
+    """
+    _store(sid)  # validates sid shape before any filesystem work
+    sd_root = session_dir(sid).resolve()
+    target = Path(src)
+    # Absolute-only + is_relative_to: a bare startswith() prefix check would
+    # also admit sibling sessions whose id extends this one (s_ab → s_abcd),
+    # and a relative src would resolve against the process CWD.
+    if not target.is_absolute():
+        raise HTTPException(403, "src must be an absolute path")
+    target = target.resolve()
+    if not target.is_relative_to(sd_root):
+        raise HTTPException(403, "src must be inside the session workdir")
+    if not target.exists():
+        raise HTTPException(404, "src not found")
+    h = max(16, min(int(h), 270))
+    from .render.thumbs import thumbnail_for
+    try:
+        p = thumbnail_for(target, sd_root / "cache" / "thumbs", t=float(t), height=h)
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    return FileResponse(p, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=3600"})
 
 
 # --- M6: project save/load ---

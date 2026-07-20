@@ -47,19 +47,14 @@ export function Properties() {
     return <StickerProps c={c as unknown as StickerLike} dispatch={dispatch} />
   }
   if (!isMediaClip(c)) {
-    // Text clip — minimal view
+    // Text clip (sticker tracks were handled above) — full editable inspector.
     return (
-      <div className="props">
-        <h2>Properties</h2>
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{clip.t.label} · {c.id}</div>
-        <div className="field">
-          <label>Text</label>
-          <input value={('text' in c ? c.text : '') as string} readOnly />
-        </div>
-        <div className="row">
-          <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
-        </div>
-      </div>
+      <TextProps
+        c={c as unknown as TextClipLike}
+        trackLabel={clip.t.label ?? clip.t.id}
+        canvas={edl.canvas}
+        dispatch={dispatch}
+      />
     )
   }
 
@@ -295,6 +290,151 @@ function StickerProps({ c, dispatch }: {
   )
 }
 
+// The backend TextClip schema (edl/schema.py) always carries style/transform
+// (pydantic default factories), so the dotted set_property paths below always
+// resolve — including on auto_caption's caption cues. types.ts's TextClip
+// interface deliberately omits transform ("M1 frontend ignores transform"),
+// hence the local cast shape.
+interface TextClipLike {
+  id: string
+  text: string
+  start: number
+  end: number
+  role?: string | null
+  style?: { font?: string; size?: number; color?: string }
+  transform?: { x?: unknown; y?: unknown }
+}
+
+function TextProps({ c, trackLabel, canvas, dispatch }: {
+  c: TextClipLike
+  trackLabel: string
+  canvas: { w: number; h: number }
+  dispatch: ReturnType<typeof useStore.getState>['dispatch']
+}) {
+  const x = asScalar(c.transform?.x, canvas.w / 2)
+  const y = asScalar(c.transform?.y, canvas.h * 0.85)
+  const size = c.style?.size ?? 96
+  const rawColor = c.style?.color ?? '#FFFFFF'
+  // <input type=color> only speaks #rrggbb — drop an alpha suffix if present.
+  const color = /^#[0-9a-fA-F]{6}/.test(rawColor) ? rawColor.slice(0, 7) : '#ffffff'
+  const start = c.start
+  const end = c.end
+
+  // Editing an existing TextClip = `set_property` (dispatch.py's generic
+  // dotted-path mutator): paths `text`, `style.size`, `style.color`,
+  // `transform.x`, `transform.y`. Timing goes through `set_clip_timing`
+  // instead — it enforces end > start (clamps to a 0.1s minimum span) and
+  // re-sorts the track, which a raw set_property on start/end would skip.
+  const setProp = (path: string, value: unknown) =>
+    dispatch('set_property', { clip_id: c.id, path, value })
+  const setTiming = (p: { start?: number; end?: number }) =>
+    dispatch('set_clip_timing', { clip_id: c.id, ...p })
+
+  const commitText = (v: string) => {
+    // Skip blank commits — an empty TextClip renders nothing everywhere and
+    // is only recoverable through this same (now-empty-looking) inspector.
+    if (v.trim() && v !== c.text) void setProp('text', v)
+  }
+  // Shared number-commit guard: NaN-proof, optional floor, and same-value
+  // skip against the SEEDED display value (mirrors Slider's `commit` guard)
+  // so a focus-then-blur without edits never appends a junk op to history.
+  const commitNumber = (path: string, raw: string, seeded: number, min?: number) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) return
+    const v = min != null ? Math.max(min, n) : n
+    if (v !== seeded) void setProp(path, v)
+  }
+
+  return (
+    <div className="props">
+      <h2>Properties</h2>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+        {trackLabel} · {c.role ?? 'default'} · {c.id}
+      </div>
+
+      <Section label="Text">
+        {/* Uncontrolled + key-seeded like the sticker inputs: typing stays
+            local; commit fires once on blur (or Cmd/Ctrl+Enter, routed
+            through blur so there's a single commit path); an external change
+            (chat edit, undo) re-seeds via the key. */}
+        <textarea
+          key={`t${c.id}:${c.text}`}
+          defaultValue={c.text}
+          rows={3}
+          onBlur={(e) => commitText(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault()
+              ;(e.target as HTMLTextAreaElement).blur()
+            }
+          }}
+          style={{ width: '100%', resize: 'vertical', fontSize: 12,
+                   fontFamily: 'inherit', boxSizing: 'border-box' }}
+        />
+      </Section>
+
+      <Section label="Style">
+        <div className="row two">
+          <div className="field">
+            <label>Size (px)</label>
+            <input type="number" step="1" min={8} key={`sz${size}`} defaultValue={size}
+              onBlur={(e) => commitNumber('style.size', e.target.value, size, 8)} />
+          </div>
+          <div className="field">
+            <label>Color</label>
+            <input type="color" key={`c${color}`} defaultValue={color}
+              title="Text fill color (#ffffff means: use the role's preset style)"
+              onBlur={(e) => { const v = e.target.value; if (v !== color) void setProp('style.color', v) }}
+              style={{ width: '100%', padding: 0, height: 24 }} />
+          </div>
+        </div>
+      </Section>
+
+      <Section label={`Position (canvas px, ${canvas.w}×${canvas.h})`}>
+        {/* TextClip transform x/y are ABSOLUTE CANVAS PIXELS (clip centre),
+            not relative units — 540/1700 is bottom-centre on a 1080×1920. */}
+        <div className="row two">
+          <div className="field">
+            <label>X</label>
+            <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
+              onBlur={(e) => commitNumber('transform.x', e.target.value, Math.round(x))} />
+          </div>
+          <div className="field">
+            <label>Y</label>
+            <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
+              onBlur={(e) => commitNumber('transform.y', e.target.value, Math.round(y))} />
+          </div>
+        </div>
+      </Section>
+
+      <Section label="Timing">
+        <div className="row two">
+          <div className="field">
+            <label>Start (s)</label>
+            <input type="number" step="0.1" min={0} key={`s${start.toFixed(2)}`} defaultValue={start.toFixed(2)}
+              onBlur={(e) => {
+                const n = Number(e.target.value)
+                if (Number.isFinite(n) && n !== start) void setTiming({ start: Math.max(0, n) })
+              }} />
+          </div>
+          <div className="field">
+            <label>End (s)</label>
+            <input type="number" step="0.1" key={`e${end.toFixed(2)}`} defaultValue={end.toFixed(2)}
+              onBlur={(e) => {
+                const n = Number(e.target.value)
+                if (Number.isFinite(n) && n !== end) void setTiming({ end: n })
+              }} />
+          </div>
+        </div>
+      </Section>
+
+      <div className="row" style={{ marginTop: 8 }}>
+        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+      </div>
+    </div>
+  )
+}
+
 function Section({ label, children, onReset }: {
   label: string; children: React.ReactNode; onReset?: () => void;
 }) {
@@ -379,20 +519,42 @@ function ColorPanel({ clipId, dispatch, current }: {
   // a new effect for every pixel of slider drag. The backend merges each
   // commit into the clip's single "color" effect (dispatch.py color_grade),
   // so repeated adjustments settle on a final value instead of stacking.
+  const setLiveFilter = useStore((s) => s.setLiveFilter)
   const commit = (params: Record<string, number>) => {
     dispatch('color_grade', { clip_id: clipId, ...params })
   }
+  // Live CSS preview during a drag (the Color mirror of liveTransform). The
+  // filter always carries all three mappable params seeded from the clip's
+  // CURRENT grade — with the dragged one overriding — so dragging one slider
+  // doesn't visually drop another's just-committed value while that value's
+  // re-render is still in flight. Values stay in eq-param space; Preview.tsx
+  // converts to CSS.
+  const live = (p: { brightness?: number; contrast?: number; saturation?: number }) =>
+    setLiveFilter({
+      clipId,
+      brightness: current.brightness ?? 0,
+      contrast: current.contrast ?? 1,
+      saturation: current.saturation ?? current.sat ?? 1,
+      ...p,
+    })
   return (
     <>
       <ColorSlider label="Brightness" min={-0.5} max={0.5} step={0.02} commit={(v) => commit({ brightness: v })}
+        onLive={(v) => live({ brightness: v })}
         value={current.brightness} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}`} />
       <ColorSlider label="Contrast"   min={0.5}  max={2.0} step={0.02} commit={(v) => commit({ contrast: v })}
+        onLive={(v) => live({ contrast: v })}
         value={current.contrast} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
       <ColorSlider label="Saturation" min={0}    max={3.0} step={0.02} commit={(v) => commit({ saturation: v })}
+        onLive={(v) => live({ saturation: v })}
         value={current.saturation ?? current.sat} init={1}
         format={(v) => `${v.toFixed(2)}×`} />
+      {/* Temp/Tint stay commit-only (no onLive): the backend maps them to
+          band-weighted colorbalance on midtones (render/effects.py), which
+          CSS filter() has no faithful equivalent for — a wrong live preview
+          would be worse than none. */}
       <ColorSlider label="Temp"       min={-1}   max={1}   step={0.02} commit={(v) => commit({ temp: v })}
         value={current.temp} init={0}
         format={(v) => `${v >= 0 ? '+' : ''}${Math.round(v * 100)}`} />
@@ -403,9 +565,11 @@ function ColorPanel({ clipId, dispatch, current }: {
   )
 }
 
-function ColorSlider({ label, min, max, step, commit, value, init = 0, format }: {
+function ColorSlider({ label, min, max, step, commit, onLive, value, init = 0, format }: {
   label: string; min: number; max: number; step: number;
-  commit: (v: number) => void; value?: number; init?: number; format?: (v: number) => string;
+  commit: (v: number) => void;          // committed value — dispatched to server
+  onLive?: (v: number) => void;         // live value during drag — client-side only
+  value?: number; init?: number; format?: (v: number) => string;
 }) {
   // Controlled so the value readout tracks the thumb live; commit only fires
   // on release. `onPointerUp` (not `onMouseUp`) is the reliable cross-input
@@ -421,13 +585,22 @@ function ColorSlider({ label, min, max, step, commit, value, init = 0, format }:
 
   const release = (e: { target: EventTarget | null }) => {
     dragging.current = false
-    commit(Number((e.target as HTMLInputElement).value))
+    // Same-value guard (mirrors Slider's `commit`): release fires from
+    // pointerup AND the later blur — without the guard the blur re-commits
+    // the identical value, appending a junk op to undo history.
+    const v = Number((e.target as HTMLInputElement).value)
+    if (v !== seeded) commit(v)
   }
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
       <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 64 }}>{label}</span>
       <input type="range" min={min} max={max} step={step} value={local}
-        onChange={(e) => { dragging.current = true; setLocal(Number(e.target.value)) }}
+        onChange={(e) => {
+          const v = Number(e.target.value)
+          dragging.current = true
+          setLocal(v)
+          onLive?.(v)
+        }}
         onPointerUp={release}
         onKeyUp={release}
         onBlur={release}

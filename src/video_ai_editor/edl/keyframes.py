@@ -51,20 +51,48 @@ def is_keyframed(value: float | Keyframe | dict | None) -> bool:
     return len(kfs) >= 2
 
 
+def _segment_expr(t0: float, v0: float, t1: float, v1: float,
+                  interp: str, time_var: str) -> str:
+    """One segment's value expression, with the same easing math as sample().
+
+    Commas inside function calls are escaped (`\\,`) because these
+    expressions are embedded in filtergraph option values.
+    """
+    if interp == "step" or t1 - t0 < 1e-6:
+        return f"{v0:.4f}" if interp == "step" else f"{v1:.4f}"
+    f_raw = f"(({time_var}-{t0:.4f})/({t1 - t0:.6f}))"
+    if interp == "ease-in":
+        prog = f"pow({f_raw}\\,2)"
+    elif interp == "ease-out":
+        prog = f"(1-pow(1-{f_raw}\\,2))"
+    elif interp == "ease-in-out":
+        prog = f"({f_raw}*{f_raw}*(3-2*{f_raw}))"  # smoothstep, as in sample()
+    elif interp == "back-out":
+        prog = f"(1-pow(1-{f_raw}\\,3))"
+    else:
+        prog = f_raw
+    return f"({v0:.4f}+{prog}*({v1 - v0:.4f}))"
+
+
 def to_ffmpeg_expr(value: float | Keyframe | dict, *, time_var: str = "t",
                    start_offset: float = 0.0) -> str:
     """Build an ffmpeg filter expression for a keyframed scalar.
 
     `start_offset` shifts so that t=0 in the expression maps to clip-local 0.
-    Linear-only for now; ease-* approximated with linear (renderer doesn't
-    implement curves yet — they only animate in the browser preview).
+    Easing mirrors sample() exactly — what the browser preview animates is
+    what exports (they used to diverge: every mode exported as linear).
 
     Returns a numeric expression usable in filters that accept the `t` variable
     (e.g. overlay's x= and y=).
     """
     if isinstance(value, (int, float)):
         return f"{value:.4f}"
-    kfs = (value.get("keyframes") if isinstance(value, dict) else value.keyframes) or []
+    if isinstance(value, dict):
+        kfs = value.get("keyframes") or []
+        interp = value.get("interp", "linear")
+    else:
+        kfs = value.keyframes or []
+        interp = value.interp
     if not kfs:
         return "0"
     pts = sorted([(float(p[0]) - start_offset, float(p[1])) for p in kfs], key=lambda p: p[0])
@@ -78,10 +106,7 @@ def to_ffmpeg_expr(value: float | Keyframe | dict, *, time_var: str = "t",
     for i in range(len(pts) - 1, 0, -1):
         t0, v0 = pts[i - 1]
         t1, v1 = pts[i]
-        # linear: v0 + (t-t0)/(t1-t0) * (v1-v0)
-        seg = (
-            f"({v0:.4f}+({time_var}-{t0:.4f})/({t1 - t0:.6f})*({v1 - v0:.4f}))"
-        )
+        seg = _segment_expr(t0, v0, t1, v1, interp, time_var)
         expr = f"if(lt({time_var}\\,{t1:.4f})\\,{seg}\\,{expr})"
     # Hold first value before t0
     expr = f"if(lt({time_var}\\,{pts[0][0]:.4f})\\,{pts[0][1]:.4f}\\,{expr})"

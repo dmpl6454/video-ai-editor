@@ -15,7 +15,9 @@ export interface Command {
   id: string
   label: string
   category: 'Transport' | 'Editing' | 'Marks' | 'Navigation' | 'View' | 'Selection' | 'History'
-  run: (s: Store) => void | Promise<void>
+  // Promise<unknown>: store.dispatch now returns the response payload, and
+  // commands hand its promise straight back — the engine ignores the value.
+  run: (s: Store) => void | Promise<unknown>
 }
 
 const FRAME = 1 / 30  // one frame at 30fps; the timeline is normalised to 30fps

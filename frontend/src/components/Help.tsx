@@ -1,14 +1,21 @@
 import { useEffect, useState } from 'react'
+import { chordLabel, useKeymapStore } from '../keymap/engine'
+import { PRESETS } from '../keymap/presets'
 
 let _setOpen: ((v: boolean) => void) | null = null
 export function openHelp() { _setOpen?.(true) }
 
-const SHORTCUTS: { keys: string; label: string }[] = [
+// Rows tagged with a `cmd` read their keys from the LIVE keymap (active preset
+// + user overrides) at render time, so the modal can't advertise a binding
+// that isn't real for the current preset (it used to hardcode "⌘B · S" while
+// no preset bound S, and Premiere splits with ⌘K). The static `keys` on those
+// rows is never shown.
+const SHORTCUTS: { keys: string; label: string; cmd?: string }[] = [
   { keys: 'Space',                label: 'Play / pause' },
   { keys: 'J  ·  K  ·  L',        label: 'Shuttle reverse / pause / forward' },
   { keys: ',  ·  .',              label: 'Step 1 frame back / forward' },
   { keys: '←  ·  →',              label: 'Step 1 frame (Shift = 1 second)' },
-  { keys: '⌘B  ·  S',             label: 'Split clip at playhead' },
+  { keys: '⌘B',                   label: 'Split clip at playhead', cmd: 'split' },
   { keys: 'Backspace',            label: 'Delete selected clip(s) (ripple)' },
   { keys: '⌘D',                   label: 'Duplicate selected clip(s)' },
   { keys: 'Shift-click clip',     label: 'Add to multi-selection' },
@@ -23,6 +30,10 @@ const SHORTCUTS: { keys: string; label: string }[] = [
 
 export function Help() {
   const [open, setOpen] = useState(false)
+  // Live keymap inputs for the `cmd`-tagged rows. Subscribed (not getState())
+  // so a preset switch re-renders an already-open modal too.
+  const presetId = useKeymapStore((s) => s.presetId)
+  const overrides = useKeymapStore((s) => s.overrides)
   // expose a handle so the topbar's ? button can open us
   useEffect(() => {
     _setOpen = setOpen
@@ -46,6 +57,14 @@ export function Help() {
   }, [])
 
   if (!open) return null
+  // Per-command override replaces the preset's chords wholesale — the same
+  // merge rule as the engine's effectiveMap(). An unbound command shows "—"
+  // rather than falling back to a key that wouldn't work.
+  const rows = SHORTCUTS.map((s) => {
+    if (!s.cmd) return s
+    const chords = overrides[s.cmd] ?? PRESETS[presetId].map[s.cmd] ?? []
+    return { ...s, keys: chords.map(chordLabel).join('  ·  ') || '—' }
+  })
   return (
     <div
       onClick={() => setOpen(false)}
@@ -69,7 +88,7 @@ export function Help() {
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <tbody>
-            {SHORTCUTS.map((s, i) => (
+            {rows.map((s, i) => (
               <tr key={s.keys + i} style={{ borderBottom: '1px solid var(--line)' }}>
                 <td style={{ padding: '8px 0', width: 200 }}>
                   <span className="kbd" style={{ fontSize: 11 }}>{s.keys}</span>

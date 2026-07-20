@@ -7,6 +7,40 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 
+// Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
+// `result` is the tool handler's own return dict (e.g. add_text returns
+// {summary, id}; auto_caption returns {summary, cues, language, ...}) — typed
+// unknown here because each tool's payload differs; callers narrow it.
+export interface DispatchResponse {
+  result: unknown
+  edl_hash: string
+  op: Op | null
+}
+
+// api.ts's http() throws `Error("422 Unprocessable Entity: {json envelope}")`
+// with the raw response body appended. The body is usually the hardening
+// error envelope ({error:{message}}) or a FastAPI detail — pull the human-
+// readable message out so toasts show e.g. "auto_caption: no clip on v1 to
+// caption" instead of a wall of JSON.
+function errorMessage(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const jsonStart = raw.indexOf('{')
+  if (jsonStart !== -1) {
+    try {
+      const body = JSON.parse(raw.slice(jsonStart)) as {
+        error?: { message?: string }
+        detail?: string | { error?: string }
+      }
+      const msg = body.error?.message
+        ?? (typeof body.detail === 'string' ? body.detail : body.detail?.error)
+      if (msg) return msg
+    } catch {
+      // not a JSON tail — fall through to the raw text
+    }
+  }
+  return raw
+}
+
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
 // SSR (no `localStorage`), an unset key (`null` -> NaN -> falls through to
 // `fallback`), and a corrupted/non-numeric value the same way. Clamped to the
@@ -66,8 +100,16 @@ interface State {
   // without a server render. Cleared (null) the moment the drag commits.
   liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number } | null
 
+  // Client-side live color filter — the Color panel's mirror of liveTransform.
+  // Set while a brightness/contrast/saturation slider drags so Preview applies
+  // a CSS filter() approximation instantly; cleared the same way liveTransform
+  // is (the re-rendered <video>'s onLoadedData + safety-net timeout). Values
+  // are the EDL grade params (ffmpeg eq semantics) — Preview converts to CSS.
+  liveFilter: { clipId: string; brightness?: number; contrast?: number; saturation?: number } | null
+
   // setters
   setLiveTransform(t: State['liveTransform']): void
+  setLiveFilter(f: State['liveFilter']): void
   setSelection(id: string | null): void
   toggleSelection(id: string): void
   clearSelection(): void
@@ -121,7 +163,11 @@ interface State {
   refreshSoon(): void
   upload(file: File): Promise<void>
   uploadAudio(file: File): Promise<void>
-  dispatch(tool: string, args?: Record<string, unknown>): Promise<void>
+  // Resolves with the dispatch response on success (so callers can read the
+  // tool's own result, e.g. add_text's new clip id or auto_caption's cue
+  // count) or null on failure — the failure is already surfaced via
+  // toast.error here, so callers just need to know it didn't land.
+  dispatch(tool: string, args?: Record<string, unknown>): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
   cancelExport(): Promise<void>
@@ -146,6 +192,7 @@ export const useStore = create<State>((set, get) => ({
   outMark: null,
   playbackRate: 1,
   liveTransform: null,
+  liveFilter: null,
   uploading: false,
   uploadProgress: null,
   uploadError: null,
@@ -215,6 +262,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setPlaybackRate: (r) => set({ playbackRate: r }),
   setLiveTransform: (t) => set({ liveTransform: t }),
+  setLiveFilter: (f) => set({ liveFilter: f }),
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
@@ -394,7 +442,7 @@ export const useStore = create<State>((set, get) => ({
 
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
-    if (!sid) return
+    if (!sid) return null
     set({ pendingOps: get().pendingOps + 1 })
     try {
       // We KEEP the previous export's download link after an edit, but the UI
@@ -412,7 +460,7 @@ export const useStore = create<State>((set, get) => ({
           set({ redoAvailable: res.result.redo_available })
         }
         await get().refresh()
-        return
+        return res
       }
       // Use the debounced refresh: chained tool calls (chat storms) coalesce
       // into one EDL fetch instead of N.
@@ -429,14 +477,15 @@ export const useStore = create<State>((set, get) => ({
           { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
         )
       }
+      return res
     } catch (e) {
       // Edits used to fail SILENTLY here — no catch at all, so a rejected
       // dispatch (bad args, a validation error like the new lane-type check,
       // a network hiccup) left the user staring at a UI that looked like
       // nothing happened, with no error anywhere (issue 15-adjacent: "no
       // persistent error surface for a failed edit").
-      const msg = e instanceof Error ? e.message : String(e)
-      toast.error(msg)
+      toast.error(errorMessage(e))
+      return null
     } finally {
       set({ pendingOps: Math.max(0, get().pendingOps - 1) })
     }
@@ -518,8 +567,28 @@ export const useStore = create<State>((set, get) => ({
   },
 
   splitAtPlayhead: async () => {
-    const t = get().playhead
-    await get().dispatch('split_at', { track: 'v1', time: t })
+    const s = get()
+    const t = s.playhead
+    // Split the SELECTED clip's track when the playhead is inside its range —
+    // this used to hardcode v1, cutting the wrong track for a v2/overlay
+    // selection even though the backend (and the timeline's right-click
+    // "Split here") supports any track. Multi-selection: one split per
+    // distinct track that has a selected clip containing the playhead.
+    // No containing selected clip → v1, the historical default.
+    const selected = new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[])
+    const trackIds: string[] = []
+    if (s.edl && selected.size) {
+      for (const tk of s.edl.tracks) {
+        for (const c of tk.clips) {
+          if (!selected.has(c.id)) continue
+          if (c.start <= t && t < clipEnd(c) && !trackIds.includes(tk.id)) trackIds.push(tk.id)
+        }
+      }
+    }
+    if (!trackIds.length) trackIds.push('v1')
+    for (const track of trackIds) {
+      await s.dispatch('split_at', { track, time: t })
+    }
   },
 
   rippleDeleteSelection: async () => {

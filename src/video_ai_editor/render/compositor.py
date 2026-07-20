@@ -22,7 +22,7 @@ from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
-from .pip import build_pip_overlay_chain
+from .pip import build_pip_overlay_chain, collect_pip_clips
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 
 
@@ -336,21 +336,32 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str
             remaining /= 0.5
         if abs(remaining - 1.0) > 0.001:
             a_chain += f",atempo={remaining:.4f}"
+    a_chain += _audio_props_filters(c)
+    a_chain += label_out
+    return a_chain
+
+
+def _audio_props_filters(c: Clip) -> str:
+    """`,volume=…,afade=…` fragment for a clip's gain/fade/mute (no labels).
+
+    Fade times are clip-LOCAL (the source is -ss/-to-trimmed and starts at
+    t=0), so callers must apply this BEFORE any adelay repositioning.
+    """
+    frag = ""
     if c.audio:
         if abs(c.audio.gain_db) > 0.01:
-            a_chain += f",volume={c.audio.gain_db:.2f}dB"
+            frag += f",volume={c.audio.gain_db:.2f}dB"
         if c.audio.fade_in > 0.001:
             # fade-in starts at local t=0 and runs for fade_in seconds.
-            a_chain += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
+            frag += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
         if c.audio.fade_out > 0.001:
             # fade-out ends at clip duration; start at duration - fade_out.
             fade_out_start = max(0.0, c.duration - c.audio.fade_out)
-            a_chain += (f",afade=t=out:st={fade_out_start:.3f}"
-                        f":d={c.audio.fade_out:.3f}")
+            frag += (f",afade=t=out:st={fade_out_start:.3f}"
+                     f":d={c.audio.fade_out:.3f}")
         if c.audio.mute:
-            a_chain += ",volume=0"
-    a_chain += label_out
-    return a_chain
+            frag += ",volume=0"
+    return frag
 
 
 def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
@@ -556,6 +567,14 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     v_label = labels[0]
     a_label = labels[1]
 
+    # Track-level v1 mute: audio-only (v1 is the base video layer — unlike a
+    # muted V2 track, which also hides its overlay). Was a dead control: the
+    # render pipeline never read v1.muted. Applied BEFORE the PIP fold so it
+    # mutes only v1's own audio, not overlay/music/vo.
+    if v1 is not None and v1.muted:
+        fc += f";{a_label}volume=0[a_v1muted]"
+        a_label = "[a_v1muted]"
+
     extra_inputs: list[str] = list(mask_inputs)
     # Each clip + each mask are separate inputs; track the running input index
     next_idx = len(clips) + (len(mask_inputs) // 2)
@@ -590,6 +609,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     next_idx += pip_inputs_count
 
     # Composite text overlay PNGs (rendered by Pillow) via ffmpeg overlay= filter.
+    overlay_chain = ""
     if cache_dir is not None:
         chain, txt_inputs, after_label = build_overlay_chain(
             edl, cache_dir,
@@ -600,6 +620,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             preview=preview,
         )
         if chain:
+            overlay_chain = chain
             fc = fc + ";" + chain
             v_label = after_label
         extra_inputs += txt_inputs
@@ -613,6 +634,21 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         # preset — reproduced live: 1 anim clip + 1 music clip → ffmpeg
         # "Invalid file index" / "matches no streams" on export.
         next_idx += txt_inputs.count("-i")
+
+    # Warm-render fast path: a chunk-only timeline (no transitions — implied
+    # by chunk_paths — no PIP, no baked overlays, no masks) is exactly the
+    # chunk sequence, so assemble with the concat DEMUXER and `-c:v copy`
+    # instead of re-encoding the whole timeline (which cost ~55ms per
+    # timeline-second on every edit regardless of edit size). Preview-only:
+    # export keeps the single re-encode assembly (and its progress/cancel
+    # plumbing) unchanged.
+    if (preview and chunk_paths is not None and not pip_chain
+            and not overlay_chain and not mask_inputs
+            and on_progress is None and cancel_event is None):
+        try:
+            return _assemble_chunks_streamcopy(edl, chunk_paths, dst)
+        except Exception:
+            pass  # any concat/copy hiccup → fall through to the re-encode path
 
     # Fold V2 PiP audio into the V1 main audio before the music+vo mixer runs.
     # Each PIP clip's audio is positioned at its timeline start via adelay and
@@ -631,6 +667,10 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             delay_ms = max(0, int(round(c.start * 1000)))
             chain = (f"[{input_idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
+            # PIP clips' own gain/fade/mute (was ignored — the v2 volume
+            # slider did nothing). No atempo: the PIP video chain doesn't
+            # apply speed either, and audio must stay in sync with it.
+            chain += _audio_props_filters(c)
             if delay_ms > 0:
                 chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
             pa_label = f"[pa{j}]"
@@ -686,6 +726,62 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     return dst
 
 
+def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
+                                dst: Path) -> Path:
+    """Assemble cached chunks via the concat demuxer with `-c:v copy`.
+
+    Only valid when the timeline is exactly the chunk sequence (the caller
+    guarantees no transitions/PIP/overlays/masks). Chunks share codec,
+    resolution and encoder args by construction (fingerprint_clip includes
+    them), which is what makes packet-level concat safe. Music/vo still mix
+    through build_audio_mix against the concatenated chunk audio ([0:a]);
+    with no music/vo the audio packets are copied too.
+    """
+    tmp = _part_path(dst)
+    list_path = tmp.with_suffix(".concat.txt")
+    lines = []
+    for p in chunk_paths:
+        # concat-demuxer list syntax: single-quoted path with embedded quotes
+        # close-escape-reopened; forward slashes keep Windows paths intact.
+        esc = p.resolve().as_posix().replace("'", "'\\''")
+        lines.append(f"file '{esc}'")
+    _pu.write_text_utf8(list_path, "\n".join(lines) + "\n")
+    try:
+        # Track-level v1 mute — mirror of the main render path (audio-only).
+        main_label = "[0:a]"
+        pre = ""
+        v1_track = edl.get_track("v1")
+        if v1_track is not None and v1_track.muted:
+            pre = "[0:a]volume=0[amain]"
+            main_label = "[amain]"
+        audio_chain, audio_inputs, final_audio_label = build_audio_mix(
+            edl, main_audio_label=main_label, first_input_index=1,
+            apply_loudnorm=False,
+        )
+        args = [_pu.FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_path), *audio_inputs]
+        fc_all = ";".join(x for x in (pre, audio_chain) if x)
+        if fc_all:
+            final_lbl = final_audio_label if audio_chain else main_label
+            args += ["-filter_complex", fc_all,
+                     "-map", "0:v", "-map", final_lbl,
+                     "-c:v", "copy", *_AAC_OUT]
+        else:
+            args += ["-map", "0:v", "-map", "0:a", "-c", "copy"]
+        args += ["-movflags", "+faststart", str(tmp)]
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            _pu.unlink_with_retry(tmp)
+            raise RuntimeError(
+                f"streamcopy assembly failed (rc={proc.returncode}):\n"
+                f"{proc.stderr[-1500:]}")
+        _pu.replace_with_retry(tmp, dst)
+    finally:
+        _pu.unlink_with_retry(list_path)
+    return dst
+
+
 def _video_only_fingerprint(edl: EDL) -> str:
     """Hash everything that affects the visual frame (V1 + V2/PIP + text +
     stickers + transitions + canvas + brand kit) but NOT music/vo/captions
@@ -693,6 +789,20 @@ def _video_only_fingerprint(edl: EDL) -> str:
     video re-encode."""
     import hashlib, json
     from ..edl.schema import RENDER_BEHAVIOR_VERSION
+    tracks = []
+    for t in edl.tracks:
+        if t.type not in ("video", "text", "sticker"):  # video covers v1 AND v2
+            continue
+        d = t.model_dump(by_alias=True, mode="json")
+        # Per-clip audio (gain/fade/mute) never changes pixels; leaving it in
+        # forced a full video re-encode on every volume edit instead of the
+        # cheap remux. Track-level `muted` stays for V2/text/sticker (it hides
+        # the overlay) but is stripped for v1, where mute is audio-only.
+        for c in d.get("clips", []):
+            c.pop("audio", None)
+        if t.id == "v1":
+            d.pop("muted", None)
+        tracks.append(d)
     blob = {
         # See EDL.hash()'s docstring: a version salt so a pre-fix cached
         # video-only mp4 (e.g. rendered before the LUT-blend or animated-
@@ -700,11 +810,7 @@ def _video_only_fingerprint(edl: EDL) -> str:
         "v": RENDER_BEHAVIOR_VERSION,
         "canvas": edl.canvas.model_dump(),
         "brand": edl.brand_kit.model_dump() if edl.brand_kit else None,
-        "tracks": [
-            t.model_dump(by_alias=True, mode="json")
-            for t in edl.tracks
-            if t.type in ("video", "text", "sticker")  # video covers v1 AND v2
-        ],
+        "tracks": tracks,
     }
     return hashlib.sha256(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -847,11 +953,43 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "".join(a_labels) + f"concat=n={len(a_labels)}:v=0:a=1[aout]"
         )
 
-    # Mix in music + vo on top of [aout]. _remux_with_new_audio is only called
-    # from the preview fast-path, so loudnorm stays off here.
+    # Track-level v1 mute — mirror of the main render path (audio-only).
+    a_main = "[aout]"
+    v1_track = edl.get_track("v1")
+    if v1_track is not None and v1_track.muted:
+        fc_parts.append(f"{a_main}volume=0[aout_m]")
+        a_main = "[aout_m]"
+
+    # Fold V2/PIP audio the same way the full render does (aresample +
+    # per-clip gain/fade/mute + adelay + amix). Skipping this dropped every
+    # PIP clip's audio from the remuxed preview.
     next_idx = 1 + len(clips)
+    pip_clips = [c for _tid, c in collect_pip_clips(edl)]
+    if pip_clips:
+        pa_labels: list[str] = []
+        for j, c in enumerate(pip_clips):
+            idx = next_idx + j
+            inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+            delay_ms = max(0, int(round(c.start * 1000)))
+            chain = (f"[{idx}:a]aresample=async=1:first_pts=0,"
+                     f"aformat=channel_layouts=stereo:sample_rates=48000")
+            chain += _audio_props_filters(c)
+            if delay_ms > 0:
+                chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
+            pa_label = f"[rpa{j}]"
+            fc_parts.append(chain + pa_label)
+            pa_labels.append(pa_label)
+        fc_parts.append(
+            f"{a_main}{''.join(pa_labels)}amix=inputs={1 + len(pa_labels)}"
+            f":duration=first:dropout_transition=0:normalize=0[a_with_pip]"
+        )
+        a_main = "[a_with_pip]"
+        next_idx += len(pip_clips)
+
+    # Mix in music + vo on top of the folded main audio. _remux_with_new_audio
+    # is only called from the preview fast-path, so loudnorm stays off here.
     audio_chain, audio_inputs, final_audio_label = build_audio_mix(
-        edl, main_audio_label="[aout]", first_input_index=next_idx,
+        edl, main_audio_label=a_main, first_input_index=next_idx,
         apply_loudnorm=False,
     )
     fc = ";".join(fc_parts)
