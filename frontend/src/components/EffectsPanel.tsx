@@ -67,13 +67,26 @@ export function EffectsPanel() {
   const [listError, setListError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
-  // Resolve the selected clip; effects only apply to MEDIA clips (backend
-  // rejects text/sticker targets with "add_effect only supports media clips").
+  // Resolve the target clip. Selection wins; with nothing selected, fall
+  // back to the v1 clip under the playhead, then the first v1 clip — the
+  // CapCut model. A selection-required grid that silently disables read as
+  // "none of the effects work" in user testing. Effects only apply to MEDIA
+  // clips (backend rejects text/sticker targets).
+  const playhead = useStore((s) => s.playhead)
   let clip: Clip | null = null
+  let targetIsFallback = false
   for (const t of edl?.tracks ?? []) {
     for (const c of t.clips) {
       if (c.id === selection && isMediaClip(c)) clip = c
     }
+  }
+  if (!clip) {
+    const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
+    const media = (v1?.clips ?? []).filter(isMediaClip)
+    clip =
+      media.find((c) => c.start <= playhead && playhead < c.start + (c.out - c.in)) ??
+      media[0] ?? null
+    targetIsFallback = clip != null
   }
   const disabled = !clip
   const effects: EffectEntry[] = clip
@@ -186,7 +199,15 @@ export function EffectsPanel() {
         <div style={{ marginTop: 8 }}>
           {disabled && (
             <div className="fx-hint">
-              Select a clip first — click a video clip on the timeline, then apply a look or effect.
+              Add a video to the timeline first — looks and effects apply to a clip.
+            </div>
+          )}
+          {!disabled && (
+            <div className="fx-target" title={targetIsFallback
+              ? 'No clip selected — applying to the clip at the playhead. Click a clip to target it.'
+              : 'Applying to the selected clip.'}>
+              → {targetIsFallback ? 'clip at playhead' : 'selected clip'}:{' '}
+              {clip!.src.split('/').pop()?.split('\\').pop()}
             </div>
           )}
           {listError && (

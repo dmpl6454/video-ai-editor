@@ -10,13 +10,35 @@ import { PRESETS, DEFAULT_PRESET, type KeyMap, type PresetId } from './presets'
  * Preset choice and per-command overrides persist to localStorage.
  */
 
-const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
+// Platform detection: prefer userAgentData.platform (Chromium, incl. Edge
+// WebView2 — reports "Windows"/"macOS"), fall back to the legacy
+// navigator.platform (WKWebView/Safari never shipped userAgentData; they
+// report "MacIntel", WebView2's fallback is "Win32"). Exported so UI panels
+// (Help) can label non-keymap gestures (e.g. "⌘+scroll" vs "Ctrl+scroll").
+const _platform: string =
+  typeof navigator === 'undefined'
+    ? ''
+    : ((navigator as unknown as { userAgentData?: { platform?: string } })
+        .userAgentData?.platform || navigator.platform || '')
+export const IS_MAC = /mac|iphone|ipad|ipod/i.test(_platform)
 
 // ---- chord normalisation (layout-independent, from KeyboardEvent.code) ----
 
 export function chordFromEvent(e: KeyboardEvent): string {
   const parts: string[] = []
-  if (e.metaKey || e.ctrlKey) parts.push('Mod')
+  // 'Mod' is the PLATFORM's primary command modifier: ⌘ (metaKey) on macOS,
+  // Ctrl on Windows/Linux — so every 'Mod+…' preset chord works with Ctrl on
+  // a Windows keyboard and ⌘ on a Mac. The other of the two modifiers is
+  // emitted as its own token ('Ctrl' on mac, 'Meta' = Win-key elsewhere),
+  // NOT collapsed into 'Mod' (the old `metaKey || ctrlKey` rule made mac
+  // Ctrl+B fire the ⌘B binding and ⌘⌃B indistinguishable from ⌘B) and NOT
+  // dropped (dropping would make mac Ctrl+S look like a bare 'KeyS' and fire
+  // CapCut's single-key split). Because the full modifier set is serialized
+  // into the chord string and looked up exactly, Mod+KeyZ never fires on
+  // Mod+Shift+KeyZ, and 'Ctrl+…'/'Meta+…' chords only match if a user
+  // deliberately rebinds a command to them.
+  if (IS_MAC ? e.metaKey : e.ctrlKey) parts.push('Mod')
+  if (IS_MAC ? e.ctrlKey : e.metaKey) parts.push(IS_MAC ? 'Ctrl' : 'Meta')
   if (e.altKey) parts.push('Alt')
   if (e.shiftKey) parts.push('Shift')
   // The physical key. Ignore bare modifier presses.
@@ -41,6 +63,8 @@ export function chordLabel(chord: string): string {
   if (!chord) return ''
   return chord.split('+').map((p) => {
     if (p === 'Mod') return IS_MAC ? '⌘' : 'Ctrl'
+    if (p === 'Ctrl') return IS_MAC ? '⌃' : 'Ctrl'   // secondary modifier (mac only)
+    if (p === 'Meta') return IS_MAC ? '⌘' : 'Win'    // secondary modifier (win/linux only)
     if (p === 'Alt') return IS_MAC ? '⌥' : 'Alt'
     if (p === 'Shift') return IS_MAC ? '⇧' : 'Shift'
     if (p.startsWith('Key')) return p.slice(3)
@@ -177,7 +201,20 @@ export function useKeymap() {
       if (!cmdId) return
       const cmd = COMMAND_BY_ID[cmdId]
       if (!cmd) return
+      // preventDefault suppresses the host's default for every interceptable
+      // chord: page scroll on Space/arrows/Home/End, browser page-zoom on
+      // Mod+=/Mod+-, bookmark dialog on Mod+D, history nav on Alt+←/→,
+      // select-all on Mod+A, button "click" on Space (capture phase runs
+      // before the focused control). Truly reserved combos (⌘Q/⌘W in the
+      // mac app, Ctrl+W in browsers) never reach the page at all — no preset
+      // binds those.
       e.preventDefault()
+      // Stop other page-level handlers from double-acting on a handled chord —
+      // EXCEPT Escape: 'deselect' is bound to Escape in every preset, but the
+      // app's modal/popover close + drag-cancel handlers (Help,
+      // ShortcutsSettings, TransitionPopover, Timeline context menu/drag) are
+      // bubble-phase window listeners for the same key and must still see it.
+      if (e.code !== 'Escape') e.stopPropagation()
       void cmd.run(useStore.getState())
     }
     // Capture phase so this runs before the focused control's own key handling.

@@ -167,6 +167,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "chroma_key": {"clip_id": "c1", "color": "#00FF00", "similarity": 0.4,
                        "smoothness": 0.1, "spill_suppress": 0.4},
         "add_transition": {"at": 2.0, "type": "fade", "duration": 0.5},
+        "remove_transition": {"all": True},
         # Audio
         "set_volume": {"target": "music", "db": -12.0},
         "add_fade": {"clip_id": "c1", "in_s": 0.5, "out_s": 0.5},

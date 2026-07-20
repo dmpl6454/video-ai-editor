@@ -1,29 +1,33 @@
 import { useEffect, useState } from 'react'
-import { chordLabel, useKeymapStore } from '../keymap/engine'
+import { chordLabel, useKeymapStore, IS_MAC } from '../keymap/engine'
 import { PRESETS } from '../keymap/presets'
 
 let _setOpen: ((v: boolean) => void) | null = null
 export function openHelp() { _setOpen?.(true) }
 
-// Rows tagged with a `cmd` read their keys from the LIVE keymap (active preset
+// Rows tagged with `cmds` read their keys from the LIVE keymap (active preset
 // + user overrides) at render time, so the modal can't advertise a binding
 // that isn't real for the current preset (it used to hardcode "⌘B · S" while
-// no preset bound S, and Premiere splits with ⌘K). The static `keys` on those
-// rows is never shown.
-const SHORTCUTS: { keys: string; label: string; cmd?: string }[] = [
-  { keys: 'Space',                label: 'Play / pause' },
-  { keys: 'J  ·  K  ·  L',        label: 'Shuttle reverse / pause / forward' },
-  { keys: ',  ·  .',              label: 'Step 1 frame back / forward' },
-  { keys: '←  ·  →',              label: 'Step 1 frame (Shift = 1 second)' },
-  { keys: '⌘B',                   label: 'Split clip at playhead', cmd: 'split' },
-  { keys: 'Backspace',            label: 'Delete selected clip(s) (ripple)' },
-  { keys: '⌘D',                   label: 'Duplicate selected clip(s)' },
+// no preset bound S, and Premiere splits with ⌘K) — and chordLabel renders
+// platform-correct modifiers (⌘/⌥/⇧ on mac, Ctrl/Alt/Shift on Windows), so
+// no mac glyph is ever hardcoded here. Rows with a static `keys` are mouse /
+// non-keymap gestures only.
+const SHORTCUTS: { keys?: string; label: string; cmds?: string[] }[] = [
+  { cmds: ['playPause'],          label: 'Play / pause' },
+  { cmds: ['shuttleReverse', 'shuttleStop', 'shuttleForward'],
+                                  label: 'Shuttle reverse / pause / forward' },
+  { cmds: ['frameBack', 'frameForward'],   label: 'Step 1 frame back / forward' },
+  { cmds: ['secondBack', 'secondForward'], label: 'Step 1 second back / forward' },
+  { cmds: ['split'],              label: 'Split clip at playhead' },
+  { cmds: ['rippleDelete'],       label: 'Delete selected clip(s) (ripple)' },
+  { cmds: ['duplicate'],          label: 'Duplicate selected clip(s)' },
   { keys: 'Shift-click clip',     label: 'Add to multi-selection' },
-  { keys: '[  ·  ]',              label: 'Set in / out marks (range)' },
-  { keys: 'M',                    label: 'Add marker at playhead' },
-  { keys: 'Esc',                  label: 'Clear selection + marks' },
-  { keys: '⌘Z  ·  ⌘⇧Z',           label: 'Undo / redo' },
-  { keys: '⌘+scroll',             label: 'Zoom timeline' },
+  { cmds: ['markIn', 'markOut'],  label: 'Set in / out marks (range)' },
+  { cmds: ['addMarker'],          label: 'Add marker at playhead' },
+  { cmds: ['zoomIn', 'zoomOut'],  label: 'Zoom timeline in / out' },
+  { cmds: ['deselect'],           label: 'Clear selection + marks' },
+  { cmds: ['undo', 'redo'],       label: 'Undo / redo' },
+  { keys: `${IS_MAC ? '⌘' : 'Ctrl'}+scroll`, label: 'Zoom timeline (wheel)' },
   { keys: 'Right-click clip',     label: 'Context menu (split / mute / lock / delete)' },
   { keys: '?',                    label: 'Toggle this help' },
 ]
@@ -42,8 +46,9 @@ export function Help() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      const tgt = e.target as HTMLElement | null
+      const tag = tgt?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
       // `?` is shift+/ on US layouts; accept either
       if (e.key === '?' || (e.shiftKey && e.code === 'Slash')) {
         e.preventDefault()
@@ -59,11 +64,18 @@ export function Help() {
   if (!open) return null
   // Per-command override replaces the preset's chords wholesale — the same
   // merge rule as the engine's effectiveMap(). An unbound command shows "—"
-  // rather than falling back to a key that wouldn't work.
+  // rather than falling back to a key that wouldn't work. Single-command rows
+  // list every chord (e.g. CapCut split "⌘B · S"); multi-command rows list
+  // each command's primary chord so the row stays scannable.
+  const chordsOf = (cmd: string): string[] =>
+    overrides[cmd] ?? PRESETS[presetId].map[cmd] ?? []
   const rows = SHORTCUTS.map((s) => {
-    if (!s.cmd) return s
-    const chords = overrides[s.cmd] ?? PRESETS[presetId].map[s.cmd] ?? []
-    return { ...s, keys: chords.map(chordLabel).join('  ·  ') || '—' }
+    if (!s.cmds) return { label: s.label, keys: s.keys ?? '' }
+    const multi = s.cmds.length > 1
+    const parts = s.cmds
+      .map((c) => (multi ? chordsOf(c).slice(0, 1) : chordsOf(c)).map(chordLabel).join('  ·  '))
+      .filter(Boolean)
+    return { label: s.label, keys: parts.join('  ·  ') || '—' }
   })
   return (
     <div
