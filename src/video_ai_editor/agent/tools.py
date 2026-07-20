@@ -104,6 +104,86 @@ EDIT_TOOLS = [
        "edit",
        {"clip_id": {"type": "string"}, "factor": {"type": "number"}},
        ["clip_id", "factor"]),
+    _t("set_clip_transform",
+       "Set transform properties on any clip (media, sticker, or text): x/y position, "
+       "scale, rotation (degrees), opacity — this is THE tool for positioning things on "
+       "the canvas. For text and stickers, x/y are ABSOLUTE CANVAS PIXELS (e.g. 540,960 "
+       "= center of a 1080×1920 canvas), and setting a value replaces any keyframes on "
+       "that property with the scalar.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "x": {"type": "number", "description": "Canvas px (absolute for text/stickers)"},
+           "y": {"type": "number", "description": "Canvas px (absolute for text/stickers)"},
+           "scale": {"type": "number", "description": "1.0 = original size"},
+           "rotation": {"type": "number", "description": "Degrees"},
+           "opacity": {"type": "number", "description": "0..1"},
+       },
+       ["clip_id"]),
+    _t("set_clip_timing",
+       "Retime an OVERLAY clip (text/sticker/caption) by setting its timeline start "
+       "and/or end in seconds — media clips must use trim_clip/move_clip instead. "
+       "Enforces end > start (clamps to start+0.1s) and re-sorts the track by start.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "start": {"type": "number", "description": "Timeline seconds"},
+           "end": {"type": "number", "description": "Timeline seconds; must be > start"},
+       },
+       ["clip_id"]),
+    _t("set_property",
+       "LOW-LEVEL escape hatch: set any field on a clip by dotted path (e.g. "
+       "transform.x, audio.gain_db, audio.fade_in, speed, reverse, in, out, start). "
+       "Prefer the specific tool when one exists (set_speed, set_volume, "
+       "set_clip_transform, trim_clip…) — this does no validation of the value.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "path": {"type": "string", "description": "Dotted attribute path, e.g. 'transform.x'"},
+           "value": {"description": "New value; type must match the field"},
+       },
+       ["clip_id", "path", "value"]),
+    _t("bulk_delete",
+       "Ripple-delete several clips in one operation (one undo step instead of N). "
+       "Gaps are closed on every affected track; ids that don't exist are skipped.",
+       "edit",
+       {"clip_ids": {"type": "array", "items": {"type": "string"}}},
+       ["clip_ids"]),
+    _t("bulk_duplicate",
+       "Duplicate several MEDIA clips in one operation; each copy is placed right "
+       "after its original. Text/sticker overlay ids are silently skipped — use "
+       "duplicate_clip semantics only for media.",
+       "edit",
+       {"clip_ids": {"type": "array", "items": {"type": "string"}}},
+       ["clip_ids"]),
+    _t("add_keyframe",
+       "Add or update a keyframe on a clip's transform property to animate it over "
+       "time (time is CLIP-LOCAL seconds, 0 = clip start; a keyframe within 1ms of an "
+       "existing one replaces it). Exported renders interpolate LINEAR only — ease/"
+       "bounce modes animate in the browser preview but bake as linear.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "time": {"type": "number", "description": "Clip-local seconds (0 = clip start)"},
+           "value": {"type": "number"},
+           "interp": {"type": "string",
+                      "enum": ["linear", "ease-in", "ease-out", "ease-in-out",
+                               "step", "back-out", "bounce"],
+                      "default": "linear"},
+       },
+       ["clip_id", "prop", "time", "value"]),
+    _t("remove_keyframe",
+       "Remove the keyframe at a given clip-local time from a clip's transform "
+       "property. When 1 key remains the property collapses to that scalar; when 0 "
+       "remain it resets to 0.0.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "time": {"type": "number", "description": "Clip-local seconds of the key to remove"},
+       },
+       ["clip_id", "prop", "time"]),
 ]
 
 # --- Project / canvas ---
@@ -121,6 +201,41 @@ PROJECT_TOOLS = [
        "project",
        {"track": {"type": "string"}, "muted": {"type": "boolean", "default": True}},
        ["track"]),
+    _t("set_track_locked",
+       "Lock or unlock a track (a UI flag that prevents accidental edits in the "
+       "timeline panel; it does not block tool calls). Omit `locked` to toggle the "
+       "current state.",
+       "project",
+       {"track": {"type": "string"},
+        "locked": {"type": "boolean", "description": "Omit to toggle"}},
+       ["track"]),
+    _t("add_marker",
+       "Drop a marker on the timeline ruler at a time, with an optional label and "
+       "color — useful for flagging moments to revisit. Returns the marker_id needed "
+       "by remove_marker.",
+       "project",
+       {
+           "time": {"type": "number", "description": "Timeline seconds"},
+           "label": {"type": "string"},
+           "color": {"type": "string", "description": "#RRGGBB, default amber #fbbf24"},
+       },
+       ["time"]),
+    _t("remove_marker",
+       "Remove a timeline marker by its id (as returned by add_marker or listed in "
+       "the EDL's markers). Errors if the id doesn't exist.",
+       "project",
+       {"marker_id": {"type": "string"}},
+       ["marker_id"]),
+    _t("apply_export_preset",
+       "One-call platform setup: sets canvas size/fps, bitrate, and loudness target "
+       "from a named preset (reels/tiktok/story 1080×1920 -16 LUFS, shorts 1080×1920 "
+       "-14, ig_feed_1x1 1080×1080, ig_feed_4x5 1080×1350, youtube_16x9 1920×1080 -14, "
+       "youtube_4k 3840×2160 -14). Use before export when the user names a platform.",
+       "project",
+       {"name": {"type": "string",
+                 "enum": ["reels", "shorts", "tiktok", "story", "ig_feed_1x1",
+                          "ig_feed_4x5", "youtube_16x9", "youtube_4k"]}},
+       ["name"]),
 ]
 
 # --- text / captions / brand kit / audit (M2) ---
@@ -234,6 +349,45 @@ TEXT_TOOLS = [
                         "description": "[x, y] canvas px, default center"},
            "scale": {"type": "number", "default": 1.0},
        }),
+    _t("import_srt",
+       "REPLACE the project transcript with one parsed from an external .srt/.vtt/.ass "
+       "subtitle file — use when the user has a pre-edited or translated subtitle file. "
+       "Follow with add_caption_track to burn the imported captions in.",
+       "text",
+       {
+           "path": {"type": "string", "description": "Path to the .srt/.vtt/.ass file"},
+           "language": {"type": "string", "default": "en"},
+       },
+       ["path"]),
+    _t("export_srt",
+       "Write the current transcript out as a .srt subtitle file (read-only; no "
+       "timeline change). Default destination is <session>/captions.srt; returns the "
+       "written path.",
+       "text",
+       {"path": {"type": "string", "description": "Destination file; omit for <session>/captions.srt"}}),
+    _t("export_vtt",
+       "Write the current transcript out as a WebVTT .vtt file (read-only; no "
+       "timeline change). Default destination is <session>/captions.vtt.",
+       "text",
+       {"path": {"type": "string", "description": "Destination file; omit for <session>/captions.vtt"}}),
+    _t("export_ass",
+       "Write the current transcript out as an Advanced SubStation .ass file "
+       "(read-only; no timeline change). Default destination is <session>/captions.ass.",
+       "text",
+       {"path": {"type": "string", "description": "Destination file; omit for <session>/captions.ass"}}),
+    _t("translate_captions",
+       "Translate the EXISTING captions track in place to a target language using "
+       "local Argos Translate (no cloud) — run add_caption_track/auto_caption first if "
+       "there are no captions yet. Source language defaults to the transcript's "
+       "detected language.",
+       "text",
+       {
+           "target_lang": {"type": "string", "default": "hi",
+                           "description": "ISO code, e.g. 'hi', 'es', 'fr', 'en'"},
+           "source_lang": {"type": "string",
+                           "description": "Omit to use the transcript's detected language"},
+       },
+       ["target_lang"]),
 ]
 
 AUDIO_TOOLS = [
@@ -300,6 +454,22 @@ AUDIO_TOOLS = [
        "auto",
        {"ratio": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]}},
        ["ratio"]),
+    _t("noise_reduce",
+       "Spectrally denoise a media clip's audio (hiss, fans, room tone) and replace "
+       "the clip's source with the cleaned file (video stream copied untouched). "
+       "Needs the local noisereduce package installed.",
+       "audio",
+       {
+           "clip_id": {"type": "string"},
+           "strength": {"type": "number", "default": 0.85, "description": "0..1 reduction amount"},
+       },
+       ["clip_id"]),
+    _t("set_loudness_target",
+       "Set the export loudness-normalisation target in LUFS (Reels/TikTok -16, "
+       "YouTube -14, broadcast -23; default -16). Pass lufs=null to disable the "
+       "loudnorm pass entirely; this only affects export, not preview.",
+       "audio",
+       {"lufs": {"type": ["number", "null"], "default": -16.0}}),
 ]
 
 
@@ -397,6 +567,15 @@ EFFECT_TOOLS = [
            "duration": {"type": "number", "default": 0.5},
        },
        ["at"]),
+    _t("remove_transition",
+       "Remove transition(s) on V1: pass `at` (cut time in seconds) to clear "
+       "every transition at that boundary, or all=true to clear the track.",
+       "effects",
+       {
+           "at": {"type": "number"},
+           "all": {"type": "boolean", "default": False},
+       },
+       []),
     _t("list_transitions",
        "The full transition catalog: categories, aliases, and descriptions.",
        "effects", {}),
@@ -423,6 +602,14 @@ EFFECT_TOOLS = [
            "spill_suppress": {"type": "number", "default": 0.5},
        },
        ["clip_id"]),
+    _t("list_filters",
+       "List every effect type add_effect understands (read-only discovery; no "
+       "timeline change). Call this before add_effect if unsure a type exists.",
+       "effects", {}),
+    _t("list_luts",
+       "List the bundled .cube LUT files available to apply_lut (read-only "
+       "discovery; no timeline change).",
+       "effects", {}),
 ]
 
 
@@ -522,6 +709,36 @@ HEAVY_AI_TOOLS = [
         "turns": {"type": "array", "items": {"type": "object"},
                   "description": "Optional pre-computed [{speaker,start,end}] turns"}},
        []),
+    _t("smooth_slow_motion",
+       "RIFE optical-flow frame interpolation for buttery slow-mo on a media clip "
+       "(unlike set_speed, which just stretches existing frames). Replaces the clip's "
+       "source; its duration becomes original × factor, and the rife binary/model must "
+       "be installed locally.",
+       "ai",
+       {
+           "clip_id": {"type": "string"},
+           "factor": {"type": "integer", "default": 2, "description": "Slow-down multiple, e.g. 2 or 4"},
+       },
+       ["clip_id"]),
+    _t("make_shorts",
+       "Heuristically pick N highlight ranges from the V1 source (transcript + audio "
+       "energy) for cutting a long video into shorts. Default returns the ranges only; "
+       "pass save_as_sessions=true to also create one NEW session per short.",
+       "ai",
+       {
+           "target_count": {"type": "integer", "default": 3},
+           "max_dur": {"type": "number", "default": 60.0, "description": "Cap each short at this many seconds"},
+           "min_dur": {"type": "number", "default": 12.0, "description": "Pad each short to at least this long"},
+           "save_as_sessions": {"type": "boolean", "default": False},
+       }),
+    _t("name_speakers",
+       "Save a diarized-speaker → display-name mapping (e.g. {'SPEAKER_00': 'Host'}) "
+       "to the session for lower-thirds. Informational only for now — it does not "
+       "change the timeline; run diarize first to learn the speaker labels.",
+       "ai",
+       {"mapping": {"type": "object",
+                    "description": "{SPEAKER_XX: 'Display Name'} pairs"}},
+       ["mapping"]),
 ]
 
 

@@ -40,10 +40,18 @@ export function ChatOverlay() {
     setMsgs((m) => [...m, { role: 'user', text }])
     setBusy(true)
     try {
+      // Snapshot the editor UI state at send time so Claude can bind "this
+      // clip" (selection) and "here" (playhead) to real clip ids.
+      const { selection, multiSelection, playhead } = useStore.getState()
       const res = await fetch(`/api/sessions/${sid}/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          selection: selection ?? null,
+          multi_selection: multiSelection ?? [],
+          playhead,
+        }),
       })
       if (!res.ok || !res.body) {
         const errText = await res.text()

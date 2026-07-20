@@ -21,7 +21,54 @@ from .tools import list_tools as _list_tools
 from .system_prompt import SYSTEM_PROMPT
 
 
-def _live_context_block(store: EDLStore) -> str:
+def _clip_line(i: int, c: dict) -> str:
+    """One enumerated clip entry: ordinal, id, human name, timeline span."""
+    name = c.get("src_name") or c.get("text") or ""
+    if isinstance(name, str) and len(name) > 32:
+        name = name[:29] + "…"
+    start = float(c.get("start", 0.0))
+    dur = float(c.get("duration", 0.0) or 0.0)
+    label = f' "{name}"' if name else ""
+    return f"[{i}] {c.get('id', '?')}{label} {start:.1f}–{start + dur:.1f}s"
+
+
+def _ui_state_block(ui_state: dict | None, tracks: list[dict]) -> str:
+    """What the user is pointing at in the editor UI right now.
+
+    This is what lets Claude bind "this clip" (selection) and "here"
+    (playhead) to concrete clip ids instead of guessing.
+    """
+    if not ui_state:
+        return ""
+    lines: list[str] = []
+    sel = ui_state.get("selection")
+    multi = [s for s in (ui_state.get("multi_selection") or []) if s != sel]
+    if sel:
+        lines.append(f"Selected clip (what the user means by 'this'): {sel}"
+                     + (f" (+ also selected: {', '.join(multi)})" if multi else ""))
+    playhead = ui_state.get("playhead")
+    if playhead is not None:
+        ph = float(playhead)
+        under = None
+        for t in tracks:
+            if t.get("type") != "video":
+                continue
+            for c in t.get("clips", []):
+                start = float(c.get("start", 0.0))
+                dur = float(c.get("duration", 0.0) or 0.0)
+                if start <= ph < start + dur:
+                    under = c.get("id")
+                    break
+            if under:
+                break
+        lines.append(f"Playhead (what the user means by 'here'): {ph:.2f}s"
+                     + (f" — inside clip {under}" if under else ""))
+    if not lines:
+        return ""
+    return "\n\n# Editor UI state (what the user is pointing at)\n" + "\n".join(lines)
+
+
+def _live_context_block(store: EDLStore, ui_state: dict | None = None) -> str:
     """A fresh, ground-truth snapshot of what's actually on the timeline right
     now, appended to the system prompt on every API call (never persisted into
     `history`, so it can never itself go stale).
@@ -40,22 +87,34 @@ def _live_context_block(store: EDLStore) -> str:
     except Exception:
         return ""
     tracks = snap.get("tracks", [])
-    lines = [f"- {t['type']} ({t['label']}): {len(t['clips'])} clip(s)"
-             for t in tracks if t.get("clips")]
+    lines = []
+    for t in tracks:
+        clips = t.get("clips") or []
+        if not clips:
+            continue
+        # Enumerate with ordinals so "the second clip" resolves to an id.
+        shown = clips[:12]
+        entries = " · ".join(_clip_line(i + 1, c) for i, c in enumerate(shown))
+        more = f" · +{len(clips) - len(shown)} more" if len(clips) > len(shown) else ""
+        lines.append(f"- {t['type']} ({t['label']}): {len(clips)} clip(s): "
+                     f"{entries}{more}")
     if not lines:
         return ("\n\n# Live timeline state (ground truth — the timeline is EMPTY)\n"
                 "There is nothing on the timeline right now. If the user refers to "
                 "a video, an upload just happened; call get_timeline(summary=true) "
-                "before describing any footage.")
+                "before describing any footage."
+                + _ui_state_block(ui_state, tracks))
     body = "\n".join(lines)
     return (
         "\n\n# Live timeline state (ground truth, recomputed this turn)\n"
         f"Duration: {snap.get('duration', 0):.1f}s\n{body}\n"
         "This reflects the ACTUAL current timeline — not anything described "
-        "earlier in this conversation. If the user asks what a video shows or "
+        "earlier in this conversation. Ordinals like 'the second clip' refer "
+        "to the [n] numbering above. If the user asks what a video shows or "
         "contains, verify against get_transcript()/find_moments() rather than "
         "recalling a prior answer; footage from an earlier upload may no "
         "longer be on the timeline at all."
+        + _ui_state_block(ui_state, tracks)
     )
 
 
@@ -102,6 +161,7 @@ async def chat_turn(
     history: list[dict],
     *,
     max_turns: int = 8,
+    ui_state: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Run a single chat turn — possibly multiple tool-use rounds — to completion.
 
@@ -123,7 +183,7 @@ async def chat_turn(
         # Recomputed every iteration (not just once) so a tool call that
         # mutates the EDL mid-turn (e.g. a destructive batch op) is reflected
         # before the next round — see _live_context_block's docstring.
-        system_with_context = SYSTEM_PROMPT + _live_context_block(store)
+        system_with_context = SYSTEM_PROMPT + _live_context_block(store, ui_state)
         try:
             resp = await asyncio.to_thread(
                 client.messages.create,

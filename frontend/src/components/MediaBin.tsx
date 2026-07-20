@@ -49,6 +49,7 @@ export function MediaBin() {
       <h2>Media</h2>
       <div
         className={`dropzone${dragOver ? ' over' : ''}`}
+        title="Video lands on the main video track; audio lands on the Music track"
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => { e.preventDefault(); setDragOver(false); void onFiles(e.dataTransfer.files) }}
@@ -68,6 +69,9 @@ export function MediaBin() {
         style={{ width: '100%', marginBottom: 10, fontSize: 11 }}
         onClick={() => audioRef.current?.click()}
         disabled={uploading}
+        title={uploading
+          ? 'Wait for the current upload to finish'
+          : 'Pick an audio file — it lands on the Music track'}
       >
         🎵 Add music…
       </button>
@@ -108,6 +112,12 @@ export function MediaBin() {
         </div>
       )}
 
+      {sources.size === 0 && !uploading && (
+        <div style={{ color: 'var(--text-dim)', fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
+          Your clips appear here after upload — drag one onto a timeline row
+          (v1 main, v2 for picture-in-picture) to add it again.
+        </div>
+      )}
       {[...sources.entries()].map(([src, ids]) => (
         <div
           key={src}
@@ -192,7 +202,10 @@ function MusicPanel() {
         </span>
       </div>
       <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
-        <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+        <label
+          style={{ fontSize: 11, color: 'var(--text-dim)' }}
+          title="Automatically lower the music whenever someone is speaking"
+        >
           <input
             type="checkbox" checked={ducking}
             onChange={() => dispatch('set_duck', { track: 'music', enabled: !ducking })}
@@ -203,6 +216,7 @@ function MusicPanel() {
       </div>
       <button
         style={{ marginTop: 6, width: '100%', fontSize: 11 }}
+        title="Remove this music from the timeline (the file stays uploaded)"
         onClick={() => dispatch('ripple_delete', { clip_id: clip.id })}
       >
         Remove music

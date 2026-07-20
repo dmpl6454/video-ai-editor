@@ -8,6 +8,7 @@ import json
 import os
 import re
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable
 from ..edl import EDLStore
 from ..edl.schema import EDL, Clip, Track, Canvas, TextClip, BrandKit, CaptionsConfig, Transform
@@ -415,7 +416,11 @@ def split_at(store: EDLStore, args: dict) -> dict:
             local = t - c_start
             left = c.model_copy(update={"out": c.in_ + local})
             right = c.model_copy(update={
-                "id": f"c_{c.id[2:]}b",
+                # Unique suffix, not a literal 'b': splitting a clip whose
+                # earlier split-sibling already took c_<id>b produced two
+                # clips with the SAME id, so clip_id-targeted tools hit the
+                # wrong one.
+                "id": f"c_{c.id[2:]}_{uuid4().hex[:6]}",
                 "in_": c.in_ + local,
                 "start": t,
             })
@@ -1483,6 +1488,33 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     summary = f"Add {tr.type}{note} transition at {tr.at:.2f}s ({tr.duration:.2f}s)"
     store.commit("add_transition", args, summary)
     return {"summary": summary}
+
+
+def remove_transition(store: EDLStore, args: dict) -> dict:
+    """Remove transition(s) on V1 — `at` clears every entry within 0.05s of
+    that cut (add_transition appends, so duplicates can pile up at one
+    boundary and last-match-wins renders; removal must clear them all), or
+    `all: true` clears the track.
+    """
+    v1 = store.edl.get_track("v1")
+    if not v1:
+        raise ValueError("v1 track not found")
+    clear_all = bool(args.get("all", False))
+    at = args.get("at")
+    if not clear_all and at is None:
+        raise ValueError("remove_transition needs 'at' (cut time) or all=true")
+    before = len(v1.transitions)
+    if clear_all:
+        v1.transitions = []
+    else:
+        at = float(at)
+        # Same 0.05s tolerance as the compositor's boundary matcher.
+        v1.transitions = [t for t in v1.transitions if abs(t.at - at) >= 0.05]
+    removed = before - len(v1.transitions)
+    summary = (f"Remove all {removed} transition(s)" if clear_all
+               else f"Remove {removed} transition(s) at {at:.2f}s")
+    store.commit("remove_transition", args, summary)
+    return {"summary": summary, "removed": removed}
 
 
 def add_mask(store: EDLStore, args: dict) -> dict:
@@ -3088,6 +3120,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "color_grade": color_grade,
     "apply_lut": apply_lut,
     "add_transition": add_transition,
+    "remove_transition": remove_transition,
     "add_mask": add_mask,
     "chroma_key": chroma_key,
     # M5: vision-driven find + style match

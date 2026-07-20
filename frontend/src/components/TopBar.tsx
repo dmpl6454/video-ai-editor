@@ -272,10 +272,22 @@ export function TopBar() {
           past the visible edge with no visual cue that scrolling the
           TOOLBAR ITSELF (not the page) would reveal it — issues 9/10. */}
       <div className="topbar-scroll">
-        <button onClick={() => dispatch('undo')} title="Cmd+Z">Undo</button>
-        <button onClick={() => dispatch('redo')} disabled={!redoAvailable} title="Cmd+Shift+Z">Redo</button>
+        <button
+          onClick={() => dispatch('undo')}
+          disabled={opsLen === 0}
+          title={opsLen === 0 ? 'Nothing to undo yet — make an edit first' : 'Undo last edit (⌘Z)'}
+        >Undo</button>
+        <button
+          onClick={() => dispatch('redo')}
+          disabled={!redoAvailable}
+          title={redoAvailable ? 'Redo (⌘⇧Z)' : 'Nothing to redo — Redo re-applies an edit you just undid'}
+        >Redo</button>
         {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
-          <button key={r} onClick={() => dispatch('set_aspect_ratio', { ratio: r })}>{r}</button>
+          <button
+            key={r}
+            title={`Set canvas aspect ratio to ${r} — overlays reposition to fit`}
+            onClick={() => dispatch('set_aspect_ratio', { ratio: r })}
+          >{r}</button>
         ))}
         <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
         <TextTool />
@@ -309,7 +321,15 @@ export function TopBar() {
           much content is in .topbar-scroll above. Export is always the
           right-most, always-visible element. */}
       <div className="topbar-pinned">
-        <button onClick={onSaveProject} disabled={saving || !edl?.duration} title="Save an editable project file (.vae) you can reopen later">
+        <button
+          onClick={onSaveProject}
+          disabled={saving || !edl?.duration}
+          title={!edl?.duration
+            ? 'Nothing to save yet — add a video to the timeline first'
+            : saving
+              ? 'Saving the project file…'
+              : 'Save an editable project file (.vae) you can reopen later'}
+        >
           {saving ? 'Saving…' : '💾 Save'}
         </button>
         <button onClick={() => importRef.current?.click()} title="Open a saved .vae project">
@@ -331,7 +351,11 @@ export function TopBar() {
             className="primary"
             onClick={() => setExportOptsOpen((o) => !o)}
             disabled={exporting || !edl?.duration}
-            title="Render the final flattened video (MP4) to share"
+            title={!edl?.duration
+              ? 'Nothing to export yet — add a video to the timeline first'
+              : exporting
+                ? 'Export is already running — the button shows elapsed time'
+                : 'Render the final flattened video (MP4/MOV) to share'}
           >
             {exporting
               ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`

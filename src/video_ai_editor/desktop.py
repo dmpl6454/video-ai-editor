@@ -401,7 +401,7 @@ def main() -> None:
         sys.exit(1)
 
     import webview
-    webview.create_window(
+    window = webview.create_window(
         title="Video AI Editor",
         url=url,
         width=1480, height=920,
@@ -409,6 +409,20 @@ def main() -> None:
         easy_drag=False,
         js_api=_Api(host, port),
     )
+    if _pu.IS_WINDOWS:
+        # WebView2 honors browser accelerator keys by default, so F5 reloads
+        # the editor mid-session and Ctrl+F/Ctrl+P/Ctrl+W open find/print/
+        # close — none are app shortcuts. Disable them (and Ctrl+wheel page
+        # zoom, which fights the timeline's Ctrl+wheel zoom). The native-tree
+        # traversal varies across pywebview versions → degrade gracefully.
+        def _harden_webview(w=window):
+            try:
+                core = w.native.Controls[0].CoreWebView2
+                core.Settings.AreBrowserAcceleratorKeysEnabled = False
+                core.Settings.IsZoomControlEnabled = False
+            except Exception:
+                pass
+        window.events.loaded += _harden_webview
     try:
         webview.start()
     except Exception as e:  # WebView2 Runtime missing / init failure on Windows

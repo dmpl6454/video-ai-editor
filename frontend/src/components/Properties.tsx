@@ -33,7 +33,12 @@ export function Properties() {
   if (!sel || !edl) return (
     <div className="props">
       <h2>Properties</h2>
-      <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>Select a clip to inspect.</div>
+      <div style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.8 }}>
+        Nothing selected.
+        <br />• Click a clip on the timeline to edit it here
+        <br />• Drag a selected clip's edges to trim it
+        <br />• ⌘B splits the clip at the playhead
+      </div>
     </div>
   )
 
@@ -44,7 +49,13 @@ export function Properties() {
 
   const c = clip.c
   if (clip.t.type === 'sticker') {
-    return <StickerProps c={c as unknown as StickerLike} dispatch={dispatch} />
+    return (
+      <StickerProps
+        c={c as unknown as StickerLike}
+        trackLabel={clip.t.label ?? clip.t.id}
+        dispatch={dispatch}
+      />
+    )
   }
   if (!isMediaClip(c)) {
     // Text clip (sticker tracks were handled above) — full editable inspector.
@@ -206,8 +217,14 @@ export function Properties() {
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
-        <button onClick={() => dispatch('duplicate_clip', { clip_id: c.id })}>Duplicate</button>
-        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+        <button
+          title="Add a copy of this clip right after it (⌘D)"
+          onClick={() => dispatch('duplicate_clip', { clip_id: c.id })}
+        >Duplicate</button>
+        <button
+          title="Remove this clip and close the gap (⌫)"
+          onClick={() => dispatch('ripple_delete', { clip_id: c.id })}
+        >Delete</button>
       </div>
     </div>
   )
@@ -221,8 +238,9 @@ interface StickerLike {
   transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
 }
 
-function StickerProps({ c, dispatch }: {
+function StickerProps({ c, trackLabel, dispatch }: {
   c: StickerLike
+  trackLabel: string
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   const tx = c.transform ?? {}
@@ -240,7 +258,7 @@ function StickerProps({ c, dispatch }: {
     <div className="props">
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
-        {c.label ? `${c.label} ` : ''}Sticker · {c.id}
+        {trackLabel} · {c.label ? `${c.label} ` : ''}Sticker · {c.id}
       </div>
 
       <Section label="Position">
@@ -284,7 +302,10 @@ function StickerProps({ c, dispatch }: {
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
-        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+        <button
+          title="Remove this overlay from the timeline (⌫)"
+          onClick={() => dispatch('ripple_delete', { clip_id: c.id })}
+        >Delete</button>
       </div>
     </div>
   )
@@ -429,7 +450,10 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
-        <button onClick={() => dispatch('ripple_delete', { clip_id: c.id })}>Delete</button>
+        <button
+          title="Remove this overlay from the timeline (⌫)"
+          onClick={() => dispatch('ripple_delete', { clip_id: c.id })}
+        >Delete</button>
       </div>
     </div>
   )

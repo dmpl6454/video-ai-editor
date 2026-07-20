@@ -741,6 +741,11 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
 
 class ChatRequest(BaseModel):
     message: str
+    # Editor UI state at send time — lets Claude bind "this clip" and "here"
+    # to real ids instead of guessing. All optional for older callers.
+    selection: str | None = None
+    multi_selection: list[str] = []
+    playhead: float | None = None
 
 
 def _history_path(sid: str) -> Path:
@@ -772,9 +777,16 @@ async def chat(sid: str, body: ChatRequest):
     store = _store(sid)
     history = _load_history(sid)
 
+    ui_state = {
+        "selection": body.selection,
+        "multi_selection": body.multi_selection,
+        "playhead": body.playhead,
+    } if (body.selection or body.playhead is not None) else None
+
     async def gen():
         try:
-            async for evt in chat_turn(store, body.message, history):
+            async for evt in chat_turn(store, body.message, history,
+                                       ui_state=ui_state):
                 yield f"data: {json.dumps(evt)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"

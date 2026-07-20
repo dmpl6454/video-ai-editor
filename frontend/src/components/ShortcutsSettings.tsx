@@ -1,13 +1,37 @@
 import { useEffect, useState } from 'react'
 import { COMMANDS, CATEGORIES, type Command } from '../keymap/commands'
 import {
-  useKeymapStore, chordFromEvent, chordLabel, setCaptureMode,
+  useKeymapStore, chordFromEvent, chordLabel, setCaptureMode, IS_MAC,
 } from '../keymap/engine'
 import { PRESETS, PRESET_IDS, type PresetId } from '../keymap/presets'
 
 let _setOpen: ((v: boolean) => void) | null = null
 /** Open the Keyboard Shortcuts settings (from the TopBar / Help). */
 export function openShortcuts() { _setOpen?.(true) }
+
+// Chords the host swallows or acts on before/despite the page — a binding on
+// these can never fire reliably, so the rebind UI refuses them with a reason
+// instead of saving a dead (or destructive) binding. macOS: ⌘Q quits the
+// desktop app / Safari and ⌘W closes the window — neither is interceptable
+// (menu key-equivalents win); ⌘T/⌘N open tabs/windows in browsers. Windows /
+// Linux: Ctrl+W/T/N are browser-reserved (Chrome won't let a page prevent
+// them; in the WebView2 app Ctrl+W closes the window) and Alt+F4 closes any
+// window at the OS level.
+const RESERVED_CHORDS: Record<string, string> = IS_MAC
+  ? {
+      'Mod+KeyQ': 'quits the app before the page sees it',
+      'Mod+KeyW': 'closes the window/tab before the page sees it',
+      'Mod+KeyT': 'opens a new tab in browsers',
+      'Mod+KeyN': 'opens a new window in browsers',
+      'Mod+KeyM': 'minimises the window in browsers',
+      'Mod+KeyH': 'hides the app (macOS system shortcut)',
+    }
+  : {
+      'Mod+KeyW': 'closes the window/tab before the page sees it',
+      'Mod+KeyT': 'opens a new tab in browsers',
+      'Mod+KeyN': 'opens a new window in browsers',
+      'Alt+F4': 'closes the window at the OS level',
+    }
 
 export function ShortcutsSettings() {
   const [open, setOpen] = useState(false)
@@ -23,6 +47,8 @@ export function ShortcutsSettings() {
 
   // which command is currently capturing a new chord
   const [capturing, setCapturing] = useState<string | null>(null)
+  // why the last capture was refused (reserved chord), shown under the hint
+  const [warning, setWarning] = useState<string | null>(null)
 
   // chord → commandId, to flag conflicts
   const chordOwners: Record<string, string[]> = {}
@@ -42,6 +68,12 @@ export function ShortcutsSettings() {
       if (e.code === 'Escape') { setCapturing(null); return }
       const chord = chordFromEvent(e)
       if (!chord) return  // bare modifier — keep waiting
+      const reserved = RESERVED_CHORDS[chord]
+      if (reserved) {
+        setWarning(`${chordLabel(chord)} can't be bound — it ${reserved}. Press another combo.`)
+        return  // keep capturing so the user can try again
+      }
+      setWarning(null)
       rebind(capturing, [chord])
       setCapturing(null)
     }
@@ -116,6 +148,11 @@ export function ShortcutsSettings() {
           Click a shortcut to rebind it, then press the new key combo. Esc cancels.
           {Object.keys(overrides).length > 0 && ' · customised (★)'}
         </div>
+        {warning && (
+          <div style={{ fontSize: 11, color: '#e0556d', marginBottom: 12 }}>
+            {warning}
+          </div>
+        )}
 
         {CATEGORIES.map((cat) => {
           const cmds = COMMANDS.filter((c) => c.category === cat)
