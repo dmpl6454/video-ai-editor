@@ -13,6 +13,8 @@ datas = [('frontend/dist', 'frontend/dist'), ('fonts', 'fonts'), ('presets', 'pr
 hiddenimports = ['uvicorn.lifespan.on', 'uvicorn.protocols.websockets.auto', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.logging', 'video_ai_editor.main']
 datas += collect_data_files('webview')
 datas += collect_data_files('open_clip')
+datas += collect_data_files('faster_whisper')  # silero VAD onnx — auto-captions need it
+datas += collect_data_files('piper')  # espeak-ng-data — TTS hard-crashes the process without it
 hiddenimports += collect_submodules('video_ai_editor')
 hiddenimports += collect_submodules('open_clip')
 

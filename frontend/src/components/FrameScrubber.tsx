@@ -18,7 +18,6 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 // mp4box.js publishes named exports; there's no `default`. We pull the two
 // pieces we need: `createFile` (the demuxer factory) and `DataStream`
 // (used to serialise codec description boxes for VideoDecoder).
-// @ts-expect-error — mp4box.js has no bundled types
 import { createFile, DataStream } from 'mp4box'
 
 export interface FrameScrubberHandle {
@@ -126,7 +125,7 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
         v.addEventListener('canplay', onLoaded, { once: true })
       }
 
-      const mp4 = createFile() as MP4BoxFile
+      const mp4 = createFile() as unknown as MP4BoxFile
 
       mp4.onError = (e: string) => {
         // mp4box.js emits these on abort + on real parse errors. A real parse

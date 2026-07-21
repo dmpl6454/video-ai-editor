@@ -246,7 +246,7 @@ function StickerProps({ c, dispatch }: {
       </Section>
 
       <Section label="Transform">
-        <Slider label min={0.1} max={4} step={0.05} value={scale}
+        <Slider min={0.1} max={4} step={0.05} value={scale}
           format={(v) => `scale ${v.toFixed(2)}`} onChange={(v) => setTx({ scale: v })} />
         <Slider min={-180} max={180} step={1} value={rotation}
           format={(v) => `rotation ${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
