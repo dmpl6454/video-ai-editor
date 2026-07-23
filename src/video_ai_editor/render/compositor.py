@@ -387,10 +387,14 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     # transitions are between adjacent clip joins, indexed by left clip's index
     trans_at: dict[int, tuple[str, float]] = {}
     if transitions and clips:
-        # Build a map: clip i (0-based) → transition that bridges to i+1
+        # Build a map: clip i (0-based) → transition that bridges to i+1.
+        # tr.at is a TIMELINE position (the visible boundary the user
+        # clicked), and clips pack by effective_duration — summing source
+        # `duration` here silently dropped every transition that follows a
+        # speed≠1 clip (running overshot tr.at, no match, hard cut).
         running = 0.0
         for idx, c in enumerate(clips[:-1]):
-            running += c.duration
+            running += c.effective_duration
             for tr in transitions:
                 if abs(tr.at - running) < 0.05:
                     trans_at[idx] = (tr.type, tr.duration)
@@ -453,9 +457,14 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         fc_parts.append(f"{interleaved}concat=n={len(clips)}:v=1:a=1[vout][aout]")
     else:
         # Chain xfade for video, acrossfade for audio between adjacent clips.
+        # cur_dur tracks the accumulated OUTPUT stream length: each clip's
+        # per-clip chain applies setpts/atempo for speed (and chunk files
+        # bake it), so streams entering xfade are effective_duration long —
+        # source `duration` would place every offset after a sped clip at
+        # the wrong time.
         cur_v = v_labels[0]
         cur_a = a_labels[0]
-        cur_dur = clips[0].duration
+        cur_dur = clips[0].effective_duration
         for i in range(1, len(clips)):
             tr_for_left = trans_at.get(i - 1)
             new_v = f"[xv{i}]"
@@ -478,7 +487,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 fc_parts.append(
                     f"{cur_a}{a_labels[i]}acrossfade=d={tdur}{new_a}"
                 )
-                cur_dur = cur_dur + clips[i].duration - tdur
+                cur_dur = cur_dur + clips[i].effective_duration - tdur
             else:
                 fc_parts.append(
                     f"{cur_v}{v_labels[i]}concat=n=2:v=1:a=0{new_v}"
@@ -486,7 +495,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 fc_parts.append(
                     f"{cur_a}{a_labels[i]}concat=n=2:v=0:a=1{new_a}"
                 )
-                cur_dur += clips[i].duration
+                cur_dur += clips[i].effective_duration
             cur_v = new_v
             cur_a = new_a
         # Rename the final accumulators to [vout]/[aout] for downstream code

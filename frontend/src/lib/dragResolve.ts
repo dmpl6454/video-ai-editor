@@ -7,7 +7,7 @@
 // dispatch.py's `_first_free_gap` (same 1e-9 epsilon), consolidated here.
 
 import type { Track } from '../types'
-import { isMediaClip } from '../types'
+import { isMediaClip, clipEnd } from '../types'
 
 const EPS = 1e-9
 
@@ -21,7 +21,10 @@ function occupiedRanges(track: Track, ignoreClipId: string): [number, number][] 
   return track.clips
     .filter(isMediaClip)
     .filter((c) => c.id !== ignoreClipId)
-    .map((c): [number, number] => [c.start, c.start + (c.out - c.in)])
+    // clipEnd = start + (out-in)/speed — the clip's TIMELINE footprint, matching
+    // the draw loop and dispatch.py's _first_free_gap. Raw `out-in` made a 2x
+    // clip occupy twice its drawn width here, so drops snapped past phantom space.
+    .map((c): [number, number] => [c.start, clipEnd(c)])
     .sort((a, b) => a[0] - b[0])
 }
 
@@ -62,12 +65,19 @@ const SPEED_MAX = 4
 
 export function resolveMediaTrim(
   clip: { in: number; out: number }, side: 'l' | 'r', deltaSec: number,
+  speed: number = 1,
 ): { in: number; out: number } {
+  // `deltaSec` is a TIMELINE-space delta (pixels/zoom at the drag site), but
+  // in/out are SOURCE-space. A clip at speed s covers (out-in)/s timeline
+  // seconds, so 1 timeline second of edge movement consumes s source seconds.
+  // Without this conversion a 0.5x clip dragged +2s grew its source span by
+  // only 2s — i.e. its timeline footprint grew 4s, double the drag.
+  const srcDelta = deltaSec * (speed > 0 ? speed : 1)
   if (side === 'l') {
-    const newIn = Math.min(Math.max(0, clip.in + deltaSec), clip.out - MIN_SPAN)
+    const newIn = Math.min(Math.max(0, clip.in + srcDelta), clip.out - MIN_SPAN)
     return { in: newIn, out: clip.out }
   }
-  const newOut = Math.max(clip.out + deltaSec, clip.in + MIN_SPAN)
+  const newOut = Math.max(clip.out + srcDelta, clip.in + MIN_SPAN)
   return { in: clip.in, out: newOut }
 }
 

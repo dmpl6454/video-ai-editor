@@ -14,7 +14,10 @@ EDL_VERSION = 2
 # v3: keyframe easing now exports for real (to_ffmpeg_expr used to emit
 #     linear for every interp mode) — cached chunks/videos baked pre-fix
 #     linear motion for eased keyframes.
-RENDER_BEHAVIOR_VERSION = 3
+# v4: text transform.x/y + style.size/stroke now render (previously ignored)
+#     and sticker z-order sorts — unchanged EDL bytes produce different
+#     pixels.
+RENDER_BEHAVIOR_VERSION = 4
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]

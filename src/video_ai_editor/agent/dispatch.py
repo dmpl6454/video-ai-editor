@@ -105,7 +105,11 @@ def _first_free_gap(
     replace) and are never routed through this helper.
     """
     occupied = sorted(
-        (c.start, c.start + c.duration)
+        # effective_duration, not duration: a 2x clip occupies half its
+        # source time on the timeline, so its occupied range ends earlier —
+        # source-based ranges false-positived collisions against genuinely
+        # free timeline space and pushed drops past a phantom footprint.
+        (c.start, c.start + c.effective_duration)
         for c in track.clips
         if isinstance(c, Clip) and c.id != ignore_clip_id
     )
@@ -283,7 +287,13 @@ def get_timeline(store: EDLStore, args: dict) -> dict:
                         "in": c.in_,
                         "out": c.out,
                         "start": c.start,
-                        "duration": c.duration,
+                        # TIMELINE seconds occupied — what start+duration
+                        # arithmetic (Claude's coordinate reasoning,
+                        # loop.py's _clip_line span) needs. Source seconds
+                        # (out-in) are preserved as source_duration so
+                        # nothing is lost for trim math.
+                        "duration": c.effective_duration,
+                        "source_duration": c.duration,
                     })
                 elif hasattr(c, "text"):  # text clip
                     tinfo["clips"].append({
@@ -488,24 +498,28 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     _ripple_close_gap(track)
     if track.id == "v1" and new_duration < old_duration - 1e-9:
         # The clip's OWN start doesn't move here (only _ripple_close_gap
-        # repacks positions) — its old timeline footprint was
-        # [old_start, old_start + old_duration). Trimming from the front
-        # (in_ increased) removes the HEAD of that footprint, since the
-        # surviving content still ends at the same `out` and now starts
-        # later: removed = [old_start, old_start + delta_in). Trimming from
-        # the back (out decreased, in_ unchanged) removes the TAIL instead,
+        # repacks positions) — its old TIMELINE footprint was
+        # [old_start, old_start + old_duration/sf), where old/new_duration
+        # are SOURCE seconds and sf converts to timeline seconds (a 2x clip
+        # occupies half its source time). _ripple_overlays wants the removed
+        # interval in TIMELINE coords. Trimming from the front (in_
+        # increased) removes the HEAD of that footprint, since the surviving
+        # content still ends at the same `out` and now starts later:
+        # removed = [old_start, old_start + delta_in/sf). Trimming from the
+        # back (out decreased, in_ unchanged) removes the TAIL instead,
         # since surviving content still starts at the same `in_`: removed =
-        # [old_start + new_duration, old_start + old_duration). These are
-        # genuinely different positions (not the same formula) — e.g. a
-        # clip at start=5 with old_duration=10 trimmed to new_duration=6
-        # removes [5,9) if trimmed from the front but [11,15) if trimmed
-        # from the back.
+        # [old_start + new_duration/sf, old_start + old_duration/sf). These
+        # are genuinely different positions (verified numerically) — e.g. a
+        # clip at start=5, source 10s @ 2x (footprint [5,10)) trimmed to
+        # source 6s removes [5,7) from the front but [8,10) from the back;
+        # both remove (10-6)/2 = 2 timeline seconds.
+        sf = c.speed_factor  # trim doesn't change speed, so old==new sf
         delta_in = c.in_ - old_in
         if delta_in > 1e-9:
             removed_start = old_start
         else:
-            removed_start = old_start + new_duration
-        removed_len = old_duration - new_duration
+            removed_start = old_start + new_duration / sf
+        removed_len = (old_duration - new_duration) / sf
         _ripple_overlays(store.edl, removed_start, removed_start + removed_len)
     summary = f"Trim {c.id} → in={c.in_:.2f} out={c.out:.2f}"
     store.commit("trim_clip", args, summary)
@@ -525,6 +539,16 @@ def move_clip(store: EDLStore, args: dict) -> dict:
         # is legitimate and must not go through the media-only check.
         new_t = _v_track_for_media(store.edl, new_track_id) if isinstance(c, Clip) \
             else _v_track(store.edl, new_track_id)
+        # A speed≠1 clip can't live on an audio lane (audio_mix applies no
+        # atempo, and PIP applies no setpts on v2) — its effective_duration
+        # would lie about the timeline geometry. Same contract as set_speed's
+        # lane guards, enforced at the second ingress.
+        if (isinstance(c, Clip) and c.speed_factor != 1.0
+                and (new_t.type in _AUDIO_LANE_TYPES or
+                     (new_t.type == "video" and new_t.id != "v1"))):
+            raise ValueError(
+                f"clip {c.id} has speed {c.speed_factor:g}x — reset speed to 1 "
+                f"before moving it off v1 ('{new_t.id}' renders at native speed)")
         track.clips.remove(c)
         new_t.clips.append(c)
         track = new_t
@@ -541,8 +565,13 @@ def move_clip(store: EDLStore, args: dict) -> dict:
             # instead of allowing the overlap; this is the backend
             # enforcement so Claude/MCP callers can't create it either (the
             # Timeline.tsx drop handler mirrors this client-side for instant
-            # feedback, but this is the real guard).
-            c.start = _first_free_gap(track, c.duration, requested_start, ignore_clip_id=c.id)
+            # feedback, but this is the real guard). The moved clip's width
+            # on the timeline is its effective_duration (speed-adjusted) —
+            # passing source `duration` made a 2x clip claim twice its real
+            # footprint and get snapped past slots it actually fits in.
+            c.start = _first_free_gap(
+                track, c.effective_duration, requested_start, ignore_clip_id=c.id
+            )
         else:
             c.start = requested_start
     track.clips.sort(key=lambda x: getattr(x, "start", 0))
@@ -571,8 +600,13 @@ def ripple_delete(store: EDLStore, args: dict) -> dict:
     track, c = res
     # Capture the removed interval BEFORE the track repacks — only meaningful
     # (and only applied) when deleting a v1 media clip; deleting a sticker/
-    # text overlay itself must not shift every OTHER overlay.
-    removed_start, removed_end = (c.start, c.start + c.duration) if isinstance(c, Clip) else (None, None)
+    # text overlay itself must not shift every OTHER overlay. The interval is
+    # in TIMELINE coords, so the clip's footprint is effective_duration —
+    # using source `duration` on a 2x clip claimed a removal window twice as
+    # wide as the actual timeline shift, over-shifting every later overlay.
+    removed_start, removed_end = (
+        (c.start, c.start + c.effective_duration) if isinstance(c, Clip) else (None, None)
+    )
     track.clips.remove(c)
     _ripple_close_gap(track)
     if track.id == "v1" and removed_start is not None:
@@ -589,7 +623,11 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("duplicate_clip only supports media clips")
-    dup = c.model_copy(update={"id": f"c_{c.id[2:]}d", "start": c.start + c.duration})
+    # Place the copy right after the original's TIMELINE footprint —
+    # effective_duration, since a sped clip ends earlier than its source
+    # length suggests (source-based placement left a gap that
+    # _ripple_close_gap then had to paper over).
+    dup = c.model_copy(update={"id": f"c_{c.id[2:]}d", "start": c.start + c.effective_duration})
     track.clips.append(dup)
     _ripple_close_gap(track)
     summary = f"Duplicate {c.id} → {dup.id}"
@@ -1217,8 +1255,16 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
             local_end = ends[i] - keep_pad
             if local_end - local_start < min_dur:
                 continue
-            tl_start = c.start + local_start
-            tl_end = c.start + local_end
+            # silencedetect offsets are SOURCE seconds into the [in_, out)
+            # slice; cut_range interprets its args as TIMELINE seconds. On a
+            # sped clip 1 timeline-second covers speed_factor source-seconds,
+            # so divide before anchoring at c.start — without this, a 2x
+            # clip's silence at source [2,4) (playing at timeline [1,2))
+            # emitted cut_range(2,4), which removed source [4,8): the wrong
+            # content, and twice as much of it.
+            sf = c.speed_factor
+            tl_start = c.start + local_start / sf
+            tl_end = c.start + local_end / sf
             ranges_to_cut.append((tl_start, tl_end))
 
     if not ranges_to_cut:
@@ -1674,6 +1720,21 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("set_speed only supports media clips")
+    # Audio lanes: audio_mix applies no atempo, so a committed speed field
+    # would never change playback — but it WOULD change effective_duration
+    # and therefore edl.duration / timeline geometry, desyncing what the
+    # timeline shows from what actually plays. Fail loudly (same posture as
+    # _reject_audio_lane_clip for transform/effects).
+    _reject_audio_lane_clip(track, cid, "set_speed")
+    # Non-v1 video tracks (PIP overlays): render/pip.py applies no setpts
+    # either, so speed on a v2 clip is fiction — and the old code worse-than-
+    # no-op'd by _ripple_close_gap-repacking the whole v2 track from t=0,
+    # destroying deliberate PIP placements (v2 legitimately has gaps).
+    if track.type == "video" and track.id != "v1":
+        raise ValueError(
+            "speed is only supported on the main video track (v1) — "
+            "PIP clips render at native speed"
+        )
     factor = float(args["factor"])
     if factor <= 0:
         raise ValueError("speed factor must be > 0")
@@ -1681,28 +1742,27 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     old_fp = c.effective_duration
     c.speed = factor
     new_fp = c.effective_duration
-    if track.type == "video" and abs(new_fp - old_fp) > 1e-9:
+    if track.id == "v1" and abs(new_fp - old_fp) > 1e-9:
         _ripple_close_gap(track)
-        if track.id == "v1":
-            # Overlays after this clip must follow the shift (same contract
-            # as cut_range/trim_clip). Speed-UP removes timeline; the removed
-            # interval is the tail of the old footprint. _ripple_overlays
-            # only handles left-shifts; a slow-DOWN inserts timeline, so
-            # push overlays right by the delta directly.
-            if new_fp < old_fp:
-                _ripple_overlays(store.edl,
-                                 removed_start=c.start + new_fp,
-                                 removed_end=c.start + old_fp)
-            else:
-                shift = new_fp - old_fp
-                boundary = c.start + old_fp
-                for t in store.edl.tracks:
-                    if t.type not in _OVERLAY_TRACK_TYPES:
-                        continue
-                    for oc in t.clips:
-                        if getattr(oc, "start", 0.0) >= boundary - 1e-9:
-                            oc.start += shift
-                            oc.end += shift
+        # Overlays after this clip must follow the shift (same contract
+        # as cut_range/trim_clip). Speed-UP removes timeline; the removed
+        # interval is the tail of the old footprint. _ripple_overlays
+        # only handles left-shifts; a slow-DOWN inserts timeline, so
+        # push overlays right by the delta directly.
+        if new_fp < old_fp:
+            _ripple_overlays(store.edl,
+                             removed_start=c.start + new_fp,
+                             removed_end=c.start + old_fp)
+        else:
+            shift = new_fp - old_fp
+            boundary = c.start + old_fp
+            for t in store.edl.tracks:
+                if t.type not in _OVERLAY_TRACK_TYPES:
+                    continue
+                for oc in t.clips:
+                    if getattr(oc, "start", 0.0) >= boundary - 1e-9:
+                        oc.start += shift
+                        oc.end += shift
     summary = f"Speed {cid} → {factor:.2f}× (now {new_fp:.2f}s on timeline)"
     store.commit("set_speed", args, summary)
     return {"summary": summary}

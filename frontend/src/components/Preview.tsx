@@ -62,14 +62,26 @@ export function Preview() {
   // subset — so this fingerprint can't drift out of sync with the schema again.
   const videoFingerprint = useMemo(() => {
     if (!edl) return ''
-    const vidTracks = edl.tracks.filter(t => t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
+    // Sticker tracks are INCLUDED: stickers are server-baked into the preview
+    // even in preview mode (render/text_overlay.py's build_overlay_chain skips
+    // TEXT clips for the client-drawn TextLayer but still bakes stickers —
+    // StickerLayer only draws selection/drag handles, not the sticker image).
+    // Excluding them meant sticker add/drag/delete never re-rendered: with the
+    // always-on client draw gone, sticker edits produced NO visual result
+    // until an unrelated video edit happened to bump the fingerprint. Text
+    // tracks stay deliberately excluded — TextLayer draws those client-side.
+    const vidTracks = edl.tracks.filter(t =>
+      t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo'
+      || t.type === 'sticker')
     return JSON.stringify({
       canvas: edl.canvas,
       // Track-LEVEL props matter too: transitions and mute live on the track,
       // not a clip — omitting them left the preview stale after adding a
-      // transition (surfaced the day transitions got a UI).
+      // transition (surfaced the day transitions got a UI). `z` is the
+      // compositing order (PIP/sticker stacking) — also render-relevant.
       tracks: vidTracks.map(t => ({
         id: t.id,
+        z: t.z,
         muted: t.muted,
         transitions: (t as unknown as { transitions?: unknown }).transitions,
         clips: t.clips,
@@ -374,6 +386,13 @@ export function Preview() {
             // (onLoadedMetadata below) is still in flight.
             const v = e.target as HTMLVideoElement
             const ph = useStore.getState().playhead
+            // readyState < 2: the media-load algorithm fires a bogus
+            // timeupdate (currentTime=0, readyState=0, seeking=false) BEFORE
+            // loadedmetadata. For ph in (0.05, 0.35] that 0 passes the
+            // proximity gate below and stomps the playhead to 0 before the
+            // onLoadedMetadata restore even runs. A genuine settled scrub
+            // reports readyState >= 2 (HAVE_CURRENT_DATA; observed 4).
+            if (v.readyState < 2) return
             if (v.seeking || Math.abs(v.currentTime - ph) > 0.35) return
             setPlayhead(v.currentTime)
           }}
@@ -393,8 +412,22 @@ export function Preview() {
             // the reloaded video to the same target.
             const v = e.target as HTMLVideoElement
             const ph = useStore.getState().playhead
-            if (ph > 0.05) {
-              try { v.currentTime = ph } catch { /* non-fatal */ }
+            // Clamp to the NEW render's duration: a speed-up can shrink the
+            // video below the stored playhead. The browser clamps the seek
+            // silently, but the store playhead then sits stranded past the
+            // end ("5.00/3.00s" transport, red line off the content) — so
+            // when ph exceeds the new duration, pull the store playhead back
+            // too, re-cohering transport/red-line/video. duration can be NaN
+            // here in theory (guard), though loadedmetadata implies it's set.
+            const vd = v.duration
+            const maxT = Number.isFinite(vd) && vd > 0 ? vd : ph
+            const target = Math.min(ph, maxT)
+            if (ph > maxT + 0.001) {
+              try { setPlayhead(target) } catch { /* non-fatal */ }
+              clockRef.current = target
+            }
+            if (target > 0.05) {
+              try { v.currentTime = target } catch { /* non-fatal */ }
             }
           }}
           onLoadedData={() => {
