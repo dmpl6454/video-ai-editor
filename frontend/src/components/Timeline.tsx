@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
-import { isMediaClip, isTextClip, type AnyClip, type Track } from '../types'
+import { isMediaClip, isTextClip, clipDuration, clipEnd, type AnyClip, type Track } from '../types'
 import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
+import { baseName } from '../lib/paths'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
@@ -37,7 +38,7 @@ function firstFreeGap(
   const occupied = track.clips
     .filter(isMediaClip)
     .filter((c) => c.id !== ignoreClipId)
-    .map((c): [number, number] => [c.start, c.start + (c.out - c.in)])
+    .map((c): [number, number] => [c.start, clipEnd(c)])
     .sort((a, b) => a[0] - b[0])
   let candidate = Math.max(0, preferredStart)
   const overlaps = (start: number) => {
@@ -134,6 +135,25 @@ export function Timeline() {
   const setPlayhead = useStore((s) => s.setPlayhead)
   const dispatch = useStore((s) => s.dispatch)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; clipId: string; trackId: string } | null>(null)
+  // Clamp the context menu into the viewport AFTER it renders (useLayoutEffect
+  // below): the raw click point is stored in `contextMenu`, but on lower
+  // tracks in a short timeline pane the fixed-position menu's items fall
+  // below the viewport. Measuring the real rendered box (multi-select adds
+  // items, so the height varies) beats estimating; useLayoutEffect mutates
+  // the style before paint, so there is no unclamped flash. The window-level
+  // mousedown close listener is attached in a useEffect after open, so this
+  // pre-paint adjustment cannot self-close the menu.
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (!contextMenu) return
+    const el = contextMenuRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const left = Math.max(8, Math.min(contextMenu.x, window.innerWidth - r.width - 8))
+    const top = Math.max(8, Math.min(contextMenu.y, window.innerHeight - r.height - 8))
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
+  }, [contextMenu])
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -409,8 +429,8 @@ export function Timeline() {
       // below, instead of being invisible.
       const seenRanges: [number, number][] = []
       for (const c of t.clips) {
-        const start = isMediaClip(c) ? c.start : c.start
-        const dur = isMediaClip(c) ? c.out - c.in : c.end - c.start
+        const start = c.start
+        const dur = clipDuration(c)
         const end = start + dur
         const overlapsPrior = seenRanges.some(([s, e]) => start < e - 1e-9 && end > s + 1e-9)
         seenRanges.push([start, end])
@@ -494,7 +514,7 @@ export function Timeline() {
         // left-edge scrim (clipped to the rounded clip rect) and switch to
         // light text.
         ctx.font = '10px var(--font-ui)'
-        const label = isMediaClip(c) ? (c.src.split('/').pop() ?? '') : ('text' in c ? c.text : '')
+        const label = isMediaClip(c) ? baseName(c.src) : ('text' in c ? c.text : '')
         const txt = label.slice(0, Math.max(0, Math.floor(w / 6)))
         if (txt && drewThumbs) {
           ctx.save()
@@ -1121,7 +1141,7 @@ export function Timeline() {
       for (const c of tk.clips) {
         if (ignoreClipId && c.id === ignoreClipId) continue
         const cs = (c as { start?: number }).start ?? 0
-        const ce = isMediaClip(c) ? (cs + (c.out - c.in)) : ((c as { end?: number }).end ?? cs)
+        const ce = isMediaClip(c) ? (cs + clipDuration(c)) : ((c as { end?: number }).end ?? cs)
         candidates.push(cs, ce)
       }
     }
@@ -1576,6 +1596,7 @@ export function Timeline() {
       )}
       {contextMenu && (
         <div
+          ref={contextMenuRef}
           onMouseDown={(e) => e.stopPropagation()}
           style={{
             position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 100,

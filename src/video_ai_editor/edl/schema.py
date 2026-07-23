@@ -85,7 +85,27 @@ class Clip(BaseModel):
 
     @property
     def duration(self) -> float:
+        """SOURCE seconds consumed (out - in). NOT timeline time when speed
+        != 1 — use effective_duration for timeline math."""
         return max(0.0, self.out - self.in_)
+
+    @property
+    def speed_factor(self) -> float:
+        """Scalar speed, 1.0 for unset/curve dicts (curves render as 1.0
+        today; when the compositor learns curves this stays the timeline-
+        footprint contract point)."""
+        if isinstance(self.speed, (int, float)) and self.speed > 0:
+            return float(self.speed)
+        return 1.0
+
+    @property
+    def effective_duration(self) -> float:
+        """TIMELINE seconds this clip occupies: source duration / speed.
+        A 10s source at 2x fills 5s of timeline — this is what
+        recompute_duration, ripple math, and the timeline draw must use;
+        `duration` alone silently assumed speed=1 everywhere (so speeding a
+        clip never changed the transport total or clip widths)."""
+        return self.duration / self.speed_factor
 
 
 class TextStyle(BaseModel):
@@ -117,6 +137,10 @@ class Sticker(BaseModel):
     start: float
     end: float
     transform: Transform = Field(default_factory=Transform)
+    # Per-clip stacking order WITHIN the sticker track (set_clip_z). Higher
+    # composites on top; ties fall back to the legacy start-order (later start
+    # wins). 0 = legacy default, so pre-existing EDLs render unchanged.
+    z: int = 0
     label: str | None = None  # for emoji stickers, the original character
 
 
@@ -151,9 +175,8 @@ class Track(BaseModel):
     config: CaptionsConfig | None = None  # captions track only
     transitions: list[Transition] = Field(default_factory=list)
     label: str | None = None
-    muted: bool = False
-    locked: bool = False
     muted: bool = False  # render skips this track if true
+    locked: bool = False
 
 
 class Canvas(BaseModel):
@@ -228,7 +251,7 @@ class EDL(BaseModel):
         for t in self.tracks:
             for c in t.clips:
                 if isinstance(c, Clip):
-                    end = max(end, c.start + c.duration)
+                    end = max(end, c.start + c.effective_duration)
                 else:
                     # TextClip and Sticker both expose `.end`
                     end = max(end, getattr(c, "end", 0.0))

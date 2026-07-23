@@ -58,6 +58,7 @@ def denoise_clip(src: Path, cache_dir: Path, *,
              "-vn", "-ac", "1", "-ar", str(sample_rate),
              "-c:a", "pcm_s16le", str(wav_in)],
             capture_output=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg audio extract failed: {proc.stderr[-500:]}")
@@ -81,6 +82,7 @@ def denoise_clip(src: Path, cache_dir: Path, *,
              "-map", "0:v", "-map", "1:a",
              "-c:v", "copy", "-c:a", "aac", "-shortest", str(dst)],
             capture_output=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg mux failed: {proc.stderr[-500:]}")

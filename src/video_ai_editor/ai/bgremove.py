@@ -62,6 +62,7 @@ def remove_background(src: Path, cache_dir: Path, *,
          "-show_entries", "stream=avg_frame_rate", "-of",
          "default=nokey=1:noprint_wrappers=1", str(src)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     fps_str = probe.stdout.strip()
     if "/" in fps_str:
@@ -75,6 +76,7 @@ def remove_background(src: Path, cache_dir: Path, *,
         [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2",
          str(in_dir / "f%05d.png")],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     n_in = len(list(in_dir.glob("*.png")))
     if n_in < 1:
@@ -106,6 +108,7 @@ def remove_background(src: Path, cache_dir: Path, *,
              "-c:v", "qtrle",
              "-c:a", "aac", "-shortest", str(dst)],
             capture_output=True, check=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
     else:
         subprocess.run(
@@ -117,6 +120,7 @@ def remove_background(src: Path, cache_dir: Path, *,
              "-pix_fmt", "yuv420p",
              "-c:a", "aac", "-shortest", str(dst)],
             capture_output=True, check=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
     shutil.rmtree(work, ignore_errors=True)
     return dst

@@ -123,6 +123,20 @@ _log = logging.getLogger(__name__)
 # TextClip construction site), which is out of scope for this fix.
 _STYLE_SENTINEL_COLOR = "#FFFFFF"
 _STYLE_SENTINEL_FONT = "Inter-Black"
+# TextStyle.size schema default. Any other scalar means "explicit size in
+# EDL-canvas pixels" (same coordinate system ROLE_STYLES sizes live in).
+_STYLE_SENTINEL_SIZE = 96.0
+# TextStyle stroke defaults ("#000000" / 4) — same sentinel posture: the
+# schema default means "use the role's stroke", anything else is explicit.
+_STYLE_SENTINEL_STROKE = "#000000"
+_STYLE_SENTINEL_STROKE_W = 4.0
+# TextClip's Transform default is Transform(x=540, y=1700) (edl/schema.py) —
+# absolute canvas pixels that no renderer ever read. Honoring them literally
+# would move every existing clip, so they are "unset" sentinels, exactly
+# like the color/font pair above. See resolve_anchor_overrides for the full
+# per-axis sentinel sets (tool defaults + role anchors are sentinels too).
+_TRANSFORM_SENTINEL_X = 540.0
+_TRANSFORM_SENTINEL_Y = 1700.0
 
 
 def _parse_hex_color(s: str) -> tuple[int, int, int, int] | None:
@@ -214,8 +228,17 @@ def _pick_script_font(text: str) -> Path | None:
     return p if p.exists() else None
 
 
-def _y_for_role(role: str, transform_y: float, canvas_h: int) -> float:
-    """Center-y in canvas coords."""
+def _y_for_role(role: str, transform_y: float | None, canvas_h: int) -> float:
+    """Center-y in canvas coords.
+
+    `transform_y` is a RESOLVED override (resolve_anchor_overrides): a float
+    means the user explicitly positioned this clip and it beats the role
+    anchor; None means role positioning. Captions never get here with a
+    float — resolve_anchor_overrides pins caption to (None, None) because
+    the captions block owns caption positioning.
+    """
+    if transform_y is not None and role != "caption":
+        return float(transform_y)
     if role == "watermark":
         return canvas_h - canvas_h * 0.04
     if role == "hook":
@@ -224,9 +247,103 @@ def _y_for_role(role: str, transform_y: float, canvas_h: int) -> float:
         return canvas_h - canvas_h * 0.16
     if role == "lower_third":
         return canvas_h - canvas_h * 0.20
-    if isinstance(transform_y, (int, float)):
-        return float(transform_y)
     return canvas_h * 0.75
+
+
+def resolve_size_override(c: TextClip) -> float | None:
+    """Explicit style.size in EDL-canvas px, or None for the role size.
+
+    The schema default (96) is the "never touched" sentinel — honoring it
+    literally would resize every existing clip (a hook would drop from 170
+    to 96). KNOWN LIMITATION (same class as the Inter-Black font sentinel):
+    explicitly asking for exactly 96 is indistinguishable from unset and
+    keeps the role size — harmless, not a crash or a dropped promise.
+    """
+    st = getattr(c, "style", None)
+    size = getattr(st, "size", None) if st is not None else None
+    if not isinstance(size, (int, float)):
+        return None
+    if abs(float(size) - _STYLE_SENTINEL_SIZE) < 1e-6 or float(size) <= 0:
+        return None
+    return float(size)
+
+
+def resolve_stroke_overrides(c: TextClip
+                             ) -> tuple[tuple[int, int, int, int] | None, float | None]:
+    """Explicit (stroke_rgba, stroke_w) from TextClip.style, or Nones.
+
+    Schema defaults ("#000000" / 4) are unset sentinels. A role whose own
+    stroke_w happens to be 4 (the "default" role) renders identically either
+    way, so the collision is a no-op by construction.
+    """
+    st = getattr(c, "style", None)
+    if st is None:
+        return None, None
+    stroke = sw = None
+    raw = (getattr(st, "stroke", "") or "").strip()
+    if raw and raw.upper() != _STYLE_SENTINEL_STROKE:
+        stroke = _parse_hex_color(raw)
+    w = getattr(st, "stroke_w", None)
+    if isinstance(w, (int, float)) and w >= 0 and abs(float(w) - _STYLE_SENTINEL_STROKE_W) > 1e-6:
+        sw = float(w)
+    return stroke, sw
+
+
+def resolve_anchor_overrides(c: TextClip, role: str,
+                             canvas_w: int, canvas_h: int
+                             ) -> tuple[float | None, float | None]:
+    """Explicit (anchor_x, anchor_y) in EDL-canvas px, or Nones (role layout).
+
+    x/y are ABSOLUTE CANVAS PIXELS of the text anchor (the block's center).
+    A value counts as explicit only when it can't be a construction-site
+    default, mirroring the color/font sentinel pattern:
+
+      x sentinels: 540 (Transform schema default on TextClip) and
+        canvas.w/2 (every tool's default AND the renderer's historic
+        hard-coded centering — requesting center is a semantic no-op).
+      y sentinels: 1700 (schema default), canvas.h*0.85 (add_text's no-arg
+        default, which never matched what actually rendered), and the
+        role's OWN anchor y (add_super_text / brand_kit write the anchor
+        value itself — again a no-op).
+
+    caption: always (None, None) — the captions block owns caption
+    positioning (task/product rule), so a stray transform can't move it.
+
+    Keyframed x/y resolve as None: text x/y were never animated server-side
+    and silently baking the last keyframe value would move existing EDLs.
+
+    KNOWN LIMITATION (accepted, same class as the Inter-Black font case):
+    explicitly typing a sentinel value (e.g. x exactly 540 on a canvas
+    whose center isn't 540, or y exactly at the role anchor) reads as
+    unset and renders at the role position — a reasonable result, never a
+    crash. After set_canvas/set_aspect_ratio, dispatch's
+    _rescale_overlays_for_canvas_change multiplies stored x/y, so a legacy
+    sentinel like y=1700 becomes a non-sentinel value at the SAME RELATIVE
+    position it always claimed — the clip then renders at that relative
+    position instead of snapping to the role anchor, which is exactly what
+    the rescale is documented to preserve.
+    """
+    if role == "caption":
+        return None, None
+    tx = getattr(c, "transform", None)
+    if tx is None:
+        return None, None
+
+    def _explicit(v: object, sentinels: tuple[float, ...]) -> float | None:
+        if not isinstance(v, (int, float)):
+            return None  # keyframed / missing
+        f = float(v)
+        for s in sentinels:
+            if abs(f - s) < 0.5:  # canvas px; rescale float noise tolerance
+                return None
+        return f
+
+    anchor_y_role = _y_for_role(role, None, canvas_h)
+    ax = _explicit(getattr(tx, "x", None),
+                   (_TRANSFORM_SENTINEL_X, canvas_w / 2))
+    ay = _explicit(getattr(tx, "y", None),
+                   (_TRANSFORM_SENTINEL_Y, canvas_h * 0.85, anchor_y_role))
+    return ax, ay
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
@@ -250,16 +367,28 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, ma
 
 def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     fill: tuple[int, int, int, int] | None = None,
-                    font_file: Path | None = None) -> Image.Image:
+                    font_file: Path | None = None,
+                    size: float | None = None,
+                    anchor_x: float | None = None,
+                    anchor_y: float | None = None,
+                    stroke: tuple[int, int, int, int] | None = None,
+                    stroke_w: float | None = None) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role.
 
     Emoji are stripped from the text before drawing (bundled fonts have no
     emoji glyphs and would render as boxes).
 
-    `fill` / `font_file` are per-clip TextStyle overrides (see
-    resolve_style_overrides); None means use the role style. An explicit fill
-    with default alpha inherits the role fill's alpha so e.g. a colored
-    watermark keeps its translucency.
+    `fill` / `font_file` / `size` / `stroke` / `stroke_w` are per-clip
+    TextStyle overrides (see resolve_style_overrides / resolve_size_override
+    / resolve_stroke_overrides); None means use the role style. An explicit
+    fill with default alpha inherits the role fill's alpha so e.g. a colored
+    watermark keeps its translucency. `size` is in EDL-canvas pixels — the
+    same coordinate system ROLE_STYLES sizes live in.
+
+    `anchor_x` / `anchor_y` are per-clip Transform overrides (see
+    resolve_anchor_overrides) in ABSOLUTE canvas pixels: the text block is
+    centered on the anchor. None keeps the historic layout (horizontal
+    centering; vertical role anchor via _y_for_role).
     """
     text = _strip_emoji(text)
     if not text:
@@ -269,6 +398,12 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         role_alpha = style["fill"][3]
         style = {**style, "fill": (fill[0], fill[1], fill[2],
                                    fill[3] if fill[3] != 255 else role_alpha)}
+    if size is not None:
+        style = {**style, "size": max(1, int(round(size)))}
+    if stroke is not None:
+        style = {**style, "stroke": stroke}
+    if stroke_w is not None:
+        style = {**style, "stroke_w": max(0, int(round(stroke_w)))}
     # Fall back to a Noto script font when the caption isn't Latin
     script_font = _pick_script_font(text)
     chosen_font = script_font if script_font is not None else (font_file or _font_path(style["font"]))
@@ -279,11 +414,12 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     lines = _wrap(draw, text.upper() if role in ("super", "hook") else text, font, max_w)
     line_h = font.size + 8
     total_h = line_h * len(lines)
-    y_center = _y_for_role(role, canvas_h * 0.75, canvas_h)
+    y_center = _y_for_role(role, anchor_y, canvas_h)
     y_top = int(y_center - total_h / 2)
+    x_center = float(anchor_x) if anchor_x is not None else canvas_w / 2
     for i, line in enumerate(lines):
         w = draw.textlength(line, font=font)
-        x = int((canvas_w - w) / 2)
+        x = int(x_center - w / 2)
         y = y_top + i * line_h
         if style.get("shadow"):
             for dx, dy in ((4, 6),):
@@ -324,16 +460,29 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
     for c, role in collect_text_clips(edl):
         displayable = _strip_emoji(c.text)
         fill, font_file = resolve_style_overrides(c, role)
-        # Style overrides are part of the pixels, so they are part of the key
-        # (v2→v3 bump also invalidates every pre-style-support cache entry).
+        size = resolve_size_override(c)
+        stroke, stroke_w = resolve_stroke_overrides(c)
+        anchor_x, anchor_y = resolve_anchor_overrides(c, role, canvas.w, canvas.h)
+        # Every override is part of the pixels, so every override is part of
+        # the key — keyed on the RESOLVED values (sentinels normalize to '')
+        # so a sentinel-valued clip shares its PNG with an untouched one.
+        # (v3→v4 bump also invalidates every pre-transform/size cache entry;
+        # without size/x/y in the key, a size edit silently served the
+        # stale PNG forever.)
         style_key = f"{fill or ''}|{font_file.name if font_file else ''}"
+        geo_key = (f"{'' if size is None else f'{size:.2f}'}|"
+                   f"{'' if anchor_x is None else f'{anchor_x:.2f}'},"
+                   f"{'' if anchor_y is None else f'{anchor_y:.2f}'}|"
+                   f"{stroke or ''}|{'' if stroke_w is None else f'{stroke_w:.2f}'}")
         key = hashlib.sha256(
-            f"v3|{role}|{canvas.w}x{canvas.h}|{style_key}|{displayable}".encode()
+            f"v4|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
             img = render_text_png(c.text, role, canvas.w, canvas.h,
-                                  fill=fill, font_file=font_file)
+                                  fill=fill, font_file=font_file,
+                                  size=size, anchor_x=anchor_x, anchor_y=anchor_y,
+                                  stroke=stroke, stroke_w=stroke_w)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -347,7 +496,9 @@ def collect_stickers(edl: EDL) -> list[Sticker]:
         for c in track.clips:
             if isinstance(c, Sticker):
                 out.append(c)
-    out.sort(key=lambda s: s.start)
+    # Per-clip z first (set_clip_z override), then legacy start-order for
+    # ties — later start still wins at equal z, pinning the old behavior.
+    out.sort(key=lambda s: (getattr(s, "z", 0), s.start))
     return out
 
 
@@ -544,17 +695,22 @@ def build_overlay_chain(
                           "z": zmap.get(c.id, 0)})
     for s, png in static_stickers:
         items.append({"kind": "static", "start": s.start, "end": s.end, "png": png,
-                      "opacity": 1.0, "z": zmap.get(s.id, 0)})
+                      "opacity": 1.0, "z": zmap.get(s.id, 0),
+                      "clip_z": getattr(s, "z", 0)})
     for s, png, (sw, sh) in animated_stickers:
         items.append({"kind": "anim", "sticker": s, "png": png, "size": (sw, sh),
-                      "z": zmap.get(s.id, 0)})
+                      "z": zmap.get(s.id, 0), "clip_z": getattr(s, "z", 0)})
 
     if not items:
         return "", [], source_label
 
-    # Later overlays composite on top; sort() is stable so same-z items keep
-    # their insertion order (text before stickers, matching prior behavior).
-    items.sort(key=lambda it: it["z"])
+    # Later overlays composite on top. Sort key: (track_z, clip_z) — clip_z is
+    # the per-sticker set_clip_z override (text items carry no clip_z → 0, so
+    # relative text/sticker layering by track z is unchanged). sort() is
+    # stable, so same-(track_z, clip_z) items keep their insertion order —
+    # collect_stickers already yields (clip_z, start) order, meaning ties
+    # still resolve by start (later start on top), pinning legacy behavior.
+    items.sort(key=lambda it: (it["z"], it.get("clip_z", 0)))
 
     extra_inputs: list[str] = []
     parts: list[str] = []
@@ -637,12 +793,18 @@ def build_overlay_chain(
             parts.append(chain + preprocessed)
 
             # Overlay position. x/y center the (possibly pop-scaled) frame on
-            # the text's own anchor: text is horizontally centered in the
-            # canvas-sized PNG, and its vertical center is the role anchor
-            # (recomputed here exactly as render_text_png placed it). For
-            # non-pop clips overlay_w==main_w / overlay_h==main_h, so both
-            # exprs collapse to 0 — identical to the static path.
-            cy = _y_for_role(role, canvas.h * 0.75, canvas.h) * (out_h / max(1, canvas.h))
+            # the text's own anchor: text sits at its anchor inside the
+            # canvas-sized PNG (horizontal center by default, explicit
+            # transform.x when set; vertical role anchor or explicit
+            # transform.y — recomputed here exactly as render_text_png
+            # placed it, via the SAME resolve_anchor_overrides so the
+            # animated path always agrees with the static one). For non-pop
+            # clips overlay_w==main_w / overlay_h==main_h, so both exprs
+            # collapse to 0 — identical to the static path.
+            anchor_x, anchor_y = resolve_anchor_overrides(tc, role, canvas.w, canvas.h)
+            cy = _y_for_role(role, anchor_y, canvas.h) * (out_h / max(1, canvas.h))
+            cx = ((float(anchor_x) if anchor_x is not None else canvas.w / 2)
+                  * (out_w / max(1, canvas.w)))
             off = out_h * 0.04
             y_terms = [f"{cy:.2f}*(1-overlay_h/main_h)"]
             if a_in == "slide_up":
@@ -653,8 +815,18 @@ def build_overlay_chain(
                 y_terms.append(f"-{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
             elif a_out == "slide_down":
                 y_terms.append(f"+{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
+            # x compensation mirrors y: center the (possibly pop-scaled)
+            # frame on the anchor x. For a centered anchor cx == out_w/2 and
+            # `cx*(1-overlay_w/main_w)` is algebraically `(main_w-overlay_w)/2`
+            # — the historic expression — so keep emitting the exact legacy
+            # string in that case (byte-identical filtergraphs for every
+            # existing project).
+            if anchor_x is None:
+                x_expr = "(main_w-overlay_w)/2"
+            else:
+                x_expr = f"{cx:.2f}*(1-overlay_w/main_w)"
             parts.append(
-                f"{cur}{preprocessed}overlay=x='(main_w-overlay_w)/2':y='{''.join(y_terms)}'"
+                f"{cur}{preprocessed}overlay=x='{x_expr}':y='{''.join(y_terms)}'"
                 f":enable='between(t\\,{tc.start:.3f}\\,{tc.end:.3f})'{next_label}"
             )
         else:

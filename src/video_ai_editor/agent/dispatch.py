@@ -70,6 +70,22 @@ def _v_track_for_media(edl: EDL, track_id: str) -> Track:
     return t
 
 
+_AUDIO_LANE_TYPES = frozenset({"audio", "music", "vo"})
+
+
+def _reject_audio_lane_clip(track: Track, clip_id: str, tool: str) -> None:
+    """Guard for video-only tools (color_grade / set_clip_transform /
+    add_effect): the audio render path (audio_mix._audio_clip_filter) applies
+    only resample + delay + gain + fades + mute — effects and transform are
+    ignored entirely, so committing them to a music/vo/audio clip is a silent
+    no-op (tester issue 10). Fail loudly instead of writing dead data."""
+    if track.type in _AUDIO_LANE_TYPES:
+        raise ValueError(
+            f"clip {clip_id} is on '{track.id}', an audio lane — "
+            f"{tool} has no effect on audio clips"
+        )
+
+
 def _first_free_gap(
     track: Track, duration: float, preferred_start: float, ignore_clip_id: str | None = None
 ) -> float:
@@ -130,7 +146,10 @@ def _ripple_close_gap(track: Track) -> None:
         if not isinstance(c, Clip):
             continue
         c.start = cursor
-        cursor = c.start + c.duration
+        # effective_duration, not duration: a 2x clip occupies half its
+        # source time on the timeline — packing by source time re-opened
+        # gaps after every speed change.
+        cursor = c.start + c.effective_duration
 
 
 _OVERLAY_TRACK_TYPES = ("text", "sticker", "captions")
@@ -278,7 +297,11 @@ def get_timeline(store: EDLStore, args: dict) -> dict:
                     tinfo["clips"].append({
                         "id": c.id,
                         "label": getattr(c, "label", None),
-                        "src": str(getattr(c, "src", "")).split("/")[-1],
+                        # Both separators, same as the media-clip src_name
+                        # above — split('/') alone returned the whole D:\...
+                        # path on Windows. Named src_name (not src) to match,
+                        # so loop.py's _clip_line picks it up too.
+                        "src_name": str(getattr(c, "src", "")).replace("\\", "/").split("/")[-1],
                         "start": getattr(c, "start", 0),
                         "end": getattr(c, "end", 0),
                     })
@@ -359,14 +382,19 @@ def cut_range(store: EDLStore, args: dict) -> dict:
     if args.get("dry_run"):
         return {"would_cut": [c.id for c in track.clips
                               if isinstance(c, Clip)
-                              and c.start < end and (c.start + c.duration) > start]}
+                              and c.start < end
+                              and (c.start + c.effective_duration) > start]}
 
     new_clips: list[Clip] = []
     for c in list(track.clips):
         if not isinstance(c, Clip):
             new_clips.append(c)
             continue
-        c_start, c_end = c.start, c.start + c.duration
+        # Timeline extent uses effective_duration; timeline deltas convert to
+        # SOURCE seconds via speed_factor before touching in/out (a 2x clip
+        # consumes 2 source-seconds per timeline second).
+        sf = c.speed_factor
+        c_start, c_end = c.start, c.start + c.effective_duration
         if c_end <= start or c_start >= end:
             new_clips.append(c)
             continue
@@ -374,11 +402,13 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         if c_start < start and c_end > end:
             # Split into two: [c_start..start] and [end..c_end]
             left_dur = start - c_start
-            right_dur = c_end - end
-            left = c.model_copy(update={"out": c.in_ + left_dur, "start": c_start})
+            left = c.model_copy(update={"out": c.in_ + left_dur * sf,
+                                        "start": c_start})
             right = c.model_copy(update={
-                "id": f"c_{c.id[2:]}b",
-                "in_": c.in_ + (end - c_start),
+                # Unique suffix — a literal 'b' collides with an earlier
+                # cut/split sibling of the same clip (same bug as split_at).
+                "id": f"c_{c.id[2:]}_{uuid4().hex[:6]}",
+                "in_": c.in_ + (end - c_start) * sf,
                 "out": c.out,
                 "start": start,  # will be ripple-adjusted
             })
@@ -388,12 +418,12 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         elif c_start < start:
             # Trim right side
             new_dur = start - c_start
-            c.out = c.in_ + new_dur
+            c.out = c.in_ + new_dur * sf
             new_clips.append(c)
         elif c_end > end:
             # Trim left side
             shift = end - c_start
-            c.in_ = c.in_ + shift
+            c.in_ = c.in_ + shift * sf
             new_clips.append(c)
         # else: fully inside → drop
     track.clips = new_clips
@@ -415,9 +445,12 @@ def split_at(store: EDLStore, args: dict) -> dict:
         if not isinstance(c, Clip):
             new_clips.append(c)
             continue
-        c_start, c_end = c.start, c.start + c.duration
+        c_start, c_end = c.start, c.start + c.effective_duration
         if c_start < t < c_end:
-            local = t - c_start
+            # Timeline seconds → SOURCE seconds: a 2x clip covers 2 source-
+            # seconds per timeline second, so the cut lands speed× deeper
+            # into the source than the timeline offset suggests.
+            local = (t - c_start) * c.speed_factor
             left = c.model_copy(update={"out": c.in_ + local})
             right = c.model_copy(update={
                 # Unique suffix, not a literal 'b': splitting a clip whose
@@ -1044,7 +1077,12 @@ def add_music(store: EDLStore, args: dict) -> dict:
         audio=AudioProps(gain_db=volume_db, fade_in=0.5, fade_out=1.0),
     )
     track.clips.append(clip)
-    summary = f"Add music {src.split('/')[-1]} @ {start:.1f}s, {volume_db:.0f}dB{', ducked' if duck else ''}"
+    # Both separators: split('/') alone left the whole D:\... path in the
+    # summary on Windows (same fix as get_timeline's src_name). Hoisted out
+    # of the f-string: a backslash inside an f-string expression is a
+    # SyntaxError before Python 3.12 (ubuntu CI runs 3.11).
+    src_name = str(src).replace("\\", "/").split("/")[-1]
+    summary = f"Add music {src_name} @ {start:.1f}s, {volume_db:.0f}dB{', ducked' if duck else ''}"
     store.commit("add_music", args, summary)
     return {"clip_id": clip.id, "summary": summary, "duck": duck}
 
@@ -1119,6 +1157,30 @@ def add_fade(store: EDLStore, args: dict) -> dict:
     return {"summary": summary}
 
 
+def set_clip_muted(store: EDLStore, args: dict) -> dict:
+    """Mute/unmute ONE clip's audio via `audio.mute` (omit `muted` to toggle).
+
+    This is the real clip-level mute — distinct from set_track_muted (whole
+    track) and from the old Properties.tsx proxy of `set_volume {db:-60}`,
+    which clobbered the user's gain trim and never set `audio.mute`, so the
+    checkbox could never render checked and unmute was impossible (issue 9).
+    Deliberately does NOT touch gain_db: a -6 dB trim survives a
+    mute/unmute cycle. The renderer already honors audio.mute on every path
+    (V1 clip chain, PIP, and audio_mix._audio_clip_filter all emit volume=0).
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    _, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("set_clip_muted only supports media clips (they carry audio)")
+    c.audio.mute = bool(args.get("muted", not c.audio.mute))
+    summary = f"{'Muted' if c.audio.mute else 'Unmuted'} clip {cid}"
+    store.commit("set_clip_muted", args, summary)
+    return {"summary": summary, "muted": c.audio.mute}
+
+
 def remove_silences(store: EDLStore, args: dict) -> dict:
     """Detect silences in the V1 audio + emit cut ops to remove them.
 
@@ -1145,6 +1207,7 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
              "-af", f"silencedetect=noise={threshold_db}dB:d={min_dur}",
              "-f", "null", "-"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **_pu.SUBPROCESS_FLAGS,
         )
         starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", proc.stderr)]
         ends = [float(m.group(1)) for m in re.finditer(r"silence_end: ([\d.]+)", proc.stderr)]
@@ -1357,9 +1420,10 @@ def add_effect(store: EDLStore, args: dict) -> dict:
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
-    _, c = res
+    t, c = res
     if not isinstance(c, Clip):
         raise ValueError("add_effect only supports media clips")
+    _reject_audio_lane_clip(t, cid, "add_effect")
     from ..edl.schema import Effect
     eff = Effect(type=str(args["type"]), params=dict(args.get("params") or {}))
     c.effects.append(eff)
@@ -1396,7 +1460,8 @@ def color_grade(store: EDLStore, args: dict) -> dict:
         res = store.edl.get_clip(str(cid))
         if not res:
             raise ValueError(f"clip {cid} not found")
-        _, c = res
+        t, c = res
+        _reject_audio_lane_clip(t, str(cid), "color_grade")
         if isinstance(c, Clip):
             target_clips.append(c)
     else:
@@ -1598,21 +1663,47 @@ def set_track_locked(store: EDLStore, args: dict) -> dict:
 
 
 def set_speed(store: EDLStore, args: dict) -> dict:
-    """Set playback-speed factor on a clip (1.0 = normal). Saved to EDL; the
-    renderer applies setpts/atempo when speed is non-default. M3 stores it as
-    a scalar; full speed-curve support comes later."""
+    """Set playback-speed factor on a clip (1.0 = normal) and RETIME the
+    timeline (CapCut semantics): a 2x clip's footprint halves, later clips on
+    the track ripple to stay adjacent, and overlays over the shifted region
+    follow. Scalar only; full speed-curve support comes later."""
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
-    _, c = res
+    track, c = res
     if not isinstance(c, Clip):
         raise ValueError("set_speed only supports media clips")
     factor = float(args["factor"])
     if factor <= 0:
         raise ValueError("speed factor must be > 0")
+
+    old_fp = c.effective_duration
     c.speed = factor
-    summary = f"Speed {cid} → {factor:.2f}×"
+    new_fp = c.effective_duration
+    if track.type == "video" and abs(new_fp - old_fp) > 1e-9:
+        _ripple_close_gap(track)
+        if track.id == "v1":
+            # Overlays after this clip must follow the shift (same contract
+            # as cut_range/trim_clip). Speed-UP removes timeline; the removed
+            # interval is the tail of the old footprint. _ripple_overlays
+            # only handles left-shifts; a slow-DOWN inserts timeline, so
+            # push overlays right by the delta directly.
+            if new_fp < old_fp:
+                _ripple_overlays(store.edl,
+                                 removed_start=c.start + new_fp,
+                                 removed_end=c.start + old_fp)
+            else:
+                shift = new_fp - old_fp
+                boundary = c.start + old_fp
+                for t in store.edl.tracks:
+                    if t.type not in _OVERLAY_TRACK_TYPES:
+                        continue
+                    for oc in t.clips:
+                        if getattr(oc, "start", 0.0) >= boundary - 1e-9:
+                            oc.start += shift
+                            oc.end += shift
+    summary = f"Speed {cid} → {factor:.2f}× (now {new_fp:.2f}s on timeline)"
     store.commit("set_speed", args, summary)
     return {"summary": summary}
 
@@ -1623,10 +1714,11 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
-    _, c = res
+    t, c = res
     # Media clips and stickers both carry a Transform; text clips don't.
     if not hasattr(c, "transform"):
         raise ValueError("set_clip_transform needs a media clip or sticker (it has no transform)")
+    _reject_audio_lane_clip(t, cid, "set_clip_transform")
     for k in ("x", "y", "scale", "rotation", "opacity"):
         if k in args and args[k] is not None:
             setattr(c.transform, k, float(args[k]))
@@ -2518,6 +2610,44 @@ def set_clip_timing(store: EDLStore, args: dict) -> dict:
     return {"summary": summary}
 
 
+def set_clip_z(store: EDLStore, args: dict) -> dict:
+    """Set the stacking order (z) of a sticker overlay within its track.
+
+    `z` is an int, or 'front' (max existing sibling z + 1) / 'back' (min
+    existing sibling z - 1). "Existing" includes the target's own current z,
+    matching the intuitive button semantics: 'front' always ends strictly
+    above every other sticker on the track, 'back' strictly below. Ties keep
+    the legacy start-order (later start on top) — see collect_stickers.
+
+    Sticker-only for now: TextClip/Clip carry no per-clip z (their layering is
+    the track z), so targeting one is a clear error rather than a silent no-op.
+    """
+    from ..edl.schema import Sticker as _Sticker
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    track, c = res
+    if not isinstance(c, _Sticker):
+        raise ValueError("set_clip_z targets a sticker (per-clip z exists only "
+                         "on stickers; other clip kinds layer by track z)")
+    z_arg = args.get("z", "front")
+    sib_z = [getattr(s, "z", 0) for s in track.clips if isinstance(s, _Sticker)]
+    if z_arg == "front":
+        new_z = (max(sib_z) if sib_z else 0) + 1
+    elif z_arg == "back":
+        new_z = (min(sib_z) if sib_z else 0) - 1
+    else:
+        try:
+            new_z = int(z_arg)
+        except (TypeError, ValueError):
+            raise ValueError("z must be an int, 'front', or 'back'")
+    c.z = new_z
+    summary = f"Sticker {cid} z → {new_z}"
+    store.commit("set_clip_z", args, summary)
+    return {"summary": summary, "z": new_z}
+
+
 def vocal_isolate(store: EDLStore, args: dict) -> dict:
     """Run Demucs to extract a vocals-only WAV from a clip's source. Adds the
     resulting stem as a new clip on the `vo` track and mutes the original V1
@@ -2807,7 +2937,7 @@ def _probe_audio_duration(p: Path) -> float:
         out = sp.run([_pu.FFPROBE, "-v", "error", "-show_entries",
                       "format=duration", "-of",
                       "default=nokey=1:noprint_wrappers=1", str(p)],
-                     capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout.strip()
+                     capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, **_pu.SUBPROCESS_FLAGS).stdout.strip()
         return float(out)
     except Exception:
         return 0.0
@@ -3085,6 +3215,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "add_music": add_music,
     "set_duck": set_duck,
     "set_volume": set_volume,
+    "set_clip_muted": set_clip_muted,
     "add_fade": add_fade,
     "remove_silences": remove_silences,
     "remove_fillers": remove_fillers,
@@ -3111,6 +3242,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_speed": set_speed,
     "set_clip_transform": set_clip_transform,
     "set_clip_timing": set_clip_timing,
+    "set_clip_z": set_clip_z,
     "bulk_delete": bulk_delete,
     "bulk_duplicate": bulk_duplicate,
     "add_marker": add_marker,

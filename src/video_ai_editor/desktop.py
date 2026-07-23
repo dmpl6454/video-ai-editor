@@ -72,6 +72,7 @@ def _ensure_frontend_built() -> None:
         [_npm_cmd(), "run", "build"],
         cwd=str(repo / "frontend"),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         print("[desktop] npm build failed:\n", proc.stderr[-1500:], file=sys.stderr)
@@ -109,6 +110,7 @@ def _avfoundation_default_audio_index() -> str:
             [_pu.FFMPEG, "-f", "avfoundation", "-list_devices", "true", "-i", ""],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=10,
+            **_pu.SUBPROCESS_FLAGS,
         )
     except Exception:
         return "0"
@@ -293,6 +295,7 @@ class _Api:
             proc = subprocess.Popen(
                 [_pu.FFMPEG, "-y", "-f", "avfoundation", "-i", f":{audio_idx}", str(out_path)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                **_pu.SUBPROCESS_FLAGS,
             )
         except Exception as e:
             return {"ok": False, "error": f"could not start ffmpeg: {e}"}

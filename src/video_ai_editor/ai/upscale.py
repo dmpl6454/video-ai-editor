@@ -56,6 +56,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
     subprocess.run(
         [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     # Upscale each frame. The binary segfaults if it can't find models/ on a
     # relative path, so we cd into its directory and pass `-m models`.
@@ -72,6 +73,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
          "-m", "models"],
         cwd=str(ESRGAN_DIR),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"realesrgan failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}\n{proc.stdout[-500:]}")
@@ -81,6 +83,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
         encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     ).stdout.strip()
     if "/" in fps:
         n, d = fps.split("/")
@@ -96,6 +99,7 @@ def upscale_clip(src: Path, cache_dir: Path, *, factor: int = 2,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-shortest", str(dst)],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     shutil.rmtree(work, ignore_errors=True)
     return dst

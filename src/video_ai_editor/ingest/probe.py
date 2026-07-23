@@ -55,6 +55,7 @@ def probe(path: Path) -> ProbeResult:
             "-of", "json", str(path),
         ],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     data = json.loads(out.stdout)
     fmt = data.get("format", {})

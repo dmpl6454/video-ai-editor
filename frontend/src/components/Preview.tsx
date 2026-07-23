@@ -360,10 +360,43 @@ export function Preview() {
             // distrust. Only let it drive the playhead when paused (scrubbing
             // via native seek, not our rAF loop).
             if (isPlaying) return
-            setPlayhead((e.target as HTMLVideoElement).currentTime)
+            // Even while paused, distrust a currentTime that's far from the
+            // store playhead: a preview re-render swaps <video src>, and the
+            // media-load algorithm resets currentTime to 0 and fires
+            // timeupdate — writing that 0 through permanently yanked the
+            // paused playhead back to the start on EVERY edit (the same
+            // stale-reload value the playing-path TRUST_TOL check rejects).
+            // A genuine native seek settles within the tolerance (the sync
+            // effect above just set currentTime = playhead), so real scrubs
+            // still pass. Fresh load (playhead≈0) needs no special case:
+            // |0 − 0| < 0.35 passes and writes 0, which equals the playhead.
+            // `seeking` guards the window where the restore-on-reload seek
+            // (onLoadedMetadata below) is still in flight.
+            const v = e.target as HTMLVideoElement
+            const ph = useStore.getState().playhead
+            if (v.seeking || Math.abs(v.currentTime - ph) > 0.35) return
+            setPlayhead(v.currentTime)
           }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
+          onLoadedMetadata={(e) => {
+            // Restore the playhead position after a src swap (preview
+            // re-render). The media-load algorithm resets currentTime to 0;
+            // nothing else re-seeks a PAUSED video (the playhead-sync effect
+            // keys on playhead/isPlaying, which don't change across a
+            // reload), so without this the paused preview showed frame 0
+            // after every edit. loadedmetadata is the earliest moment
+            // (readyState >= 1) a seek is honored rather than discarded.
+            // Reads the LATEST store playhead so a drag that happened
+            // mid-reload wins. While playing this is redundant-but-
+            // consistent: the sync effect + rAF TRUST_TOL already converge
+            // the reloaded video to the same target.
+            const v = e.target as HTMLVideoElement
+            const ph = useStore.getState().playhead
+            if (ph > 0.05) {
+              try { v.currentTime = ph } catch { /* non-fatal */ }
+            }
+          }}
           onLoadedData={() => {
             // The committed transform (Properties.tsx's onChange) is only
             // visible once THIS reload finishes — clearing liveTransform any

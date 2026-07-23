@@ -24,6 +24,7 @@ def _audio_extract(src: Path, dst: Path) -> Path:
         [_pu.FFMPEG, "-y", "-i", str(src), "-vn", "-acodec", "pcm_s16le",
          "-ar", "44100", "-ac", "2", str(dst)],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     return dst
 
@@ -47,6 +48,7 @@ def _demucs_separate(audio_path: Path, out_dir: Path) -> dict[str, Path]:
             str(audio_path),
         ],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"demucs failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -91,6 +93,7 @@ def _mix(stems: list[Path], dst: Path) -> Path:
         [_pu.FFMPEG, "-y", *inputs, "-filter_complex", fc, "-map", "[out]",
          "-c:a", "pcm_s16le", str(dst)],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     return dst
 

@@ -34,7 +34,7 @@ def _ffmpeg_with_vidstab() -> str | None:
             continue
         try:
             out = subprocess.run([cand, "-hide_banner", "-filters"],
-                                 capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, **_pu.SUBPROCESS_FLAGS)
             if "vidstabdetect" in out.stdout:
                 return cand
         except Exception:
@@ -69,6 +69,7 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
          "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={trf_filt}",
          "-f", "null", "-"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if p1.returncode != 0:
         raise RuntimeError(f"vidstabdetect failed (rc={p1.returncode}):\n{p1.stderr[-1200:]}")
@@ -80,6 +81,7 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-c:a", "copy", str(dst)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if p2.returncode != 0:
         raise RuntimeError(f"vidstabtransform failed (rc={p2.returncode}):\n{p2.stderr[-1200:]}")

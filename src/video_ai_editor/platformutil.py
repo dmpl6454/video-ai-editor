@@ -7,12 +7,31 @@ codebase should route through a function in this module rather than an inline
 from __future__ import annotations
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
+
+# Spread into every subprocess.run/Popen/check_output/check_call as
+# `**_pu.SUBPROCESS_FLAGS`. On Windows, a windowed parent (frozen exe built
+# with console=False, or pythonw) spawning a console child (ffmpeg/ffprobe/
+# whisper-cli/...) pops up a visible terminal window for every task unless the
+# call passes creationflags=subprocess.CREATE_NO_WINDOW. On macOS/Linux this is
+# an empty dict, so the spread is a no-op and behavior is byte-identical.
+#
+# NOTE: the dict-spread raises TypeError if a call site ALSO passes its own
+# creationflags= kwarg (duplicate keyword). No site does today — a future site
+# that needs extra creation flags must drop the spread and OR the flag in
+# manually: creationflags=subprocess.CREATE_NO_WINDOW | <extra> (guarded for
+# Windows, since CREATE_NO_WINDOW only exists there).
+# tests/test_subprocess_no_window.py statically enforces that every subprocess
+# call site under src/video_ai_editor carries one of the two forms.
+SUBPROCESS_FLAGS: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
+)
 
 
 def exe_name(name: str) -> str:

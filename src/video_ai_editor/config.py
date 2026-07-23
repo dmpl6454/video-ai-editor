@@ -72,7 +72,14 @@ def _apply_env_file(env_path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        k, v = k.strip(), v.strip().strip('"').strip("'")
+        k, v = k.strip(), v.strip()
+        # Strip unquoted inline comments (`KEY=auto  # note` → `auto`) —
+        # .env.example itself shipped one on WHISPER_DEVICE and the comment
+        # became part of the value, crashing whisper with "unsupported
+        # device". Quoted values keep their # (passwords etc.).
+        if v and not v.startswith(('"', "'")):
+            v = v.split(" #", 1)[0].rstrip()
+        v = v.strip('"').strip("'")
         if k and v:
             parsed[k] = v  # later entries overwrite earlier ones
     for k, v in parsed.items():

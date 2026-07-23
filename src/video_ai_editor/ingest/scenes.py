@@ -27,6 +27,7 @@ def detect_shots(src: Path, threshold: float = 0.3) -> list[Shot]:
             "-f", "null", "-",
         ],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     times: list[float] = []
     for line in proc.stderr.splitlines():

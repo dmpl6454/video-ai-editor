@@ -53,6 +53,7 @@ def object_erase(src: Path, cache_dir: Path, *,
         [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,avg_frame_rate", "-of", "json", str(src)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     import json as _json
     s = _json.loads(probe.stdout)["streams"][0]
@@ -74,6 +75,7 @@ def object_erase(src: Path, cache_dir: Path, *,
     subprocess.run(
         [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(in_dir / "f%05d.png")],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
 
     # Build the binary mask once — same shape for every frame.
@@ -130,6 +132,7 @@ def object_erase(src: Path, cache_dir: Path, *,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-shortest", str(dst)],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     shutil.rmtree(work, ignore_errors=True)
     return dst

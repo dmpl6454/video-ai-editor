@@ -82,6 +82,7 @@ def _audio_extract(src: Path, dst: Path) -> Path:
         [_pu.FFMPEG, "-y", "-i", str(src), "-vn",
          "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(dst)],
         capture_output=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         # Common cause: source has no audio track at all.
@@ -204,6 +205,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
         [_pu.FFMPEG, "-i", str(audio_wav), "-af",
          "silencedetect=noise=-35dB:d=0.4", "-f", "null", "-"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     starts: list[float] = [0.0]
     ends: list[float] = []
@@ -225,6 +227,7 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
             [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nokey=1:noprint_wrappers=1", str(audio_wav)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+            **_pu.SUBPROCESS_FLAGS,
         ).stdout.strip())
     except Exception:
         dur = 0.0

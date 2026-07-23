@@ -53,17 +53,26 @@ class Transcript(BaseModel):
 _models: dict[str, Any] = {}
 
 
+def _resolve_device() -> str:
+    """Sanitize WHISPER_DEVICE into something ctranslate2 accepts.
+
+    Users' .env files may carry a polluted value (an inline comment that a
+    pre-fix parser kept as part of the value), and 'mps'/'auto' are not
+    ctranslate2 devices — everything unknown degrades to cpu instead of
+    crashing the Captions button with "unsupported device".
+    """
+    device = str(WHISPER_DEVICE).split("#", 1)[0].strip().lower()
+    return device if device in ("cpu", "cuda") else "cpu"
+
+
 def _get_model(model_size: str | None = None):
     name = model_size or WHISPER_MODEL
     cached = _models.get(name)
     if cached is not None:
         return cached
     from faster_whisper import WhisperModel
-    device = WHISPER_DEVICE
     compute_type = "int8"
-    if device == "auto":
-        device = "cpu"  # CoreML path is opt-in; default cpu+int8 is fine
-    cached = WhisperModel(name, device=device, compute_type=compute_type)
+    cached = WhisperModel(name, device=_resolve_device(), compute_type=compute_type)
     _models[name] = cached
     return cached
 
@@ -134,6 +143,7 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
             [_pu.FFMPEG, "-y", "-i", str(audio_path),
              "-vn", "-ac", "1", "-ar", "16000", str(wav)],
             capture_output=True, check=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         out_prefix = Path(td) / "out"
         # `-l auto` is REQUIRED when no language is given: whisper-cli's
@@ -161,7 +171,7 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
         # errors="replace" on the captured pipes (progress meter can split a
         # multibyte char across buffers).
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
         json_path = Path(f"{out_prefix}.json")
