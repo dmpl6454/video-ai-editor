@@ -2,10 +2,16 @@ import { describe, it, expect } from 'vitest'
 import { rangesOverlap, resolveMediaSpeed, resolveMediaTrim, resolveOverlayTiming, snapToFreeGap, wouldOverlap } from './dragResolve'
 import type { Track } from '../types'
 
-function mediaTrack(clips: { id: string; start: number; dur: number }[]): Track {
+function mediaTrack(clips: { id: string; start: number; dur: number; speed?: number }[]): Track {
   return {
     id: 'v1', type: 'video', z: 0,
-    clips: clips.map((c) => ({ id: c.id, src: 'x.mp4', in: 0, out: c.dur, start: c.start })),
+    // `speed` isn't on the frontend Clip interface (hand-mirrored, incomplete
+    // on purpose) — attach it the way the backend serializes it; clipSpeedFactor
+    // reads it via a cast.
+    clips: clips.map((c) => ({
+      id: c.id, src: 'x.mp4', in: 0, out: c.dur, start: c.start,
+      ...(c.speed != null ? { speed: c.speed } : {}),
+    })) as Track['clips'],
   }
 }
 
@@ -31,6 +37,13 @@ describe('wouldOverlap', () => {
   })
   it('ignores the clip being moved', () => {
     expect(wouldOverlap(track, 5, 0, 'a')).toBe(false)
+  })
+  it('uses the EFFECTIVE (speed-adjusted) footprint of existing clips', () => {
+    // 10s of source at 2x occupies only [0,5) on the timeline — placing at 6
+    // must be free (raw out-in would say it occupies [0,10) and flag overlap).
+    const retimed = mediaTrack([{ id: 'a', start: 0, dur: 10, speed: 2 }])
+    expect(wouldOverlap(retimed, 3, 6, 'ignore')).toBe(false)
+    expect(wouldOverlap(retimed, 3, 4, 'ignore')).toBe(true)
   })
 })
 
@@ -59,6 +72,11 @@ describe('snapToFreeGap', () => {
     const track = mediaTrack([{ id: 'a', start: 0, dur: 5 }])
     expect(snapToFreeGap(track, 0, 2, 'ignore')).toBe(5)
   })
+  it('snaps to the EFFECTIVE end of a retimed clip, not its source end', () => {
+    // 10s source at 2x ends at timeline 5 — a collided drop snaps to 5, not 10.
+    const retimed = mediaTrack([{ id: 'a', start: 0, dur: 10, speed: 2 }])
+    expect(snapToFreeGap(retimed, 3, 2, 'ignore')).toBe(5)
+  })
 })
 
 describe('resolveMediaTrim', () => {
@@ -74,6 +92,19 @@ describe('resolveMediaTrim', () => {
   })
   it('clamps in to >= 0', () => {
     expect(resolveMediaTrim(clip, 'l', -100)).toEqual({ in: 0, out: 8 })
+  })
+  it('converts the timeline delta to source space via speed (0.5x)', () => {
+    // 0.5x clip dragged +2 TIMELINE seconds on the right edge should consume
+    // only 1 SOURCE second (2·0.5) → footprint grows exactly the dragged 2s
+    // ((out-in)/speed: 6/0.5=12 → 7/0.5=14). Unscaled it grew 4s.
+    expect(resolveMediaTrim(clip, 'r', 2, 0.5)).toEqual({ in: 2, out: 9 })
+  })
+  it('converts the timeline delta to source space via speed (2x, left edge)', () => {
+    // 2x clip: +1 timeline second on the left edge advances `in` by 2 source s.
+    expect(resolveMediaTrim(clip, 'l', 1, 2)).toEqual({ in: 4, out: 8 })
+  })
+  it('treats a missing/invalid speed as 1', () => {
+    expect(resolveMediaTrim(clip, 'r', 2, 0)).toEqual({ in: 2, out: 10 })
   })
 })
 

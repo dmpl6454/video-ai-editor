@@ -24,7 +24,7 @@ def _has_filter(name: str) -> bool:
     """Cheap check: is this filter available in the local ffmpeg build?"""
     try:
         out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-filters"],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, **_pu.SUBPROCESS_FLAGS)
         return any(line.split()[1:2] == [name] for line in out.stdout.splitlines())
     except Exception:
         return False
@@ -37,6 +37,7 @@ def _color_meta(src: Path) -> dict:
              "-show_entries", "stream=color_transfer,color_primaries,color_space,pix_fmt",
              "-of", "json", str(src)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         data = json.loads(out.stdout)
         return (data.get("streams") or [{}])[0]
@@ -59,6 +60,7 @@ def _has_audio(src: Path) -> bool:
             [_pu.FFPROBE, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", str(src)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+            **_pu.SUBPROCESS_FLAGS,
         )
         return bool(out.stdout.strip())
     except Exception:
@@ -130,7 +132,7 @@ def normalize(src: Path, dst: Path, fps: int = 30, sample_rate: int = 48000,
     hdr = _is_hdr(meta)
     last_proc: subprocess.CompletedProcess | None = None
     for args in _attempts(src, dst, fps, sample_rate, channels, height, hdr):
-        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         if proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
             return probe(dst)
         last_proc = proc

@@ -55,6 +55,7 @@ def waveform_peaks(src: Path, cache_dir: Path,
         [_pu.FFMPEG, "-v", "error", "-i", str(src),
          "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
         capture_output=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         # Source has no audio; return zeros

@@ -59,6 +59,56 @@ function isText(c: unknown): c is TextClip {
 // explicit override without check (a).
 const SENTINEL_COLOR = '#FFFFFF'
 const SENTINEL_FONT = 'Inter-Black'
+// TextStyle.size schema default — any other value is an explicit size in
+// EDL-canvas px (the same coordinate system ROLE_STYLES sizes live in).
+const SENTINEL_SIZE = 96
+// TextStyle stroke defaults — mirror of the server's stroke sentinels.
+const SENTINEL_STROKE = '#000000'
+const SENTINEL_STROKE_W = 4
+// TextClip's Transform schema default is (x=540, y=1700) — absolute canvas
+// px that historically no renderer read. Mirrors the server's
+// resolve_anchor_overrides (render/text_overlay.py): a value is an explicit
+// anchor only when it can't be a construction-site default —
+//   x sentinels: 540 and canvas.w/2 (tool default = hard-coded centering)
+//   y sentinels: 1700, canvas.h*0.85 (add_text's no-arg default), and the
+//     role's own server-side anchor y (add_super_text/brand_kit write it)
+// caption role: transform overrides are ignored entirely (the captions
+// block owns caption positioning). Keyframed x/y also resolve as unset.
+const SENTINEL_X = 540
+const SENTINEL_Y = 1700
+
+// The SERVER's role anchor y in canvas coords (_y_for_role with no
+// override) — this is what add_super_text/brand_kit persist, so it is the
+// value the sentinel comparison must run against. NOT the browser's own
+// draw anchors below (those stay authoritative for how a role-positioned
+// clip actually draws on screen).
+function serverAnchorY(role: string, canvasH: number): number {
+  if (role === 'watermark') return canvasH - canvasH * 0.04
+  if (role === 'hook') return canvasH * 0.5
+  if (role === 'caption') return canvasH - canvasH * 0.16
+  if (role === 'lower_third') return canvasH - canvasH * 0.2
+  return canvasH * 0.75
+}
+
+// Explicit (anchorX, anchorY) in EDL-canvas px, or nulls (role layout).
+// Same tolerance (±0.5 canvas px) as the server, absorbing the float noise
+// _rescale_overlays_for_canvas_change multiplication introduces.
+function resolveAnchor(
+  c: TextClip, role: string, canvasW: number, canvasH: number,
+): { ax: number | null; ay: number | null } {
+  if (role === 'caption') return { ax: null, ay: null }
+  const tx = (c as TextClip & { transform?: { x?: unknown; y?: unknown } }).transform
+  if (!tx) return { ax: null, ay: null }
+  const pick = (v: unknown, sentinels: number[]): number | null => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return null // keyframed / missing
+    for (const s of sentinels) if (Math.abs(v - s) < 0.5) return null
+    return v
+  }
+  return {
+    ax: pick(tx.x, [SENTINEL_X, canvasW / 2]),
+    ay: pick(tx.y, [SENTINEL_Y, canvasH * 0.85, serverAnchorY(role, canvasH)]),
+  }
+}
 
 function roleFontMatches(role: string, ttf: string): boolean {
   const want = cssFont(ttf)
@@ -198,19 +248,37 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         const styleFont = c.style?.font && c.style.font !== SENTINEL_FONT
           && !roleFontMatches(role, c.style.font)
           ? cssFont(c.style.font) : null
-        // s.size is a fixed px value against the EDL canvas (matches the
-        // server's ROLE_STYLES); rescale it to the on-screen preview box.
-        const fontPx = Math.round((s.size / edl.canvas.h) * height)
+        // style.size (non-sentinel) is an explicit size in EDL-canvas px —
+        // exactly the coordinate system s.size (ROLE_STYLES) lives in, so
+        // both rescale to the on-screen preview box the same way. Mirrors
+        // the server's resolve_size_override.
+        const sizeCanvasPx = typeof c.style?.size === 'number'
+          && Number.isFinite(c.style.size) && c.style.size > 0
+          && Math.abs(c.style.size - SENTINEL_SIZE) > 1e-6
+          ? c.style.size : s.size
+        const fontPx = Math.round((sizeCanvasPx / edl.canvas.h) * height)
         const family = styleFont?.family ?? s.font
         const weight = styleFont?.weight ?? s.weight ?? 'bold'
         ctx.font = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'center'
         ctx.lineJoin = 'round'
-        ctx.lineWidth = Math.max(2, Math.round(s.stroke * height))
+        // Custom stroke_w is in canvas px like the server's; the role
+        // fallback keeps the historic on-screen-height fraction.
+        const styleStrokeW = typeof c.style?.stroke_w === 'number'
+          && Number.isFinite(c.style.stroke_w) && c.style.stroke_w >= 0
+          && Math.abs(c.style.stroke_w - SENTINEL_STROKE_W) > 1e-6
+          ? c.style.stroke_w : null
+        ctx.lineWidth = styleStrokeW != null
+          ? Math.max(1, Math.round((styleStrokeW / edl.canvas.h) * height))
+          : Math.max(2, Math.round(s.stroke * height))
 
         const env = animEnvelope(c, t, height)
-        ctx.strokeStyle = 'rgba(0,0,0,0.95)'
+        const styleStroke = c.style?.stroke
+          && c.style.stroke.toUpperCase() !== SENTINEL_STROKE
+          && /^#[0-9a-fA-F]{6}/.test(c.style.stroke)
+          ? c.style.stroke.slice(0, 7) : null
+        ctx.strokeStyle = styleStroke ?? 'rgba(0,0,0,0.95)'
         ctx.fillStyle = styleColor ?? `rgba(255,255,255,1)`
         ctx.globalAlpha = (s.opacity ?? 1) * env.alpha
 
@@ -222,8 +290,17 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         const lineH = fontPx * 1.15
         const totalH = lineH * lines.length
 
+        // Anchor overrides (transform.x / transform.y, EDL-canvas px):
+        // non-sentinel values place the text block's center absolutely,
+        // scaled by the on-screen-box / canvas ratio — the same
+        // canvas→output scale the server applies. Sentinels keep the
+        // browser's own historic role layout below.
+        const { ax, ay } = resolveAnchor(c, role, edl.canvas.w, edl.canvas.h)
+        const anchorX = ax != null ? (ax / edl.canvas.w) * width : width / 2
+
         let cy: number
-        if (s.align === 'top') cy = height * 0.06 + totalH / 2
+        if (ay != null) cy = (ay / edl.canvas.h) * height
+        else if (s.align === 'top') cy = height * 0.06 + totalH / 2
         else if (s.align === 'center') cy = height / 2
         else if (s.align === 'lower') cy = height * 0.78
         else if (s.align === 'bottom') cy = height - totalH / 2 - height * 0.10
@@ -234,9 +311,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // pop: scale around the text's own anchor, like the server's
         // overlay-position compensation does.
         if (env.scale !== 1) {
-          ctx.translate(width / 2, cy)
+          ctx.translate(anchorX, cy)
           ctx.scale(env.scale, env.scale)
-          ctx.translate(-width / 2, -cy)
+          ctx.translate(-anchorX, -cy)
         }
         // shadow
         ctx.save()
@@ -245,12 +322,12 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         ctx.shadowOffsetY = Math.max(2, fontPx * 0.03)
         for (let i = 0; i < lines.length; i++) {
           const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          ctx.strokeText(lines[i], width / 2, ly)
+          ctx.strokeText(lines[i], anchorX, ly)
         }
         ctx.restore()
         for (let i = 0; i < lines.length; i++) {
           const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          ctx.fillText(lines[i], width / 2, ly)
+          ctx.fillText(lines[i], anchorX, ly)
         }
         ctx.restore()
         ctx.globalAlpha = 1

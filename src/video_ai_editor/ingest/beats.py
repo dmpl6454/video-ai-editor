@@ -42,6 +42,7 @@ def detect_beats(src: Path, *, sr: int = 22050) -> list[float]:
              "-vn", "-ac", "1", "-ar", str(sr),
              "-c:a", "pcm_s16le", str(wav)],
             capture_output=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         if proc.returncode != 0:
             raise RuntimeError(

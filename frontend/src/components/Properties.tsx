@@ -1,6 +1,7 @@
 import React from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
+import { baseName } from '../lib/paths'
 
 function isKeyframed(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false
@@ -69,7 +70,14 @@ export function Properties() {
     )
   }
 
-  // Media clip — full inspector
+  // Media clip — full inspector.
+  // Audio-lane clips (music/vo/audio tracks) hide Speed/Color/Transform:
+  // the audio render path (audio_mix._audio_clip_filter) applies only
+  // resample + delay + gain + fades + mute — effects/transform are ignored
+  // and speed (atempo) isn't applied on audio lanes at all, so those
+  // sections' commits were silent no-ops (tester issue 10). The backend
+  // rejects them too (dispatch.py _reject_audio_lane_clip).
+  const isAudioLane = ['audio', 'music', 'vo'].includes(clip.t.type)
   const speedRaw = (c as unknown as { speed?: number | null }).speed
   const speed = typeof speedRaw === 'number' ? speedRaw : 1.0
   const audio = (c as unknown as { audio?: { gain_db?: number; fade_in?: number; fade_out?: number; mute?: boolean } }).audio
@@ -108,7 +116,7 @@ export function Properties() {
     <div className="props">
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.src}>
-        {clip.t.label} · {c.src.split('/').pop()}
+        {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · {baseName(c.src)}
       </div>
 
       <Section label="Timing">
@@ -131,17 +139,21 @@ export function Properties() {
         </div>
       </Section>
 
-      <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
-        <Slider min={0.25} max={4} step={0.05} value={speed}
-          format={(v) => `${v.toFixed(2)}×`}
-          onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
-      </Section>
+      {!isAudioLane && (
+        <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
+          <Slider min={0.25} max={4} step={0.05} value={speed}
+            format={(v) => `${v.toFixed(2)}×`}
+            onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
+        </Section>
+      )}
 
-      <Section label="Color" onReset={() => dispatch('color_grade', {
-        clip_id: c.id, brightness: 0, contrast: 1, saturation: 1, temp: 0, tint: 0,
-      })}>
-        <ColorPanel clipId={c.id} dispatch={dispatch} current={colorParams} />
-      </Section>
+      {!isAudioLane && (
+        <Section label="Color" onReset={() => dispatch('color_grade', {
+          clip_id: c.id, brightness: 0, contrast: 1, saturation: 1, temp: 0, tint: 0,
+        })}>
+          <ColorPanel clipId={c.id} dispatch={dispatch} current={colorParams} />
+        </Section>
+      )}
 
       <Section label="Audio" onReset={() => {
         dispatch('set_volume', { target: c.id, db: 0 })
@@ -164,14 +176,17 @@ export function Properties() {
         </div>
         <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
           <input type="checkbox" checked={muted} onChange={() => {
-            // Mute = set audio.mute; achieved by toggling clip volume tag.
-            // No dedicated mute_clip tool yet; using set_volume to -∞ as proxy:
-            dispatch('set_volume', { target: c.id, db: muted ? 0 : -60 })
+            // Real clip-level mute: flips audio.mute (which the checkbox
+            // renders from, via the EDL refresh) and preserves gain_db.
+            // The old set_volume{db:-60} proxy never set audio.mute — the
+            // box never showed checked and unmute was impossible (issue 9).
+            dispatch('set_clip_muted', { clip_id: c.id, muted: !muted })
           }} style={{ marginRight: 4 }} />
           Mute clip
         </label>
       </Section>
 
+      {!isAudioLane && (
       <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
         clip_id: c.id, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1,
       })}>
@@ -215,6 +230,7 @@ export function Properties() {
           </label>
         </div>
       </Section>
+      )}
 
       <div className="row" style={{ marginTop: 8 }}>
         <button

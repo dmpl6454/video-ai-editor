@@ -51,16 +51,24 @@ def test_context_block_without_ui_state_has_no_selection_line(store: EDLStore):
 def test_src_name_is_basename_for_windows_paths(tmp_path: Path):
     """get_timeline's src_name must be the leaf name on BOTH separators —
     a POSIX-only split('/') returned the whole D:\\... path on Windows,
-    which the context block then truncated into an unrecognizable prefix."""
+    which the context block then truncated into an unrecognizable prefix.
+    Covers both branches: media Clip AND Sticker (the sticker branch had its
+    own separate naive split('/'))."""
     from video_ai_editor.agent.dispatch import dispatch
+    from video_ai_editor.edl.schema import Sticker
     s = EDLStore(tmp_path)
     s.edl.get_track("v1").clips = [
         Clip(src=r"D:\media\projects\intro.mp4", in_=0, out=2, start=0, id="c_w"),
+    ]
+    s.edl.get_track("stickers").clips = [
+        Sticker(src=r"D:\x\st.png", start=0, end=1, id="st_w"),
     ]
     s.edl.recompute_duration()
     snap = dispatch(s, "get_timeline", {"summary": True})
     v1 = next(t for t in snap["tracks"] if t["id"] == "v1")
     assert v1["clips"][0]["src_name"] == "intro.mp4"
+    st = next(t for t in snap["tracks"] if t["id"] == "stickers")
+    assert st["clips"][0]["src_name"] == "st.png"
 
 
 def test_chat_request_accepts_ui_state_fields():

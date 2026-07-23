@@ -32,6 +32,7 @@ def thumbnail_for(src: Path, cache_dir: Path, *, t: float, height: int = 54) -> 
          "-frames:v", "1", "-vf", f"scale=-2:{int(height)}",
          "-q:v", "5", str(tmp)],
         capture_output=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         _pu.unlink_with_retry(tmp)

@@ -49,6 +49,7 @@ def extract_keyframe(src: Path, t: float, dst: Path, max_w: int = 384) -> Path:
          "-vf", f"scale={max_w}:-2", "-frames:v", "1", "-q:v", "3",
          str(dst)],
         capture_output=True, check=False,
+        **_pu.SUBPROCESS_FLAGS,
     )
     return dst
 

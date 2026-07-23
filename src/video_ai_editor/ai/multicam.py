@@ -31,6 +31,7 @@ def _probe_duration(p: Path) -> float:
         [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nokey=1:noprint_wrappers=1", str(p)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **_pu.SUBPROCESS_FLAGS,
     ).stdout.strip()
     return float(out) if out else 0.0
 

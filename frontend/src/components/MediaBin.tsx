@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
+import { baseName } from '../lib/paths'
 import { StickerPanel } from './StickerPanel'
 import { EffectsPanel } from './EffectsPanel'
 import { VoRecorder } from './VoRecorder'
@@ -131,7 +132,7 @@ export function MediaBin() {
           }}
           style={{ cursor: 'grab' }}
         >
-          {src.split('/').pop()}
+          {baseName(src)}
           <div style={{ color: 'var(--text-dim)', fontSize: 10, marginTop: 4 }}>
             ×{ids.length} on timeline · drag to add
           </div>
@@ -140,7 +141,7 @@ export function MediaBin() {
             title="Remove this media and all its clips from the timeline"
             onClick={async (e) => {
               e.stopPropagation()
-              if (!window.confirm(`Remove ${src.split('/').pop()} and its ${ids.length} clip(s) from the timeline?`)) return
+              if (!window.confirm(`Remove ${baseName(src)} and its ${ids.length} clip(s) from the timeline?`)) return
               await dispatch('bulk_delete', { clip_ids: ids })
             }}
           >×</button>
@@ -185,7 +186,7 @@ function MusicPanel() {
   return (
     <div className="item" style={{ background: 'var(--bg-3)', borderColor: '#3a3a44' }}>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>🎵 Music</div>
-      <div style={{ wordBreak: 'break-all' }}>{clip.src.split('/').pop()}</div>
+      <div style={{ wordBreak: 'break-all' }}>{baseName(clip.src)}</div>
       <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
         <label style={{ fontSize: 11, color: 'var(--text-dim)', minWidth: 38 }}>Vol</label>
         <input

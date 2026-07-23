@@ -50,6 +50,7 @@ def _chunk_workers(n_clips: int) -> int:
             out = subprocess.run(
                 ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2,
+                **_pu.SUBPROCESS_FLAGS,
             )
             p_cores = int(out.stdout.strip())
         except Exception:
@@ -122,6 +123,7 @@ def chunk_is_valid(p: Path) -> bool:
              "-show_entries", "stream=codec_name", "-of",
              "default=nokey=1:noprint_wrappers=1", str(p)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            **_pu.SUBPROCESS_FLAGS,
         )
         return proc.returncode == 0 and bool(proc.stdout.strip())
     except Exception:
@@ -186,7 +188,7 @@ def render_clip_to_chunk(
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart",
             str(dst)]
-    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
     if proc.returncode != 0:
         raise RuntimeError(f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
 

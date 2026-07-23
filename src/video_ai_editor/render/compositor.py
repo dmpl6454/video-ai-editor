@@ -62,7 +62,7 @@ def _run_ffmpeg_progress(args: list[str], total_s: float,
     out = args[-1]
     full = [*args[:-1], "-progress", "pipe:1", "-nostats", out]
     proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
     err_chunks: list[str] = []
 
     def _drain_err() -> None:
@@ -109,7 +109,7 @@ def _usable_encoder(name: str) -> bool:
     encode works for it too, so we use one code path. Cached per process."""
     try:
         out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, **_pu.SUBPROCESS_FLAGS)
         if f" {name} " not in out.stdout:
             return False
     except Exception:
@@ -121,6 +121,7 @@ def _usable_encoder(name: str) -> bool:
              "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
              "-c:v", name, "-f", "null", "-"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+            **_pu.SUBPROCESS_FLAGS,
         )
         return r.returncode == 0
     except Exception:
@@ -386,10 +387,14 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     # transitions are between adjacent clip joins, indexed by left clip's index
     trans_at: dict[int, tuple[str, float]] = {}
     if transitions and clips:
-        # Build a map: clip i (0-based) → transition that bridges to i+1
+        # Build a map: clip i (0-based) → transition that bridges to i+1.
+        # tr.at is a TIMELINE position (the visible boundary the user
+        # clicked), and clips pack by effective_duration — summing source
+        # `duration` here silently dropped every transition that follows a
+        # speed≠1 clip (running overshot tr.at, no match, hard cut).
         running = 0.0
         for idx, c in enumerate(clips[:-1]):
-            running += c.duration
+            running += c.effective_duration
             for tr in transitions:
                 if abs(tr.at - running) < 0.05:
                     trans_at[idx] = (tr.type, tr.duration)
@@ -452,9 +457,14 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         fc_parts.append(f"{interleaved}concat=n={len(clips)}:v=1:a=1[vout][aout]")
     else:
         # Chain xfade for video, acrossfade for audio between adjacent clips.
+        # cur_dur tracks the accumulated OUTPUT stream length: each clip's
+        # per-clip chain applies setpts/atempo for speed (and chunk files
+        # bake it), so streams entering xfade are effective_duration long —
+        # source `duration` would place every offset after a sped clip at
+        # the wrong time.
         cur_v = v_labels[0]
         cur_a = a_labels[0]
-        cur_dur = clips[0].duration
+        cur_dur = clips[0].effective_duration
         for i in range(1, len(clips)):
             tr_for_left = trans_at.get(i - 1)
             new_v = f"[xv{i}]"
@@ -477,7 +487,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 fc_parts.append(
                     f"{cur_a}{a_labels[i]}acrossfade=d={tdur}{new_a}"
                 )
-                cur_dur = cur_dur + clips[i].duration - tdur
+                cur_dur = cur_dur + clips[i].effective_duration - tdur
             else:
                 fc_parts.append(
                     f"{cur_v}{v_labels[i]}concat=n=2:v=1:a=0{new_v}"
@@ -485,7 +495,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 fc_parts.append(
                     f"{cur_a}{a_labels[i]}concat=n=2:v=0:a=1{new_a}"
                 )
-                cur_dur += clips[i].duration
+                cur_dur += clips[i].effective_duration
             cur_v = new_v
             cur_a = new_a
         # Rename the final accumulators to [vout]/[aout] for downstream code
@@ -524,7 +534,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             "-f", "lavfi", "-i", f"color=c=black:s={w_out}x{h_out}:r={fps}:d={dur}",
             "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
             "-shortest", *enc_args, *_AAC_OUT, str(dst),
-        ], check=True, capture_output=True)
+        ], check=True, capture_output=True, **_pu.SUBPROCESS_FLAGS)
         return dst
 
     # Pull transitions for V1 from the EDL (transitions live on the v1 track in M4)
@@ -717,7 +727,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             _pu.unlink_with_retry(tmp)
             raise
     else:
-        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         rc, err = proc.returncode, proc.stderr
     if rc != 0:
         _pu.unlink_with_retry(tmp)
@@ -770,7 +780,7 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
             args += ["-map", "0:v", "-map", "0:a", "-c", "copy"]
         args += ["-movflags", "+faststart", str(tmp)]
         proc = subprocess.run(args, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         if proc.returncode != 0:
             _pu.unlink_with_retry(tmp)
             raise RuntimeError(
@@ -890,6 +900,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
                 [_pu.FFMPEG, "-y", "-i", str(dst), "-c:v", "copy", "-an",
                  "-movflags", "+faststart", str(cached_video)],
                 capture_output=True, check=True,
+                **_pu.SUBPROCESS_FLAGS,
             )
         except Exception:
             pass
@@ -926,7 +937,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
                 "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
                 "-c:v", "copy", *_AAC_OUT, "-shortest",
                 "-movflags", "+faststart", str(tmp),
-            ], capture_output=True, check=True)
+            ], capture_output=True, check=True, **_pu.SUBPROCESS_FLAGS)
         except Exception:
             _pu.unlink_with_retry(tmp)
             raise
@@ -1004,7 +1015,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-r", str(fps),
             "-movflags", "+faststart",
             str(tmp)]
-    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
     if proc.returncode != 0:
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

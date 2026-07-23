@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
-import { isMediaClip, isTextClip, type AnyClip, type Track } from '../types'
+import { isMediaClip, isTextClip, clipDuration, clipEnd, clipSpeedFactor, type AnyClip, type Track } from '../types'
 import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
+import { baseName } from '../lib/paths'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
@@ -37,7 +38,7 @@ function firstFreeGap(
   const occupied = track.clips
     .filter(isMediaClip)
     .filter((c) => c.id !== ignoreClipId)
-    .map((c): [number, number] => [c.start, c.start + (c.out - c.in)])
+    .map((c): [number, number] => [c.start, clipEnd(c)])
     .sort((a, b) => a[0] - b[0])
   let candidate = Math.max(0, preferredStart)
   const overlaps = (start: number) => {
@@ -134,6 +135,25 @@ export function Timeline() {
   const setPlayhead = useStore((s) => s.setPlayhead)
   const dispatch = useStore((s) => s.dispatch)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; clipId: string; trackId: string } | null>(null)
+  // Clamp the context menu into the viewport AFTER it renders (useLayoutEffect
+  // below): the raw click point is stored in `contextMenu`, but on lower
+  // tracks in a short timeline pane the fixed-position menu's items fall
+  // below the viewport. Measuring the real rendered box (multi-select adds
+  // items, so the height varies) beats estimating; useLayoutEffect mutates
+  // the style before paint, so there is no unclamped flash. The window-level
+  // mousedown close listener is attached in a useEffect after open, so this
+  // pre-paint adjustment cannot self-close the menu.
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (!contextMenu) return
+    const el = contextMenuRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const left = Math.max(8, Math.min(contextMenu.x, window.innerWidth - r.width - 8))
+    const top = Math.max(8, Math.min(contextMenu.y, window.innerHeight - r.height - 8))
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
+  }, [contextMenu])
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -275,7 +295,10 @@ export function Timeline() {
     const media = v1.clips.filter(isMediaClip).slice().sort((a, b) => a.start - b.start)
     const cuts: { at: number; tr: TransitionInfo | null }[] = []
     for (let i = 0; i < media.length - 1; i++) {
-      const end = media[i].start + (media[i].out - media[i].in)
+      // EFFECTIVE timeline end ((out-in)/speed) — the backend ripples
+      // neighbors to the effective end, so raw `out-in` both misplaced the
+      // affordance and failed the 0.05s adjacency check for any retimed clip.
+      const end = clipEnd(media[i])
       if (Math.abs(media[i + 1].start - end) <= 0.05) {
         let match: TransitionInfo | null = null
         for (const tr of trs) if (Math.abs(tr.at - end) < 0.05) match = tr
@@ -315,8 +338,13 @@ export function Timeline() {
     const t = tracks[i]
     const y = trackY(i)
     for (const c of t.clips) {
-      const start = isMediaClip(c) ? c.start : c.start
-      const dur = isMediaClip(c) ? c.out - c.in : c.end - c.start
+      const start = c.start
+      // EFFECTIVE timeline width — (out-in)/speed for media, matching the draw
+      // loop's clipDuration. Raw `out-in` made a 2x clip's hit box extend past
+      // its drawn rect (shadowing the neighbor: clicks selected the wrong clip,
+      // trim handles hit-tested at invisible positions) and a 0.5x clip's
+      // right half fell through the hit-test entirely (clicks seeked instead).
+      const dur = clipDuration(c)
       hits.push({
         trackId: t.id, clip: c,
         x: labelWidth + start * zoom,
@@ -409,8 +437,8 @@ export function Timeline() {
       // below, instead of being invisible.
       const seenRanges: [number, number][] = []
       for (const c of t.clips) {
-        const start = isMediaClip(c) ? c.start : c.start
-        const dur = isMediaClip(c) ? c.out - c.in : c.end - c.start
+        const start = c.start
+        const dur = clipDuration(c)
         const end = start + dur
         const overlapsPrior = seenRanges.some(([s, e]) => start < e - 1e-9 && end > s + 1e-9)
         seenRanges.push([start, end])
@@ -494,7 +522,7 @@ export function Timeline() {
         // left-edge scrim (clipped to the rounded clip rect) and switch to
         // light text.
         ctx.font = '10px var(--font-ui)'
-        const label = isMediaClip(c) ? (c.src.split('/').pop() ?? '') : ('text' in c ? c.text : '')
+        const label = isMediaClip(c) ? baseName(c.src) : ('text' in c ? c.text : '')
         const txt = label.slice(0, Math.max(0, Math.floor(w / 6)))
         if (txt && drewThumbs) {
           ctx.save()
@@ -841,7 +869,15 @@ export function Timeline() {
       // Compute the raw (cursor-following) and snapped (landing) starts.
       const rawLeftX = drag.pointerX - drag.offsetX
       const rawStart = Math.max(0, (rawLeftX - labelWidth) / zoom)
-      const durSec = drag.origOut - drag.origIn
+      // EFFECTIVE timeline width of the dragged clip — same clipDuration the
+      // draw loop and the release path (onMouseUp → firstFreeGap) use, so the
+      // ghost/insertion preview equals where the clip actually lands (the
+      // file's own preview==landing contract). Raw origOut-origIn drew a 2x
+      // clip's ghost at double its real width and snapped past phantom space.
+      const dragged = hits.find((h) => h.clip.id === drag.clipId)?.clip
+      const durSec = dragged
+        ? clipDuration(dragged)
+        : drag.origOut - drag.origIn
       let landStart = rawStart
       let overlapping = false
       if (compatible && destTrack && drag.clipKind === 'media') {
@@ -887,17 +923,29 @@ export function Timeline() {
       let label: string
       if (drag.clipKind === 'media' && drag.modifier) {
         const sourceDur = drag.origOut - drag.origIn
-        // Preview assumes speed=1 (types.ts doesn't expose current speed cheaply here);
-        // Task 7's release reads the clip's real speed, so an already-retimed clip's
-        // committed factor can differ slightly from this label — expected, not a bug.
-        const factor = dragResolve.resolveMediaSpeed(sourceDur, 1, side, dt)
+        // Read the clip's ACTUAL current speed — same hits-cast lookup as the
+        // release path (onMouseUp's curSpeed). A hardcoded 1 here made the
+        // live label/guide disagree with the committed factor on any
+        // already-retimed clip (e.g. alt-dragging a 2x clip previewed from a
+        // double-width footprint that isn't what's on screen).
+        const c = hits.find((h) => h.clip.id === drag.clipId)?.clip
+        const curSpeed = c ? clipSpeedFactor(c) : 1
+        const factor = dragResolve.resolveMediaSpeed(sourceDur, curSpeed, side, dt)
         const footprint = sourceDur / factor
         edgeSec = side === 'l' ? drag.origStart : drag.origStart + footprint
         label = `speed ${factor.toFixed(2)}× · ${footprint.toFixed(2)}s`
       } else if (drag.clipKind === 'media') {
-        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, dt)
-        const footprint = r.out - r.in
-        edgeSec = side === 'l' ? drag.origStart + (r.in - drag.origIn) : drag.origStart + footprint
+        // Trim preview in TIMELINE space: convert the timeline-pixel dt to a
+        // source delta via the clip's speed (resolveMediaTrim's speed param —
+        // same conversion the release path commits), then map the resulting
+        // source span back to its timeline footprint ((out-in)/speed). Without
+        // both conversions a 0.5x clip's live edge/label moved at double the
+        // committed rate.
+        const c = hits.find((h) => h.clip.id === drag.clipId)?.clip
+        const sp = c ? clipSpeedFactor(c) : 1
+        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, dt, sp)
+        const footprint = (r.out - r.in) / sp
+        edgeSec = side === 'l' ? drag.origStart + (r.in - drag.origIn) / sp : drag.origStart + footprint
         label = `trim · ${footprint.toFixed(2)}s`
       } else {
         // origIn/origOut are 0/0 for a text/sticker clip (see onMouseDown), so
@@ -1121,7 +1169,7 @@ export function Timeline() {
       for (const c of tk.clips) {
         if (ignoreClipId && c.id === ignoreClipId) continue
         const cs = (c as { start?: number }).start ?? 0
-        const ce = isMediaClip(c) ? (cs + (c.out - c.in)) : ((c as { end?: number }).end ?? cs)
+        const ce = isMediaClip(c) ? (cs + clipDuration(c)) : ((c as { end?: number }).end ?? cs)
         candidates.push(cs, ce)
       }
     }
@@ -1195,10 +1243,14 @@ export function Timeline() {
       // Sticker/TextClip hit sets them to 0/0); a dropped Sticker/TextClip
       // has no analogous cross-track drop-overlap path.
       const originTrack = tracks.find((t) => t.id === drag.trackId)
-      const draggedIsMedia = !!originTrack
-        && originTrack.clips.some((c) => c.id === drag.clipId && isMediaClip(c))
+      const draggedClip = originTrack?.clips.find((c) => c.id === drag.clipId)
+      const draggedIsMedia = !!draggedClip && isMediaClip(draggedClip)
       if (destTrack && draggedIsMedia) {
-        const dur = drag.origOut - drag.origIn
+        // EFFECTIVE timeline width ((out-in)/speed) — must match the drag
+        // ghost's durSec (preview==landing contract) and firstFreeGap's
+        // occupancy math, which both use clipDuration/clipEnd. Raw source
+        // width made a 2x clip demand a gap twice its drawn size on release.
+        const dur = clipDuration(draggedClip)
         const snapped = firstFreeGap(destTrack, dur, newStart, drag.clipId)
         if (Math.abs(snapped - newStart) > 1e-6) {
           newStart = snapped
@@ -1216,10 +1268,15 @@ export function Timeline() {
       // up their actual end from `hits` instead (same cast pattern as curSpeed
       // below); media clips keep using the origIn/origOut captured at grab time.
       const isOverlay = drag.clipKind === 'text' || drag.clipKind === 'sticker'
+      // Media right edge sits at the EFFECTIVE end (start + (out-in)/speed) —
+      // the same position the draw loop/hit boxes place it. Raw source span
+      // put the snap baseline past the drawn edge on a retimed clip, so every
+      // right-edge trim started from a phantom position.
+      const trimClip = hits.find((h) => h.clip.id === drag.clipId)?.clip
+      const trimSpeed = trimClip ? clipSpeedFactor(trimClip) : 1
       const origEnd = isOverlay
-        ? ((hits.find((h) => h.clip.id === drag.clipId)?.clip as unknown as { end?: number })?.end
-            ?? drag.origStart)
-        : drag.origStart + (drag.origOut - drag.origIn)
+        ? ((trimClip as unknown as { end?: number })?.end ?? drag.origStart)
+        : drag.origStart + (drag.origOut - drag.origIn) / trimSpeed
       // The signed edge delta AFTER snapping the moved edge to neighbors.
       // side='l' → the edge is origStart; side='r' → the edge is origEnd. In
       // both cases `edgeDelta` is (snapped new edge position − old edge
@@ -1238,17 +1295,21 @@ export function Timeline() {
       } else if (drag.modifier) {
         // Alt + edge-drag on media = speed retime (keep whole source, change
         // the timeline footprint). resolveMediaSpeed handles the side→footprint
-        // sign internally, so pass the raw edgeDelta. Clip speed defaults to 1
-        // (types.ts omits `speed`; read via the repo's cast pattern).
+        // sign internally, so pass the raw edgeDelta. clipSpeedFactor is the
+        // canonical speed read (scalar>0, else 1 — curve dicts included) and
+        // is exactly what the live drag label uses, so preview==commit.
         const sourceDur = drag.origOut - drag.origIn
-        const c = hits.find((h) => h.clip.id === drag.clipId)?.clip
-        const curSpeed = (c as unknown as { speed?: number | null })?.speed ?? 1
-        const factor = dragResolve.resolveMediaSpeed(sourceDur, curSpeed, side, edgeDelta)
+        const factor = dragResolve.resolveMediaSpeed(sourceDur, trimSpeed, side, edgeDelta)
         await dispatch('set_speed', { clip_id: drag.clipId, factor })
       } else {
         // Plain media edge-drag = trim (show less/more of the source). Reuse
-        // the same snapped `edgeDelta`; resolveMediaTrim clamps out>in, in>=0.
-        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, edgeDelta)
+        // the same snapped `edgeDelta` — it's TIMELINE-space, so pass the
+        // clip's speed and let resolveMediaTrim convert to source space
+        // (delta·speed); a 0.5x clip dragged +2s used to grow its source span
+        // 2s = a 4s footprint change, double the drag. resolveMediaTrim
+        // clamps out>in, in>=0.
+        const r = dragResolve.resolveMediaTrim(
+          { in: drag.origIn, out: drag.origOut }, side, edgeDelta, trimSpeed)
         if (side === 'l') await dispatch('trim_clip', { clip_id: drag.clipId, in: r.in })
         else await dispatch('trim_clip', { clip_id: drag.clipId, out: r.out })
       }
@@ -1576,6 +1637,7 @@ export function Timeline() {
       )}
       {contextMenu && (
         <div
+          ref={contextMenuRef}
           onMouseDown={(e) => e.stopPropagation()}
           style={{
             position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 100,

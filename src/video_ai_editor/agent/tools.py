@@ -131,6 +131,18 @@ EDIT_TOOLS = [
            "end": {"type": "number", "description": "Timeline seconds; must be > start"},
        },
        ["clip_id"]),
+    _t("set_clip_z",
+       "Change how overlapping STICKER overlays stack: set a sticker's per-clip "
+       "z-order within its track. Higher z composites on top; ties keep the "
+       "legacy order (later start wins). Pass an int, or 'front' (above every "
+       "sibling sticker) / 'back' (below every sibling sticker).",
+       "edit",
+       {
+           "clip_id": {"type": "string", "description": "Sticker clip id (st_…)"},
+           "z": {"description": "int, or 'front' / 'back'",
+                 "anyOf": [{"type": "integer"}, {"type": "string", "enum": ["front", "back"]}]},
+       },
+       ["clip_id", "z"]),
     _t("set_property",
        "LOW-LEVEL escape hatch: set any field on a clip by dotted path (e.g. "
        "transform.x, audio.gain_db, audio.fade_in, speed, reverse, in, out, start). "
@@ -420,6 +432,14 @@ AUDIO_TOOLS = [
        "audio",
        {"target": {"type": "string"}, "db": {"type": "number"}},
        ["target", "db"]),
+    _t("set_clip_muted",
+       "Mute or unmute ONE clip's audio (clip-level, vs set_track_muted which "
+       "silences a whole track). Preserves the clip's gain_db, so a volume trim "
+       "survives a mute/unmute cycle. Omit `muted` to toggle.",
+       "audio",
+       {"clip_id": {"type": "string"},
+        "muted": {"type": "boolean", "description": "Omit to toggle"}},
+       ["clip_id"]),
     _t("add_fade",
        "Add audio fade in / fade out to a clip.",
        "audio",

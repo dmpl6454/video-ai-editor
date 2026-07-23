@@ -63,6 +63,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
          "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
          str(src)], capture_output=True, text=True, check=True,
         encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     ).stdout.strip()
     if "/" in fps_str:
         n, d = fps_str.split("/")
@@ -74,6 +75,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     subprocess.run(
         [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     n_in = len(list(frames_in.glob("*.png")))
     if n_in < 2:
@@ -93,6 +95,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
          "-m", model, "-n", str(target), "-f", "f%05d.png"],
         cwd=str(RIFE_DIR), capture_output=True, text=True,
         encoding="utf-8", errors="replace",
+        **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rife failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -106,6 +109,7 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
          "-an", str(dst)],
         capture_output=True, check=True,
+        **_pu.SUBPROCESS_FLAGS,
     )
     shutil.rmtree(work, ignore_errors=True)
     return dst

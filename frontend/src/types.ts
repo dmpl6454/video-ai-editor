@@ -88,12 +88,23 @@ export function isTextClip(c: AnyClip): c is TextClip {
   return 'text' in c && 'end' in c
 }
 
+/** Scalar playback speed of a media clip (1 for unset/curve dicts) —
+ * mirrors backend Clip.speed_factor. `speed` isn't declared on the frontend
+ * Clip interface (M1 mirror), so read it via a cast like Properties does. */
+export function clipSpeedFactor(c: AnyClip): number {
+  const sp = (c as unknown as { speed?: number | object | null }).speed
+  return typeof sp === 'number' && sp > 0 ? sp : 1
+}
+
+/** TIMELINE seconds a clip occupies — (out-in)/speed for media, mirroring
+ * backend Clip.effective_duration. Using raw out-in drew a 2x clip at its
+ * source length, overlapping the neighbours the backend had rippled left. */
 export function clipDuration(c: AnyClip): number {
-  if (isMediaClip(c)) return c.out - c.in
+  if (isMediaClip(c)) return (c.out - c.in) / clipSpeedFactor(c)
   return c.end - c.start
 }
 
 export function clipEnd(c: AnyClip): number {
-  if (isMediaClip(c)) return c.start + (c.out - c.in)
+  if (isMediaClip(c)) return c.start + clipDuration(c)
   return c.end
 }

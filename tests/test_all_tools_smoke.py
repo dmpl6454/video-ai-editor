@@ -155,6 +155,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "set_clip_transform": {"clip_id": "c1", "scale": 1.2},
         # Overlay timing: stickers/text only (s1 is the fixture sticker).
         "set_clip_timing": {"clip_id": "s1", "start": 0.5, "end": 3.0},
+        "set_clip_z": {"clip_id": "s1", "z": "front"},
         "set_property": {"clip_id": "c1", "path": "audio.gain_db", "value": 2.0},
         "add_keyframe": {"clip_id": "c1", "prop": "scale", "time": 0.5, "value": 1.5},
         "remove_keyframe": {"clip_id": "c1", "prop": "scale", "time": 0.5},
@@ -170,6 +171,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "remove_transition": {"all": True},
         # Audio
         "set_volume": {"target": "music", "db": -12.0},
+        "set_clip_muted": {"clip_id": "c1"},
         "add_fade": {"clip_id": "c1", "in_s": 0.5, "out_s": 0.5},
         "add_music": {"src": music, "start": 0, "in": 0, "out": 4, "duck": True, "volume_db": -12},
         "set_loudness_target": {"lufs": -16.0},

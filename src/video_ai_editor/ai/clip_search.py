@@ -106,6 +106,7 @@ def _extract_frames(src: str, in_: float, out: float, n: int, work: Path) -> lis
             [_pu.FFMPEG, "-y", "-ss", f"{t:.3f}", "-i", src,
              "-frames:v", "1", "-vf", "scale=320:-2", str(fp)],
             capture_output=True,
+            **_pu.SUBPROCESS_FLAGS,
         )
         if fp.exists() and fp.stat().st_size > 0:
             try:

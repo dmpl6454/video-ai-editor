@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
-import { isMediaClip, type Clip } from '../types'
+import { isMediaClip, clipEnd, type Clip } from '../types'
 import './EffectsPanel.css'
 
 // The backend Effect model isn't declared on types.ts's Clip ("M1 frontend
@@ -84,7 +84,10 @@ export function EffectsPanel() {
     const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
     const media = (v1?.clips ?? []).filter(isMediaClip)
     clip =
-      media.find((c) => c.start <= playhead && playhead < c.start + (c.out - c.in)) ??
+      // clipEnd = start + (out-in)/speed — the clip's EFFECTIVE timeline end.
+      // Raw source width made a retimed clip's phantom tail capture the
+      // playhead past its drawn extent, targeting the wrong clip here.
+      media.find((c) => c.start <= playhead && playhead < clipEnd(c)) ??
       media[0] ?? null
     targetIsFallback = clip != null
   }
