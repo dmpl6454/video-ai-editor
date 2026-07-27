@@ -271,3 +271,33 @@ def test_video_only_fingerprint_tracks_timeline_extent():
     quiet = edl_with_music(12.0)
     quiet.get_track("music").clips[0].audio.gain_db = -12.0
     assert _video_only_fingerprint(quiet) == _video_only_fingerprint(long_bed)
+
+
+def test_streamcopy_rejects_a_short_assembly(tmp_path, monkeypatch):
+    """The packet-copy preview shortcut must verify it produced the whole
+    timeline. On Windows CI a timeline whose clips share ONE source file
+    (identical chunk fingerprint → the same chunk listed twice) concatenated
+    to a single clip's length with rc=0 and no warning. The caller falls back
+    to the re-encode on any exception, so the guard just has to raise."""
+    from video_ai_editor.render import compositor as C
+
+    src = _mkvideo(tmp_path / "v.mp4", 4)
+    store = _store(tmp_path, [Track(id="v1", type="video", clips=[
+        Clip(id="c1", src=src, in_=0.0, out=4.0, start=0.0),
+        Clip(id="c2", src=src, in_=0.0, out=4.0, start=4.0)])])
+
+    # Simulate the platform quirk: the assembly silently yields half the length.
+    monkeypatch.setattr(C, "_probe_duration", lambda p: 3.99)
+    with pytest.raises(RuntimeError, match="falling back to re-encode"):
+        C._assemble_chunks_streamcopy(store.edl, [tmp_path / "v.mp4"],
+                                      tmp_path / "out.mp4")
+
+
+def test_duplicate_source_clips_render_full_length(tmp_path):
+    """End-to-end guard for the same case, through the real preview path."""
+    src = _mkvideo(tmp_path / "v.mp4", 4)
+    store = _store(tmp_path, [Track(id="v1", type="video", clips=[
+        Clip(id="c1", src=src, in_=0.0, out=4.0, start=0.0),
+        Clip(id="c2", src=src, in_=0.0, out=4.0, start=4.0)])])
+    out = render_preview(store.edl, store.dir, height=180).path
+    assert _duration(out) == pytest.approx(8.0, abs=0.35)

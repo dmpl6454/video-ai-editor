@@ -850,6 +850,19 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     return dst
 
 
+def _probe_duration(p: Path) -> float | None:
+    """Container duration in seconds, or None if ffprobe can't say."""
+    try:
+        out = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(p)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, **_pu.SUBPROCESS_FLAGS)
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
 def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
                                 dst: Path) -> Path:
     """Assemble cached chunks via the concat demuxer with `-c:v copy`.
@@ -900,6 +913,25 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
             raise RuntimeError(
                 f"streamcopy assembly failed (rc={proc.returncode}):\n"
                 f"{proc.stderr[-1500:]}")
+        # Verify the packet-copy actually produced the whole timeline before
+        # publishing it. This path is a pure optimisation whose caller already
+        # falls back to the re-encode on ANY exception, so a cheap correctness
+        # check costs one ffprobe and removes a whole class of silent
+        # wrong-output bugs. It earns its keep: on Windows CI, a timeline whose
+        # clips share one source file (identical chunk fingerprint → the same
+        # chunk listed twice) concatenated to a single clip's length — 4s for
+        # an 8s timeline — with rc=0 and no warning. Rather than depend on a
+        # platform's concat-demuxer quirk, assert the invariant and re-encode
+        # when it doesn't hold. Callers reach here only when the timeline has
+        # no gaps, so edl.duration IS the expected v1 extent.
+        expected = float(edl.duration)
+        if expected > 0:
+            got = _probe_duration(tmp)
+            if got is not None and abs(got - expected) > 0.5:
+                _pu.unlink_with_retry(tmp)
+                raise RuntimeError(
+                    f"streamcopy assembly produced {got:.2f}s for a "
+                    f"{expected:.2f}s timeline — falling back to re-encode")
         _pu.replace_with_retry(tmp, dst)
     finally:
         _pu.unlink_with_retry(list_path)
