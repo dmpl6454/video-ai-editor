@@ -412,8 +412,13 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         if c_start < start and c_end > end:
             # Split into two: [c_start..start] and [end..c_end]
             left_dur = start - c_start
+            # Partition the visual fades across the seam — same reasoning as
+            # split_at: the cut edge is interior to the original shot, so
+            # only the outer edges keep their fade (otherwise remove_silences
+            # on a faded clip strobes to black at every removed silence).
             left = c.model_copy(update={"out": c.in_ + left_dur * sf,
-                                        "start": c_start})
+                                        "start": c_start,
+                                        "video_fade_out": 0.0})
             right = c.model_copy(update={
                 # Unique suffix — a literal 'b' collides with an earlier
                 # cut/split sibling of the same clip (same bug as split_at).
@@ -421,6 +426,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
                 "in_": c.in_ + (end - c_start) * sf,
                 "out": c.out,
                 "start": start,  # will be ripple-adjusted
+                "video_fade_in": 0.0,
             })
             # Pydantic alias quirk: ensure model carries fresh `in`
             new_clips.append(left)
@@ -461,7 +467,14 @@ def split_at(store: EDLStore, args: dict) -> dict:
             # seconds per timeline second, so the cut lands speed× deeper
             # into the source than the timeline offset suggests.
             local = (t - c_start) * c.speed_factor
-            left = c.model_copy(update={"out": c.in_ + local})
+            # A visual fade belongs to the clip's OUTER edges. The split
+            # seam is interior to what the user sees as one continuous shot,
+            # so the halves PARTITION the fades (left keeps fade-in, right
+            # keeps fade-out) instead of each inheriting both — model_copy
+            # would otherwise give every fragment its own fade-to-black tail
+            # AND fade-from-black head, strobing to black at every cut.
+            left = c.model_copy(update={"out": c.in_ + local,
+                                        "video_fade_out": 0.0})
             right = c.model_copy(update={
                 # Unique suffix, not a literal 'b': splitting a clip whose
                 # earlier split-sibling already took c_<id>b produced two
@@ -470,6 +483,7 @@ def split_at(store: EDLStore, args: dict) -> dict:
                 "id": f"c_{c.id[2:]}_{uuid4().hex[:6]}",
                 "in_": c.in_ + local,
                 "start": t,
+                "video_fade_in": 0.0,
             })
             new_clips.append(left)
             new_clips.append(right)
@@ -1192,6 +1206,40 @@ def add_fade(store: EDLStore, args: dict) -> dict:
     c.audio.fade_out = float(args.get("out_s", c.audio.fade_out))
     summary = f"Fade {cid}: in={c.audio.fade_in:.2f}s out={c.audio.fade_out:.2f}s"
     store.commit("add_fade", args, summary)
+    return {"summary": summary}
+
+
+def set_video_fade(store: EDLStore, args: dict) -> dict:
+    """Visual fade-from/to-black on a media clip's VIDEO (video_fade_in/out,
+    rendered as ffmpeg `fade=` in the per-clip chain — both the monolithic
+    and the chunk render path). Distinct from add_fade, which sets
+    audio.fade_in/out (audio-only). Same single-key-update semantics as
+    add_fade: an omitted side preserves the current value; negatives clamp
+    to 0. v1 only for now: the PIP overlay chain (render/pip.py) has no
+    setpts shift (a fade baked at pip-stream PTS 0 would land outside the
+    overlay's enable window for any start>0) and a correct PIP fade must go
+    to TRANSPARENT (alpha), not black — so we reject v2 loudly rather than
+    commit a dead field.
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    track, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("set_video_fade only supports media clips")
+    # music/vo/a1 clips have no video to fade — same guard family as
+    # set_speed / color_grade (fail loudly instead of writing dead data).
+    _reject_audio_lane_clip(track, cid, "set_video_fade")
+    if track.type == "video" and track.id != "v1":
+        raise ValueError(
+            f"clip {cid} is on '{track.id}' — video fade is currently supported on v1 only"
+        )
+    c.video_fade_in = max(0.0, float(args.get("in_s", c.video_fade_in)))
+    c.video_fade_out = max(0.0, float(args.get("out_s", c.video_fade_out)))
+    summary = (f"Video fade {cid}: in={c.video_fade_in:.2f}s "
+               f"out={c.video_fade_out:.2f}s")
+    store.commit("set_video_fade", args, summary)
     return {"summary": summary}
 
 
@@ -3277,6 +3325,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_volume": set_volume,
     "set_clip_muted": set_clip_muted,
     "add_fade": add_fade,
+    "set_video_fade": set_video_fade,
     "remove_silences": remove_silences,
     "remove_fillers": remove_fillers,
     "auto_cut_to_beats": auto_cut_to_beats,

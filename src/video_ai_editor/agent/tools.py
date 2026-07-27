@@ -445,6 +445,15 @@ AUDIO_TOOLS = [
        "audio",
        {"clip_id": {"type": "string"}, "in_s": {"type": "number"}, "out_s": {"type": "number"}},
        ["clip_id"]),
+    _t("set_video_fade",
+       "Visual fade-from-black / fade-to-black on a clip's VIDEO (v1 media clips only; "
+       "distinct from add_fade, which fades audio). Seconds are clip-local source time; "
+       "an omitted side keeps its current value, negatives clamp to 0.",
+       "edit",
+       {"clip_id": {"type": "string"},
+        "in_s": {"type": "number", "description": "Fade-from-black duration, seconds"},
+        "out_s": {"type": "number", "description": "Fade-to-black duration, seconds"}},
+       ["clip_id"]),
     _t("remove_silences",
        "Detect silences in a track and ripple-cut them out. Default thresholds work "
        "for normal talking-head speech.",

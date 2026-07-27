@@ -12,7 +12,7 @@ though their media was fine — see docs/superpowers/plans/
 from __future__ import annotations
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 from video_ai_editor.edl.schema import EDL, Canvas, Track, TextClip, Sticker, Transform
 from video_ai_editor.render.text_overlay import (
@@ -20,19 +20,26 @@ from video_ai_editor.render.text_overlay import (
     cache_sticker_pngs,
     cache_animated_sticker_pngs,
     build_overlay_chain,
+    render_text_png,
     _png_is_valid,
     _save_png_atomic,
 )
 
 
-def _edl_with_text(canvas_w=320, canvas_h=180) -> EDL:
+def _edl_with_text(canvas_w=320, canvas_h=180, opacity=None) -> EDL:
+    tx = Transform(x=160, y=40)
+    if opacity is not None:
+        # Post-construction assignment, like the keyframed-sticker helper
+        # below: a raw keyframe dict sticks unvalidated, which is exactly
+        # how EDLs loaded from disk present keyframed values at runtime.
+        tx.opacity = opacity
     return EDL(
         canvas=Canvas(w=canvas_w, h=canvas_h, fps=30),
         tracks=[
             Track(id="v1", type="video", clips=[]),
             Track(id="text", type="text", z=10, clips=[
                 TextClip(id="t1", text="HELLO", start=0.0, end=2.0,
-                         transform=Transform(x=160, y=40), role="super"),
+                         transform=tx, role="super"),
             ]),
         ],
     )
@@ -234,6 +241,102 @@ def test_build_overlay_chain_still_bakes_stickers_in_preview_mode(tmp_path: Path
     # sticker pixel renderer exists), unlike the text-skip case above.
     assert filter_str != ""
     assert len(extra_inputs) > 0
+
+
+# ---------- TextClip transform.opacity (was a dead field) ----------
+#
+# transform.opacity on a TextClip used to be accepted and stored by add_text
+# but never rendered: render_text_png had no opacity input and the browser's
+# TextLayer ignored it. It now multiplies the finished PNG's alpha channel
+# (fill, stroke and shadow uniformly) and participates in the content-hash
+# cache key — without the key change, cached PNGs silently ignore opacity
+# edits (the same dead-control bug class as the pre-v4 size/anchor omission).
+
+def test_render_text_png_opacity_scales_alpha():
+    img_full = render_text_png("HELLO", "super", 640, 360)
+    img_dim = render_text_png("HELLO", "super", 640, 360, opacity=0.4)
+    a_full = img_full.getchannel("A")
+    a_dim = img_dim.getchannel("A")
+    # Glyph interiors are fully opaque at opacity 1.0; at 0.4 the maximum is
+    # exactly int(255 * 0.4) — covering fill AND stroke (both alpha 255).
+    assert a_full.getextrema()[1] == 255
+    assert a_dim.getextrema()[1] == int(255 * 0.4)
+    # Mean alpha drops proportionally (int truncation pulls slightly under
+    # 0.4, mostly on the antialiased edge pixels).
+    mean_full = ImageStat.Stat(a_full).mean[0]
+    mean_dim = ImageStat.Stat(a_dim).mean[0]
+    assert mean_full > 0
+    assert 0.30 <= mean_dim / mean_full <= 0.41
+
+
+def test_cache_text_pngs_opacity_gets_its_own_cache_path(tmp_path: Path):
+    """Opacity must be part of the PNG content-hash key: rendering the same
+    text at 1.0 then 0.4 into the same cache dir has to produce two distinct
+    files, or the second render silently serves the first's fully-opaque PNG
+    forever (the exact dead-control cache bug class this repo just fixed)."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (_, _, png_full), = cache_text_pngs(_edl_with_text(), cache_dir)
+    (_, _, png_dim), = cache_text_pngs(_edl_with_text(opacity=0.4), cache_dir)
+    assert png_full != png_dim
+    with Image.open(png_full) as im:
+        assert im.getchannel("A").getextrema()[1] == 255
+    with Image.open(png_dim) as im:
+        assert im.getchannel("A").getextrema()[1] == int(255 * 0.4)
+
+
+def test_cache_text_pngs_keyframed_opacity_renders_like_full(tmp_path: Path):
+    """A keyframed opacity resolves as unset for the PNG bake (the ffmpeg
+    anim_text path animates it per frame over a full-alpha PNG) — so the
+    keyframed clip must land on the SAME cache path as an untouched clip,
+    and that PNG must be fully opaque."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    edl_kf = _edl_with_text(opacity={"keyframes": [[0.0, 0.2], [2.0, 0.9]]})
+    (_, _, png_kf), = cache_text_pngs(edl_kf, cache_dir)
+    (_, _, png_full), = cache_text_pngs(_edl_with_text(), cache_dir)
+    assert png_kf == png_full
+    with Image.open(png_kf) as im:
+        assert im.getchannel("A").getextrema()[1] == 255
+
+
+def test_cache_text_pngs_single_keyframe_opacity_still_bakes(tmp_path: Path):
+    """A DEGENERATE 1-keyframe opacity list is NOT animated (is_keyframed
+    needs >= 2), so build_overlay_chain sends it down the static branch —
+    where the pre-bake code applied it via colorchannelmixer. The bake must
+    therefore honor it, or `add_keyframe` on opacity exactly once (reachable
+    from chat/MCP/dispatch) silently renders the text fully opaque."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    edl_1kf = _edl_with_text(opacity={"keyframes": [[0.0, 0.4]]})
+    (_, _, png_1kf), = cache_text_pngs(edl_1kf, cache_dir)
+    (_, _, png_full), = cache_text_pngs(_edl_with_text(), cache_dir)
+    # Distinct cache entry, and actually dimmed to the single keyframe value.
+    assert png_1kf != png_full
+    with Image.open(png_1kf) as im:
+        assert im.getchannel("A").getextrema()[1] == int(255 * 0.4)
+    # And the filtergraph must not then apply it a second time.
+    filter_str, _, _ = build_overlay_chain(
+        edl_1kf, cache_dir, source_label="[v]", out_label="[vout]",
+        first_input_index=5, out_w=320, out_h=180, preview=False,
+    )
+    assert "colorchannelmixer" not in filter_str
+
+
+def test_build_overlay_chain_scalar_text_opacity_not_double_applied(tmp_path: Path):
+    """Scalar text opacity is baked into the PNG's alpha; the filtergraph
+    must NOT apply it again via colorchannelmixer (0.4 baked x aa=0.4 would
+    composite at an effective 0.16)."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    filter_str, extra_inputs, _ = build_overlay_chain(
+        _edl_with_text(opacity=0.4), cache_dir, source_label="[v]",
+        out_label="[vout]", first_input_index=5, out_w=320, out_h=180,
+        preview=False,
+    )
+    assert filter_str != ""          # the text IS baked (export path)
+    assert len(extra_inputs) > 0
+    assert "colorchannelmixer" not in filter_str
 
 
 def test_build_overlay_chain_preview_default_still_bakes_everything(tmp_path: Path):

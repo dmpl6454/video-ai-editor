@@ -384,6 +384,17 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       try { cv.releasePointerCapture(e.pointerId) } catch { /* noop */ }
       dragRef.current = null
       if (d.mode === 'move') {
+        // A body pointerdown always starts a 'move' drag, so a plain
+        // select-click lands here with unchanged coords — skip the commit
+        // entirely (an identical-x/y op would still clear the redo stack).
+        const moved = Math.round(d.live.x) !== Math.round(d.x0)
+          || Math.round(d.live.y) !== Math.round(d.y0)
+        if (!moved) return
+        // Deliberately position-only: a drag does NOT restack. Auto-raising
+        // the dragged sticker would silently override an explicit "Send to
+        // back", and it can't share this commit — two dispatches means Undo
+        // reverts the raise while leaving the sticker moved. Stacking is
+        // controlled explicitly by Properties' Bring-to-front / Send-to-back.
         dispatch('set_clip_transform', { clip_id: d.id, x: Math.round(d.live.x), y: Math.round(d.live.y) })
       } else {
         dispatch('set_clip_transform', { clip_id: d.id, scale: Math.round(d.live.scale * 100) / 100 })

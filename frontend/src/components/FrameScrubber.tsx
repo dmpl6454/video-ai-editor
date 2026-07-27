@@ -73,14 +73,19 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       keyIdx: number[]             // indices of keyframe samples
       timescale: number            // ticks per second
       lastDecodedCts: number       // last cts decoded, microseconds
-      pendingTarget: number | null // seconds
+      targetUs: number             // current seek target, microseconds — the
+                                   // decoder output gate only paints frames
+                                   // that cover-or-follow this time
+      pendingTarget: number | null // seconds — newest seek queued behind an
+                                   // in-flight walk (drag coalescing)
+      inFlight: boolean            // a decode walk + flush is running
       lastSeekKey: number          // the keyframe-sample index used last seek
       decoderConfig: VideoDecoderConfig | null
       useFallback: boolean         // mp4box failed → drive the hidden <video>
     }>({
       decoder: null, samples: [], keyIdx: [], timescale: 1,
-      lastDecodedCts: -1, pendingTarget: null, lastSeekKey: -1,
-      decoderConfig: null, useFallback: false,
+      lastDecodedCts: -1, targetUs: 0, pendingTarget: null, inFlight: false,
+      lastSeekKey: -1, decoderConfig: null, useFallback: false,
     })
 
     // Load + demux the mp4 whenever `src` changes
@@ -95,8 +100,8 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       }
       stateRef.current = {
         decoder: null, samples: [], keyIdx: [], timescale: 1,
-        lastDecodedCts: -1, pendingTarget: null, lastSeekKey: -1,
-        decoderConfig: null, useFallback: false,
+        lastDecodedCts: -1, targetUs: 0, pendingTarget: null, inFlight: false,
+        lastSeekKey: -1, decoderConfig: null, useFallback: false,
       }
       // Detach any prior fallback <video> source so a stale clip can't paint.
       const fv0 = fallbackVideoRef.current
@@ -164,7 +169,16 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
 
           const decoder = new VideoDecoder({
             output: (frame) => {
-              try { renderFrame(frame) } finally { frame.close() }
+              // GOP-walk intermediates — frames that END before the seek
+              // target — are decode-only; painting them is what made a drag
+              // visibly rewind to the keyframe and replay forward. The walk
+              // always ends with a frame that covers-or-follows the target
+              // (see seek()), so exactly that frame lands on the canvas.
+              try {
+                if (frame.timestamp + (frame.duration ?? 0) >= stateRef.current.targetUs) {
+                  renderFrame(frame)
+                }
+              } finally { frame.close() }
             },
             error: (e) => console.warn('[FrameScrubber] decoder error:', e),
           })
@@ -278,48 +292,84 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
         }
 
         if (!st.decoder || !st.samples.length) return
-        const targetUs = timeSeconds * 1_000_000
 
-        // Bisect to find latest keyframe index whose cts ≤ target
-        let lo = 0, hi = st.keyIdx.length - 1, best = 0
-        while (lo <= hi) {
-          const mid = (lo + hi) >> 1
-          const sIdx = st.keyIdx[mid]
-          const cts = st.samples[sIdx].cts
-          if (cts <= targetUs) { best = mid; lo = mid + 1 }
-          else hi = mid - 1
+        // Coalesce concurrent seeks: a paused drag fires one unawaited seek
+        // per mousemove. If a walk+flush is already in flight, just remember
+        // the newest target — the in-flight call runs one more walk for it
+        // after its flush, collapsing N mousemoves into at most 2 walks.
+        if (st.inFlight) {
+          st.pendingTarget = timeSeconds
+          return
         }
-        const startIdx = st.keyIdx[best]
+        st.inFlight = true
+        try {
+          let target = timeSeconds
+          for (;;) {
+            const targetUs = target * 1_000_000
+            // Arm the paint gate (see the decoder output callback) before
+            // any chunk is fed.
+            st.targetUs = targetUs
 
-        // Walk forward from the keyframe through every sample whose cts ≤ target.
-        // We feed everything to the decoder so output frames before the target
-        // are decoded but discarded by `renderFrame` (the latest one wins).
-        for (let i = startIdx; i < st.samples.length; i++) {
-          const s = st.samples[i]
-          if (s.cts > targetUs && i > startIdx) {
-            // Include the first sample whose cts > targetUs so a target
-            // that lies between two frames still gets the next frame
-            // displayed (closest match).
-            const chunk = new EncodedVideoChunk({
-              type: s.is_sync ? 'key' : 'delta',
-              timestamp: s.cts,
-              duration: s.duration,
-              data: s.data,
-            })
-            st.decoder.decode(chunk)
-            break
+            // Bisect to find latest keyframe index whose cts ≤ target
+            let lo = 0, hi = st.keyIdx.length - 1, best = 0
+            while (lo <= hi) {
+              const mid = (lo + hi) >> 1
+              const sIdx = st.keyIdx[mid]
+              const cts = st.samples[sIdx].cts
+              if (cts <= targetUs) { best = mid; lo = mid + 1 }
+              else hi = mid - 1
+            }
+            const startIdx = st.keyIdx[best]
+
+            // Walk forward from the keyframe through every sample whose
+            // cts ≤ target. We feed everything to the decoder (it needs the
+            // whole chain), but the output gate skips painting the frames
+            // before the target — only the frame covering it hits the canvas.
+            let maxEndUs = 0
+            for (let i = startIdx; i < st.samples.length; i++) {
+              const s = st.samples[i]
+              maxEndUs = Math.max(maxEndUs, s.cts + s.duration)
+              if (s.cts > targetUs && i > startIdx) {
+                // Include the first sample whose cts > targetUs so a target
+                // that lies between two frames still gets the next frame
+                // displayed (closest match).
+                const chunk = new EncodedVideoChunk({
+                  type: s.is_sync ? 'key' : 'delta',
+                  timestamp: s.cts,
+                  duration: s.duration,
+                  data: s.data,
+                })
+                st.decoder.decode(chunk)
+                break
+              }
+              const chunk = new EncodedVideoChunk({
+                type: i === startIdx || s.is_sync ? 'key' : 'delta',
+                timestamp: s.cts,
+                duration: s.duration,
+                data: s.data,
+              })
+              st.decoder.decode(chunk)
+            }
+            // A target past the last fed sample would otherwise fail the
+            // gate and paint nothing — clamp it to the walk's real end.
+            // (-2µs absorbs float cts/duration truncating to VideoFrame's
+            // integer-microsecond timestamps.)
+            st.targetUs = Math.min(st.targetUs, maxEndUs - 2)
+            // Force the decoder to emit any queued frames so the canvas paints.
+            await st.decoder.flush().catch(() => {})
+            st.lastSeekKey = startIdx
+
+            // src changed mid-walk: the effect wholesale-replaced stateRef
+            // (and closed this decoder) — this state object is dead, stop.
+            if (stateRef.current !== st) break
+            const next = st.pendingTarget
+            st.pendingTarget = null
+            if (next === null || next === target) break
+            target = next
           }
-          const chunk = new EncodedVideoChunk({
-            type: i === startIdx || s.is_sync ? 'key' : 'delta',
-            timestamp: s.cts,
-            duration: s.duration,
-            data: s.data,
-          })
-          st.decoder.decode(chunk)
+        } finally {
+          st.inFlight = false
         }
-        // Force the decoder to emit any queued frames so the canvas paints.
-        await st.decoder.flush().catch(() => {})
-        st.lastSeekKey = startIdx
       },
     }), [ready])
 

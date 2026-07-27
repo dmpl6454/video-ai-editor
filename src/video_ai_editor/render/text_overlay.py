@@ -346,6 +346,38 @@ def resolve_anchor_overrides(c: TextClip, role: str,
     return ax, ay
 
 
+def resolve_opacity_override(c: TextClip) -> float | None:
+    """Explicit scalar transform.opacity in [0, 1), or None (fully opaque).
+
+    Unlike the color/font/anchor sentinels above there is no collision
+    problem: the schema default is 1.0, which is a natural no-op, so any
+    scalar below 1 is unambiguously an explicit override. Values are clamped
+    to [0, 1].
+
+    ANIMATED opacity resolves as None ("keyframed resolves unset", same
+    convention as resolve_anchor_overrides): the PNG stays at full alpha and
+    build_overlay_chain's anim_text path animates it per frame via geq —
+    baking a keyframe value into the PNG would double-apply it. The browser
+    preview mirrors this by treating any non-scalar value as 1.0.
+
+    "Animated" here means `is_keyframed` (>= 2 keyframes) — EXACTLY the
+    condition build_overlay_chain uses to pick the anim_text path, so the
+    bake and the filtergraph can never both apply (or both skip) the value.
+    A DEGENERATE 1-keyframe list is not animated: it takes the static
+    branch, where the old code applied `_scalar_or_last` via
+    colorchannelmixer, so it must bake here or the clip silently renders
+    fully opaque (`add_keyframe` on opacity once produces exactly this).
+    """
+    tx = getattr(c, "transform", None)
+    if tx is None:
+        return None
+    v = getattr(tx, "opacity", None)
+    if v is None or is_keyframed(v):
+        return None  # missing, or animated per-frame by the geq path
+    f = max(0.0, min(1.0, _scalar_or_last(v, 1.0)))
+    return None if f >= 0.999 else f
+
+
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
     lines: list[str] = []
     for paragraph in text.splitlines():
@@ -372,7 +404,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     anchor_x: float | None = None,
                     anchor_y: float | None = None,
                     stroke: tuple[int, int, int, int] | None = None,
-                    stroke_w: float | None = None) -> Image.Image:
+                    stroke_w: float | None = None,
+                    opacity: float | None = None) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role.
 
     Emoji are stripped from the text before drawing (bundled fonts have no
@@ -389,6 +422,11 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     resolve_anchor_overrides) in ABSOLUTE canvas pixels: the text block is
     centered on the anchor. None keeps the historic layout (horizontal
     centering; vertical role anchor via _y_for_role).
+
+    `opacity` is the resolved scalar transform.opacity (see
+    resolve_opacity_override); it multiplies the finished image's alpha
+    channel so fill, stroke and shadow all dim uniformly. None means fully
+    opaque.
     """
     text = _strip_emoji(text)
     if not text:
@@ -427,6 +465,12 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                           stroke_width=style["stroke_w"], stroke_fill=(0, 0, 0, 140))
         draw.text((x, y), line, font=font, fill=style["fill"],
                   stroke_width=style["stroke_w"], stroke_fill=style["stroke"])
+    if opacity is not None and opacity < 0.999:
+        # Multiply the finished image's alpha so fill, stroke and shadow dim
+        # uniformly — same pattern as the static-sticker opacity bake in
+        # cache_sticker_pngs.
+        a = img.getchannel("A").point(lambda v: int(v * opacity))
+        img.putalpha(a)
     return img
 
 
@@ -463,17 +507,20 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
         size = resolve_size_override(c)
         stroke, stroke_w = resolve_stroke_overrides(c)
         anchor_x, anchor_y = resolve_anchor_overrides(c, role, canvas.w, canvas.h)
+        opacity = resolve_opacity_override(c)
         # Every override is part of the pixels, so every override is part of
         # the key — keyed on the RESOLVED values (sentinels normalize to '')
         # so a sentinel-valued clip shares its PNG with an untouched one.
         # (v3→v4 bump also invalidates every pre-transform/size cache entry;
         # without size/x/y in the key, a size edit silently served the
-        # stale PNG forever.)
+        # stale PNG forever. opacity joined the key when it started baking
+        # into the alpha channel — same dead-control bug class otherwise.)
         style_key = f"{fill or ''}|{font_file.name if font_file else ''}"
         geo_key = (f"{'' if size is None else f'{size:.2f}'}|"
                    f"{'' if anchor_x is None else f'{anchor_x:.2f}'},"
                    f"{'' if anchor_y is None else f'{anchor_y:.2f}'}|"
-                   f"{stroke or ''}|{'' if stroke_w is None else f'{stroke_w:.2f}'}")
+                   f"{stroke or ''}|{'' if stroke_w is None else f'{stroke_w:.2f}'}|"
+                   f"{'' if opacity is None else f'{opacity:.3f}'}")
         key = hashlib.sha256(
             f"v4|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
@@ -482,7 +529,8 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
             img = render_text_png(c.text, role, canvas.w, canvas.h,
                                   fill=fill, font_file=font_file,
                                   size=size, anchor_x=anchor_x, anchor_y=anchor_y,
-                                  stroke=stroke, stroke_w=stroke_w)
+                                  stroke=stroke, stroke_w=stroke_w,
+                                  opacity=opacity)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -690,8 +738,12 @@ def build_overlay_chain(
             items.append({"kind": "anim_text", "text_clip": c, "png": png, "role": role,
                           "anim_in": a_in, "anim_out": a_out, "z": zmap.get(c.id, 0)})
         else:
+            # Scalar transform.opacity is baked into the PNG's alpha channel
+            # by cache_text_pngs (resolve_opacity_override) — pass 1.0 here,
+            # or the colorchannelmixer branch below would apply it a SECOND
+            # time (0.4 baked × aa=0.4 → effective 0.16).
             items.append({"kind": "static", "start": c.start, "end": c.end, "png": png,
-                          "opacity": _scalar_or_last(opa, 1.0) if opa is not None else 1.0,
+                          "opacity": 1.0,
                           "z": zmap.get(c.id, 0)})
     for s, png in static_stickers:
         items.append({"kind": "static", "start": s.start, "end": s.end, "png": png,
@@ -746,9 +798,10 @@ def build_overlay_chain(
             pre = f"[{idx}:v]scale={out_w}:{out_h}"
             opa = float(item.get("opacity", 1.0))
             if opa < 0.999:
-                # Static (non-keyframed) opacity used to be collected into the
-                # item dict and then never applied — a text clip at opacity 0.5
-                # baked fully opaque.
+                # No current producer sends <1.0 here — text bakes scalar
+                # opacity into the PNG in cache_text_pngs, stickers in
+                # cache_sticker_pngs — but the branch stays for any future
+                # static item whose PNG doesn't carry its own opacity.
                 pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
             parts.append(pre + scaled)
             parts.append(

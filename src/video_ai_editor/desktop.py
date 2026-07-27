@@ -388,6 +388,46 @@ class _Api:
             return None
         dest_path = dest if isinstance(dest, str) else dest[0]
         shutil.copy2(src, dest_path)
+        # macOS Spotlight's `com.apple.metadata.mdflagwriter` daemon marks some
+        # freshly-created files with UF_HIDDEN within ~1s (the same daemon behind
+        # this repo's `.pth` hidden-flag gotcha — see CLAUDE.md). When it hits a
+        # just-copied export, Finder renders the file GRAYED OUT and it reads as
+        # missing even though the bytes are perfect. Proactively clear the hidden
+        # flag so exports always appear normally. macOS-only; best-effort.
+        if _pu.IS_MAC:
+            try:
+                subprocess.run(["chflags", "nohidden", dest_path], **_pu.SUBPROCESS_FLAGS)
+            except Exception:
+                pass
+        # On a case-insensitive volume (default APFS/HFS+), writing "DemoVid.mp4"
+        # over a pre-existing "demovid.mp4" overwrites it IN PLACE and keeps the
+        # old on-disk case — so the path we were handed (and would toast) can
+        # differ in case from what Finder/Spotlight actually show, reading as
+        # "the file isn't where it said". Resolve the true stored leaf by
+        # matching the parent dir case-insensitively (realpath alone won't do it:
+        # on a case-insensitive volume it returns whatever case you asked for),
+        # so the reported path always matches what the user sees on disk.
+        dp = Path(dest_path)
+        try:
+            for entry in dp.parent.iterdir():
+                if entry.name.lower() == dp.name.lower():
+                    dest_path = str(entry)
+                    break
+        except OSError:
+            pass
+        # Take the user straight to the saved file so they never have to hunt for
+        # it in a crowded Downloads folder (the exported video is easy to lose
+        # among dozens of files). Best-effort: a reveal failure must NEVER undo
+        # the save that already succeeded, so swallow every error and still
+        # return the path. macOS: `open -R` selects it in Finder; Windows:
+        # `explorer /select,` selects it in Explorer.
+        try:
+            if _pu.IS_MAC:
+                subprocess.run(["open", "-R", dest_path], **_pu.SUBPROCESS_FLAGS)
+            elif _pu.IS_WINDOWS:
+                subprocess.run(["explorer", f"/select,{dest_path}"], **_pu.SUBPROCESS_FLAGS)
+        except Exception:
+            pass
         return dest_path
 
 

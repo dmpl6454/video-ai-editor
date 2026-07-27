@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { EDL, TextClip } from '../types'
+import { sampleKF, type KFNum } from '../lib/overlay'
 
 interface Props {
   edl: EDL
@@ -280,7 +281,18 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           ? c.style.stroke.slice(0, 7) : null
         ctx.strokeStyle = styleStroke ?? 'rgba(0,0,0,0.95)'
         ctx.fillStyle = styleColor ?? `rgba(255,255,255,1)`
-        ctx.globalAlpha = (s.opacity ?? 1) * env.alpha
+        // transform.opacity, sampled the same way the SERVER resolves it, so
+        // preview predicts export in all three shapes: a scalar and a
+        // degenerate 1-keyframe list are baked into the PNG's alpha by
+        // resolve_opacity_override/_scalar_or_last, and a real (>=2)
+        // keyframe list is animated per-frame by the geq path in CLIP-LOCAL
+        // time (`T - clip.start`) — hence `t - c.start` here, matching
+        // animEnvelope's own time base. types.ts deliberately omits
+        // transform on the mirrored Clip interfaces, hence the cast (same
+        // pattern as resolveAnchor above).
+        const rawOpacity = (c as TextClip & { transform?: { opacity?: KFNum } }).transform?.opacity
+        const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, t - c.start, 1)))
+        ctx.globalAlpha = (s.opacity ?? 1) * env.alpha * txOpacity
 
         const cleaned = c.text.replace(EMOJI_RE, '').trim()
         if (!cleaned) continue

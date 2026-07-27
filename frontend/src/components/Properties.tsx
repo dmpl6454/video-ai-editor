@@ -50,10 +50,24 @@ export function Properties() {
 
   const c = clip.c
   if (clip.t.type === 'sticker') {
+    // Is this sticker already strictly above / below every sibling on its
+    // track? set_clip_z 'front' assigns max(sibling z)+1 over a list that
+    // INCLUDES the target, so clicking when already top-most still bumps z:
+    // a commit, a cleared redo stack and a full preview re-encode for a
+    // pixel-identical timeline. Disable the button instead (it also shows
+    // the user the current state).
+    const sibZ = clip.t.clips
+      .filter((s) => s.id !== c.id)
+      .map((s) => (s as unknown as { z?: number }).z ?? 0)
+    const myZ = (c as unknown as { z?: number }).z ?? 0
+    const canRaise = sibZ.some((z) => z >= myZ)
+    const canLower = sibZ.some((z) => z <= myZ)
     return (
       <StickerProps
         c={c as unknown as StickerLike}
         trackLabel={clip.t.label ?? clip.t.id}
+        canRaise={canRaise}
+        canLower={canLower}
         dispatch={dispatch}
       />
     )
@@ -91,6 +105,11 @@ export function Properties() {
   const fadeIn = audio?.fade_in ?? 0
   const fadeOut = audio?.fade_out ?? 0
   const muted = !!audio?.mute
+  // Visual fade-from/to-black — top-level Clip fields (NOT audio.*), rendered
+  // by compositor._build_clip_video_chain. types.ts omits them, hence the cast.
+  const vf = c as unknown as { video_fade_in?: number; video_fade_out?: number }
+  const videoFadeIn = vf.video_fade_in ?? 0
+  const videoFadeOut = vf.video_fade_out ?? 0
 
   const effects = (c as unknown as { effects?: { type: string; params?: Record<string, number> }[] }).effects
   const colorEffect = effects?.find((e) => e.type === 'color' || e.type === 'color_grade')
@@ -155,6 +174,45 @@ export function Properties() {
         </Section>
       )}
 
+      {clip.t.id === 'v1' && (
+        // v1-only, mirroring the backend: set_video_fade rejects audio lanes
+        // AND v2/PIP clips (the pip overlay chain has no setpts shift and
+        // would need an alpha-fade, not fade-to-black — see dispatch.py).
+        // Showing the section on a v2 clip would just 400 with a toast.
+        <Section label="Video fade" onReset={() => dispatch('set_video_fade', { clip_id: c.id, in_s: 0, out_s: 0 })}>
+          {/* The visual fade the tester expected from the (audio-only) fade
+              fields below. Key-seeded so undo/chat edits re-seed the inputs.
+              The same-value guard compares against the SEEDED (2-dp) display
+              value, not the raw EDL float: seeded from a chat-set 0.333 the
+              field shows "0.33", so comparing to 0.333 would treat a
+              focus-then-blur as an edit — committing an op, clearing redo,
+              re-encoding the preview and silently rounding the stored value.
+              Same rule as TextProps.commitNumber below. */}
+          <div className="row two">
+            <div className="field">
+              <label>Video fade in (s)</label>
+              <input type="number" step="0.05" min={0} max={5}
+                key={`vfi${videoFadeIn.toFixed(2)}`} defaultValue={videoFadeIn.toFixed(2)}
+                onBlur={(e) => {
+                  const n = Number(e.target.value)
+                  if (Number.isFinite(n) && Math.max(0, n) !== Number(videoFadeIn.toFixed(2)))
+                    void dispatch('set_video_fade', { clip_id: c.id, in_s: Math.max(0, n) })
+                }} />
+            </div>
+            <div className="field">
+              <label>Video fade out (s)</label>
+              <input type="number" step="0.05" min={0} max={5}
+                key={`vfo${videoFadeOut.toFixed(2)}`} defaultValue={videoFadeOut.toFixed(2)}
+                onBlur={(e) => {
+                  const n = Number(e.target.value)
+                  if (Number.isFinite(n) && Math.max(0, n) !== Number(videoFadeOut.toFixed(2)))
+                    void dispatch('set_video_fade', { clip_id: c.id, out_s: Math.max(0, n) })
+                }} />
+            </div>
+          </div>
+        </Section>
+      )}
+
       <Section label="Audio" onReset={() => {
         dispatch('set_volume', { target: c.id, db: 0 })
         dispatch('add_fade', { clip_id: c.id, in_s: 0, out_s: 0 })
@@ -162,14 +220,18 @@ export function Properties() {
         <Slider min={-30} max={6} step={0.5} value={gain}
           format={(v) => `${v.toFixed(1)} dB`}
           onChange={(v) => dispatch('set_volume', { target: c.id, db: v })} />
+        {/* "Audio" prefix is load-bearing: the section header scrolls out of
+            small panels and a bare "Fade in" reads as a VIDEO fade (tester
+            issue: "fade in and out is not working video" — the audio fade
+            worked fine; the label promised more than add_fade delivers). */}
         <div className="row two">
           <div className="field">
-            <label>Fade in</label>
+            <label>Audio fade in (s)</label>
             <input type="number" step="0.05" min={0} max={5} defaultValue={fadeIn.toFixed(2)}
               onBlur={(e) => dispatch('add_fade', { clip_id: c.id, in_s: Number(e.target.value) })} />
           </div>
           <div className="field">
-            <label>Fade out</label>
+            <label>Audio fade out (s)</label>
             <input type="number" step="0.05" min={0} max={5} defaultValue={fadeOut.toFixed(2)}
               onBlur={(e) => dispatch('add_fade', { clip_id: c.id, out_s: Number(e.target.value) })} />
           </div>
@@ -254,9 +316,11 @@ interface StickerLike {
   transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
 }
 
-function StickerProps({ c, trackLabel, dispatch }: {
+function StickerProps({ c, trackLabel, canRaise, canLower, dispatch }: {
   c: StickerLike
   trackLabel: string
+  canRaise: boolean
+  canLower: boolean
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   const tx = c.transform ?? {}
@@ -318,6 +382,25 @@ function StickerProps({ c, trackLabel, dispatch }: {
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
+        {/* Stacking is decided server-side by (track_z, clip_z, start) — with
+            every sticker at the default z=0 the LATEST-added always composites
+            on top and dragging (which only writes x/y) can't change it (tester
+            issue: "latest emoji always overlaps"). set_clip_z is the existing,
+            tested backend primitive; these buttons are its first UI surface. */}
+        <button
+          disabled={!canRaise}
+          title={canRaise
+            ? 'Composite this sticker above all overlapping stickers'
+            : 'Already in front of every other sticker on this track'}
+          onClick={() => dispatch('set_clip_z', { clip_id: c.id, z: 'front' })}
+        >Bring to front</button>
+        <button
+          disabled={!canLower}
+          title={canLower
+            ? 'Composite this sticker below all overlapping stickers'
+            : 'Already behind every other sticker on this track'}
+          onClick={() => dispatch('set_clip_z', { clip_id: c.id, z: 'back' })}
+        >Send to back</button>
         <button
           title="Remove this overlay from the timeline (⌫)"
           onClick={() => dispatch('ripple_delete', { clip_id: c.id })}
@@ -339,7 +422,7 @@ interface TextClipLike {
   end: number
   role?: string | null
   style?: { font?: string; size?: number; color?: string }
-  transform?: { x?: unknown; y?: unknown }
+  transform?: { x?: unknown; y?: unknown; opacity?: unknown }
 }
 
 function TextProps({ c, trackLabel, canvas, dispatch }: {
@@ -350,6 +433,8 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
 }) {
   const x = asScalar(c.transform?.x, canvas.w / 2)
   const y = asScalar(c.transform?.y, canvas.h * 0.85)
+  const opacity = asScalar(c.transform?.opacity, 1)
+  const isCaption = c.role === 'caption'
   const size = c.style?.size ?? 96
   const rawColor = c.style?.color ?? '#FFFFFF'
   // <input type=color> only speaks #rrggbb — drop an alpha suffix if present.
@@ -425,23 +510,41 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
               style={{ width: '100%', padding: 0, height: 24 }} />
           </div>
         </div>
+        {/* transform.opacity — rendered by BOTH paths (server render_text_png
+            alpha-multiplies the baked PNG; TextLayer multiplies globalAlpha),
+            so this is a live control, not another dead field (tester issue 4:
+            "more controls for the text like opacity"). */}
+        <Slider min={0} max={1} step={0.05} value={opacity}
+          format={(v) => `opacity ${v.toFixed(2)}`}
+          onChange={(v) => setProp('transform.opacity', v)} />
       </Section>
 
       <Section label={`Position (canvas px, ${canvas.w}×${canvas.h})`}>
         {/* TextClip transform x/y are ABSOLUTE CANVAS PIXELS (clip centre),
-            not relative units — 540/1700 is bottom-centre on a 1080×1920. */}
-        <div className="row two">
-          <div className="field">
-            <label>X</label>
-            <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
-              onBlur={(e) => commitNumber('transform.x', e.target.value, Math.round(x))} />
+            not relative units — 540/1700 is bottom-centre on a 1080×1920.
+            Caption cues are the exception: both renderers deliberately ignore
+            caption transforms (resolve_anchor_overrides returns (None, None)
+            for role='caption'; TextLayer's resolveAnchor mirrors it), so live
+            inputs here would be dead controls — show why instead. */}
+        {isCaption ? (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+            Caption position is controlled by the captions style, not per-cue
+            coordinates.
           </div>
-          <div className="field">
-            <label>Y</label>
-            <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
-              onBlur={(e) => commitNumber('transform.y', e.target.value, Math.round(y))} />
+        ) : (
+          <div className="row two">
+            <div className="field">
+              <label>X</label>
+              <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
+                onBlur={(e) => commitNumber('transform.x', e.target.value, Math.round(x))} />
+            </div>
+            <div className="field">
+              <label>Y</label>
+              <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
+                onBlur={(e) => commitNumber('transform.y', e.target.value, Math.round(y))} />
+            </div>
           </div>
-        </div>
+        )}
       </Section>
 
       <Section label="Timing">

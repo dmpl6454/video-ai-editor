@@ -153,7 +153,17 @@ def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
     default_crf = 30 if preview else 20
     crf_val = crf if crf is not None else default_crf
     preset = "ultrafast" if preview else "medium"
-    return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf_val), "-pix_fmt", "yuv420p"]
+    args = ["-c:v", "libx264", "-preset", preset, "-crf", str(crf_val), "-pix_fmt", "yuv420p"]
+    if preview:
+        # Bound the preview GOP to ~1s. x264's default keyint=250 yields
+        # 8.3s keyframe spacing at 30fps, and the frontend scrubber decodes
+        # from the nearest PRIOR keyframe on every paused playhead drag —
+        # on no-GPU machines (this fallback) that was up to ~250 frames per
+        # drag tick, the visible "rewinds a second or two while scrubbing"
+        # tester report. HW encoders already emit ~0.4-1s GOPs. Export path
+        # untouched: long GOPs are the right trade for file size there.
+        args += ["-g", "30"]
+    return args
 
 
 def _crf_to_videotoolbox_qv(crf: int) -> int:
@@ -304,6 +314,21 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # show through to canvas bg colour, on PiP they show through to the layer below.
     if getattr(c, "chromakey", None) is not None:
         v_chain += "," + build_chromakey_filter(c.chromakey)
+
+    # Visual fade from/to black (clip.video_fade_in/out). st/d are clip-local
+    # SOURCE-time seconds: the clip input is -ss/-to trimmed so its PTS start
+    # at 0, and this sits IMMEDIATELY BEFORE the speed setpts below —
+    # deliberately the same convention as the audio side (_audio_props_filters
+    # also positions fades in source-time c.duration). Speed quirk, shared
+    # with audio fades: on a 2x clip a 1s fade displays over 0.5s wall-clock.
+    # d is clamped to the clip duration (and skipped entirely for
+    # zero-duration clips, where fade=d=0 would error).
+    vfi = min(float(getattr(c, "video_fade_in", 0.0) or 0.0), c.duration)
+    vfo = min(float(getattr(c, "video_fade_out", 0.0) or 0.0), c.duration)
+    if vfi > 0.001:
+        v_chain += f",fade=t=in:st=0:d={vfi:.3f}"
+    if vfo > 0.001:
+        v_chain += f",fade=t=out:st={max(0.0, c.duration - vfo):.3f}:d={vfo:.3f}"
 
     if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         v_chain += f",setpts=PTS/{float(c.speed)}"

@@ -22,6 +22,7 @@ export function TopBar() {
   const exportError = useStore((s) => s.exportError)
   const clearExportError = useStore((s) => s.clearExportError)
   const doExport = useStore((s) => s.doExport)
+  const downloadExport = useStore((s) => s.downloadExport)
   const [exportElapsed, setExportElapsed] = useState(0)
   const edl = useStore((s) => s.edl)
   const sid = useStore((s) => s.sessionId)
@@ -423,12 +424,21 @@ export function TopBar() {
           )}
         </div>
         {exportUrl && !exporting && (
-          <a href={exportUrl} download
+          // Deliberately a <button>, NOT an <a href={exportUrl} download>. In the
+          // packaged app (pywebview WKWebView/WebView2) the `download` attribute is
+          // ignored, so clicking an anchor NAVIGATES the webview to the inline
+          // .mp4 — which macOS opens as a borderless native fullscreen player with
+          // no Escape/back affordance, trapping the user (force-quit only). Routing
+          // through downloadExport() → the native save bridge avoids any navigation
+          // and pops a real Save-As dialog instead.
+          <button
+            type="button"
+            onClick={() => downloadExport()}
             className={exportStale ? 'stale-dl' : ''}
-            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : `Download exported ${exportUrl.split('.').pop()?.toUpperCase()}`}
-            style={{ color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
+            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : `Save exported ${exportUrl.split('.').pop()?.toUpperCase()}`}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
             ↓ {exportUrl.split('.').pop()?.toUpperCase()}{exportStale ? ' (outdated)' : ''}
-          </a>
+          </button>
         )}
         {exportError && (
           <span

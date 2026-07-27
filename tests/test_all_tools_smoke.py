@@ -173,6 +173,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "set_volume": {"target": "music", "db": -12.0},
         "set_clip_muted": {"clip_id": "c1"},
         "add_fade": {"clip_id": "c1", "in_s": 0.5, "out_s": 0.5},
+        "set_video_fade": {"clip_id": "c1", "in_s": 0.5, "out_s": 0.5},
         "add_music": {"src": music, "start": 0, "in": 0, "out": 4, "duck": True, "volume_db": -12},
         "set_loudness_target": {"lufs": -16.0},
         "set_track_muted": {"track": "music", "muted": True},

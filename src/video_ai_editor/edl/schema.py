@@ -17,7 +17,8 @@ EDL_VERSION = 2
 # v4: text transform.x/y + style.size/stroke now render (previously ignored)
 #     and sticker z-order sorts — unchanged EDL bytes produce different
 #     pixels.
-RENDER_BEHAVIOR_VERSION = 4
+# v5: clip video_fade_in/out render; text transform.opacity renders
+RENDER_BEHAVIOR_VERSION = 5
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -77,6 +78,15 @@ class Clip(BaseModel):
     transform: Transform = Field(default_factory=Transform)
     speed: float | dict | None = None  # number or curve {"curve":[[t,r],...]}
     reverse: bool = False
+    # Visual fade-from/to-black on the clip's VIDEO, in clip-local SOURCE
+    # seconds (same time convention as audio.fade_in/out — on a 2x clip a 1s
+    # fade displays over 0.5s of wall-clock). Deliberately TOP-LEVEL fields,
+    # NOT inside AudioProps: compositor._video_only_fingerprint pops each
+    # clip's "audio" key (audio props never change pixels), so a video-fade
+    # change must live outside it to invalidate the cached video-only mp4 —
+    # which top-level fields do automatically since it dumps whole clips.
+    video_fade_in: float = 0.0
+    video_fade_out: float = 0.0
     effects: list[Effect] = Field(default_factory=list)
     mask: Mask | None = None
     chromakey: ChromaKey | None = None

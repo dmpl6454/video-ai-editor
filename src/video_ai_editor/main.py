@@ -886,23 +886,47 @@ async def load_project_endpoint(file: UploadFile = File(...)):
     return {"id": sid}
 
 
-@app.get("/api/sessions/{sid}/files/{kind}/{name}")
+@app.get("/api/sessions/{sid}/files/{kind}/{name:path}")
 def serve_session_file(sid: str, kind: str, name: str):
+    # Same first-layer sid shape check as DELETE /sessions/{sid} — sid is
+    # untrusted URL input that gets joined into a filesystem path below.
+    if not is_valid_session_id(sid):
+        raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
     if kind not in {"uploads", "previews", "exports"}:
         raise HTTPException(404, "not found")
-    sd = session_dir(sid)
-    # `name` may include subdirs (e.g. "Outfit.../Outfit....normalized.mp4")
-    candidate = (sd / kind / name).resolve()
-    # Prevent path traversal
-    if not str(candidate).startswith(str(sd.resolve())):
+    base = (session_dir(sid) / kind).resolve()
+    # `name` may include subdirs (e.g. "stickers/smile.png",
+    # "Outfit.../Outfit....normalized.mp4") — the route param is {name:path},
+    # so the router no longer rejects slashes and THIS containment check is
+    # the only traversal guard. Anchored at <session>/<kind> and compared via
+    # is_relative_to: the old startswith(str(session_dir)) prefix compare had
+    # no trailing separator, so a sibling session whose dir name merely
+    # EXTENDS this sid (s_abc vs s_abc12) — or a cross-kind "../snapshots/…"
+    # hop — would have passed it.
+    candidate = (base / name).resolve()
+    if not candidate.is_relative_to(base):
         raise HTTPException(403, "forbidden")
-    if not candidate.exists():
-        # Try one level deeper for ingest output (uploaded clips live under uploads/<stem>/)
-        for sub in (sd / kind).rglob(name):
+    if not candidate.exists() and "/" not in name:
+        # Bare-name fallback only: one level deeper for ingest output
+        # (uploaded clips live under uploads/<stem>/). Subpath names are
+        # exact by construction (StickerLayer, preview URLs) — never rglob
+        # those (an unmatchable pattern with separators can raise in glob).
+        for sub in base.rglob(name):
             candidate = sub
             break
-    if not candidate.exists():
+    # is_file(), not exists(): {name:path} also matches "" and directory
+    # names, and FileResponse(directory) is a 500, not a clean 404.
+    if not candidate.is_file():
         raise HTTPException(404, "file not found")
+    # Exports are downloads, not something to play in-page. Force
+    # `Content-Disposition: attachment` (Starlette does this when `filename=` is
+    # set) so that if this URL is ever *navigated* to — e.g. a stray anchor
+    # click inside the packaged pywebview app — the webview downloads it instead
+    # of handing the .mp4 to macOS's borderless native fullscreen player (which
+    # had no Escape/back affordance and trapped the user). uploads/previews stay
+    # inline so the frontend <video> can still stream them.
+    if kind == "exports":
+        return FileResponse(candidate, filename=candidate.name)
     return FileResponse(candidate)
 
 

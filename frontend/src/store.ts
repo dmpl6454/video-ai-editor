@@ -89,6 +89,7 @@ interface State {
   uploadError: string | null
   exporting: boolean
   exportUrl: string | null
+  exportFilename: string | null // leaf name of the finished export (for the native save dialog)
   exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
   exportError: string | null
   exportProgress: number        // 0..1 live ffmpeg progress
@@ -170,6 +171,12 @@ interface State {
   dispatch(tool: string, args?: Record<string, unknown>): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
+  // Save the last finished export to disk. In the packaged app this drives the
+  // native Save-As dialog (via the pywebview bridge); in a browser it falls
+  // back to an `<a download>` click. Wired to the green download-arrow link so
+  // clicking it never navigates the WKWebView to the inline .mp4 (which opened
+  // an inescapable native fullscreen player).
+  downloadExport(): Promise<void>
   cancelExport(): Promise<void>
   splitAtPlayhead(): Promise<void>
   rippleDeleteSelection(): Promise<void>
@@ -198,6 +205,7 @@ export const useStore = create<State>((set, get) => ({
   uploadError: null,
   exporting: false,
   exportUrl: null,
+  exportFilename: null,
   exportStatus: null,
   exportError: null,
   exportProgress: 0,
@@ -503,7 +511,7 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     set({
-      exporting: true, exportUrl: null, exportStatus: 'queued',
+      exporting: true, exportUrl: null, exportFilename: null, exportStatus: 'queued',
       exportError: null, exportProgress: 0, exportJobId: null,
     })
     const POLL_MS = 500           // tight enough that the bar feels live
@@ -527,8 +535,8 @@ export const useStore = create<State>((set, get) => ({
         if (job.status === 'completed' && job.result) {
           // Stamp the export with the current history length so the UI can flag
           // it "outdated" once the user edits past this point.
-          set({ exportUrl: job.result.url, exportStatus: null, exportProgress: 1,
-                exportGen: get().ops.length })
+          set({ exportUrl: job.result.url, exportFilename: job.result.filename,
+                exportStatus: null, exportProgress: 1, exportGen: get().ops.length })
           await triggerDownload(job.result.url, job.result.filename, sid)
           return
         }
@@ -553,6 +561,15 @@ export const useStore = create<State>((set, get) => ({
     } finally {
       set({ exporting: false, exportStatus: null, exportJobId: null })
     }
+  },
+
+  downloadExport: async () => {
+    const { exportUrl, exportFilename, sessionId } = get()
+    if (!exportUrl) return
+    // Derive the leaf name from the URL if we somehow lack the stored filename
+    // (e.g. an export from before this field existed).
+    const filename = exportFilename || exportUrl.split('/').pop() || 'export.mp4'
+    await triggerDownload(exportUrl, filename, sessionId)
   },
 
   cancelExport: async () => {
