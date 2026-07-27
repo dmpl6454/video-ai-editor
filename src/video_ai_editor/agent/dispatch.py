@@ -70,6 +70,43 @@ def _v_track_for_media(edl: EDL, track_id: str) -> Track:
     return t
 
 
+_VIDEO_LANE_TYPES = frozenset({"video"})
+
+
+def _reject_videoless_on_video_lane(track: Track, src: str, tool: str) -> None:
+    """Guard: a source with no VIDEO stream cannot sit on a video-family lane.
+
+    Every other lane check in this file tests the TRACK TYPE; none of them ever
+    asked what the file actually contains. So an mp3 dropped on v1 was accepted
+    everywhere, and then `_build_clip_video_chain` emitted `[i:v]scale=…` for a
+    file with no `:v` — ffmpeg answers "Stream specifier ':v' … matches no
+    streams / Error binding filtergraph inputs/outputs" and the WHOLE render
+    dies, so every preview and export 422s until the clip is removed.
+
+    This is the exact mirror of `ingest/normalize._has_video`, which was written
+    to stop the identical crash in the other direction (a video with no audio
+    hitting `[i:a]`).
+
+    Fail-OPEN when the probe can't answer (missing file, ffprobe absent,
+    unreadable container): this guard exists to catch a confidently-wrong
+    placement, not to become a new way for valid edits to fail. Only a
+    definitive "this file has streams, and none of them is video" rejects.
+    """
+    if track.type not in _VIDEO_LANE_TYPES:
+        return
+    try:
+        from ..ingest.probe import probe as _probe
+        pr = _probe(Path(src))
+    except Exception:
+        return  # can't tell → allow (fail-open, see docstring)
+    if pr.streams and pr.video is None:
+        name = str(src).replace("\\", "/").split("/")[-1]
+        raise ValueError(
+            f"'{name}' has no video stream — it can't go on '{track.id}' "
+            f"(a video lane). Add it to a music/audio lane instead."
+        )
+
+
 _AUDIO_LANE_TYPES = frozenset({"audio", "music", "vo"})
 
 
@@ -363,7 +400,9 @@ def _safe_src(p: str | Path) -> str:
 
 def add_clip(store: EDLStore, args: dict) -> dict:
     track = _v_track_for_media(store.edl, args["track"])
-    clip = Clip(src=_safe_src(args["src"]), in_=float(args["in"]),
+    src = _safe_src(args["src"])
+    _reject_videoless_on_video_lane(track, src, "add_clip")
+    clip = Clip(src=src, in_=float(args["in"]),
                 out=float(args["out"]), start=float(args["start"]))
     # Sensible default PiP placement for non-V1 video tracks. The PIP renderer
     # scales by 35% of the canvas long edge × `scale`. We can't know the
@@ -563,6 +602,11 @@ def move_clip(store: EDLStore, args: dict) -> dict:
             raise ValueError(
                 f"clip {c.id} has speed {c.speed_factor:g}x — reset speed to 1 "
                 f"before moving it off v1 ('{new_t.id}' renders at native speed)")
+        # Second ingress for the same contract add_clip enforces: dragging an
+        # audio-only clip up from the music lane onto v1 would otherwise break
+        # every subsequent render.
+        if isinstance(c, Clip):
+            _reject_videoless_on_video_lane(new_t, c.src, "move_clip")
         track.clips.remove(c)
         new_t.clips.append(c)
         track = new_t

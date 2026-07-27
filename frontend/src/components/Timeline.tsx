@@ -5,7 +5,7 @@ import { toast } from '../toast'
 import { isMediaClip, isTextClip, clipDuration, clipEnd, clipSpeedFactor, type AnyClip, type Track } from '../types'
 import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
-import { baseName } from '../lib/paths'
+import { baseName, isAudioPath } from '../lib/paths'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
@@ -1226,7 +1226,18 @@ export function Timeline() {
         const targetIsCompatible = targetType
           ? (originIsMediaFamily ? laneAcceptsMediaClip(targetType) : targetType === originType)
           : true
-        if (targetIsCompatible) {
+        // An audio-only clip dragged UP onto a video lane would break every
+        // render (see onCanvasDrop). music↔video are both "media family", so
+        // the compatibility test above happily allows it — this is the extra
+        // content-aware check, mirroring the backend's move_clip guard.
+        const movingClip = drag.clipId
+          ? tracks.flatMap((t) => t.clips).find((c) => c.id === drag.clipId)
+          : undefined
+        const audioOntoVideoLane = !!targetType && VIDEO_FAMILY.has(targetType)
+          && !!movingClip && isMediaClip(movingClip) && isAudioPath(movingClip.src)
+        if (audioOntoVideoLane) {
+          toast.error(`“${baseName((movingClip as { src: string }).src)}” is audio — it can't go on the "${targetType}" lane.`)
+        } else if (targetIsCompatible) {
           args.new_track = targetTrackId
           destTrack = tracks.find((t) => t.id === targetTrackId)
         } else {
@@ -1390,14 +1401,28 @@ export function Timeline() {
         break
       }
     }
-    let trackId = 'v1'
+    // An audio-only source can never live on a video lane: the render builds a
+    // video filtergraph for v1 clips, so an mp3 there kills EVERY preview and
+    // export with "[i:v] … matches no streams". The v1 fallbacks below made
+    // that easy to hit by accident — dropping on no row at all, or on a
+    // text/sticker row, both funnelled straight to v1. Route audio to the
+    // Music lane instead, honouring the promise MediaBin's own tooltip makes
+    // ("audio lands on the Music track"). The backend enforces this too.
+    const srcIsAudio = isAudioPath(src)
+    const musicTrackId = (edl?.tracks ?? []).find((t) => t.type === 'music')?.id
+    let trackId = srcIsAudio ? (musicTrackId ?? 'music') : 'v1'
     if (droppedOnTrackType && laneAcceptsMediaClip(droppedOnTrackType)) {
-      trackId = droppedOnTrackId!
+      const droppedOnVideoLane = VIDEO_FAMILY.has(droppedOnTrackType)
+      if (srcIsAudio && droppedOnVideoLane) {
+        toast.info(`“${baseName(src)}” is audio — added to the Music lane instead.`)
+      } else {
+        trackId = droppedOnTrackId!
+      }
     } else if (droppedOnTrackType) {
       // Landed on an incompatible row (text/sticker/captions/effect) — say
-      // so and fall back to v1, rather than silently placing it there with
-      // no indication the drop target was wrong.
-      toast.error(`Media can't go on the "${droppedOnTrackType}" lane — added to the main video track instead.`)
+      // so and fall back, rather than silently placing it there with no
+      // indication the drop target was wrong.
+      toast.error(`Media can't go on the "${droppedOnTrackType}" lane — added to the ${srcIsAudio ? 'Music' : 'main video'} track instead.`)
     }
     // Probe duration via a quick HEAD-ish request: we don't have one, so we
     // pass out=0 and let the backend default to the source duration if it can,
