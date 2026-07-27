@@ -91,6 +91,12 @@ def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
         # render time), so audio props are part of the chunk's identity —
         # omitting them served stale audio on every volume/fade edit.
         "audio": _canonical(c.audio),
+        # The chunk also bakes the visual fade (build_video_chain runs at
+        # chunk render time) — omitting these would silently serve a stale
+        # un-faded chunk after a set_video_fade edit (the exact bug class
+        # the audio comment above documents).
+        "video_fade_in": float(getattr(c, "video_fade_in", 0.0) or 0.0),
+        "video_fade_out": float(getattr(c, "video_fade_out", 0.0) or 0.0),
         "transform": _canonical(c.transform),
         "effects": _canonical(c.effects),
         "mask": _canonical(c.mask) if c.mask else None,
