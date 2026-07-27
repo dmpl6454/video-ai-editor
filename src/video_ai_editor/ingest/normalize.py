@@ -53,18 +53,34 @@ def _vf_for_height(height: int | None) -> str:
     return f"scale=-2:{height}" if height is not None else ""
 
 
-def _has_audio(src: Path) -> bool:
-    """True if `src` has at least one audio stream."""
+def _has_stream(src: Path, kind: str) -> bool:
+    """True if `src` has at least one stream of `kind` ('a' or 'v')."""
     try:
         out = subprocess.run(
-            [_pu.FFPROBE, "-v", "error", "-select_streams", "a",
+            [_pu.FFPROBE, "-v", "error", "-select_streams", kind,
              "-show_entries", "stream=index", "-of", "csv=p=0", str(src)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
             **_pu.SUBPROCESS_FLAGS,
         )
         return bool(out.stdout.strip())
     except Exception:
-        return True  # assume audio; the render has its own fallbacks
+        return True  # assume present; the render has its own fallbacks
+
+
+def _has_audio(src: Path) -> bool:
+    """True if `src` has at least one audio stream."""
+    return _has_stream(src, "a")
+
+
+def _has_video(src: Path) -> bool:
+    """True if `src` has at least one video stream.
+
+    The mirror of `_has_audio`. Without it, normalizing an audio-only file
+    succeeded (ffmpeg happily writes an audio-only mp4 and exits 0), so the
+    upload landed on v1 as a `.normalized.mp4` with no picture — and every
+    later render died on `[i:v] … matches no streams`.
+    """
+    return _has_stream(src, "v")
 
 
 def _attempts(src: Path, dst: Path, fps: int, sample_rate: int, channels: int,

@@ -247,6 +247,51 @@ def _video_clips(edl: EDL) -> list[Clip]:
     return clips
 
 
+# A gap shorter than this is a rounding artefact, not a deliberate hole.
+_GAP_EPS = 0.001
+
+
+def _v1_segments(clips: list[Clip], total_duration: float) -> list[tuple[str, object]]:
+    """Ordered v1 timeline segments: ("clip", index) | ("gap", seconds).
+
+    v1 used to be assembled as a bare `concat` of the clips, which packed them
+    from t=0 and threw `clip.start` away — the timeline drew a gap, the render
+    silently closed it, and the output was shorter than `edl.duration` (proven:
+    an 84.27s timeline rendering as a 62.31s file). Every other lane already
+    honours `start` via `adelay` (music: audio_mix.py; PIP: build_pip_overlay_chain),
+    so v1 was the only track whose geometry was a lie.
+
+    Emitting explicit black+silent filler for the leading offset, each interior
+    gap and the trailing remainder makes the rendered file exactly
+    `total_duration` long. That single property is what lets the playhead, the
+    transport denominator, the music extent and the export all agree — and it
+    makes `amix=duration=first` correct, since input 0 now spans the whole
+    timeline instead of just the video content.
+
+    Overlapping clips (legacy EDLs; `_first_free_gap` prevents new ones) keep the
+    old packing behaviour via the `max(cursor, start)` cursor — never a negative
+    filler.
+    """
+    segs: list[tuple[str, object]] = []
+    cursor = 0.0
+    for i, c in enumerate(clips):
+        gap = c.start - cursor
+        if gap > _GAP_EPS:
+            segs.append(("gap", gap))
+            cursor += gap
+        segs.append(("clip", i))
+        cursor = max(cursor, c.start) + c.effective_duration
+    tail = total_duration - cursor
+    if tail > _GAP_EPS:
+        segs.append(("gap", tail))
+    return segs
+
+
+def _has_v1_gaps(clips: list[Clip], total_duration: float) -> bool:
+    """True when the v1 base needs filler (so packet-level concat can't be used)."""
+    return any(kind == "gap" for kind, _ in _v1_segments(clips, total_duration))
+
+
 def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
                             canvas_w: int, canvas_h: int) -> str:
     """Build the per-clip video filter chain (scale + transform + effects + speed),
@@ -394,13 +439,20 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                           *, transitions: list | None = None,
                           cache_dir: Path | None = None,
                           chunk_paths: list[Path] | None = None,
+                          fps: int = 30, total_duration: float = 0.0,
                           ) -> tuple[str, list[str], list[str], list[str]]:
-    """Build the video+audio filter chain for a list of V1 clips.
+    """Build the video+audio filter chain for the V1 timeline.
 
     Returns (filter_str, input_args, [v_label, a_label], extra_inputs_for_masks).
     Each clip is decoded with input-side seeking, scaled+padded to canvas,
     then runs through any per-clip effect chain, then mask alphamerge if a
     mask is set, then enters the timeline assembly (concat OR xfade).
+
+    The assembly runs over `_v1_segments`, not over the clip list: black+silent
+    filler is emitted for the leading offset, interior gaps and the trailing
+    remainder so the output spans `total_duration` exactly. Fillers are lavfi
+    filter SOURCES (no `-i`), which keeps the per-clip chunk cache 1:1 with
+    `clips` and untouched.
     """
     inputs: list[str] = []
     extra_inputs: list[str] = []
@@ -409,21 +461,6 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     a_labels: list[str] = []
 
     transitions = transitions or []
-    # transitions are between adjacent clip joins, indexed by left clip's index
-    trans_at: dict[int, tuple[str, float]] = {}
-    if transitions and clips:
-        # Build a map: clip i (0-based) → transition that bridges to i+1.
-        # tr.at is a TIMELINE position (the visible boundary the user
-        # clicked), and clips pack by effective_duration — summing source
-        # `duration` here silently dropped every transition that follows a
-        # speed≠1 clip (running overshot tr.at, no match, hard cut).
-        running = 0.0
-        for idx, c in enumerate(clips[:-1]):
-            running += c.effective_duration
-            for tr in transitions:
-                if abs(tr.at - running) < 0.05:
-                    trans_at[idx] = (tr.type, tr.duration)
-
     use_chunks = chunk_paths is not None and len(chunk_paths) == len(clips)
 
     # Pass 1: assign clip indices [0..N-1]; emit clip-side filter chains and
@@ -472,26 +509,72 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         )
         v_labels[clip_i] = v_masked
 
-    if not clips:
+    # ---- Segment plan: clips interleaved with black+silent gap filler ----
+    segments = _v1_segments(clips, total_duration)
+    if not segments:
         return "", [], [], []
 
+    seg_v: list[str] = []
+    seg_a: list[str] = []
+    seg_dur: list[float] = []
+    seg_of_clip: dict[int, int] = {}
+    for kind, val in segments:
+        if kind == "clip":
+            ci = int(val)  # type: ignore[arg-type]
+            seg_of_clip[ci] = len(seg_v)
+            seg_v.append(v_labels[ci])
+            seg_a.append(a_labels[ci])
+            seg_dur.append(clips[ci].effective_duration)
+        else:
+            g = float(val)  # type: ignore[arg-type]
+            k = len(seg_v)
+            vg, ag = f"[vgap{k}]", f"[agap{k}]"
+            # format/setsar/aformat pin the filler to the same parameters the
+            # clip chains produce — concat refuses inputs whose link params
+            # differ (it does not auto-convert).
+            fc_parts.append(
+                f"color=c=black:s={canvas_w}x{canvas_h}:r={fps}:d={g:.3f},"
+                f"format=yuv420p,setsar=1{vg}")
+            fc_parts.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000:d={g:.3f},"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:"
+                f"channel_layouts=stereo{ag}")
+            seg_v.append(vg)
+            seg_a.append(ag)
+            seg_dur.append(g)
+
+    # Transitions bridge two clips that are ADJACENT segments — a cross-fade
+    # across intervening black is meaningless, so a gapped boundary stays a cut.
+    # `tr.at` is matched against the clip's TIMELINE end (start + effective
+    # duration); the old code accumulated effective durations from 0, which
+    # drifted the moment the timeline had any leading offset or gap.
+    seg_trans: dict[int, tuple[str, float]] = {}
+    for idx, c in enumerate(clips[:-1]):
+        si = seg_of_clip.get(idx)
+        if si is None or seg_of_clip.get(idx + 1) != si + 1:
+            continue
+        boundary = c.start + c.effective_duration
+        for tr in transitions:
+            if abs(tr.at - boundary) < 0.05:
+                seg_trans[si] = (tr.type, tr.duration)
+
     # ---- Timeline assembly ----
-    if not trans_at:
+    if not seg_trans:
         # Plain concat (interleaved [v0][a0][v1][a1]...)
-        interleaved = "".join(f"{v}{a}" for v, a in zip(v_labels, a_labels))
-        fc_parts.append(f"{interleaved}concat=n={len(clips)}:v=1:a=1[vout][aout]")
+        interleaved = "".join(f"{v}{a}" for v, a in zip(seg_v, seg_a))
+        fc_parts.append(f"{interleaved}concat=n={len(seg_v)}:v=1:a=1[vout][aout]")
     else:
-        # Chain xfade for video, acrossfade for audio between adjacent clips.
+        # Chain xfade for video, acrossfade for audio between adjacent segments.
         # cur_dur tracks the accumulated OUTPUT stream length: each clip's
         # per-clip chain applies setpts/atempo for speed (and chunk files
         # bake it), so streams entering xfade are effective_duration long —
         # source `duration` would place every offset after a sped clip at
-        # the wrong time.
-        cur_v = v_labels[0]
-        cur_a = a_labels[0]
-        cur_dur = clips[0].effective_duration
-        for i in range(1, len(clips)):
-            tr_for_left = trans_at.get(i - 1)
+        # the wrong time. Filler segments contribute their own length.
+        cur_v = seg_v[0]
+        cur_a = seg_a[0]
+        cur_dur = seg_dur[0]
+        for i in range(1, len(seg_v)):
+            tr_for_left = seg_trans.get(i - 1)
             new_v = f"[xv{i}]"
             new_a = f"[xa{i}]"
             if tr_for_left:
@@ -507,20 +590,20 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                     # expr is wrapped in single quotes; it contains no quotes itself.
                     xf += f":expr='{xf_expr}'"
                 fc_parts.append(
-                    f"{cur_v}{v_labels[i]}{xf}{new_v}"
+                    f"{cur_v}{seg_v[i]}{xf}{new_v}"
                 )
                 fc_parts.append(
-                    f"{cur_a}{a_labels[i]}acrossfade=d={tdur}{new_a}"
+                    f"{cur_a}{seg_a[i]}acrossfade=d={tdur}{new_a}"
                 )
-                cur_dur = cur_dur + clips[i].effective_duration - tdur
+                cur_dur = cur_dur + seg_dur[i] - tdur
             else:
                 fc_parts.append(
-                    f"{cur_v}{v_labels[i]}concat=n=2:v=1:a=0{new_v}"
+                    f"{cur_v}{seg_v[i]}concat=n=2:v=1:a=0{new_v}"
                 )
                 fc_parts.append(
-                    f"{cur_a}{a_labels[i]}concat=n=2:v=0:a=1{new_a}"
+                    f"{cur_a}{seg_a[i]}concat=n=2:v=0:a=1{new_a}"
                 )
-                cur_dur += clips[i].effective_duration
+                cur_dur += seg_dur[i]
             cur_v = new_v
             cur_a = new_a
         # Rename the final accumulators to [vout]/[aout] for downstream code
@@ -552,15 +635,15 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     enc_args = _video_encoder_args(preview=preview, crf=crf)
 
     clips = _video_clips(edl)
+    # The v1 base always spans the WHOLE timeline (see `_v1_segments`): gaps and
+    # the trailing remainder become black+silent filler. A timeline with no v1
+    # clips at all is therefore just the degenerate case — one full-length
+    # filler — and NOT a special path. It used to short-circuit to a bare
+    # black+anullsrc render that never called `build_audio_mix`, which silently
+    # dropped every note of a music-only timeline.
+    total_duration = max(0.0, edl.duration)
     if not clips:
-        dur = max(1.0, edl.duration)
-        subprocess.run([
-            _pu.FFMPEG, "-y",
-            "-f", "lavfi", "-i", f"color=c=black:s={w_out}x{h_out}:r={fps}:d={dur}",
-            "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
-            "-shortest", *enc_args, *_AAC_OUT, str(dst),
-        ], check=True, capture_output=True, **_pu.SUBPROCESS_FLAGS)
-        return dst
+        total_duration = max(1.0, total_duration)  # never emit a 0-length file
 
     # Pull transitions for V1 from the EDL (transitions live on the v1 track in M4)
     v1 = edl.get_track("v1")
@@ -597,7 +680,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
 
     fc, inputs, labels, mask_inputs = _build_filter_complex(
         clips, w_out, h_out, transitions=transitions, cache_dir=cache_dir,
-        chunk_paths=chunk_paths,
+        chunk_paths=chunk_paths, fps=fps, total_duration=total_duration,
     )
     v_label = labels[0]
     a_label = labels[1]
@@ -677,8 +760,14 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # timeline-second on every edit regardless of edit size). Preview-only:
     # export keeps the single re-encode assembly (and its progress/cancel
     # plumbing) unchanged.
+    # Gapped timelines are excluded: packet-level concat can only stitch the
+    # chunk files themselves, so it would silently reproduce the old
+    # gap-collapsing bug (and a trailing gap — music outlasting the video — is
+    # extremely common). Those fall through to the re-encode path, which still
+    # reuses the cached per-clip chunks and only pays for the assembly.
     if (preview and chunk_paths is not None and not pip_chain
             and not overlay_chain and not mask_inputs
+            and not _has_v1_gaps(clips, total_duration)
             and on_progress is None and cancel_event is None):
         try:
             return _assemble_chunks_streamcopy(edl, chunk_paths, dst)
@@ -846,6 +935,15 @@ def _video_only_fingerprint(edl: EDL) -> str:
         "canvas": edl.canvas.model_dump(),
         "brand": edl.brand_kit.model_dump() if edl.brand_kit else None,
         "tracks": tracks,
+        # The timeline EXTENT is a video input now: v1 pads with black out to
+        # edl.duration (`_v1_segments`), and that duration is set by every
+        # track — including the music/vo lanes deliberately excluded above.
+        # Without this, trimming a 12s music bed to 6s would keep the cached
+        # 12s video and remux it against 6s of audio, serving a file with 6s
+        # of silent black welded on. Audio-only edits that DON'T move the
+        # timeline end still take the cheap remux, which is the point of this
+        # fingerprint.
+        "dur": round(float(edl.duration), 3),
     }
     return hashlib.sha256(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -932,6 +1030,12 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
 
         files = sorted(out_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in files[:-10]:
+            # Never delete the render we just produced. A long editing session
+            # can push the file the <video> is currently range-streaming out of
+            # the 10-newest window; the browser then gets a mid-playback read
+            # error and reloads from 0. `dst` is by definition the one in use.
+            if old == dst:
+                continue
             _pu.unlink_with_retry(old)
         # Cap the video-only cache too
         vfiles = sorted(videos_dir.glob("video_*.mp4"), key=lambda p: p.stat().st_mtime)

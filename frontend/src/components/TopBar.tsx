@@ -441,12 +441,23 @@ export function TopBar() {
           </button>
         )}
         {exportError && (
+          // Show the REASON, not just "failed". The backend now maps ffmpeg
+          // stderr through _render_failure_message, so this is a sentence a
+          // user can act on ("…an audio-only file on the video track. Move
+          // that clip to the Music lane") — it used to be reachable only by
+          // hovering for a 2000-char raw ffmpeg dump. Strip the RuntimeError:
+          // prefix jobs.py adds, and cap the width so a long tail (an
+          // unmapped ffmpeg error) can't blow out the toolbar.
           <span
-            style={{ color: 'var(--accent)', fontSize: 12, cursor: 'pointer' }}
+            style={{
+              color: 'var(--accent)', fontSize: 12, cursor: 'pointer',
+              maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
             title={`${exportError} (click to dismiss)`}
             onClick={() => clearExportError()}
           >
-            ⚠ Export failed ✕
+            ⚠ {exportError.replace(/^\w*Error:\s*/, '')} ✕
           </span>
         )}
       </div>

@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
-import { baseName } from '../lib/paths'
+import { AUDIO_EXTS, baseName } from '../lib/paths'
 import { StickerPanel } from './StickerPanel'
 import { EffectsPanel } from './EffectsPanel'
 import { VoRecorder } from './VoRecorder'
 
-const AUDIO_EXTS = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|aif|aiff)$/i
 
 export function MediaBin() {
   const upload = useStore((s) => s.upload)

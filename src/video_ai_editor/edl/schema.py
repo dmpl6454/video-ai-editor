@@ -18,7 +18,11 @@ EDL_VERSION = 2
 #     and sticker z-order sorts — unchanged EDL bytes produce different
 #     pixels.
 # v5: clip video_fade_in/out render; text transform.opacity renders
-RENDER_BEHAVIOR_VERSION = 5
+# v6: v1 honours clip.start — leading offsets, interior gaps and the trailing
+#     remainder render as black+silence, so the output is exactly edl.duration
+#     long (it used to concat v1 clips from t=0 and drop the gaps). Plain
+#     `audio` lanes (a1) are now mixed in too.
+RENDER_BEHAVIOR_VERSION = 6
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]

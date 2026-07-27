@@ -68,6 +68,14 @@ def build_audio_mix(
     vo_track = edl.get_track("vo")
     music_clips = [c for c in (music_track.clips if music_track and not music_track.muted else []) if isinstance(c, Clip)]
     vo_clips = [c for c in (vo_track.clips if vo_track and not vo_track.muted else []) if isinstance(c, Clip)]
+    # Plain audio lanes (the stock `a1` "Main audio" track, plus any other
+    # type=="audio" track) were read by NO render path: clips dropped there were
+    # silent, yet still extended `edl.duration`. The UI shows the lane and
+    # `laneAcceptsMediaClip` happily accepts drops on it, so it has to render.
+    # Folded in with the voiceover group — same per-clip filter, same mix stage.
+    for t in edl.tracks:
+        if t.type == "audio" and not t.muted:
+            vo_clips += [c for c in t.clips if isinstance(c, Clip)]
 
     if not music_clips and not vo_clips:
         # Still apply loudnorm on the speech-only path if a target is set

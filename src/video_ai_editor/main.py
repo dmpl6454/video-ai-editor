@@ -42,7 +42,7 @@ from .storage import (new_session_id, session_dir, session_exists,
                        list_sessions, write_meta, read_meta, delete_session,
                        is_valid_session_id)
 from .edl import EDLStore
-from .edl.schema import Canvas
+from .edl.schema import Canvas, Clip
 from .ingest import ingest_upload
 from .render import render_preview, render_export
 from .agent.dispatch import dispatch, list_tools
@@ -488,13 +488,34 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
             "detail": msg[-300:] if len(msg) > 300 else msg,
         })
 
+    # /upload is the VIDEO ingress and hardcodes track v1 below. An audio-only
+    # file reaching it (an .mp4/.mov/.mkv container with no video stream slips
+    # past the frontend's extension-based routing) normalizes "successfully"
+    # into a picture-less mp4, lands on v1, and then breaks every subsequent
+    # render with "[i:v] … matches no streams". Point the user at the audio
+    # ingress instead of letting them build an unrenderable timeline.
+    if res.probe.streams and res.probe.video is None:
+        raise HTTPException(status_code=422, detail={
+            "file": safe_name,
+            "error": "audio_only_file",
+            "message": "This file has no video track — it's audio only. "
+                       "Add it with “Add music…” (or drop it on the Music lane) "
+                       "instead of the video track.",
+        })
+
     if add_to_timeline:
         v1 = store.edl.get_track("v1")
         was_empty = not any(True for _ in (v1.clips if v1 else []))
         if was_empty:
             _match_canvas_to_source(store, res.probe)
         store.edl.recompute_duration()
-        start = store.edl.duration
+        # Append after the last V1 clip — NOT after `edl.duration`, which spans
+        # every track. Importing a 6-minute song first would otherwise park the
+        # next video at start=373s, stranding it behind minutes of black (now
+        # that gaps actually render, that black is real footage in the export).
+        start = max((c.start + c.effective_duration
+                     for c in (v1.clips if v1 else []) if isinstance(c, Clip)),
+                    default=0.0)
         dispatch(store, "add_clip", {
             "track": "v1",
             "src": str(res.normalized),
@@ -610,6 +631,19 @@ def _render_failure_message(ffmpeg_tail: str) -> str:
         return ("Couldn't render a preview — a cached text/sticker overlay "
                  "image was corrupted. Retrying will regenerate it; your "
                  "media is fine.")
+    # A stream specifier that binds to nothing means a clip's source doesn't
+    # have the stream its lane requires — overwhelmingly an audio-only file
+    # sitting on the video track. New placements are now blocked
+    # (dispatch._reject_videoless_on_video_lane), but a project saved before
+    # that guard existed can't render at all, and the generic message below
+    # sends the user hunting for a "corrupt" file that is perfectly fine.
+    if "matches no streams" in ffmpeg_tail or \
+       "Error binding filtergraph inputs/outputs" in ffmpeg_tail:
+        which = ("an audio-only file on the video track"
+                 if ":v' " in ffmpeg_tail or ":v'" in ffmpeg_tail
+                 else "a clip whose source is missing a needed stream")
+        return (f"Couldn't render — the timeline contains {which}. "
+                f"Move that clip to the Music lane (or delete it) and try again.")
     return ("Couldn't render a preview for this clip — it may have corrupt "
              "frames or an unusual codec.")
 
@@ -698,6 +732,15 @@ def stream_preview(sid: str, h: str | None = None):
     # rejects with "invalid box". Re-render instead.
     if not p.exists() or p.stat().st_size == 0:
         res = render_preview(store.edl, store.dir)
+        # Only serve what the caller ASKED for. This used to return whatever
+        # the current EDL rendered to, even when `h` named a different render:
+        # a mid-playback range request would then receive bytes from a file of
+        # a different length, which the browser sees as a corrupt/short read →
+        # decode stall, reload, currentTime reset. The <video> re-requests with
+        # the right hash after `refresh()`, so a 404 here is recoverable; a
+        # silently mismatched body is not.
+        if h and res.edl_hash != h:
+            raise HTTPException(404, "preview for that hash is no longer available")
         p = res.path
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
 
@@ -716,8 +759,19 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     store = _store(sid)
     body = body or ExportRequest()
     if wait:
-        res = render_export(store.edl, store.dir, height=body.height,
-                            fps=body.fps, crf=body.crf, container=body.container)
+        # Mirror the preview path's RuntimeError→422 handling. Without it an
+        # ffmpeg failure fell through to hardening's generic handler as an
+        # opaque HTTP 500 with the reason discarded into the server log.
+        try:
+            res = render_export(store.edl, store.dir, height=body.height,
+                                fps=body.fps, crf=body.crf, container=body.container)
+        except RuntimeError as e:
+            tail = str(e)[-400:]
+            raise HTTPException(422, {
+                "error": "render_failed",
+                "message": _render_failure_message(tail),
+                "ffmpeg": tail,
+            })
         return _export_payload(sid, res)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl
@@ -725,9 +779,15 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     height, fps, crf, container = body.height, body.fps, body.crf, body.container
 
     def _job(set_progress=None, cancel_event=None) -> dict:
-        res = render_export(edl_snapshot, session_dir_snapshot,
-                            height=height, fps=fps, crf=crf, container=container,
-                            on_progress=set_progress, cancel_event=cancel_event)
+        try:
+            res = render_export(edl_snapshot, session_dir_snapshot,
+                                height=height, fps=fps, crf=crf, container=container,
+                                on_progress=set_progress, cancel_event=cancel_event)
+        except RuntimeError as e:
+            # jobs.py stores `f"{type(e).__name__}: {e}"` as job.error and the
+            # UI shows it verbatim — so raise something whose str() is already
+            # user-facing instead of a 2000-char ffmpeg stderr dump.
+            raise RuntimeError(_render_failure_message(str(e)[-400:])) from e
         return _export_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)

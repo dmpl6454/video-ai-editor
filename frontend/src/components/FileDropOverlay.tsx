@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
-
-const AUDIO_EXTS = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|aif|aiff)$/i
+import { AUDIO_EXTS } from '../lib/paths'
 
 /**
  * Global file drag-and-drop.

@@ -188,7 +188,16 @@ export function Preview() {
     // mirrors the video, so only a large gap warrants a seek — small free-run
     // drift must not trigger a per-frame seek storm.
     const gap = Math.abs(v.currentTime - playhead)
-    if (gap > (isPlaying ? 0.35 : 0.05)) {
+    // Don't re-seek an element that is still servicing the previous seek or
+    // hasn't got data yet. While playing, this effect re-runs on every rAF
+    // playhead tick, so a stalled/ended/reloading <video> used to get a fresh
+    // `currentTime =` write ~60x a second, which keeps it stalled (each write
+    // restarts the seek) and shows as the video "lagging" behind a timer that
+    // races ahead. HAVE_CURRENT_DATA(2) is the point a seek is honoured
+    // rather than queued-and-discarded. Scoped to the <video> seek only — the
+    // WebCodecs scrubber below has its own readiness check and must still run.
+    const canSeekVideo = !v.seeking && v.readyState >= 2
+    if (canSeekVideo && gap > (isPlaying ? 0.35 : 0.05)) {
       // A failed/odd <video> can throw on a seek — never let that break the UI.
       // Note: this is the GENERAL sync path (external scrubs, jumps, and the
       // Space-key replay-from-end command — which has no <video> ref of its
@@ -430,7 +439,7 @@ export function Preview() {
               try { v.currentTime = target } catch { /* non-fatal */ }
             }
           }}
-          onLoadedData={() => {
+          onLoadedData={(e) => {
             // The committed transform (Properties.tsx's onChange) is only
             // visible once THIS reload finishes — clearing liveTransform any
             // earlier drops the CSS preview back to the untransformed old
@@ -441,6 +450,18 @@ export function Preview() {
             // identical lifecycle.
             if (liveTransform) setLiveTransform(null)
             if (liveFilter) setLiveFilter(null)
+            // Re-arm playback after a mid-playback src swap. The media-load
+            // algorithm sets paused=true WITHOUT firing a `pause` event, and
+            // the play/pause effect keys on [isPlaying, playbackRate] — which
+            // don't change across a reload — so nothing ever called play()
+            // again: the audio went silent while the rAF wall clock kept
+            // counting, and the sync effect scrub-seeked the paused element
+            // frame by frame. That is the reported "music stops, timer speeds
+            // up, video lags out of sync".
+            const v = e.target as HTMLVideoElement
+            if (useStore.getState().isPlaying && v.paused && playbackRate > 0) {
+              v.play().catch(() => { /* autoplay/decode hiccup — non-fatal */ })
+            }
           }}
         />
         {/* WebCodecs frame-accurate scrubber. Sits between <video> and text
