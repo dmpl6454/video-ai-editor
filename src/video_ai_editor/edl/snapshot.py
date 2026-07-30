@@ -1,9 +1,15 @@
 """EDL store with snapshot-based undo/redo, persisted per session."""
 from __future__ import annotations
 import json
+import logging
 from pathlib import Path
 from .schema import EDL, empty_edl
 from .ops_log import OpsLog
+
+# Same logger the request middleware uses, so a durability failure lands in the
+# structured log next to the request that triggered it. Fetched by name rather
+# than importing api.hardening — edl/ must not depend on the web layer.
+_log = logging.getLogger("video_ai_editor")
 
 
 class EDLStore:
@@ -71,19 +77,55 @@ class EDLStore:
         return self.dir / "ops.json"
 
     def _load_edl(self) -> EDL:
-        if self.edl_path.exists():
+        """Load edl.json, recovering from the newest VALID snapshot if it's broken.
+
+        This used to `except Exception: pass` straight into `empty_edl()`. Since
+        the filesystem IS the database, that turned one unparseable float into
+        "my entire project vanished" — and worse, the next `commit()` would
+        overwrite the damaged-but-recoverable file with the empty timeline, so
+        the data was then genuinely gone. There are already numbered, hashed
+        snapshots on disk; falling back to the newest one that parses turns a
+        total loss into losing at most one edit.
+        """
+        if not self.edl_path.exists():
+            return empty_edl()
+        try:
+            return EDL.model_validate_json(self.edl_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            _log.error("edl.json is unreadable (%s: %s) — attempting snapshot "
+                       "recovery for %s", type(e).__name__, e, self.dir.name)
+            # Keep the bad file for forensics instead of letting commit() clobber it.
             try:
-                return EDL.model_validate_json(self.edl_path.read_text(encoding="utf-8"))
-            except Exception:
+                bad = self.edl_path.with_suffix(".corrupt.json")
+                if not bad.exists():
+                    bad.write_text(self.edl_path.read_text(encoding="utf-8", errors="replace"),
+                                   encoding="utf-8")
+            except OSError:
                 pass
+        snaps = sorted(self.snapshots_dir.glob("*.json"),
+                       key=lambda p: p.stat().st_mtime, reverse=True) \
+            if self.snapshots_dir.exists() else []
+        for snap in snaps:
+            try:
+                edl = EDL.model_validate_json(snap.read_text(encoding="utf-8"))
+                _log.warning("recovered %s from snapshot %s", self.dir.name, snap.name)
+                return edl
+            except Exception:
+                continue
+        _log.error("no valid snapshot for %s — starting from an empty timeline",
+                   self.dir.name)
         return empty_edl()
 
     def _load_ops(self) -> OpsLog:
         if self.ops_path.exists():
             try:
                 return OpsLog.model_validate_json(self.ops_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            except Exception as e:
+                # The ops log is history, not state — an empty one is survivable,
+                # but it must not be silent, or "my undo history disappeared" has
+                # no trail at all.
+                _log.error("ops.json is unreadable (%s: %s) for %s — starting a "
+                           "fresh log", type(e).__name__, e, self.dir.name)
         return OpsLog()
 
     def commit(self, tool: str, args: dict, summary: str, by: str = "user") -> None:

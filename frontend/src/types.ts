@@ -78,6 +78,9 @@ export interface SessionInfo {
     ops: number
   }
   ops: Op[]
+  // Mirrors the on-disk redo_stack.json (main.py:286). Optional so a response
+  // from an older backend still typechecks; store.ts coerces it to a boolean.
+  redo_available?: boolean
 }
 
 export function isMediaClip(c: AnyClip): c is Clip {

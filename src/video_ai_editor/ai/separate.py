@@ -10,6 +10,7 @@ The htdemucs model downloads on first use (~80MB).
 from __future__ import annotations
 import hashlib
 import subprocess
+import sys
 from pathlib import Path
 
 from .. import platformutil as _pu
@@ -33,15 +34,43 @@ def _key(src: Path) -> str:
     return hashlib.sha256(str(src).encode()).hexdigest()[:14]
 
 
+def available() -> bool:
+    """True when demucs can actually run here.
+
+    Mirrors bgremove.available() / upscale.available(). This module had NO
+    availability probe, so `vocal_isolate`/`instrumental_isolate` were advertised
+    to Claude with no gate at all and failed deep inside a subprocess instead of
+    returning a clean "feature not installed".
+    """
+    if getattr(sys, "frozen", False):
+        # The packaged app deliberately EXCLUDES torch/demucs to stay ~150MB
+        # (see CLAUDE.md Packaging), so there is no interpreter to run it with.
+        return False
+    try:
+        import importlib.util
+        return importlib.util.find_spec("demucs") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _demucs_separate(audio_path: Path, out_dir: Path) -> dict[str, Path]:
     """Run demucs on a wav and return paths to {vocals, drums, bass, other}.
 
     Outputs land in `out_dir/<model>/<basename>/<stem>.wav`.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "Stem separation needs the full Python install (torch + demucs are "
+            "deliberately excluded from the packaged app). Run "
+            "`uv run video-ai-editor` instead.")
     proc = subprocess.run(
         [
-            "python", "-m", "demucs.separate",
+            # `sys.executable`, NOT a bare "python": that resolved to whatever
+            # happened to be first on PATH — often a system Python with no
+            # demucs, or nothing at all on Windows — so the tool failed with a
+            # confusing interpreter error rather than running the venv's demucs.
+            sys.executable, "-m", "demucs.separate",
             "-n", "htdemucs",
             "-o", str(out_dir),
             "--filename", "{stem}.{ext}",

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import { useStore } from '../store'
+import { useStore, errorMessage } from '../store'
 import { TextLayer } from './TextLayer'
 import { StickerLayer } from './StickerLayer'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
@@ -105,7 +105,11 @@ export function Preview() {
       renderPreview()
         .catch((e) => {
           if (ac.signal.aborted) return
-          setError(String(e))
+          // `String(e)` pasted the whole error envelope — status line, request
+          // id and a 400-char raw ffmpeg stderr dump — into the preview pane as
+          // a wall of red text (see the tester screenshots). errorMessage()
+          // unwraps the same body down to the sentence written for the user.
+          setError(errorMessage(e))
           // A failed render means the <video> src never changes, so
           // onLoadedData (which clears liveTransform/liveFilter) never fires
           // either — fail fast instead of leaving the CSS preview stuck

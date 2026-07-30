@@ -56,6 +56,66 @@ def _read_version() -> str:
 
 APP_VERSION = _read_version()
 
+_BUILD_ID: str | None = None
+
+
+def build_id() -> str:
+    """Short, unambiguous identifier for the exact bits that are running.
+
+    `APP_VERSION` alone is NOT a build identity: VERSION sat at 0.3.7 for 99
+    commits and three fix rounds, so a bug report saying "v0.3.7" could not be
+    dated, and testers repeatedly re-reported bugs that had already been fixed.
+    This returns something that changes with the code:
+
+      frozen app -> the BUILD_ID file baked in at package time
+      dev tree   -> `git rev-parse --short HEAD` plus `-dirty` for local edits
+      neither    -> "" (callers must treat it as optional)
+
+    Deliberately LAZY and cached, not computed at import: `config` is the
+    import-time chokepoint every entry point hits, and shelling out to git there
+    would add latency to every launch, test and CLI invocation.
+    """
+    global _BUILD_ID
+    if _BUILD_ID is not None:
+        return _BUILD_ID
+    _BUILD_ID = ""
+    import sys as _sys
+    for base in (getattr(_sys, "_MEIPASS", None), PROJECT_ROOT):
+        if not base:
+            continue
+        bf = Path(base) / "BUILD_ID"
+        if bf.exists():
+            try:
+                _BUILD_ID = bf.read_text(encoding="utf-8").strip()
+                if _BUILD_ID:
+                    return _BUILD_ID
+            except OSError:
+                pass
+    if getattr(_sys, "frozen", False):
+        # No git in a packaged app, and no BUILD_ID baked in — nothing to add.
+        return _BUILD_ID
+    import subprocess
+    try:
+        rev = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, **_pu.SUBPROCESS_FLAGS,
+        )
+        if rev.returncode != 0:
+            return _BUILD_ID
+        sha = rev.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "status", "--porcelain"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, **_pu.SUBPROCESS_FLAGS,
+        )
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            sha += "-dirty"
+        _BUILD_ID = sha
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return _BUILD_ID
+
 # Auto-load .env at the project root. Last assignment wins (POSIX-style) so
 # stale duplicates higher up in the file are overridden by newer entries
 # appended at the bottom.

@@ -22,7 +22,14 @@ EDL_VERSION = 2
 #     remainder render as black+silence, so the output is exactly edl.duration
 #     long (it used to concat v1 clips from t=0 and drop the gaps). Plain
 #     `audio` lanes (a1) are now mixed in too.
-RENDER_BEHAVIOR_VERSION = 6
+# v7: v1 media clips honour a STATIC transform.x/y pan (previously only the
+#     keyframed path emitted x/y, and the static path hardcoded a dead-centre
+#     crop — so the Properties Position inputs committed and re-rendered but
+#     never moved the picture). A pure pan at scale 1 now zooms by the minimum
+#     factor needed to expose the offset. Unchanged for every clip whose x/y are
+#     both 0, which is the overwhelming majority — but the salt has to move
+#     because an existing EDL with a non-zero x/y renders differently now.
+RENDER_BEHAVIOR_VERSION = 7
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -262,6 +269,22 @@ class EDL(BaseModel):
                 if c.id == clip_id:
                     return (t, c)
         return None
+
+    def video_extent(self) -> float:
+        """Timeline seconds occupied by the V1 video track (0.0 if empty).
+
+        Distinct from `duration`, which is a max over EVERY track — so a
+        6-minute music bed makes `duration` 373s even when the video is 29s.
+        Callers that mean "how long is the video" must use this: sizing a music
+        bed, appending the next upload, or deciding where the timeline ends.
+
+        Uses `effective_duration` (source duration / speed) so a sped-up clip
+        reports the timeline length it actually occupies.
+        """
+        t = self.get_track("v1")
+        return max((c.start + c.effective_duration
+                    for c in (t.clips if t else []) if isinstance(c, Clip)),
+                   default=0.0)
 
     def recompute_duration(self) -> None:
         end = 0.0

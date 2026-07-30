@@ -51,3 +51,8 @@ tool-results/
 # Local git worktrees (superpowers:using-git-worktrees fallback)
 .worktrees/
 .playwright-mcp/
+
+# Generated at package time by build_app.sh / build_win.ps1 and read by
+# config.build_id() inside the frozen app. Must stay ignored, or the very next
+# build sees it as an untracked file and falsely stamps itself "-dirty".
+BUILD_ID

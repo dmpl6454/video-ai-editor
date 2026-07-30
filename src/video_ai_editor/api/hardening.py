@@ -25,7 +25,7 @@ import json
 import logging
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Request
@@ -57,6 +57,27 @@ if not _logger.handlers:
             return json.dumps(payload, default=str)
     handler.setFormatter(_JSONFormatter())
     _logger.addHandler(handler)
+
+    # ALSO log to a rotating file. In both windowed builds — the macOS .app and
+    # the Windows pythonw/console=False exe — stdout and stderr are None or
+    # discarded, so every diagnostic this app produced was simply lost: a hang or
+    # a startup failure left literally nothing to look at. A file handler is the
+    # prerequisite for hiding the console at all (see run.ps1), and it is what
+    # makes a user-reported "it froze" actionable.
+    try:
+        from logging.handlers import RotatingFileHandler
+        from .. import platformutil as _pu
+        log_dir = _pu.user_data_dir("Video AI Editor") / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(log_dir / "app.log", maxBytes=2_000_000,
+                                 backupCount=3, encoding="utf-8")
+        fh.setFormatter(_JSONFormatter())
+        _logger.addHandler(fh)
+    except Exception:  # pragma: no cover - never let logging setup break boot
+        # A read-only or missing data dir must not stop the app from starting;
+        # the stream handler above still works wherever a console exists.
+        pass
+
     _logger.setLevel(logging.INFO)
     _logger.propagate = False
 
@@ -123,15 +144,48 @@ METRICS = _Metrics()
 # Rate limiter — sliding window per (ip, scope).
 
 class _RateLimiter:
+    """Sliding-window limiter with a BOUNDED key map.
+
+    `windows` is keyed on (ip, path) and the path contains session ids, clip ids
+    and cache hashes — unbounded cardinality. As a plain defaultdict it grew for
+    the entire process lifetime, one empty deque per distinct URL ever seen.
+
+    Deliberately NOT "fixed" by collapsing the key to the bare IP: MAX_THUMB_TILES
+    means a single timeline paint can issue hundreds of /thumb requests, and one
+    60-rps bucket for the whole client would 429 them and blank the filmstrip.
+    Bounding the map keeps the per-path semantics and removes the leak.
+    """
+
+    #: Ample for any real client (one entry per distinct URL inside a 1s window);
+    #: small enough that the map can never be a memory problem.
+    MAX_KEYS = 4096
+
     def __init__(self, *, default_rps: float = 60.0, window_s: float = 1.0):
         self.default_rps = default_rps
         self.window_s = window_s
-        self.windows: dict[str, deque[float]] = defaultdict(deque)
+        self.windows: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def _sweep(self, now: float) -> None:
+        """Drop keys whose window has fully expired, then LRU-trim the remainder."""
+        cutoff = now - self.window_s
+        stale = [k for k, w in self.windows.items() if not w or w[-1] < cutoff]
+        for k in stale:
+            del self.windows[k]
+        while len(self.windows) > self.MAX_KEYS:
+            self.windows.popitem(last=False)
 
     def allow(self, key: str, rps: float | None = None) -> bool:
         rps = rps or self.default_rps
         now = time.monotonic()
-        w = self.windows[key]
+        w = self.windows.get(key)
+        if w is None:
+            # Sweep on insertion only — an O(n) scan per request would itself be
+            # a cost, and insertions are the only thing that grows the map.
+            if len(self.windows) >= self.MAX_KEYS:
+                self._sweep(now)
+            w = self.windows[key] = deque()
+        else:
+            self.windows.move_to_end(key)
         cutoff = now - self.window_s
         while w and w[0] < cutoff:
             w.popleft()

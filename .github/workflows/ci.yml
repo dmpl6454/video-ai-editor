@@ -104,8 +104,14 @@ jobs:
       - name: Install
         run: npm ci
 
+      # MUST be `tsc -b`, not `tsc --noEmit`. frontend/tsconfig.json is a
+      # solution file (`"files": []` + `references`), so plain `tsc` builds a
+      # program of ZERO files and exits 0 — verified with `--listFiles`. Only
+      # build mode walks into tsconfig.app.json / tsconfig.node.json. The old
+      # `--noEmit` gate is why 4 real type errors sat on main undetected while
+      # `npm run build` (which desktop.py and build_win.ps1 both run) failed.
       - name: Type-check
-        run: npx tsc --noEmit
+        run: npx tsc -b --force
 
       - name: Unit tests
         run: npx vitest run

@@ -157,11 +157,17 @@ class JobManager:
             jobs = [j for j in jobs if j.session_id == session_id]
         return jobs
 
+    # Every state a job can no longer leave (mirrors the JobStatus Literal above).
+    # "cancelled" was missing from the eviction filter, so a cancelled job was
+    # retained for the process's whole life — a slow leak on any long-running
+    # instance where users abandon exports.
+    _TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
     def _evict_old_completed_locked(self) -> None:
         """Drop the oldest finished jobs once we exceed the retention cap."""
         completed_ids = [
             jid for jid, j in self._jobs.items()
-            if j.status in ("completed", "failed")
+            if j.status in self._TERMINAL
         ]
         # Drop in insertion order (oldest first) until under cap.
         excess = len(completed_ids) - self._retain

@@ -30,7 +30,7 @@ uv run pytest tests/test_tools_dispatch.py::test_name     # one test
 uv run pytest -k auto_caption            # by keyword
 
 # Frontend checks (what CI runs)
-cd frontend && npx tsc --noEmit && npx vite build
+cd frontend && npx tsc -b --force && npx vite build   # NOT --noEmit: see note below
 npm run lint                             # eslint
 
 # macOS packaging
@@ -46,8 +46,8 @@ Notes:
 - Playwright's frontend smoke test needs a browser binary: `uv run playwright install chromium`.
 - Tests requiring local AI binaries/models skip cleanly by default; opt in with `VAI_RUN_CLIP_TESTS` / `VAI_RUN_CAPTION_TESTS`.
 - Ports differ by entry point: desktop binds `VAE_PORT` (default **8765**); raw `uvicorn ...:app` defaults to **8000**; Vite dev server is **5173** and proxies `/api` → `:8000`. They are not interchangeable.
-- **`npx tsc --noEmit && npx vite build` (CLAUDE.md/CI's check) ≠ `npm run build` (`tsc -b && vite build`).** `tsc -b` is project-references incremental build mode and is strictly stricter — it currently fails on this repo (`FrameScrubber.tsx` mp4box.js type mismatch, `Properties.tsx` a JSX `label` boolean-shorthand passed where `label?: string` is declared), both pre-existing and invisible to the documented check above *and* to CI (verified directly against `.github/workflows/ci.yml`, which runs the two `npx` commands separately, never `npm run build`). `desktop.py`'s dev auto-build (`_ensure_frontend_built()`) also only fires `npm run build` when `frontend/dist/index.html` is missing, so a stale-but-present `dist/` silently papers over this. If you touch `FrameScrubber.tsx` or `Properties.tsx`'s `Slider` usage, run `npm run build` too, not just the documented command. **`build_app.sh` deliberately uses `npx tsc --noEmit && npx vite build`, NOT `npm run build`** — an earlier version used `npm run build` unconditionally and broke the whole macOS build on those pre-existing `tsc -b` errors. It rebuilds the frontend **unconditionally** now (`rm -rf frontend/dist` first), since the old "only if `dist/` missing" guard silently shipped a stale frontend.
-- **Lint (`npm run lint`) has ~31 pre-existing problems (28 errors, 3 warnings) that are NOT part of the CI gate** (CI runs only `tsc --noEmit` + `vite build`). When checking whether your change added lint issues, compare against this baseline (e.g. `git stash` / a worktree at the pre-change commit) rather than treating a nonzero exit as your regression — most are pre-existing `no-empty`/`react-hooks/*` debt in files you didn't touch.
+- **`npx tsc --noEmit` type-checks ZERO files. Always use `npx tsc -b`.** `frontend/tsconfig.json` is a *solution* file (`"files": []` plus only `references`), so plain `tsc` builds an empty program and exits 0 — verified with `npx tsc --noEmit --listFiles`, which prints 0 lines. Only build mode (`tsc -b`) descends into `tsconfig.app.json` / `tsconfig.node.json`. This was a silent hole for a long time: 4 real type errors sat on main while CI stayed green, and `npm run build` — which `desktop.py`'s dev auto-build **and** `build_win.ps1` both invoke — failed on them, so a fresh clone could not launch. Those 4 are fixed and **CI, `build_app.sh` and the docs now all use `tsc -b --force`.** Never "simplify" a gate back to `--noEmit`.
+- **Lint (`npm run lint`) has 32 pre-existing problems (28 errors, 4 warnings) that are NOT part of the CI gate.** Measured on 2026-07-30; only 1 is `--fix`-able. When checking whether your change added lint issues, compare against this baseline (e.g. `git stash` / a worktree at the pre-change commit) rather than treating a nonzero exit as your regression — most are pre-existing `no-empty`/`react-hooks/*` debt in files you didn't touch.
 
 ## Launching on macOS — the hidden-`.pth` gotcha (use `run.sh`)
 
@@ -95,7 +95,7 @@ Windows launch/build: `run.ps1` (parallel of `run.sh`, uses `PYTHONPATH=src`) an
 
 ### Dispatch engine — `agent/dispatch.py` (~2700 lines, the whole editing engine)
 - A tool is a plain module-level function `fn(store: EDLStore, args: dict) -> dict`, callable **only** by being a literal entry in the `DISPATCH` dict at the bottom of the file. No decorators, no class framework — `dispatch()` just does `DISPATCH.get(tool)()`.
-- **Adding a tool is a two-file edit with no shared source of truth:** (1) write the handler and add its `"name": fn` line to `DISPATCH`; (2) add a matching schema in `agent/tools.py` via the `_t(...)` helper and append it to `ALL_TOOLS`. The name string must match by hand — nothing enforces it. Not every dispatch tool is advertised to Claude: `DISPATCH` holds **92** unique tools, but `tools.py`/`ALL_TOOLS` schematizes only **49** for the chat LLM; the rest are reachable via `/dispatch` and MCP but invisible to Claude. (A few `DISPATCH` keys are duplicated, where the later definition silently wins.)
+- **Adding a tool is a two-file edit with no shared source of truth:** (1) write the handler and add its `"name": fn` line to `DISPATCH`; (2) add a matching schema in `agent/tools.py` via the `_t(...)` helper and append it to `ALL_TOOLS`. The name string must match by hand — nothing enforces it. Not every dispatch tool is advertised to Claude: `DISPATCH` holds **98** unique tools, `tools.py`/`ALL_TOOLS` schematizes **92** for the chat LLM, and every advertised name resolves to a live handler (verified); the remaining 6 are reachable via `/dispatch` and MCP but invisible to Claude. **`tests/test_wave3_correctness.py` now enforces the registry by AST**: no duplicated module-level handler name and no duplicated `DISPATCH` key. Both had regressed — `set_track_muted`, `vocal_isolate` and `instrumental_isolate` were each defined twice with *different bodies* (Python keeps the last, so the earlier body was unreachable and any edit to it would be silently ignored) and were also listed twice as dict keys.
 - Three callers share this **single mutation path**, all getting identical undo/ops-log/persistence: (1) Claude chat via `agent/loop.py`, (2) UI gestures via `POST /api/sessions/{sid}/dispatch`, (3) external agents via the MCP server.
 - Many handlers are **composites** that call other handlers (`remove_silences` loops `cut_range` back-to-front so timeline coords stay valid; `apply_template` → `apply_hook_stack` → `generate_hook` + `add_super_text`), so one tool call can produce multiple commits/ops.
 - Handlers defensively accept **arg aliases** (`index|idx`, `src|lut_path`, `target_lang|to`, `ratio|aspect`) because the same fn is reached from Claude, UI, MCP, and docs. User path args funnel through `_safe_src()` → `assert_path_allowed()`.
@@ -173,8 +173,39 @@ Distinct from `ai/` (models) and `ingest/` (media prep). `audit.py` is a **pre-e
 - `pyproject.toml` sets `pythonpath = ["src"]` (import `video_ai_editor.*` without install) and `asyncio_mode = "auto"`. There is **no `conftest.py`** — fixtures are per-file, typically building an `EDLStore` in `tmp_path` with ffmpeg-lavfi-synthesized media.
 - `test_all_tools_smoke.py` parametrizes over `sorted(DISPATCH.keys())` — a new tool is auto-covered by a smoke test.
 - CI (`.github/workflows/ci.yml`) runs three jobs in parallel: backend pytest on **ubuntu** (Python 3.11, ffmpeg via apt), backend pytest on **windows-latest** (Python 3.13, ffmpeg-full via Chocolatey — the real cross-platform gate), and frontend `tsc + vite build`. All **force `ANTHROPIC_API_KEY`/`HUGGINGFACE_TOKEN` empty** so tests never hit real endpoints and heavy-AI tests skip cleanly. The Windows runner has no local AI binaries/models, so a few more tests skip there (e.g. torchcodec-dependent) — that's expected. **Windows-only regressions surface here, not locally on a Mac** — the CI job is the source of truth for Windows behavior.
-- CI actually runs `npx tsc --noEmit` then a separate `npx vite build`, NOT `npm run build` (which is `tsc -b`, a stricter incremental project-references check). The two catch different errors — a `tsc -b`-only failure is invisible to CI. Confirm with `git stash` (not assumption) before treating a `tsc -b` failure as pre-existing vs. self-introduced.
+- CI runs `npx tsc -b --force` then a separate `npx vite build`. It used to run `npx tsc --noEmit`, which type-checks **zero** files against this repo's solution-style `tsconfig.json` (see the Frontend-checks note above) — so the type gate was inert and `tsc -b`-only failures were invisible. Keep the two as separate steps so a typecheck failure is distinguishable from a bundling failure in the log.
 - **Env-var-reload tests must restore state in a `finally`, in the right order, or they poison the rest of the pytest process.** A monkeypatched `importlib.reload(cfg)` to pick up a changed env var needs its "undo" reload to happen **after** `monkeypatch.delenv`/`setenv` teardown, not before — otherwise the module keeps the test's env-driven state (e.g. `VAI_RESTRICT_PATHS=True`) for every test that runs later in the same process, since pytest doesn't re-import modules between tests. This class of bug hides until an alphabetically-later test file happens to depend on the polluted global state; it won't reproduce running the buggy test file alone.
+
+## Release identity — why "which build?" must always be answerable
+
+`VERSION` alone is **not** a build identity. It read `0.3.7` for 99 commits across
+three fix rounds, and `git tag` was empty, so three consecutive tester reports said
+"v0.3.7" and could not be dated. The measurable cost: **13 of 45 issues in the
+2026-07-28 QA round were re-reports of code that had already been fixed** (mute
+checkbox, text coordinates, video fade, font size, music-clip showing video
+controls, PNG stickers, sticker ✕, cropped context menu, full-path labels…), and a
+fourth investigation round was spent re-proving correct code.
+
+Three mechanisms now keep what ships equal to what runs — do not weaken any of them:
+- **`/api/version` returns `{version, build}`**, where `build` is `config.build_id()`:
+  the baked `BUILD_ID` file in a frozen app, else `git rev-parse --short HEAD`
+  (+`-dirty`). It is lazy and cached, deliberately NOT computed at `config` import
+  (that module is the import-time chokepoint for every entry point). `BUILD_ID` is
+  written by `build_app.sh`/`build_win.ps1` before packaging and is **gitignored** —
+  if it were tracked, the next build would see it as untracked and stamp `-dirty`.
+  The TopBar badge shows `v0.4.0 · <sha>`.
+- **`desktop.py::_ensure_frontend_built()` compares mtimes**, not mere existence. The
+  old `if dist/index.html exists: return` let a bundle from a previous checkout
+  satisfy the guard forever. Failure policy differs on purpose: a *missing* bundle is
+  fatal, a *stale* one only warns — bricking a working launch because npm is absent
+  would be worse than serving old bits. `build_win.ps1` now also `rm -rf`s `dist`
+  unconditionally (mirroring `build_app.sh`) and asserts `$LASTEXITCODE`, because
+  `$ErrorActionPreference='Stop'` does **not** trip on a native exe's non-zero exit.
+- **`index.html` is served `no-store`** (`main._NoCacheHtmlStatic`) while `assets/*`
+  stay `immutable`. Vite emits content-hashed assets behind a stable HTML url, so a
+  cached `index.html` pins a deleted asset hash. This was observed live during the
+  fix round: after a rebuild the page kept loading a bundle that no longer existed on
+  disk, and a verified frontend fix appeared not to work at all.
 
 ## Packaging
 

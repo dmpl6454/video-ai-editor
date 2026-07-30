@@ -3,6 +3,75 @@ import { useStore } from '../store'
 import { isMediaClip } from '../types'
 import { baseName } from '../lib/paths'
 
+/** Number input that re-seeds from the EDL but never stomps in-progress typing,
+ *  and commits at most one dispatch per real change.
+ *
+ *  Replaces `defaultValue` inputs, which were actively dangerous here. React
+ *  assigns `value` on MOUNT, and assigning the `value` IDL property sets the
+ *  DOM's "dirty value flag" permanently. The media inspector's element tree is
+ *  structurally identical for any two media clips, so selecting a different clip
+ *  reconciles onto the SAME <input> node — which then kept displaying, and on
+ *  blur COMMITTED, the previously selected clip's number onto the newly selected
+ *  clip. Trimming clip A to In=0.50 and then clicking clip B showed B with A's
+ *  0.50, and one keystroke wrote A's timing onto B. Silent data corruption.
+ *
+ *  Controlled-with-local-state (the same shape `Slider`/`ColorSlider` already
+ *  use) re-seeds on undo / chat edits / timeline drags WITHOUT remounting, so
+ *  the caret is never dropped mid-edit.
+ */
+function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, title }: {
+  value: number
+  dp?: number
+  min?: number
+  max?: number
+  step?: number
+  width?: number
+  onCommit: (n: number) => void
+  title?: string
+}) {
+  const seeded = value.toFixed(dp)
+  const ref = React.useRef<HTMLInputElement>(null)
+  const [local, setLocal] = React.useState(seeded)
+  // Re-seed when the EDL moves underneath us — but not while this very field is
+  // focused, or we'd overwrite what the user is typing.
+  React.useEffect(() => {
+    if (document.activeElement !== ref.current) setLocal(seeded)
+  }, [seeded])
+
+  const commit = () => {
+    // An <input type=number> runs the HTML value-sanitization algorithm, so
+    // "abc", "-", "." and "1e999" all arrive as "". Number("") === 0, which is
+    // how clearing the In field used to silently commit in=0 and restore the
+    // whole trimmed head of the clip.
+    if (local.trim() === '' || !Number.isFinite(Number(local))) {
+      setLocal(seeded)
+      return
+    }
+    let v = Number(local)
+    if (min != null) v = Math.max(min, v)
+    if (max != null) v = Math.min(max, v)
+    // Compare against the SEEDED display value, not the raw float: a bare
+    // focus+blur must not append an op, clear the redo stack and force a
+    // re-encode. (Same rule the video-fade block documents.)
+    if (v.toFixed(dp) === seeded) {
+      setLocal(seeded)
+      return
+    }
+    onCommit(v)
+  }
+
+  return (
+    <input ref={ref} type="number" step={step} min={min} max={max} title={title}
+      style={width != null ? { width } : undefined}
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={commit}
+      // Enter should commit; a bare number input otherwise only commits on blur,
+      // so typing a value and hitting Enter looked like nothing happened.
+      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }} />
+  )
+}
+
 function isKeyframed(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false
   const o = v as { keyframes?: unknown[] }
@@ -132,7 +201,10 @@ export function Properties() {
   )
 
   return (
-    <div className="props">
+    // key={c.id} is the belt to NumberField's braces: ANY selection change
+    // unmounts this whole subtree, so no field — present or future — can carry
+    // one clip's value across to another clip.
+    <div className="props" key={c.id}>
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.src}>
         {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · {baseName(c.src)}
@@ -142,19 +214,19 @@ export function Properties() {
         <div className="row two">
           <div className="field">
             <label>In (s)</label>
-            <input type="number" step="0.1" defaultValue={c.in.toFixed(2)}
-              onBlur={(e) => dispatch('trim_clip', { clip_id: c.id, in: Number(e.target.value) })} />
+            <NumberField value={c.in} min={0}
+              onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, in: n })} />
           </div>
           <div className="field">
             <label>Out (s)</label>
-            <input type="number" step="0.1" defaultValue={c.out.toFixed(2)}
-              onBlur={(e) => dispatch('trim_clip', { clip_id: c.id, out: Number(e.target.value) })} />
+            <NumberField value={c.out} min={0}
+              onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, out: n })} />
           </div>
         </div>
         <div className="field">
           <label>Start on timeline (s)</label>
-          <input type="number" step="0.1" defaultValue={c.start.toFixed(2)}
-            onBlur={(e) => dispatch('move_clip', { clip_id: c.id, new_start: Number(e.target.value) })} />
+          <NumberField value={c.start} min={0}
+            onCommit={(n) => dispatch('move_clip', { clip_id: c.id, new_start: n })} />
         </div>
       </Section>
 
@@ -227,13 +299,13 @@ export function Properties() {
         <div className="row two">
           <div className="field">
             <label>Audio fade in (s)</label>
-            <input type="number" step="0.05" min={0} max={5} defaultValue={fadeIn.toFixed(2)}
-              onBlur={(e) => dispatch('add_fade', { clip_id: c.id, in_s: Number(e.target.value) })} />
+            <NumberField value={fadeIn} step={0.05} min={0} max={5}
+              onCommit={(n) => dispatch('add_fade', { clip_id: c.id, in_s: n })} />
           </div>
           <div className="field">
             <label>Audio fade out (s)</label>
-            <input type="number" step="0.05" min={0} max={5} defaultValue={fadeOut.toFixed(2)}
-              onBlur={(e) => dispatch('add_fade', { clip_id: c.id, out_s: Number(e.target.value) })} />
+            <NumberField value={fadeOut} step={0.05} min={0} max={5}
+              onCommit={(n) => dispatch('add_fade', { clip_id: c.id, out_s: n })} />
           </div>
         </div>
         <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
@@ -277,17 +349,15 @@ export function Properties() {
           <KFKey prop="x" value={tx?.x} fallback={xVal} />
           <label style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80, display: 'flex', alignItems: 'center', gap: 4 }}>
             x:
-            <input type="number" key={`mx${xVal.toFixed(0)}`} defaultValue={xVal.toFixed(0)}
-              style={{ width: 56 }}
-              onBlur={(e) => dispatch('set_clip_transform', { clip_id: c.id, x: Number(e.target.value) })} />
+            <NumberField value={xVal} dp={0} step={1} width={56}
+              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, x: n })} />
             {isKeyframed(tx?.x) ? '· animated' : ''}
           </label>
           <KFKey prop="y" value={tx?.y} fallback={yVal} />
           <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
             y:
-            <input type="number" key={`my${yVal.toFixed(0)}`} defaultValue={yVal.toFixed(0)}
-              style={{ width: 56 }}
-              onBlur={(e) => dispatch('set_clip_transform', { clip_id: c.id, y: Number(e.target.value) })} />
+            <NumberField value={yVal} dp={0} step={1} width={56}
+              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, y: n })} />
             {isKeyframed(tx?.y) ? '· animated' : ''}
           </label>
         </div>
@@ -335,30 +405,33 @@ function StickerProps({ c, trackLabel, canRaise, canLower, dispatch }: {
     dispatch('set_clip_timing', { clip_id: c.id, ...p })
 
   return (
-    <div className="props">
+    // See the media panel: key={c.id} guarantees a fresh field subtree per clip.
+    <div className="props" key={c.id}>
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {trackLabel} · {c.label ? `${c.label} ` : ''}Sticker · {c.id}
       </div>
 
       <Section label="Position">
-        {/* keys force the input to re-seed when canvas drag changes x/y */}
+        {/* NumberField re-seeds from the EDL when a canvas drag changes x/y, and
+            rejects an emptied field instead of committing 0 (which would jump
+            the sticker to the canvas origin). */}
         <div className="row two">
           <div className="field">
             <label>X</label>
-            <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
-              onBlur={(e) => setTx({ x: Number(e.target.value) })} />
+            <NumberField value={x} dp={0} step={1}
+              onCommit={(n) => setTx({ x: n })} />
           </div>
           <div className="field">
             <label>Y</label>
-            <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
-              onBlur={(e) => setTx({ y: Number(e.target.value) })} />
+            <NumberField value={y} dp={0} step={1}
+              onCommit={(n) => setTx({ y: n })} />
           </div>
         </div>
       </Section>
 
       <Section label="Transform">
-        <Slider label min={0.1} max={4} step={0.05} value={scale}
+        <Slider min={0.1} max={4} step={0.05} value={scale}
           format={(v) => `scale ${v.toFixed(2)}`} onChange={(v) => setTx({ scale: v })} />
         <Slider min={-180} max={180} step={1} value={rotation}
           format={(v) => `rotation ${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
@@ -370,13 +443,13 @@ function StickerProps({ c, trackLabel, canRaise, canLower, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>Start (s)</label>
-            <input type="number" step="0.1" key={`s${start.toFixed(2)}`} defaultValue={start.toFixed(2)}
-              onBlur={(e) => { const ns = Math.max(0, Number(e.target.value)); setTiming({ start: ns, end: ns + duration }) }} />
+            <NumberField value={start} min={0}
+              onCommit={(ns) => setTiming({ start: ns, end: ns + duration })} />
           </div>
           <div className="field">
             <label>Duration (s)</label>
-            <input type="number" step="0.1" min={0.1} key={`d${duration.toFixed(2)}`} defaultValue={duration.toFixed(2)}
-              onBlur={(e) => { const nd = Math.max(0.1, Number(e.target.value)); setTiming({ end: start + nd }) }} />
+            <NumberField value={duration} min={0.1}
+              onCommit={(nd) => setTiming({ end: start + nd })} />
           </div>
         </div>
       </Section>
@@ -457,18 +530,14 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
     // is only recoverable through this same (now-empty-looking) inspector.
     if (v.trim() && v !== c.text) void setProp('text', v)
   }
-  // Shared number-commit guard: NaN-proof, optional floor, and same-value
-  // skip against the SEEDED display value (mirrors Slider's `commit` guard)
-  // so a focus-then-blur without edits never appends a junk op to history.
-  const commitNumber = (path: string, raw: string, seeded: number, min?: number) => {
-    const n = Number(raw)
-    if (!Number.isFinite(n)) return
-    const v = min != null ? Math.max(min, n) : n
-    if (v !== seeded) void setProp(path, v)
-  }
+  // (The former local `commitNumber` guard now lives in the shared NumberField
+  // component at the top of this file, which every numeric input routes
+  // through — including the five media-inspector fields that had no guard and
+  // no React key at all.)
 
   return (
-    <div className="props">
+    // See the media panel: key={c.id} guarantees a fresh field subtree per clip.
+    <div className="props" key={c.id}>
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {trackLabel} · {c.role ?? 'default'} · {c.id}
@@ -499,8 +568,8 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>Size (px)</label>
-            <input type="number" step="1" min={8} key={`sz${size}`} defaultValue={size}
-              onBlur={(e) => commitNumber('style.size', e.target.value, size, 8)} />
+            <NumberField value={size} dp={0} step={1} min={8}
+              onCommit={(n) => void setProp('style.size', n)} />
           </div>
           <div className="field">
             <label>Color</label>
@@ -535,13 +604,13 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
           <div className="row two">
             <div className="field">
               <label>X</label>
-              <input type="number" key={`x${Math.round(x)}`} defaultValue={Math.round(x)}
-                onBlur={(e) => commitNumber('transform.x', e.target.value, Math.round(x))} />
+              <NumberField value={x} dp={0} step={1}
+                onCommit={(n) => void setProp('transform.x', n)} />
             </div>
             <div className="field">
               <label>Y</label>
-              <input type="number" key={`y${Math.round(y)}`} defaultValue={Math.round(y)}
-                onBlur={(e) => commitNumber('transform.y', e.target.value, Math.round(y))} />
+              <NumberField value={y} dp={0} step={1}
+                onCommit={(n) => void setProp('transform.y', n)} />
             </div>
           </div>
         )}
@@ -550,20 +619,19 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
       <Section label="Timing">
         <div className="row two">
           <div className="field">
+            {/* These two DID guard for finiteness, but compared against the raw
+                EDL float while displaying a 2-dp rounding of it — so re-blurring
+                an unchanged field whose true value was e.g. 1.004 dispatched a
+                no-op op, cleared the redo stack and forced a re-encode.
+                NumberField compares against the SEEDED display value instead. */}
             <label>Start (s)</label>
-            <input type="number" step="0.1" min={0} key={`s${start.toFixed(2)}`} defaultValue={start.toFixed(2)}
-              onBlur={(e) => {
-                const n = Number(e.target.value)
-                if (Number.isFinite(n) && n !== start) void setTiming({ start: Math.max(0, n) })
-              }} />
+            <NumberField value={start} min={0}
+              onCommit={(n) => void setTiming({ start: n })} />
           </div>
           <div className="field">
             <label>End (s)</label>
-            <input type="number" step="0.1" key={`e${end.toFixed(2)}`} defaultValue={end.toFixed(2)}
-              onBlur={(e) => {
-                const n = Number(e.target.value)
-                if (Number.isFinite(n) && n !== end) void setTiming({ end: n })
-              }} />
+            <NumberField value={end} min={0}
+              onCommit={(n) => void setTiming({ end: n })} />
           </div>
         </div>
       </Section>

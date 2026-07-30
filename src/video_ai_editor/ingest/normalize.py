@@ -147,11 +147,28 @@ def normalize(src: Path, dst: Path, fps: int = 30, sample_rate: int = 48000,
     meta = _color_meta(src)
     hdr = _is_hdr(meta)
     last_proc: subprocess.CompletedProcess | None = None
-    for args in _attempts(src, dst, fps, sample_rate, channels, height, hdr):
-        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
-        if proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
-            return probe(dst)
-        last_proc = proc
+    # Stage every attempt and swap on success — the write-temp-then-replace
+    # pattern used by thumbs.py, text_overlay.py and the compositor's .part.mp4.
+    # This was the one writer that pointed ffmpeg at its FINAL path, so the
+    # freshly-uploaded file existed at its serving path while still being written:
+    # a /thumb or /preview arriving in that window read a torn mp4 and 422'd
+    # (reported as "transient 422 right after upload, succeeds moments later").
+    # Staging closes the window entirely rather than making it smaller.
+    tmp = _pu.part_path(dst)
+    try:
+        for args in _attempts(src, tmp, fps, sample_rate, channels, height, hdr):
+            proc = subprocess.run(args, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  **_pu.SUBPROCESS_FLAGS)
+            if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                _pu.replace_with_retry(tmp, dst)
+                return probe(dst)
+            last_proc = proc
+            # A failed attempt can leave a partial file that would satisfy the
+            # size check on the NEXT attempt's early exit — clear it between tries.
+            _pu.unlink_with_retry(tmp)
+    finally:
+        _pu.unlink_with_retry(tmp)
 
     msg = last_proc.stderr[-1200:] if last_proc else "(no attempts ran)"
     raise RuntimeError(

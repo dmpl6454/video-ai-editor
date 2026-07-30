@@ -190,8 +190,11 @@ def health():
 
 @app.get("/api/version")
 def version():
-    from .config import APP_VERSION
-    return {"version": APP_VERSION}
+    # `build` is what makes a bug report actionable — VERSION alone stayed at
+    # 0.3.7 across 99 commits, so "I'm on v0.3.7" identified nothing. See
+    # config.build_id().
+    from .config import APP_VERSION, build_id
+    return {"version": APP_VERSION, "build": build_id()}
 
 
 @app.get("/api/tools")
@@ -409,9 +412,22 @@ async def audio_upload(sid: str, file: UploadFile = File(...),
 
     if add_to_music:
         store.edl.recompute_duration()
-        # Place at start of timeline; loop or trim to project duration if needed
         start = 0.0
-        out = min(p.duration, max(store.edl.duration, p.duration))
+        # Trim the music bed to the VIDEO length. The old expression here was
+        #     min(p.duration, max(edl.duration, p.duration))
+        # which is the algebraic identity `min(d, max(x, d)) == d` for all x — it
+        # ALWAYS returned the full song, so its "trim to project duration"
+        # comment described behaviour that never existed. A 29s video plus a
+        # 6:13 song therefore made edl.duration 373.71s, and the transport and
+        # the render then legitimately ran minutes past the last frame of video
+        # (reported on both the browser and the desktop app as "the timer keeps
+        # running after the clip finishes").
+        #
+        # Music-first-then-video is still valid, and so is a deliberately long
+        # bed on a short video, so when there is no video yet we keep the whole
+        # song rather than trimming it to nothing.
+        video_extent = store.edl.video_extent()
+        out = min(p.duration, video_extent) if video_extent > 0.05 else p.duration
         dispatch(store, "add_music", {
             "src": str(dst), "start": start, "in": 0.0, "out": out,
             "duck": duck, "volume_db": volume_db,
@@ -513,9 +529,7 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
         # every track. Importing a 6-minute song first would otherwise park the
         # next video at start=373s, stranding it behind minutes of black (now
         # that gaps actually render, that black is real footage in the export).
-        start = max((c.start + c.effective_duration
-                     for c in (v1.clips if v1 else []) if isinstance(c, Clip)),
-                    default=0.0)
+        start = store.edl.video_extent()
         dispatch(store, "add_clip", {
             "track": "v1",
             "src": str(res.normalized),
@@ -569,6 +583,7 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
 @app.post("/api/sessions/{sid}/dispatch")
 def dispatch_tool(sid: str, body: DispatchRequest):
     store = _store(sid)
+    ops_before = len(store.ops.ops)
     try:
         result = dispatch(store, body.tool, body.args)
     except KeyError as e:
@@ -579,7 +594,19 @@ def dispatch_tool(sid: str, body: DispatchRequest):
         # External-tool / setup errors bubble up here (pyannote token missing,
         # ffmpeg failure, model not found, etc.) — give the user the message.
         raise HTTPException(422, str(e))
-    last_op = store.ops.last()
+    except (OSError, subprocess.SubprocessError) as e:
+        # There are ~20 `check=True` subprocess sites under ai/, so a missing
+        # binary (FileNotFoundError) or a non-zero exit (CalledProcessError)
+        # reached the client as a bare HTTP 500 + traceback rather than an
+        # actionable message. Both are OSError/SubprocessError subclasses.
+        raise HTTPException(422, f"An external tool failed: {e}")
+    # Read-only tools (get_*, list_*, search_media) deliberately don't commit, so
+    # `ops.last()` was the PREVIOUS mutation — making an API consumer believe a
+    # read had changed the timeline. Compare the op COUNT rather than the op's
+    # tool name: composite handlers commit under a different name than the tool
+    # that was called (remove_silences loops cut_range), so a name check would
+    # wrongly report "no change" for them.
+    last_op = store.ops.last() if len(store.ops.ops) > ops_before else None
     return {
         "result": result,
         "edl_hash": store.edl.hash(),
@@ -614,36 +641,95 @@ def _preview_payload(sid: str, res) -> dict:
     }
 
 
-def _render_failure_message(ffmpeg_tail: str) -> str:
+# Lines that carry an actual diagnosis, as opposed to ffmpeg's inventory of its
+# inputs. This distinction is load-bearing: a render with text/stickers lists
+# every overlay PNG as `Input #12, png_pipe, from 'st_<hash>.png'`, so matching
+# the overlay-cache pattern anywhere in stderr would blame a corrupt overlay for
+# EVERY failure of a timeline that merely HAS overlays.
+_ERRORISH = re.compile(
+    r"(?:error|invalid|cannot|could not|failed|unable|no such file|"
+    r"does not|do not match|not divisible)", re.IGNORECASE)
+
+
+def _error_lines(text: str) -> str:
+    return "\n".join(ln for ln in text.splitlines() if _ERRORISH.search(ln))
+
+
+def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
     """Pick a user-facing message for a render_failed 422.
 
-    ffmpeg's stderr names the file it choked on. If that file lives under our
-    own overlay-PNG cache (st_/text_/sa_/mask_ prefixes), the corrupt input is
-    an app-generated rasterized overlay, not the user's uploaded media — say
-    so instead of implying their video/audio file is bad.
+    `ffmpeg_tail` is what gets SHOWN; `full` (when given) is the complete
+    RuntimeError text used for CLASSIFICATION. They differ on purpose: the
+    caller truncates the display string to a few hundred characters, and the
+    decisive line of an ffmpeg failure is often further back than that — a
+    filtergraph-configuration error is followed by per-stream teardown summaries
+    and `Conversion failed!`, so classifying on the tail alone fell through to
+    the generic "corrupt frames" message for almost every real failure.
+
+    Branch order is deliberate: interruption first (it is not a media problem at
+    all), then our own generated inputs, then graph/dimension errors, then
+    missing files, then stream binding, and only then "your media might be bad".
     """
-    # st_/text_/sa_ cache files are named "<prefix><16-hex-char content hash>.png"
-    # (text_overlay.py); mask_ files are "mask_<clip_id>_<type>_<feather>_<w>x<h>.png"
-    # (compositor.py/chunks.py) — a much less regular shape, so it gets its own
-    # alternative rather than trying to force one pattern to fit both.
-    if re.search(r"[\\/](?:st_|text_|sa_)[0-9a-f]+\.png", ffmpeg_tail) or \
-       re.search(r"[\\/]mask_[^\\/]+\.png", ffmpeg_tail):
+    hay = full or ffmpeg_tail
+    errs = _error_lines(hay)
+
+    # 1. INTERRUPTED. A child ffmpeg that was terminated logs a NORMAL-looking
+    # encode summary and then "Exiting normally, received signal 15" — nothing
+    # is wrong with the media. This is what a Windows tester hit by closing the
+    # console window that used to appear behind the app: the render died, and
+    # the app told them their footage had "corrupt frames or an unusual codec".
+    if re.search(r"received signal \d+", hay) or "Exiting normally" in hay:
+        return ("The render was interrupted before it finished — something "
+                "stopped the video encoder (for example closing a terminal "
+                "window that the app had opened). Nothing is wrong with your "
+                "media; press play or re-export to try again.")
+
+    # 2. Our own rasterized overlay cache, but ONLY when named on an error line.
+    # st_/text_/sa_ files are "<prefix><16-hex content hash>.png"
+    # (text_overlay.py); mask_ files are
+    # "mask_<clip_id>_<type>_<feather>_<w>x<h>.png" (compositor.py/chunks.py) —
+    # a much less regular shape, hence the separate alternative.
+    if re.search(r"[\\/](?:st_|text_|sa_)[0-9a-f]+\.png", errs) or \
+       re.search(r"[\\/]mask_[^\\/]+\.png", errs):
         return ("Couldn't render a preview — a cached text/sticker overlay "
-                 "image was corrupted. Retrying will regenerate it; your "
-                 "media is fine.")
-    # A stream specifier that binds to nothing means a clip's source doesn't
+                "image was corrupted. Retrying will regenerate it; your "
+                "media is fine.")
+
+    # 3. Filtergraph / dimension inconsistency: the app built an internally
+    # contradictory graph. Never the user's fault, and "corrupt frames" sent
+    # people hunting through perfectly good footage (this is how the 4:5 aspect
+    # bug and the transition-timebase bug both presented).
+    if ("Padded dimensions cannot be smaller" in hay
+            or "do not match the corresponding output link" in hay
+            or "Input frame sizes do not match" in hay
+            or re.search(r"(?:width|height) not divisible by 2", hay)
+            or "Error reinitializing filters" in hay):
+        return ("Couldn't render — the app built an inconsistent video "
+                "filtergraph for this timeline (a size or timing mismatch "
+                "between clips). This is a bug, not a problem with your media. "
+                "Undoing the last edit usually clears it.")
+
+    # 4. A source file that has moved or been deleted since it was added.
+    if "No such file or directory" in errs:
+        missing = re.findall(r"'([^']+)'", errs)
+        which = f" ({Path(missing[0]).name})" if missing else ""
+        return (f"Couldn't render — a clip's source file{which} is missing. It "
+                f"may have been moved or deleted since you added it.")
+
+    # 5. A stream specifier that binds to nothing means a clip's source doesn't
     # have the stream its lane requires — overwhelmingly an audio-only file
     # sitting on the video track. New placements are now blocked
     # (dispatch._reject_videoless_on_video_lane), but a project saved before
     # that guard existed can't render at all, and the generic message below
     # sends the user hunting for a "corrupt" file that is perfectly fine.
-    if "matches no streams" in ffmpeg_tail or \
-       "Error binding filtergraph inputs/outputs" in ffmpeg_tail:
+    if "matches no streams" in hay or \
+       "Error binding filtergraph inputs/outputs" in hay:
         which = ("an audio-only file on the video track"
-                 if ":v' " in ffmpeg_tail or ":v'" in ffmpeg_tail
+                 if ":v' " in hay or ":v'" in hay
                  else "a clip whose source is missing a needed stream")
         return (f"Couldn't render — the timeline contains {which}. "
                 f"Move that clip to the Music lane (or delete it) and try again.")
+
     return ("Couldn't render a preview for this clip — it may have corrupt "
              "frames or an unusual codec.")
 
@@ -668,8 +754,10 @@ def make_preview(sid: str, wait: int = 1):
             # short tail of ffmpeg's reason so the UI can show something useful.
             msg = str(e)
             tail = msg[-400:] if len(msg) > 400 else msg
+            # Classify on the FULL message, display the tail — the decisive
+            # ffmpeg line is routinely further back than 400 chars.
             raise HTTPException(422, {"error": "render_failed",
-                                      "message": _render_failure_message(tail),
+                                      "message": _render_failure_message(tail, msg),
                                       "ffmpeg": tail})
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER
@@ -731,7 +819,19 @@ def stream_preview(sid: str, h: str | None = None):
     # as missing — serving it would hand the client a torn file that mp4box
     # rejects with "invalid box". Re-render instead.
     if not p.exists() or p.stat().st_size == 0:
-        res = render_preview(store.edl, store.dir)
+        # Same RuntimeError -> 422 mapping the POST /preview and /export paths
+        # use. Without it this route answered a render failure with a bare 500
+        # plus a full traceback (logged twice), while the very same failure via
+        # POST produced a clean, actionable 422. The <video> element polls THIS
+        # url, so it was the shape the UI hit most often.
+        try:
+            res = render_preview(store.edl, store.dir)
+        except RuntimeError as e:
+            msg = str(e)
+            tail = msg[-400:]
+            raise HTTPException(422, {"error": "render_failed",
+                                      "message": _render_failure_message(tail, msg),
+                                      "ffmpeg": tail}) from e
         # Only serve what the caller ASKED for. This used to return whatever
         # the current EDL rendered to, even when `h` named a different render:
         # a mid-playback range request would then receive bytes from a file of
@@ -766,10 +866,11 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             res = render_export(store.edl, store.dir, height=body.height,
                                 fps=body.fps, crf=body.crf, container=body.container)
         except RuntimeError as e:
-            tail = str(e)[-400:]
+            msg = str(e)
+            tail = msg[-400:]
             raise HTTPException(422, {
                 "error": "render_failed",
-                "message": _render_failure_message(tail),
+                "message": _render_failure_message(tail, msg),
                 "ffmpeg": tail,
             })
         return _export_payload(sid, res)
@@ -787,7 +888,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             # jobs.py stores `f"{type(e).__name__}: {e}"` as job.error and the
             # UI shows it verbatim — so raise something whose str() is already
             # user-facing instead of a 2000-char ffmpeg stderr dump.
-            raise RuntimeError(_render_failure_message(str(e)[-400:])) from e
+            msg = str(e)
+            raise RuntimeError(_render_failure_message(msg[-400:], msg)) from e
         return _export_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
@@ -1009,6 +1111,36 @@ def _find_frontend_dist() -> Path | None:
     return None
 
 
+class _NoCacheHtmlStatic(StaticFiles):
+    """StaticFiles that forbids caching of HTML while keeping assets cacheable.
+
+    Vite emits content-hashed assets (`index-CkUGqqZ_.js`) referenced from a
+    STABLE url (`/index.html`). Plain StaticFiles serves that HTML with only an
+    etag/last-modified, so a browser is free to reuse a cached copy — which pins
+    the OLD asset hash. Observed live: after a rebuild the page kept loading a
+    bundle that no longer existed on disk, so a verified frontend fix appeared
+    not to work at all. In the packaged app (WKWebView / WebView2) the same
+    thing survives an app update and shows a stale — or blank — editor.
+
+    The hashed assets themselves are safe to cache hard: a new build produces a
+    new filename, so there is nothing to invalidate.
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        resp = await super().get_response(path, scope)
+        # `path` is "" or "index.html" for the SPA entry (html=True rewrites
+        # directory requests), and any unknown route also falls back to it.
+        is_html = path in ("", ".", "/", "index.html") or path.endswith(".html")
+        if is_html:
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+        elif path.startswith("assets/"):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
 _FRONTEND_DIST = _find_frontend_dist()
 if _FRONTEND_DIST is not None:
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="frontend")
+    app.mount("/", _NoCacheHtmlStatic(directory=str(_FRONTEND_DIST), html=True),
+              name="frontend")

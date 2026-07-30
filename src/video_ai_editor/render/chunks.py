@@ -193,10 +193,28 @@ def render_clip_to_chunk(
             # (-22) on a negotiated PCM layout. See compositor._AAC_OUT.
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart",
-            str(dst)]
-    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
-    if proc.returncode != 0:
-        raise RuntimeError(f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
+            # Stage, then swap. This was the ONLY mp4 writer in the render
+            # pipeline that wrote straight to its final path, and here the final
+            # path is the CONTENT FINGERPRINT — i.e. the cache key. An ffmpeg
+            # terminated by SIGTERM (or by a Windows console close, which maps to
+            # SIGTERM) still flushes a complete, decodable trailer, so a
+            # half-length chunk landed under a valid-looking key and was then
+            # served forever: the timeline silently rendered short, and no
+            # validity check could tell, because the file genuinely is valid.
+            str(tmp := _pu.part_path(dst))]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              **_pu.SUBPROCESS_FLAGS)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
+        _pu.replace_with_retry(tmp, dst)
+    except BaseException:
+        # Includes KeyboardInterrupt/SystemExit — a killed render must not leave
+        # the staged file behind to be swept up as a cache entry later.
+        _pu.unlink_with_retry(tmp)
+        raise
 
 
 def get_or_build_chunks(

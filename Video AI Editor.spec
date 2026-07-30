@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
@@ -10,6 +11,12 @@ with open('VERSION') as _vf:
     _APP_VERSION = _vf.read().strip() or '0.0.0'
 
 datas = [('frontend/dist', 'frontend/dist'), ('fonts', 'fonts'), ('presets', 'presets'), ('VERSION', '.')]
+# BUILD_ID is written by build_app.sh / build_win.ps1 just before packaging and
+# is what config.build_id() reads inside a frozen app (no git there). Guarded so
+# a bare `pyinstaller "Video AI Editor.spec"` on a tree without it still builds —
+# the app then just reports an empty build string.
+if os.path.exists('BUILD_ID'):
+    datas += [('BUILD_ID', '.')]
 hiddenimports = ['uvicorn.lifespan.on', 'uvicorn.protocols.websockets.auto', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.logging', 'video_ai_editor.main']
 datas += collect_data_files('webview')
 datas += collect_data_files('open_clip')

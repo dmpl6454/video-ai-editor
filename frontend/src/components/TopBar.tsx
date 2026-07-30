@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useStore } from '../store'
+import { useStore, errorMessage } from '../store'
 import { api } from '../api'
+import { toast } from '../toast'
 import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
 import { TextTool } from './TextTool'
@@ -39,6 +40,9 @@ export function TopBar() {
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [appVersion, setAppVersion] = useState('')
+  // Git short-sha (or a baked BUILD_ID in a packaged app). Shown next to the
+  // version so a bug report identifies the exact bits, which "v0.3.7" did not.
+  const [appBuild, setAppBuild] = useState('')
   // The session-picker dropdown is rendered via a portal to document.body
   // (positioned from this ref's rect) instead of as a normal absolutely-
   // positioned child of .topbar. .topbar clips overflow on both axes to keep
@@ -68,8 +72,18 @@ export function TopBar() {
   const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
 
   useEffect(() => {
-    fetch('/api/version').then((r) => r.json())
-      .then((d) => setAppVersion(d.version || '')).catch(() => {})
+    // `res.ok` matters: without it a 4xx/5xx body goes to .json(), throws, and
+    // the badge silently vanishes with no clue why. Log instead of swallowing.
+    fetch('/api/version')
+      .then((r) => {
+        if (!r.ok) throw new Error(`/api/version -> HTTP ${r.status}`)
+        return r.json()
+      })
+      .then((d) => {
+        setAppVersion(d.version || '')
+        setAppBuild(d.build || '')
+      })
+      .catch((e) => console.warn('[TopBar] version fetch failed:', e))
   }, [])
 
   // Tick an elapsed-seconds counter while an export is running so the button
@@ -91,16 +105,25 @@ export function TopBar() {
       const r = await api.saveProject(sid)
       setSavedUrl(r.url)
       setSavedGen(useStore.getState().ops.length)
+    } catch (e) {
+      // Save used to fail in TOTAL silence: no toast, no console line, and the
+      // "Saved" link simply never appeared — indistinguishable from a slow save.
+      // Losing a project export without being told is the worst kind of quiet.
+      toast.error(`Couldn't save the project: ${errorMessage(e)}`)
     } finally {
       setSaving(false)
     }
   }
 
   const onLoadProject = async (file: File) => {
-    const r = await api.loadProject(file)
-    // Switch to the new session and refresh
-    useStore.setState({ sessionId: r.id, sessionName: r.id })
-    await refresh()
+    try {
+      const r = await api.loadProject(file)
+      // Switch to the new session and refresh
+      useStore.setState({ sessionId: r.id, sessionName: r.id })
+      await refresh()
+    } catch (e) {
+      toast.error(`Couldn't open that .vae project: ${errorMessage(e)}`)
+    }
   }
 
   // Load sessions when picker opens; close on outside click
@@ -112,7 +135,13 @@ export function TopBar() {
     // paths (react-hooks/refs flags this for good reason, not just style).
     const rect = pickerBtnRef.current?.getBoundingClientRect()
     if (rect) setPickerPos({ left: rect.left, top: rect.bottom + 4 })
-    api.listSessions().then((r) => setSessions(r.sessions ?? [])).catch(() => {})
+    // A swallowed failure here left the picker showing "Loading…" forever.
+    api.listSessions()
+      .then((r) => setSessions(r.sessions ?? []))
+      .catch((e) => {
+        setSessions([])
+        toast.error(`Couldn't list sessions: ${errorMessage(e)}`)
+      })
     const close = (e: MouseEvent) => {
       const tgt = e.target as HTMLElement
       if (!tgt.closest('[data-session-picker]')) setPickerOpen(false)
@@ -313,8 +342,9 @@ export function TopBar() {
         <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
         <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
         {appVersion && (
-          <span title="App version" style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
-            v{appVersion}
+          <span title={appBuild ? `App version ${appVersion} · build ${appBuild}` : 'App version'}
+                style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
+            v{appVersion}{appBuild ? ` · ${appBuild}` : ''}
           </span>
         )}
       </div>
@@ -378,13 +408,19 @@ export function TopBar() {
             >
               <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
                 Resolution
+                {/* Bound to the CHOICE, with 0 as the "source" sentinel — not to
+                    the resolved height. Giving the Source option the canvas
+                    height emitted two options with the same value whenever the
+                    canvas matched a preset (a 1080-tall project had 1080 twice),
+                    and a <select> resolves a duplicate value to the FIRST match,
+                    so picking "1080p" silently snapped back to "Source". */}
                 <select
-                  value={exportHeight}
+                  value={exportHeightChoice}
                   onChange={(e) => setExportHeightChoice(Number(e.target.value))}
                   style={{ fontSize: 12, padding: '3px 4px' }}
                 >
                   {edl?.canvas?.h && (
-                    <option value={edl.canvas.h}>Source ({edl.canvas.w}×{edl.canvas.h})</option>
+                    <option value={0}>Source ({edl.canvas.w}×{edl.canvas.h})</option>
                   )}
                   <option value={2160}>2160p (4K)</option>
                   <option value={1440}>1440p (2K)</option>

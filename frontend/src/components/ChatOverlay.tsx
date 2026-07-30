@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../store'
+import { useStore, errorMessage } from '../store'
 
 type ChatEvent =
   | { type: 'text_delta'; text: string }
@@ -70,7 +70,16 @@ export function ChatOverlay() {
         buf = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
-          const evt: ChatEvent = JSON.parse(line.slice(6))
+          // Per-LINE guard: one malformed frame must not abort the whole stream.
+          // An uncaught throw here escaped the read loop, so chat stopped
+          // mid-sentence with no message and no way to tell it had stopped.
+          let evt: ChatEvent
+          try {
+            evt = JSON.parse(line.slice(6)) as ChatEvent
+          } catch {
+            console.warn('[chat] skipping malformed SSE frame:', line.slice(0, 120))
+            continue
+          }
           if (evt.type === 'text_delta') {
             assistantText += evt.text
             setMsgs((m) => {
@@ -100,6 +109,16 @@ export function ChatOverlay() {
           }
         }
       }
+    } catch (e) {
+      // Stream-LEVEL guard: a network drop mid-answer rejects reader.read().
+      // Without this the rejection escaped `send()` entirely and the user was
+      // left staring at a half-written reply, unsure whether Claude was still
+      // thinking. Say what happened instead.
+      setMsgs((m) => [...m, {
+        role: 'assistant',
+        text: `⚠ The connection dropped mid-answer (${errorMessage(e)}). `
+            + `Any edits already applied are saved — send the message again to continue.`,
+      }])
     } finally {
       setBusy(false)
     }
