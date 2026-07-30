@@ -50,12 +50,51 @@ def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
     return False
 
 
+def _frontend_is_stale(repo: Path, dist: Path) -> bool:
+    """True when any frontend source is newer than the built bundle.
+
+    A bare `dist/index.html` existence check was NOT enough: it let a bundle
+    built weeks ago satisfy the guard forever, so `bash run.sh` silently served
+    a stale UI. Three consecutive tester rounds re-reported bugs that were
+    already fixed in source because the fixes never reached the bundle they
+    were running (mute checkbox, text coordinates, PNG stickers, path labels…).
+
+    Cheap mtime comparison — no git, no hashing — so it costs ~a few ms even on
+    a large src tree, and it degrades to "not stale" if anything is unreadable
+    rather than forcing a rebuild loop.
+    """
+    try:
+        built = (dist / "index.html").stat().st_mtime
+    except OSError:
+        return True
+    fe = repo / "frontend"
+    watch = [fe / "package.json", fe / "package-lock.json", fe / "index.html",
+             fe / "vite.config.ts", fe / "tsconfig.app.json"]
+    try:
+        for p in watch:
+            if p.exists() and p.stat().st_mtime > built:
+                return True
+        for p in (fe / "src").rglob("*"):
+            # Directory mtimes change on any add/remove inside them too, so we
+            # deliberately do not filter to files only.
+            if p.stat().st_mtime > built:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def _ensure_frontend_built() -> None:
-    """Make sure frontend/dist exists.
+    """Make sure frontend/dist exists AND is not older than frontend/src.
 
     In a PyInstaller .app the frontend is bundled under sys._MEIPASS, so there
     is nothing to build (npm isn't available) — just return. In dev, build it
-    on first run if missing."""
+    on first run if missing, and rebuild it when sources have moved on.
+
+    Failure policy differs by case on purpose: a MISSING bundle is fatal (there
+    is nothing to serve), but a STALE bundle only warns — bricking a working
+    launch because npm is unavailable would be worse than serving old bits.
+    """
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         if (Path(meipass) / "frontend" / "dist" / "index.html").exists():
@@ -64,9 +103,14 @@ def _ensure_frontend_built() -> None:
         sys.exit(1)
     repo = Path(__file__).resolve().parents[2]
     dist = repo / "frontend" / "dist"
-    if dist.exists() and (dist / "index.html").exists():
+    missing = not (dist.exists() and (dist / "index.html").exists())
+    if missing:
+        reason = "frontend/dist missing"
+    elif _frontend_is_stale(repo, dist):
+        reason = "frontend/dist is older than frontend/src"
+    else:
         return
-    print("[desktop] frontend/dist missing — running `npm run build`…", flush=True)
+    print(f"[desktop] {reason} — running `npm run build`…", flush=True)
     import subprocess
     proc = subprocess.run(
         [_npm_cmd(), "run", "build"],
@@ -76,7 +120,11 @@ def _ensure_frontend_built() -> None:
     )
     if proc.returncode != 0:
         print("[desktop] npm build failed:\n", proc.stderr[-1500:], file=sys.stderr)
-        sys.exit(1)
+        if missing:
+            sys.exit(1)
+        print("[desktop] WARNING: serving the STALE bundle in frontend/dist. "
+              "Fix the build or your UI will not match the source.",
+              file=sys.stderr, flush=True)
 
 
 def _serve(host: str, port: int) -> None:

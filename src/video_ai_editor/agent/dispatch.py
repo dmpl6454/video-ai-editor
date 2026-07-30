@@ -179,6 +179,58 @@ def _first_free_gap(
     return candidate
 
 
+def _num(args: dict, key: str, default: float | None = None, *,
+         min: float | None = None, max: float | None = None) -> float | None:
+    """Read a numeric tool argument, rejecting anything that isn't a real number.
+
+    Tool args arrive from four callers (Claude, the UI, MCP, docs) and used to be
+    coerced with a bare `float(args[key])`. That let three bad shapes through:
+
+      * `None`      -> TypeError -> HTTP 500 + traceback
+      * `"abc"`     -> ValueError -> 500 (a plain 400 is the honest answer)
+      * `NaN`/`inf` -> accepted silently, then serialised into edl.json as
+                       `null`/`Infinity`, which is how a single bad float could
+                       make a whole project unloadable.
+
+    Raising ValueError gets mapped to HTTP 400 by main.py's bare-ValueError rule,
+    so callers see a real error instead of a traceback or a corrupted timeline.
+    """
+    if key not in args:
+        return default
+    raw = args[key]
+    # An ABSENT key means "leave it alone"; an explicit null does not — that is a
+    # malformed request, and silently treating it as absent is how a UI bug turns
+    # into "my edit did nothing".
+    if raw is None:
+        raise ValueError(f"{key} must be a number, got null")
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number, got {raw!r}")
+    if v != v or v in (float("inf"), float("-inf")):
+        raise ValueError(f"{key} must be finite, got {raw!r}")
+    if min is not None and v < min:
+        v = min
+    if max is not None and v > max:
+        v = max
+    return v
+
+
+def _source_duration(src: str | Path) -> float | None:
+    """Container duration of a clip's source, or None if it can't be determined.
+
+    Returns None rather than raising so callers can treat "unprobeable" as
+    "don't clamp" — media imported from a .vae, or a repaired path, must keep
+    working exactly as it does today.
+    """
+    try:
+        from ..ingest.probe import probe as _probe
+        d = float(_probe(Path(src)).duration)
+        return d if d > 0 else None
+    except Exception:
+        return None
+
+
 def _ripple_close_gap(track: Track) -> None:
     """After a removal, slide subsequent clips left to close any gap."""
     track.clips.sort(key=lambda c: getattr(c, "start", 0))
@@ -543,10 +595,25 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     if not isinstance(c, Clip):
         raise ValueError("trim_clip only supports media clips")
     old_start, old_in, old_duration = c.start, c.in_, c.duration
-    if "in" in args:
-        c.in_ = float(args["in"])
-    if "out" in args:
-        c.out = float(args["out"])
+    new_in = _num(args, "in", c.in_, min=0.0)
+    new_out = _num(args, "out", c.out, min=0.0)
+    # Clamp `out` to the source's real length. `out=20` on a 6s file was accepted,
+    # producing a clip whose timeline footprint exceeded its media — the render
+    # then diverged from the timeline, and any duration-based cache-validity
+    # check would re-render that chunk forever. Skipped silently when the source
+    # can't be probed (imported .vae media, repaired paths) so nothing that works
+    # today starts failing.
+    src_dur = _source_duration(c.src)
+    if src_dur is not None and src_dur > 0:
+        new_out = min(new_out, src_dur)
+        new_in = min(new_in, max(0.0, src_dur - 1.0 / 30.0))
+    # A zero- or negative-length clip is not a valid timeline object: it stays in
+    # the EDL, still enters the filtergraph, and renders as a broken segment.
+    # Clearing the Out field in the UI used to produce exactly that.
+    if new_out <= new_in:
+        raise ValueError(
+            f"out ({new_out:.3f}) must be greater than in ({new_in:.3f})")
+    c.in_, c.out = new_in, new_out
     new_duration = c.duration
     _ripple_close_gap(track)
     if track.id == "v1" and new_duration < old_duration - 1e-9:
@@ -613,7 +680,7 @@ def move_clip(store: EDLStore, args: dict) -> dict:
     if hasattr(c, "start"):
         # Clamp to >= 0; ffmpeg can't address negative timeline positions
         # and the timeline renderer would crash on the next preview.
-        requested_start = max(0.0, float(args["new_start"]))
+        requested_start = _num(args, "new_start", 0.0, min=0.0)
         if isinstance(c, Clip):
             # Cross-track (or same-track) drop onto an occupied range used to
             # silently stack two media clips at the same time — no data loss
@@ -743,17 +810,11 @@ def render_preview_tool(store: EDLStore, args: dict) -> dict:
     return {"path": str(res.path), "cached": res.cached, "edl_hash": res.edl_hash}
 
 
-def set_track_muted(store: EDLStore, args: dict) -> dict:
-    """Mute or unmute a track. Muted tracks are skipped at render time."""
-    track_id = str(args["track"])
-    muted = bool(args.get("muted", True))
-    track = store.edl.get_track(track_id)
-    if not track:
-        raise ValueError(f"track {track_id} not found")
-    track.muted = muted
-    summary = f"{'Mute' if muted else 'Unmute'} track {track_id}"
-    store.commit("set_track_muted", args, summary)
-    return {"summary": summary, "track": track_id, "muted": muted}
+# NOTE: `set_track_muted` used to be defined twice, here and further down, with
+# different bodies — Python kept the later one, so this earlier body was dead
+# code. Deleted. The surviving definition has the better default (omitting
+# `muted` TOGGLES rather than always muting) and now also returns `track`, which
+# is the only thing this version contributed.
 
 
 # ---------- text / captions / brand kit ----------
@@ -1148,13 +1209,19 @@ def add_music(store: EDLStore, args: dict) -> dict:
     volume_db = float(args.get("volume_db", -12.0))
 
     if out <= 0:
-        # Probe source duration
+        # Default the out-point to the VIDEO length, not the whole song. Taking
+        # the full source duration here is what made `edl.duration` become the
+        # song length (a 29s video + a 6:13 track reported 373.71s), so the
+        # transport and the rendered file both ran minutes past the last frame.
+        # A caller that genuinely wants the whole bed passes an explicit `out`.
         from ..ingest.probe import probe
+        video_extent = store.edl.video_extent()
         try:
             p = probe(src)
-            out = p.duration
+            out = min(p.duration, video_extent) if video_extent > 0.05 else p.duration
         except Exception:
-            out = max(1.0, store.edl.duration)
+            # Unprobeable source: fall back to the video extent if we have one.
+            out = video_extent if video_extent > 0.05 else max(1.0, store.edl.duration)
 
     track = store.edl.get_track("music")
     if not track:
@@ -1246,8 +1313,10 @@ def add_fade(store: EDLStore, args: dict) -> dict:
     from ..edl.schema import Clip
     if not isinstance(c, Clip):
         raise ValueError("add_fade only supports media clips")
-    c.audio.fade_in = float(args.get("in_s", c.audio.fade_in))
-    c.audio.fade_out = float(args.get("out_s", c.audio.fade_out))
+    # Clamp at 0 exactly as set_video_fade already does — a negative fade makes
+    # ffmpeg's afade emit nothing, so it read as "fade silently stopped working".
+    c.audio.fade_in = _num(args, "in_s", c.audio.fade_in, min=0.0)
+    c.audio.fade_out = _num(args, "out_s", c.audio.fade_out, min=0.0)
     summary = f"Fade {cid}: in={c.audio.fade_in:.2f}s out={c.audio.fade_out:.2f}s"
     store.commit("add_fade", args, summary)
     return {"summary": summary}
@@ -1785,7 +1854,7 @@ def set_track_muted(store: EDLStore, args: dict) -> dict:
     track.muted = bool(args.get("muted", not track.muted))
     summary = f"{'Muted' if track.muted else 'Unmuted'} track {track.id}"
     store.commit("set_track_muted", args, summary)
-    return {"summary": summary, "muted": track.muted}
+    return {"summary": summary, "track": track.id, "muted": track.muted}
 
 
 def set_track_locked(store: EDLStore, args: dict) -> dict:
@@ -1941,10 +2010,18 @@ def bulk_duplicate(store: EDLStore, args: dict) -> dict:
 
 def add_marker(store: EDLStore, args: dict) -> dict:
     from ..edl.schema import Marker
+    # The colour goes straight into a canvas fillStyle, and an arbitrary string
+    # let a marker be drawn in the playhead's own red — indistinguishable from
+    # the playhead, which is precisely how a stray marker got reported as "an
+    # extra red playhead appeared on its own". Accept only a #rgb/#rrggbb literal
+    # and fall back to amber otherwise.
+    raw_color = str(args.get("color", "") or "").strip()
+    color = raw_color if re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})", raw_color) \
+        else "#fbbf24"  # amber — deliberately unlike the playhead red (#ff4d6d)
     m = Marker(
-        time=float(args["time"]),
-        label=str(args.get("label", "")),
-        color=str(args.get("color", "#fbbf24")),  # amber — must differ from the playhead red (#ff4d6d)
+        time=_num(args, "time", 0.0, min=0.0),
+        label=str(args.get("label", ""))[:64],
+        color=color,
     )
     store.edl.markers.append(m)
     summary = f"Marker @ {m.time:.2f}s{' — ' + m.label if m.label else ''}"
@@ -2289,11 +2366,40 @@ def export_ass_tool(store: EDLStore, args: dict) -> dict:
 
 
 def _load_transcript(store: EDLStore):
-    p = store.dir / "transcript.json"
-    if not p.exists():
-        return None
+    """Resolve the project's transcript from EITHER of its two writers.
+
+    Transcript persistence is split, and this helper used to see only half of it:
+      * `<session>/transcript.json` — written ONLY by `import_srt`.
+      * `uploads/<stem>/ingest.json` -> `["transcript"]` — written by whisper
+        (`main._bg_transcribe`) and by `auto_caption`.
+    Reading only the first meant `export_srt` / `export_vtt` / `export_ass` raised
+    "no transcript on this project" for every whisper project — i.e. for every
+    project that had not explicitly imported an .srt — even though captions on
+    the timeline were built from a transcript that existed on disk.
+
+    An explicitly imported/edited transcript wins, since that is the user's
+    deliberate override. Resolution of the whisper side stays with
+    `_current_v1_ingest_json`: per CLAUDE.md it must be the CURRENT v1 clip's own
+    upload directory, never a `glob("uploads/**/ingest.json")[0]`, which has no
+    ordering guarantee in a session with more than one upload.
+    """
     from ..ingest.transcribe import Transcript
-    return Transcript.model_validate_json(p.read_text(encoding="utf-8"))
+    p = store.dir / "transcript.json"
+    if p.exists():
+        try:
+            return Transcript.model_validate_json(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass  # fall through to the ingest side rather than hard-failing
+    ing = _current_v1_ingest_json(store)
+    if ing and ing.exists():
+        try:
+            data = json.loads(ing.read_text(encoding="utf-8"))
+            tr = data.get("transcript")
+            if tr:
+                return Transcript.model_validate(tr)
+        except Exception:
+            return None
+    return None
 
 
 def noise_reduce(store: EDLStore, args: dict) -> dict:
@@ -2800,56 +2906,13 @@ def set_clip_z(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "z": new_z}
 
 
-def vocal_isolate(store: EDLStore, args: dict) -> dict:
-    """Run Demucs to extract a vocals-only WAV from a clip's source. Adds the
-    resulting stem as a new clip on the `vo` track and mutes the original V1
-    audio so they don't double up."""
-    cid = str(args["clip_id"])
-    res = store.edl.get_clip(cid)
-    if not res:
-        raise ValueError(f"clip {cid} not found")
-    _, c = res
-    if not isinstance(c, Clip):
-        raise ValueError("vocal_isolate only supports media clips")
-    from ..ai.separate import isolate_vocals
-    cache_dir = store.dir / "cache" / "demucs"
-    out_wav = isolate_vocals(Path(c.src), cache_dir)
-    # Add as a clip on the vo track at the clip's start
-    track = store.edl.get_track("vo") or ensure_track(store.edl, "vo", "vo", z=0)
-    from ..ingest.probe import probe
-    p = probe(out_wav)
-    from ..edl.schema import Clip as _Clip, AudioProps
-    new_clip = _Clip(src=str(out_wav), in_=c.in_, out=c.in_ + p.duration, start=c.start,
-                     audio=AudioProps(gain_db=0))
-    track.clips.append(new_clip)
-    summary = f"Vocal isolate {cid} → vo clip ({p.duration:.1f}s)"
-    store.commit("vocal_isolate", args, summary)
-    return {"summary": summary, "vo_clip_id": new_clip.id, "src": str(out_wav)}
-
-
-def instrumental_isolate(store: EDLStore, args: dict) -> dict:
-    """Run Demucs to extract an instrumental (no-vocals) WAV from a clip and
-    add it on the music track."""
-    cid = str(args["clip_id"])
-    res = store.edl.get_clip(cid)
-    if not res:
-        raise ValueError(f"clip {cid} not found")
-    _, c = res
-    if not isinstance(c, Clip):
-        raise ValueError("instrumental_isolate only supports media clips")
-    from ..ai.separate import isolate_instrumental
-    cache_dir = store.dir / "cache" / "demucs"
-    out_wav = isolate_instrumental(Path(c.src), cache_dir)
-    track = store.edl.get_track("music") or ensure_track(store.edl, "music", "music", z=0)
-    from ..ingest.probe import probe
-    p = probe(out_wav)
-    from ..edl.schema import Clip as _Clip, AudioProps
-    new_clip = _Clip(src=str(out_wav), in_=c.in_, out=c.in_ + p.duration, start=c.start,
-                     audio=AudioProps(gain_db=-6))
-    track.clips.append(new_clip)
-    summary = f"Instrumental isolate {cid} → music clip ({p.duration:.1f}s)"
-    store.commit("instrumental_isolate", args, summary)
-    return {"summary": summary, "music_clip_id": new_clip.id, "src": str(out_wav)}
+# NOTE: `vocal_isolate` / `instrumental_isolate` used to ALSO be defined here,
+# with different bodies. Python keeps the last definition, so these earlier ones
+# were dead code that nothing could reach — an edit to them would have been
+# silently ignored. Deleted; the surviving definitions live further down (they are
+# the better pair: they mute the original clip audio so the stem doesn't double
+# up, and they fade the stem in/out). Same treatment applied to the third
+# duplicate, `set_track_muted`.
 
 
 def add_lower_third(store: EDLStore, args: dict) -> dict:
@@ -3274,14 +3337,22 @@ def vocal_isolate(store: EDLStore, args: dict) -> dict:
     _, c = res
     if not isinstance(c, Clip):
         raise ValueError("vocal_isolate only supports media clips")
-    from ..ai.separate import isolate_vocals
+    from ..ai.separate import isolate_vocals, available as _demucs_available
+    if not _demucs_available():
+        raise RuntimeError(
+            "Vocal isolation needs demucs (install with `uv sync --all-extras`) "
+            "and the full Python install — it is excluded from the packaged app.")
     stem = isolate_vocals(Path(c.src), store.dir / "cache" / "stems")
     # Drop the vocal stem onto the vo track; mute the original audio of the clip.
     c.audio.mute = True
     track = ensure_track(store.edl, "vo", "vo", z=0)
     from ..edl.schema import AudioProps
+    # in_=c.in_, NOT 0.0: the stem spans the WHOLE source file, so a trimmed clip
+    # (in_ > 0) paired with in_=0.0 played the stem from the source's beginning
+    # against video that started later — the isolated voice drifted out of sync
+    # by exactly the trim amount.
     track.clips.append(Clip(
-        src=str(stem), in_=0.0, out=c.duration, start=c.start,
+        src=str(stem), in_=c.in_, out=c.out, start=c.start,
         audio=AudioProps(gain_db=0.0, fade_in=0.05, fade_out=0.1),
     ))
     summary = f"Isolate vocals from {cid} → vo track ({stem.name})"
@@ -3298,13 +3369,19 @@ def instrumental_isolate(store: EDLStore, args: dict) -> dict:
     _, c = res
     if not isinstance(c, Clip):
         raise ValueError("instrumental_isolate only supports media clips")
-    from ..ai.separate import isolate_instrumental
+    from ..ai.separate import isolate_instrumental, available as _demucs_available
+    if not _demucs_available():
+        raise RuntimeError(
+            "Instrumental isolation needs demucs (install with "
+            "`uv sync --all-extras`) and the full Python install — it is "
+            "excluded from the packaged app.")
     inst = isolate_instrumental(Path(c.src), store.dir / "cache" / "stems")
     c.audio.mute = True
     track = ensure_track(store.edl, "music", "music", z=0)
     from ..edl.schema import AudioProps
+    # in_=c.in_ for the same sync reason as vocal_isolate above.
     track.clips.append(Clip(
-        src=str(inst), in_=0.0, out=c.duration, start=c.start,
+        src=str(inst), in_=c.in_, out=c.out, start=c.start,
         audio=AudioProps(gain_db=-6.0, fade_in=0.05, fade_out=0.1),
     ))
     summary = f"Isolate instrumental from {cid} → music track"
@@ -3390,7 +3467,6 @@ DISPATCH: dict[str, DispatchFn] = {
     "save_show_template": save_show_template,
     "apply_show_template": apply_show_template,
     "generate_hook": generate_hook,
-    "set_track_muted": set_track_muted,
     "set_track_locked": set_track_locked,
     "set_speed": set_speed,
     "set_clip_transform": set_clip_transform,
@@ -3419,8 +3495,6 @@ DISPATCH: dict[str, DispatchFn] = {
     # TTS voiceover (Piper)
     "tts_voiceover": tts_voiceover,
     # Heavy AI: vocal/instrumental separation, upscale
-    "vocal_isolate": vocal_isolate,
-    "instrumental_isolate": instrumental_isolate,
     "upscale": upscale,
     # Keyframes
     "add_keyframe": add_keyframe,

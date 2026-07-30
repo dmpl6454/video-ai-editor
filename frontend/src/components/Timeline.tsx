@@ -648,9 +648,23 @@ export function Timeline() {
     for (const m of markers) {
       const mx = labelWidth + m.time * zoom
       if (mx < labelWidth || mx > contentW) continue
+      // DASHED, and always labelled. A solid full-height line is exactly what
+      // the playhead looks like, so a marker created by an accidental `M`
+      // keypress read as "a second red playhead appeared on its own, and I
+      // can't get rid of it" — with no UI anywhere that admitted markers exist.
+      // Right-click the diamond to remove it (see onContextMenu).
+      ctx.save()
+      ctx.strokeStyle = m.color ?? '#fbbf24'
+      ctx.setLineDash([4, 4])
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(mx, headerHeight)
+      ctx.lineTo(mx, contentH)
+      ctx.stroke()
+      ctx.restore()
+      ctx.save()
       ctx.fillStyle = m.color ?? '#fbbf24'
-      ctx.fillRect(mx, headerHeight, 1.5, contentH - headerHeight)
-      // diamond at the ruler line
+      // diamond at the ruler line — the right-click target
       ctx.beginPath()
       ctx.moveTo(mx, headerHeight - 6)
       ctx.lineTo(mx + 4, headerHeight)
@@ -658,11 +672,9 @@ export function Timeline() {
       ctx.lineTo(mx - 4, headerHeight)
       ctx.closePath()
       ctx.fill()
-      if (m.label) {
-        ctx.fillStyle = m.color ?? '#fbbf24'
-        ctx.font = '9px var(--font-ui)'
-        ctx.fillText(m.label.slice(0, 12), mx + 6, headerHeight - 8)
-      }
+      ctx.font = '9px system-ui, sans-serif'
+      ctx.fillText(m.label ? m.label.slice(0, 12) : 'marker', mx + 6, headerHeight - 8)
+      ctx.restore()
     }
 
     // In/out range shading on the ruler
@@ -1449,6 +1461,20 @@ export function Timeline() {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
+    // Right-clicking a marker's diamond removes it. This is the ONLY way to get
+    // rid of a marker — `M` created them silently and nothing in the UI could
+    // remove one, which is why an accidental keypress read as a permanent
+    // "extra red playhead". It goes through dispatch, so Undo restores it.
+    const markers = (edl?.markers ?? []) as { id: string; time: number }[]
+    if (y <= headerHeight + 8) {
+      const near = markers.find((m) => Math.abs((labelWidth + m.time * zoom) - x) <= 6)
+      if (near) {
+        e.preventDefault()
+        void dispatch('remove_marker', { marker_id: near.id })
+        toast.info('Marker removed (⌘Z to undo)')
+        return
+      }
+    }
     const hit = hits.find((h) => x >= h.x && x <= h.x + h.w && y >= h.y + 4 && y <= h.y + h.h - 4)
     if (!hit) return
     e.preventDefault()
@@ -1548,6 +1574,33 @@ export function Timeline() {
     wrap.addEventListener('scroll', onScroll)
     return () => wrap.removeEventListener('scroll', onScroll)
   }, [contentW])
+
+  // Follow the playhead during playback. Without this the playhead simply left
+  // the visible window and the timeline sat still while the video played on —
+  // which also made the transport look desynced from the timeline (a tester
+  // screenshot shows the clock at 34s while the view still showed 3–10s).
+  //
+  // Band check, not centre-on-every-frame: only scroll when the playhead crosses
+  // outside the middle 60% of the viewport, then re-centre. Scrolling every frame
+  // would fight a user who is dragging the scrollbar, and re-centring constantly
+  // makes the whole timeline appear to slide under a stationary playhead.
+  // `dragRef.current` is checked so an in-progress drag is never yanked.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || dragRef.current) return
+    const x = labelWidth + playhead * zoom
+    const viewLeft = wrap.scrollLeft
+    const viewW = wrap.clientWidth
+    if (viewW <= 0) return
+    const lo = viewLeft + labelWidth + viewW * 0.2
+    const hi = viewLeft + viewW * 0.8
+    if (x < lo || x > hi) {
+      const target = Math.max(0, x - viewW / 2)
+      // Only move if it's a real jump — sub-pixel corrections every frame would
+      // make the view jitter.
+      if (Math.abs(target - viewLeft) > 8) wrap.scrollLeft = target
+    }
+  }, [playhead, zoom, labelWidth])
 
   // Mute-toggle click on the sticky label canvas. Coordinates here are
   // already relative to the label canvas's own (unscrolled) origin, so no

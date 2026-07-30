@@ -310,6 +310,10 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     sc_animated = is_keyframed(tx.scale)
     x_animated = is_keyframed(tx.x)
     y_animated = is_keyframed(tx.y)
+    # Scalar pan, in canvas pixels. 0.0 when the axis is keyframed — that case is
+    # handled entirely by the animated branch below.
+    x_static = 0.0 if x_animated else float(tx.x) if isinstance(tx.x, (int, float)) else 0.0
+    y_static = 0.0 if y_animated else float(tx.y) if isinstance(tx.y, (int, float)) else 0.0
     tvar = f"(t-{c.start:.4f})"
 
     if rot_animated:
@@ -342,14 +346,39 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
             f",scale=w='{canvas_w}*{zoom}':h='{canvas_h}*{zoom}':eval=frame"
             f",crop={canvas_w}:{canvas_h}:'{cx_expr}':'{cy_expr}'"
         )
-    elif abs(sc_static - 1.0) > 0.001 and sc_static > 0:
+    elif (abs(sc_static - 1.0) > 0.001 and sc_static > 0) or x_static or y_static:
+        # This branch used to fire ONLY on a scale change, and even then it
+        # hardcoded a dead-centre crop — so `Transform.x`/`y` were silently
+        # dropped for every v1 clip. The Position inputs in the Properties panel
+        # dispatched, committed and re-rendered, and the picture never moved
+        # ("I tried to change the position by changing the coordinates, but it
+        # didn't flinch"). Only the KEYFRAMED branch above ever emitted x/y.
+        #
+        # The offset is applied EXACTLY: x=200 moves the picture 200 canvas
+        # pixels right, revealing black where nothing covers the canvas. The
+        # obvious alternative — zoom in just enough to have material to pan into —
+        # avoids the black edge but makes the apparent shift smaller than the
+        # number the user typed, which is how a control earns a reputation for
+        # being half-broken. There is no client-side translate preview to diverge
+        # from (Preview.tsx's liveTransform only does scale + rotate).
+        #
+        # scale -> pad(oversized, offset) -> crop(canvas) is one chain and is
+        # exact for scale <1, ==1 and >1 alike. Note it never asks `pad` for a
+        # target SMALLER than its input, which is the error that made 4:5
+        # unrenderable ("Padded dimensions cannot be smaller than input").
         sw = max(2, int(canvas_w * sc_static) // 2 * 2)
         sh = max(2, int(canvas_h * sc_static) // 2 * 2)
+        dx, dy = int(round(x_static)), int(round(y_static))
         v_chain += f",scale={sw}:{sh}"
-        if sc_static < 1.0:
-            v_chain += f",pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black"
-        else:
-            v_chain += f",crop={canvas_w}:{canvas_h}:(iw-{canvas_w})/2:(ih-{canvas_h})/2"
+        # Intermediate must cover the scaled frame AND the canvas plus the pan
+        # margin on both sides; even parity for the same chroma reason as h_out.
+        pw = (max(sw, canvas_w) + 2 * abs(dx) + 1) // 2 * 2
+        ph = (max(sh, canvas_h) + 2 * abs(dy) + 1) // 2 * 2
+        if pw > sw or ph > sh:
+            v_chain += (f",pad={pw}:{ph}:"
+                        f"({pw}-{sw})/2+{dx}:({ph}-{sh})/2+{dy}:color=black")
+        v_chain += (f",crop={canvas_w}:{canvas_h}:"
+                    f"({pw}-{canvas_w})/2:({ph}-{canvas_h})/2")
 
     ec = effect_chain(c.effects or [], uid=c.id)
     if ec:
@@ -589,9 +618,34 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 if xf_expr:
                     # expr is wrapped in single quotes; it contains no quotes itself.
                     xf += f":expr='{xf_expr}'"
+                # xfade's config_output REQUIRES both inputs to share a
+                # timebase, and ours routinely don't: a link coming out of
+                # `concat` or a `color=` filler is normalised to 1/1000000,
+                # while a raw per-clip chain keeps the demuxer's own tbn (and a
+                # mask/alphamerge branch keeps yet another). Any mismatch aborts
+                # the whole graph with "Input link parameters … do not match",
+                # which the UI then reported as "corrupt frames or an unusual
+                # codec" — blaming the user's media for a graph bug.
+                #
+                # It bit hardest when a seam was NOT the first (the left side had
+                # been through concat), which is why "add a transition, then
+                # split" reproduced so reliably. But it also hit the FIRST seam
+                # whenever the two sources had different container timebases
+                # (mp4 + mkv) or the left clip carried a Mask — both verified.
+                #
+                # Pin both inputs at the NODE, not inside _build_clip_video_chain:
+                # that function is also handed to the chunk renderer, and
+                # chunks.fingerprint_clip keys the cache on clip FIELDS, never on
+                # the chain string — so changing the chain there would silently
+                # serve every already-cached chunk with the old timebase and no
+                # invalidation.
+                ltb, rtb = f"[xtbl{i}]", f"[xtbr{i}]"
+                fc_parts.append(f"{cur_v}settb=AVTB{ltb}")
+                fc_parts.append(f"{seg_v[i]}settb=AVTB{rtb}")
                 fc_parts.append(
-                    f"{cur_v}{seg_v[i]}{xf}{new_v}"
+                    f"{ltb}{rtb}{xf}{new_v}"
                 )
+                # acrossfade performs no such timebase check — leave it alone.
                 fc_parts.append(
                     f"{cur_a}{seg_a[i]}acrossfade=d={tdur}{new_a}"
                 )
@@ -630,7 +684,27 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None, on_progress=None,
             cancel_event=None, crf: int | None = None) -> Path:
     canvas = edl.canvas
-    h_out = height
+    # BOTH output dimensions must be even. H.264/yuv420p subsamples chroma 2x2,
+    # so an odd dimension is unencodable — and long before the encoder, an odd
+    # canvas height makes the filtergraph internally inconsistent, because
+    # ffmpeg's `pad` FLOORS its target to the chroma multiple while rounding its
+    # input up. A 4:5 project (1080x1350) hits exactly this: render_preview's
+    # short-edge math yields 675, and the graph then breaks four different ways
+    # depending on the timeline's shape —
+    #   pad=540:675 fed a 540x675-tall clip -> "Padded dimensions cannot be
+    #     smaller than input dimensions" -> -22 -> "Nothing was written…"
+    #   gap filler `color=…:s=540x675` vs clip chains at 540x674 -> concat
+    #     "Input link parameters … do not match"
+    #   mask alphamerge -> "Input frame sizes do not match (540x674 vs 540x675)"
+    #   no-v1 filler straight to the encoder -> libx264 "height not divisible
+    #     by 2" (macOS hid this leg: h264_videotoolbox silently writes 674)
+    # FLOOR (not round up) so this agrees with what `pad` already does to its
+    # own target, making the clip chains, gap filler, mask PNG, PIP base and
+    # encoder all settle on the same number.
+    h_out = max(2, int(height) // 2 * 2)
+    # Leave this expression alone. It already forces even, and fed h_out=674 it
+    # still returns 540. Rewriting it as _even(round(canvas.w*h_out/canvas.h))
+    # would return 538 and change a width that works today.
     w_out = int(round(canvas.w * (h_out / canvas.h) / 2) * 2)
     enc_args = _video_encoder_args(preview=preview, crf=crf)
 
@@ -1002,6 +1076,12 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
         height = min(canvas.h, int(round(height * canvas.h / max(1, canvas.w))))
     else:
         height = min(canvas.h, height)
+    # Snap to even HERE too, not only in _render. This value is baked into the
+    # video-only cache filename below (`video_{fp}_{height}.mp4`), so without the
+    # snap a 4:5 project would name its cache entry 675 while the file inside is
+    # 674 — a cache key describing a height that never existed. Identity for
+    # every preset that works today (960, 540, 540).
+    height = max(2, int(height) // 2 * 2)
     h = edl.hash()
     out_dir = session_dir / "previews"
     out_dir.mkdir(parents=True, exist_ok=True)

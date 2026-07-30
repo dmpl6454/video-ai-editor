@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -120,6 +121,30 @@ def read_text_utf8(path: Path | str) -> str:
 
 def write_text_utf8(path: Path | str, text: str) -> None:
     Path(path).write_text(text, encoding="utf-8")
+
+
+def part_path(dst: Path) -> Path:
+    """A unique sibling temp path for an in-progress write of `dst`.
+
+    ffmpeg's `-y` truncates its output to 0 bytes and writes progressively, so
+    pointing it straight at the final path means a concurrent reader — or a
+    process killed mid-write — sees a torn file. Worse for content-addressed
+    caches: the final name IS the cache key, so a truncated file becomes a
+    permanently-valid-looking cache hit. Write here, then swap in with
+    `replace_with_retry`.
+
+    ffmpeg terminated by SIGTERM (or by a Windows console close, which its
+    CtrlHandler maps to SIGTERM) flushes and writes a COMPLETE trailer, so the
+    partial file is fully decodable and no "is it valid?" check can spot it —
+    staging is the only reliable defence.
+
+    PID + thread id keep concurrent writers of the same destination from
+    clobbering each other. The suffix MUST be preserved: ffmpeg picks its muxer
+    from the output path's extension, so a `.mov` staged as `.part.mp4` would be
+    muxed as MP4 and then merely renamed.
+    """
+    return dst.with_name(
+        f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part{dst.suffix}")
 
 
 def replace_with_retry(src: Path | str, dst: Path | str,

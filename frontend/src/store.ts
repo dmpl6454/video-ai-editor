@@ -22,17 +22,31 @@ export interface DispatchResponse {
 // error envelope ({error:{message}}) or a FastAPI detail — pull the human-
 // readable message out so toasts show e.g. "auto_caption: no clip on v1 to
 // caption" instead of a wall of JSON.
-function errorMessage(e: unknown): string {
+// The backend's error envelope (api/hardening.py) hardcodes
+//   message = "request failed"
+// for EVERY HTTPException whose detail is a dict, and puts the real dict under
+// `error.details`. So reading `error.message` first — as this used to — meant a
+// carefully written server-side explanation ("a cached overlay image was
+// corrupted; your media is fine") could never reach a toast: the user always saw
+// "request failed". Prefer details.message and fall back to the sentinel.
+export function errorMessage(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e)
   const jsonStart = raw.indexOf('{')
   if (jsonStart !== -1) {
     try {
       const body = JSON.parse(raw.slice(jsonStart)) as {
-        error?: { message?: string }
-        detail?: string | { error?: string }
+        error?: { message?: string; details?: unknown }
+        detail?: string | { error?: string; message?: string }
       }
-      const msg = body.error?.message
-        ?? (typeof body.detail === 'string' ? body.detail : body.detail?.error)
+      const d = body.error?.details
+      const detailMsg = d && typeof d === 'object' && !Array.isArray(d)
+        ? (d as { message?: string }).message
+        : undefined
+      const msg = detailMsg
+        ?? body.error?.message
+        ?? (typeof body.detail === 'string'
+              ? body.detail
+              : body.detail?.message ?? body.detail?.error)
       if (msg) return msg
     } catch {
       // not a JSON tail — fall through to the raw text
@@ -384,7 +398,8 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     const [info, edl] = await Promise.all([api.getSession(sid), api.getEDL(sid)])
-    set({ edl, ops: info.ops, sessionName: info.name, redoAvailable: info.redo_available })
+    set({ edl, ops: info.ops, sessionName: info.name,
+          redoAvailable: !!info.redo_available })
   },
 
   // Coalesce many quick refresh() calls (chat tool storms, drag bursts) into a
@@ -396,7 +411,14 @@ export const useStore = create<State>((set, get) => ({
       if (pending) clearTimeout(pending)
       pending = setTimeout(() => {
         pending = null
-        useStore.getState().refresh().catch(() => {})
+        // A swallowed rejection here leaves the UI showing a STALE timeline
+        // that no longer matches the server, with nothing on screen to say so —
+        // the user's next edit is then computed against the wrong state. Surface
+        // it; the toast is cheap and the alternative is silent divergence.
+        useStore.getState().refresh().catch((e) => {
+          console.warn('[store] refresh failed:', e)
+          toast.error(`Couldn't refresh the timeline: ${errorMessage(e)}`)
+        })
       }, 120)
     }
   })(),

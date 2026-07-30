@@ -15,11 +15,12 @@
  * hidden — the regular <video> handles playback.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-// mp4box.js publishes named exports; there's no `default`. We pull the two
-// pieces we need: `createFile` (the demuxer factory) and `DataStream`
-// (used to serialise codec description boxes for VideoDecoder).
-// @ts-expect-error — mp4box.js has no bundled types
-import { createFile, DataStream } from 'mp4box'
+// mp4box.js publishes named exports; there's no `default`. We pull the pieces
+// we need: `createFile` (the demuxer factory), `DataStream` (used to serialise
+// codec description boxes for VideoDecoder) and the `Endianness` enum.
+// mp4box 2.3 DOES ship types (`dist/mp4box.all.d.ts`), so this import needs no
+// suppression — a `@ts-expect-error` here is itself an error under `tsc -b`.
+import { createFile, DataStream, Endianness } from 'mp4box'
 
 export interface FrameScrubberHandle {
   seek: (timeSeconds: number) => Promise<void>
@@ -46,7 +47,9 @@ interface MP4BoxFile {
                                    timescale: number; movie_duration: number;
                                    movie_timescale: number; track_width: number;
                                    track_height: number }[] }) => void
-  onError: (e: string) => void
+  // mp4box's real signature is (module, message) — declaring one param made the
+  // handler log the MODULE name where it meant to log the message.
+  onError: (module: string, message: string) => void
   onSamples: (id: number, _user: unknown, samples: Sample[]) => void
   setExtractionOptions: (id: number, user: unknown,
                          opts: { nbSamples: number }) => void
@@ -131,14 +134,20 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
         v.addEventListener('canplay', onLoaded, { once: true })
       }
 
-      const mp4 = createFile() as MP4BoxFile
+      // `MP4BoxFile` is a deliberately NARROW view of mp4box's `ISOFile` —
+      // only the members this scrubber touches. It is not assignable to/from
+      // `ISOFile` directly (ISOFile.onReady takes the full `Movie`, ours takes
+      // the subset we read), so the hop through `unknown` is required. The
+      // previous direct `as MP4BoxFile` cast was a `tsc -b` error AND hid the
+      // onError arity bug fixed below.
+      const mp4 = createFile() as unknown as MP4BoxFile
 
-      mp4.onError = (e: string) => {
+      mp4.onError = (module: string, message: string) => {
         // mp4box.js emits these on abort + on real parse errors. A real parse
         // error means it can't demux this file — switch to the <video> fallback
         // so scrubbing still works instead of silently disabling it.
-        console.warn('[FrameScrubber] mp4box error:', e)
-        enableFallback('onError: ' + e)
+        console.warn('[FrameScrubber] mp4box error:', module, message)
+        enableFallback('onError: ' + message)
       }
 
       let trackId: number | null = null
@@ -448,9 +457,12 @@ function extractDescription(mp4: MP4BoxFile, trackId: number): Uint8Array | unde
   if (!box) return undefined
   // mp4box doesn't expose the raw bytes directly; build a tiny stream.
   // Reference: https://github.com/gpac/mp4box.js/issues/243#issuecomment-1003305708
-  // mp4box's DataStream constants are class-statics; BIG_ENDIAN === 1.
-  // @ts-expect-error — DataStream is mp4box's writer
-  const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN) as {
+  // BIG_ENDIAN lives on the `Endianness` enum, NOT as a DataStream class-static:
+  // `DataStream.BIG_ENDIAN` is `undefined` (verified at runtime), which fell
+  // through to the constructor's documented BIG_ENDIAN default — accidentally
+  // correct. Note `DataStream.ENDIANNESS` is 2 (LITTLE_ENDIAN), so do NOT
+  // "fix" this by reaching for that static.
+  const stream = new DataStream(undefined, 0, Endianness.BIG_ENDIAN) as unknown as {
     adjustUint32: (n: number, v: number) => void; position: number;
     getEndPosition: () => number; buffer: ArrayBuffer
   }

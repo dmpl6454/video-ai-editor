@@ -19,18 +19,30 @@ set -euo pipefail
 # changes (this guard used to be `if [ ! -d frontend/dist ]`, which only
 # built on a first run and thereafter trusted whatever was already there).
 #
-# Deliberately `tsc --noEmit && vite build`, NOT `npm run build` (`tsc -b`).
-# `tsc -b` is project-references incremental build mode and is strictly
-# stricter — it currently fails on this repo (FrameScrubber.tsx mp4box.js
-# type mismatch, Properties.tsx a JSX `label` boolean-shorthand passed where
-# `label?: string` is declared), pre-existing issues unrelated to whatever
-# this script is packaging. This mirrors the documented CI/dev check (see
-# CLAUDE.md); vite build's own esbuild transpile is what actually produces
-# frontend/dist, and tsc --noEmit is a pure typecheck gate that doesn't
-# additionally fail on the tsc -b-only errors.
+# The typecheck MUST be `tsc -b`, not `tsc --noEmit`. frontend/tsconfig.json is
+# a solution file (`"files": []` + only `references`), so plain `tsc` builds a
+# program of ZERO files and exits 0 — i.e. the old gate here type-checked
+# nothing at all (verified: `npx tsc --noEmit --listFiles` prints 0 lines).
+# Only build mode descends into tsconfig.app.json / tsconfig.node.json.
+# This script used to avoid `tsc -b` because it failed on 4 pre-existing errors;
+# those are fixed now, so the real gate is back on. Kept as two explicit steps
+# rather than `npm run build` so a typecheck failure is distinguishable from a
+# bundling failure in the log. vite build's esbuild transpile is what actually
+# emits frontend/dist.
 echo "[build] rebuilding frontend/dist"
 rm -rf frontend/dist
-(cd frontend && npx tsc --noEmit && npx vite build)
+(cd frontend && npx tsc -b --force && npx vite build)
+
+# Bake the exact source revision into the bundle. There is no git inside a
+# packaged .app, so config.build_id() reads this file; without it every shipped
+# build is indistinguishable from every other (the reason three tester rounds
+# re-reported already-fixed bugs against "v0.3.7").
+BUILD_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  BUILD_SHA="${BUILD_SHA}-dirty"
+fi
+echo "$BUILD_SHA" > BUILD_ID
+echo "[build] BUILD_ID=$BUILD_SHA"
 
 uv run pyinstaller \
   --name "Video AI Editor" \
@@ -41,6 +53,7 @@ uv run pyinstaller \
   --add-data "fonts:fonts" \
   --add-data "presets:presets" \
   --add-data "VERSION:." \
+  --add-data "BUILD_ID:." \
   --hidden-import "uvicorn.lifespan.on" \
   --hidden-import "uvicorn.protocols.websockets.auto" \
   --hidden-import "uvicorn.loops.auto" \

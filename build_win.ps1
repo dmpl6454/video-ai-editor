@@ -12,12 +12,27 @@ $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
 # Build the frontend first — pywebview serves frontend/dist.
-if (-not (Test-Path "frontend\dist\index.html")) {
-    Write-Host "[build] frontend/dist missing — running npm run build"
-    Push-Location frontend
-    & npm run build
-    Pop-Location
-}
+# UNCONDITIONALLY, mirroring build_app.sh: the old `if (-not (Test-Path ...))`
+# guard meant a bundle left over from an earlier checkout satisfied it forever,
+# so the packaged Windows app shipped a stale UI (this is why three tester
+# rounds re-reported already-fixed frontend bugs).
+Write-Host "[build] rebuilding frontend/dist from scratch"
+if (Test-Path "frontend\dist") { Remove-Item -Recurse -Force "frontend\dist" }
+Push-Location frontend
+& npm run build
+# $ErrorActionPreference='Stop' does NOT trip on a native executable's non-zero
+# exit, so a failed npm build would otherwise sail on and PyInstaller would
+# package whatever (nothing) is in dist.
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "npm run build failed ($LASTEXITCODE)" }
+Pop-Location
+
+# Bake the exact source revision in — there is no git inside the packaged app,
+# so config.build_id() reads this file. Mirrors build_app.sh.
+$BuildSha = (& git rev-parse --short HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $BuildSha) { $BuildSha = "unknown" }
+if ((& git status --porcelain 2>$null)) { $BuildSha = "$BuildSha-dirty" }
+Set-Content -Path "BUILD_ID" -Value $BuildSha -NoNewline -Encoding utf8
+Write-Host "[build] BUILD_ID=$BuildSha"
 
 # Drive the cross-platform spec (BUNDLE is darwin-guarded; COLLECT yields the
 # dist folder on Windows).
