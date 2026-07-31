@@ -104,6 +104,20 @@ EDIT_TOOLS = [
        "edit",
        {"clip_id": {"type": "string"}, "factor": {"type": "number"}},
        ["clip_id", "factor"]),
+    _t("set_clip_fit",
+       "Choose how a clip reconciles its aspect ratio with the canvas. 'cover' scales "
+       "the source UP and crops the overflow so it FILLS the frame with no black bars — "
+       "this is the crop/fill mode, and it is what to use when a landscape clip is on a "
+       "vertical canvas (or vice versa) and the user does not want letterboxing. "
+       "'contain' (default) scales down and pads black. Pair 'cover' with "
+       "set_clip_transform scale/x/y to choose WHICH part of the frame is visible.",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "fit": {"type": "string", "enum": ["contain", "cover"],
+                   "description": "cover = fill + crop; contain = letterbox"},
+       },
+       ["clip_id", "fit"]),
     _t("set_clip_transform",
        "Set transform properties on any clip (media, sticker, or text): x/y position, "
        "scale, rotation (degrees), opacity — this is THE tool for positioning things on "

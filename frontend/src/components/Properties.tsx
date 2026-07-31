@@ -174,6 +174,8 @@ export function Properties() {
   const fadeIn = audio?.fade_in ?? 0
   const fadeOut = audio?.fade_out ?? 0
   const muted = !!audio?.mute
+  // Another top-level Clip field types.ts doesn't declare (see the note below).
+  const fitCover = (c as unknown as { fit?: string }).fit === 'cover'
   // Visual fade-from/to-black — top-level Clip fields (NOT audio.*), rendered
   // by compositor._build_clip_video_chain. types.ts omits them, hence the cast.
   const vf = c as unknown as { video_fade_in?: number; video_fade_out?: number }
@@ -319,6 +321,25 @@ export function Properties() {
           Mute clip
         </label>
       </Section>
+
+      {!isAudioLane && (
+      <Section label="Framing">
+        {/* The only framing control used to be the toolbar's aspect buttons,
+            which just resize the canvas — so a landscape clip on a vertical
+            canvas could only ever gain black bars ("there is no crop option for
+            the video, only the aspect ratio gets changed"). 'Fill frame' is
+            scale-up-and-crop; combine it with Transform scale/X/Y below to pick
+            which part of the frame is visible. */}
+        <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          <input type="checkbox" checked={fitCover}
+            onChange={() => dispatch('set_clip_fit', {
+              clip_id: c.id, fit: fitCover ? 'contain' : 'cover',
+            })}
+            style={{ marginRight: 4 }} />
+          Fill frame (crop to canvas instead of letterboxing)
+        </label>
+      </Section>
+      )}
 
       {!isAudioLane && (
       <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
@@ -494,7 +515,16 @@ interface TextClipLike {
   start: number
   end: number
   role?: string | null
-  style?: { font?: string; size?: number; color?: string }
+  // Mirrors TextStyle in edl/schema.py. `stroke`/`stroke_w`/`anim_in`/`anim_out`
+  // were missing here (though types.ts declared them), which is why the outline
+  // and animation fields looked unavailable to the inspector even though BOTH
+  // renderers already honoured them.
+  style?: {
+    font?: string; size?: number; color?: string
+    stroke?: string; stroke_w?: number
+  }
+  anim_in?: string | null
+  anim_out?: string | null
   transform?: { x?: unknown; y?: unknown; opacity?: unknown }
 }
 
@@ -512,6 +542,14 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
   const rawColor = c.style?.color ?? '#FFFFFF'
   // <input type=color> only speaks #rrggbb — drop an alpha suffix if present.
   const color = /^#[0-9a-fA-F]{6}/.test(rawColor) ? rawColor.slice(0, 7) : '#ffffff'
+  // Defaults mirror TextStyle in edl/schema.py so the control shows what the
+  // renderer will actually use when the field is unset.
+  const font = c.style?.font ?? 'Inter-Black'
+  const rawStroke = c.style?.stroke ?? '#000000'
+  const stroke = /^#[0-9a-fA-F]{6}/.test(rawStroke) ? rawStroke.slice(0, 7) : '#000000'
+  const strokeW = c.style?.stroke_w ?? 4
+  const animIn = c.anim_in ?? ''
+  const animOut = c.anim_out ?? ''
   const start = c.start
   const end = c.end
 
@@ -577,6 +615,67 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
               title="Text fill color (#ffffff means: use the role's preset style)"
               onBlur={(e) => { const v = e.target.value; if (v !== color) void setProp('style.color', v) }}
               style={{ width: '100%', padding: 0, height: 24 }} />
+          </div>
+        </div>
+        {/* Everything below was already honoured END TO END by both renderers
+            and had no control at all — the "more controls for the text" gap.
+            Each option list is deliberately limited to what BOTH sides support,
+            so the browser preview matches the export:
+              · fonts → the families declared in fonts.css, which is exactly what
+                TextLayer's cssFont() can map (Anton, Bebas Neue, Montserrat,
+                Inter Bold/Black). Offering a font the client can't map would
+                silently preview in the role default and export differently.
+              · anim → server ANIM_PRESETS ("pop","fade","slide_up","slide_down");
+                TextLayer mirrors the same curves. */}
+        <div className="row two">
+          <div className="field">
+            <label>Font</label>
+            <select key={`f${font}`} defaultValue={font}
+              title="Bundled font. Preview and export use the same file."
+              onChange={(e) => { const v = e.target.value; if (v !== font) void setProp('style.font', v) }}
+              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+              <option value="Inter-Black">Inter Black (default)</option>
+              <option value="Inter-Bold">Inter Bold</option>
+              <option value="Anton-Regular">Anton</option>
+              <option value="BebasNeue-Regular">Bebas Neue</option>
+              <option value="Montserrat-Bold">Montserrat Bold</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>Outline width</label>
+            <NumberField value={strokeW} dp={0} step={1} min={0} max={40}
+              onCommit={(n) => void setProp('style.stroke_w', n)} />
+          </div>
+        </div>
+        <div className="row two">
+          <div className="field">
+            <label>Outline color</label>
+            <input type="color" key={`sk${stroke}`} defaultValue={stroke}
+              onBlur={(e) => { const v = e.target.value; if (v !== stroke) void setProp('style.stroke', v) }}
+              style={{ width: '100%', padding: 0, height: 24 }} />
+          </div>
+          <div className="field">
+            <label>Animate in / out</label>
+            <div className="row" style={{ gap: 4 }}>
+              <select key={`ai${animIn}`} defaultValue={animIn}
+                onChange={(e) => void setProp('anim_in', e.target.value || null)}
+                style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
+                <option value="">none</option>
+                <option value="pop">pop</option>
+                <option value="fade">fade</option>
+                <option value="slide_up">slide up</option>
+                <option value="slide_down">slide down</option>
+              </select>
+              <select key={`ao${animOut}`} defaultValue={animOut}
+                onChange={(e) => void setProp('anim_out', e.target.value || null)}
+                style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
+                <option value="">none</option>
+                <option value="pop">pop</option>
+                <option value="fade">fade</option>
+                <option value="slide_up">slide up</option>
+                <option value="slide_down">slide down</option>
+              </select>
+            </div>
           </div>
         </div>
         {/* transform.opacity — rendered by BOTH paths (server render_text_png

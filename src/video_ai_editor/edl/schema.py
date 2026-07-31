@@ -98,6 +98,18 @@ class Clip(BaseModel):
     # which top-level fields do automatically since it dumps whole clips.
     video_fade_in: float = 0.0
     video_fade_out: float = 0.0
+    # How to reconcile a source whose aspect ratio differs from the canvas:
+    #   "contain" — scale down to fit, pad black (letterbox). The historical and
+    #               default behaviour, so existing EDLs render byte-identically.
+    #   "cover"   — scale up to fill, crop the overflow. This is the "crop" the
+    #               tester asked for; combined with transform.scale/x/y it gives
+    #               a full manual reframe without a separate crop-rect field
+    #               (which would have needed its own canvas-resize rescaling
+    #               rules, exactly like the overlay x/y trap in CLAUDE.md).
+    # Top-level, NOT inside `audio`, for the same fingerprint reason as the
+    # video fades above: it changes pixels, so it must invalidate the cached
+    # video-only mp4.
+    fit: Literal["contain", "cover"] = "contain"
     effects: list[Effect] = Field(default_factory=list)
     mask: Mask | None = None
     chromakey: ChromaKey | None = None

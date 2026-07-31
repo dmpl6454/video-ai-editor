@@ -38,6 +38,30 @@ def _npm_cmd() -> str:
     return candidates[0]
 
 
+def _diag(msg: str) -> None:
+    """Emit a startup diagnostic that survives a WINDOWED launch.
+
+    `print(..., file=sys.stderr)` is not enough here. A windowed process — the
+    macOS `--windowed` .app, `pythonw.exe`, or anything launched detached — gets
+    `sys.stdout is None` and `sys.stderr is None`, and Python's `print` then
+    SILENTLY DOES NOTHING (verified on 3.13: it returns without raising). So
+    every diagnostic on this path, including "backend didn't start", was written
+    into the void in exactly the builds where a user most needs it — which is why
+    a reported windowed hang came with nothing to look at.
+
+    Keep the print for the console case AND log to the rotating file.
+    """
+    print(msg, file=sys.stderr, flush=True)
+    try:
+        # ABSOLUTE import — this module is PyInstaller's entry script, so it runs
+        # as top-level `__main__` with no `__package__`, and a `from .` form would
+        # raise ImportError in the frozen app ONLY (invisible in every dev path).
+        from video_ai_editor.api.hardening import get_logger
+        get_logger().warning("[desktop] %s", msg)
+    except Exception:
+        pass
+
+
 def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
     end = time.time() + timeout
     while time.time() < end:
@@ -99,7 +123,7 @@ def _ensure_frontend_built() -> None:
     if meipass:
         if (Path(meipass) / "frontend" / "dist" / "index.html").exists():
             return
-        print("[desktop] bundled frontend missing — rebuild the .app", file=sys.stderr)
+        _diag("bundled frontend missing — rebuild the .app")
         sys.exit(1)
     repo = Path(__file__).resolve().parents[2]
     dist = repo / "frontend" / "dist"
@@ -119,12 +143,11 @@ def _ensure_frontend_built() -> None:
         **_pu.SUBPROCESS_FLAGS,
     )
     if proc.returncode != 0:
-        print("[desktop] npm build failed:\n", proc.stderr[-1500:], file=sys.stderr)
+        _diag(f"npm build failed:\n{proc.stderr[-1500:]}")
         if missing:
             sys.exit(1)
-        print("[desktop] WARNING: serving the STALE bundle in frontend/dist. "
-              "Fix the build or your UI will not match the source.",
-              file=sys.stderr, flush=True)
+        _diag("WARNING: serving the STALE bundle in frontend/dist. "
+              "Fix the build or your UI will not match the source.")
 
 
 def _serve(host: str, port: int) -> None:
@@ -488,7 +511,8 @@ def main() -> None:
     server_thread = threading.Thread(target=_serve, args=(host, port), daemon=True)
     server_thread.start()
     if not _wait_for_server(f"{url}/api/health"):
-        print(f"[desktop] backend didn't start on {url}", file=sys.stderr)
+        _diag(f"backend didn't start on {url} — the window would open with "
+              f"nothing to show. Check the log next to this line.")
         sys.exit(1)
 
     import webview
@@ -518,10 +542,10 @@ def main() -> None:
         webview.start()
     except Exception as e:  # WebView2 Runtime missing / init failure on Windows
         if _pu.IS_WINDOWS:
-            print("[desktop] Could not start the WebView2 window. Install the "
+            _diag("Could not start the WebView2 window. Install the "
                   "Microsoft Edge WebView2 Runtime (Evergreen) from "
                   "https://developer.microsoft.com/microsoft-edge/webview2/ "
-                  f"and relaunch.\n  Underlying error: {e}", file=sys.stderr)
+                  f"and relaunch.\n  Underlying error: {e}")
             sys.exit(1)
         raise
 

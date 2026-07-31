@@ -153,6 +153,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "bulk_duplicate": {"clip_ids": ["c1"]},
         # Transform / keyframes
         "set_clip_transform": {"clip_id": "c1", "scale": 1.2},
+        "set_clip_fit": {"clip_id": "c1", "fit": "cover"},
         # Overlay timing: stickers/text only (s1 is the fixture sticker).
         "set_clip_timing": {"clip_id": "s1", "start": 0.5, "end": 3.0},
         "set_clip_z": {"clip_id": "s1", "z": "front"},

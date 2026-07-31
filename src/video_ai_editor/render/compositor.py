@@ -300,9 +300,22 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     Used by both the monolithic renderer (where input_label = [N:v] for the
     Nth input) and the chunk renderer (where input_label = [0:v]).
     """
-    v_chain = (f"{input_label}"
-               f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
-               f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+    # `fit` decides what happens when the source aspect doesn't match the canvas:
+    #   contain (default) — scale DOWN to fit, pad the remainder black. Letterbox.
+    #   cover             — scale UP to fill, crop the overflow. No black bars.
+    # `decrease`+`pad` IS letterbox by construction, and it was the only mode
+    # that existed, which is why switching 9:16 → 16:9 could only ever add bars
+    # ("there is no crop option for the video, only the aspect ratio gets
+    # changed"). `contain` is the default so every existing EDL renders
+    # byte-identically.
+    if getattr(c, "fit", "contain") == "cover":
+        v_chain = (f"{input_label}"
+                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                   f"crop={canvas_w}:{canvas_h},setsar=1")
+    else:
+        v_chain = (f"{input_label}"
+                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
+                   f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
     tx = c.transform
     rot_static = float(tx.rotation) if isinstance(tx.rotation, (int, float)) else 0.0
     sc_static = float(tx.scale) if isinstance(tx.scale, (int, float)) else 1.0
