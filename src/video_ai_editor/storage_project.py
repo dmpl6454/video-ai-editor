@@ -16,15 +16,32 @@ import zipfile
 from pathlib import Path
 from .config import WORKDIR
 from .edl import EDL, EDLStore
-from .edl.schema import Clip
+from .edl.schema import Clip, Sticker
 from .storage import session_dir, new_session_id
 
 
 def _media_srcs(edl: EDL) -> set[str]:
+    """Every on-disk file the EDL references, for bundling + path remapping.
+
+    `Sticker` counts. It used to be `isinstance(c, Clip)` only, so save_project
+    bundled no sticker PNG and recorded none in the manifest — which meant
+    load_project's src_remap never rewrote them either, and the restored EDL
+    still pointed at the ORIGINAL session's `uploads/stickers/…`. On the
+    authoring machine those paths usually still resolve, which is exactly why
+    this went unnoticed; move the .vae to another machine (or delete the source
+    session) and every sticker is gone. The renderer then skips a sticker whose
+    src is missing SILENTLY, so the failure mode was "my stickers just aren't
+    there any more" with no error.
+
+    Emoji stickers matter here too: their src lives in a per-machine
+    `user_cache_dir/emoji/<codepoints>.png`, so an emoji-heavy project was not
+    portable at all. They are ~2KB each — bundling is strictly better than
+    re-deriving them on load, which would need network access.
+    """
     out: set[str] = set()
     for t in edl.tracks:
         for c in t.clips:
-            if isinstance(c, Clip):
+            if isinstance(c, (Clip, Sticker)):
                 out.add(c.src)
     if edl.brand_kit and edl.brand_kit.end_card:
         out.add(edl.brand_kit.end_card)

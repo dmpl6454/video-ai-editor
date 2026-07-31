@@ -307,22 +307,38 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         }
       }
 
-      // 3) Body hit (top-most first) → select + start move.
+      // 3) Body hit → select + start move, CYCLING through overlaps.
+      //
+      // This used to return the first (top-most) hit unconditionally, so a
+      // sticker underneath another was unreachable: clicking selected the top one
+      // forever, and Backspace then had nothing of the buried one to delete. The
+      // backend now cascades identical insert positions, but a deliberate stack —
+      // or any project created before that fix — still needs a way in.
+      //
+      // Repeat-clicking the same spot walks DOWN the stack and wraps, which is
+      // the standard behaviour for overlapping canvas objects.
+      const under: typeof stickers = []
       for (let i = stickers.length - 1; i >= 0; i--) {
         const sk = stickers[i]
         const g = geomFor(sk, t)
         const { lx, ly } = toLocal(px, py, g)
         const h = g.size / 2
-        if (Math.abs(lx) <= h && Math.abs(ly) <= h) {
-          e.preventDefault()
-          if (sk.id !== sel) setSelection(sk.id)
-          try { cv.setPointerCapture(e.pointerId) } catch { /* synthetic/edge pointer */ }
-          dragRef.current = {
-            id: sk.id, mode: 'move', startMx: px, startMy: py,
-            x0: g.x, y0: g.y, live: { x: g.x, y: g.y },
-          }
-          return
+        if (Math.abs(lx) <= h && Math.abs(ly) <= h) under.push(sk)
+      }
+      if (under.length) {
+        const at = under.findIndex((s) => s.id === sel)
+        // Currently-selected one is under the cursor → take the next one down
+        // (wrapping). Otherwise take the top-most.
+        const pick = at === -1 ? under[0] : under[(at + 1) % under.length]
+        const g = geomFor(pick, t)
+        e.preventDefault()
+        if (pick.id !== sel) setSelection(pick.id)
+        try { cv.setPointerCapture(e.pointerId) } catch { /* synthetic/edge pointer */ }
+        dragRef.current = {
+          id: pick.id, mode: 'move', startMx: px, startMy: py,
+          x0: g.x, y0: g.y, live: { x: g.x, y: g.y },
         }
+        return
       }
 
       // 4) Empty space → deselect.

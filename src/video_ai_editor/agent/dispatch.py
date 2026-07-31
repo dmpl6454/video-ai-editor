@@ -1949,6 +1949,33 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     return {"summary": summary}
 
 
+def set_clip_fit(store: EDLStore, args: dict) -> dict:
+    """Crop-to-fill or letterbox a clip against the canvas.
+
+    `fit='cover'` scales the source UP and crops the overflow, so an
+    aspect-mismatched clip fills the frame with no black bars; `fit='contain'`
+    (the default) scales down and pads. Combine `cover` with
+    set_clip_transform's scale/x/y to place the visible window — that pair is
+    the manual crop, and it needs no separate crop-rect field.
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    t, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("set_clip_fit only supports media clips")
+    _reject_audio_lane_clip(t, cid, "set_clip_fit")
+    mode = str(args.get("fit") or args.get("mode") or "cover").lower()
+    if mode not in ("contain", "cover"):
+        raise ValueError(f"fit must be 'contain' or 'cover', got {mode!r}")
+    c.fit = mode  # type: ignore[assignment]
+    summary = f"Fit {cid} → {mode}" + (" (fills frame, crops overflow)"
+                                       if mode == "cover" else " (letterbox)")
+    store.commit("set_clip_fit", args, summary)
+    return {"summary": summary, "fit": mode}
+
+
 def bulk_delete(store: EDLStore, args: dict) -> dict:
     """Ripple-delete multiple clips in one op (avoids dispatching N times)."""
     ids = list(args.get("clip_ids", []))
@@ -2822,6 +2849,39 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
 
     from ..edl.schema import Sticker, Transform, Track
     track = store.edl.get_track("stickers")
+
+    # Cascade off an EXACT position collision. All three insert paths hard-code
+    # the same canvas point — StickerPanel.tsx, the Timeline emoji drop and the
+    # PNG upload in main.py all use [w/2, h*0.55] — and the client hit-test
+    # derives its box purely from x/y/scale. So stickers added back-to-back had
+    # PIXEL-IDENTICAL hit boxes, the body test returned the top-most one every
+    # time, and the ones underneath were permanently unselectable: clicking did
+    # nothing, so Backspace had nothing to delete ("sometimes the sticker
+    # becomes unresponsive and cannot be deleted").
+    #
+    # Done here rather than in each caller so Claude and MCP get it too — the
+    # single-mutation-path rule. Only an exact collision cascades; a deliberate
+    # stack (explicit identical coordinates via set_clip_transform) is untouched,
+    # and click-through cycling in StickerLayer handles that case.
+    if track is not None:
+        from ..edl.keyframes import sample as _kf_sample
+        step = max(8.0, min(canvas.w, canvas.h) * 0.03)
+        # Bounded: on a canvas so crowded that every cascade step still collides
+        # we give up and place it anyway (same as the old behaviour), rather than
+        # looping. `sample(v, 0.0)` reads a scalar OR a keyframed value's t=0.
+        for _ in range(24):
+            clash = any(
+                isinstance(s, Sticker)
+                and abs(_kf_sample(s.transform.x, 0.0) - float(pos[0])) < 1.0
+                and abs(_kf_sample(s.transform.y, 0.0) - float(pos[1])) < 1.0
+                for s in track.clips
+            )
+            if not clash:
+                break
+            # Down-right, clamped to the canvas so a crowded board cascades along
+            # the edge instead of marching the sticker off-screen entirely.
+            pos = [min(float(canvas.w), float(pos[0]) + step),
+                   min(float(canvas.h), float(pos[1]) + step)]
     if not track:
         track = Track(id="stickers", type="sticker", z=12, label="Stickers")
         store.edl.tracks.append(track)
@@ -3470,6 +3530,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_track_locked": set_track_locked,
     "set_speed": set_speed,
     "set_clip_transform": set_clip_transform,
+    "set_clip_fit": set_clip_fit,
     "set_clip_timing": set_clip_timing,
     "set_clip_z": set_clip_z,
     "bulk_delete": bulk_delete,

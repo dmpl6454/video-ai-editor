@@ -736,7 +736,8 @@ def build_overlay_chain(
         a_in, a_out = _anim_name(c, "anim_in"), _anim_name(c, "anim_out")
         if is_keyframed(opa) or a_in or a_out:
             items.append({"kind": "anim_text", "text_clip": c, "png": png, "role": role,
-                          "anim_in": a_in, "anim_out": a_out, "z": zmap.get(c.id, 0)})
+                          "anim_in": a_in, "anim_out": a_out, "z": zmap.get(c.id, 0),
+                          "sort_start": c.start, "is_sticker": 0})
         else:
             # Scalar transform.opacity is baked into the PNG's alpha channel
             # by cache_text_pngs (resolve_opacity_override) — pass 1.0 here,
@@ -744,25 +745,39 @@ def build_overlay_chain(
             # time (0.4 baked × aa=0.4 → effective 0.16).
             items.append({"kind": "static", "start": c.start, "end": c.end, "png": png,
                           "opacity": 1.0,
-                          "z": zmap.get(c.id, 0)})
+                          "z": zmap.get(c.id, 0),
+                          "sort_start": c.start, "is_sticker": 0})
     for s, png in static_stickers:
         items.append({"kind": "static", "start": s.start, "end": s.end, "png": png,
                       "opacity": 1.0, "z": zmap.get(s.id, 0),
-                      "clip_z": getattr(s, "z", 0)})
+                      "clip_z": getattr(s, "z", 0),
+                      "sort_start": s.start, "is_sticker": 1})
     for s, png, (sw, sh) in animated_stickers:
         items.append({"kind": "anim", "sticker": s, "png": png, "size": (sw, sh),
-                      "z": zmap.get(s.id, 0), "clip_z": getattr(s, "z", 0)})
+                      "z": zmap.get(s.id, 0), "clip_z": getattr(s, "z", 0),
+                      "sort_start": s.start, "is_sticker": 1})
 
     if not items:
         return "", [], source_label
 
-    # Later overlays composite on top. Sort key: (track_z, clip_z) — clip_z is
-    # the per-sticker set_clip_z override (text items carry no clip_z → 0, so
-    # relative text/sticker layering by track z is unchanged). sort() is
-    # stable, so same-(track_z, clip_z) items keep their insertion order —
-    # collect_stickers already yields (clip_z, start) order, meaning ties
-    # still resolve by start (later start on top), pinning legacy behavior.
-    items.sort(key=lambda it: (it["z"], it.get("clip_z", 0)))
+    # Later overlays composite on top. Sort key:
+    #   (track_z, clip_z, is_sticker, start)
+    #
+    # The previous key was (track_z, clip_z) relying on sort() stability to make
+    # ties "resolve by start" — a guarantee the code did NOT provide. Static and
+    # animated stickers are appended in two SEPARATE blocks above, so at equal
+    # (z, clip_z) every static sticker sorted ahead of every animated one
+    # regardless of start: a static sticker starting at 5s drew under an animated
+    # one starting at 1s. Making `start` an explicit key removes the dependence
+    # on insertion order.
+    #
+    # `is_sticker` MUST stay ahead of `start`: empty_edl gives BOTH the `tx_lt`
+    # (Lower thirds, text) and `stickers` tracks z=12, so a bare
+    # (z, clip_z, start) key would start interleaving lower-third TEXT with
+    # stickers and silently change existing renders. With is_sticker first,
+    # text-below-sticker at equal track z is preserved byte-for-byte.
+    items.sort(key=lambda it: (it["z"], it.get("clip_z", 0),
+                               it.get("is_sticker", 0), it.get("sort_start", 0.0)))
 
     extra_inputs: list[str] = []
     parts: list[str] = []
