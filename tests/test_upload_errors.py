@@ -50,12 +50,34 @@ def test_empty_file_import_returns_422(client, tmp_path: Path):
 
 def test_preview_of_unrenderable_clip_returns_422(client, tmp_path: Path):
     # A clip pointing at a non-video file → render fails → must be 422, not 500.
+    #
+    # This asserts its own PRECONDITION and reports context on failure, because
+    # it previously did neither: it ignored add_clip's status and asserted only
+    # the preview code. An empty timeline renders fine (v6: gaps become
+    # black+silence), so if add_clip is ever rejected the preview legitimately
+    # returns 200 and the failure reads as "the render didn't fail" when the
+    # real story is "the clip was never added". A Windows-only 200 here in the
+    # round-5 verification run could not be diagnosed from the log for exactly
+    # that reason — the message now carries what is needed.
     bad = tmp_path / "broken.mp4"
     bad.write_bytes(os.urandom(2000))
     sid = client.post("/api/sessions").json()["id"]
-    client.post(f"/api/sessions/{sid}/dispatch", json={
+    add = client.post(f"/api/sessions/{sid}/dispatch", json={
         "tool": "add_clip",
         "args": {"track": "v1", "src": str(bad), "in": 0, "out": 2, "start": 0},
     })
+    assert add.status_code == 200, (
+        f"precondition failed: add_clip returned {add.status_code}: {add.text[:300]}")
+    edl = client.get(f"/api/sessions/{sid}/edl").json()
+    v1 = [c for t in edl["tracks"] if t["id"] == "v1" for c in t["clips"]]
+    assert len(v1) == 1, f"precondition failed: v1 holds {len(v1)} clips, expected 1"
+
     r = client.post(f"/api/sessions/{sid}/preview")
-    assert r.status_code == 422, f"expected 422, got {r.status_code}"
+    assert r.status_code == 422, (
+        f"expected 422, got {r.status_code}.\n"
+        f"  body: {r.text[:400]}\n"
+        f"  v1 clip: {v1[0]}\n"
+        f"  duration: {edl.get('duration')}\n"
+        f"  A 200 here means ffmpeg RENDERED a garbage source instead of "
+        f"failing — check whether the chunk path swallowed the error and the "
+        f"black-filler covered the clip's span.")

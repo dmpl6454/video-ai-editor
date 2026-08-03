@@ -781,9 +781,20 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
                 "between clips). This is a bug, not a problem with your media. "
                 "Undoing the last edit usually clears it.")
 
-    # 4. A source file that has moved or been deleted since it was added.
+    # 4. A missing file. Which KIND of file matters: a `.cube` named on the
+    # error line is a LUT the user pointed an effect at, not the clip's source,
+    # and telling them their footage moved sent them hunting through media that
+    # was never the problem. (`apply_lut` now rejects a nonexistent path up
+    # front, so this is the belt for a project saved before that guard, or a LUT
+    # deleted after it was applied.) Found by the round-5 end-to-end sweep.
     if "No such file or directory" in errs:
         missing = re.findall(r"'([^']+)'", errs)
+        lut = next((m for m in missing if m.lower().endswith(".cube")), None)
+        if lut or re.search(r"lut3d", errs, re.I):
+            which = f" ({Path(lut).name})" if lut else ""
+            return (f"Couldn't render — a colour LUT{which} applied to a clip is "
+                    f"missing. Remove that effect in Properties, or re-apply the "
+                    f"LUT from an existing '.cube' file.")
         which = f" ({Path(missing[0]).name})" if missing else ""
         return (f"Couldn't render — a clip's source file{which} is missing. It "
                 f"may have been moved or deleted since you added it.")
