@@ -1963,7 +1963,18 @@ def apply_lut(store: EDLStore, args: dict) -> dict:
                 "and not a path to a .cube file")
     else:
         src = _safe_src(src_arg)
-    intensity = float(args.get("intensity", 1.0))
+        # A bundled NAME is checked for existence above; a PATH was not, so a
+        # typo'd .cube was stored on the clip and only failed at render time —
+        # where ffmpeg's error is a filtergraph complaint that
+        # `_render_failure_message` used to attribute to a missing *source*
+        # file. Same defect family as VAI-07 (an unknown effect type stored and
+        # discovered later); found by the round-5 end-to-end sweep, not by the
+        # tester.
+        if not Path(src).exists():
+            raise ValueError(
+                f"LUT file not found: {src_arg!r}. Pass a path to an existing "
+                "'.cube' file, or a bundled preset name (see list_luts).")
+    intensity = _num(args, "intensity", 1.0, min=0.0, max=1.0)
     cid = args.get("clip_id")
     target_clips: list[Clip] = []
     if cid:

@@ -476,3 +476,57 @@ def test_add_transition_keeps_its_own_did_you_mean_error(store: EDLStore):
     """The generic enum check must stand down where a handler answers better."""
     with pytest.raises(ValueError, match="unknown transition"):
         dispatch(store, "add_transition", {"at": 1.0, "type": "kapow"})
+
+
+# --------------------------------------------------------------------------
+# Found by the live end-to-end sweep, not by the tester. Same defect family as
+# VAI-07: a value the handler accepts, stores, and only fails on much later.
+# --------------------------------------------------------------------------
+
+def test_apply_lut_rejects_a_nonexistent_path(store: EDLStore):
+    """A bundled LUT *name* was checked for existence; a *path* was not, so a
+    typo was stored on the clip and surfaced as an ffmpeg filtergraph error at
+    render time — which the API then attributed to a missing SOURCE file."""
+    with pytest.raises(ValueError, match="LUT file not found"):
+        dispatch(store, "apply_lut", {"clip_id": "c1", "src": "/no/such/grade.cube"})
+    assert store.edl.get_clip("c1")[1].effects == []
+
+
+def test_apply_lut_still_accepts_a_bundled_name(store: EDLStore):
+    """The guard must not break the list_luts -> apply_lut loop."""
+    names = dispatch(store, "list_luts", {})["luts"]
+    if not names:
+        pytest.skip("no bundled LUTs in presets/luts")
+    dispatch(store, "apply_lut", {"clip_id": "c1", "src": names[0]})
+    effects = store.edl.get_clip("c1")[1].effects
+    assert [e.type for e in effects] == ["lut"]
+    assert Path(effects[0].params["src"]).exists()
+
+
+def test_apply_lut_alias_lut_path_still_reaches_the_handler(store: EDLStore):
+    """`lut_path` is a documented alias. The error naming the LUT proves the
+    alias was READ — a type/unknown-key rejection would prove it wasn't."""
+    with pytest.raises(ValueError, match="LUT file not found"):
+        dispatch(store, "apply_lut", {"clip_id": "c1", "lut_path": "/no/such/grade.cube"})
+
+
+def test_apply_lut_clamps_intensity(store: EDLStore):
+    names = dispatch(store, "list_luts", {})["luts"]
+    if not names:
+        pytest.skip("no bundled LUTs in presets/luts")
+    dispatch(store, "apply_lut", {"clip_id": "c1", "src": names[0], "intensity": 9.0})
+    assert store.edl.get_clip("c1")[1].effects[0].params["intensity"] == 1.0
+
+
+@pytest.mark.parametrize("tail,expect", [
+    ("[Parsed_lut3d_4 @ 0x1] Cannot open file '/x/grade.cube': No such file or "
+     "directory", "colour LUT"),
+    ("[in#0 @ 0x1] Error opening input: No such file or directory\n"
+     "Error opening input file '/x/clip.mp4'.", "source file"),
+])
+def test_render_failure_message_distinguishes_a_missing_lut_from_missing_media(tail, expect):
+    """Both are "No such file or directory"; only one is the user's footage.
+    Telling someone their media moved when a LUT was deleted sent them hunting
+    through files that were never the problem."""
+    from video_ai_editor.main import _render_failure_message
+    assert expect in _render_failure_message(tail, tail)
