@@ -2,9 +2,10 @@
 from __future__ import annotations
 import hashlib
 import json
+import math
 from typing import Any, Literal, Union
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 EDL_VERSION = 2
 
@@ -36,7 +37,36 @@ KeyframeList = list[tuple[float, float]]
 Interp = Literal["linear", "ease-in", "ease-out", "ease-in-out", "step", "back-out", "bounce"]
 
 
-class Keyframe(BaseModel):
+class _EDLModel(BaseModel):
+    """Base for every node in the EDL tree.
+
+    `validate_assignment=True` is the load-bearing setting here. The dispatch
+    handlers mutate the tree by direct attribute assignment — `cap.config.style
+    = style` in `add_caption_track`, `setattr(obj, key, value)` in
+    `set_property` — and **Pydantic v2 does not validate on assignment** unless
+    told to. So an out-of-domain value (QA round 5, VAI-01: `style='karaoke'`)
+    used to land in the tree, get serialised to `edl.json`, and only surface as
+    a ValidationError on the NEXT load — by which point every retained snapshot
+    was poisoned too and the session opened with zero clips.
+
+    Constructing a model has always validated, which is why the four other
+    enum-constrained tools (`add_mask`, `add_super_text`, `add_keyframe`,
+    `set_aspect_ratio`) were already safe: they build a new model instead of
+    assigning to an existing one. This closes the assignment half.
+
+    Measured cost: ~0.5 µs vs ~0.14 µs per assignment.
+    """
+
+    model_config = ConfigDict(validate_assignment=True)
+
+
+def _finite(v: float, field: str) -> float:
+    if not math.isfinite(v):
+        raise ValueError(f"{field} must be a finite number, got {v!r}")
+    return v
+
+
+class Keyframe(_EDLModel):
     keyframes: KeyframeList
     interp: Interp = "linear"
 
@@ -45,27 +75,79 @@ class Keyframe(BaseModel):
 KFNum = Union[float, Keyframe]
 
 
-class Transform(BaseModel):
+# Domain bounds for Transform. Deliberately generous: they exist to stop
+# nonsense reaching the renderer (opacity 5.0 — QA round 5 VAI-08 — scale 0,
+# NaN), not to second-guess a deliberate extreme.
+#
+# Out-of-range values are CLAMPED, not rejected. Rejecting would make an EDL
+# that already holds one unloadable, which is precisely the class of total-loss
+# failure this round is fixing. Non-finite values ARE rejected: there is no
+# sensible clamp for NaN, and nothing in the codebase computes a transform
+# (they come from UI numbers and tool args), so one can only arrive from a
+# caller the new assignment validation now blocks at the source.
+_OPACITY_RANGE = (0.0, 1.0)
+_SCALE_RANGE = (0.01, 100.0)
+_ROTATION_RANGE = (-3600.0, 3600.0)  # ±10 full turns; keyframed spins fit easily
+_POSITION_RANGE = (-100_000.0, 100_000.0)
+
+
+def _clamp_kfnum(v: KFNum, lo: float, hi: float, field: str) -> KFNum:
+    """Clamp a scalar-or-keyframed transform property into [lo, hi].
+
+    Applies to BOTH shapes of `KFNum` — a bound expressed as
+    `Field(ge=…, le=…)` cannot, because pydantic cannot attach a numeric
+    constraint to a `float | Keyframe` union.
+    """
+    if isinstance(v, Keyframe):
+        clamped = [(float(t), min(hi, max(lo, _finite(float(val), field))))
+                   for t, val in v.keyframes]
+        if clamped != list(v.keyframes):
+            return Keyframe(keyframes=clamped, interp=v.interp)
+        return v
+    return min(hi, max(lo, _finite(float(v), field)))
+
+
+class Transform(_EDLModel):
     x: KFNum = 0.0
     y: KFNum = 0.0
     scale: KFNum = 1.0
     rotation: KFNum = 0.0
     opacity: KFNum = 1.0
 
+    @field_validator("x", "y")
+    @classmethod
+    def _check_position(cls, v: KFNum) -> KFNum:
+        return _clamp_kfnum(v, *_POSITION_RANGE, "position")
 
-class AudioProps(BaseModel):
+    @field_validator("scale")
+    @classmethod
+    def _check_scale(cls, v: KFNum) -> KFNum:
+        return _clamp_kfnum(v, *_SCALE_RANGE, "scale")
+
+    @field_validator("rotation")
+    @classmethod
+    def _check_rotation(cls, v: KFNum) -> KFNum:
+        return _clamp_kfnum(v, *_ROTATION_RANGE, "rotation")
+
+    @field_validator("opacity")
+    @classmethod
+    def _check_opacity(cls, v: KFNum) -> KFNum:
+        return _clamp_kfnum(v, *_OPACITY_RANGE, "opacity")
+
+
+class AudioProps(_EDLModel):
     gain_db: float = 0.0
     mute: bool = False
     fade_in: float = 0.0
     fade_out: float = 0.0
 
 
-class Effect(BaseModel):
+class Effect(_EDLModel):
     type: str
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class Mask(BaseModel):
+class Mask(_EDLModel):
     type: Literal["linear", "mirror", "circle", "rectangle", "heart", "star"]
     feather: float = 0.0
     angle: float = 0.0
@@ -73,14 +155,14 @@ class Mask(BaseModel):
     invert: bool = False
 
 
-class ChromaKey(BaseModel):
+class ChromaKey(_EDLModel):
     color: str = "#00FF00"
     similarity: float = 0.4
     smoothness: float = 0.1
     spill_suppress: float = 0.5
 
 
-class Clip(BaseModel):
+class Clip(_EDLModel):
     id: str = Field(default_factory=lambda: f"c_{uuid4().hex[:8]}")
     src: str
     in_: float = Field(0.0, alias="in")
@@ -117,7 +199,7 @@ class Clip(BaseModel):
     matte_src: str | None = None
     track_to: str | None = None  # motion-tracking target id
 
-    model_config = {"populate_by_name": True}
+    model_config = ConfigDict(populate_by_name=True, validate_assignment=True)
 
     @property
     def duration(self) -> float:
@@ -144,7 +226,7 @@ class Clip(BaseModel):
         return self.duration / self.speed_factor
 
 
-class TextStyle(BaseModel):
+class TextStyle(_EDLModel):
     font: str = "Inter-Black"
     size: float = 96
     color: str = "#FFFFFF"
@@ -153,7 +235,7 @@ class TextStyle(BaseModel):
     shadow: tuple[float, float, float, str] | None = (4, 4, 16, "#000000AA")
 
 
-class TextClip(BaseModel):
+class TextClip(_EDLModel):
     id: str = Field(default_factory=lambda: f"t_{uuid4().hex[:8]}")
     text: str
     start: float
@@ -166,7 +248,7 @@ class TextClip(BaseModel):
     speaker: str | None = None  # for lower-thirds attached to a speaker
 
 
-class Sticker(BaseModel):
+class Sticker(_EDLModel):
     """Image overlay clip: PNG (or fetched emoji) composited on the canvas."""
     id: str = Field(default_factory=lambda: f"st_{uuid4().hex[:8]}")
     src: str   # absolute path to the PNG
@@ -180,7 +262,7 @@ class Sticker(BaseModel):
     label: str | None = None  # for emoji stickers, the original character
 
 
-class Transition(BaseModel):
+class Transition(_EDLModel):
     # `type` is any name in render/transitions.py (NATIVE + ALIASES + custom).
     # Kept as a plain str instead of a Literal so the ~45-name catalog can grow
     # without touching the schema; the renderer resolves unknowns to `fade`
@@ -190,19 +272,19 @@ class Transition(BaseModel):
     duration: float = 0.5
 
 
-class CaptionsConfig(BaseModel):
+class CaptionsConfig(_EDLModel):
     enabled: bool = False
     style: Literal["default", "ig_chunky", "word_emphasis"] = "default"
     position: Literal["bottom", "center", "top"] = "bottom"
     lang: str | None = None
 
 
-class MusicDuck(BaseModel):
+class MusicDuck(_EDLModel):
     to_db: float = -18.0
     track_ref: str = "a1"
 
 
-class Track(BaseModel):
+class Track(_EDLModel):
     id: str
     type: Literal["video", "audio", "music", "vo", "text", "sticker", "effect", "captions"]
     z: int = 0
@@ -215,11 +297,34 @@ class Track(BaseModel):
     locked: bool = False
 
 
-class Canvas(BaseModel):
+# Canvas bounds. The lower bound is not cosmetic: `set_canvas {w:0, h:-10}`
+# was accepted verbatim (QA round 5, VAI-05) and every downstream consumer —
+# scale/pad filters, overlay rescaling, the preview's aspect box — divides by
+# these. 7680 is 8K, well past anything this app renders.
+CANVAS_MIN, CANVAS_MAX = 16, 7680
+FPS_MIN, FPS_MAX = 1, 240
+
+
+class Canvas(_EDLModel):
     w: int = 1080
     h: int = 1920
     fps: int = 30
     bg: str = "#000000"
+
+    @field_validator("w", "h")
+    @classmethod
+    def _check_dimension(cls, v: int) -> int:
+        # Snapped even because H.264 chroma subsampling requires it and the
+        # round-4 letterbox parity math already assumes it; clamped rather than
+        # rejected for the same reason as Transform — an EDL that already holds
+        # a bad value must stay loadable.
+        v = min(CANVAS_MAX, max(CANVAS_MIN, int(v)))
+        return v - (v % 2)
+
+    @field_validator("fps")
+    @classmethod
+    def _check_fps(cls, v: int) -> int:
+        return min(FPS_MAX, max(FPS_MIN, int(v)))
     # Audio loudness target for export (LUFS). Reels/TikTok target is -16; -14
     # for YouTube. None = skip the loudnorm pass.
     loudness_lufs: float | None = -16.0
@@ -227,7 +332,7 @@ class Canvas(BaseModel):
     bitrate_kbps: int | None = None
 
 
-class BrandKit(BaseModel):
+class BrandKit(_EDLModel):
     handle: str | None = None
     hashtags: list[str] = Field(default_factory=list)
     end_card: str | None = None  # path to end-card image
@@ -235,7 +340,7 @@ class BrandKit(BaseModel):
     font: str | None = None
 
 
-class Marker(BaseModel):
+class Marker(_EDLModel):
     """Visual bookmark on the ruler — labels a moment for quick navigation."""
     id: str = Field(default_factory=lambda: f"mk_{uuid4().hex[:8]}")
     time: float
@@ -243,7 +348,7 @@ class Marker(BaseModel):
     color: str = "#fbbf24"  # amber — must differ from the playhead red (#ff4d6d, Timeline.tsx)
 
 
-class EDL(BaseModel):
+class EDL(_EDLModel):
     version: int = EDL_VERSION
     duration: float = 0.0
     canvas: Canvas = Field(default_factory=Canvas)

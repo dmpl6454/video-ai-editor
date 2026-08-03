@@ -18,3 +18,60 @@ export const INSERTION_W = 2               // landing/insertion line px
 export function cursorForCorner(sx: number, sy: number): string {
   return sx * sy > 0 ? 'nwse-resize' : 'nesw-resize'
 }
+
+// --- selection chrome, shared by every overlay kind -------------------------
+// Text and stickers must look and behave identically when selected. These
+// constants and the draw below are the single definition of that, so adding a
+// third overlay kind (or tuning a handle size) can't make them diverge.
+
+export const HANDLE = 7          // half-size of a corner handle, display px
+export const HANDLE_HIT = 13     // click tolerance around a handle
+export const DEL_R = 9           // radius of the ✕ delete handle, display px
+export const DEL_GAP = 14        // gap between box corner and the ✕ center
+
+const CORNER_SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
+
+/** Draw the selection box, corner handles and (when idle) the ✕ delete handle
+ *  for a box already translated/rotated into its own local frame by the caller. */
+export function drawSelectionChrome(
+  ctx: CanvasRenderingContext2D,
+  hw: number, hh: number,
+  opts: { dragging: boolean; resizing: boolean; showDelete: boolean },
+): void {
+  ctx.strokeStyle = ACCENT
+  if (opts.dragging) {
+    ctx.lineWidth = DRAG_BORDER_W
+    ctx.setLineDash([])
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'
+    ctx.shadowBlur = 8
+  } else {
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([4, 3])
+  }
+  ctx.strokeRect(-hw, -hh, hw * 2, hh * 2)
+  ctx.setLineDash([])
+  ctx.shadowBlur = 0
+  ctx.fillStyle = ACCENT
+  for (const [sx, sy] of CORNER_SIGNS) {
+    const pad = opts.resizing ? HANDLE + 1 : HANDLE
+    ctx.fillRect(sx * hw - pad, sy * hh - pad, pad * 2, pad * 2)
+  }
+  // Hidden mid-gesture: a drag that ends over the ✕ must not read as a delete
+  // click, and it cuts chrome noise while moving.
+  if (!opts.showDelete || opts.dragging) return
+  const dx = hw + DEL_GAP, dy = -hh - DEL_GAP
+  ctx.beginPath()
+  ctx.arc(dx, dy, DEL_R, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(20,20,24,0.9)'
+  ctx.fill()
+  ctx.lineWidth = 1.5
+  ctx.strokeStyle = ACCENT
+  ctx.stroke()
+  const r = DEL_R * 0.42
+  ctx.beginPath()
+  ctx.moveTo(dx - r, dy - r); ctx.lineTo(dx + r, dy + r)
+  ctx.moveTo(dx + r, dy - r); ctx.lineTo(dx - r, dy + r)
+  ctx.lineWidth = 1.8
+  ctx.strokeStyle = '#fff'
+  ctx.stroke()
+}

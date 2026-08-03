@@ -17,6 +17,39 @@ export interface DispatchResponse {
   op: Op | null
 }
 
+// Tools that load an ML model and walk every frame. Run on the synchronous
+// endpoint they hold a request-thread worker for minutes, which is what makes
+// the rest of the app stop responding mid-operation (round-5 VAI-11). These go
+// through the job queue instead — the same 202-and-poll path Export has used
+// since round 3. Must stay in step with main.py's ASYNC_DISPATCH_TOOLS; the
+// backend permits `wait=0` for any tool, so a drift here costs latency, not
+// correctness.
+const ASYNC_DISPATCH_TOOLS = new Set([
+  'remove_background', 'object_erase', 'upscale', 'stabilize',
+  'smooth_slow_motion', 'vocal_isolate', 'instrumental_isolate',
+  'motion_track', 'auto_caption', 'multicam',
+])
+
+const JOB_POLL_MS = 700
+
+/** Submit a tool as a background job and resolve when it finishes, so callers
+ *  of `store.dispatch()` see the same promise contract either way. */
+async function runDispatchJob(
+  sid: string, tool: string, args: Record<string, unknown>,
+): Promise<{ result: { redo_available?: boolean }; edl_hash: string; op: Op | null }> {
+  const { job_id } = await api.dispatchAsync(sid, tool, args)
+  for (;;) {
+    await new Promise((r) => setTimeout(r, JOB_POLL_MS))
+    const job = await api.getJob(job_id)
+    if (job.status === 'completed') {
+      return job.result as unknown as
+        { result: { redo_available?: boolean }; edl_hash: string; op: Op | null }
+    }
+    if (job.status === 'failed') throw new Error(job.error || `${tool} failed`)
+    if (job.status === 'cancelled') throw new Error(`${tool} was cancelled`)
+  }
+}
+
 // api.ts's http() throws `Error("422 Unprocessable Entity: {json envelope}")`
 // with the raw response body appended. The body is usually the hardening
 // error envelope ({error:{message}}) or a FastAPI detail — pull the human-
@@ -477,7 +510,10 @@ export const useStore = create<State>((set, get) => ({
     try {
       // We KEEP the previous export's download link after an edit, but the UI
       // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
-      const res = await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
+      const res: { result: { redo_available?: boolean }; edl_hash: string; op: Op | null } =
+        ASYNC_DISPATCH_TOOLS.has(tool)
+          ? await runDispatchJob(sid, tool, args)
+          : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
       if (tool === 'undo' || tool === 'redo') {
         // Undo/redo get an IMMEDIATE (non-debounced) refresh, not the
         // 120ms-coalesced refreshSoon(): the whole point of Undo/Redo is that

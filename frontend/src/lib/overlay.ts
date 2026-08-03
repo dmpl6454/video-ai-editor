@@ -1,7 +1,16 @@
-// Shared geometry + keyframe sampling for sticker overlays. Used by both the
+// Shared geometry + keyframe sampling for canvas overlays. Used by both the
 // display layer (StickerLayer draws the glyph) and the interaction layer (the
 // same code hit-tests + sizes the selection handles), so the box always lines
 // up exactly with what's painted.
+//
+// It is also the meeting point between TextLayer and StickerLayer. Text and
+// stickers are drawn by two different components, but they must be SELECTABLE,
+// DRAGGABLE and RESIZABLE identically — the round-4/round-5 gap was that only
+// stickers had on-canvas handles (M-01). Rather than duplicate the handle
+// geometry (which would drift the moment either side is tuned), the box shape,
+// the chrome drawing and the hit tests live here once, and a small registry
+// lets the layer that OWNS a clip's draw math publish its measured box to the
+// layer that owns interaction.
 
 export interface KFSpec { keyframes: [number, number][]; interp?: string }
 export type KFNum = number | KFSpec
@@ -77,4 +86,83 @@ export function stickerGeom(
   const baseSize = Math.max(canvasW, canvasH) * 0.22 * scale
   const size = Math.max(20, baseSize * Math.min(dsx, dsy))
   return { cx: x * dsx, cy: y * dsy, size, rot, opa, scale, x, y }
+}
+
+// ---------------------------------------------------------------------------
+// Shared overlay boxes: one description of "a selectable thing on the canvas"
+// ---------------------------------------------------------------------------
+
+export interface OverlayBox {
+  id: string
+  kind: 'sticker' | 'text'
+  cx: number; cy: number    // center, display px
+  hw: number; hh: number    // half width/height, display px
+  rot: number               // radians
+  x: number; y: number      // the same center in EDL-canvas px (what we commit)
+  sizeCanvasPx?: number     // text only: the resolved style.size a resize scales
+  // Text only. TextLayer.resolveAnchor treats these exact canvas-px values as
+  // "no explicit anchor — use the role layout", because they are what the
+  // construction-site defaults write. A drag that lands on one would commit
+  // and then visibly snap back to the role position, so the interaction layer
+  // nudges off them. Published from TextLayer so the two lists cannot diverge.
+  xSentinels?: number[]
+  ySentinels?: number[]
+}
+
+export function boxFromStickerGeom(id: string, g: StickerGeom): OverlayBox {
+  return { id, kind: 'sticker', cx: g.cx, cy: g.cy, hw: g.size / 2, hh: g.size / 2,
+           rot: g.rot, x: g.x, y: g.y }
+}
+
+// A pointer position expressed in a box's own unrotated, centered frame.
+export function toLocal(px: number, py: number, b: OverlayBox): { lx: number; ly: number } {
+  const dx = px - b.cx, dy = py - b.cy
+  const cos = Math.cos(-b.rot), sin = Math.sin(-b.rot)
+  return { lx: dx * cos - dy * sin, ly: dx * sin + dy * cos }
+}
+
+export function hitsBody(px: number, py: number, b: OverlayBox): boolean {
+  const { lx, ly } = toLocal(px, py, b)
+  return Math.abs(lx) <= b.hw && Math.abs(ly) <= b.hh
+}
+
+// Corners in local coords, in the fixed order the chrome draws them.
+export const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
+
+// TextLayer measures + wraps its own text, so it is the only place that knows
+// a text clip's real on-screen box. It publishes that here each frame and
+// StickerLayer (which owns pointer interaction for the whole preview) reads
+// it. A frame of staleness is harmless — both run on rAF against the same
+// playhead.
+let TEXT_BOXES: OverlayBox[] = []
+
+export function publishTextBoxes(boxes: OverlayBox[]): void { TEXT_BOXES = boxes }
+export function getTextBoxes(): OverlayBox[] { return TEXT_BOXES }
+
+// Live drag feedback flows the other way: StickerLayer owns the gesture, but
+// TextLayer owns the pixels, so the offset being dragged has to reach it
+// without a React render (which would re-run the whole draw effect mid-drag).
+export interface OverlayDragOverride {
+  id: string
+  dx: number; dy: number    // display px offset from the drawn position
+  sizeMul: number           // 1 while moving; the live factor while resizing
+}
+
+let DRAG_OVERRIDE: OverlayDragOverride | null = null
+
+export function setOverlayDrag(o: OverlayDragOverride | null): void { DRAG_OVERRIDE = o }
+export function getOverlayDrag(): OverlayDragOverride | null { return DRAG_OVERRIDE }
+
+/** Nudge a committed coordinate off a "means unset" sentinel value.
+ *
+ *  TextLayer.resolveAnchor treats a handful of exact canvas-px values as "no
+ *  explicit anchor — use the role layout", because they are what the
+ *  construction-site defaults write. A drag that happens to land on one (the
+ *  role's own anchor y is a very reachable target — you dragged from there)
+ *  would commit successfully and then snap straight back, i.e. look broken.
+ *  One pixel is invisible and unambiguous.
+ */
+export function unsentinel(v: number, sentinels: number[] | undefined): number {
+  if (!sentinels?.length) return v
+  return sentinels.some((s) => Math.abs(v - s) < 0.5) ? v + 1 : v
 }

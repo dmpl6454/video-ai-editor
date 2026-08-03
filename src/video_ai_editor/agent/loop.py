@@ -147,10 +147,32 @@ def _friendly_anthropic_error(e: Exception) -> str:
             f"(details: {e})")
 
 
+def _strip_internal_keys(schema: dict) -> dict:
+    """Drop this repo's own `x-…` schema annotations before the wire.
+
+    `tools.py` carries a few keys the dispatch-boundary validator reads (today:
+    `x-validated-by-handler`). They are not JSON Schema and have no meaning to
+    the model, so they are projected out here alongside the `category` field —
+    the same reason.
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return schema
+    return {
+        **schema,
+        "properties": {
+            k: ({pk: pv for pk, pv in v.items() if not pk.startswith("x-")}
+                if isinstance(v, dict) else v)
+            for k, v in props.items()
+        },
+    }
+
+
 # Tool list cached — same Anthropic-format spec lives in tools.py.
 def _anthropic_tools(categories: list[str] | None = None) -> list[dict]:
     return [
-        {"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]}
+        {"name": t["name"], "description": t["description"],
+         "input_schema": _strip_internal_keys(t["input_schema"])}
         for t in _list_tools(categories)
     ]
 

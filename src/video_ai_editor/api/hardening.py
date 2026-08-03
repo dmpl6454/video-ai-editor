@@ -310,7 +310,14 @@ def install(app: FastAPI) -> None:
                          message="internal server error", request_id=rid)
 
     @app.get("/livez", include_in_schema=False)
-    def livez() -> dict:
+    async def livez() -> dict:
+        # `async def`, deliberately. A `def` endpoint runs on Starlette's
+        # bounded anyio worker threadpool — the same one every synchronous
+        # route uses — so a handful of in-flight renders or model loads could
+        # queue the liveness probe behind them and a healthy process would
+        # report dead (the exact shape of the round-5 VAI-11 report). This
+        # handler does no blocking work, so running it directly on the event
+        # loop is both correct and immune to threadpool saturation.
         return {"ok": True}
 
     @app.get("/readyz", include_in_schema=False)

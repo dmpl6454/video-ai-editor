@@ -101,6 +101,18 @@ export const api = {
       { tool, args }
     ),
 
+  // Async dispatch (202 + job id), for the handful of tools that load an ML
+  // model and process every frame. Held on the sync path they pin a request
+  // worker for minutes, which starves the rest of the app — the round-5
+  // "becomes unresponsive" report. Poll `getJob` until status is terminal;
+  // the completed job's `result` is the same payload the sync path returns.
+  dispatchAsync: (sid: string, tool: string, args: Record<string, unknown> = {}) =>
+    http<{ job_id: string; status: JobStatus; status_url: string }>(
+      'POST',
+      `/sessions/${sid}/dispatch?wait=0`,
+      { tool, args }
+    ),
+
   preview: (sid: string) =>
     http<{ path: string; cached: boolean; edl_hash: string; url: string }>(
       'POST',

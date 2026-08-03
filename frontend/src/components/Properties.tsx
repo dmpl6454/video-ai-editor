@@ -72,6 +72,57 @@ function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, tit
   )
 }
 
+// Sub-half-second overlays are almost never intentional: at 30fps a 0.1s
+// sticker is three frames. `set_clip_timing`'s Duration field has a floor of
+// 0.1, so it is a permitted, silent outcome of a mis-typed number.
+const SHORT_OVERLAY_S = 0.5
+
+/** Banner: "this clip isn't on screen at the playhead" (+ jump), and a warning
+ *  for a too-short overlay.
+ *
+ *  Round-5 manual finding M-02 was filed as "rotation sometimes doesn't work".
+ *  Rotation worked; the selected sticker was 0.10s long and started at 6.78s
+ *  while the playhead sat at 1.02s, so a dozen correct `set_clip_transform`
+ *  commits changed the EDL and nothing on screen. Every control in this panel
+ *  edits a clip you may not be looking at, and nothing said so — the panel read
+ *  `playhead` only for a keyframe-button tooltip. This is the missing feedback,
+ *  not a new capability.
+ */
+function ClipWindowNotice({ start, end }: { start: number; end: number }) {
+  const playhead = useStore((s) => s.playhead)
+  const setPlayhead = useStore((s) => s.setPlayhead)
+  const outside = playhead < start || playhead >= end
+  const tooShort = end - start < SHORT_OVERLAY_S
+  if (!outside && !tooShort) return null
+  return (
+    <div style={{
+      fontSize: 11, lineHeight: 1.5, marginBottom: 8, padding: '6px 8px',
+      borderRadius: 4, border: '1px solid var(--line)',
+      background: 'rgba(245,158,11,0.12)', color: 'var(--text)',
+    }}>
+      {outside && (
+        <div>
+          Not visible at the playhead ({playhead.toFixed(2)}s) — this clip runs{' '}
+          {start.toFixed(2)}–{end.toFixed(2)}s. Edits here still apply.{' '}
+          <button
+            onClick={() => setPlayhead(start + Math.min(0.05, (end - start) / 2))}
+            style={{
+              background: 'var(--bg-3)', border: '1px solid var(--line)',
+              borderRadius: 3, padding: '0 6px', fontSize: 11, cursor: 'pointer',
+              color: 'inherit',
+            }}
+          >Jump to clip</button>
+        </div>
+      )}
+      {tooShort && (
+        <div style={{ marginTop: outside ? 4 : 0 }}>
+          Only {(end - start).toFixed(2)}s long — raise Duration below to see it.
+        </div>
+      )}
+    </div>
+  )
+}
+
 function isKeyframed(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false
   const o = v as { keyframes?: unknown[] }
@@ -211,6 +262,13 @@ export function Properties() {
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.src}>
         {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · {baseName(c.src)}
       </div>
+      {/* Timeline footprint = source duration / speed (effective_duration
+          server-side); a 2x clip ends halfway through its source length. */}
+      <ClipWindowNotice
+        start={clipStart}
+        end={clipStart + (Math.max(0, ((c as unknown as { out?: number }).out ?? 0)
+          - ((c as unknown as { in?: number }).in ?? 0)) / (speed > 0 ? speed : 1))}
+      />
 
       <Section label="Timing">
         <div className="row two">
@@ -432,6 +490,7 @@ function StickerProps({ c, trackLabel, canRaise, canLower, dispatch }: {
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {trackLabel} · {c.label ? `${c.label} ` : ''}Sticker · {c.id}
       </div>
+      <ClipWindowNotice start={start} end={start + duration} />
 
       <Section label="Position">
         {/* NumberField re-seeds from the EDL when a canvas drag changes x/y, and
@@ -580,6 +639,7 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {trackLabel} · {c.role ?? 'default'} · {c.id}
       </div>
+      <ClipWindowNotice start={start} end={end} />
 
       <Section label="Text">
         {/* Uncontrolled + key-seeded like the sticker inputs: typing stays

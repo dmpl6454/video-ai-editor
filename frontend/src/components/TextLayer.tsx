@@ -6,7 +6,10 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { EDL, TextClip } from '../types'
-import { sampleKF, type KFNum } from '../lib/overlay'
+import {
+  sampleKF, publishTextBoxes, getOverlayDrag,
+  type KFNum, type OverlayBox,
+} from '../lib/overlay'
 
 interface Props {
   edl: EDL
@@ -94,6 +97,16 @@ function serverAnchorY(role: string, canvasH: number): number {
 // Explicit (anchorX, anchorY) in EDL-canvas px, or nulls (role layout).
 // Same tolerance (±0.5 canvas px) as the server, absorbing the float noise
 // _rescale_overlays_for_canvas_change multiplication introduces.
+// The exact values resolveAnchor treats as "unset". Exported through the
+// published OverlayBox so the interaction layer can avoid committing a drag
+// that would land on one (and silently snap back to the role layout).
+function xSentinelsFor(canvasW: number): number[] {
+  return [SENTINEL_X, canvasW / 2]
+}
+function ySentinelsFor(role: string, canvasH: number): number[] {
+  return [SENTINEL_Y, canvasH * 0.85, serverAnchorY(role, canvasH)]
+}
+
 function resolveAnchor(
   c: TextClip, role: string, canvasW: number, canvasH: number,
 ): { ax: number | null; ay: number | null } {
@@ -106,8 +119,8 @@ function resolveAnchor(
     return v
   }
   return {
-    ax: pick(tx.x, [SENTINEL_X, canvasW / 2]),
-    ay: pick(tx.y, [SENTINEL_Y, canvasH * 0.85, serverAnchorY(role, canvasH)]),
+    ax: pick(tx.x, xSentinelsFor(canvasW)),
+    ay: pick(tx.y, ySentinelsFor(role, canvasH)),
   }
 }
 
@@ -211,20 +224,28 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     )
     if (!hasAnyText) {
       ctx.clearRect(0, 0, width, height)
+      publishTextBoxes([])
       return
     }
 
     let raf = 0
     let lastTime = -1
+    let lastDragId: string | null = null
     const draw = () => {
       const t = videoEl ? videoEl.currentTime : 0
-      // Only redraw when the playhead actually advanced (or first frame).
-      if (Math.abs(t - lastTime) < 1 / 60 && lastTime >= 0) {
+      const drag = getOverlayDrag()
+      // Only redraw when the playhead actually advanced (or first frame) — but
+      // ALWAYS redraw while a drag is live, or the text would sit frozen at its
+      // pre-drag position on a paused preview and the gesture would look dead.
+      const dragActive = !!drag || lastDragId !== null
+      lastDragId = drag?.id ?? null
+      if (!dragActive && Math.abs(t - lastTime) < 1 / 60 && lastTime >= 0) {
         raf = requestAnimationFrame(draw)
         return
       }
       lastTime = t
       ctx.clearRect(0, 0, width, height)
+      const boxes: OverlayBox[] = []
 
       // Collect active text clips
       const active: { c: TextClip; role: string }[] = []
@@ -257,7 +278,10 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           && Number.isFinite(c.style.size) && c.style.size > 0
           && Math.abs(c.style.size - SENTINEL_SIZE) > 1e-6
           ? c.style.size : s.size
-        const fontPx = Math.round((sizeCanvasPx / edl.canvas.h) * height)
+        // A live corner-resize scales the drawn glyphs immediately; the EDL
+        // only changes on pointer-up (StickerLayer commits style.size then).
+        const sizeMul = drag?.id === c.id ? drag.sizeMul : 1
+        const fontPx = Math.round((sizeCanvasPx * sizeMul / edl.canvas.h) * height)
         const family = styleFont?.family ?? s.font
         const weight = styleFont?.weight ?? s.weight ?? 'bold'
         ctx.font = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
@@ -308,7 +332,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // canvas→output scale the server applies. Sentinels keep the
         // browser's own historic role layout below.
         const { ax, ay } = resolveAnchor(c, role, edl.canvas.w, edl.canvas.h)
-        const anchorX = ax != null ? (ax / edl.canvas.w) * width : width / 2
+        let anchorX = ax != null ? (ax / edl.canvas.w) * width : width / 2
 
         let cy: number
         if (ay != null) cy = (ay / edl.canvas.h) * height
@@ -318,6 +342,37 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         else if (s.align === 'bottom') cy = height - totalH / 2 - height * 0.10
         else cy = height * 0.78
         cy += env.dy
+
+        // Live drag offset from <StickerLayer>. Applied AFTER the anchor
+        // resolution so a role-positioned clip (no explicit x/y yet) still
+        // follows the pointer — the commit on pointer-up is what makes it
+        // explicit.
+        if (drag?.id === c.id) { anchorX += drag.dx; cy += drag.dy }
+
+        // Publish the measured box for the interaction layer. Captions are
+        // excluded: their position is owned by the captions block server-side
+        // (resolveAnchor returns nulls for them), so a drag would commit an
+        // x/y the renderer ignores — a control that does nothing is worse than
+        // no control. Same for a keyframed/motion-tracked clip, whose position
+        // is a curve a single drag can't express.
+        const kfPositioned = typeof (c as TextClip & { transform?: { x?: KFNum } })
+          .transform?.x === 'object'
+        if (role !== 'caption' && !kfPositioned) {
+          boxes.push({
+            id: c.id, kind: 'text',
+            cx: anchorX, cy,
+            // Measured from the wrapped lines, so the box hugs the real glyphs
+            // rather than a guessed rectangle.
+            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0) / 2 + fontPx * 0.15),
+            hh: Math.max(10, totalH / 2 + fontPx * 0.12),
+            rot: 0,
+            x: (anchorX / width) * edl.canvas.w,
+            y: (cy / height) * edl.canvas.h,
+            sizeCanvasPx,
+            xSentinels: xSentinelsFor(edl.canvas.w),
+            ySentinels: ySentinelsFor(role, edl.canvas.h),
+          })
+        }
 
         ctx.save()
         // pop: scale around the text's own anchor, like the server's
@@ -345,10 +400,14 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         ctx.globalAlpha = 1
       }
 
+      publishTextBoxes(boxes)
       raf = requestAnimationFrame(draw)
     }
     draw()
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      publishTextBoxes([])
+    }
     // fontsReady is included so the effect re-runs (resetting `lastTime`,
     // which forces an immediate redraw) once the real bundled fonts finish
     // loading — otherwise a frame already drawn with the system-font
