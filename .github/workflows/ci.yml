@@ -63,7 +63,24 @@ jobs:
 
       - name: Install ffmpeg (Chocolatey)
         run: |
-          choco install ffmpeg-full -y --no-progress
+          # Retried on purpose. The community.chocolatey.org V2 feed returns 504
+          # often enough that it took out TWO of three Windows runs during the
+          # round-5 verification — and per CLAUDE.md this job is the only gate
+          # for Windows behaviour, so losing it to a transient feed error means
+          # losing the ability to verify Windows at all. `choco install` is
+          # idempotent (already-installed exits 0), so retrying is safe.
+          #
+          # $LASTEXITCODE is checked explicitly because
+          # `$ErrorActionPreference='Stop'` does NOT trip on a native exe's
+          # non-zero exit — the same trap build_win.ps1 documents.
+          $ok = $false
+          foreach ($i in 1..4) {
+            choco install ffmpeg-full -y --no-progress
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "choco install failed (exit $LASTEXITCODE) — attempt $i/4, retrying in 30s"
+            Start-Sleep -Seconds 30
+          }
+          if (-not $ok) { throw "choco install ffmpeg-full failed after 4 attempts" }
           ffmpeg -version | Select-Object -First 1
         shell: pwsh
 
