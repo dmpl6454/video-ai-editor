@@ -216,6 +216,233 @@ def _num(args: dict, key: str, default: float | None = None, *,
     return v
 
 
+def _enum_arg(args: dict, key: str, allowed: tuple[str, ...], default: str) -> str:
+    """Read a string argument that must be one of `allowed`.
+
+    Handlers that ASSIGN an enum onto an existing model (rather than
+    constructing a fresh one) need this even now that the schema validates on
+    assignment: it produces a plain ValueError -> HTTP 400 naming the legal
+    values, instead of a pydantic ValidationError the caller has to decode.
+    Pass `allowed` straight from the model's Literal (see _literal_values) so
+    the two can never drift.
+    """
+    raw = args.get(key)
+    if raw is None:
+        return default
+    v = str(raw)
+    if v not in allowed:
+        raise ValueError(f"{key} must be one of {list(allowed)}, got {raw!r}")
+    return v
+
+
+def _literal_values(model: type, field: str) -> tuple[str, ...]:
+    """The permitted values of a `Literal[...]` field on a pydantic model."""
+    from typing import get_args
+    return tuple(get_args(model.model_fields[field].annotation))
+
+
+# ---------- tool-argument validation at the dispatch boundary ----------
+#
+# Args reach dispatch() from four callers with no shared contract: Claude
+# (which follows the JSON schema), the UI, MCP, and hand-rolled curl/docs.
+# Nothing checked them until round 5, so `apply_lut {src: true}` reached
+# `Path(True)` -> unhandled TypeError -> HTTP 500 (VAI-03), `add_sticker
+# {position: 'center'}` reached `float('c')` (VAI-04), and every declared enum
+# was advisory only (VAI-10).
+#
+# Four deliberate non-goals, each one load-bearing:
+#
+#   * `additionalProperties` is NOT enforced. Handlers accept documented arg
+#     aliases (`index|idx`, `src|lut_path`, `target_lang|to`, `ratio|aspect`,
+#     `fit|mode`) and tolerate extra keys from older UI builds.
+#
+#   * `required` is NOT enforced. The round-5 plan assumed it was safe; the
+#     test suite disproved it immediately. `split_at` declares `track` required
+#     but its handler defaults to v1 — so the schema's `required` is advice to
+#     Claude about what to send, not a contract every caller has honoured for
+#     the last N releases. A genuinely absent argument is instead converted
+#     from the handler's KeyError into a 400 by `dispatch()` below, which
+#     needs no per-tool judgement about which defaults exist.
+#
+#   * Coercible values are ACCEPTED, matching the tolerance `_num()` has always
+#     had — "3.5" for a number is a caller style, not a bug. `'c'` and `true`
+#     are the actual defects, and those are what get rejected.
+#
+#   * An enum match is CASE-INSENSITIVE and rewrites the arg to the canonical
+#     spelling, because several handlers already normalise case deliberately
+#     (`add_text` lower-cases anim names at storage, `set_clip_fit` lower-cases
+#     `fit`). Rejecting 'Pop' here would have broken that on day one.
+#
+# The 6 DISPATCH tools with no schema in tools.py pass through unvalidated;
+# they are unreachable from Claude and this layer has nothing to check against.
+
+_SCHEMA_BY_TOOL: dict[str, dict] | None = None
+
+
+def _schema_for(tool: str) -> dict | None:
+    global _SCHEMA_BY_TOOL
+    if _SCHEMA_BY_TOOL is None:
+        from .tools import ALL_TOOLS
+        _SCHEMA_BY_TOOL = {t["name"]: t["input_schema"] for t in ALL_TOOLS}
+    return _SCHEMA_BY_TOOL.get(tool)
+
+
+def _arg_type_ok(v: Any, declared: str) -> bool:
+    if declared in ("number", "integer"):
+        # `isinstance(True, int)` is True in Python — a bool must never satisfy
+        # a numeric field or `{"w": true}` silently becomes a 1px canvas.
+        if isinstance(v, bool):
+            return False
+        if isinstance(v, (int, float)):
+            n = float(v)
+        elif isinstance(v, str):
+            try:
+                n = float(v)
+            except ValueError:
+                return False
+        else:
+            return False
+        if n != n or n in (float("inf"), float("-inf")):
+            return False
+        return n.is_integer() if declared == "integer" else True
+    if declared == "boolean":
+        return isinstance(v, bool) or (isinstance(v, str) and v.lower() in ("true", "false"))
+    if declared == "string":
+        # A bool is NOT a string. `end_card: true` used to reach Path(True) and
+        # raise "argument should be a str or an os.PathLike" as a 500 (VAI-03).
+        return isinstance(v, str) or (isinstance(v, (int, float)) and not isinstance(v, bool))
+    if declared == "array":
+        return isinstance(v, (list, tuple))
+    if declared == "object":
+        return isinstance(v, dict)
+    if declared == "null":
+        return v is None
+    return True
+
+
+def _validate_tool_args(tool: str, args: dict) -> None:
+    """Check `args` against the tool's advertised JSON schema. Raises ValueError
+    (-> HTTP 400) rather than letting a malformed value reach a handler."""
+    schema = _schema_for(tool)
+    if not schema:
+        return
+    props: dict = schema.get("properties") or {}
+
+    for key, value in list(args.items()):
+        spec = props.get(key)
+        if not isinstance(spec, dict):
+            continue  # alias, or an extra key we deliberately tolerate
+        # An explicit null means "unset"; handlers already treat it that way.
+        if value is None:
+            continue
+        declared = spec.get("type")
+        if declared is not None:
+            variants = declared if isinstance(declared, list) else [declared]
+            if not any(_arg_type_ok(value, d) for d in variants):
+                raise ValueError(
+                    f"{tool}.{key} must be of type {declared}, got "
+                    f"{type(value).__name__} {value!r}")
+        allowed = spec.get("enum")
+        if allowed and all(isinstance(a, str) for a in allowed):
+            canonical = {a.lower(): a for a in allowed}
+            hit = canonical.get(str(value).lower())
+            if hit is not None:
+                # Rewrite in place so the handler (and the ops-log entry
+                # commit() records) both see the canonical spelling.
+                args[key] = hit
+            elif not spec.get("x-validated-by-handler"):
+                shown = allowed if len(allowed) <= 20 else allowed[:20] + ["…"]
+                raise ValueError(
+                    f"{tool}.{key} must be one of {shown}, got {value!r}")
+        items = spec.get("items")
+        if isinstance(items, dict) and items.get("type") and isinstance(value, (list, tuple)):
+            for i, item in enumerate(value):
+                if not _arg_type_ok(item, items["type"]):
+                    raise ValueError(
+                        f"{tool}.{key}[{i}] must be of type {items['type']}, "
+                        f"got {type(item).__name__} {item!r}")
+
+
+# Named canvas anchors, as fractions of (w, h). Captions have always taken a
+# named `position` ('bottom'/'center'/'top'), so rejecting `add_sticker
+# {position: 'center'}` was an inconsistency in the tool surface, not a
+# principled restriction — and it surfaced as `ValueError: could not convert
+# string to float: 'c'` (QA round 5, VAI-04) because the handler indexed the
+# string as if it were a 2-element list.
+_CANVAS_ANCHORS: dict[str, tuple[float, float]] = {
+    "top-left": (0.15, 0.15), "top": (0.5, 0.15), "top-center": (0.5, 0.15),
+    "top-right": (0.85, 0.15),
+    "left": (0.15, 0.5), "center": (0.5, 0.5), "middle": (0.5, 0.5),
+    "right": (0.85, 0.5),
+    "bottom-left": (0.15, 0.85), "bottom": (0.5, 0.85),
+    "bottom-center": (0.5, 0.85), "bottom-right": (0.85, 0.85),
+}
+
+
+def _resolve_position(raw: Any, canvas: Canvas, key: str = "position") -> list[float]:
+    """Resolve a `position` argument to absolute canvas pixels.
+
+    Accepts `[x, y]` (px, as before) or a named anchor. Underscores and spaces
+    normalise to hyphens so 'top_left'/'top left'/'topLeft' all land.
+    """
+    if raw is None:
+        return [canvas.w / 2, canvas.h / 2]
+    if isinstance(raw, str):
+        name = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", raw.strip())  # topLeft -> top-Left
+        name = re.sub(r"[\s_]+", "-", name).lower()
+        anchor = _CANVAS_ANCHORS.get(name)
+        if anchor is None:
+            raise ValueError(
+                f"{key} must be [x, y] canvas pixels or one of "
+                f"{sorted(_CANVAS_ANCHORS)}, got {raw!r}")
+        return [canvas.w * anchor[0], canvas.h * anchor[1]]
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 2:
+            raise ValueError(f"{key} must be exactly [x, y], got {len(raw)} values")
+        try:
+            return [float(raw[0]), float(raw[1])]
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be two numbers, got {list(raw)!r}")
+    raise ValueError(f"{key} must be [x, y] canvas pixels or a named anchor, got {raw!r}")
+
+
+def _norm_bbox(raw: Any, tool: str) -> tuple[float, float, float, float]:
+    """Validate a NORMALISED [x, y, w, h] bbox and clamp it inside the frame.
+
+    Every bbox arg in this file is documented as 0..1, and nothing enforced it.
+    Passing pixels instead — the obvious mistake, and what the round-5 tester
+    did with `[10, 10, 100, 100]` — made `tracker.track_object` hand OpenCV an
+    init box ~100× the frame in each axis; MIL allocates its feature buffers
+    from the box area, so the process was OOM-killed outright (exit 137, no
+    traceback, whole app gone). That is why this is a hard 400 and not a
+    best-effort coercion: a bbox out of 0..1 is unambiguously a caller bug, and
+    the failure mode of guessing wrong is losing the app.
+    """
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        raise ValueError(f"{tool}: bbox must be [x, y, w, h] normalised 0..1")
+    try:
+        x, y, w, h = (float(v) for v in raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{tool}: bbox values must be numbers, got {list(raw)!r}")
+    for name, v in (("x", x), ("y", y), ("w", w), ("h", h)):
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValueError(f"{tool}: bbox {name} must be finite, got {v!r}")
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(
+                f"{tool}: bbox is normalised 0..1 (a fraction of the frame), "
+                f"but {name}={v!r}. Divide pixel coordinates by the frame "
+                f"width/height first.")
+    if w <= 0 or h <= 0:
+        raise ValueError(f"{tool}: bbox width and height must be > 0, got w={w}, h={h}")
+    # Clamp the box inside the frame; an x+w of 1.3 is in-domain per-value but
+    # still hands the tracker a rectangle that runs off the edge.
+    w = min(w, 1.0 - x)
+    h = min(h, 1.0 - y)
+    if w <= 0 or h <= 0:
+        raise ValueError(f"{tool}: bbox starts at or past the frame edge (x={x}, y={y})")
+    return (x, y, w, h)
+
+
 def _source_duration(src: str | Path) -> float | None:
     """Container duration of a clip's source, or None if it can't be determined.
 
@@ -763,14 +990,21 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
 # ---------- project ----------
 
 def set_canvas(store: EDLStore, args: dict) -> dict:
+    from ..edl.schema import CANVAS_MIN, CANVAS_MAX, FPS_MIN, FPS_MAX
     c = store.edl.canvas
     old_w, old_h = c.w, c.h
-    if "w" in args:
-        c.w = int(args["w"])
-    if "h" in args:
-        c.h = int(args["h"])
-    if "fps" in args:
-        c.fps = int(args["fps"])
+    # Canvas already clamps these (so no writer can produce a 0×-10 canvas —
+    # QA round 5, VAI-05), but a clamp is the wrong answer for a caller that
+    # asked for something impossible: silently rendering at 16px would read as
+    # a different bug. Reject here and clamp there.
+    for key, lo, hi in (("w", CANVAS_MIN, CANVAS_MAX), ("h", CANVAS_MIN, CANVAS_MAX),
+                        ("fps", FPS_MIN, FPS_MAX)):
+        if key not in args or args[key] is None:
+            continue
+        v = _num(args, key)
+        if not (lo <= v <= hi):
+            raise ValueError(f"{key} must be between {lo} and {hi}, got {args[key]!r}")
+        setattr(c, key, int(v))
     _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, c.w, c.h)
     summary = f"Canvas → {c.w}×{c.h} @ {c.fps}fps"
     store.commit("set_canvas", args, summary)
@@ -979,15 +1213,18 @@ def apply_hook_stack(store: EDLStore, args: dict) -> dict:
 
 
 def add_caption_track(store: EDLStore, args: dict) -> dict:
-    style = args.get("style", "default")
-    position = args.get("position", "bottom")
+    # These two land on the EDL by ASSIGNMENT (`cap.config.style = …`) rather
+    # than by constructing a CaptionsConfig, which is exactly why an unknown
+    # value used to be written to edl.json and poison the session on next load
+    # (QA round 5, VAI-01). Schema.validate_assignment now catches it too; this
+    # turns the pydantic error into a plain 400 that names the legal values.
+    style = _enum_arg(args, "style", _literal_values(CaptionsConfig, "style"), "default")
+    position = _enum_arg(args, "position", _literal_values(CaptionsConfig, "position"), "bottom")
     cap = store.edl.get_track("captions")
     if not cap:
         cap = ensure_track(store.edl, "captions", "captions", z=13)
-        from ..edl.schema import CaptionsConfig
         cap.config = CaptionsConfig()
     if cap.config is None:
-        from ..edl.schema import CaptionsConfig
         cap.config = CaptionsConfig()
     cap.config.enabled = True
     cap.config.style = style  # type: ignore
@@ -1069,8 +1306,9 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     from ..ingest.transcribe import transcribe
     from ..ingest.caption_format import cues_from_segments
 
-    style = str(args.get("style", "ig_chunky"))
-    position = str(args.get("position", "bottom"))
+    # Same assignment-into-the-EDL hazard as add_caption_track — see there.
+    style = _enum_arg(args, "style", _literal_values(CaptionsConfig, "style"), "ig_chunky")
+    position = _enum_arg(args, "position", _literal_values(CaptionsConfig, "position"), "bottom")
     language = args.get("language")  # None → auto-detect (Hinglish-friendly)
     model = str(args.get("model") or WHISPER_CAPTION_MODEL)
 
@@ -1113,7 +1351,6 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     cap = store.edl.get_track("captions")
     if not cap:
         cap = ensure_track(store.edl, "captions", "captions", z=13)
-    from ..edl.schema import CaptionsConfig
     if cap.config is None:
         cap.config = CaptionsConfig()
     cap.config.enabled = True
@@ -1632,7 +1869,16 @@ def add_effect(store: EDLStore, args: dict) -> dict:
         raise ValueError("add_effect only supports media clips")
     _reject_audio_lane_clip(t, cid, "add_effect")
     from ..edl.schema import Effect
-    eff = Effect(type=str(args["type"]), params=dict(args.get("params") or {}))
+    from ..render.effects import EFFECT_BUILDERS
+    # Validated against the SAME registry `list_filters` advertises, not against
+    # a hand-kept list — the tools.py enum has drifted from EFFECT_BUILDERS
+    # before, and an unknown type used to be stored on the clip and then
+    # silently skipped by the compositor, so the UI showed an effect that did
+    # nothing (QA round 5, VAI-07).
+    etype = _enum_arg(args, "type", tuple(sorted(EFFECT_BUILDERS)), "")
+    if not etype:
+        raise ValueError("add_effect requires a 'type'")
+    eff = Effect(type=etype, params=dict(args.get("params") or {}))
     c.effects.append(eff)
     summary = f"Add effect {eff.type} → {cid}"
     store.commit("add_effect", args, summary)
@@ -1940,9 +2186,14 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     if not hasattr(c, "transform"):
         raise ValueError("set_clip_transform needs a media clip or sticker (it has no transform)")
     _reject_audio_lane_clip(t, cid, "set_clip_transform")
+    # _num rejects null/NaN/'abc' as a 400; Transform's own field validators
+    # then clamp each value into its domain, so `opacity: 5.0` lands as 1.0
+    # instead of being stored verbatim and rendered as garbage (VAI-08). The
+    # clamp lives on the model deliberately — set_clip_transform is not the
+    # only writer (add_keyframe, motion_track and set_property all reach here).
     for k in ("x", "y", "scale", "rotation", "opacity"):
         if k in args and args[k] is not None:
-            setattr(c.transform, k, float(args[k]))
+            setattr(c.transform, k, _num(args, k))
     summary = (f"Transform {cid}: rot={c.transform.rotation} scale={c.transform.scale} "
                f"x={c.transform.x} y={c.transform.y} opacity={c.transform.opacity}")
     store.commit("set_clip_transform", args, summary)
@@ -2494,9 +2745,8 @@ def motion_track(store: EDLStore, args: dict) -> dict:
     """
     cid = str(args["clip_id"])
     tid = str(args["target_id"])
-    bbox = args.get("bbox") or [0.4, 0.4, 0.2, 0.2]
-    if len(bbox) != 4:
-        raise ValueError("bbox must be [x,y,w,h] normalised")
+    bbox = _norm_bbox(args.get("bbox") or [0.4, 0.4, 0.2, 0.2], "motion_track")
+    sample_every = int(_num(args, "sample_every", 2, min=1, max=600))
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
@@ -2520,12 +2770,22 @@ def motion_track(store: EDLStore, args: dict) -> dict:
 
     from ..ai import tracker
     canvas = store.edl.canvas
-    track_data = tracker.track_object(
-        Path(c.src), tuple(bbox),  # type: ignore
-        canvas_w=canvas.w, canvas_h=canvas.h,
-        method=str(args.get("method", "mil")),
-        sample_every=int(args.get("sample_every", 2)),
-    )
+    try:
+        track_data = tracker.track_object(
+            Path(c.src), bbox,
+            canvas_w=canvas.w, canvas_h=canvas.h,
+            method=_enum_arg(args, "method", ("mil", "vit"), "mil"),
+            sample_every=sample_every,
+        )
+    except (RuntimeError, ValueError):
+        raise
+    except Exception as e:
+        # OpenCV raises cv2.error (not an Exception subclass anyone here
+        # imports) for a malformed init box, a codec it can't decode, or a
+        # missing Vit model file. Unwrapped, each is an HTTP 500 with a
+        # traceback; as a RuntimeError main.py maps it to a 422 with the
+        # message, which is what every other optional-AI failure does.
+        raise RuntimeError(f"motion tracking failed: {type(e).__name__}: {e}") from e
     track_dir = store.dir / "cache" / "tracks"
     track_id = f"trk_{tid}_{int(track_data['fps']*100)}"
     tracker.save_track(track_data, track_dir / f"{track_id}.json")
@@ -2608,13 +2868,9 @@ def smooth_slow_motion(store: EDLStore, args: dict) -> dict:
 def object_erase(store: EDLStore, args: dict) -> dict:
     """LaMa inpaint: erase a bbox region across a time window on a clip."""
     cid = str(args["clip_id"])
-    bbox = args["bbox"]  # [x, y, w, h] normalized 0..1
-    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-        raise ValueError("bbox must be [x, y, w, h] in 0..1")
-    t_start = float(args.get("t_start", 0.0))
-    t_end = args.get("t_end")
-    if t_end is not None:
-        t_end = float(t_end)
+    bbox = _norm_bbox(args.get("bbox"), "object_erase")
+    t_start = _num(args, "t_start", 0.0, min=0.0)
+    t_end = _num(args, "t_end")
 
     res = store.edl.get_clip(cid)
     if not res:
@@ -2624,8 +2880,7 @@ def object_erase(store: EDLStore, args: dict) -> dict:
         raise ValueError("object_erase only supports media clips")
     from ..ai.lama import object_erase as _erase
     new_src = _erase(Path(c.src), store.dir / "cache" / "lama",
-                     bbox=tuple(float(v) for v in bbox),
-                     t_start=t_start, t_end=t_end)
+                     bbox=bbox, t_start=t_start, t_end=t_end)
     c.src = str(new_src)
     summary = f"Object erase {cid} bbox={bbox} t={t_start}..{t_end or 'end'}"
     store.commit("object_erase", args, summary)
@@ -2832,8 +3087,8 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
         # User-supplied PNG path goes through the allowlist guard.
         src_arg = _safe_src(src_arg)
 
-    start = float(args.get("start", 0.0))
-    end = float(args.get("end", start + 3.0))
+    start = _num(args, "start", 0.0, min=0.0)
+    end = _num(args, "end", start + 3.0)
     if end <= start + 0.1:
         # An explicit end that's <= start (or barely past it) collapses to a
         # near-invisible/zero-duration sticker — e.g. StickerPanel.tsx clamps
@@ -2843,9 +3098,9 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
         # end, not an explicitly-too-small one, so this is a second, always-
         # applied floor.
         end = start + 3.0
-    pos = args.get("position") or [canvas.w / 2, canvas.h / 2]
-    scale = float(args.get("scale", 1.0))
-    rotation = float(args.get("rotation", 0.0))
+    pos = _resolve_position(args.get("position"), canvas)
+    scale = _num(args, "scale", 1.0)
+    rotation = _num(args, "rotation", 0.0)
 
     from ..edl.schema import Sticker, Transform, Track
     track = store.edl.get_track("stickers")
@@ -3590,7 +3845,25 @@ def dispatch(store: EDLStore, tool: str, args: dict) -> dict:
     fn = DISPATCH.get(tool)
     if not fn:
         raise KeyError(f"unknown tool: {tool}")
-    return fn(store, args)
+    _validate_tool_args(tool, args)
+    try:
+        return fn(store, args)
+    except KeyError as e:
+        # Handlers read mandatory args as `args["clip_id"]`, so omitting one was
+        # an unhandled KeyError -> HTTP 500 with a traceback. Converting it here
+        # (rather than enforcing the schema's `required` list, which several
+        # handlers deliberately default — see _validate_tool_args) gives a clean
+        # 400 for every tool with no per-tool judgement calls.
+        #
+        # Narrowed to a key the schema actually declares AND that is absent from
+        # args, so an internal KeyError deep inside a handler still surfaces as
+        # the 500 it is, rather than being mislabelled a caller error.
+        key = e.args[0] if e.args else None
+        declared = _schema_for(tool) or {}
+        known = set(declared.get("properties") or {}) | set(declared.get("required") or [])
+        if isinstance(key, str) and key in known and key not in args:
+            raise ValueError(f"{tool}: missing required argument '{key}'") from e
+        raise
 
 
 def list_tools(categories: list[str] | None = None):

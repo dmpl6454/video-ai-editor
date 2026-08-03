@@ -19,6 +19,15 @@ def _transition_names() -> list[str]:
     return all_names()
 
 
+def _effect_names() -> list[str]:
+    """The `add_effect` type enum, generated from the render registry — the
+    same source `list_filters` reports and `add_effect` now validates against.
+    The hardcoded list this replaces had already drifted (it was missing
+    `color_grade`), so the advertised contract and the real one disagreed."""
+    from ..render.effects import EFFECT_BUILDERS
+    return sorted(EFFECT_BUILDERS.keys())
+
+
 def _t(name: str, description: str, category: str, properties: dict, required: list[str] | None = None) -> ToolSchema:
     return {
         "name": name,
@@ -371,9 +380,15 @@ TEXT_TOOLS = [
            "src": {"type": "string", "description": "PNG path (alternative to emoji)"},
            "start": {"type": "number", "default": 0.0},
            "end": {"type": "number"},
-           "position": {"type": "array", "items": {"type": "number"},
-                        "description": "[x, y] canvas px, default center"},
+           # Two shapes on purpose: captions have always taken a named position,
+           # so a named anchor here keeps the tool surface consistent instead of
+           # 400-ing on the obvious guess (QA round 5, VAI-04).
+           "position": {"type": ["array", "string"], "items": {"type": "number"},
+                        "description": "[x, y] canvas px, or a named anchor: "
+                                       "center, top, bottom, left, right, "
+                                       "top-left, top-right, bottom-left, bottom-right"},
            "scale": {"type": "number", "default": 1.0},
+           "rotation": {"type": "number", "default": 0.0, "description": "Degrees"},
        }),
     _t("import_srt",
        "REPLACE the project transcript with one parsed from an external .srt/.vtt/.ass "
@@ -563,15 +578,13 @@ SHOW_TOOLS = [
 
 EFFECT_TOOLS = [
     _t("add_effect",
-       "Append a per-clip video effect. Types: color, lut, blur, sharpen, vignette, "
-       "grain, vintage, vhs, glow, hflip, vflip, rgb_split.",
+       "Append a per-clip video effect. Call list_filters for the current type "
+       "catalog (color, lut, blur, sharpen, vignette, grain, vintage, vhs, glow, "
+       "hflip, vflip, rgb_split, …).",
        "effects",
        {
            "clip_id": {"type": "string"},
-           "type": {"type": "string", "enum": [
-               "color", "lut", "blur", "sharpen", "vignette",
-               "grain", "vintage", "vhs", "glow", "hflip", "vflip", "rgb_split",
-           ]},
+           "type": {"type": "string", "enum": _effect_names()},
            "params": {"type": "object", "description": "type-specific params"},
        },
        ["clip_id", "type"]),
@@ -606,7 +619,11 @@ EFFECT_TOOLS = [
            "at": {"type": "number"},
            # Enum generated from the render catalog — the previous hardcoded
            # 12-name list silently hid 45+ working transitions from the LLM.
-           "type": {"type": "string", "enum": _transition_names()},
+           # `add_transition` validates this itself and answers with a
+           # did-you-mean suggestion; the generic boundary check would fire
+           # first and replace that with a wall of ~88 names.
+           "type": {"type": "string", "enum": _transition_names(),
+                    "x-validated-by-handler": True},
            "duration": {"type": "number", "default": 0.5},
        },
        ["at"]),

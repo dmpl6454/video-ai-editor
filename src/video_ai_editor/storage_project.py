@@ -11,6 +11,7 @@ are not bundled — they regenerate on demand.
 """
 from __future__ import annotations
 import json
+import logging
 import shutil
 import zipfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from .config import WORKDIR
 from .edl import EDL, EDLStore
 from .edl.schema import Clip, Sticker
 from .storage import session_dir, new_session_id
+
+_log = logging.getLogger("video_ai_editor")
 
 
 def _media_srcs(edl: EDL) -> set[str]:
@@ -53,15 +56,35 @@ def save_project(session_id: str, dst: Path) -> Path:
     store = EDLStore(sd)
     edl = store.edl
 
+    # An unreadable edl.json with no usable snapshot presents to every caller
+    # as an empty timeline, indistinguishable from a brand-new session. Writing
+    # a .vae in that state produced a valid archive with `manifest.media == []`
+    # and no error (QA round 5, VAI-02) — a second data-loss path stacked on
+    # the first, since the user's natural response to "my project looks empty"
+    # is to save a backup, which then overwrites their only good copy.
+    if store.is_data_loss_state:
+        raise ValueError(
+            f"session {session_id} could not be loaded (its edl.json is "
+            f"unreadable and no snapshot recovered), so there is nothing to "
+            f"save — writing a project file now would produce an empty one. "
+            f"The unreadable original is kept at edl.corrupt.json.")
+    if store.load_state == "recovered":
+        _log.warning("saving %s from a snapshot-recovered timeline — the most "
+                     "recent edit(s) may be missing from %s", session_id, dst.name)
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.suffix != ".vae":
         dst = dst.with_suffix(".vae")
 
     media_paths = sorted(_media_srcs(edl))
-    manifest = {"media": [], "session_id": session_id}
+    manifest = {"media": [], "session_id": session_id,
+                "load_state": store.load_state}
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
-        # State files
-        for name in ("edl.json", "ops.json", "meta.json", "chat.json"):
+        # edl.json comes from the LIVE store, not the file on disk: after a
+        # snapshot recovery the on-disk copy is still the unreadable one, and
+        # bundling that would make the archive unloadable too.
+        zf.writestr("edl.json", edl.to_json())
+        for name in ("ops.json", "meta.json", "chat.json"):
             p = sd / name
             if p.exists():
                 zf.write(p, arcname=name)

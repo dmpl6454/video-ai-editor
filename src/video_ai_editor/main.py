@@ -146,6 +146,23 @@ def _safe_filename(name: str | None, fallback: str) -> str:
     return f"{stem_clean}{suffix_clean}" or fallback
 
 
+# One mutation at a time per session. FastAPI runs sync endpoints in a
+# threadpool, and `dispatch()` read-modify-writes a shared EDLStore, so two
+# concurrent edits to the same session could interleave: both mutate the same
+# in-memory tree, both call commit(), and the second snapshot/ops entry
+# describes a state neither caller asked for. Uncontended acquisition is
+# ~100ns, so this costs nothing on the normal single-user path — it exists so
+# the background-job path below (which can hold a session for minutes) cannot
+# race a UI gesture.
+_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+def _session_lock(sid: str) -> threading.Lock:
+    with _SESSION_LOCKS_GUARD:
+        return _SESSION_LOCKS.setdefault(sid, threading.Lock())
+
+
 def _store(sid: str) -> EDLStore:
     # Fast path: already cached. Mark as recently used.
     with _STORES_LOCK:
@@ -580,9 +597,64 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
     }
 
 
+# Tools that routinely run for tens of seconds to minutes: they load a torch/
+# ONNX model and process every frame. Held on the request threadpool they pin a
+# worker for the whole run, which is the concrete mechanism behind the round-5
+# "app becomes unresponsive" observation (VAI-11) — the default threadpool is
+# small and /livez, the timeline poll and the next edit all queue behind them.
+# The frontend calls these with `wait=0` and polls /api/jobs/{id}, exactly as it
+# already does for export.
+ASYNC_DISPATCH_TOOLS = frozenset({
+    "remove_background", "object_erase", "upscale", "stabilize",
+    "smooth_slow_motion", "vocal_isolate", "instrumental_isolate",
+    "motion_track", "auto_caption", "multicam",
+})
+
+
 @app.post("/api/sessions/{sid}/dispatch")
-def dispatch_tool(sid: str, body: DispatchRequest):
+def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
+    """Run a tool.
+
+    `wait=1` (default): blocks and returns the result — the long-standing
+    behaviour every existing caller relies on.
+    `wait=0`: returns 202 + `{job_id, status_url}` and runs the tool on the job
+    executor. The completed job's `result` is the same payload the sync path
+    returns. Intended for ASYNC_DISPATCH_TOOLS; permitted for any tool so the
+    UI never needs a second allowlist.
+    """
     store = _store(sid)
+    if not wait:
+        return _dispatch_async(sid, store, body)
+    with _session_lock(sid):
+        return _dispatch_sync(sid, store, body)
+
+
+def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONResponse:
+    from .api.jobs import JOB_MANAGER
+
+    def _job() -> dict:
+        # Re-resolve the store inside the worker: the LRU cache may have
+        # evicted and rebuilt it while this job sat queued, and mutating a
+        # detached copy would write edits that the next request never sees.
+        try:
+            with _session_lock(sid):
+                return _dispatch_sync(sid, _store(sid), body)
+        except HTTPException as e:
+            # JobManager records `f"{type(e).__name__}: {e}"`, and an
+            # HTTPException stringifies to its repr — unreadable in the UI's
+            # job-error toast. Carry the detail across instead.
+            detail = e.detail
+            raise RuntimeError(detail if isinstance(detail, str) else json.dumps(detail)) from e
+
+    job = JOB_MANAGER.submit(kind=f"dispatch:{body.tool}", fn=_job, session_id=sid)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job.id, "status": job.status,
+                 "status_url": f"/api/jobs/{job.id}"},
+    )
+
+
+def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest) -> dict:
     ops_before = len(store.ops.ops)
     try:
         result = dispatch(store, body.tool, body.args)

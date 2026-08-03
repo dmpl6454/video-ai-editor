@@ -229,6 +229,18 @@ def _hw_encoder_args(name: str, *, preview: bool, crf: int | None = None) -> lis
 _INFLIGHT: dict[str, threading.Event] = {}
 _INFLIGHT_LOCK = threading.Lock()
 
+# Ceiling on ffmpeg jobs running at once. _INFLIGHT only collapses renders of
+# the SAME EDL hash; N different hashes (several sessions, or one user editing
+# fast enough that each keystroke supersedes the last) still launched N ffmpeg
+# processes, each of which saturates every core. Past a couple of concurrent
+# renders total throughput does not improve — they just contend — while the
+# machine becomes unresponsive, which is the reported VAI-11 symptom.
+# Deliberately a plain semaphore, not a queue: waiters proceed in arrival order
+# and nothing is dropped.
+_RENDER_SLOTS = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("VAI_MAX_CONCURRENT_RENDERS", "2")))
+)
+
 
 @dataclass
 class RenderResult:
@@ -696,6 +708,18 @@ _AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None, on_progress=None,
             cancel_event=None, crf: int | None = None) -> Path:
+    # The single chokepoint every ffmpeg render passes through (preview and
+    # export both land here, and it never recurses), so it is where the
+    # concurrency ceiling belongs.
+    with _RENDER_SLOTS:
+        return _render_locked(edl, dst, height=height, fps=fps, preview=preview,
+                              cache_dir=cache_dir, on_progress=on_progress,
+                              cancel_event=cancel_event, crf=crf)
+
+
+def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
+                   cache_dir: Path | None = None, on_progress=None,
+                   cancel_event=None, crf: int | None = None) -> Path:
     canvas = edl.canvas
     # BOTH output dimensions must be even. H.264/yuv420p subsamples chroma 2x2,
     # so an odd dimension is unencodable — and long before the encoder, an odd

@@ -51,11 +51,38 @@ def track_object(
         cap.release()
         raise RuntimeError("empty video")
 
-    bx, by, bw, bh = bbox_norm
+    if sample_every < 1:
+        # `frame_idx % 0` below is a ZeroDivisionError; a negative stride never
+        # matches, so the whole loop silently emits nothing.
+        raise ValueError(f"sample_every must be >= 1, got {sample_every}")
+
+    # Clamp the init box into the frame. `dispatch._norm_bbox` already rejects
+    # a non-0..1 bbox, but this is the layer where getting it wrong is FATAL
+    # rather than merely wrong: MIL sizes its feature buffers from the box
+    # area, so a bbox given in pixels (e.g. [10,10,100,100] -> a 192000×108000
+    # box) makes cv2 allocate until the OS SIGKILLs the whole app — exit 137,
+    # no traceback, every session in the process gone with it (QA round 5,
+    # VAI-06, and the likeliest contributor to the VAI-11 instability report).
+    # A library that can kill the process must defend itself, not trust its
+    # caller.
+    bx, by, bw, bh = (float(v) for v in bbox_norm)
+    bx = min(max(bx, 0.0), 1.0)
+    by = min(max(by, 0.0), 1.0)
+    bw = min(max(bw, 0.0), 1.0 - bx)
+    bh = min(max(bh, 0.0), 1.0 - by)
     init_box = (int(bx * sw), int(by * sh), int(bw * sw), int(bh * sh))
+    if init_box[2] < 2 or init_box[3] < 2:
+        cap.release()
+        raise ValueError(
+            f"bbox {tuple(bbox_norm)} is {init_box[2]}×{init_box[3]}px in a "
+            f"{sw}×{sh} source — too small to track (bbox is normalised 0..1)")
 
     tracker = _make_tracker(method)
-    tracker.init(frame, init_box)
+    try:
+        tracker.init(frame, init_box)
+    except Exception as e:
+        cap.release()
+        raise RuntimeError(f"tracker init failed on {init_box}: {e}") from e
 
     # Map source pixel space → canvas pixel space (centre point of the box).
     sx = canvas_w / max(1, sw)
@@ -71,26 +98,29 @@ def track_object(
         init_box[3] * sy,
     ])
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame_idx += 1
-        ok2, box = tracker.update(frame)
-        if not ok2:
-            continue
-        if frame_idx % sample_every:
-            continue
-        x, y, w, h = box
-        track.append([
-            frame_idx / fps,
-            (x + w / 2) * sx,
-            (y + h / 2) * sy,
-            w * sx,
-            h * sy,
-        ])
-
-    cap.release()
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_idx += 1
+            ok2, box = tracker.update(frame)
+            if not ok2:
+                continue
+            if frame_idx % sample_every:
+                continue
+            x, y, w, h = box
+            track.append([
+                frame_idx / fps,
+                (x + w / 2) * sx,
+                (y + h / 2) * sy,
+                w * sx,
+                h * sy,
+            ])
+    finally:
+        # A cv2.error mid-loop used to leak the VideoCapture (and its decoder
+        # buffers) for the life of the process.
+        cap.release()
     return {
         "src": str(src),
         "fps": fps,
