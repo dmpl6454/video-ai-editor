@@ -10,6 +10,7 @@ import {
   sampleKF, publishTextBoxes, getOverlayDrag,
   type KFNum, type OverlayBox,
 } from '../lib/overlay'
+import { emojiImage, emojiGeneration } from '../lib/emojiArt'
 
 interface Props {
   edl: EDL
@@ -45,7 +46,76 @@ const ROLE_STYLES: Record<string, {
   default:     { font: 'Inter',           size: 64,  stroke: 0.0025, weight: '700', align: 'lower' },
 }
 
-const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu
+// --- inline emoji, mirroring render/text_overlay.py --------------------------
+//
+// Emoji used to be stripped from text here AND on the server, so typing them
+// into a text clip produced nothing anywhere ("I was unable to apply the
+// emojis through the text section"). They are composited as IMAGES now — the
+// same Fluent 3D artwork the exporter bakes, fetched from /api/emoji/<seq>.png.
+// Drawing them with the browser's own emoji font instead would put the OS
+// design in the preview and Fluent in the delivered file: the exact
+// preview/export mismatch stickers already had.
+//
+// EMOJI_BOX_RATIO must stay equal to text_overlay.py's, or the preview wraps
+// differently from the bake.
+const EMOJI_BOX_RATIO = 1.0
+const ZWJ = '\u{200D}'
+const EMOJI_MOD = new Set(['\u{FE0F}', '\u{20E3}',
+  '\u{1F3FB}', '\u{1F3FC}', '\u{1F3FD}', '\u{1F3FE}', '\u{1F3FF}'])
+// ZWJ / VS16 / keycap are class MEMBERS on purpose: they keep a
+// multi-codepoint emoji inside ONE match so emojiClusters() can split it
+// correctly. Written as escapes, not literals — invisible characters in a
+// regex are unreadable and unreviewable.
+// eslint-disable-next-line no-misleading-character-class
+const RUN_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{200D}\u{FE0F}\u{20E3}]+/gu
+
+/** Split one matched emoji run into individual renderable emoji, keeping ZWJ
+ *  sequences, flag pairs, skin tones and keycaps together. */
+function emojiClusters(run: string): string[] {
+  const cp = Array.from(run)
+  const out: string[] = []
+  let i = 0
+  const isRI = (ch: string) => ch >= '\u{1F1E6}' && ch <= '\u{1F1FF}'
+  while (i < cp.length) {
+    const start = i
+    const ch = cp[i]; i++
+    if (isRI(ch)) {
+      if (i < cp.length && isRI(cp[i])) i++
+    } else {
+      while (i < cp.length && EMOJI_MOD.has(cp[i])) i++
+      while (i < cp.length && cp[i] === ZWJ) {
+        i++
+        if (i < cp.length) i++
+        while (i < cp.length && EMOJI_MOD.has(cp[i])) i++
+      }
+    }
+    out.push(cp.slice(start, i).join(''))
+  }
+  return out
+}
+
+type Seg = { emoji: boolean; s: string }
+
+function tokenize(s: string): Seg[] {
+  const out: Seg[] = []
+  let pos = 0
+  for (const m of s.matchAll(RUN_RE)) {
+    const at = m.index ?? 0
+    if (at > pos) out.push({ emoji: false, s: s.slice(pos, at) })
+    for (const cl of emojiClusters(m[0])) out.push({ emoji: true, s: cl })
+    pos = at + m[0].length
+  }
+  if (pos < s.length) out.push({ emoji: false, s: s.slice(pos) })
+  return out
+}
+
+function lineWidth(ctx: CanvasRenderingContext2D, line: string, box: number): number {
+  let w = 0
+  for (const seg of tokenize(line)) w += seg.emoji ? box : ctx.measureText(seg.s).width
+  return w
+}
+
+// Emoji artwork (fetch + cache + the arrival counter) lives in lib/emojiArt.
 
 function isText(c: unknown): c is TextClip {
   return !!c && typeof c === 'object' && 'text' in (c as object) && 'end' in (c as object)
@@ -162,20 +232,90 @@ function animEnvelope(c: TextClip, t: number, height: number): { alpha: number; 
   return { alpha, scale, dy }
 }
 
-function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number): string[] {
+function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number,
+              box = 0): string[] {
   const out: string[] = []
   for (const para of text.split('\n')) {
-    const words = para.split(/\s+/).filter(Boolean)
+    // Each emoji is its own wrap-word: the text font measures it at ~0px, so
+    // gluing it to a neighbour overflows the line by exactly its box width.
+    // `glued` records that the SOURCE had no space at that boundary, so the
+    // rejoin below can't invent one — mirror of _emoji_words in
+    // text_overlay.py, and see its comment for what inventing them looked like.
+    const words = box ? wrapUnits(para)
+                      : para.split(/\s+/).filter(Boolean).map((w) => [false, w] as const)
     if (!words.length) { out.push(''); continue }
-    let cur = words[0]
+    let cur = words[0][1]
     for (let i = 1; i < words.length; i++) {
-      const trial = `${cur} ${words[i]}`
-      if (ctx.measureText(trial).width <= maxW) cur = trial
-      else { out.push(cur); cur = words[i] }
+      const [glued, word] = words[i]
+      const trial = `${cur}${glued ? '' : ' '}${word}`
+      const w = box ? lineWidth(ctx, trial, box) : ctx.measureText(trial).width
+      if (w <= maxW) cur = trial
+      else { out.push(cur); cur = word }
     }
     out.push(cur)
   }
   return out
+}
+
+/** Wrap units as [gluedToPrevious, unit]. Mirror of `_emoji_words`. */
+function wrapUnits(para: string): (readonly [boolean, string])[] {
+  const units: (readonly [boolean, string])[] = []
+  let prevWs = true               // start of string separates like whitespace
+  for (const seg of tokenize(para)) {
+    if (seg.emoji) {
+      units.push([units.length > 0 && !prevWs, seg.s] as const)
+      prevWs = false
+      continue
+    }
+    const parts = seg.s.split(/\s+/).filter(Boolean)
+    if (!parts.length) { prevWs = true; continue }
+    parts.forEach((w, i) => units.push(
+      [i === 0 && units.length > 0 && !/^\s/.test(seg.s), w] as const))
+    prevWs = /\s$/.test(seg.s)
+  }
+  return units
+}
+
+/** Vertical middle of the cap band, in canvas y — what the eye aligns an emoji
+ *  to. Mirror of text_overlay.py's `_cap_band_mid`, measured from THIS side's
+ *  metrics: `cy` is the em-box middle here (textBaseline 'middle') whereas
+ *  Pillow draws from the ascender top, so only the measured band is common
+ *  ground. Falls back to `cy` on the (long-obsolete) engines that don't report
+ *  actualBoundingBox*. */
+function capBandMid(ctx: CanvasRenderingContext2D, cy: number): number {
+  const m = ctx.measureText('H')
+  const asc = m.actualBoundingBoxAscent, desc = m.actualBoundingBoxDescent
+  if (typeof asc !== 'number' || typeof desc !== 'number') return cy
+  return cy + (desc - asc) / 2
+}
+
+/** Draw one wrapped line centred on `cx`, walking text runs and emoji boxes.
+ *  `paint` picks the pass: stroke (shadow/outline) or fill. */
+function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, cy: number,
+                  box: number, paint: 'stroke' | 'fill'): void {
+  const segs = tokenize(line)
+  let x = cx - lineWidth(ctx, line, box) / 2
+  const prevAlign = ctx.textAlign
+  ctx.textAlign = 'left'
+  // Measured once per line, and only when there IS an emoji to place.
+  let capMid: number | null = null
+  for (const seg of segs) {
+    if (seg.emoji) {
+      // Only on the fill pass: an emoji is artwork, it takes no outline, and
+      // painting it twice would double its opacity.
+      if (paint === 'fill') {
+        const im = emojiImage(seg.s)
+        if (capMid === null) capMid = capBandMid(ctx, cy)
+        if (im) ctx.drawImage(im, x, capMid - box / 2, box, box)
+      }
+      x += box
+      continue
+    }
+    if (paint === 'stroke') ctx.strokeText(seg.s, x, cy)
+    else ctx.fillText(seg.s, x, cy)
+    x += ctx.measureText(seg.s).width
+  }
+  ctx.textAlign = prevAlign
 }
 
 export function TextLayer({ edl, videoEl, width, height }: Props) {
@@ -231,19 +371,25 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     let raf = 0
     let lastTime = -1
     let lastDragId: string | null = null
+    let lastEmojiGen = -1
     const draw = () => {
       const t = videoEl ? videoEl.currentTime : 0
       const drag = getOverlayDrag()
       // Only redraw when the playhead actually advanced (or first frame) — but
       // ALWAYS redraw while a drag is live, or the text would sit frozen at its
       // pre-drag position on a paused preview and the gesture would look dead.
+      // Emoji artwork arriving counts as a change too: it is fetched during a
+      // draw and lands after it, so on a PAUSED preview nothing else would ever
+      // trigger the repaint that actually paints it (see emojiGeneration()).
       const dragActive = !!drag || lastDragId !== null
       lastDragId = drag?.id ?? null
-      if (!dragActive && Math.abs(t - lastTime) < 1 / 60 && lastTime >= 0) {
+      if (!dragActive && emojiGeneration() === lastEmojiGen
+          && Math.abs(t - lastTime) < 1 / 60 && lastTime >= 0) {
         raf = requestAnimationFrame(draw)
         return
       }
       lastTime = t
+      lastEmojiGen = emojiGeneration()
       ctx.clearRect(0, 0, width, height)
       const boxes: OverlayBox[] = []
 
@@ -318,11 +464,15 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, t - c.start, 1)))
         ctx.globalAlpha = (s.opacity ?? 1) * env.alpha * txOpacity
 
-        const cleaned = c.text.replace(EMOJI_RE, '').trim()
+        // Emoji are KEPT and drawn as artwork below (see drawLine) — they
+        // used to be stripped here and on the server, so typing one into a
+        // text clip produced nothing at all.
+        const cleaned = c.text.trim()
         if (!cleaned) continue
         const text = s.upper ? cleaned.toUpperCase() : cleaned
         const maxW = width * 0.86
-        const lines = wrap(ctx, text, maxW)
+        const emojiBox = fontPx * EMOJI_BOX_RATIO
+        const lines = wrap(ctx, text, maxW, emojiBox)
         const lineH = fontPx * 1.15
         const totalH = lineH * lines.length
 
@@ -363,7 +513,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
             cx: anchorX, cy,
             // Measured from the wrapped lines, so the box hugs the real glyphs
             // rather than a guessed rectangle.
-            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, ctx.measureText(l).width), 0) / 2 + fontPx * 0.15),
+            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, lineWidth(ctx, l, emojiBox)), 0) / 2 + fontPx * 0.15),
             hh: Math.max(10, totalH / 2 + fontPx * 0.12),
             rot: 0,
             x: (anchorX / width) * edl.canvas.w,
@@ -389,12 +539,12 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         ctx.shadowOffsetY = Math.max(2, fontPx * 0.03)
         for (let i = 0; i < lines.length; i++) {
           const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          ctx.strokeText(lines[i], anchorX, ly)
+          drawLine(ctx, lines[i], anchorX, ly, emojiBox, 'stroke')
         }
         ctx.restore()
         for (let i = 0; i < lines.length; i++) {
           const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          ctx.fillText(lines[i], anchorX, ly)
+          drawLine(ctx, lines[i], anchorX, ly, emojiBox, 'fill')
         }
         ctx.restore()
         ctx.globalAlpha = 1

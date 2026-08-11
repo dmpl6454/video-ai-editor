@@ -86,6 +86,18 @@
   margin-top: 2px;
 }
 
+/* Remove sits at the FAR LEFT, away from Update — it is the one destructive
+   action here and must not be a slip of the hand from the primary button. */
+.tp-remove {
+  margin-right: auto;
+  border-color: var(--danger-border, #6b2b2b);
+  color: var(--danger-fg, #ff8a8a);
+}
+.tp-remove:hover:not(:disabled) {
+  background: var(--danger-bg, #3a1d1d);
+  border-color: var(--danger-fg, #ff8a8a);
+}
+
 .tp-apply {
   background: var(--accent-2, #5b8dff);
   border-color: var(--accent-2, #5b8dff);

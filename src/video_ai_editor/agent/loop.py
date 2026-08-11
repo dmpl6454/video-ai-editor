@@ -177,6 +177,46 @@ def _anthropic_tools(categories: list[str] | None = None) -> list[dict]:
     ]
 
 
+TOOL_RESULT_LIMIT = 8000
+
+
+def _tool_result_json(result) -> str:
+    """A tool result as JSON, bounded — and still VALID JSON when bounded.
+
+    This used to be `json.dumps(result)[:8000]`, which slices mid-structure: on
+    a 40-clip timeline `get_timeline` is ~11.4k chars, so what reached the model
+    was a document that simply stopped — an unclosed string, half a key. Asked
+    to reason over that, it says it is confused, or invents the missing half.
+
+    Truncating into a labelled envelope keeps the payload parseable and tells
+    the model both that it is partial and what to do about it. Cheaper than
+    guessing which fields matter, and it cannot corrupt a small result.
+    """
+    s = json.dumps(result, default=str)
+    if len(s) <= TOOL_RESULT_LIMIT:
+        return s
+
+    def envelope(preview_chars: int) -> str:
+        return json.dumps({
+            "_truncated": True,
+            "original_chars": len(s),
+            "note": ("This result was too large to include in full. It is CUT OFF — "
+                     "do not assume anything about what is missing. Narrow the "
+                     "query (one track, one clip) or work from the ids you have."),
+            "preview": s[:preview_chars],
+        })
+
+    # Re-encoding escapes quotes and backslashes, so the envelope is longer than
+    # the preview it holds — by however much the payload happens to contain.
+    # Shrink until it genuinely fits rather than assuming a fixed allowance.
+    room = TOOL_RESULT_LIMIT - 400
+    out = envelope(room)
+    while len(out) > TOOL_RESULT_LIMIT and room > 200:
+        room -= max(64, len(out) - TOOL_RESULT_LIMIT)
+        out = envelope(room)
+    return out
+
+
 async def chat_turn(
     store: EDLStore,
     user_message: str,
@@ -254,7 +294,7 @@ async def chat_turn(
                         "content": [{
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": json.dumps(result, default=str)[:8000],
+                            "content": _tool_result_json(result),
                         }],
                     })
                     assistant_blocks = []  # reset; next turn starts fresh
@@ -278,5 +318,22 @@ async def chat_turn(
 
         if not any_tool:
             break
+    else:
+        # Ran out of tool-use rounds with the model still working.
+        #
+        # Two failures, both silent. The chat produced NO closing text — the
+        # user saw a run of tool calls and then nothing, which reads as the
+        # assistant giving up or losing the thread. And `history` was left
+        # ending on a `user` tool_result, so the next message appended a second
+        # consecutive user turn and the API rejected the whole conversation
+        # ("roles must alternate") — the same wedge the credit-failure path
+        # above already guards against, just reached from the other direction.
+        #
+        # So: say what happened, and close the history on an assistant turn.
+        msg = (f"I stopped after {max_turns} tool steps — the task needed more "
+               f"than one turn's worth. Nothing is broken and every step so far "
+               f"has been applied; tell me to continue and I'll pick up from here.")
+        yield {"type": "text_delta", "text": msg}
+        history.append({"role": "assistant", "content": [{"type": "text", "text": msg}]})
 
     yield {"type": "done"}

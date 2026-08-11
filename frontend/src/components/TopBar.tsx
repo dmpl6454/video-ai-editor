@@ -7,6 +7,7 @@ import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
+import { chordLabel } from '../keymap/engine'
 
 interface SessionRow { id: string; name: string }
 
@@ -305,12 +306,12 @@ export function TopBar() {
         <button
           onClick={() => dispatch('undo')}
           disabled={opsLen === 0}
-          title={opsLen === 0 ? 'Nothing to undo yet — make an edit first' : 'Undo last edit (⌘Z)'}
+          title={opsLen === 0 ? 'Nothing to undo yet — make an edit first' : `Undo last edit (${chordLabel('Mod+KeyZ')})`}
         >Undo</button>
         <button
           onClick={() => dispatch('redo')}
           disabled={!redoAvailable}
-          title={redoAvailable ? 'Redo (⌘⇧Z)' : 'Nothing to redo — Redo re-applies an edit you just undid'}
+          title={redoAvailable ? `Redo (${chordLabel('Mod+Shift+KeyZ')})` : 'Nothing to redo — Redo re-applies an edit you just undid'}
         >Redo</button>
         {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
           <button

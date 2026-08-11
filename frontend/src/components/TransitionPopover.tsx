@@ -64,10 +64,15 @@ interface Props {
   existing: TransitionInfo | null
   sessionId: string
   onApply: (type: string, duration: number) => void
+  /** Only meaningful when `existing` is set — there is nothing to remove
+   *  from a cut that has no transition yet. */
+  onRemove: () => void
   onClose: () => void
 }
 
-export function TransitionPopover({ x, y, at, existing, sessionId, onApply, onClose }: Props) {
+export function TransitionPopover(
+  { x, y, at, existing, sessionId, onApply, onRemove, onClose }: Props,
+) {
   const [names, setNames] = useState<string[]>(catalogCache ?? FALLBACK)
   const [showAll, setShowAll] = useState(false)
   const [type, setType] = useState(existing?.type ?? 'fade')
@@ -147,6 +152,14 @@ export function TransitionPopover({ x, y, at, existing, sessionId, onApply, onCl
         <span className="tp-unit">s</span>
       </label>
       <div className="tp-actions">
+        {/* Only offered for a cut that HAS a transition. Removing was
+            otherwise reachable only through chat/MCP (`remove_transition`),
+            so a transition added by a mis-click had no undo but Undo itself. */}
+        {existing && (
+          <button type="button" className="tp-remove" onClick={onRemove}>
+            Remove
+          </button>
+        )}
         <button type="button" onClick={onClose}>Cancel</button>
         <button type="button" className="tp-apply" onClick={apply}>
           {existing ? 'Update' : 'Add'}

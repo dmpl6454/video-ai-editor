@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -17,6 +18,8 @@ from pydantic import BaseModel
 
 from ..config import WHISPER_MODEL, WHISPER_DEVICE
 from .. import platformutil as _pu
+
+_log = logging.getLogger("video_ai_editor")
 
 
 class Word(BaseModel):
@@ -70,7 +73,20 @@ def _get_model(model_size: str | None = None):
     cached = _models.get(name)
     if cached is not None:
         return cached
-    from faster_whisper import WhisperModel
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as e:
+        # A bare ImportError here is neither ValueError nor RuntimeError, so
+        # main.py's dispatch mapping let it through as an HTTP 500 "internal
+        # server error" — the Captions button just failed with no explanation.
+        # RuntimeError maps to a 422 carrying this text straight to the toast.
+        # (The macOS .app deliberately excludes faster-whisper to stay ~150MB;
+        # that build reaches exactly this line.)
+        raise RuntimeError(
+            "Speech-to-text is unavailable in this build — the 'faster-whisper' "
+            "package is not installed. Run the app from source (`uv sync "
+            "--all-extras`) to enable captions and transcription."
+        ) from e
     compute_type = "int8"
     cached = WhisperModel(name, device=_resolve_device(), compute_type=compute_type)
     _models[name] = cached
@@ -244,12 +260,37 @@ def transcribe(audio_path: Path, language: str | None = None,
     if backend == "whisper_cpp" and _whisper_cpp_available():
         return _transcribe_via_whisper_cpp(audio_path, language, model_size)
     model = _get_model(model_size)
-    segments_iter, info = model.transcribe(
-        str(audio_path),
-        language=language,
-        word_timestamps=True,
-        vad_filter=True,
-    )
+    try:
+        segments_iter, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            word_timestamps=True,
+            vad_filter=True,
+        )
+    except Exception as e:
+        # `vad_filter=True` loads Silero VAD, which faster-whisper ships as a
+        # DATA FILE inside its own package (`faster_whisper/assets/
+        # silero_vad_v6.onnx`) — not as Python code. PyInstaller collects the
+        # module but NOT a package's data files unless the spec asks, so the
+        # packaged Windows app raised onnxruntime's `NoSuchFile` right here.
+        # That type is neither ValueError nor RuntimeError, so it escaped
+        # main.py's dispatch mapping and reached the user as a bare HTTP 500
+        # "internal server error" with no captions and no clue — while the
+        # identical click worked in dev, where site-packages has the asset.
+        #
+        # The spec now collects those data files (see "Video AI Editor.spec"),
+        # but degrade here too: VAD only trims silence before decoding, so
+        # transcription is fully functional without it. A packaging regression
+        # should cost caption *quality*, never the whole feature. If the retry
+        # fails as well, that exception propagates — this is not a blanket
+        # swallow.
+        _log.warning("whisper VAD unavailable (%s) — transcribing without vad_filter", e)
+        segments_iter, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            word_timestamps=True,
+            vad_filter=False,
+        )
     segments: list[Segment] = []
     for s in segments_iter:
         segments.append(Segment(

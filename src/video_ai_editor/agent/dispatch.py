@@ -179,6 +179,84 @@ def _first_free_gap(
     return candidate
 
 
+#: What `add_clip` gives a clip it places on a PIP lane. The PIP renderer sizes
+#: a clip at 35% of the canvas long edge × scale, so 0.6 keeps it on-canvas
+#: whatever the source orientation.
+_PIP_DEFAULT_SCALE = 0.6
+
+
+def _is_pip_lane(t: Track) -> bool:
+    """A video lane that is NOT the base layer — v2 and friends."""
+    return t.type == "video" and t.id != "v1"
+
+
+def _rebase_transform_for_lane(edl: EDL, c: Clip, origin: Track, dest: Track) -> str | None:
+    """Re-base x/y/scale when a clip crosses between v1 and a PIP lane.
+
+    Those three fields mean DIFFERENT THINGS on the two lanes, so carrying the
+    numbers across is not preservation, it is nonsense:
+      * on v1 they are a crop-window pan and zoom (`_build_clip_video_chain`);
+      * on a PIP lane they are the element's centre on the canvas and its size
+        (`render/pip.py`, which never even looks at `fit`).
+
+    `add_clip` has always applied the PIP default when it PLACES a clip on such
+    a lane, but a clip that arrives by being DRAGGED kept `Transform`'s plain
+    defaults — x=0, y=0. The PIP renderer reads that as "centre this element on
+    the canvas ORIGIN", emitting `overlay=x='(0.00)-overlay_w/2'`, so
+    three-quarters of the picture sat off-screen and only its bottom-right
+    corner showed, in the top-left of the frame. Measured on a 720x1280
+    preview: the overlay occupied x0-223, y0-167 hard against the corner,
+    versus x136-583, y472-807 centred once the default is applied. That corner
+    is what "it just applies a black box on the top left" was describing.
+
+    Returns a short phrase for the op summary, or None if nothing changed.
+    Nothing is touched when any of the three is KEYFRAMED — the same rule
+    `set_clip_fit` follows, and for the same reason: one lane change cannot
+    express what an authored curve should become, and destroying it silently is
+    worse than leaving a value that at least the user can see and fix.
+    """
+    if _is_pip_lane(origin) == _is_pip_lane(dest):
+        return None
+    tx = c.transform
+    if any(not isinstance(getattr(tx, p, 0.0), (int, float)) for p in ("x", "y", "scale")):
+        return None
+    if _is_pip_lane(dest):
+        tx.x, tx.y = edl.canvas.w * 0.5, edl.canvas.h * 0.5
+        tx.scale = _PIP_DEFAULT_SCALE
+        return "centred as a PIP"
+    # …and back the other way: a PIP's placement is meaningless as a crop pan,
+    # where it would instead slide an already-fitted picture and crop the far
+    # edge (the same trap `set_clip_fit`'s cover→contain reset exists for).
+    tx.x, tx.y, tx.scale = 0.0, 0.0, 1.0
+    return "reset to full-frame"
+
+
+def _repack_media(track: Track, prefer_first: str | None = None) -> None:
+    """Lay every media Clip on `track` end-to-end from 0 in start order.
+
+    This is what `move_clip(close_gap=True)` means: a drag is a REORDER, so the
+    lane ends up with no holes and the sequence follows the drop position.
+
+    `prefer_first` breaks a start-time TIE in favour of the clip being dragged,
+    which is what makes dropping onto an occupied slot an INSERT rather than a
+    no-op: dropping clip C at exactly 0 has to place it before the clip already
+    sitting at 0, or the repack re-derives the order it started with.
+
+    Only media `Clip`s are repositioned — text/sticker/caption clips on the
+    track (there normally are none on a video lane) keep their own timing,
+    since an overlay's start is a coordinate against the picture, not a slot.
+    """
+    media = sorted(
+        (x for x in track.clips if isinstance(x, Clip)),
+        key=lambda x: (float(x.start), 0 if x.id == prefer_first else 1),
+    )
+    cursor = 0.0
+    for x in media:
+        x.start = cursor
+        cursor += x.effective_duration
+    track.clips.sort(key=lambda x: getattr(x, "start", 0))
+
+
 def _num(args: dict, key: str, default: float | None = None, *,
          min: float | None = None, max: float | None = None) -> float | None:
     """Read a numeric tool argument, rejecting anything that isn't a real number.
@@ -582,6 +660,12 @@ def _current_v1_ingest_json(store: EDLStore) -> Path | None:
 
 # ---------- inspection ----------
 
+# Most clips listed per track by get_timeline(summary=True). Chosen against
+# loop.py's TOOL_RESULT_LIMIT: ~285 chars per clip, so 24 per track keeps a
+# busy multi-track project inside the budget with room for canvas/brand fields.
+MAX_SUMMARY_CLIPS = 24
+
+
 def get_timeline(store: EDLStore, args: dict) -> dict:
     summary = args.get("summary", True)
     edl = store.edl
@@ -631,7 +715,21 @@ def get_timeline(store: EDLStore, args: dict) -> dict:
                         "start": getattr(c, "start", 0),
                         "end": getattr(c, "end", 0),
                     })
+            # Cap the per-track listing. The summary grew ~285 chars per clip
+            # with nothing bounding it, so a 40-clip timeline (one
+            # remove_silences run) produced ~11.4k chars against loop.py's 8k
+            # tool-result limit — the model was handed a truncated document.
+            # The count and the boundary clips are what positional reasoning
+            # actually needs; the middle of a long strip is not.
             tinfo["clip_count"] = len(tinfo["clips"])
+            if len(tinfo["clips"]) > MAX_SUMMARY_CLIPS:
+                head = MAX_SUMMARY_CLIPS - 5
+                omitted = len(tinfo["clips"]) - MAX_SUMMARY_CLIPS
+                tinfo["clips"] = (tinfo["clips"][:head]
+                                  + [{"_omitted": omitted,
+                                      "note": "call get_clip(clip_id) for any of these"}]
+                                  + tinfo["clips"][-5:])
+                tinfo["clips_listed"] = MAX_SUMMARY_CLIPS
             track_summaries.append(tinfo)
         return {
             "duration": edl.duration,
@@ -775,6 +873,13 @@ def split_at(store: EDLStore, args: dict) -> dict:
     t = float(args["time"])
     new_clips: list = []
     split_count = 0
+    # original clip id → the RIGHT half's new id. The left half keeps the
+    # original id, so a caller holding a selection keeps pointing at the piece
+    # that now ENDS exactly at the cut — i.e. the one the playhead is no longer
+    # inside. The UI then warned "Not visible at the playhead (28.90s) — this
+    # clip runs 0.00–28.90s" the instant you split, which reads as a bug in the
+    # split. Returned so the caller can follow the playhead into the right half.
+    halves: dict[str, str] = {}
     for c in track.clips:
         if not isinstance(c, Clip):
             new_clips.append(c)
@@ -805,13 +910,14 @@ def split_at(store: EDLStore, args: dict) -> dict:
             })
             new_clips.append(left)
             new_clips.append(right)
+            halves[c.id] = right.id
             split_count += 1
         else:
             new_clips.append(c)
     track.clips = new_clips
     summary = f"Split at {t:.2f}s on {track.id} ({split_count} clip(s) split)"
     store.commit("split_at", args, summary)
-    return {"summary": summary, "split": split_count}
+    return {"summary": summary, "split": split_count, "halves": halves}
 
 
 def trim_clip(store: EDLStore, args: dict) -> dict:
@@ -878,6 +984,7 @@ def move_clip(store: EDLStore, args: dict) -> dict:
     if not res:
         raise ValueError("clip not found")
     track, c = res
+    origin = track
     new_track_id = args.get("new_track")
     if new_track_id and new_track_id != track.id:
         # Only a media Clip is restricted to video/audio-family lanes — a
@@ -904,11 +1011,28 @@ def move_clip(store: EDLStore, args: dict) -> dict:
         track.clips.remove(c)
         new_t.clips.append(c)
         track = new_t
+    crossed = track is not origin
+    rebased = (_rebase_transform_for_lane(store.edl, c, origin, track)
+               if crossed and isinstance(c, Clip) else None)
+    # A same-lane drag with close_gap is a REORDER, and a reorder must be
+    # allowed to land on an occupied slot — that is how you say "put this one
+    # before that one". The repack below assigns the real positions, so the
+    # free-gap snap is not just unnecessary here, it actively defeats the
+    # gesture: dragging the LAST clip to the front snapped it straight back
+    # past every clip it was trying to jump, the repack then found the
+    # original order, and the drag did nothing at all (while the UI still
+    # announced "Snapped to the nearest free gap"). A cross-lane drop is a
+    # placement, not a reorder, so it keeps the snap.
+    reorder = (bool(args.get("close_gap")) and isinstance(c, Clip)
+               and track.id == "v1" and not crossed)
+
     if hasattr(c, "start"):
         # Clamp to >= 0; ffmpeg can't address negative timeline positions
         # and the timeline renderer would crash on the next preview.
         requested_start = _num(args, "new_start", 0.0, min=0.0)
-        if isinstance(c, Clip):
+        if reorder:
+            c.start = requested_start
+        elif isinstance(c, Clip):
             # Cross-track (or same-track) drop onto an occupied range used to
             # silently stack two media clips at the same time — no data loss
             # (both survive in the EDL) but the canvas draws them with
@@ -925,11 +1049,74 @@ def move_clip(store: EDLStore, args: dict) -> dict:
                 track, c.effective_duration, requested_start, ignore_clip_id=c.id
             )
         else:
+            # A Sticker/TextClip stores an ABSOLUTE `end`; a media Clip derives
+            # its span from in_/out. So moving an overlay by assigning `start`
+            # alone leaves `end` behind and DESTROYS the span: a text clip
+            # dragged from 2–5s to 20s became start=20, end=5 — a
+            # negative-duration clip that validated and persisted fine.
+            #
+            # The damage compounds. `_ripple_overlays` remaps start and end
+            # INDEPENDENTLY (correct for a clip straddling a cut), so on the
+            # next ripple the inverted pair collapsed to that function's 0.1s
+            # minimum-span floor and stranded itself far out on the timeline.
+            # `edl.duration` is a max over EVERY track, so a 0.1s sliver at 56s
+            # held the whole timeline open: delete a long video, add a short
+            # one, and the timeline still ran to the OLD length and played
+            # black past the end of the new clip. It also made every re-render
+            # encode ~56s of black, which is why the stale preview took so
+            # long to go away.
+            span = float(getattr(c, "end", requested_start)) - float(c.start)
             c.start = requested_start
+            if hasattr(c, "end"):
+                # A non-positive span here is pre-existing corruption or a
+                # legacy EDL — give it the same 0.1s floor `set_clip_timing`
+                # applies rather than propagating the inversion.
+                c.end = requested_start + (span if span > 0 else 0.1)
     track.clips.sort(key=lambda x: getattr(x, "start", 0))
+
+    # Close the hole the clip left behind, when asked.
+    #
+    # Without this, dragging the FIRST clip to the end of the timeline leaves
+    # its old slot empty and the timeline just gets longer — the tester saw
+    # "the video duration got increased and left an empty space at the start"
+    # and expected "the second clip should come to the front". A plain move is
+    # still the default: Claude/MCP callers place clips at absolute positions
+    # (apply_template, b-roll insertion) and must not have neighbours shuffle
+    # underneath them. The Timeline drag opts in, because a drag is the one
+    # gesture where "the gap follows the clip" is what people mean.
+    #
+    # V1 only, and only for media Clips. v1 is the SEQUENCE — the one lane
+    # where clips follow one another and "the gap follows the clip" is what a
+    # drag means. Every other lane holds elements positioned against v1's
+    # picture: a caption's start is a coordinate, not a slot, and so is a
+    # PIP's (render/pip.py floats a v2 clip over the composite at an absolute
+    # time). Packing one of those from t=0 is the same damage
+    # test_set_speed_rejected_on_v2_pip already pins down — deliberately
+    # gapped PIP placements at 8.0/20.0 collapsing to 0.0/2.0.
+    #
+    # WHICH lane gets closed depends on whether the drag crossed lanes, and
+    # getting that wrong is invisible in the common case. The hole is on the
+    # track the clip LEFT, but `track` has already been reassigned to the
+    # destination by this point — so a v1→v2 drag closed gaps on v2 (shuffling
+    # clips the user never touched, and pulling the dropped one out of the
+    # slot it was just dropped in) while the actual hole sat open on v1,
+    # holding the timeline at its old length. The two coincide only for a
+    # same-lane move, which is why this read as correct for so long.
+    if args.get("close_gap") and isinstance(c, Clip):
+        if crossed:
+            # The destination is NOT repacked: a drop onto another lane places
+            # the clip at a chosen time, and _first_free_gap above already
+            # guarantees it doesn't land on top of anything.
+            if origin.id == "v1":
+                _repack_media(origin)
+        elif track.id == "v1":
+            _repack_media(track, prefer_first=c.id)
+
     summary = f"Move {c.id} → {track.id} @ {c.start:.2f}s"
+    if rebased:
+        summary += f" ({rebased})"
     store.commit("move_clip", args, summary)
-    return {"summary": summary}
+    return {"summary": summary, "start": c.start, "transform_rebased": rebased}
 
 
 def reorder_clips(store: EDLStore, args: dict) -> dict:
@@ -2015,12 +2202,34 @@ def add_transition(store: EDLStore, args: dict) -> dict:
         )
     tr = Transition(at=float(args["at"]), type=ttype,
                     duration=float(args.get("duration", 0.5)))
+    # Replace any transition already sitting on this cut instead of appending.
+    # The renderer keys transitions by the seam they belong to, so a second one
+    # at the same boundary never rendered — it just accumulated in the EDL,
+    # where `remove_transition` then had to sweep up an unknown number of them
+    # and the file disagreed with the picture. Same rule the text overlays
+    # follow (add_text replaces on temporal overlap). 0.05s tolerance because
+    # `at` arrives from a click on the timeline, not from exact arithmetic.
+    replaced = [t for t in v1.transitions if abs(t.at - tr.at) <= 0.05]
+    if replaced:
+        v1.transitions = [t for t in v1.transitions if abs(t.at - tr.at) > 0.05]
     v1.transitions.append(tr)
     resolved, _ = resolve_transition(ttype)
     note = "" if resolved == ttype else f" → {resolved}"
-    summary = f"Add {tr.type}{note} transition at {tr.at:.2f}s ({tr.duration:.2f}s)"
+    verb = "Replace" if replaced else "Add"
+    summary = f"{verb} {tr.type}{note} transition at {tr.at:.2f}s ({tr.duration:.2f}s)"
+    before = store.edl.duration
     store.commit("add_transition", args, summary)
-    return {"summary": summary}
+    # A cross-fade plays both clips at once, so the timeline genuinely gets
+    # shorter (see EDL.transition_overlap). Say so: the length change is the
+    # single most surprising thing about this tool, and until the EDL started
+    # accounting for it the app reported the OLD length and playback just
+    # stopped early with no explanation.
+    shortened = before - store.edl.duration
+    if shortened > 0.001:
+        summary += (f" — timeline {before:.2f}s → {store.edl.duration:.2f}s "
+                    f"(the two clips overlap for {shortened:.2f}s)")
+    return {"summary": summary, "duration": store.edl.duration,
+            "shortened_by": round(shortened, 3) if shortened > 0.001 else 0.0}
 
 
 def remove_transition(store: EDLStore, args: dict) -> dict:
@@ -2205,8 +2414,24 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     for k in ("x", "y", "scale", "rotation", "opacity"):
         if k in args and args[k] is not None:
             setattr(c.transform, k, _num(args, k))
+    # Optional restack, IN THE SAME COMMIT. Dragging a sticker only ever wrote
+    # x/y, so with every sticker at the default z=0 the order stayed "latest
+    # added on top" and no amount of dragging could bring an older one forward
+    # ("even after I drag the earlier emoji and stack on the latest emoji, the
+    # latest still overlaps"). Doing it as a second dispatch would split the
+    # gesture across two ops, so one Undo would revert the raise and leave the
+    # sticker moved. `raise_to_front` is opt-in: the direct-manipulation layer
+    # asks for it only when the sticker is actually covered (see StickerLayer),
+    # so an explicit Send-to-back is not silently undone by an unrelated nudge.
+    z_note = ""
+    if args.get("raise_to_front"):
+        from ..edl.schema import Sticker as _Sticker
+        if isinstance(c, _Sticker):
+            sib = [getattr(s, "z", 0) for s in t.clips if isinstance(s, _Sticker)]
+            c.z = (max(sib) if sib else 0) + 1
+            z_note = f" z={c.z}"
     summary = (f"Transform {cid}: rot={c.transform.rotation} scale={c.transform.scale} "
-               f"x={c.transform.x} y={c.transform.y} opacity={c.transform.opacity}")
+               f"x={c.transform.x} y={c.transform.y} opacity={c.transform.opacity}{z_note}")
     store.commit("set_clip_transform", args, summary)
     return {"summary": summary}
 
@@ -2231,9 +2456,57 @@ def set_clip_fit(store: EDLStore, args: dict) -> dict:
     mode = str(args.get("fit") or args.get("mode") or "cover").lower()
     if mode not in ("contain", "cover"):
         raise ValueError(f"fit must be 'contain' or 'cover', got {mode!r}")
+    was_cover = getattr(c, "fit", "contain") == "cover"
     c.fit = mode  # type: ignore[assignment]
+
+    # Leaving cover DROPS the framing that only meant anything inside cover.
+    #
+    # `x`/`y` are the crop-window pan: "which part of the over-sized frame do I
+    # keep". In `contain` there is no over-sized frame — the same numbers become
+    # a translate of an already-letterboxed picture, which shifts it off centre
+    # and crops the far edge. Combined with a leftover cover zoom, unticking
+    # "Fill frame" therefore returned something still cropped instead of the
+    # original: "when I unmark the fill frame option the video gets cropped, but
+    # doesn't come to its original aspect ratio". Restoring the identity
+    # transform is what makes that control an undo of itself.
+    #
+    # Keyframed values are left ALONE — they are an animation the user authored
+    # deliberately, and silently flattening one to a constant would destroy work
+    # that a fit toggle has no business touching. Undo restores either way.
+    #
+    # TWO conditions gate the reset, and both were found by review after the
+    # first version shipped them wrong:
+    #
+    # 1. **v1 ONLY.** `fit` is read exclusively by `_build_clip_video_chain`,
+    #    which the compositor uses for the v1 base layer; `render/pip.py` never
+    #    looks at it. On a v2/PIP clip `x`/`y`/`scale` are the PIP's on-canvas
+    #    PLACEMENT, not a crop pan — so this reset took a toggle that was a
+    #    harmless no-op (nothing renders differently on v2) and made it silently
+    #    move a bottom-right PIP to three-quarters off the top-left corner.
+    # 2. **Nothing keyframed on ANY of the three.** Guarding each property
+    #    independently is not enough: they are coupled. Zeroing a SCALAR `scale`
+    #    while a KEYFRAMED `x` survives leaves the pan with no headroom to move
+    #    into — the animated branch emits `scale=1080*max(1,1.0)` so `iw` equals
+    #    the canvas, ffmpeg clamps the whole pan expression to 0, and the
+    #    authored animation renders as a motionless frame. Preserving a
+    #    keyframed value but destroying what makes it visible is not preserving
+    #    it, so if any one of them is keyframed the whole reset is skipped.
+    reset: list[str] = []
+    props = (("x", 0.0), ("y", 0.0), ("scale", 1.0))
+    on_v1 = t.id == "v1"
+    any_keyframed = any(
+        not isinstance(getattr(c.transform, p, d), (int, float)) for p, d in props)
+    if was_cover and mode == "contain" and on_v1 and not any_keyframed:
+        for prop, default in props:
+            cur = getattr(c.transform, prop, default)
+            if isinstance(cur, (int, float)) and abs(float(cur) - default) > 1e-6:
+                setattr(c.transform, prop, default)
+                reset.append(prop)
+
     summary = f"Fit {cid} → {mode}" + (" (fills frame, crops overflow)"
                                        if mode == "cover" else " (letterbox)")
+    if reset:
+        summary += f"; reset {'/'.join(reset)} to restore the original framing"
     store.commit("set_clip_fit", args, summary)
     return {"summary": summary, "fit": mode}
 
@@ -2327,6 +2600,19 @@ def remove_marker(store: EDLStore, args: dict) -> dict:
     summary = f"Removed marker {mid}"
     store.commit("remove_marker", args, summary)
     return {"summary": summary}
+
+
+def check_features(store: EDLStore, args: dict) -> dict:
+    """What this install can actually do, with a concrete fix for each gap.
+
+    Read-only and cheap (import-spec + file-existence checks, no model loads),
+    so it deliberately does NOT commit. Exists because the agent had no way to
+    find out why a tool failed and invented remedies instead — telling a user to
+    `uv add noisereduce soundfile` for a working noisereduce, and calling vocal
+    isolation "not installed" when the real fault was a torchcodec DLL.
+    """
+    from ..ai.features import feature_report
+    return feature_report()
 
 
 def pyannote_status(store: EDLStore, args: dict) -> dict:
@@ -3006,22 +3292,69 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "shorts": ranges, "new_sessions": new_sessions}
 
 
+KF_PROPS = ("x", "y", "scale", "rotation", "opacity")
+
+
+def _kf_props_arg(args: dict) -> list[str]:
+    """The props one keyframe call targets: `props` (list) or `prop` (single).
+
+    Both handlers accept a LIST so the UI's single "Keyframe" button can key a
+    clip's whole transform in ONE commit — five separate dispatches would mean
+    five undo steps for one click, and an Undo could leave the clip half-keyed.
+    `prop` stays the single-property form Claude/MCP and older callers use.
+    """
+    raw = args.get("props")
+    props = ([str(p) for p in raw] if isinstance(raw, (list, tuple))
+             else [str(args["prop"])] if args.get("prop") is not None
+             else [])
+    if not props:
+        raise ValueError("need 'prop' (one of x|y|scale|rotation|opacity) or 'props'")
+    bad = [p for p in props if p not in KF_PROPS]
+    if bad:
+        raise ValueError(f"prop must be {'|'.join(KF_PROPS)}, got {bad[0]!r}")
+    # Preserve order, drop repeats — a duplicate would just re-write the key.
+    return list(dict.fromkeys(props))
+
+
+def _kf_read(cur, interp: str, *, seed_anchor: bool = True) -> tuple[list[tuple[float, float]], str]:
+    """Existing keyframes + interp for a transform value in any of its three
+    shapes (scalar / dict / Keyframe).
+
+    `seed_anchor` controls what happens to a property that is NOT yet animated.
+    True (the single-`prop` form, unchanged) turns the scalar into a key at t=0
+    first, so `add_keyframe scale @2s = 1.5` on a static clip yields a RAMP from
+    the current value — the behaviour every existing Claude/MCP/template caller
+    was written against. False (the `props` form) starts empty, so one press of
+    the UI's Keyframe button creates exactly ONE keyframe: with five properties
+    keyed at once the hidden anchors were the difference between "I added a
+    keyframe" and a panel reading 2 keys — and, per property, why a tester
+    counted more keyframes than clicks.
+    """
+    if isinstance(cur, (int, float)):
+        return ([(0.0, float(cur))] if seed_anchor else []), interp
+    if isinstance(cur, dict):
+        return [tuple(p) for p in (cur.get("keyframes") or [])], cur.get("interp", interp)
+    return [tuple(p) for p in cur.keyframes], cur.interp
+
+
 def add_keyframe(store: EDLStore, args: dict) -> dict:
     """Add (or update) a keyframe for a clip's transform property.
 
     `clip_id`  — clip to animate (Clip, TextClip, or Sticker)
     `prop`     — one of x / y / scale / rotation / opacity
+    `props`    — OR a list of them, keyed together in one commit
     `time`     — clip-local seconds (0 = clip start)
-    `value`    — scalar value at that time
+    `value`    — scalar value at that time (single-prop form)
+    `values`   — {prop: value} for the list form; any prop left out keeps the
+                 value it already has at `time`, which is what "key the current
+                 look" means and is why the UI needn't compute it
     `interp`   — linear (default) | ease-in | ease-out | ease-in-out | step | back-out
     """
     cid = str(args["clip_id"])
-    prop = str(args["prop"])
-    if prop not in ("x", "y", "scale", "rotation", "opacity"):
-        raise ValueError(f"prop must be x|y|scale|rotation|opacity, got {prop!r}")
+    props = _kf_props_arg(args)
     t = float(args["time"])
-    val = float(args["value"])
-    interp = str(args.get("interp", "linear"))
+    interp_arg = str(args.get("interp", "linear"))
+    values = args.get("values") if isinstance(args.get("values"), dict) else {}
 
     res = store.edl.get_clip(cid)
     if not res:
@@ -3029,55 +3362,89 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
     _, c = res
     if not hasattr(c, "transform"):
         raise ValueError(f"clip {cid} has no transform")
-    cur = getattr(c.transform, prop)
-    # Convert scalar → Keyframe spec; merge into existing list (replace at same time).
-    if isinstance(cur, (int, float)):
-        kfs = [(0.0, float(cur))]
-    elif isinstance(cur, dict):
-        kfs = [tuple(p) for p in (cur.get("keyframes") or [])]
-        interp = cur.get("interp", interp)
-    else:  # Keyframe instance
-        kfs = [tuple(p) for p in cur.keyframes]
-        interp = cur.interp
-    kfs = [p for p in kfs if abs(p[0] - t) > 1e-3]
-    kfs.append((t, val))
-    kfs.sort(key=lambda p: p[0])
+
     from ..edl.schema import Keyframe
-    setattr(c.transform, prop, Keyframe(keyframes=kfs, interp=interp))
-    summary = f"Keyframe {cid}.{prop} @ {t:.2f}s = {val:.3f} (now {len(kfs)} keys)"
+    from ..edl.keyframes import sample as _kf_sample
+    counts: dict[str, int] = {}
+    for prop in props:
+        cur = getattr(c.transform, prop)
+        if prop in values:
+            val = float(values[prop])
+        elif len(props) == 1 and args.get("value") is not None:
+            val = float(args["value"])
+        else:
+            # Whatever the property already reads as at this instant — so
+            # keying an untouched property pins it rather than jumping it.
+            val = float(_kf_sample(cur, t))
+        kfs, interp = _kf_read(cur, interp_arg, seed_anchor=len(props) == 1)
+        kfs = [p for p in kfs if abs(p[0] - t) > 1e-3]
+        kfs.append((t, val))
+        kfs.sort(key=lambda p: p[0])
+        setattr(c.transform, prop, Keyframe(keyframes=kfs, interp=interp))
+        counts[prop] = len(kfs)
+
+    if len(props) == 1:
+        p = props[0]
+        summary = (f"Keyframe {cid}.{p} @ {t:.2f}s "
+                   f"= {_kf_sample(getattr(c.transform, p), t):.3f} (now {counts[p]} keys)")
+    else:
+        summary = f"Keyframed {cid} {'+'.join(props)} @ {t:.2f}s"
     store.commit("add_keyframe", args, summary)
-    return {"summary": summary, "keys": len(kfs)}
+    return {"summary": summary, "keys": max(counts.values()), "props": props}
 
 
 def remove_keyframe(store: EDLStore, args: dict) -> dict:
+    """Remove the keyframe at `time` from `prop` (or every prop in `props`)."""
     cid = str(args["clip_id"])
-    prop = str(args["prop"])
+    props = _kf_props_arg(args)
     t = float(args["time"])
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
     _, c = res
-    cur = getattr(c.transform, prop, None)
-    if cur is None or isinstance(cur, (int, float)):
-        return {"summary": f"{prop} on {cid} has no keyframes", "keys": 0}
-    if isinstance(cur, dict):
-        kfs = [tuple(p) for p in (cur.get("keyframes") or [])]
-        interp = cur.get("interp", "linear")
+
+    from ..edl.schema import Keyframe
+    left: dict[str, int] = {}
+    touched: list[str] = []
+    for prop in props:
+        cur = getattr(c.transform, prop, None)
+        if cur is None or isinstance(cur, (int, float)):
+            continue                      # not animated — nothing here to drop
+        kfs, interp = _kf_read(cur, "linear")
+        keep = [p for p in kfs if abs(p[0] - t) > 1e-3]
+        if len(keep) == len(kfs):
+            continue                      # no key AT this time
+        touched.append(prop)
+        if not keep:
+            # Collapse to the value that key HELD, not to 0.0.
+            #
+            # A single keyframe is a constant, so dropping it must leave the
+            # clip looking exactly as it did. Zeroing instead meant scale 0.0
+            # (clamped by Transform to 0.01, i.e. invisible-small) and opacity
+            # 0.0 (invisible) — removing a keyframe made the clip vanish. That
+            # was survivable while five separate buttons each removed one
+            # property; with one button that keys the whole transform it is two
+            # clicks from a blank clip, which is how it was finally noticed.
+            gone = next((p[1] for p in kfs if abs(p[0] - t) <= 1e-3), None)
+            setattr(c.transform, prop, float(gone) if gone is not None else 0.0)
+        elif len(keep) == 1:
+            setattr(c.transform, prop, keep[0][1])
+        else:
+            setattr(c.transform, prop, Keyframe(keyframes=keep, interp=interp))
+        left[prop] = len(keep)
+
+    if not touched:
+        # Nothing changed — do NOT commit. A no-op op would still clear the
+        # redo stack (see EDLStore.commit), so a stray click would silently
+        # cost the user their redo history.
+        return {"summary": f"{cid} has no keyframe at {t:.2f}s", "keys": 0}
+    if len(touched) == 1:
+        p = touched[0]
+        summary = f"Removed keyframe {cid}.{p} @ {t:.2f}s ({left[p]} left)"
     else:
-        kfs = [tuple(p) for p in cur.keyframes]
-        interp = cur.interp
-    kfs = [p for p in kfs if abs(p[0] - t) > 1e-3]
-    if not kfs:
-        # Collapse back to scalar (use 0 as sensible default)
-        setattr(c.transform, prop, 0.0)
-    elif len(kfs) == 1:
-        setattr(c.transform, prop, kfs[0][1])
-    else:
-        from ..edl.schema import Keyframe
-        setattr(c.transform, prop, Keyframe(keyframes=kfs, interp=interp))
-    summary = f"Removed keyframe {cid}.{prop} @ {t:.2f}s ({len(kfs)} left)"
+        summary = f"Removed {cid} {'+'.join(touched)} keyframes @ {t:.2f}s"
     store.commit("remove_keyframe", args, summary)
-    return {"summary": summary, "keys": len(kfs)}
+    return {"summary": summary, "keys": max(left.values()), "props": touched}
 
 
 def add_sticker(store: EDLStore, args: dict) -> dict:
@@ -3093,7 +3460,31 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
         png_path = fetch_emoji_png(str(emoji_arg))
         if not png_path:
             raise ValueError(f"could not fetch emoji PNG for {emoji_arg!r}")
-        src_arg = str(png_path)
+        # Copy the fetched artwork INTO the session's uploads/stickers/, and
+        # point the clip at that copy rather than at the shared per-machine
+        # emoji cache (`user_cache_dir/emoji/<codepoint>.png`). Two reasons:
+        #   1. `GET /files/{kind}/{name}` is confined to <session>/{uploads,
+        #      previews,exports} — correctly, it's the traversal guard — so the
+        #      cache path is unreachable from the browser. StickerLayer draws
+        #      stickers client-side now, and without a fetchable PNG it fell
+        #      back to painting the emoji with the SYSTEM font: the preview
+        #      showed the OS glyph while the export baked Twemoji, i.e. the
+        #      sticker visibly changed artwork the moment you let go of it.
+        #   2. A session that owns its own copy survives the cache being
+        #      cleared, and `.vae` bundling/remapping (storage_project's
+        #      `_media_srcs`) already handles uploads-relative sticker paths.
+        # Falls back to the cache path if the copy fails for any reason —
+        # never let a cosmetic improvement break adding a sticker.
+        try:
+            import shutil as _shutil
+            dst_dir = store.dir / "uploads" / "stickers"
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = dst_dir / Path(png_path).name
+            if not dst.exists():
+                _shutil.copy2(png_path, dst)
+            src_arg = str(dst)
+        except OSError:
+            src_arg = str(png_path)
     else:
         # User-supplied PNG path goes through the allowlist guard.
         src_arg = _safe_src(src_arg)
@@ -3498,7 +3889,15 @@ def list_transitions(store: EDLStore, args: dict) -> dict:
     """
     from ..render.transitions import catalog, all_names
     cat = catalog()
-    return {"transitions": all_names(), "catalog": cat, "count": cat["count"]}
+    # `looks` is surfaced at the TOP level, not only inside `catalog`, because
+    # the top-level `count` is the number a reader quotes — and it counts
+    # accepted NAMES (105), a third of which are synonyms. Quoting it is how
+    # "the platform promises N transitions" became a padded claim a tester
+    # could disprove by finding repeats. `count` keeps its meaning for existing
+    # callers; this just makes the flat read honest on its own.
+    return {"transitions": all_names(), "catalog": cat, "count": cat["count"],
+            "looks": cat["looks"], "alias_count": cat["alias_count"],
+            "note": cat["note"]}
 
 
 def list_text_styles(store: EDLStore, args: dict) -> dict:
@@ -3848,6 +4247,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "diarize": diarize,
     "assign_caption_speakers": assign_caption_speakers,
     "pyannote_status": pyannote_status,
+    "check_features": check_features,
     "name_speakers": name_speakers,
 }
 

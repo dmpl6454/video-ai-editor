@@ -14,7 +14,7 @@ import pytest
 
 from video_ai_editor.agent.dispatch import dispatch
 from video_ai_editor.edl import EDLStore
-from video_ai_editor.edl.schema import Canvas, Clip, Sticker, empty_edl
+from video_ai_editor.edl.schema import Canvas, Clip, Sticker, Transform, empty_edl
 from video_ai_editor.render import render_preview
 from video_ai_editor.storage import new_session_id, session_dir
 from video_ai_editor.storage_project import _media_srcs, load_project, save_project
@@ -152,6 +152,92 @@ def test_fit_defaults_to_contain_so_existing_edls_are_unchanged():
     assert Clip(src="/x.mp4", in_=0.0, out=1.0).fit == "contain"
 
 
+def _mk_split_video(path: Path, w: int = 640, h: int = 360, dur: float = 1.0) -> Path:
+    """Left half red, right half blue — lets a test tell which part of the
+    source is actually on screen, not just whether it's black or not."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "lavfi", "-i", f"color=c=red:s={w // 2}x{h}:d={dur}",
+         "-f", "lavfi", "-i", f"color=c=blue:s={w // 2}x{h}:d={dur}",
+         "-f", "lavfi", "-i", f"sine=f=440:duration={dur}",
+         "-filter_complex", "[0:v][1:v]hstack[v]",
+         "-map", "[v]", "-map", "2:a", "-r", "30",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+         "-shortest", str(path)],
+        check=True, capture_output=True)
+    return path
+
+
+def test_cover_fit_pan_reveals_real_footage_not_black(tmp_path):
+    """'Fill frame' + a Transform X pan used to crop to dead-centre in the fit
+    stage BEFORE the pan ever ran, so panning had nothing left to reveal and
+    just padded in black ("this function crops the video by its own, I have
+    no freedom to choose which part is kept"). A pan should show a different
+    real part of the (wide) source, with the frame still fully filled."""
+    src = _mk_split_video(tmp_path / "split.mp4", w=640, h=360)
+    edl = empty_edl(Canvas(w=360, h=640, fps=30))
+    c = Clip(src=str(src), in_=0.0, out=1.0, start=0.0)
+    c.fit = "cover"
+    edl.get_track("v1").clips.append(c)
+    edl.recompute_duration()
+
+    def render_and_sample(transform: Transform) -> tuple[int, int, int]:
+        c.transform = transform
+        sess = tmp_path / f"s_{transform.x}"
+        sess.mkdir()
+        res = render_preview(edl, sess, height=640)
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", "0.3", "-i", str(res.path), "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "360x640", "-"],
+            capture_output=True, check=True).stdout
+        black_rows = sum(1 for y in range(640) if max(raw[y * 360 * 3:(y + 1) * 360 * 3]) < 12)
+        # The red/blue split lands at the source's own centre, which a centred
+        # cover crop also puts at the output's centre column — so the centre
+        # column is the point most sensitive to a modest pan in EITHER
+        # direction (an edge column only "sees" one direction of pan before
+        # it's already saturated one colour).
+        px = raw[(320 * 360 + 180) * 3: (320 * 360 + 180) * 3 + 3]
+        return px[0], px[2], black_rows  # (red channel, blue channel, black rows)
+
+    _, _, blk0 = render_and_sample(Transform())                 # centred cover crop
+    r_pos, b_pos, blk_pos = render_and_sample(Transform(x=200))   # +x moves the picture
+    r_neg, b_neg, blk_neg = render_and_sample(Transform(x=-200))  # right -> reveals more
+                                                                   # of the source's LEFT
+                                                                   # (red) side; -x more blue.
+
+    assert blk0 == blk_pos == blk_neg == 0, (
+        f"panning a cover-fit clip must never reveal black: {blk0} {blk_pos} {blk_neg}")
+    # Proves the pan reveals genuinely different real footage (not a no-op or
+    # manufactured black fill): +x shifts toward red, -x shifts toward blue.
+    assert r_pos > r_neg, f"+x didn't shift toward red vs -x: {r_pos} vs {r_neg}"
+    assert b_neg > b_pos, f"-x didn't shift toward blue vs +x: {b_neg} vs {b_pos}"
+
+
+def test_cover_fit_pan_with_scale_below_one_is_not_black(tmp_path):
+    """A cover-fit pan combined with Transform scale < 1 (reachable via the
+    CropReposition scroll-to-zoom-out gesture) used to render a solid BLACK
+    frame: the "extra zoom" step multiplied the already-covering frame by
+    `sc_static` unclamped, so scale=0.1 shrunk it to 10% — SMALLER than the
+    canvas — and the subsequent crop then asked for more pixels than existed.
+    Found live via a real user session (scale=0.1 x=342 y=130); ffmpeg
+    produced a valid-looking mp4 with no error, just a black one. The extra
+    zoom must never shrink the frame below its cover-fit baseline size."""
+    src = _mk_split_video(tmp_path / "split2.mp4", w=640, h=360)
+    edl = empty_edl(Canvas(w=360, h=640, fps=30))
+    c = Clip(src=str(src), in_=0.0, out=1.0, start=0.0)
+    c.fit = "cover"
+    c.transform = Transform(x=100.0, y=0.0, scale=0.1)
+    edl.get_track("v1").clips.append(c)
+    edl.recompute_duration()
+    res = render_preview(edl, tmp_path / "sess", height=640)
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", "0.3", "-i", str(res.path), "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "360x640", "-"],
+        capture_output=True, check=True).stdout
+    max_channel = max(raw)
+    assert max_channel > 12, f"scale<1 cover-fit pan rendered (near-)black: max byte {max_channel}"
+
+
 def test_set_clip_fit_rejects_an_unknown_mode(tmp_path):
     src = _mk_video(tmp_path / "v.mp4")
     edl = empty_edl(Canvas(w=320, h=180, fps=30))
@@ -203,3 +289,116 @@ def test_overlay_order_follows_start_not_static_vs_animated(tmp_path):
     assert order == ["sa", "st"], (
         "expected the EARLY (animated) sticker first and the LATE (static) one "
         f"composited on top; got {order} from {extra_inputs}")
+
+
+def test_preview_skips_stickers_but_export_still_bakes_them(tmp_path):
+    """Preview must NOT bake stickers; export must.
+
+    StickerLayer draws every sticker client-side each frame so a drag is
+    smooth. While the preview ALSO baked them, the baked copy sat frozen at
+    the pre-drag position through the whole gesture and the commit→re-render
+    gap: two stickers on screen mid-drag, then the live one vanished and the
+    stale one lingered at the old spot ("it disappears and leaves a trail").
+    A client cannot erase a baked pixel, so the preview has to leave them
+    alone — but export has no StickerLayer, so it must keep baking.
+    """
+    from video_ai_editor.render.text_overlay import build_overlay_chain
+
+    png = _mk_png(tmp_path / "sticker.png", "red")
+    edl = empty_edl(Canvas(w=320, h=180, fps=30))
+    track = edl.get_track("stickers")
+    static = Sticker(src=str(png), start=0.0, end=4.0)
+    animated = Sticker(src=str(png), start=0.0, end=4.0)
+    animated.transform.opacity = {"keyframes": [[0.0, 0.0], [0.5, 1.0]]}
+    track.clips.extend([static, animated])
+    edl.recompute_duration()
+
+    def chain(preview: bool):
+        return build_overlay_chain(
+            edl, tmp_path / f"cache_{preview}", source_label="[v]", out_label="[vo]",
+            first_input_index=1, out_w=320, out_h=180, preview=preview)
+
+    pv_filter, pv_inputs, pv_label = chain(True)
+    ex_filter, ex_inputs, _ = chain(False)
+
+    # Both kinds (static `st_`, animated `sa_`) must be gone from preview.
+    assert [a for a in pv_inputs if a.endswith(".png")] == [], (
+        f"preview must bake no sticker PNGs, got {pv_inputs}")
+    # No overlay work at all here → the chain is a pass-through, so callers
+    # keep using the untouched source label.
+    assert pv_filter == "" and pv_label == "[v]"
+
+    ex_pngs = [Path(a).name.split("_")[0] for a in ex_inputs if a.endswith(".png")]
+    assert sorted(ex_pngs) == ["sa", "st"], (
+        f"export must still bake both sticker kinds, got {ex_inputs}")
+
+
+def test_split_at_reports_the_right_half_so_selection_can_follow(tmp_path):
+    """The LEFT half keeps the original clip id, so whatever was selected
+    before the split ends up pointing at the piece that now ENDS exactly at
+    the cut — the one the playhead has just left. Properties then opened with
+    "Not visible at the playhead (28.90s) — this clip runs 0.00–28.90s" the
+    instant you pressed split, which reads as the split having broken
+    something. `halves` maps original id → right-half id so the caller can
+    move the selection onto the piece under the playhead.
+    """
+    sid = new_session_id()
+    sd = session_dir(sid)
+    for sub in ("uploads", "previews", "exports", "cache", "snapshots"):
+        (sd / sub).mkdir(parents=True, exist_ok=True)
+    store = EDLStore(sd)
+    src = _mk_video(tmp_path / "v.mp4", dur=4.0)
+    dispatch(store, "add_clip", {"src": str(src), "track": "v1",
+                                 "in": 0.0, "out": 4.0, "start": 0.0})
+    orig = store.edl.get_track("v1").clips[0].id
+
+    res = dispatch(store, "split_at", {"track": "v1", "time": 2.0})
+    assert res["split"] == 1
+    halves = res["halves"]
+    assert list(halves) == [orig], f"expected the original id as the key, got {halves}"
+
+    right_id = halves[orig]
+    clips = {c.id: c for c in store.edl.get_track("v1").clips}
+    assert right_id in clips and right_id != orig
+    left, right = clips[orig], clips[right_id]
+    # The left half ends AT the cut (playhead >= end → "not visible"); the
+    # right half is the one that actually contains the playhead.
+    assert left.start + left.effective_duration == pytest.approx(2.0, abs=1e-6)
+    assert right.start == pytest.approx(2.0, abs=1e-6)
+    assert right.start + right.effective_duration > 2.0
+
+
+def test_sticker_image_route_resolves_paths_outside_uploads(tmp_path):
+    """StickerLayer draws sticker pixels client-side now, so it must be able
+    to FETCH every sticker's artwork — including the ones that legitimately
+    live outside <session>/uploads/ (a brand kit's end-card, an emoji from the
+    shared cache, any absolute path). /files/{kind}/{name} refuses those by
+    design, so those stickers would have drawn as an empty box in preview
+    while exporting perfectly. Resolution goes through the session's OWN EDL,
+    so the untrusted URL input is a clip id, never a path.
+    """
+    from fastapi.testclient import TestClient
+    from video_ai_editor import main as m
+
+    outside = tmp_path / "brand" / "endcard.png"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    _mk_png(outside, "blue")
+
+    sid = new_session_id()
+    sd = session_dir(sid)
+    for sub in ("uploads", "previews", "exports", "cache", "snapshots"):
+        (sd / sub).mkdir(parents=True, exist_ok=True)
+    store = EDLStore(sd)
+    sk = Sticker(src=str(outside), start=0.0, end=2.0)
+    store.edl.get_track("stickers").clips.append(sk)
+    store.commit("test", {}, "add sticker")
+
+    client = TestClient(m.app)
+    r = client.get(f"/api/sessions/{sid}/sticker/{sk.id}")
+    assert r.status_code == 200, r.text
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # Unknown clip id → 404, not a 500 and not a path probe.
+    assert client.get(f"/api/sessions/{sid}/sticker/nope").status_code == 404
+    # A malformed session id is rejected before any lookup.
+    assert client.get("/api/sessions/..%2F..%2Fetc/sticker/x").status_code in (400, 404)

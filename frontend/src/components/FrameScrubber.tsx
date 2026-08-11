@@ -21,10 +21,23 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 // mp4box 2.3 DOES ship types (`dist/mp4box.all.d.ts`), so this import needs no
 // suppression — a `@ts-expect-error` here is itself an error under `tsc -b`.
 import { createFile, DataStream, Endianness } from 'mp4box'
+import { frameChainFor } from '../lib/frameWalk'
 
 export interface FrameScrubberHandle {
   seek: (timeSeconds: number) => Promise<void>
   isReady: () => boolean
+  /**
+   * Copy the <video>'s CURRENTLY displayed frame onto the canvas, synchronously.
+   *
+   * The canvas is revealed the instant a scrub starts, but its own exact frame
+   * only lands once the async WebCodecs walk finishes (~150ms). Without this,
+   * the first scrub of a session fades up a never-painted (transparent) canvas
+   * over the video — a visible flash — and later scrubs briefly show the
+   * previous scrub's frame. Priming from the element that is already on screen
+   * makes the reveal a genuine no-op: identical pixels, then one clean swap to
+   * the exact frame.
+   */
+  prime: (video: HTMLVideoElement | null) => void
 }
 
 interface Props {
@@ -76,9 +89,13 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       keyIdx: number[]             // indices of keyframe samples
       timescale: number            // ticks per second
       lastDecodedCts: number       // last cts decoded, microseconds
-      targetUs: number             // current seek target, microseconds — the
-                                   // decoder output gate only paints frames
-                                   // that cover-or-follow this time
+      targetUs: number             // current seek target, microseconds
+      paintUs: number              // composition timestamp of the ONE frame
+                                   // this seek should paint (see seek())
+      painted: boolean             // has THIS seek painted yet? Only used to
+                                   // arm the non-conforming-decoder safety net
+                                   // in the output gate; false on a conforming
+                                   // one only until the exact match lands.
       pendingTarget: number | null // seconds — newest seek queued behind an
                                    // in-flight walk (drag coalescing)
       inFlight: boolean            // a decode walk + flush is running
@@ -87,13 +104,14 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       useFallback: boolean         // mp4box failed → drive the hidden <video>
     }>({
       decoder: null, samples: [], keyIdx: [], timescale: 1,
-      lastDecodedCts: -1, targetUs: 0, pendingTarget: null, inFlight: false,
+      lastDecodedCts: -1, targetUs: 0, paintUs: -1, painted: false, pendingTarget: null, inFlight: false,
       lastSeekKey: -1, decoderConfig: null, useFallback: false,
     })
 
     // Load + demux the mp4 whenever `src` changes
     useEffect(() => {
       let cancelled = false
+      let sawSamples = false
       // Guard: calling close() on an already-closed VideoDecoder throws
       // ("Cannot call 'close' on a closed codec"). The cleanup may have
       // already closed it before this re-run, so check state first.
@@ -103,7 +121,7 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
       }
       stateRef.current = {
         decoder: null, samples: [], keyIdx: [], timescale: 1,
-        lastDecodedCts: -1, targetUs: 0, pendingTarget: null, inFlight: false,
+        lastDecodedCts: -1, targetUs: 0, paintUs: -1, painted: false, pendingTarget: null, inFlight: false,
         lastSeekKey: -1, decoderConfig: null, useFallback: false,
       }
       // Detach any prior fallback <video> source so a stale clip can't paint.
@@ -178,13 +196,43 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
 
           const decoder = new VideoDecoder({
             output: (frame) => {
-              // GOP-walk intermediates — frames that END before the seek
-              // target — are decode-only; painting them is what made a drag
-              // visibly rewind to the keyframe and replay forward. The walk
-              // always ends with a frame that covers-or-follows the target
-              // (see seek()), so exactly that frame lands on the canvas.
+              // Paint EXACTLY the one frame seek() picked, by its composition
+              // timestamp. Everything else the walk feeds is decode-only:
+              // the GOP intermediates before the target (painting those made a
+              // drag visibly rewind to the keyframe and replay forward), and —
+              // just as important — the reference frames AFTER it that a
+              // B-frame stream forces us to feed (see seek()). The old gate
+              // was "covers-or-follows the target", which paints every frame
+              // from the covering one onward; since the decoder emits in
+              // PRESENTATION order, the last one to land won, so the canvas
+              // ended up showing a frame past the target and the picture
+              // stepped BACK when the <video> was revealed underneath.
               try {
-                if (frame.timestamp + (frame.duration ?? 0) >= stateRef.current.targetUs) {
+                // ±2µs: cts/duration can be fractional in the track timescale
+                // while VideoFrame.timestamp is integer microseconds.
+                if (Math.abs(frame.timestamp - stateRef.current.paintUs) <= 2) {
+                  stateRef.current.painted = true
+                  renderFrame(frame)
+                } else if (!stateRef.current.painted
+                           && frame.timestamp > stateRef.current.paintUs) {
+                  // Safety net for a decoder that does not echo the chunk
+                  // timestamp back on the decoded frame. WebCodecs REQUIRES it
+                  // (the output VideoFrame's timestamp is set from the
+                  // EncodedVideoChunk's), and Chromium does — but this is the
+                  // one claim in the scrubber that cannot be measured on the
+                  // engine it matters most for, WKWebView, and the cost of
+                  // being wrong is asymmetric: an unmatched gate paints
+                  // NOTHING, leaving a blank canvas over an otherwise correct
+                  // <video>.
+                  //
+                  // Frames are emitted in PRESENTATION order, so the first one
+                  // past the target proves the exact match is never coming.
+                  // Painting it degrades to the old "covers-or-follows"
+                  // behaviour — at most one frame late, which is what shipped
+                  // before this branch — instead of degrading to blank. On a
+                  // conforming decoder the exact branch always fires first and
+                  // this is unreachable, so it changes nothing on Chromium.
+                  stateRef.current.painted = true
                   renderFrame(frame)
                 }
               } finally { frame.close() }
@@ -221,7 +269,19 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
         }
         // The first batch arriving lights up scrubbing; we don't have to wait
         // for every sample to be parsed before allowing seek.
-        if (!cancelled && !ready) setReady(true)
+        // `sawSamples` is a per-effect-run local, NOT the `ready` state. Using
+        // `!ready` here read the value captured when this effect run was
+        // created — which is `true` on every re-run after the first successful
+        // load (a preview re-render swaps `src`). The re-run's own
+        // `setReady(false)` above never reached that stale closure, so the
+        // guard short-circuited forever and the scrubber went permanently
+        // dead after the very first edit of a session: `isReady()` false →
+        // Preview never shows the canvas → every paused seek exposed the raw
+        // <video> GOP-walk (keyframe, then visibly decoding forward frame by
+        // frame), which is the "stutters when I pause and move the playhead"
+        // report. It looked intermittently fixed because a freshly-loaded
+        // session, before any edit, still had its first (working) src.
+        if (!cancelled && !sawSamples) { sawSamples = true; setReady(true) }
       }
 
       function renderFrame(frame: VideoFrame) {
@@ -282,6 +342,9 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
 
     useImperativeHandle(ref, () => ({
       isReady: () => ready,
+      prime(video: HTMLVideoElement | null) {
+        if (video && video.readyState >= 2) paintVideoFrame(video, canvasRef.current)
+      },
       async seek(timeSeconds: number) {
         const st = stateRef.current
 
@@ -319,38 +382,19 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
             // any chunk is fed.
             st.targetUs = targetUs
 
-            // Bisect to find latest keyframe index whose cts ≤ target
-            let lo = 0, hi = st.keyIdx.length - 1, best = 0
-            while (lo <= hi) {
-              const mid = (lo + hi) >> 1
-              const sIdx = st.keyIdx[mid]
-              const cts = st.samples[sIdx].cts
-              if (cts <= targetUs) { best = mid; lo = mid + 1 }
-              else hi = mid - 1
-            }
-            const startIdx = st.keyIdx[best]
-
-            // Walk forward from the keyframe through every sample whose
-            // cts ≤ target. We feed everything to the decoder (it needs the
-            // whole chain), but the output gate skips painting the frames
-            // before the target — only the frame covering it hits the canvas.
-            let maxEndUs = 0
-            for (let i = startIdx; i < st.samples.length; i++) {
+            // Which frames to feed, and which single one to paint. The rule
+            // lives in lib/frameWalk (pure + unit-tested) because it turns on
+            // decode-order vs composition-order, which is easy to get wrong in
+            // review and instantly visible on screen: the canvas painted a
+            // frame ~2 ahead of the <video> underneath, so the picture snapped
+            // BACK the moment the canvas handed over. Measured on a
+            // frame-numbered fixture: canvas 165, video 163, on every paused
+            // seek and every single-frame step.
+            const { startIdx, lastIdx, paintUs, maxEndUs } =
+              frameChainFor(st.samples, st.keyIdx, targetUs)
+            if (lastIdx < 0) break
+            for (let i = startIdx; i <= lastIdx; i++) {
               const s = st.samples[i]
-              maxEndUs = Math.max(maxEndUs, s.cts + s.duration)
-              if (s.cts > targetUs && i > startIdx) {
-                // Include the first sample whose cts > targetUs so a target
-                // that lies between two frames still gets the next frame
-                // displayed (closest match).
-                const chunk = new EncodedVideoChunk({
-                  type: s.is_sync ? 'key' : 'delta',
-                  timestamp: s.cts,
-                  duration: s.duration,
-                  data: s.data,
-                })
-                st.decoder.decode(chunk)
-                break
-              }
               const chunk = new EncodedVideoChunk({
                 type: i === startIdx || s.is_sync ? 'key' : 'delta',
                 timestamp: s.cts,
@@ -359,6 +403,12 @@ export const FrameScrubber = forwardRef<FrameScrubberHandle, Props>(
               })
               st.decoder.decode(chunk)
             }
+            // The frame the canvas must show — and the exact value the output
+            // gate compares against. `painted` re-arms the gate's safety net
+            // for THIS seek; without the reset a previous seek's success would
+            // leave it disarmed for the rest of the session.
+            st.paintUs = paintUs
+            st.painted = false
             // A target past the last fed sample would otherwise fail the
             // gate and paint nothing — clamp it to the walk's real end.
             // (-2µs absorbs float cts/duration truncating to VideoFrame's

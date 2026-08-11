@@ -82,3 +82,44 @@ def test_thumb_404_for_missing_source(client, tmp_path: Path):
     r = client.get(f"/api/sessions/{sid}/thumb",
                    params={"src": str(tmp_path / sid / "uploads" / "nope.mp4")})
     assert r.status_code == 404
+
+
+def test_thumb_at_the_very_end_of_a_clip_still_returns_a_frame(client, tmp_path: Path):
+    """Found by loading the packaged app and watching its network log.
+
+    The Timeline requests a thumbnail for the TAIL of a clip. A seek at or past
+    the last frame decodes nothing, so ffmpeg wrote no output and the endpoint
+    answered 422 — a broken thumbnail and a console error for a perfectly valid
+    file. Measured on a 4.017s clip: t=3.9 was fine, t=3.967 was a 422.
+    """
+    sid = client.post("/api/sessions").json()["id"]
+    src = tmp_path / sid / "uploads" / "tail.mp4"
+    _make_video(src, dur=2.0)
+
+    for t in (1.9, 1.98, 2.0, 2.5):
+        r = client.get(f"/api/sessions/{sid}/thumb",
+                       params={"src": str(src), "t": t, "h": 54})
+        assert r.status_code == 200, f"t={t} -> {r.status_code} {r.text[:200]}"
+        assert r.content[:2] == b"\xff\xd8", f"t={t} did not return a JPEG"
+
+
+def test_thumb_end_retry_does_not_change_the_normal_path(client, tmp_path: Path):
+    """The end-of-file retry must be a FAILURE path only: a mid-clip thumb has
+    to keep coming from the requested timestamp, not the last frame."""
+    sid = client.post("/api/sessions").json()["id"]
+    src = tmp_path / sid / "uploads" / "grad.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    # Brightness ramps over time, so an early frame and a late frame differ.
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi",
+                    "-i", "gradients=s=320x180:d=3:r=30",
+                    "-pix_fmt", "yuv420p", str(src)],
+                   check=True, capture_output=True)
+
+    early = client.get(f"/api/sessions/{sid}/thumb",
+                       params={"src": str(src), "t": 0.2, "h": 54})
+    late = client.get(f"/api/sessions/{sid}/thumb",
+                      params={"src": str(src), "t": 2.5, "h": 54})
+    assert early.status_code == late.status_code == 200
+    assert early.content != late.content, (
+        "mid-clip thumbnails collapsed to the same frame — the retry is "
+        "firing on the normal path")

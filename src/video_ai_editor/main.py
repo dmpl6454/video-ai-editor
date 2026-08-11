@@ -1131,6 +1131,74 @@ async def load_project_endpoint(file: UploadFile = File(...)):
     return {"id": sid}
 
 
+_EMOJI_SEQ_RE = re.compile(r"^[0-9a-f]{1,6}(-[0-9a-f]{1,6}){0,7}$")
+
+
+@app.get("/api/emoji/{seq}.png")
+def serve_emoji_png(seq: str):
+    """Emoji artwork by dash-joined hex codepoints (e.g. `1f60d`, `1f468-200d-1f4bb`).
+
+    TextLayer composites emoji INSIDE a text clip from the same Fluent 3D PNGs
+    the exporter bakes (render/text_overlay.render_text_png). Letting the
+    browser paint them with its own emoji font instead would put the OS design
+    in the preview and Fluent in the delivered file — the same preview/export
+    mismatch stickers already had.
+
+    Not session-scoped: emoji artwork is global, shared, and read-only. `seq`
+    is validated to hex-and-dashes before it is turned back into characters,
+    so it can never name a path.
+    """
+    if not _EMOJI_SEQ_RE.match(seq):
+        raise HTTPException(400, "bad emoji sequence")
+    try:
+        emoji = "".join(chr(int(p, 16)) for p in seq.split("-"))
+    except ValueError:
+        raise HTTPException(400, "bad emoji sequence")
+    from .ai.emoji import fetch_emoji_png
+    path = fetch_emoji_png(emoji)
+    if not path or not Path(path).is_file():
+        raise HTTPException(404, "no artwork for that emoji")
+    # Immutable: the bytes for a codepoint never change, and TextLayer asks
+    # for them on every text clip that contains one.
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/api/sessions/{sid}/sticker/{clip_id}")
+def serve_sticker_image(sid: str, clip_id: str):
+    """Serve a sticker clip's artwork, resolved through the session's own EDL.
+
+    StickerLayer draws stickers client-side (the server no longer bakes them
+    into the preview — see build_overlay_chain's `preview` docstring), so it
+    needs the real artwork bytes for every sticker, not just the ones that
+    happen to sit under <session>/uploads/. Three sources legitimately don't:
+    emoji added before add_sticker started copying into the session (shared
+    `user_cache_dir/emoji/`), a brand kit's end-card/watermark image, and any
+    sticker whose src was supplied as an absolute path. Those would otherwise
+    render as an empty box in preview while exporting perfectly — the worst
+    kind of mismatch.
+
+    NOT a path-serving route: the only untrusted input is `clip_id`, used as a
+    lookup key. The path served is whatever that session's EDL already stores
+    and the renderer already reads, so this exposes nothing new — unlike
+    widening `/files/{kind}/{name}`, whose containment check is its whole
+    security model.
+    """
+    if not is_valid_session_id(sid):
+        raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
+    from .edl.schema import Sticker
+    store = _store(sid)
+    found = store.edl.get_clip(clip_id)
+    clip = found[1] if found else None
+    if not isinstance(clip, Sticker) or not clip.src:
+        raise HTTPException(404, "sticker not found")
+    path = Path(clip.src)
+    if not path.is_file():
+        # The artwork is genuinely gone (emoji cache cleared, end-card moved).
+        # 404 so the client falls back to its glyph/outline rather than hanging.
+        raise HTTPException(404, "sticker image missing")
+    return FileResponse(path)
+
+
 @app.get("/api/sessions/{sid}/files/{kind}/{name:path}")
 def serve_session_file(sid: str, kind: str, name: str):
     # Same first-layer sid shape check as DELETE /sessions/{sid} — sid is

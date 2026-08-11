@@ -95,7 +95,15 @@ EDIT_TOOLS = [
        ["clip_id"]),
     _t("move_clip", "Move a clip to a new timeline start (and optional new track).",
        "edit",
-       {"clip_id": {"type": "string"}, "new_start": {"type": "number"}, "new_track": {"type": "string"}},
+       {"clip_id": {"type": "string"}, "new_start": {"type": "number"}, "new_track": {"type": "string"},
+        "close_gap": {
+            "type": "boolean",
+            "description": "Video lanes only: after the move, pull the remaining "
+                           "media clips left so the slot the clip vacated is closed "
+                           "and the timeline doesn't grow. Off by default — use it "
+                           "for reordering, not for placing a clip at an absolute "
+                           "time (which would shuffle its neighbours).",
+        }},
        ["clip_id", "new_start"]),
     _t("reorder_clips", "Reorder the clips on a track by listing their ids in the new order.",
        "edit",
@@ -141,6 +149,13 @@ EDIT_TOOLS = [
            "scale": {"type": "number", "description": "1.0 = original size"},
            "rotation": {"type": "number", "description": "Degrees"},
            "opacity": {"type": "number", "description": "0..1"},
+           "raise_to_front": {
+               "type": "boolean",
+               "description": "Stickers only: also stack this sticker above every "
+                              "sibling on its track, in the same undo step as the "
+                              "move. Use when a repositioned sticker would land "
+                              "underneath another one.",
+           },
        },
        ["clip_id"]),
     _t("set_clip_timing",
@@ -200,8 +215,14 @@ EDIT_TOOLS = [
        {
            "clip_id": {"type": "string"},
            "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "props": {"type": "array", "items": {"type": "string"},
+                     "description": "Key several properties in ONE commit instead of "
+                                    "'prop'. A property left out of 'values' keeps "
+                                    "whatever it already reads as at 'time'."},
            "time": {"type": "number", "description": "Clip-local seconds (0 = clip start)"},
            "value": {"type": "number"},
+           "values": {"type": "object",
+                      "description": "{prop: value} — the 'props' form's per-property values"},
            "interp": {"type": "string",
                       "enum": ["linear", "ease-in", "ease-out", "ease-in-out",
                                "step", "back-out", "bounce"],
@@ -216,6 +237,11 @@ EDIT_TOOLS = [
        {
            "clip_id": {"type": "string"},
            "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "props": {"type": "array", "items": {"type": "string"},
+                     "description": "Remove from several properties in ONE commit "
+                                    "instead of 'prop'. Properties with no key at "
+                                    "'time' are skipped; if none has one, nothing "
+                                    "is committed."},
            "time": {"type": "number", "description": "Clip-local seconds of the key to remove"},
        },
        ["clip_id", "prop", "time"]),
@@ -639,6 +665,13 @@ EFFECT_TOOLS = [
     _t("list_transitions",
        "The full transition catalog: categories, aliases, and descriptions.",
        "effects", {}),
+    _t("check_features",
+       "What THIS install can actually do: which optional features (captions, "
+       "stem isolation, background removal, upscaling, …) are available, and the "
+       "exact fix for each one that is not. Cheap and read-only. Call this before "
+       "telling the user that anything is missing or broken, and before "
+       "suggesting any install command — never guess at either.",
+       "project", {}),
     _t("add_mask",
        "Add a vector mask to a clip (everything outside is hidden / black-padded).",
        "effects",

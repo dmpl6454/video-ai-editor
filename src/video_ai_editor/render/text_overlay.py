@@ -74,6 +74,137 @@ def _strip_emoji(s: str) -> str:
     return _EMOJI_RE.sub("", s).strip()
 
 
+# --- inline emoji in text -----------------------------------------------------
+#
+# The bundled role fonts (Anton, Bebas, Inter, Montserrat) carry no emoji
+# glyphs, so text used to be pushed through _strip_emoji before drawing and
+# every emoji simply VANISHED — typing "🔥 SALE" exported "SALE", and typing
+# only emoji exported an empty PNG ("I was unable to apply the emojis through
+# the text section"). Rather than bundle a ~10MB colour-emoji font (which
+# Pillow can only draw at its own fixed bitmap sizes, and which would still
+# differ from what the browser paints), each emoji is composited as an IMAGE —
+# the very same Fluent 3D PNG a sticker uses. One artwork source for the whole
+# app, identical on macOS and Windows, identical between preview and export.
+
+# An emoji occupies a square this many times the font size. The client mirrors
+# this constant (TextLayer) so the drawn layout matches the baked one.
+#
+# VERTICAL placement is measured, not a constant: the square is centred on the
+# text's CAP BAND — the top of a capital to the baseline, which is what the eye
+# reads as the middle of a line. A fixed fraction of the em box was wrong twice
+# over, because "where the cap band sits inside the em box" is a property of the
+# font, and the two sides start from different origins: Pillow draws from the
+# ASCENDER TOP while canvas 'middle' draws from the em-box MIDDLE. One nudge of
+# 0.06em therefore put the bake 26.5px ABOVE the text and the preview below it —
+# misaligned on both sides AND disagreeing with each other. Each side now
+# measures the same band from its own font metrics, so they land together.
+EMOJI_BOX_RATIO = 1.0
+
+
+_ZWJ = "‍"
+_VS16 = "️"
+_KEYCAP = "⃣"
+# Trailing codepoints that belong to the emoji BEFORE them rather than
+# starting a new one: variation selector, keycap, and the five skin tones.
+_EMOJI_MODIFIERS = {_VS16, _KEYCAP, *(chr(cp) for cp in range(0x1F3FB, 0x1F400))}
+
+
+def _emoji_clusters(run: str) -> list[str]:
+    """Split a matched emoji RUN into individual renderable emoji.
+
+    `_EMOJI_RE` ends in `+`, so it swallows adjacent emoji into one match —
+    "😍🤩" arrived as a single token, was looked up as codepoints
+    `1f60d-1f929`, found no artwork, and drew NOTHING. But the run genuinely
+    can contain multi-codepoint emoji that must stay together: a ZWJ sequence
+    (👨‍💻), a regional-indicator pair (🇮🇳), a skin tone, a keycap. So walk it
+    rather than splitting per character.
+    """
+    out: list[str] = []
+    i, n = 0, len(run)
+    while i < n:
+        start = i
+        ch = run[i]
+        i += 1
+        if "\U0001F1E6" <= ch <= "\U0001F1FF":
+            # Regional indicator: exactly two make a flag.
+            if i < n and "\U0001F1E6" <= run[i] <= "\U0001F1FF":
+                i += 1
+        else:
+            while i < n and run[i] in _EMOJI_MODIFIERS:
+                i += 1
+            while i < n and run[i] == _ZWJ:
+                i += 1                       # the joiner
+                if i < n:
+                    i += 1                   # the joined base
+                while i < n and run[i] in _EMOJI_MODIFIERS:
+                    i += 1
+        out.append(run[start:i])
+    return out
+
+
+def _tokenize_emoji(s: str) -> list[tuple[str, str]]:
+    """Split into ('text'|'emoji', chunk) segments, preserving order. Each
+    'emoji' segment is exactly ONE renderable emoji (see _emoji_clusters)."""
+    out: list[tuple[str, str]] = []
+    pos = 0
+    for m in _EMOJI_RE.finditer(s):
+        if m.start() > pos:
+            out.append(("text", s[pos:m.start()]))
+        for cluster in _emoji_clusters(m.group()):
+            out.append(("emoji", cluster))
+        pos = m.end()
+    if pos < len(s):
+        out.append(("text", s[pos:]))
+    return out
+
+
+def _emoji_words(text: str) -> list[tuple[bool, str]]:
+    """Split into wrap units as `(glued_to_previous, unit)`.
+
+    A unit is one whitespace-delimited word or one emoji cluster. Wrapping
+    works on words, and an emoji has to be its own unit or it would be measured
+    with the text font (≈0 px, it has no glyph) and lines would overflow by
+    exactly the emoji boxes they contain.
+
+    `glued` is what keeps that from changing the text: the wrapper rejoins
+    units, and joining unconditionally with " " INSERTED a space at every
+    emoji boundary that the writer never typed — "GG🔥🔥" laid out as "GG 🔥 🔥",
+    spacing emoji 0.32 em apart when a word space is 0.24 ("the space between
+    the emoji is too much"). Splitting a string for measurement must not alter
+    what gets drawn.
+    """
+    units: list[tuple[bool, str]] = []
+    prev_ws = True          # start of string separates like whitespace does
+    for kind, chunk in _tokenize_emoji(text):
+        if kind == "emoji":
+            units.append((bool(units) and not prev_ws, chunk))
+            prev_ws = False
+            continue
+        parts = chunk.split()
+        if not parts:       # a run of pure whitespace between two emoji
+            prev_ws = True
+            continue
+        for i, w in enumerate(parts):
+            units.append((i == 0 and bool(units) and not chunk[:1].isspace(), w))
+        prev_ws = chunk[-1:].isspace()
+    return units
+
+
+def _emoji_image(cluster: str, box: int) -> Image.Image | None:
+    """Fluent 3D artwork for one emoji cluster, scaled to `box` px. None if
+    unavailable (offline and uncached) — the caller then skips it, which is
+    the old strip-it behaviour for that one emoji rather than a broken render."""
+    try:
+        from ..ai.emoji import fetch_emoji_png
+        p = fetch_emoji_png(cluster)
+        if not p:
+            return None
+        with Image.open(p) as im:
+            return im.convert("RGBA").resize((box, box), Image.LANCZOS)
+    except Exception:
+        return None
+
+
 # Per-role rendering style.
 ROLE_STYLES: dict[str, dict] = {
     "super":       {"font": "Anton-Regular.ttf",        "size": 140, "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 6, "shadow": True},
@@ -378,17 +509,57 @@ def resolve_opacity_override(c: TextClip) -> float | None:
     return None if f >= 0.999 else f
 
 
-def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
+def _cap_band_mid(draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont) -> float:
+    """Vertical middle of the cap band, as an offset from the y passed to
+    `draw.text()` (Pillow's default 'la' anchor = the ascender top).
+
+    'H' stands in for the band because cap height is what the eye aligns to and
+    every font this app loads has one — including the Noto script fallbacks,
+    which are Latin-complete. Falls back to the em-box middle if the glyph is
+    missing or degenerate rather than letting a zero bbox slam every emoji to
+    the top of the line.
+    """
+    try:
+        bb = draw.textbbox((0, 0), "H", font=font)
+    except Exception:      # pragma: no cover - a font with no 'H' at all
+        return font.size * 0.5
+    return (bb[1] + bb[3]) / 2 if bb[3] > bb[1] else font.size * 0.5
+
+
+def _word_w(word: str, draw: ImageDraw.ImageDraw,
+            font: ImageFont.FreeTypeFont, box: int) -> float:
+    """Width of one wrap-word: an emoji is its fixed box, text is measured."""
+    return _line_w(word, draw, font, box)
+
+
+def _line_w(line: str, draw: ImageDraw.ImageDraw,
+            font: ImageFont.FreeTypeFont, box: int) -> float:
+    """Width of a laid-out line, counting emoji as boxes. Text runs are
+    measured whole (not per-word) so kerning matches what Pillow draws."""
+    total = 0.0
+    for kind, chunk in _tokenize_emoji(line):
+        total += float(box) if kind == "emoji" else draw.textlength(chunk, font=font)
+    return total
+
+
+def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
+          max_w: int, box: int = 0) -> list[str]:
     lines: list[str] = []
     for paragraph in text.splitlines():
-        words = paragraph.split()
+        # Emoji become their own words so their real (box) width counts toward
+        # the line budget — the font measures them at ~0px.
+        # (glued, unit) pairs when emoji are in play; a plain split otherwise
+        # keeps the no-emoji path byte-identical to what it always produced.
+        words = (_emoji_words(paragraph) if box
+                 else [(False, w) for w in paragraph.split()])
         if not words:
             lines.append("")
             continue
-        cur = words[0]
-        for w in words[1:]:
-            trial = f"{cur} {w}"
-            if draw.textlength(trial, font=font) <= max_w:
+        cur = words[0][1]
+        for glued, w in words[1:]:
+            trial = f"{cur}{'' if glued else ' '}{w}"
+            width = _line_w(trial, draw, font, box) if box else draw.textlength(trial, font=font)
+            if width <= max_w:
                 cur = trial
             else:
                 lines.append(cur)
@@ -428,8 +599,9 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     channel so fill, stroke and shadow all dim uniformly. None means fully
     opaque.
     """
-    text = _strip_emoji(text)
-    if not text:
+    # Emoji are kept and composited as images below (see _emoji_image). Only a
+    # string with NOTHING drawable left is an empty render.
+    if not text.strip():
         return Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     style = ROLE_STYLES.get(role, ROLE_STYLES["default"])
     if fill is not None:
@@ -442,29 +614,54 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         style = {**style, "stroke": stroke}
     if stroke_w is not None:
         style = {**style, "stroke_w": max(0, int(round(stroke_w)))}
-    # Fall back to a Noto script font when the caption isn't Latin
-    script_font = _pick_script_font(text)
+    # Fall back to a Noto script font when the caption isn't Latin. Judged on
+    # the TEXT only: emoji live in pictograph blocks that no script font
+    # covers, and letting them vote pushed a plain-Latin caption with one 🔥
+    # onto a Devanagari font.
+    script_font = _pick_script_font(_strip_emoji(text) or text)
     chosen_font = script_font if script_font is not None else (font_file or _font_path(style["font"]))
     font = ImageFont.truetype(str(chosen_font), style["size"])
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     max_w = int(canvas_w * 0.86)
-    lines = _wrap(draw, text.upper() if role in ("super", "hook") else text, font, max_w)
+    box = int(round(font.size * EMOJI_BOX_RATIO))
+    cap_mid = _cap_band_mid(draw, font)
+    lines = _wrap(draw, text.upper() if role in ("super", "hook") else text,
+                  font, max_w, box)
     line_h = font.size + 8
     total_h = line_h * len(lines)
     y_center = _y_for_role(role, anchor_y, canvas_h)
     y_top = int(y_center - total_h / 2)
     x_center = float(anchor_x) if anchor_x is not None else canvas_w / 2
     for i, line in enumerate(lines):
-        w = draw.textlength(line, font=font)
-        x = int(x_center - w / 2)
+        w = _line_w(line, draw, font, box)
+        x = float(x_center - w / 2)
         y = y_top + i * line_h
+        # Walk the line's segments left to right, drawing text runs with the
+        # font and pasting emoji artwork. One pass per visual layer (shadow,
+        # then fill) so an emoji can't land under the next run's shadow.
+        segs = _tokenize_emoji(line)
         if style.get("shadow"):
-            for dx, dy in ((4, 6),):
-                draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 140),
+            cx = x
+            for kind, chunk in segs:
+                if kind == "emoji":
+                    cx += box
+                    continue
+                draw.text((cx + 4, y + 6), chunk, font=font, fill=(0, 0, 0, 140),
                           stroke_width=style["stroke_w"], stroke_fill=(0, 0, 0, 140))
-        draw.text((x, y), line, font=font, fill=style["fill"],
-                  stroke_width=style["stroke_w"], stroke_fill=style["stroke"])
+                cx += draw.textlength(chunk, font=font)
+        cx = x
+        for kind, chunk in segs:
+            if kind == "emoji":
+                im_e = _emoji_image(chunk, box)
+                if im_e is not None:
+                    img.alpha_composite(
+                        im_e, dest=(int(round(cx)), int(round(y + cap_mid - box / 2))))
+                cx += box
+                continue
+            draw.text((cx, y), chunk, font=font, fill=style["fill"],
+                      stroke_width=style["stroke_w"], stroke_fill=style["stroke"])
+            cx += draw.textlength(chunk, font=font)
     if opacity is not None and opacity < 0.999:
         # Multiply the finished image's alpha so fill, stroke and shadow dim
         # uniformly — same pattern as the static-sticker opacity bake in
@@ -495,14 +692,17 @@ def collect_text_clips(edl: EDL) -> list[tuple[TextClip, str]]:
 def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path]]:
     """Render each text clip to a PNG (cached by content hash). Return paired list.
 
-    Cache key uses the *displayable* text (after emoji-strip) so changing the
-    rendering rules invalidates the cache for free.
+    Cache key uses the FULL text including emoji — they are composited into
+    the PNG now (see render_text_png), so two clips differing only by an emoji
+    are genuinely different pixels and must not share a cache entry. The `v5`
+    prefix below invalidates every entry keyed under the old emoji-stripped
+    rule, which would otherwise serve emoji-less art forever.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     canvas = edl.canvas
     paired: list[tuple[TextClip, str, Path]] = []
     for c, role in collect_text_clips(edl):
-        displayable = _strip_emoji(c.text)
+        displayable = c.text.strip()
         fill, font_file = resolve_style_overrides(c, role)
         size = resolve_size_override(c)
         stroke, stroke_w = resolve_stroke_overrides(c)
@@ -522,7 +722,11 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                    f"{stroke or ''}|{'' if stroke_w is None else f'{stroke_w:.2f}'}|"
                    f"{'' if opacity is None else f'{opacity:.3f}'}")
         key = hashlib.sha256(
-            f"v4|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
+            # v6: emoji moved from a fixed em-box fraction to the measured cap
+            # band, so every PNG holding an emoji changed pixels. The key has no
+            # other input that tracks placement, and a stale hit is invisible —
+            # the export would silently keep the old misalignment.
+            f"v7|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
@@ -699,20 +903,26 @@ def build_overlay_chain(
     `first_input_index` is the index of the first overlay input we'll add (after
     the existing video clip inputs). Each PNG is added as a new `-i` input.
 
-    `preview`: when True, skip baking TEXT/caption clips — the browser's
-    TextLayer already draws every text/captions clip live over the <video>
-    with no ffmpeg round-trip (Preview.tsx's docstring: "no server
-    roundtrip per edit"). Baking them here too used to double them up in the
-    preview (server copy + client copy, at different sizing/position math —
-    "big and small captions simultaneously", issue 40). Export has no
-    TextLayer, so it always bakes text regardless of this flag. Stickers are
-    NOT skipped: unlike text, StickerLayer only draws selection/drag handles,
-    not the sticker image itself, so the server-baked PNG is the only
-    place a sticker's actual pixels come from in preview.
+    `preview`: when True, skip baking TEXT/caption clips AND stickers — the
+    browser draws both live over the <video> with no ffmpeg round-trip
+    (TextLayer for text/captions, StickerLayer for stickers; Preview.tsx's
+    docstring: "no server roundtrip per edit"). Baking them here too doubles
+    them up in the preview: server copy + client copy. For text that showed as
+    "big and small captions simultaneously" (issue 40, at different sizing
+    math); for stickers it showed as a GHOST — the baked copy sits frozen at
+    the pre-drag position while the client draws the live one at the pointer,
+    so a drag displayed two stickers at once and, after release, the sticker
+    "vanished" from the new spot and left a copy at the old one for the whole
+    commit→re-render gap (seconds on a long timeline). There is no way to
+    erase a baked pixel from the client, so smooth direct manipulation
+    requires the client to own the pixels — the same conclusion text reached.
+
+    Export has no TextLayer/StickerLayer, so it always bakes both regardless
+    of this flag; this only ever changes what the in-app preview looks like.
     """
     text_paired = [] if preview else cache_text_pngs(edl, cache_dir)
-    static_stickers = cache_sticker_pngs(edl, cache_dir)
-    animated_stickers = cache_animated_sticker_pngs(edl, cache_dir)
+    static_stickers = [] if preview else cache_sticker_pngs(edl, cache_dir)
+    animated_stickers = [] if preview else cache_animated_sticker_pngs(edl, cache_dir)
 
     # Unified item list. Static items get full canvas-sized PNGs that scale to
     # output then overlay at (0,0). Animated stickers get small PNGs overlaid

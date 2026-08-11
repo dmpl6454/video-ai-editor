@@ -31,12 +31,38 @@ Pop-Location
 $BuildSha = (& git rev-parse --short HEAD 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $BuildSha) { $BuildSha = "unknown" }
 if ((& git status --porcelain 2>$null)) { $BuildSha = "$BuildSha-dirty" }
-Set-Content -Path "BUILD_ID" -Value $BuildSha -NoNewline -Encoding utf8
+# Write BOM-LESS. `Set-Content -Encoding utf8` is BOM-less only in PowerShell 7+;
+# under PowerShell 5.1 — which is what `powershell -File build_win.ps1` resolves
+# to, the documented launch command — it prepends EF BB BF. `.strip()` does not
+# remove a BOM, so config.build_id() reported "<BOM>c93af1e-dirty": a sha that
+# matches no git object, in the one mechanism that exists to make "which build?"
+# answerable. build_id() is BOM-tolerant now too; this keeps the file clean.
+[System.IO.File]::WriteAllText(
+    (Join-Path $PSScriptRoot "BUILD_ID"), $BuildSha,
+    (New-Object System.Text.UTF8Encoding $false))
 Write-Host "[build] BUILD_ID=$BuildSha"
 
 # Drive the cross-platform spec (BUNDLE is darwin-guarded; COLLECT yields the
 # dist folder on Windows).
 uv run pyinstaller --noconfirm "Video AI Editor.spec"
+if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed ($LASTEXITCODE)" }
+
+# Assert the packaged UI IS the one just built. Same rule as the /api/version
+# build id and desktop.py's mtime check: what ships must equal what runs.
+# A frozen app that serves a stale bundle is invisible from the outside — the
+# window opens, every route answers 200 — and it reads as "the fix didn't work",
+# which has already cost multiple re-investigation rounds here. Comparing the
+# content-hashed asset names is enough: Vite renames on every content change.
+$srcAssets = Get-ChildItem "frontend\dist\assets" -Filter *.js -EA SilentlyContinue |
+    Select-Object -ExpandProperty Name | Sort-Object
+$outAssets = Get-ChildItem "dist\Video AI Editor\_internal\frontend\dist\assets" `
+    -Filter *.js -EA SilentlyContinue | Select-Object -ExpandProperty Name | Sort-Object
+if (-not $outAssets) { throw "packaged app contains no frontend bundle" }
+if (Compare-Object $srcAssets $outAssets) {
+    throw ("packaged frontend is STALE: built [$($srcAssets -join ', ')] " +
+           "but bundled [$($outAssets -join ', ')]")
+}
+Write-Host "[build] packaged UI matches the freshly built bundle ($($srcAssets -join ', '))"
 
 Write-Host ""
 Write-Host "[build] Done -> dist\Video AI Editor\Video AI Editor.exe"
