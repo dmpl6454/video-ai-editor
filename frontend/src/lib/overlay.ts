@@ -56,6 +56,36 @@ export function sampleKF(v: KFNum | undefined, t: number, fallback: number): num
   return fallback
 }
 
+/** Every distinct keyframe time on a clip's transform, ascending, CLIP-LOCAL.
+ *
+ *  The union across properties is the honest answer to "where are this clip's
+ *  keyframes": the UI keys all five together, but an EDL from Claude/MCP (or an
+ *  older project) can perfectly well animate only `scale`, and that key is just
+ *  as real. Times within half a frame at 30fps collapse to one — the panel and
+ *  the timeline must agree on the count, and floats that arrived by different
+ *  routes are never bit-identical.
+ */
+export function keyframeTimes(clip: unknown): number[] {
+  const tx = (clip as { transform?: Record<string, unknown> })?.transform
+  if (!tx) return []
+  const all: number[] = []
+  for (const p of ['x', 'y', 'scale', 'rotation', 'opacity']) {
+    const v = tx[p] as KFSpec | undefined
+    if (!v || typeof v !== 'object' || !Array.isArray(v.keyframes)) continue
+    for (const k of v.keyframes) {
+      const t = k?.[0]
+      if (typeof t === 'number' && Number.isFinite(t)) all.push(t)
+    }
+  }
+  // Sort BEFORE collapsing: dedup-then-sort keeps whichever property happened
+  // to be visited first as the survivor, so the reported time depended on
+  // property order. Sorted, the earliest of each cluster always wins.
+  all.sort((a, b) => a - b)
+  const out: number[] = []
+  for (const t of all) if (!out.length || t - out[out.length - 1] >= 0.017) out.push(t)
+  return out
+}
+
 export interface StickerGeom {
   cx: number; cy: number   // center, display px
   size: number             // glyph box side, display px
@@ -129,11 +159,40 @@ export function hitsBody(px: number, py: number, b: OverlayBox): boolean {
 // Corners in local coords, in the fixed order the chrome draws them.
 export const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
 
+/** Compositing order with the item being dragged moved to the END (= on top).
+ *
+ *  A sticker's z is only raised when the gesture COMMITS (set_clip_transform's
+ *  raise_to_front). Painting the live drag in stored z-order therefore made an
+ *  older sticker slide UNDER a newer one for the whole gesture and jump to the
+ *  front on release — "when I drag the previous emoji it gets behind the latest
+ *  one, but after placement it works fine". Hoisting it while dragging previews
+ *  the committed result. When nothing overlaps at the drop point no raise is
+ *  issued, but then the relative order was never visible anyway.
+ *
+ *  Returns the input array unchanged (same reference) when there is no drag, so
+ *  the common per-frame path allocates nothing.
+ */
+export function paintOrder<T extends { id: string }>(items: T[], dragId?: string): T[] {
+  if (!dragId) return items
+  const i = items.findIndex((s) => s.id === dragId)
+  if (i < 0 || i === items.length - 1) return items
+  return [...items.slice(0, i), ...items.slice(i + 1), items[i]]
+}
+
 // TextLayer measures + wraps its own text, so it is the only place that knows
 // a text clip's real on-screen box. It publishes that here each frame and
 // StickerLayer (which owns pointer interaction for the whole preview) reads
 // it. A frame of staleness is harmless — both run on rAF against the same
 // playhead.
+//
+// CONTRACT: a published box is already LIVE. TextLayer reads the same
+// getOverlayDrag() override to draw its glyphs, so the move offset and the
+// resize multiplier are folded in before it lands here. A consumer must NOT
+// re-apply them — StickerLayer did, and the selection chrome then moved at
+// double the pointer distance (visibly detaching from the text it framed) and
+// inflated by mul² on a resize. Under a live resize TextLayer also RE-WRAPS at
+// the new size, so line breaks can change and the box is not a uniform scale of
+// the previous one: only the publisher can compute it correctly.
 let TEXT_BOXES: OverlayBox[] = []
 
 export function publishTextBoxes(boxes: OverlayBox[]): void { TEXT_BOXES = boxes }

@@ -359,6 +359,17 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   max-width: 100%;
   background: #000;
 }
+/* The crop/reposition view's raw source is DELIBERATELY bigger than the pane —
+   that overflow IS the footage you are choosing between, and the component
+   sizes it in px from cropLayout(). The rule above would clamp it, and because
+   it clamps per axis it only caught the overflowing one: zooming to 2x gave a
+   715px-wide element rendered at 349px with its height left at 402px, i.e. the
+   picture squashed sideways instead of growing ("when I increase the scale of
+   the video while framing, it doesn't work properly"). */
+.preview-pane video.crop-source {
+  max-height: none;
+  max-width: none;
+}
 .preview-empty {
   color: var(--text-dim);
   font-size: 14px;

@@ -145,18 +145,23 @@ def test_set_clip_z_roundtrips_through_serialization(tmp_path):
 
 @pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not available")
 def test_default_order_later_start_wins_then_z_overrides(tmp_path):
-    from video_ai_editor.render import render_preview
+    # EXPORT, not preview: preview deliberately no longer bakes stickers
+    # (StickerLayer draws them client-side — see build_overlay_chain's
+    # `preview` docstring), so a preview frame has no sticker pixels at all to
+    # compare. The compositing ORDER under test is the server's and is shared
+    # by both paths; export is where it is observable in the output file.
+    from video_ai_editor.render import render_export
 
     store, gid, rid = _store_with_two_stickers(tmp_path)
 
     # --- Default (both z=0): red (later start) composites on top.
-    pv = render_preview(store.edl, tmp_path)
+    pv = render_export(store.edl, tmp_path, filename="z_default.mp4")
     px = _center_pixel(pv.path, 2.0, 320, 568)
     assert _is_red(px), f"expected red on top by default, got {px}"
 
     # --- set_clip_z back on red → green must now be on top. The z change is
     # part of the model, so edl.hash() changes and the render cache re-renders.
     dispatch(store, "set_clip_z", {"clip_id": rid, "z": "back"})
-    pv2 = render_preview(store.edl, tmp_path)
+    pv2 = render_export(store.edl, tmp_path, filename="z_back.mp4")
     px2 = _center_pixel(pv2.path, 2.0, 320, 568)
     assert _is_green(px2), f"expected green on top after red sent to back, got {px2}"

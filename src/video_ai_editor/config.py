@@ -48,7 +48,7 @@ def _read_version() -> str:
             vf = Path(base) / "VERSION"
             if vf.exists():
                 try:
-                    return vf.read_text(encoding="utf-8").strip() or "0.0.0"
+                    return _pu.read_text_config(vf).strip() or "0.0.0"
                 except Exception:
                     pass
     return "0.0.0"
@@ -86,7 +86,10 @@ def build_id() -> str:
         bf = Path(base) / "BUILD_ID"
         if bf.exists():
             try:
-                _BUILD_ID = bf.read_text(encoding="utf-8").strip()
+                # BOM-tolerant: build_win.ps1 under PowerShell 5.1 writes this
+                # file with a UTF-8 BOM, which `.strip()` does not remove — the
+                # reported sha then differs from every real git object.
+                _BUILD_ID = _pu.read_text_config(bf).strip()
                 if _BUILD_ID:
                     return _BUILD_ID
             except OSError:
@@ -124,7 +127,11 @@ def _apply_env_file(env_path: Path) -> None:
         return
     parsed: dict[str, str] = {}
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        # BOM-tolerant: a `.env` written by Notepad or PowerShell 5.1 starts
+        # with EF BB BF, which would make the FIRST key parse as
+        # `﻿ANTHROPIC_API_KEY` — so the key never loads and the app reports
+        # it missing while the file plainly contains it.
+        lines = _pu.read_text_config(env_path).splitlines()
     except Exception:
         return
     for line in lines:

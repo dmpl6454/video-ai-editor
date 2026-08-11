@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore, errorMessage } from '../store'
+import { isMediaClip, type Clip } from '../types'
 import { TextLayer } from './TextLayer'
 import { StickerLayer } from './StickerLayer'
+import { CropReposition } from './CropReposition'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
 import { ErrorBoundary } from './ErrorBoundary'
+import { chordLabel } from '../keymap/engine'
 
 /**
  * Preview pane.
@@ -29,6 +32,7 @@ export function Preview() {
   const setLiveTransform = useStore((s) => s.setLiveTransform)
   const liveFilter = useStore((s) => s.liveFilter)
   const setLiveFilter = useStore((s) => s.setLiveFilter)
+  const selection = useStore((s) => s.selection)
 
   const ref = useRef<HTMLVideoElement>(null)
   const [rendering, setRendering] = useState(false)
@@ -39,10 +43,25 @@ export function Preview() {
   // come from <video> at full smoothness.
   const scrubberRef = useRef<FrameScrubberHandle>(null)
   const [scrubbing, setScrubbing] = useState(false)
+  // Mirror of `scrubbing` for the sync effect, which must know "is a scrub
+  // already in progress?" WITHOUT taking `scrubbing` as a dependency — doing
+  // that would re-run the effect on its own setScrubbing and re-issue the
+  // same seek in a loop.
+  const scrubbingRef = useRef(false)
+  const setScrubbingBoth = (v: boolean) => { scrubbingRef.current = v; setScrubbing(v) }
   const scrubTimer = useRef<number | null>(null)
+  // Cancels a pending "wait for the video's native seek to settle before
+  // revealing it" listener from a superseded scrub (see the sync effect).
+  const scrubSeekedCleanup = useRef<(() => void) | null>(null)
+  // A <video> seek that has been DEFERRED so it can run hidden behind the
+  // opaque scrubber canvas instead of on screen (see the sync effect).
+  const pendingSeekRef = useRef<number | null>(null)
   // Authoritative playback time (seconds). The rAF clock owns this while
   // playing; kept in a ref so the loop never reads a stale `playhead` closure.
   const clockRef = useRef(0)
+  // Previous isPlaying value, so the sync effect below can tell a genuine
+  // playing→paused transition apart from an ordinary playhead move.
+  const prevIsPlayingRef = useRef(isPlaying)
 
   // A fingerprint that changes only for video-relevant edits. Text edits do
   // NOT change this, so the server preview is reused while client overlays
@@ -62,17 +81,17 @@ export function Preview() {
   // subset — so this fingerprint can't drift out of sync with the schema again.
   const videoFingerprint = useMemo(() => {
     if (!edl) return ''
-    // Sticker tracks are INCLUDED: stickers are server-baked into the preview
-    // even in preview mode (render/text_overlay.py's build_overlay_chain skips
-    // TEXT clips for the client-drawn TextLayer but still bakes stickers —
-    // StickerLayer only draws selection/drag handles, not the sticker image).
-    // Excluding them meant sticker add/drag/delete never re-rendered: with the
-    // always-on client draw gone, sticker edits produced NO visual result
-    // until an unrelated video edit happened to bump the fingerprint. Text
-    // tracks stay deliberately excluded — TextLayer draws those client-side.
+    // Sticker tracks are EXCLUDED, exactly like text: StickerLayer now draws
+    // every sticker client-side each frame and build_overlay_chain(preview)
+    // no longer bakes them (see StickerLayer's pixel-ownership rule). Leaving
+    // them in would fire a full ffmpeg re-render for an edit whose result is
+    // already on screen — and it was that re-render round-trip which produced
+    // the "sticker disappears, then leaves a copy at the old position" gap.
+    // NOTE: this is only safe while the preview genuinely skips stickers. If
+    // baking ever comes back, sticker tracks must come back here too, or
+    // sticker edits stop producing any visual result at all.
     const vidTracks = edl.tracks.filter(t =>
-      t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo'
-      || t.type === 'sticker')
+      t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
     return JSON.stringify({
       canvas: edl.canvas,
       // Track-LEVEL props matter too: transitions and mute live on the track,
@@ -184,46 +203,201 @@ export function Preview() {
     else ref.current.pause()
   }, [isPlaying, playbackRate])
 
+  // One frame of the project's timebase, in seconds. Several thresholds below
+  // are "did the displayed frame change?" questions, and a fixed 0.05s answered
+  // them wrongly for a 30fps project (a frame is 0.033s).
+  const frameDur = 1 / Math.max(1, edl?.canvas?.fps ?? 30)
+
   useEffect(() => {
     const v = ref.current
     if (!v) return
-    // Sync the <video> to an EXTERNAL playhead move (scrub while paused, or a
-    // deliberate jump during playback). While playing, the rAF clock already
-    // mirrors the video, so only a large gap warrants a seek — small free-run
-    // drift must not trigger a per-frame seek storm.
-    const gap = Math.abs(v.currentTime - playhead)
-    // Don't re-seek an element that is still servicing the previous seek or
-    // hasn't got data yet. While playing, this effect re-runs on every rAF
-    // playhead tick, so a stalled/ended/reloading <video> used to get a fresh
-    // `currentTime =` write ~60x a second, which keeps it stalled (each write
-    // restarts the seek) and shows as the video "lagging" behind a timer that
-    // races ahead. HAVE_CURRENT_DATA(2) is the point a seek is honoured
-    // rather than queued-and-discarded. Scoped to the <video> seek only — the
-    // WebCodecs scrubber below has its own readiness check and must still run.
-    const canSeekVideo = !v.seeking && v.readyState >= 2
-    if (canSeekVideo && gap > (isPlaying ? 0.35 : 0.05)) {
-      // A failed/odd <video> can throw on a seek — never let that break the UI.
-      // Note: this is the GENERAL sync path (external scrubs, jumps, and the
-      // Space-key replay-from-end command — which has no <video> ref of its
-      // own and relies entirely on this effect plus the rAF clock's TRUST_TOL
-      // check). The transport BUTTON's onClick additionally does a synchronous
-      // currentTime/clockRef rewind as defense-in-depth for its own path; this
-      // effect's async seek is what the keyboard path depends on exclusively.
-      try { v.currentTime = playhead } catch { /* non-fatal */ }
-      clockRef.current = playhead   // keep the clock in step with the jump
+
+    // Was this run triggered by a genuine playing→paused transition (hitting
+    // Space/the transport button), rather than an ordinary playhead move?
+    const justPaused = prevIsPlayingRef.current && !isPlaying
+    prevIsPlayingRef.current = isPlaying
+
+    // Is the frame-exact scrubber available to cover the <video>'s own seek?
+    const scrubberReady = !isPlaying && !!scrubberRef.current?.isReady()
+
+    // Playback is starting (or already running) with a paused-scrub seek still
+    // deferred — land it NOW, before anything below reads currentTime and
+    // before audio/video resume from a stale position. Assigning currentTime
+    // updates the getter synchronously (the seek itself completes later), so
+    // the gap check further down sees the new value and won't seek twice.
+    if (isPlaying && pendingSeekRef.current !== null) {
+      const target = pendingSeekRef.current
+      pendingSeekRef.current = null
+      if (v.readyState >= 2 && Math.abs(v.currentTime - target) > 0.02) {
+        try { v.currentTime = target } catch { /* non-fatal */ }
+      }
     }
+
+    if (justPaused && v.readyState >= 2 && !v.seeking &&
+        Math.abs(v.currentTime - playhead) < 0.5) {
+      // The video just stopped wherever the browser's own decode pipeline
+      // naturally landed. The rAF clock (below) only samples currentTime
+      // once per animation frame, so by the time `v.pause()` (the play/pause
+      // effect above) actually runs, the video can have advanced a little
+      // past the last-sampled `playhead` — forcing `v.currentTime = playhead`
+      // in the general branch below would then visibly REWIND the video by
+      // that gap on every single pause (reported as "the video stutters and
+      // rewinds for a moment when I hit pause or move the playhead"). The
+      // video's own stopped position is the ground truth here, not the
+      // store's last sample, so pull the playhead FROM the video instead of
+      // forcing the video back to a stale one — nothing visibly moves.
+      // Bounded to a small gap so an unrelated large jump (e.g. the
+      // end-of-timeline clamp, which already set playhead deliberately)
+      // still falls through to the general branch below unchanged.
+      clockRef.current = v.currentTime
+      if (Math.abs(v.currentTime - playhead) > 0.001) {
+        try { setPlayhead(v.currentTime) } catch { /* non-fatal */ }
+      }
+    } else {
+      // Sync the <video> to an EXTERNAL playhead move (scrub while paused, or a
+      // deliberate jump during playback). While playing, the rAF clock already
+      // mirrors the video, so only a large gap warrants a seek — small free-run
+      // drift must not trigger a per-frame seek storm.
+      const gap = Math.abs(v.currentTime - playhead)
+      // Don't re-seek an element that is still servicing the previous seek or
+      // hasn't got data yet. While playing, this effect re-runs on every rAF
+      // playhead tick, so a stalled/ended/reloading <video> used to get a fresh
+      // `currentTime =` write ~60x a second, which keeps it stalled (each write
+      // restarts the seek) and shows as the video "lagging" behind a timer that
+      // races ahead. HAVE_CURRENT_DATA(2) is the point a seek is honoured
+      // rather than queued-and-discarded. Scoped to the <video> seek only — the
+      // WebCodecs scrubber below has its own readiness check and must still run.
+      const canSeekVideo = !v.seeking && v.readyState >= 2
+      if (scrubberReady) {
+        // DEFER the <video> seek instead of running it here.
+        //
+        // `currentTime = t` makes the browser jump to the nearest preceding
+        // keyframe and decode forward to the target — and Chrome PAINTS those
+        // intermediate frames. On a 2s-GOP preview that is a visible
+        // mini-playback burst on every scrub: the exact "stutter when I move
+        // the playhead". The scrubber canvas exists to hide precisely that,
+        // but it can't when the seek is started synchronously here and the
+        // canvas only becomes opaque a frame later (plus its 60ms fade).
+        //
+        // So: while the frame-exact scrubber is available, nothing touches the
+        // <video> during the scrub. The canvas (primed with the frame already
+        // on screen, then repainted with the exact target frame) is what the
+        // user sees, and the <video>'s messy seek is run by the quiet-timer
+        // below — behind an already-opaque canvas — and revealed only once
+        // 'seeked' confirms it settled. A continuous drag now also costs ONE
+        // <video> seek at the end instead of one per pointer move.
+        // Threshold is a QUARTER FRAME, not 0.05s. The canvas is temporary —
+        // it fades out and hands the picture back to the <video> — so any move
+        // big enough to change the displayed frame must leave a seek behind
+        // for the <video> to land on, or the hand-back visibly undoes the
+        // move. At 0.05s a single-frame step (0.033s at 30fps) fell under the
+        // bar: the canvas showed the stepped frame, no seek was queued, and
+        // 250ms later the canvas hid and the picture snapped back to where it
+        // started. Measured on a frame-numbered fixture: canvas frame 165,
+        // video still on 163, `currentTime` never moved for the whole gesture.
+        // Sub-quarter-frame moves still skip, which is what keeps the <video>'s
+        // own settle echo from queueing a pointless seek.
+        if (gap > frameDur * 0.25) {
+          pendingSeekRef.current = playhead
+          clockRef.current = playhead   // keep the clock in step with the jump
+        }
+      } else if (canSeekVideo && gap > (isPlaying ? 0.35 : 0.05)) {
+        // A failed/odd <video> can throw on a seek — never let that break the UI.
+        // Note: this is the GENERAL sync path (external scrubs, jumps, and the
+        // Space-key replay-from-end command — which has no <video> ref of its
+        // own and relies entirely on this effect plus the rAF clock's TRUST_TOL
+        // check). The transport BUTTON's onClick additionally does a synchronous
+        // currentTime/clockRef rewind as defense-in-depth for its own path; this
+        // effect's async seek is what the keyboard path depends on exclusively.
+        // Reached whenever the scrubber is unavailable (WebCodecs/mp4box
+        // failed, still loading) — then a raw <video> seek is still far better
+        // than not scrubbing at all.
+        try { v.currentTime = playhead } catch { /* non-fatal */ }
+        clockRef.current = playhead   // keep the clock in step with the jump
+      }
+    }
+
     // While paused, also drive the WebCodecs scrubber so frame-step keys land
     // on the exact frame even when the underlying <video> snapped to a keyframe.
-    if (!isPlaying && scrubberRef.current?.isReady()) {
-      setScrubbing(true)
-      scrubberRef.current.seek(playhead).catch(() => {})
+    //
+    // Two things must NOT take the canvas, because for them it can only add a
+    // visible transition to a picture that is already correct:
+    //
+    //   * the pause itself. `justPaused` above deliberately pulls the playhead
+    //     FROM the video, so at that moment the <video> is displaying exactly
+    //     the right frame — but `playhead` in this closure is still the
+    //     pre-pause sample, and seeking the scrubber to it painted the frame
+    //     BEFORE the one on screen. Measured: the video stopped on frame 55,
+    //     the canvas faded up on 54, and 230ms later faded back to 55. That
+    //     one-frame flinch is "the video stutters a little after I pause".
+    //   * a playhead move too small to change the displayed frame — the
+    //     <video>'s own settle echo, which lands a fraction of a frame from
+    //     the target. (onTimeUpdate already drops most of these; this is the
+    //     backstop for the ones that arrive by another route.)
+    //
+    // A real scrub always passes: even a single-frame step leaves the <video>
+    // a full frame away, and every later move of a drag already holds the
+    // canvas.
+    const covered = scrubbingRef.current || pendingSeekRef.current !== null
+      || Math.abs(v.currentTime - playhead) > frameDur * 0.25
+    if (scrubberReady && !justPaused && covered) {
+      // Prime the canvas with the frame that is ALREADY on screen before it is
+      // revealed, so the reveal itself is invisible (identical pixels) — the
+      // canvas then swaps once to the exact target frame when the WebCodecs
+      // walk lands. Only when starting a scrub: mid-scrub the canvas already
+      // holds a decoded exact frame, and the <video> underneath is stale, so
+      // re-priming would visibly step backwards.
+      if (!scrubbingRef.current) scrubberRef.current!.prime(v)
+      setScrubbingBoth(true)
+      scrubberRef.current!.seek(playhead).catch(() => {})
       if (scrubTimer.current) window.clearTimeout(scrubTimer.current)
-      // Hide the canvas after a quiet moment so playback resume looks clean.
-      scrubTimer.current = window.setTimeout(() => setScrubbing(false), 250)
+      scrubSeekedCleanup.current?.()
+      scrubSeekedCleanup.current = null
+      // Once the scrub goes quiet: run the deferred <video> seek behind the
+      // opaque canvas, and only drop the canvas after 'seeked' confirms the
+      // element settled. Revealing it any earlier puts the keyframe-then-
+      // decode-forward artifact back on screen — the thing this whole path
+      // exists to hide.
+      scrubTimer.current = window.setTimeout(() => {
+        const vid = ref.current
+        if (!vid) { setScrubbingBoth(false); return }
+        const target = pendingSeekRef.current
+        pendingSeekRef.current = null
+        const needsSeek = target !== null && vid.readyState >= 2
+          && Math.abs(vid.currentTime - target) > 0.02
+        if (!needsSeek && !vid.seeking) { setScrubbingBoth(false); return }
+        let done = false
+        // Guard timer: a <video> that never fires 'seeked' (decode stall,
+        // src swapped out from under us) must not strand the canvas opaque
+        // forever — a frozen preview is worse than a brief artifact.
+        const guard = window.setTimeout(() => finish(), 2000)
+        function finish() {
+          if (done) return
+          done = true
+          vid!.removeEventListener('seeked', finish)
+          window.clearTimeout(guard)
+          scrubSeekedCleanup.current = null
+          setScrubbingBoth(false)
+        }
+        vid.addEventListener('seeked', finish)
+        // Supersede (a newer scrub started): detach without hiding, so the
+        // new scrub owns the canvas.
+        scrubSeekedCleanup.current = () => {
+          done = true
+          vid.removeEventListener('seeked', finish)
+          window.clearTimeout(guard)
+        }
+        if (needsSeek) {
+          try { vid.currentTime = target! } catch { finish() }
+        }
+      }, 250)
     } else if (isPlaying) {
-      setScrubbing(false)
+      scrubSeekedCleanup.current?.()
+      scrubSeekedCleanup.current = null
+      if (scrubTimer.current) { window.clearTimeout(scrubTimer.current); scrubTimer.current = null }
+      setScrubbingBoth(false)
     }
-  }, [playhead, isPlaying])
+  }, [playhead, isPlaying, setPlayhead, frameDur])
 
   // When playback STARTS with the playhead freshly at 0 (a replay-from-end via
   // the Space key, which rewinds through the store's replayFromStart), reset
@@ -339,16 +513,62 @@ export function Preview() {
       <div className="preview-empty">
         <div style={{ fontSize: 24, marginBottom: 6 }}>🎞️</div>
         <div>Drop a video in the Media panel to start.</div>
-        <div style={{ marginTop: 6 }}><span className="kbd">Space</span> play · <span className="kbd">⌘B</span> split · <span className="kbd">⌫</span> delete</div>
+        <div style={{ marginTop: 6 }}><span className="kbd">Space</span> play · <span className="kbd">{chordLabel('Mod+KeyB')}</span> split · <span className="kbd">⌫</span> delete</div>
       </div>
     )
   }
 
   const url = previewHash ? api.previewURL(sid, previewHash) : api.previewURL(sid)
 
+  // The base v1 clip, if IT is the current selection — drives <CropReposition>
+  // below. Scoped to v1 for the same reason StickerLayer's direct-drag is:
+  // a v2/PIP clip's on-screen box depends on its own transform, which would
+  // need real hit-testing to place this correctly.
+  const v1Track = edl.tracks.find((t) => t.id === 'v1')
+  const selectedV1Clip = v1Track?.clips.find(
+    (c) => c.id === selection && isMediaClip(c),
+  ) as Clip | undefined
+  const selectedV1Fit = selectedV1Clip
+    ? (selectedV1Clip as unknown as { fit?: string }).fit
+    : undefined
+  // Only while paused — matches the WebCodecs scrubber's own
+  // `scrubbing && !isPlaying` gate, and avoids syncing raw-source playback
+  // with the timeline's rAF clock (a real complication for no real benefit:
+  // repositioning is a paused-editing gesture in every reference this was
+  // built from).
+  // A KEYFRAMED transform disqualifies the clip. The crop view reads only
+  // scalar x/y/scale, so an animated pan drew as if it were centred — the user
+  // would be framing against a picture the renderer never produces — and one
+  // drag or wheel-tick dispatches set_clip_transform, replacing the whole
+  // keyframe list with a constant and destroying the animation with no warning.
+  // Same rule StickerLayer already applies to text: one drag cannot express a
+  // curve, so the control is withheld rather than made lossy.
+  const selectedV1Tx = selectedV1Clip
+    ? (selectedV1Clip as unknown as {
+      transform?: { x?: unknown; y?: unknown; scale?: unknown }
+    }).transform
+    : undefined
+  const v1TransformKeyframed = !!selectedV1Tx && (['x', 'y', 'scale'] as const).some(
+    (k) => selectedV1Tx[k] !== undefined && typeof selectedV1Tx[k] !== 'number',
+  )
+  const showReposition = !!selectedV1Clip && selectedV1Fit === 'cover'
+    && !isPlaying && !v1TransformKeyframed
+
   return (
     <div ref={wrapRef} style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ position: 'relative', width: boxSize.w, height: boxSize.h, background: '#000' }}>
+      {/* `overflow: hidden` because this box IS the canvas: nothing may paint
+          outside the frame that will be exported. The live preview applies
+          transforms with CSS, and a CSS `rotate()` does not shrink its element
+          — the corners swing OUT of the box. With overflow visible they simply
+          kept painting into the surrounding pane, so at 60° the picture drew
+          711px wide against a 349px frame (2.04x) and then snapped to the
+          cropped version the moment the value committed and ffmpeg's render
+          landed: "while doing it it is fine, but once I leave the bar the
+          results are different". Clipping here makes the live preview show the
+          same framing the bake will produce. `.preview-pane`'s own overflow is
+          no substitute — it is the whole pane, several times wider than the
+          canvas box. */}
+      <div style={{ position: 'relative', width: boxSize.w, height: boxSize.h, background: '#000', overflow: 'hidden' }}>
         <video
           ref={ref}
           src={url}
@@ -359,8 +579,14 @@ export function Preview() {
             // Live transform preview: while a transform slider is being dragged,
             // apply it as a pure CSS transform (GPU-composited, 0ms) instead of
             // waiting on a server re-render. Commits to the real render on release.
+            // dx/dy (StickerLayer's direct on-canvas video drag) are canvas-pixel
+            // deltas — converted to CSS px via the same canvas→box ratio the
+            // overlay layers use. translate() comes first so it moves the frame
+            // in its own untransformed pixel space, not post-scale/rotate space.
             transform: liveTransform
-              ? `scale(${liveTransform.scale ?? 1}) rotate(${liveTransform.rotation ?? 0}deg)`
+              ? `translate(${(liveTransform.dx ?? 0) * (boxSize.w / edl.canvas.w)}px, `
+                + `${(liveTransform.dy ?? 0) * (boxSize.h / edl.canvas.h)}px) `
+                + `scale(${liveTransform.scale ?? 1}) rotate(${liveTransform.rotation ?? 0}deg)`
               : undefined,
             opacity: liveTransform?.opacity ?? 1,
             transition: liveTransform ? 'none' : 'transform 60ms linear',
@@ -406,7 +632,19 @@ export function Preview() {
             // onLoadedMetadata restore even runs. A genuine settled scrub
             // reports readyState >= 2 (HAVE_CURRENT_DATA; observed 4).
             if (v.readyState < 2) return
-            if (v.seeking || Math.abs(v.currentTime - ph) > 0.35) return
+            const delta = Math.abs(v.currentTime - ph)
+            if (v.seeking || delta > 0.35) return
+            // Ignore the ECHO of a seek we asked for. A settled seek reports a
+            // currentTime a fraction of a frame from the target, which carries
+            // no information the playhead doesn't already have — but writing it
+            // through still counts as a playhead change, which re-runs the sync
+            // effect and stands up a whole new scrub: canvas primed, faded in,
+            // a frame decoded and faded out again, ~250ms after the user
+            // stopped. That second, uninvited reveal is visible. A move that
+            // genuinely lands somewhere else (the fallback path, where the
+            // <video> can only reach a keyframe) is off by far more than a
+            // frame and still writes through.
+            if (delta < frameDur) return
             setPlayhead(v.currentTime)
           }}
           onPlay={() => setPlaying(true)}
@@ -493,6 +731,23 @@ export function Preview() {
         {/* Realtime text overlay — no server roundtrip per edit */}
         {edl && boxSize.w > 0 && (
           <TextLayer edl={edl} videoEl={ref.current} width={boxSize.w} height={boxSize.h} />
+        )}
+        {/* CapCut-style crop/reposition view. Deliberately LAST (topmost) —
+            it fully replaces the view above (raw uncropped source, zoomed
+            out) while active, so sticker/text interaction is unavailable
+            until the clip is deselected (click another clip on the Timeline,
+            or untick Fill Frame). See the component's own header for why a
+            simple outline overlay doesn't work here. */}
+        {showReposition && selectedV1Clip && sid && boxSize.w > 0 && (
+          <CropReposition
+            clip={selectedV1Clip}
+            canvasW={edl.canvas.w}
+            canvasH={edl.canvas.h}
+            sid={sid}
+            paneW={boxSize.w}
+            paneH={boxSize.h}
+            playhead={playhead}
+          />
         )}
         {rendering && (
           <div style={{ position: 'absolute', top: 8, right: 8, color: 'var(--text-dim)', fontSize: 11, background: 'rgba(0,0,0,0.5)', padding: '2px 6px', borderRadius: 4 }}>

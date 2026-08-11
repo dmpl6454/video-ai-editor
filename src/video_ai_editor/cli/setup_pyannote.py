@@ -13,6 +13,7 @@ import os
 import sys
 from pathlib import Path
 
+from .. import platformutil as _pu
 from ..ai.diarize import (
     PYANNOTE_PIPELINES,
     pyannote_status,
@@ -29,7 +30,11 @@ def _persist_token(token: str) -> None:
     """Write/replace HUGGINGFACE_TOKEN= in .env, preserving every other key."""
     lines: list[str] = []
     if ENV_PATH.exists():
-        for ln in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        # BOM-tolerant read, then a BOM-less write. Reading with plain "utf-8"
+        # kept the BOM as a leading ﻿ on line 1 and this rewrite would bake
+        # it in as a literal character — turning a recoverable encoding quirk
+        # into permanent corruption of the first key.
+        for ln in _pu.read_text_config(ENV_PATH).splitlines():
             if ln.strip().startswith("HUGGINGFACE_TOKEN=") or ln.strip().startswith("HF_TOKEN="):
                 continue
             lines.append(ln)

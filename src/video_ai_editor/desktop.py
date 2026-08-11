@@ -151,11 +151,33 @@ def _ensure_frontend_built() -> None:
 
 
 def _serve(host: str, port: int) -> None:
-    """Run uvicorn in this thread."""
-    import uvicorn
-    # Disable reload in desktop mode; users get fresh bits next launch.
-    uvicorn.run("video_ai_editor.main:app", host=host, port=port,
-                reload=False, log_level="warning", access_log=False)
+    """Run uvicorn in this thread.
+
+    This runs as a daemon thread with no caller-side try/except, so an
+    exception here previously vanished silently: Python's default thread
+    excepthook prints to sys.stderr, which is None in a windowed/frozen
+    build (see _diag docstring) — the main thread would then just spin
+    until the startup-wait timeout with zero diagnostic. Catch and route
+    through _diag so a real import/bind failure is never indistinguishable
+    from "still importing".
+    """
+    try:
+        import uvicorn
+        # log_config=None is required, not optional, in a windowed/frozen
+        # launch: uvicorn's default logging setup builds a DefaultFormatter
+        # whose __init__ calls sys.stdout.isatty() to decide on colorizing,
+        # and a genuine no-console Windows launch (a real double-click, NOT
+        # one with stdio redirected for capture) gives the process
+        # sys.stdout = None — so that call raises AttributeError, which
+        # crashes this daemon thread before uvicorn ever binds the socket.
+        # The app's own JSON/file logging (api/hardening.py) already covers
+        # everything uvicorn's logging would, so skipping it here is free.
+        uvicorn.run("video_ai_editor.main:app", host=host, port=port,
+                    reload=False, log_level="warning", access_log=False,
+                    log_config=None)
+    except Exception:
+        import traceback
+        _diag("server thread crashed:\n" + traceback.format_exc())
 
 
 def _avfoundation_default_audio_index() -> str:
@@ -510,9 +532,13 @@ def main() -> None:
 
     server_thread = threading.Thread(target=_serve, args=(host, port), daemon=True)
     server_thread.start()
-    if not _wait_for_server(f"{url}/api/health"):
-        _diag(f"backend didn't start on {url} — the window would open with "
-              f"nothing to show. Check the log next to this line.")
+    # The frozen bundle's first cold import (torch et al.) can exceed the old
+    # hard-coded 15s default on a loaded Windows box, so the launcher gave up
+    # before uvicorn bound (E2E report ISSUE-05). Default to 60s; overridable.
+    startup_timeout = float(os.environ.get("VAE_STARTUP_TIMEOUT", "60"))
+    if not _wait_for_server(f"{url}/api/health", timeout=startup_timeout):
+        _diag(f"backend didn't start on {url} within {startup_timeout:.0f}s — "
+              f"the window would open with nothing to show. Check the log next to this line.")
         sys.exit(1)
 
     import webview
@@ -530,11 +556,40 @@ def main() -> None:
         # close — none are app shortcuts. Disable them (and Ctrl+wheel page
         # zoom, which fights the timeline's Ctrl+wheel zoom). The native-tree
         # traversal varies across pywebview versions → degrade gracefully.
+        #
+        # `window.events.loaded` fires on a pywebview-internal worker thread
+        # ("Thread-4", verified via py-spy), NOT the WinForms UI/STA thread
+        # that owns the CoreWebView2 control. Touching `.CoreWebView2` (and
+        # its .Settings) directly from that worker thread deadlocks — the
+        # pythonnet/COM marshaling call blocks forever without releasing the
+        # GIL, which freezes the ENTIRE interpreter (including the unrelated
+        # uvicorn/asyncio server thread), reproducing as "app not responding"
+        # + backend unreachable, moments after every launch. pywebview's own
+        # BrowserForm methods (_show, _toggle, etc.) all avoid this the same
+        # way: marshal onto the UI thread via Form.Invoke before touching any
+        # native control. Do the same here instead of calling cross-thread.
         def _harden_webview(w=window):
+            def _apply():
+                try:
+                    core = w.native.Controls[0].CoreWebView2
+                    core.Settings.AreBrowserAcceleratorKeysEnabled = False
+                    core.Settings.IsZoomControlEnabled = False
+                except Exception:
+                    pass
+            # CoreWebView2 and the WinForms Invoke marshaling are WINDOWS-ONLY.
+            # On macOS pywebview uses a Cocoa WKWebView, `System` (pythonnet)
+            # isn't installed, and there is no accelerator-key problem to fix.
+            # Explicit rather than relying on the ImportError below to no-op:
+            # a silent exception is indistinguishable from a real failure, and
+            # per CLAUDE.md OS branches belong behind platformutil.
+            if not _pu.IS_WINDOWS:
+                return
             try:
-                core = w.native.Controls[0].CoreWebView2
-                core.Settings.AreBrowserAcceleratorKeysEnabled = False
-                core.Settings.IsZoomControlEnabled = False
+                from System import Func, Type
+                if w.native.InvokeRequired:
+                    w.native.Invoke(Func[Type](_apply))
+                else:
+                    _apply()
             except Exception:
                 pass
         window.events.loaded += _harden_webview

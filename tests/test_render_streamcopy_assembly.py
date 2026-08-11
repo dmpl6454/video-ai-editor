@@ -112,9 +112,16 @@ def test_warm_visual_edit_uses_streamcopy_assembly(tmp_path: Path, run_spy):
     assert abs(float(info["format"]["duration"]) - 4.0) < 0.3
 
 
-def test_baked_overlay_disables_streamcopy(tmp_path: Path, run_spy):
-    """Stickers are baked server-side even in preview — the fast path must
-    yield to the filter_complex assembly so they keep rendering."""
+def test_sticker_is_client_drawn_in_preview_but_baked_on_export(tmp_path: Path, run_spy):
+    """A sticker no longer forces the preview off the fast path.
+
+    Preview skips baking stickers entirely (StickerLayer draws them
+    client-side — a second baked copy was the drag "ghost"), so the
+    overlay-free chunk timeline is still exactly the chunk sequence and may
+    stream-copy. Export has no StickerLayer, so it MUST still bake — that is
+    the half of this split that would silently drop stickers from delivered
+    video if it ever broke, so assert both directions together.
+    """
     a = tmp_path / "a.mp4"; b = tmp_path / "b.mp4"; png = tmp_path / "st.png"
     _mk_video(a, color="blue"); _mk_video(b, color="red", freq=660)
     _mk_png(png)
@@ -130,13 +137,19 @@ def test_baked_overlay_disables_streamcopy(tmp_path: Path, run_spy):
     run_spy.calls.clear()
     out = render_preview(edl, tmp_path, height=180).path
 
-    assert not run_spy.has("-f", "concat", "-c:v", "copy"), (
-        "stream-copy fast path must not run when overlays need baking"
-    )
-    assert run_spy.has_sub("overlay="), (
-        "sticker overlay missing from the assembly render"
+    assert not run_spy.has_sub("overlay="), (
+        "preview must not bake the sticker — the client draws it"
     )
     assert {s["codec_type"] for s in _probe(out)["streams"]} == {"video", "audio"}
+
+    from video_ai_editor.render import render_export
+    run_spy.calls.clear()
+    exp = render_export(edl, tmp_path, height=180, filename="with_sticker.mp4").path
+    assert run_spy.has_sub("overlay="), (
+        "export dropped the sticker overlay — it would be missing from the "
+        "delivered file, which nothing else in the app would reveal"
+    )
+    assert {s["codec_type"] for s in _probe(exp)["streams"]} == {"video", "audio"}
 
 
 def test_streamcopy_with_music_reencodes_audio_only(tmp_path: Path, run_spy):

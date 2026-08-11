@@ -5,7 +5,7 @@
 Local, chat-driven, CapCut-class video editor. Upload a video, tell Claude how
 to edit it. Everything runs on your machine — only Claude API calls leave it.
 
-- **88 dispatch tools** covering every CapCut feature pillar (multi-track
+- **100 dispatch tools** (94 advertised to the chat agent) covering every CapCut feature pillar (multi-track
   timeline, keyframes, effects, masks, chroma key, transitions, color grading,
   ducked audio mix, captions in 3 styles, brand kits, show templates).
 - **Best-in-class auto captions (Hindi + English + Hinglish)** — the
@@ -26,7 +26,7 @@ to edit it. Everything runs on your machine — only Claude API calls leave it.
 - **Frame-accurate scrub** via WebCodecs + mp4box.js (falls back to
   `<video>.currentTime` when the codec rejects).
 - **VideoToolbox H.264** on Apple Silicon (libx264 fallback).
-- **250+ backend tests + Playwright frontend smoke**, full suite in ~75 s.
+- **970 backend tests + Playwright frontend smoke**, full suite in ~11 min.
 
 ## Build a macOS app (.app / .dmg)
 
@@ -71,7 +71,7 @@ claude mcp add --transport http video-ai-editor http://127.0.0.1:8000/mcp
 codex mcp add video-ai-editor --url http://127.0.0.1:8000/mcp
 ```
 
-The agent gets all 48 schema'd tools (cut, transitions, captions, color,
+The agent gets all 94 schema'd tools (cut, transitions, captions, color,
 `search_media`, export, …). The MCP server drives one "active" session by
 default; pass `session_id` in any tool's arguments to target a specific
 project.
@@ -81,7 +81,7 @@ project.
 ```bash
 brew install ffmpeg ffmpeg-full        # ffmpeg-full has libvidstab + libass + zimg
 cd ~/video-ai-editor
-uv sync
+uv sync --python 3.13 --all-extras --group dev   # plain `uv sync` omits pytest
 cd frontend && npm install && cd ..
 cp .env.example .env                   # fill in ANTHROPIC_API_KEY
 ```
@@ -110,11 +110,35 @@ uv run python -m video_ai_editor.cli.setup_pyannote
 ### Desktop app (single command)
 
 ```bash
-uv run video-ai-editor
+bash run.sh              # macOS / Linux
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File run.ps1    # Windows
 ```
 
-Builds the frontend if needed, boots the backend in-process, opens a native
-window. No browser, no separate dev server. ~2 s cold start.
+Builds the frontend if it's missing or older than `frontend/src`, boots the
+backend in-process, opens a native window. No browser, no separate dev server.
+
+> **On macOS, use `run.sh` — not `uv run video-ai-editor`.** The latter can fail
+> with `ModuleNotFoundError: No module named 'video_ai_editor'` even when the
+> venv is correctly synced: Spotlight's `mdflagwriter` marks the editable
+> install's `.pth` file hidden within ~1 s of creation, and Python 3.13+ skips
+> hidden `.pth` files, so `src/` never lands on `sys.path`. It recurs
+> system-wide, so `chflags nohidden` doesn't hold. `run.sh` sets `PYTHONPATH`
+> and bypasses the `.pth` mechanism entirely. See CLAUDE.md for the full
+> diagnosis.
+
+### Verify a fresh checkout
+
+```bash
+bash verify_mac.sh                # full check, includes pytest (~10-15 min)
+bash verify_mac.sh --no-tests     # toolchain + build + boot only (~2 min)
+```
+
+Checks ffmpeg/npm/uv, builds the frontend with the real `tsc -b` gate, imports
+every backend module, boots the server and hits `/api/health` + `/readyz`, and
+reports which optional AI features this machine actually has. Runs every check
+before summarising, so you get all failures at once.
 
 ### Browser dev (hot-reload frontend)
 
@@ -131,9 +155,15 @@ Open http://localhost:5173.
 ## Test
 
 ```bash
-uv run pytest                          # ~68 s, 163 tests
-cd frontend && npx tsc --noEmit && npx vite build
+uv run pytest                          # ~11 min, 970 tests
+cd frontend && npx tsc -b --force && npx vitest run && npx vite build
 ```
+
+> Use `tsc -b`, **never** `tsc --noEmit`. `frontend/tsconfig.json` is a solution
+> file (`"files": []` plus only `references`), so plain `tsc` builds a program of
+> zero files and exits 0 — verified with `--listFiles`. Only build mode descends
+> into `tsconfig.app.json`. Four real type errors once sat on main while that
+> gate stayed green.
 
 ## Project status
 

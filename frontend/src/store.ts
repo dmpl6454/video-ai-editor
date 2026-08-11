@@ -146,7 +146,12 @@ interface State {
   // Client-side live transform: set while a transform slider is being dragged
   // so Preview applies a CSS transform to the <video> for instant feedback,
   // without a server render. Cleared (null) the moment the drag commits.
-  liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number } | null
+  // dx/dy (canvas pixels, relative to the clip's own last-committed x/y) drive
+  // the same CSS-transform preview for StickerLayer's direct on-canvas video
+  // drag — deltas rather than absolute values so Preview doesn't need to
+  // re-derive "what was this clip's x/y before the drag started" itself.
+  liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number
+                   dx?: number; dy?: number } | null
 
   // Client-side live color filter — the Color panel's mirror of liveTransform.
   // Set while a brightness/contrast/saturation slider drags so Preview applies
@@ -226,6 +231,10 @@ interface State {
   downloadExport(): Promise<void>
   cancelExport(): Promise<void>
   splitAtPlayhead(): Promise<void>
+  // Split one track at `time` and move the selection into the resulting right
+  // half (see the implementation for why the left half is the wrong thing to
+  // keep selected).
+  splitTrackAt(track: string, time: number): Promise<void>
   rippleDeleteSelection(): Promise<void>
   duplicateSelection(): Promise<void>
 }
@@ -662,8 +671,23 @@ export const useStore = create<State>((set, get) => ({
     }
     if (!trackIds.length) trackIds.push('v1')
     for (const track of trackIds) {
-      await s.dispatch('split_at', { track, time: t })
+      await get().splitTrackAt(track, t)
     }
+  },
+
+  splitTrackAt: async (track: string, time: number) => {
+    const res = await get().dispatch('split_at', { track, time })
+    // Follow the playhead into the RIGHT half. split_at keeps the original id
+    // on the LEFT half, which now ends exactly at the cut — so the selection
+    // silently pointed at a clip the playhead had just left, and Properties
+    // opened with "Not visible at the playhead (28.90s) — this clip runs
+    // 0.00–28.90s" the moment you pressed split, reading as a bug in the
+    // split itself. Selecting the piece under the playhead is also what every
+    // other editor does after a cut. Shared by ⌘B and the timeline's
+    // right-click "Split at playhead" so the two can't diverge.
+    const halves = (res?.result as { halves?: Record<string, string> } | null)?.halves
+    const sel = get().selection
+    if (halves && sel && halves[sel]) set({ selection: halves[sel] })
   },
 
   rippleDeleteSelection: async () => {

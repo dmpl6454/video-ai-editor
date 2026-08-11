@@ -119,6 +119,31 @@ def read_text_utf8(path: Path | str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def read_text_config(path: Path | str) -> str:
+    """Read a small hand-editable config file, tolerating a UTF-8 BOM.
+
+    For files a WINDOWS user or a Windows build script may have written:
+    `.env`, `VERSION`, `BUILD_ID`. Notepad and PowerShell 5.1's
+    `Set-Content -Encoding utf8` both prepend a BOM (`EF BB BF`), and neither
+    `read_text(encoding="utf-8")` nor `.strip()` removes it — a BOM is not
+    whitespace. The leading `\\ufeff` then lands *inside* the first value:
+
+      - `.env` -> the first key parses as `\\ufeffANTHROPIC_API_KEY`, so the real
+        key is never set and the app reports it missing while the file plainly
+        contains it (chat pane silently disabled).
+      - `BUILD_ID` -> the version badge and `/api/version` report a sha that is
+        not byte-equal to any git object, defeating the release-identity
+        mechanism whose whole purpose is making "which build?" answerable.
+
+    `utf-8-sig` decodes BOM-less UTF-8 byte-for-byte identically, so this is
+    strictly more tolerant than `read_text_utf8` — never different. It is a
+    separate helper rather than a change to `read_text_utf8` because that one is
+    used for media/EDL/sidecar reads where silently eating a leading `\\ufeff`
+    would be a content change, not a fix.
+    """
+    return Path(path).read_text(encoding="utf-8-sig")
+
+
 def write_text_utf8(path: Path | str, text: str) -> None:
     Path(path).write_text(text, encoding="utf-8")
 

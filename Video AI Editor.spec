@@ -20,6 +20,17 @@ if os.path.exists('BUILD_ID'):
 hiddenimports = ['uvicorn.lifespan.on', 'uvicorn.protocols.websockets.auto', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.logging', 'video_ai_editor.main']
 datas += collect_data_files('webview')
 datas += collect_data_files('open_clip')
+# faster-whisper ships the Silero VAD model as a DATA FILE inside its own
+# package (faster_whisper/assets/silero_vad_v6.onnx), not as Python code.
+# PyInstaller collects the module graph but never a package's data files unless
+# asked — so the packaged app imported faster_whisper fine and then died inside
+# `model.transcribe(..., vad_filter=True)` with onnxruntime's NoSuchFile. That
+# type is neither ValueError nor RuntimeError, so main.py's dispatch mapping
+# passed it through as a bare HTTP 500: "CC Captions → internal server error,
+# no captions", reproducing ONLY in the packaged build. transcribe.py also
+# degrades to vad_filter=False now, but that costs caption quality — this line
+# is what keeps the shipped app at full quality.
+datas += collect_data_files('faster_whisper')
 hiddenimports += collect_submodules('video_ai_editor')
 hiddenimports += collect_submodules('open_clip')
 

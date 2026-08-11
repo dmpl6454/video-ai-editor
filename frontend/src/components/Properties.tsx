@@ -2,6 +2,7 @@ import React from 'react'
 import { useStore } from '../store'
 import { isMediaClip } from '../types'
 import { baseName } from '../lib/paths'
+import { chordLabel } from '../keymap/engine'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -129,6 +130,16 @@ function isKeyframed(v: unknown): boolean {
   return Array.isArray(o.keyframes) && o.keyframes.length > 0
 }
 
+/** Is there a keyframe on `v` at (approximately) clip-local time `t`?
+ *  Tolerance is half a frame at 30fps — the playhead lands on frame
+ *  boundaries and the stored time is a float, so exact equality never
+ *  matches and the ◆ could never light up (or be removed). */
+function keyAt(v: unknown, t: number): boolean {
+  if (!isKeyframed(v)) return false
+  const kfs = (v as { keyframes: [number, number][] }).keyframes
+  return kfs.some((k) => Math.abs((k?.[0] ?? -1) - t) < 0.017)
+}
+
 function asScalar(v: unknown, fallback: number): number {
   if (typeof v === 'number') return v
   if (v && typeof v === 'object') {
@@ -149,6 +160,10 @@ export function Properties() {
   // here at the top so the count stays stable across the early-return paths
   // below (selecting a clip would otherwise add a hook → React #310).
   const playhead = useStore((s) => s.playhead)
+  // Same "keep the hook count stable" rule as `playhead` above — the video-fade
+  // section's "Jump there" button needs it, and that section only renders for
+  // some selections.
+  const setPlayhead = useStore((s) => s.setPlayhead)
   const setLiveTransform = useStore((s) => s.setLiveTransform)
 
   if (!sel || !edl) return (
@@ -158,7 +173,7 @@ export function Properties() {
         Nothing selected.
         <br />• Click a clip on the timeline to edit it here
         <br />• Drag a selected clip's edges to trim it
-        <br />• ⌘B splits the clip at the playhead
+        <br />• {chordLabel('Mod+KeyB')} splits the clip at the playhead
       </div>
     </div>
   )
@@ -239,18 +254,64 @@ export function Properties() {
 
   const clipStart = (c as unknown as { start?: number }).start ?? 0
   const localT = Math.max(0, playhead - clipStart)
-  const KFKey = ({ prop, value, fallback }: { prop: string; value: unknown; fallback: number }) => (
+  // ONE keyframe button for the whole transform.
+  //
+  // There used to be five — one per animatable property (scale, rotation,
+  // opacity, X, Y) — which is how pro NLEs do it, and it read as "why are there
+  // 5 buttons to add a keyframe" followed by "I can't see any keyframe added".
+  // A keyframe here now means what it means in a consumer editor: a snapshot of
+  // how the clip LOOKS at this instant. One click pins all five, so moving the
+  // playhead and changing anything produces a move between two poses instead of
+  // an animation on one property and static values on the others.
+  //
+  // Three states, kept from the per-property version — a flat "add" button gave
+  // no way to tell whether a click had done anything and NO way to undo it
+  // ("I was also unable to unmark the keyframe"; remove_keyframe existed in the
+  // backend with no UI surface at all):
+  //   • dim    — nothing animated yet; click keys the current pose
+  //   • hollow — animated, but no key at the playhead; click adds one here
+  //   • solid  — a key sits at the playhead; click REMOVES it (toggle off)
+  //
+  // Both directions go out as ONE dispatch carrying all five props (the
+  // handlers take a `props` list), so one click is one undo step. Five separate
+  // dispatches would let an Undo leave the clip keyed on some properties and
+  // not others.
+  const KF_PROPS = ['scale', 'rotation', 'opacity', 'x', 'y'] as const
+  const kfValues: Record<string, unknown> = {
+    scale: tx?.scale, rotation: tx?.rotation, opacity: tx?.opacity, x: tx?.x, y: tx?.y,
+  }
+  const kfFallback: Record<string, number> = {
+    scale: 1, rotation: 0, opacity: 1, x: xVal, y: yVal,
+  }
+  // Every distinct keyframe time on the clip, so the panel can SHOW them.
+  const kfTimes = [...new Set(KF_PROPS.flatMap((p) => {
+    const v = kfValues[p]
+    return isKeyframed(v) ? (v as { keyframes: [number, number][] }).keyframes.map((k) => k[0]) : []
+  }))].sort((a, b) => a - b)
+  const kfAnimated = kfTimes.length > 0
+  const kfHere = KF_PROPS.some((p) => keyAt(kfValues[p], localT))
+
+  const KeyframeButton = () => (
     <button
-      title={`${isKeyframed(value) ? 'Add another' : 'Animate'} keyframe at playhead (${localT.toFixed(2)}s in clip)`}
-      onClick={() => dispatch('add_keyframe', {
-        clip_id: c.id, prop, time: localT, value: asScalar(value, fallback),
+      aria-label={`${kfHere ? 'Remove' : 'Add'} keyframe`}
+      title={kfHere
+        ? `Remove the keyframe at the playhead (${localT.toFixed(2)}s into the clip)`
+        : `Add a keyframe at the playhead (${localT.toFixed(2)}s into the clip) — `
+          + 'pins scale, rotation, opacity and position as they are now'}
+      onClick={() => dispatch(kfHere ? 'remove_keyframe' : 'add_keyframe', {
+        clip_id: c.id, props: [...KF_PROPS], time: localT,
+        ...(kfHere ? {} : {
+          values: Object.fromEntries(
+            KF_PROPS.map((p) => [p, asScalar(kfValues[p], kfFallback[p])])),
+        }),
       })}
       style={{
-        background: isKeyframed(value) ? 'var(--accent)' : 'var(--bg-3)',
-        border: '1px solid var(--line)', padding: '0 6px', fontSize: 11,
-        borderRadius: 3, cursor: 'pointer', color: 'inherit',
+        background: kfHere ? 'var(--accent)' : 'var(--bg-3)',
+        border: `1px solid ${kfAnimated ? 'var(--accent)' : 'var(--line)'}`,
+        padding: '1px 8px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+        color: kfAnimated ? 'inherit' : 'var(--text-dim)',
       }}
-    >◆</button>
+    >{kfHere ? '◆' : '◇'} Keyframe</button>
   )
 
   return (
@@ -342,6 +403,34 @@ export function Properties() {
                 }} />
             </div>
           </div>
+          {/* Where the fade actually lands on the timeline. A fade is a
+              property of THIS CLIP, not of the video: set 5s of fade-out on
+              the first of two clips and it dips to black in the middle, not
+              at the end — and looking anywhere else, nothing appears to have
+              happened ("Fade out isn't working"). Spelling out the seconds
+              turns that into something checkable. */}
+          {(videoFadeIn > 0 || videoFadeOut > 0) && (() => {
+            const cEnd = clipStart + Math.max(0, ((c as unknown as { out?: number }).out ?? 0)
+              - ((c as unknown as { in?: number }).in ?? 0)) / (speed > 0 ? speed : 1)
+            return (
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.6 }}>
+                {videoFadeIn > 0 && (
+                  <div>Fades in {clipStart.toFixed(2)}–{(clipStart + videoFadeIn).toFixed(2)}s</div>
+                )}
+                {videoFadeOut > 0 && (
+                  <div>Fades out {(cEnd - videoFadeOut).toFixed(2)}–{cEnd.toFixed(2)}s
+                    {' '}<button
+                      onClick={() => setPlayhead(Math.max(0, cEnd - videoFadeOut / 2))}
+                      style={{
+                        background: 'var(--bg-3)', border: '1px solid var(--line)',
+                        borderRadius: 3, padding: '0 6px', fontSize: 11, cursor: 'pointer',
+                        color: 'inherit',
+                      }}>Jump there</button>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </Section>
       )}
 
@@ -403,36 +492,60 @@ export function Properties() {
       <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
         clip_id: c.id, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1,
       })}>
+        {/* One button, and a readout of where the keys actually are — the
+            timeline draws them on the clip too, but the panel is where you are
+            looking when you press it ("I can't see any keyframe added"). */}
+        <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <KeyframeButton />
+          {kfAnimated ? (
+            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+              {kfTimes.length} key{kfTimes.length === 1 ? '' : 's'} ·{' '}
+              {kfTimes.map((t, i) => (
+                <span key={t}>
+                  {i ? ', ' : ''}
+                  <button
+                    onClick={() => setPlayhead(clipStart + t)}
+                    title={`Jump to this keyframe (${(clipStart + t).toFixed(2)}s)`}
+                    style={{
+                      background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                      fontSize: 10, textDecoration: 'underline',
+                      color: Math.abs(t - localT) < 0.017 ? 'var(--accent)' : 'var(--text-dim)',
+                    }}
+                  >{t.toFixed(2)}s</button>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+              no keyframes — move the playhead, press this, then change scale/position
+            </span>
+          )}
+        </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <KFKey prop="scale" value={tx?.scale} fallback={1} />
           <Slider min={0.1} max={4} step={0.05} value={scale}
             format={(v) => `scale ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, scale: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <KFKey prop="rotation" value={tx?.rotation} fallback={0} />
           <Slider min={-180} max={180} step={1} value={rotation}
             format={(v) => `rotation ${v.toFixed(0)}°`}
             onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <KFKey prop="opacity" value={tx?.opacity} fallback={1} />
           <Slider min={0} max={1} step={0.05} value={opacity}
             format={(v) => `opacity ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, opacity: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <KFKey prop="x" value={tx?.x} fallback={xVal} />
           <label style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80, display: 'flex', alignItems: 'center', gap: 4 }}>
             x:
             <NumberField value={xVal} dp={0} step={1} width={56}
               onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, x: n })} />
             {isKeyframed(tx?.x) ? '· animated' : ''}
           </label>
-          <KFKey prop="y" value={tx?.y} fallback={yVal} />
           <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
             y:
             <NumberField value={yVal} dp={0} step={1} width={56}
@@ -445,7 +558,7 @@ export function Properties() {
 
       <div className="row" style={{ marginTop: 8 }}>
         <button
-          title="Add a copy of this clip right after it (⌘D)"
+          title={`Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`}
           onClick={() => dispatch('duplicate_clip', { clip_id: c.id })}
         >Duplicate</button>
         <button

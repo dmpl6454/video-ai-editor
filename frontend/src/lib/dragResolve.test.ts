@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { rangesOverlap, resolveMediaSpeed, resolveMediaTrim, resolveOverlayTiming, snapToFreeGap, wouldOverlap } from './dragResolve'
+import { rangesOverlap, reorderLanding, resolveMediaSpeed, resolveMediaTrim, resolveOverlayTiming, snapToFreeGap, wouldOverlap } from './dragResolve'
 import type { Track } from '../types'
 
 function mediaTrack(clips: { id: string; start: number; dur: number; speed?: number }[]): Track {
@@ -151,5 +151,63 @@ describe('resolveOverlayTiming', () => {
   })
   it('clamps start to >= 0 and keeps end > start', () => {
     expect(resolveOverlayTiming(clip, 'l', -100)).toEqual({ start: 0, end: 8 })
+  })
+})
+
+describe('reorderLanding', () => {
+  // Three back-to-back clips, the shape every reorder complaint was about.
+  const seq = mediaTrack([
+    { id: 'a', start: 0, dur: 2 },
+    { id: 'b', start: 2, dur: 2 },
+    { id: 'c', start: 4, dur: 2 },
+  ])
+
+  it('puts a clip dropped at the head FIRST', () => {
+    expect(reorderLanding(seq, 0, 'c')).toBe(0)
+    // What the old path answered for the same drag: 4 — bit for bit where `c`
+    // already was. It walks forward past the very clips the drag is jumping,
+    // so dragging the last clip to the front moved it exactly nowhere, and the
+    // landing line drew that no-op as if it were the outcome.
+    expect(snapToFreeGap(seq, 2, 0, 'c')).toBe(4)
+  })
+
+  it('orders by the dropped clip\'s LEFT EDGE against the other starts', () => {
+    // Dropped at 2 — a tie with `b`, and a tie goes to the dragged clip, so it
+    // lands second and pushes b right.
+    expect(reorderLanding(seq, 2, 'c')).toBe(2)
+    // Dropped at 2.9 its left edge is past b's, so it lands third — back where
+    // it started. One rule, applied on both sides: the left edge decides.
+    expect(reorderLanding(seq, 2.9, 'c')).toBe(4)
+    expect(reorderLanding(seq, 1.9, 'c')).toBe(2)
+  })
+
+  it('sends a clip dropped past the end to the tail', () => {
+    expect(reorderLanding(seq, 99, 'a')).toBe(4)
+  })
+
+  it('is a no-op when a clip is dropped back where it was', () => {
+    expect(reorderLanding(seq, 2, 'b')).toBe(2)
+  })
+
+  it('closes the hole the clip leaves behind', () => {
+    // `b` moved to the end: `c` slides down into b's old slot, so b lands at 4
+    // rather than 6 — the timeline gets shorter, not longer.
+    expect(reorderLanding(seq, 99, 'b')).toBe(4)
+  })
+
+  it('packs from 0 even when the lane starts with a gap', () => {
+    const gapped = mediaTrack([{ id: 'a', start: 5, dur: 2 }, { id: 'b', start: 9, dur: 2 }])
+    expect(reorderLanding(gapped, 20, 'a')).toBe(2)
+    expect(reorderLanding(gapped, 0, 'b')).toBe(0)
+  })
+
+  it('uses the EFFECTIVE footprint of the clips it packs', () => {
+    // 10s of source at 2x occupies 5s of timeline. Packing by raw out-in would
+    // put the dropped clip 5s too far right of where the backend lands it.
+    const retimed = mediaTrack([
+      { id: 'a', start: 0, dur: 10, speed: 2 },
+      { id: 'b', start: 5, dur: 3 },
+    ])
+    expect(reorderLanding(retimed, 99, 'b')).toBe(5)
   })
 })

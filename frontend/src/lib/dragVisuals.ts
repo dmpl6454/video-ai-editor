@@ -31,12 +31,54 @@ export const DEL_GAP = 14        // gap between box corner and the ✕ center
 
 const CORNER_SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
 
+/**
+ * Where to put the ✕ delete handle, in the box's LOCAL (rotated) frame.
+ *
+ * It wants to sit just OUTSIDE the top-right corner — but the overlay canvas
+ * is exactly the preview box and clips anything drawn past its edges. A
+ * sticker dropped near the top or right edge therefore had its ✕ rendered
+ * off-canvas: invisible and unclickable, so the only way to remove it was the
+ * Delete key ("there should be a cross button on the emoji to remove, I have
+ * to press delete button on the keyboard").
+ *
+ * So: try each corner's OUTSIDE position, then each corner's INSIDE position,
+ * and take the first that lands fully within the canvas. A big sticker
+ * covering the whole frame still gets an inside-corner ✕. Exported (rather
+ * than duplicated at the two call sites) because the draw and the hit test
+ * MUST agree — a handle you can see but not click is the same bug again.
+ */
+export function deleteHandleLocal(
+  box: { cx: number; cy: number; hw: number; hh: number; rot: number },
+  canvasW: number, canvasH: number,
+): { lx: number; ly: number } {
+  const { cx, cy, hw, hh, rot } = box
+  const cos = Math.cos(rot), sin = Math.sin(rot)
+  const fits = (lx: number, ly: number) => {
+    const x = cx + lx * cos - ly * sin
+    const y = cy + lx * sin + ly * cos
+    return x >= DEL_R && x <= canvasW - DEL_R && y >= DEL_R && y <= canvasH - DEL_R
+  }
+  // Preferred first: outside top-right, then the other three outside corners,
+  // then the same four pulled inside the box.
+  const order = [[1, -1], [-1, -1], [1, 1], [-1, 1]] as const
+  for (const [sx, sy] of order) {
+    const lx = sx * (hw + DEL_GAP), ly = sy * (hh + DEL_GAP)
+    if (fits(lx, ly)) return { lx, ly }
+  }
+  for (const [sx, sy] of order) {
+    const lx = sx * Math.max(0, hw - DEL_GAP), ly = sy * Math.max(0, hh - DEL_GAP)
+    if (fits(lx, ly)) return { lx, ly }
+  }
+  return { lx: hw + DEL_GAP, ly: -hh - DEL_GAP }   // nothing fits — original spot
+}
+
 /** Draw the selection box, corner handles and (when idle) the ✕ delete handle
  *  for a box already translated/rotated into its own local frame by the caller. */
 export function drawSelectionChrome(
   ctx: CanvasRenderingContext2D,
   hw: number, hh: number,
-  opts: { dragging: boolean; resizing: boolean; showDelete: boolean },
+  opts: { dragging: boolean; resizing: boolean; showDelete: boolean
+          deleteAt?: { lx: number; ly: number } },
 ): void {
   ctx.strokeStyle = ACCENT
   if (opts.dragging) {
@@ -59,7 +101,10 @@ export function drawSelectionChrome(
   // Hidden mid-gesture: a drag that ends over the ✕ must not read as a delete
   // click, and it cuts chrome noise while moving.
   if (!opts.showDelete || opts.dragging) return
-  const dx = hw + DEL_GAP, dy = -hh - DEL_GAP
+  // Position comes from the caller (deleteHandleLocal) so draw and hit test
+  // can never disagree; the literal below is only the no-canvas-size default.
+  const dx = opts.deleteAt ? opts.deleteAt.lx : hw + DEL_GAP
+  const dy = opts.deleteAt ? opts.deleteAt.ly : -hh - DEL_GAP
   ctx.beginPath()
   ctx.arc(dx, dy, DEL_R, 0, Math.PI * 2)
   ctx.fillStyle = 'rgba(20,20,24,0.9)'

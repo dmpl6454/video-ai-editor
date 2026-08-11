@@ -17,26 +17,36 @@
 // definition of the handles lives in lib/dragVisuals, so the two kinds cannot
 // drift apart again.
 //
-// PIXEL-OWNERSHIP RULE (issue 12): the server bakes EVERY sticker into the
-// preview render, even with preview=True (text_overlay.py build_overlay_chain
-// skips only TEXT clips in preview — its docstring says so explicitly). So
-// when idle, the <video> underneath already shows the sticker pixels and this
-// layer must draw NOTHING on top — the old code drew the emoji glyph (Apple
-// Color Emoji over the baked Twemoji: a double-draw) or, for label-less PNG
-// stickers, a translucent white circle OVER the perfectly-correct baked
-// sticker (the "white circle covers my PNG" bug). We only paint the sticker's
-// image/glyph WHILE it is being dragged/resized, as live feedback at the new
-// position — the baked copy is stale (pre-drag) for that window, and the
-// solid drag box visually supersedes it. Selection chrome always draws.
-// TEXT needs no equivalent: TextLayer draws it client-side every frame and
-// picks up this layer's live drag offset directly.
+// PIXEL-OWNERSHIP RULE: in PREVIEW, this layer owns a sticker's pixels
+// outright — text_overlay.py's build_overlay_chain(preview=True) skips
+// stickers as well as text, so the <video> underneath carries none. Export
+// still bakes both (there is no TextLayer/StickerLayer there).
+//
+// It used to be the other way round: the server baked stickers even in
+// preview, so this layer drew the sticker's own image ONLY mid-gesture, as
+// live feedback. That produced a ghost — the baked copy stayed frozen at the
+// pre-drag position while this one tracked the pointer, so a drag showed TWO
+// stickers, and on release the live copy vanished while the stale one lingered
+// at the old spot for the entire commit→re-render gap ("it disappears, then
+// leaves a trail at the last position"). A client cannot erase a baked pixel,
+// so smooth direct manipulation requires owning them — the conclusion text
+// reached first.
+//
+// Consequences to preserve:
+//   • Draw the ARTWORK PNG (imageFor), never the OS emoji glyph. The glyph is
+//     a different design from the Twemoji the export bakes, so painting it
+//     made the sticker visibly change appearance on commit. It survives only
+//     as a fallback for when the artwork genuinely can't be fetched (the
+//     emoji cache was cleared, a brand-kit end-card moved on disk).
+//   • Preview.tsx's videoFingerprint must NOT include sticker tracks — no
+//     sticker edit needs an ffmpeg round-trip any more.
 
 import { useEffect, useRef } from 'react'
 import { useStore } from '../store'
-import type { EDL } from '../types'
+import { isMediaClip, clipEnd, type EDL, type Clip } from '../types'
 import {
   isSticker, stickerGeom, boxFromStickerGeom, toLocal, hitsBody,
-  getTextBoxes, setOverlayDrag, unsentinel, CORNERS,
+  getTextBoxes, setOverlayDrag, unsentinel, CORNERS, paintOrder,
   type StickerClip, type OverlayBox,
 } from '../lib/overlay'
 import * as dv from '../lib/dragVisuals'
@@ -54,36 +64,24 @@ interface Props {
 const TEXT_SIZE_MIN = 8
 const TEXT_SIZE_MAX = 600
 
-// Cache of sticker images for live drag feedback, keyed by the EDL `src`
-// (server-absolute path). Values: HTMLImageElement once decoded, 'loading'
-// while in flight, 'error' after a failed load (→ translucent-circle
-// fallback during drags only).
+// Cache of sticker artwork, keyed by the EDL `src` (server-absolute path) so
+// two clips sharing one image decode once. Values: HTMLImageElement once
+// decoded, 'loading' while in flight, 'error' after a failed load.
 const IMG_CACHE = new Map<string, HTMLImageElement | 'loading' | 'error'>()
-
-// Server src path → session file URL. Sticker uploads land under
-// <session>/uploads/stickers/<name> (main.py sticker_upload) and
-// serve_session_file streams /api/sessions/{sid}/files/uploads/<subpath>
-// (the `name` segment may include subdirs; there is also an rglob-by-name
-// fallback one level deeper). NOTE: /thumb is deliberately NOT used — it
-// re-encodes to JPEG, which drops the alpha channel a PNG sticker needs.
-function stickerUrl(src: string, sid: string): string | null {
-  const norm = src.replace(/\\/g, '/')
-  const i = norm.indexOf('/uploads/')
-  const name = i >= 0 ? norm.slice(i + '/uploads/'.length) : norm.split('/').pop()
-  if (!name) return null
-  const encoded = name.split('/').map(encodeURIComponent).join('/')
-  return `/api/sessions/${encodeURIComponent(sid)}/files/uploads/${encoded}`
-}
 
 function imageFor(sk: StickerClip, sid: string | null): HTMLImageElement | 'loading' | 'error' {
   const cached = IMG_CACHE.get(sk.src)
   if (cached) return cached
   if (!sid) return 'error'
-  const url = stickerUrl(sk.src, sid)
-  if (!url) {
-    IMG_CACHE.set(sk.src, 'error')
-    return 'error'
-  }
+  // Fetch by CLIP ID, not by path. `/files/uploads/<name>` only reaches files
+  // under this session's uploads/ — correct, that containment check is its
+  // security model — but plenty of legitimate sticker srcs live elsewhere:
+  // emoji added before add_sticker copied art into the session, a brand kit's
+  // end-card/watermark, any absolute path. Those resolved to a 404 and, now
+  // that this layer owns sticker pixels in preview, would have drawn an empty
+  // box while exporting perfectly. /sticker/{clip_id} resolves the path
+  // through the session's own EDL instead.
+  const url = `/api/sessions/${encodeURIComponent(sid)}/sticker/${encodeURIComponent(sk.id)}`
   IMG_CACHE.set(sk.src, 'loading')
   const img = new Image()
   img.onload = () => IMG_CACHE.set(sk.src, img)
@@ -98,6 +96,16 @@ type Drag =
       live: { x: number; y: number } }
   | { id: string; kind: 'sticker' | 'text'; mode: 'resize'; cx: number; cy: number
       startDist: number; scale0: number; size0: number; live: { scale: number; mul: number } }
+  // Direct on-canvas drag of the base video clip itself (Canva-style "just
+  // grab the picture and move it", replacing having to type x/y numbers in
+  // Properties). Scoped to v1 specifically — a v2/PIP clip's on-screen box
+  // depends on ITS OWN transform (position/scale), which would need real
+  // geometry + hit-testing to disambiguate overlapping video layers, the same
+  // way stickerGeom() does for stickers. v1 always fills the whole canvas
+  // with nothing else competing for the same screen space, so any click that
+  // isn't on a sticker/text unambiguously means v1.
+  | { id: string; kind: 'video'; mode: 'move'; startMx: number; startMy: number
+      x0: number; y0: number; live: { x: number; y: number } }
 
 export function StickerLayer({ edl, videoEl, width, height }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -105,6 +113,7 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
   const setSelection = useStore((s) => s.setSelection)
   const dispatch = useStore((s) => s.dispatch)
   const sessionId = useStore((s) => s.sessionId)
+  const setLiveTransform = useStore((s) => s.setLiveTransform)
 
   // Keep the latest reactive values in a ref so the rAF loop + event handlers
   // (registered once) always read fresh state without re-binding.
@@ -152,29 +161,40 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       return boxFromStickerGeom(sk.id, stickerGeom(sk, t, edl.canvas.w, edl.canvas.h, width, height, ov))
     }
 
-    // A text box, with the live drag offset folded in so the chrome tracks the
-    // pointer exactly like a sticker's does. TextLayer applies the identical
-    // offset to the glyphs it paints (it reads the same override), so box and
-    // text move together.
-    const textBoxLive = (b: OverlayBox): OverlayBox => {
-      const d = dragRef.current
-      if (!d || d.id !== b.id) return b
-      if (d.mode === 'move') {
-        const { edl, width, height } = stateRef.current
-        return { ...b,
-                 cx: b.cx + (d.live.x - d.x0) * (width / edl.canvas.w),
-                 cy: b.cy + (d.live.y - d.y0) * (height / edl.canvas.h) }
-      }
-      return { ...b, hw: b.hw * d.live.mul, hh: b.hh * d.live.mul }
-    }
-
+    // NOTE: a text box arrives from TextLayer ALREADY LIVE — it reads the same
+    // getOverlayDrag() override and applies the move offset and the resize
+    // multiplier before publishing, because it has to draw the glyphs there.
+    // This layer used to re-apply both on top, so the chrome moved at DOUBLE
+    // the pointer distance and detached upward from the text it was supposed
+    // to be around ("when I drag the text, the text box gets outside of the
+    // text"); a resize inflated it by mul² the same way. The commit reads
+    // d.live.* rather than the box, which is why the text still landed in the
+    // right place and only the box lied.
+    //
+    // TextLayer is the correct owner: it is the only place that measures and
+    // wraps a string, and under a live resize it RE-WRAPS at the new size —
+    // line breaks can change, so the true box is not a uniform scale of the
+    // old one and could not be reconstructed here anyway. The cost is that the
+    // chrome can trail the glyphs by at most one frame (two rAF loops), which
+    // is invisible; being 2× wrong was not. A sticker's box is still built
+    // locally (stickerBox) because THIS layer owns sticker geometry.
     // Every selectable overlay at time t, in hit order (top-most LAST).
     // Text sits above stickers on screen (Preview.tsx stacks TextLayer over
     // this one), so it is hit first.
     const allBoxes = (t: number): OverlayBox[] => [
       ...activeStickers(t).map((sk) => stickerBox(sk, t)),
-      ...getTextBoxes().map(textBoxLive),
+      ...getTextBoxes(),
     ]
+
+    // The v1 clip on screen at time t, if any — the direct-drag target when
+    // nothing else (sticker/text) is under the cursor.
+    const activeV1Clip = (t: number): Clip | undefined => {
+      const v1 = stateRef.current.edl.tracks.find((tk) => tk.id === 'v1')
+      if (!v1) return undefined
+      return v1.clips.find(
+        (c): c is Clip => isMediaClip(c) && c.start <= t && t < clipEnd(c),
+      )
+    }
 
     let raf = 0
     const draw = () => {
@@ -191,50 +211,52 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       const t = now()
       const stickers = activeStickers(t)
       const boxes = allBoxes(t)
-      // Only intercept clicks when there is something to hit at the playhead.
-      cv.style.pointerEvents = boxes.length ? 'auto' : 'none'
+      // Intercept clicks whenever there's a sticker/text to hit OR a v1 clip
+      // to grab-and-drag directly — which in practice is "whenever there's
+      // any footage on screen", i.e. almost always. Only a genuine gap (no
+      // v1 clip, no overlays) lets clicks fall through with nothing to do.
+      cv.style.pointerEvents = (boxes.length || activeV1Clip(t)) ? 'auto' : 'none'
 
-      for (const sk of stickers) {
-        if (dragRef.current?.id !== sk.id) continue
+      // The sticker being dragged paints LAST — see paintOrder's comment: its z
+      // is only raised at commit time, so stored order made an older sticker
+      // dive under a newer one for the whole gesture.
+      for (const sk of paintOrder(stickers, dragRef.current?.id)) {
+        const d = dragRef.current
+        const ov = d?.id === sk.id
+          ? (d.mode === 'move' ? { x: d.live.x, y: d.live.y } : { scale: d.live.scale })
+          : undefined
         const g = stickerGeom(sk, t, stateRef.current.edl.canvas.w, stateRef.current.edl.canvas.h,
-                              width, height,
-                              dragRef.current.mode === 'move'
-                                ? { x: dragRef.current.live.x, y: dragRef.current.live.y }
-                                : { scale: dragRef.current.live.scale })
-        // Paint the sticker's own pixels ONLY mid-gesture (see the
-        // pixel-ownership rule in the module comment): the baked video shows
-        // the pre-drag position, and this is the live-position feedback.
+                              width, height, ov)
         ctx.save()
         ctx.translate(g.cx, g.cy)
         ctx.rotate(g.rot)
         ctx.globalAlpha = g.opa
-        if (sk.label) {
-          // Emoji sticker: the glyph is a faithful-enough live proxy for
-          // the baked Twemoji artwork.
+        const im = imageFor(sk, stateRef.current.sessionId)
+        if (im instanceof HTMLImageElement && im.naturalWidth > 0) {
+          // Fit inside the g.size box preserving the PNG's aspect — same
+          // contain-fit the server bake uses (target_long on the longer edge).
+          const ar = im.naturalWidth / im.naturalHeight
+          const dw = ar >= 1 ? g.size : g.size * ar
+          const dh = ar >= 1 ? g.size / ar : g.size
+          ctx.drawImage(im, -dw / 2, -dh / 2, dw, dh)
+        } else if (im === 'error' && sk.label) {
+          // The artwork file is genuinely gone (emoji cache cleared, image
+          // moved on disk) — /sticker/{clip_id} 404s. The OS glyph is a
+          // near-enough stand-in; it is NOT what the export bakes, so this is
+          // a fallback, never the normal path.
           ctx.font = `${g.size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`
           ctx.textBaseline = 'middle'
           ctx.textAlign = 'center'
           ctx.fillText(sk.label, 0, 0)
-        } else {
-          const im = imageFor(sk, stateRef.current.sessionId)
-          if (im instanceof HTMLImageElement && im.naturalWidth > 0) {
-            // Fit inside the g.size box preserving the PNG's aspect — same
-            // contain-fit the server bake uses (target_long on the longer edge).
-            const ar = im.naturalWidth / im.naturalHeight
-            const dw = ar >= 1 ? g.size : g.size * ar
-            const dh = ar >= 1 ? g.size / ar : g.size
-            ctx.drawImage(im, -dw / 2, -dh / 2, dw, dh)
-          } else if (im === 'error') {
-            // Image unreachable (e.g. src outside the session's uploads/):
-            // legacy translucent-circle placeholder, but only mid-drag.
-            ctx.fillStyle = 'rgba(255,255,255,0.6)'
-            ctx.beginPath()
-            ctx.arc(0, 0, g.size / 2, 0, Math.PI * 2)
-            ctx.fill()
-          }
-          // 'loading': draw nothing extra — the drag box below is enough
-          // feedback, and the image resolves within a frame or two.
+        } else if (im === 'error') {
+          // Label-less PNG sticker we can't fetch: outline the box so the
+          // clip is still selectable/draggable rather than invisible.
+          ctx.strokeStyle = 'rgba(255,255,255,0.45)'
+          ctx.setLineDash([5, 4])
+          ctx.strokeRect(-g.size / 2, -g.size / 2, g.size, g.size)
+          ctx.setLineDash([])
         }
+        // 'loading': draw nothing — resolves within a frame or two.
         ctx.restore()
       }
 
@@ -250,9 +272,11 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
           dragging: !!dragging,
           resizing: !!dragging && d!.mode === 'resize',
           showDelete: true,
+          deleteAt: dv.deleteHandleLocal(sel, width, height),
         })
         ctx.restore()
       }
+
       raf = requestAnimationFrame(draw)
     }
     draw()
@@ -275,7 +299,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       // other overlays when the deleted clip is a v1 media Clip.
       if (selBox) {
         const { lx, ly } = toLocal(px, py, selBox)
-        if (Math.hypot(lx - (selBox.hw + dv.DEL_GAP), ly - (-selBox.hh - dv.DEL_GAP)) <= dv.DEL_R + 4) {
+        const del = dv.deleteHandleLocal(selBox, stateRef.current.width, stateRef.current.height)
+        if (Math.hypot(lx - del.lx, ly - del.ly) <= dv.DEL_R + 4) {
           e.preventDefault()
           setSelection(null)
           dispatch('ripple_delete', { clip_id: selBox.id })
@@ -339,7 +364,37 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         return
       }
 
-      // 4) Empty space → deselect.
+      // 4) Nothing overlay-shaped under the cursor → grab the base video
+      // clip itself, Canva-style direct manipulation instead of requiring
+      // the Properties panel's x/y number fields. Falls through to plain
+      // deselect if there's no v1 footage at this instant (a gap).
+      const vclip = activeV1Clip(t)
+      if (vclip) {
+        const fit = (vclip as unknown as { fit?: string }).fit
+        e.preventDefault()
+        if (vclip.id !== sel) setSelection(vclip.id)
+        // A cover-fit clip's direct drag is owned by <CropReposition> instead
+        // (Preview.tsx mounts it, covering this canvas, once the clip is
+        // selected) — it needs the raw uncropped source and a zoomed-out
+        // viewport to show real footage while panning, which this simple
+        // CSS-translate-the-baked-frame approximation can't provide (that
+        // approximation is exactly what made a cover-fit pan reveal
+        // manufactured black instead of real footage). Only start a drag
+        // here for `contain`, where the approximation has no such gap.
+        if (fit === 'cover') return
+        const tx = (vclip as unknown as { transform?: { x?: unknown; y?: unknown } }).transform
+        const x0 = typeof tx?.x === 'number' ? tx.x : 0
+        const y0 = typeof tx?.y === 'number' ? tx.y : 0
+        try { cv.setPointerCapture(e.pointerId) } catch { /* synthetic/edge pointer */ }
+        dragRef.current = {
+          id: vclip.id, kind: 'video', mode: 'move', startMx: px, startMy: py,
+          x0, y0, live: { x: x0, y: y0 },
+        }
+        setLiveTransform({ clipId: vclip.id, dx: 0, dy: 0 })
+        return
+      }
+
+      // 5) Truly empty space → deselect.
       if (sel) setSelection(null)
     }
 
@@ -356,7 +411,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         const selBox = boxes.find((b) => b.id === sel)
         if (selBox) {
           const { lx, ly } = toLocal(px, py, selBox)
-          if (Math.hypot(lx - (selBox.hw + dv.DEL_GAP), ly - (-selBox.hh - dv.DEL_GAP)) <= dv.DEL_R + 4) {
+          const del = dv.deleteHandleLocal(selBox, stateRef.current.width, stateRef.current.height)
+          if (Math.hypot(lx - del.lx, ly - del.ly) <= dv.DEL_R + 4) {
             cursor = 'pointer'  // the ✕ delete handle
           }
           if (cursor === 'default') {
@@ -369,11 +425,21 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
           }
         }
         if (cursor === 'default' && boxes.some((b) => hitsBody(px, py, b))) cursor = 'move'
+        // No overlay under the cursor, but there's real footage to grab —
+        // same hint a sticker/text body gets, so the video reads as
+        // draggable too instead of looking static.
+        if (cursor === 'default' && activeV1Clip(t)) cursor = 'move'
         cv.style.cursor = cursor
         return
       }
       const { edl, width, height } = stateRef.current
-      if (d.mode === 'move') {
+      if (d.kind === 'video') {
+        d.live.x = d.x0 + (px - d.startMx) * (edl.canvas.w / width)
+        d.live.y = d.y0 + (py - d.startMy) * (edl.canvas.h / height)
+        // Preview.tsx applies this as a CSS translate on the <video> — see
+        // the liveTransform.dx/dy comment in store.ts.
+        setLiveTransform({ clipId: d.id, dx: d.live.x - d.x0, dy: d.live.y - d.y0 })
+      } else if (d.mode === 'move') {
         d.live.x = d.x0 + (px - d.startMx) * (edl.canvas.w / width)
         d.live.y = d.y0 + (py - d.startMy) * (edl.canvas.h / height)
         setOverlayDrag({ id: d.id, dx: px - d.startMx, dy: py - d.startMy, sizeMul: 1 })
@@ -391,6 +457,20 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       if (!d) return
       try { cv.releasePointerCapture(e.pointerId) } catch { /* noop */ }
       dragRef.current = null
+      if (d.kind === 'video') {
+        // Deliberately do NOT clear liveTransform here — Preview.tsx's
+        // onLoadedData clears it once the re-render carrying this commit
+        // actually lands, so the CSS-translated preview stays put instead of
+        // snapping back to the pre-drag frame for the commit/re-render gap
+        // (the same lifecycle scale/rotation dragging already follows).
+        const moved = Math.round(d.live.x) !== Math.round(d.x0)
+          || Math.round(d.live.y) !== Math.round(d.y0)
+        if (!moved) { setLiveTransform(null); return }
+        dispatch('set_clip_transform', {
+          clip_id: d.id, x: Math.round(d.live.x), y: Math.round(d.live.y),
+        })
+        return
+      }
       setOverlayDrag(null)
       if (d.mode === 'move') {
         // A body pointerdown always starts a 'move' drag, so a plain
@@ -399,15 +479,42 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         const moved = Math.round(d.live.x) !== Math.round(d.x0)
           || Math.round(d.live.y) !== Math.round(d.y0)
         if (!moved) return
-        // Deliberately position-only: a drag does NOT restack. Auto-raising
-        // the dragged overlay would silently override an explicit "Send to
-        // back", and it can't share this commit — two dispatches means Undo
-        // reverts the raise while leaving the overlay moved. Stacking is
-        // controlled explicitly by Properties' Bring-to-front / Send-to-back.
+        // Raise the dragged sticker above anything that currently COVERS it,
+        // in the same commit (set_clip_transform's raise_to_front).
+        //
+        // Stacking is (track_z, clip_z, start), so with every sticker at the
+        // default z=0 the newest-added always won and dragging an older one
+        // on top of it changed nothing — you could see the sticker you were
+        // holding disappear underneath. Conditional rather than unconditional:
+        // only when something actually overlaps it on screen AND composites
+        // above it, so a deliberate "Send to back" survives an unrelated nudge
+        // and a drag in open space commits no pointless z change. Text is
+        // excluded — TextClip has no per-clip z (it layers by track).
+        let raise = false
+        if (d.kind === 'sticker') {
+          const t2 = now()
+          const order = activeStickers(t2)      // ascending composite order
+          const meIdx = order.findIndex((s) => s.id === d.id)
+          if (meIdx >= 0) {
+            // The DROPPED box, not the stored one: the commit hasn't landed
+            // yet, so the EDL still holds the pre-drag x/y and testing that
+            // would answer "did it overlap where it USED to be?".
+            const mine = stickerBox(order[meIdx], t2)
+            const { edl, width: w, height: h } = stateRef.current
+            const cx = d.live.x * (w / edl.canvas.w)
+            const cy = d.live.y * (h / edl.canvas.h)
+            raise = order.slice(meIdx + 1).some((other) => {
+              const ob = stickerBox(other, t2)
+              return Math.abs(ob.cx - cx) < ob.hw + mine.hw
+                  && Math.abs(ob.cy - cy) < ob.hh + mine.hh
+            })
+          }
+        }
         dispatch('set_clip_transform', {
           clip_id: d.id,
           x: unsentinel(Math.round(d.live.x), d.xSentinels),
           y: unsentinel(Math.round(d.live.y), d.ySentinels),
+          ...(raise ? { raise_to_front: true } : {}),
         })
       } else if (d.kind === 'text') {
         // Text resizes by its style.size (EDL-canvas px) — the same field the

@@ -27,14 +27,28 @@ def thumbnail_for(src: Path, cache_dir: Path, *, t: float, height: int = 54) -> 
     if out.exists() and out.stat().st_size > 0:
         return out
     tmp = cache_dir / f".th_{key}.{os.getpid()}_{threading.get_ident()}.part.jpg"
-    proc = subprocess.run(
-        [_pu.FFMPEG, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(src),
-         "-frames:v", "1", "-vf", f"scale=-2:{int(height)}",
-         "-q:v", "5", str(tmp)],
-        capture_output=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+
+    def _extract(seek: list[str]) -> bool:
+        proc = subprocess.run(
+            [_pu.FFMPEG, "-y", *seek, "-i", str(src),
+             "-frames:v", "1", "-vf", f"scale=-2:{int(height)}",
+             "-q:v", "5", str(tmp)],
+            capture_output=True,
+            **_pu.SUBPROCESS_FLAGS,
+        )
+        return proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0
+
+    ok = _extract(["-ss", f"{max(0.0, t):.3f}"])
+    if not ok:
+        # A seek AT or PAST the last frame decodes nothing, so ffmpeg writes no
+        # output and this raised — the Timeline asks for a thumb at the tail of
+        # a clip, so the user got a broken thumbnail and a console error for a
+        # perfectly valid file. Observed on a 4.017s clip: t=3.9 fine, t=3.967
+        # a 422. Retry relative to END of file, which always lands on a real
+        # frame. Failure path only: a normal thumbnail costs nothing extra.
+        _pu.unlink_with_retry(tmp)
+        ok = _extract(["-sseof", "-0.2"])
+    if not ok:
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(
             f"thumbnail extraction failed for {src.name} at t={t:.2f}")

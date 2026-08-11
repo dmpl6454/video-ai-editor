@@ -59,6 +59,38 @@ export function snapToFreeGap(
   return candidate
 }
 
+/** Where a clip dropped at `preferredStart` ACTUALLY lands on the sequence
+ *  lane, given that a same-lane drag reorders and then repacks from 0.
+ *
+ *  Mirrors dispatch.py's `_repack_media` exactly, including the tie-break:
+ *  a start equal to an existing clip's start puts the DRAGGED clip first,
+ *  which is what makes dropping on top of clip 1 an insert before it rather
+ *  than a re-derivation of the order you started with.
+ *
+ *  This is what the drag preview must draw. `snapToFreeGap` is the wrong
+ *  answer for a reorder — it walks FORWARD past the very clips the drag is
+ *  trying to jump, so the landing line promised the clip would not move while
+ *  the backend went ahead and reordered it. Preview and landing have to be the
+ *  same function; on this lane, that function is this one.
+ */
+export function reorderLanding(
+  track: Track, preferredStart: number, clipId: string,
+): number {
+  const start = Math.max(0, preferredStart)
+  const others = track.clips
+    .filter(isMediaClip)
+    .filter((c) => c.id !== clipId)
+    .map((c) => ({ start: c.start, dur: clipEnd(c) - c.start }))
+    .sort((a, b) => a.start - b.start)
+  let cursor = 0
+  for (const o of others) {
+    // Strictly-less: on a tie the dragged clip wins, matching `prefer_first`.
+    if (o.start >= start) break
+    cursor += o.dur
+  }
+  return cursor
+}
+
 const MIN_SPAN = 0.1
 const SPEED_MIN = 0.25
 const SPEED_MAX = 4

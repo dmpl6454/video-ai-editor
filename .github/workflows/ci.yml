@@ -101,6 +101,96 @@ jobs:
         run: uv run pytest -q --tb=short
         # Heavy-AI tests skip cleanly (no binaries/models on the runner).
 
+  backend-macos:
+    name: backend (pytest, macos)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      ANTHROPIC_API_KEY: ""
+      HUGGINGFACE_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      # macOS is a SHIPPING platform for this app — it is the primary one (the
+      # .app bundle, the pywebview/WKWebView front end, the VideoToolbox
+      # encoder ladder, the `.pth` hidden-flag launch quirk) — and until this
+      # job existed there was no automated gate for it at all: CI ran ubuntu +
+      # windows only. Every macOS claim rested on reading the code. ubuntu
+      # covers POSIX path/encoding semantics but not Darwin-specific paths
+      # (`~/Library/Application Support`, `exe_name` no-op, avfoundation,
+      # VideoToolbox probing), which is exactly where platformutil branches.
+      - name: Install ffmpeg
+        run: |
+          # The runner image may already carry an ffmpeg, and `brew install` on
+          # an already-installed formula can exit non-zero on a link conflict —
+          # which would fail the job over a working toolchain. The real gate is
+          # whether ffmpeg RUNS, so assert that instead of trusting brew's exit
+          # code. (Deliberately no `set -o pipefail`: `ffmpeg -version | head -1`
+          # SIGPIPEs ffmpeg, and under pipefail that reads as a failure.)
+          brew install ffmpeg || echo "brew install exited non-zero — falling back to any preinstalled ffmpeg"
+          ffmpeg -version > /dev/null 2>&1 || { echo "::error::no usable ffmpeg on this runner"; exit 1; }
+          ffmpeg -version 2>/dev/null | head -1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run pytest
+        run: uv run pytest -q --tb=short
+        # Same as the other backend jobs: heavy-AI tests skip cleanly because
+        # the binaries/models aren't on the runner. `brew install ffmpeg` (not
+        # ffmpeg-full) has no libvidstab, so `stabilize` skips too — that is
+        # the documented degrade-don't-crash path, and a test asserting it is
+        # more valuable than a 10-minute source build of ffmpeg-full.
+
+      # pytest proves the LOGIC imports and behaves; it never boots the app.
+      # This step proves the process actually RUNS on macOS: every module
+      # imports together under a real ASGI server, uvicorn binds, and the app's
+      # own readiness probe finds ffmpeg (`/readyz` is 503 when it does not).
+      # It is the closest thing to "did it launch" that a headless runner can
+      # assert — the native window (WKWebView) and the .app bundle still need a
+      # human on a Mac.
+      #
+      # PYTHONPATH=src is deliberate and mirrors run.sh: on macOS an editable
+      # install's .pth can be flagged hidden by Spotlight's mdflagwriter, and
+      # Python 3.13+ skips hidden .pth files — the documented launch gotcha.
+      # Going through PYTHONPATH bypasses that mechanism entirely, so this step
+      # tests the app rather than the runner's Spotlight state.
+      - name: Boot the backend (execution smoke test)
+        env:
+          PYTHONPATH: src
+        run: |
+          uv run python -m uvicorn video_ai_editor.main:app \
+            --host 127.0.0.1 --port 8765 --log-level warning &
+          pid=$!
+          ok=0
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8765/api/health > /dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::backend never answered /api/health on macOS"
+            kill $pid 2>/dev/null || true
+            exit 1
+          fi
+          echo "health : $(curl -fsS http://127.0.0.1:8765/api/health)"
+          echo "version: $(curl -fsS http://127.0.0.1:8765/api/version)"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/readyz)
+          echo "readyz : $code"
+          kill $pid 2>/dev/null || true
+          if [ "$code" != "200" ]; then
+            echo "::error::/readyz returned $code — the app could not find a usable ffmpeg"
+            exit 1
+          fi
+
   frontend:
     name: frontend (tsc + vite build)
     runs-on: ubuntu-latest

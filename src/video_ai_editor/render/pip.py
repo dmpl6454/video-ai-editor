@@ -72,8 +72,33 @@ def build_pip_overlay_chain(
 
     for i, (_tid, c) in enumerate(pips):
         idx = first_input_index + i
-        # Trim source on input side so we only decode what's needed.
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+        # Trim source on input side so we only decode what's needed, and place
+        # the decoded stream at the clip's ABSOLUTE timeline position.
+        #
+        # Without `-itsoffset` the PIP's frames start at t=0 in the filtergraph
+        # while `enable=between(t,start,…)` only reveals it at `start` — so by
+        # the time the window opens the stream has already ENDED, and overlay's
+        # default eof_action=repeat holds the last decoded frame for the whole
+        # appearance. A PIP anywhere but t=0 was therefore a still image of its
+        # own final frame; when that frame is dark (a fade-out, a cut to black)
+        # the result is a literal black box, which is how this was reported.
+        # Measured on a 4s source of 1s colour blocks placed at start=5: the
+        # window showed YELLOW (source second 3, the last frame) throughout,
+        # where RED (source second 0) was due.
+        #
+        # This is the same defect the text-overlay path already fixed for
+        # animated overlays ("an animated overlay later on the timeline had
+        # finished its whole animation before its enable-window even opened"),
+        # and the same offset the PIP AUDIO side has always applied via
+        # `adelay` in compositor.py — the picture was simply never given it.
+        #
+        # `-t` rather than `-to`: `-to` is an absolute input timestamp, and
+        # `-itsoffset` shifts the timestamps it is compared against, so the two
+        # together can truncate the input to nothing. A duration is immune.
+        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", f"{max(0.001, c.out - c.in_):.3f}"]
+        if c.start > 0.0005:
+            extra_inputs += ["-itsoffset", f"{c.start:.3f}"]
+        extra_inputs += ["-i", c.src]
 
         tx = c.transform
         # Scale relative to canvas long edge. Default size = 35% of canvas long edge.

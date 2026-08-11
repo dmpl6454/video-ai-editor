@@ -149,20 +149,21 @@ def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
     """
     for name in _HW_ENCODER_ORDER:
         if _usable_encoder(name):
-            return _hw_encoder_args(name, preview=preview, crf=crf)
+            # The GOP bound must apply to the HARDWARE encoders too, not just
+            # the libx264 fallback below. It was only ever set on libx264, on
+            # the assumption that "HW encoders already emit ~0.4-1s GOPs" —
+            # measured false: h264_qsv produced a 60-frame (2s) GOP, so on
+            # every machine WITH a GPU (i.e. most of them, and the fast path
+            # this ladder exists to prefer) the mitigation never applied and
+            # the scrubber paid a full ~30-frame decode per drag tick.
+            return _hw_encoder_args(name, preview=preview, crf=crf) + (
+                ["-g", str(_PREVIEW_GOP)] if preview else [])
     default_crf = 30 if preview else 20
     crf_val = crf if crf is not None else default_crf
     preset = "ultrafast" if preview else "medium"
     args = ["-c:v", "libx264", "-preset", preset, "-crf", str(crf_val), "-pix_fmt", "yuv420p"]
     if preview:
-        # Bound the preview GOP to ~1s. x264's default keyint=250 yields
-        # 8.3s keyframe spacing at 30fps, and the frontend scrubber decodes
-        # from the nearest PRIOR keyframe on every paused playhead drag —
-        # on no-GPU machines (this fallback) that was up to ~250 frames per
-        # drag tick, the visible "rewinds a second or two while scrubbing"
-        # tester report. HW encoders already emit ~0.4-1s GOPs. Export path
-        # untouched: long GOPs are the right trade for file size there.
-        args += ["-g", "30"]
+        args += ["-g", str(_PREVIEW_GOP)]
     return args
 
 
@@ -177,6 +178,24 @@ def _crf_to_videotoolbox_qv(crf: int) -> int:
     """
     q = 100 - (crf - 14) * 2.5
     return int(round(max(0.0, min(100.0, q))))
+
+
+# Keyframe spacing for PREVIEW renders only, in frames. The frontend scrubber
+# decodes from the nearest PRIOR keyframe on every paused playhead drag, so the
+# average cost of a drag tick is GOP/2 frames of H.264 decode — the GOP is the
+# single number that sets how smooth scrubbing feels.
+#
+# A/B on a 1080x1920 frame-numbered ramp, playhead dragged across 6s of timeline
+# from an in-page rAF loop at 60Hz, counting the scrubber's own drawImage calls:
+#   GOP 60 (what h264_qsv emitted with no -g) -> 45.4 fps, p90 gap 32ms
+#   GOP 15 (this)                             -> 57.3 fps, p90 gap 23ms
+# Measure this with an IN-PAGE driver and a drawImage counter, never with
+# playwright's mouse.move() (capped ~12 events/sec by the CDP round-trip) or a
+# per-rAF getImageData (~35ms/tick). Both of those measure the harness: the
+# first reported 12.4 fps here, which was playwright's event rate, not the app.
+# Export is deliberately untouched: long GOPs are the right size trade there,
+# and nothing scrubs an exported file inside the app.
+_PREVIEW_GOP = 15
 
 
 def _hw_encoder_args(name: str, *, preview: bool, crf: int | None = None) -> list[str]:
@@ -312,22 +331,6 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     Used by both the monolithic renderer (where input_label = [N:v] for the
     Nth input) and the chunk renderer (where input_label = [0:v]).
     """
-    # `fit` decides what happens when the source aspect doesn't match the canvas:
-    #   contain (default) — scale DOWN to fit, pad the remainder black. Letterbox.
-    #   cover             — scale UP to fill, crop the overflow. No black bars.
-    # `decrease`+`pad` IS letterbox by construction, and it was the only mode
-    # that existed, which is why switching 9:16 → 16:9 could only ever add bars
-    # ("there is no crop option for the video, only the aspect ratio gets
-    # changed"). `contain` is the default so every existing EDL renders
-    # byte-identically.
-    if getattr(c, "fit", "contain") == "cover":
-        v_chain = (f"{input_label}"
-                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
-                   f"crop={canvas_w}:{canvas_h},setsar=1")
-    else:
-        v_chain = (f"{input_label}"
-                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
-                   f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
     tx = c.transform
     rot_static = float(tx.rotation) if isinstance(tx.rotation, (int, float)) else 0.0
     sc_static = float(tx.scale) if isinstance(tx.scale, (int, float)) else 1.0
@@ -341,18 +344,90 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     y_static = 0.0 if y_animated else float(tx.y) if isinstance(tx.y, (int, float)) else 0.0
     tvar = f"(t-{c.start:.4f})"
 
+    # `fit` decides what happens when the source aspect doesn't match the canvas:
+    #   contain (default) — scale DOWN to fit, pad the remainder black. Letterbox.
+    #   cover             — scale UP to fill, crop the overflow. No black bars.
+    # `decrease`+`pad` IS letterbox by construction, and it was the only mode
+    # that existed, which is why switching 9:16 → 16:9 could only ever add bars
+    # ("there is no crop option for the video, only the aspect ratio gets
+    # changed"). `contain` is the default so every existing EDL renders
+    # byte-identically.
+    #
+    # A static (non-keyframed) pan on a `cover` clip needs its own path. The
+    # plain center crop below throws away everything outside the canvas box
+    # BEFORE any transform runs, so the generic pan logic further down (which
+    # assumes it's panning an already-canvas-sized frame) had no real footage
+    # left to reveal and could only pad in manufactured black — defeating the
+    # entire point of "fill frame, no bars" ("the user has no freedom of
+    # cropping the particular part of video ... this function crops the video
+    # by its own"). Scale-only cover zoom and every `contain` clip are
+    # untouched by this — see `cover_needs_real_pan` below.
+    cover_needs_real_pan = (
+        getattr(c, "fit", "contain") == "cover"
+        and not (sc_animated or x_animated or y_animated)
+        and (x_static != 0 or y_static != 0)
+    )
+    if getattr(c, "fit", "contain") == "cover":
+        if cover_needs_real_pan:
+            # Keep the "increase"-scaled frame OVERSIZED (don't crop yet) so
+            # there's real surplus footage to pan into. An optional extra
+            # zoom (the same Scale slider) widens that margin further, then a
+            # single crop picks the window — offset by the same x/y meaning
+            # used everywhere else in this function (positive x/y moves the
+            # picture right/down; see the static branch below) but evaluated
+            # against the true oversized size via ffmpeg's own `in_w`/`in_h`,
+            # since the exact "increase" scale-up factor depends on the
+            # source's aspect ratio, which isn't known in Python here. ffmpeg
+            # clamps an out-of-range crop x/y to the available margin on its
+            # own, so panning past the real footage's edge holds on the last
+            # real pixel instead of exposing black — cover's whole point.
+            v_chain = (f"{input_label}"
+                       f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,setsar=1")
+            # Clamped to >=1: this multiplier only ever WIDENS the pan margin.
+            # sc_static<1 (zooming OUT) would shrink the already-covering
+            # frame to SMALLER than the canvas — crop then has less input
+            # than its requested output size and produces black (found live:
+            # a scale=0.1 pan committed via the wheel-zoom rendered a solid
+            # black frame, no ffmpeg error). Mirrors the `max(1, ...)` guard
+            # the keyframed branch below already applies for the same reason.
+            extra_zoom = max(1.0, sc_static)
+            if extra_zoom > 1.001:
+                v_chain += f",scale=w='iw*{extra_zoom:.4f}':h='ih*{extra_zoom:.4f}'"
+            v_chain += (
+                f",crop={canvas_w}:{canvas_h}:"
+                f"'(in_w-out_w)/2-{x_static:.2f}':'(in_h-out_h)/2-{y_static:.2f}'"
+            )
+        else:
+            v_chain = (f"{input_label}"
+                       f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                       f"crop={canvas_w}:{canvas_h},setsar=1")
+    else:
+        v_chain = (f"{input_label}"
+                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
+                   f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+
+    # Rotation happens IN PLACE: the frame keeps its canvas size and the corners
+    # that swing outside it are cut, exactly like the browser's `rotate()` and
+    # exactly like every NLE's rotate control.
+    #
+    # It used to expand the output to the rotated bounding box
+    # (`ow=rotw:oh=roth`) and then scale that box back down to fit the canvas
+    # with `decrease`+`pad`. Nothing was lost, but the picture SHRANK — and the
+    # shrink grows with the angle, so nudging a clip 3° to straighten it visibly
+    # zoomed the whole shot out. Worse, `Preview.tsx`'s live preview is a CSS
+    # `rotate()`, which rotates in place, so the picture jumped to a different
+    # size the instant the value committed and the render landed: "while
+    # rotating, the preview I get is correct, but when the changes are made the
+    # preview gets changed". Two renderers of the same property have to agree,
+    # and in-place is the one users expect. `rotate`'s default ow/oh IS iw/ih,
+    # so simply not overriding them gives in-place rotation with black corners.
     if rot_animated:
         re = to_ffmpeg_expr(tx.rotation, time_var=tvar)
         re_rad = f"({re})*PI/180"
-        v_chain += (f",rotate=a='{re_rad}':c=black:"
-                    f"ow='rotw({re_rad})':oh='roth({re_rad})'")
-        v_chain += (f",scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
-                    f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        v_chain += f",rotate=a='{re_rad}':c=black"
     elif abs(rot_static) > 0.001:
         rad = rot_static * 3.14159265 / 180.0
-        v_chain += f",rotate={rad}:c=black:ow=rotw({rad}):oh=roth({rad})"
-        v_chain += (f",scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
-                    f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black")
+        v_chain += f",rotate={rad}:c=black"
 
     if sc_animated or x_animated or y_animated:
         sexpr = to_ffmpeg_expr(tx.scale, time_var=tvar) if sc_animated else f"{sc_static:.4f}"
@@ -371,6 +446,12 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
             f",scale=w='{canvas_w}*{zoom}':h='{canvas_h}*{zoom}':eval=frame"
             f",crop={canvas_w}:{canvas_h}:'{cx_expr}':'{cy_expr}'"
         )
+    elif cover_needs_real_pan:
+        # Already applied above, in the `cover`-fit block — this branch's
+        # pad/crop hack assumes it's starting from an exactly canvas-sized
+        # frame, which isn't true here (the cover frame was deliberately left
+        # oversized so the pan above had real footage, not black, to reveal).
+        pass
     elif (abs(sc_static - 1.0) > 0.001 and sc_static > 0) or x_static or y_static:
         # This branch used to fire ONLY on a scale change, and even then it
         # hardcoded a dead-centre crop — so `Transform.x`/`y` were silently
@@ -667,9 +748,21 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 ltb, rtb = f"[xtbl{i}]", f"[xtbr{i}]"
                 fc_parts.append(f"{cur_v}settb=AVTB{ltb}")
                 fc_parts.append(f"{seg_v[i]}settb=AVTB{rtb}")
-                fc_parts.append(
-                    f"{ltb}{rtb}{xf}{new_v}"
-                )
+                # A few transitions need a real filter on top of the blend,
+                # because an xfade expr can only pick between the two pixels at
+                # one coordinate — it cannot smear them. `whip` is a slide plus
+                # a directional blur burst; without it the name just produced a
+                # soft slide. Gated with enable= to the transition window in
+                # OUTPUT time, so it cannot touch the rest of the timeline.
+                from .transitions import post_filter
+                post = post_filter(ttype, offset, offset + tdur,
+                                   canvas_w, canvas_h)
+                if post:
+                    mid = f"[xpost{i}]"
+                    fc_parts.append(f"{ltb}{rtb}{xf}{mid}")
+                    fc_parts.append(f"{mid}{post}{new_v}")
+                else:
+                    fc_parts.append(f"{ltb}{rtb}{xf}{new_v}")
                 # acrossfade performs no such timebase check — leave it alone.
                 fc_parts.append(
                     f"{cur_a}{seg_a[i]}acrossfade=d={tdur}{new_a}"

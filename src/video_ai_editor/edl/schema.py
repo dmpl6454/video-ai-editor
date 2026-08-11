@@ -30,7 +30,28 @@ EDL_VERSION = 2
 #     factor needed to expose the offset. Unchanged for every clip whose x/y are
 #     both 0, which is the overwhelming majority — but the salt has to move
 #     because an existing EDL with a non-zero x/y renders differently now.
-RENDER_BEHAVIOR_VERSION = 7
+# v8: two fixes that change the pixels of an EDL nobody edited.
+#     (a) v1 rotation is IN PLACE (`rotate=<rad>:c=black`) instead of expanding
+#         to the rotated bounding box and scaling that back down to fit — a 3°
+#         straighten used to visibly zoom the whole shot out (30° rendered at
+#         57% size), and the live CSS preview, which rotates in place, jumped
+#         the moment the value committed.
+#     (b) a PIP's input is placed at its timeline position with `-itsoffset`.
+#         Without it the overlay stream ran from t=0 and had ENDED before its
+#         `enable` window opened, so overlay's eof_action=repeat froze the
+#         clip's LAST frame for the whole appearance — a black box whenever the
+#         clip ends dark. Any session holding a cached preview/export/chunk of
+#         a rotated clip or a PIP at start>0 would otherwise keep being served
+#         the pre-fix pixels forever, which reads as "the fix did nothing".
+# v9: preview renders get a bounded keyframe interval on EVERY encoder
+#     (`compositor._PREVIEW_GOP`), not just the libx264 fallback. The scrubber
+#     decodes from the nearest prior keyframe on each paused drag tick, so the
+#     GOP sets how smooth scrubbing feels; h264_qsv was emitting 60-frame GOPs
+#     and a measured drag painted only 12.4 fps. The pixels are identical —
+#     this salt moves because the FILE differs, and without the bump every
+#     existing session would keep being served its long-GOP preview from cache
+#     and the fix would read as having done nothing.
+RENDER_BEHAVIOR_VERSION = 9
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -403,16 +424,91 @@ class EDL(_EDLModel):
                     for c in (t.clips if t else []) if isinstance(c, Clip)),
                    default=0.0)
 
+    def transition_overlap(self) -> float:
+        """Seconds the v1 transitions remove from the rendered timeline.
+
+        An `xfade` PLAYS THE TWO CLIPS AT ONCE for its duration, so every
+        transition the renderer applies makes the output that much shorter than
+        the clips' geometric extent (compositor.py says so in one line:
+        `cur_dur = cur_dur + seg_dur[i] - tdur`). Nothing told the EDL, so the
+        timeline, the transport denominator and every "how long is this" caller
+        kept reporting the un-shortened length: an 8s timeline split at 2/4/6
+        with three 0.5s transitions renders **6.5s**, and playback simply
+        stopped with the transport reading 6.50 / 8.00 and a dead tail nobody
+        could explain. Reported as "the 8 sec video got stopped at 7 sec".
+
+        Mirrors the renderer's applicability rule exactly, because counting a
+        transition it will NOT apply is the same bug pointing the other way:
+          * only a boundary between two ADJACENT clips (a gap there becomes a
+            black filler segment, and a cross-fade across black is meaningless,
+            so the renderer leaves that seam a hard cut);
+          * matched to the boundary within the same 0.05s tolerance;
+          * one transition per seam (the renderer keys `seg_trans` by segment
+            index, so a legacy EDL carrying a stack at one cut still only ever
+            renders — and therefore only ever costs — one).
+        """
+        v1 = self.get_track("v1")
+        if not v1 or not v1.transitions:
+            return 0.0
+        clips = sorted((c for c in v1.clips if isinstance(c, Clip)),
+                       key=lambda c: c.start)
+        total = 0.0
+        for cur, nxt in zip(clips, clips[1:]):
+            boundary = cur.start + cur.effective_duration
+            # A GAP (a positive one) is what makes `_v1_segments` insert black
+            # filler and therefore what makes the renderer keep the seam a cut.
+            # An OVERLAP is not: `_v1_segments` packs it with `max(cursor,
+            # start)` and emits no filler, so the two clips stay adjacent
+            # segments and the transition IS applied. Testing `abs(...)` here
+            # would let a legacy overlapping pair report a longer timeline than
+            # it renders. Same 1ms tolerance as compositor._GAP_EPS, duplicated
+            # rather than imported because render/ imports this module and the
+            # dependency cannot point back.
+            if nxt.start - boundary > 0.001:
+                continue          # a gap → filler → the renderer keeps the cut
+            match = next((tr for tr in v1.transitions
+                          if abs(tr.at - boundary) < 0.05), None)
+            if match:
+                # Never claim more than the shorter side can give: xfade cannot
+                # overlap further than a clip is long.
+                total += max(0.0, min(float(match.duration),
+                                      cur.effective_duration,
+                                      nxt.effective_duration))
+        return total
+
     def recompute_duration(self) -> None:
         end = 0.0
         for t in self.tracks:
+            if t.id == "v1":
+                # v1 is ASSEMBLED, not just laid out: `_v1_segments` walks the
+                # clips with `cursor = max(cursor, start) + effective_duration`,
+                # so two clips that overlap in the EDL are still emitted one
+                # after the other and the file comes out longer than the
+                # geometric max. Measured: two 4s clips overlapping by 2s
+                # report 6.0s and render 8.0s. Only `add_clip` can still create
+                # that (move_clip snaps to the first free gap), but Claude and
+                # MCP both reach it. For every non-overlapping timeline — which
+                # is all of them in practice — this cursor equals the plain max,
+                # so nothing moves.
+                cursor = 0.0
+                for c in sorted((c for c in t.clips if isinstance(c, Clip)),
+                                key=lambda c: c.start):
+                    cursor = max(cursor, c.start) + c.effective_duration
+                end = max(end, cursor)
+                continue
             for c in t.clips:
                 if isinstance(c, Clip):
+                    # Every other lane is placed at an absolute time (music via
+                    # adelay, PIP via overlay+itsoffset), so its extent is the
+                    # plain maximum.
                     end = max(end, c.start + c.effective_duration)
                 else:
                     # TextClip and Sticker both expose `.end`
                     end = max(end, getattr(c, "end", 0.0))
-        self.duration = end
+        # What the renderer will actually produce — see transition_overlap().
+        # Subtracted from the whole timeline, not just v1's own extent: the
+        # output IS the v1 assembly, and every other lane is mixed onto it.
+        self.duration = max(0.0, end - self.transition_overlap())
 
 
 def empty_edl(canvas: Canvas | None = None) -> EDL:

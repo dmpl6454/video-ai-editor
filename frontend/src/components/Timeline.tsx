@@ -6,7 +6,10 @@ import { isMediaClip, isTextClip, clipDuration, clipEnd, clipSpeedFactor, type A
 import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
 import { baseName, isAudioPath } from '../lib/paths'
+import { keyframeTimes } from '../lib/overlay'
+import { edlTimeFromOutput, v1Layout, type LayoutClip } from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
+import { chordLabel } from '../keymap/engine'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -288,12 +291,31 @@ export function Timeline() {
   // earlier ones — so "last wins" is what actually renders. types.ts's Track
   // doesn't declare `transitions` (hand-mirrored schema, incomplete on
   // purpose), so it's read via the repo's established cast pattern.
+  // How far each v1 clip is pulled left of its `start` by the transitions
+  // before it, plus where each seam lands — both in OUTPUT time. Mirrors
+  // EDL.transition_overlap(); see lib/timelineLayout.ts.
+  const { shift: v1Shift, seams: v1Seams, clips: v1LayoutClips } = useMemo(() => {
+    const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
+    const empty = {
+      shift: new Map<string, number>(), seams: [], clips: [] as LayoutClip[],
+    }
+    if (!v1) return empty
+    const trs = (v1 as unknown as { transitions?: TransitionInfo[] }).transitions ?? []
+    const lc: LayoutClip[] = v1.clips.filter(isMediaClip).map((c) => ({
+      id: c.id, start: c.start, duration: clipDuration(c),
+    }))
+    return {
+      ...v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration }))),
+      clips: lc,
+    }
+  }, [edl])
+
   const v1Cuts = useMemo(() => {
     const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
-    if (!v1) return [] as { at: number; tr: TransitionInfo | null }[]
+    if (!v1) return [] as { at: number; outAt: number; tr: TransitionInfo | null }[]
     const trs = (v1 as unknown as { transitions?: TransitionInfo[] }).transitions ?? []
     const media = v1.clips.filter(isMediaClip).slice().sort((a, b) => a.start - b.start)
-    const cuts: { at: number; tr: TransitionInfo | null }[] = []
+    const cuts: { at: number; outAt: number; tr: TransitionInfo | null }[] = []
     for (let i = 0; i < media.length - 1; i++) {
       // EFFECTIVE timeline end ((out-in)/speed) — the backend ripples
       // neighbors to the effective end, so raw `out-in` both misplaced the
@@ -302,11 +324,15 @@ export function Timeline() {
       if (Math.abs(media[i + 1].start - end) <= 0.05) {
         let match: TransitionInfo | null = null
         for (const tr of trs) if (Math.abs(tr.at - end) < 0.05) match = tr
-        cuts.push({ at: end, tr: match })
+        // `at` stays EDL time (it is what add/remove_transition is called
+        // with); `outAt` is where the affordance is DRAWN, which differs by
+        // the accumulated overlap once any transition exists upstream.
+        const seam = v1Seams.find((s) => Math.abs(s.boundary - end) < 1e-6)
+        cuts.push({ at: end, outAt: seam ? seam.outAt : end, tr: match })
       }
     }
     return cuts
-  }, [edl])
+  }, [edl, v1Seams])
 
   // Filmstrip tile loader. Returns the image when cached; otherwise kicks off
   // a fetch (once per key — failed loads are marked 'error' and never retried
@@ -333,12 +359,14 @@ export function Timeline() {
   }
 
   // Build hit list each render so we can do clip hit-testing on click.
+  // Uses the same OUTPUT positions the draw loop does — the two must agree or
+  // clicks land on a clip other than the one under the pointer.
   const hits: HitClip[] = []
   for (let i = 0; i < tracks.length; i++) {
     const t = tracks[i]
     const y = trackY(i)
     for (const c of t.clips) {
-      const start = c.start
+      const start = c.start - (t.id === 'v1' ? (v1Shift.get(c.id) ?? 0) : 0)
       // EFFECTIVE timeline width — (out-in)/speed for media, matching the draw
       // loop's clipDuration. Raw `out-in` made a 2x clip's hit box extend past
       // its drawn rect (shadowing the neighbor: clicks selected the wrong clip,
@@ -437,11 +465,23 @@ export function Timeline() {
       // below, instead of being invisible.
       const seenRanges: [number, number][] = []
       for (const c of t.clips) {
-        const start = c.start
+        // OUTPUT position, not the EDL's. On v1 a transition makes the
+        // renderer overlap this clip with its predecessor, so everything after
+        // the first transition plays EARLIER than `start` says — drawing the
+        // raw value put the strip up to a second right of the picture and left
+        // an unreachable tail past the (correctly shortened) duration.
+        const start = c.start - (t.id === 'v1' ? (v1Shift.get(c.id) ?? 0) : 0)
         const dur = clipDuration(c)
-        const end = start + dur
-        const overlapsPrior = seenRanges.some(([s, e]) => start < e - 1e-9 && end > s + 1e-9)
-        seenRanges.push([start, end])
+        // The overlap WARNING is about the EDL invariant "two clips must not
+        // occupy the same time on a track", so it is tested against the EDL
+        // positions — never the drawn ones. Under a transition the drawn rects
+        // overlap ON PURPOSE (that is what a cross-dissolve looks like), and
+        // testing the drawn values flagged every transition as broken data.
+        const rawStartT = c.start
+        const rawEndT = c.start + dur
+        const overlapsPrior = seenRanges.some(
+          ([s, e]) => rawStartT < e - 1e-9 && rawEndT > s + 1e-9)
+        seenRanges.push([rawStartT, rawEndT])
         const x = labelWidth + start * zoom
         const w = Math.max(2, dur * zoom)
         const isSel = c.id === selection || multiSelection.includes(c.id)
@@ -558,6 +598,31 @@ export function Timeline() {
             ctx.fillRect(x + w - 3.5, y + trackHeight / 2 - 3, 1, 6)
           }
         }
+        // Keyframe markers: a small diamond on the clip at each keyframe time.
+        // Adding one used to change nothing you could see anywhere ("I can't
+        // see any keyframe added in the video") — the panel button lit up and
+        // that was the entire feedback. Drawn for every clip, not just the
+        // selected one, so an animated clip is identifiable at a glance. Times
+        // are CLIP-LOCAL (see EDL schema), hence `c.start + kt`.
+        const kfT = keyframeTimes(c)
+        if (kfT.length && w > 6) {
+          const my = y + trackHeight - 7
+          ctx.save()
+          for (const kt of kfT) {
+            const kx = labelWidth + (start + kt) * zoom
+            if (kx < x - 1 || kx > x + w + 1) continue   // trimmed out of view
+            ctx.beginPath()
+            ctx.moveTo(kx, my - 4); ctx.lineTo(kx + 4, my)
+            ctx.lineTo(kx, my + 4); ctx.lineTo(kx - 4, my)
+            ctx.closePath()
+            ctx.fillStyle = '#fbbf24'
+            ctx.fill()
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)'
+            ctx.lineWidth = 1
+            ctx.stroke()
+          }
+          ctx.restore()
+        }
         // Overlap warning: the later clip (in start order) of an overlapping
         // pair on this track gets a dashed amber border so it's never
         // invisibly merged with its neighbor, even for legacy/pre-guard data.
@@ -594,7 +659,7 @@ export function Timeline() {
       // Click handling lives in onMouseDown (hit-tested BEFORE clip hits).
       if (t.id === 'v1') {
         for (const cut of v1Cuts) {
-          const cx = labelWidth + cut.at * zoom
+          const cx = labelWidth + cut.outAt * zoom
           const cy = y + trackHeight / 2
           ctx.save()
           ctx.beginPath()
@@ -692,7 +757,7 @@ export function Timeline() {
     // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps.
     //  `thumbTick` repaints as filmstrip tiles load — waveTick's mechanism;
     //  `sid` feeds thumbImage's URLs; `v1Cuts` derives from `edl` via useMemo.)
-  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, inMark, outMark, flashClipId])
+  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, v1Shift, inMark, outMark, flashClipId])
 
   // Sticky track-label column. The main canvas draws labels at its own x=0,
   // but that canvas is the thing that SCROLLS (contentW-sized) — so once the
@@ -893,8 +958,18 @@ export function Timeline() {
       let landStart = rawStart
       let overlapping = false
       if (compatible && destTrack && drag.clipKind === 'media') {
-        overlapping = dragResolve.wouldOverlap(destTrack, durSec, rawStart, drag.clipId)
-        landStart = dragResolve.snapToFreeGap(destTrack, durSec, rawStart, drag.clipId)
+        // A same-lane drag on v1 REORDERS (onMouseUp sends close_gap), so the
+        // clip lands where the repack puts it — not at the next free gap, and
+        // landing on an occupied slot is the gesture, not a collision. Drawing
+        // the snap here promised the clip would stay put while the backend
+        // reordered it, which is the same preview≠landing split this block's
+        // durSec comment exists to prevent.
+        if (destTrack.id === 'v1' && destIdx === originIdx) {
+          landStart = dragResolve.reorderLanding(destTrack, rawStart, drag.clipId)
+        } else {
+          overlapping = dragResolve.wouldOverlap(destTrack, durSec, rawStart, drag.clipId)
+          landStart = dragResolve.snapToFreeGap(destTrack, durSec, rawStart, drag.clipId)
+        }
       }
 
       if (destIdx >= 0 && compatible) {
@@ -1018,7 +1093,7 @@ export function Timeline() {
       if (v1Idx >= 0) {
         const cy = trackY(v1Idx) + trackHeight / 2
         for (const cut of v1Cuts) {
-          const cx = labelWidth + cut.at * zoom
+          const cx = labelWidth + cut.outAt * zoom
           const dx = x - cx
           const dy = y - cy
           if (dx * dx + dy * dy <= 8 * 8) {
@@ -1256,19 +1331,44 @@ export function Timeline() {
           toast.error(`Can't move this clip to the "${targetType}" lane — it stayed on "${originType}".`)
         }
       }
-      // Cross-track (or same-track) overlap guard, mirrored client-side for
-      // instant feedback. move_clip on the backend is the real enforcement
-      // (Claude/MCP callers reach it directly and bypass this file), but
-      // without this mirror the UI would show the pre-snap position for one
-      // render before the server-computed snapped position arrives — a
-      // visible "jump". Only media clips have this check (drag.origIn/origOut
-      // are only meaningful for a media Clip — see onMouseDown, where a
-      // Sticker/TextClip hit sets them to 0/0); a dropped Sticker/TextClip
-      // has no analogous cross-track drop-overlap path.
       const originTrack = tracks.find((t) => t.id === drag.trackId)
       const draggedClip = originTrack?.clips.find((c) => c.id === drag.clipId)
       const draggedIsMedia = !!draggedClip && isMediaClip(draggedClip)
-      if (destTrack && draggedIsMedia) {
+      // A DRAG means "reorder", so close the slot the clip vacated instead of
+      // leaving a hole and a longer timeline (dragging clip 1 to the end used
+      // to give "duration increased and empty space at the start"). V1 only —
+      // the backend applies the same restriction; every other lane holds
+      // elements positioned against v1's picture (a caption's start is a
+      // coordinate, not a slot, and so is a PIP's), so packing one from t=0
+      // would destroy a deliberate layout. Deliberately NOT the default for
+      // move_clip itself: Claude/MCP callers position clips at absolute times
+      // and must not shuffle neighbours.
+      //
+      // Sent whenever v1 is EITHER end of the drag, because the hole to close
+      // is on the lane the clip LEFT: dragging a clip off v1 onto v2 has to
+      // close v1's slot, and only the backend knows which side that is (it
+      // reassigns `track` to the destination before it gets there). The
+      // same-lane case is the one that also reorders.
+      const onV1 = draggedIsMedia
+        && (originTrack?.id === 'v1' || destTrack?.id === 'v1')
+      const willReorder = onV1 && destTrack?.id === 'v1'
+        && destTrack.id === originTrack?.id
+      if (onV1) args.close_gap = true
+      // Overlap guard, mirrored client-side for instant feedback. move_clip on
+      // the backend is the real enforcement (Claude/MCP callers reach it
+      // directly and bypass this file), but without this mirror the UI would
+      // show the pre-snap position for one render before the server-computed
+      // snapped position arrives — a visible "jump". Only media clips have
+      // this check (drag.origIn/origOut are only meaningful for a media Clip —
+      // see onMouseDown, where a Sticker/TextClip hit sets them to 0/0); a
+      // dropped Sticker/TextClip has no analogous drop-overlap path.
+      //
+      // Skipped for a reorder, matching the backend: dropping onto an occupied
+      // slot is HOW you reorder, so snapping forward past it cancelled the
+      // gesture — dragging the last clip to the front snapped it straight back
+      // where it came from, and this toast then announced a "snap" for a drag
+      // that changed nothing at all.
+      if (destTrack && draggedIsMedia && !willReorder) {
         // EFFECTIVE timeline width ((out-in)/speed) — must match the drag
         // ghost's durSec (preview==landing contract) and firstFreeGap's
         // occupancy math, which both use clipDuration/clipEnd. Raw source
@@ -1452,8 +1552,17 @@ export function Timeline() {
         }
       }
     }
+    // `tDrop` is where the pointer is in OUTPUT time, but `add_clip` takes an
+    // EDL `start`. On v1 those differ by the accumulated transition overlap,
+    // so drop the conversion in — otherwise dropping onto a lane that already
+    // has transitions places the clip earlier than the pointer indicated.
+    // (Overlay lanes carry no transitions, so their two coordinate spaces are
+    // the same and the mapping is the identity.)
+    const startT = trackId === 'v1'
+      ? edlTimeFromOutput(snapTime(tDrop), v1LayoutClips, v1Shift)
+      : snapTime(tDrop)
     await dispatch('add_clip', {
-      track: trackId, src, in: 0.0, out: dur, start: snapTime(tDrop),
+      track: trackId, src, in: 0.0, out: dur, start: startT,
     })
   }
 
@@ -1471,7 +1580,7 @@ export function Timeline() {
       if (near) {
         e.preventDefault()
         void dispatch('remove_marker', { marker_id: near.id })
-        toast.info('Marker removed (⌘Z to undo)')
+        toast.info(`Marker removed (${chordLabel('Mod+KeyZ')} to undo)`)
         return
       }
     }
@@ -1649,6 +1758,20 @@ export function Timeline() {
   // Track under the open context menu — drives the Mute/Unmute + Lock/Unlock
   // item labels so the menu states the action's direction, not a blind toggle.
   const menuTrack = contextMenu ? tracks.find((t) => t.id === contextMenu.trackId) : undefined
+  // Mute only means something on a track that actually carries audio. Text,
+  // sticker, effect and caption tracks have no audio field at all — showing
+  // "Mute clip"/"Mute track" there wasn't just confusing, "Mute clip" was
+  // actively broken: set_volume's clip branch only writes `c.audio.gain_db`
+  // when the target `isinstance(c, Clip)`, so on a TextClip/Sticker it did
+  // nothing to the clip AND STILL committed an undo snapshot claiming
+  // "Set clip volume → -60.0 dB" — a fake history entry for an edit that
+  // never happened. Lock stays available everywhere: it's a real, working,
+  // track-type-agnostic flag (Timeline.tsx's own drag guards check it
+  // regardless of type), useful for pinning captions/stickers in place while
+  // editing the video underneath.
+  const menuTrackHasAudio = !!menuTrack &&
+    (['video', 'audio', 'music', 'vo'] as const).includes(
+      menuTrack.type as 'video' | 'audio' | 'music' | 'vo')
 
   return (
     <>
@@ -1657,7 +1780,7 @@ export function Timeline() {
         <input type="range" min={10} max={600} value={zoom} onChange={(e) => setZoomStore(Number(e.target.value))} style={{ width: 120 }} />
         <span className="small">{zoom}px/s</span>
         <div style={{ flex: 1 }} />
-        <span className="small">scroll to pan · ⌘+scroll to zoom · ⌘B split · ⌫ delete · ⌘D duplicate</span>
+        <span className="small">scroll to pan · {chordLabel('Mod')}+scroll to zoom · {chordLabel('Mod+KeyB')} split · ⌫ delete · {chordLabel('Mod+KeyD')} duplicate</span>
       </div>
       <div
         className="timeline-canvas-wrap"
@@ -1703,12 +1826,19 @@ export function Timeline() {
           onApply={(type, duration) => {
             const at = transPopover.at
             setTransPopover(null)
-            // add_transition APPENDS (no replace; no remove tool exists in
-            // DISPATCH). The compositor's boundary matcher iterates the whole
-            // transitions list and the LAST entry within 0.05s of a cut wins,
-            // so re-adding at the same `at` is the effective update — the
-            // superseded entry stays in the EDL as inert data.
+            // add_transition REPLACES any transition within 0.05s of the same
+            // cut rather than appending, so re-applying here is a genuine
+            // update and leaves no superseded entry behind. (It used to
+            // append, with last-match-wins at render time — the stale entries
+            // then made the EDL disagree with the picture.)
             void dispatch('add_transition', { at, type, duration })
+          }}
+          onRemove={() => {
+            const at = transPopover.at
+            setTransPopover(null)
+            // Sweeps EVERY entry within 0.05s of the cut, not just one:
+            // legacy projects and MCP callers can still hold a stack there.
+            void dispatch('remove_transition', { at })
           }}
           onClose={() => setTransPopover(null)}
         />
@@ -1727,21 +1857,25 @@ export function Timeline() {
             // "Split here" actually split at the PLAYHEAD, not the click point
             // — name it what it does and say so in the tooltip.
             { label: 'Split at playhead',
-              title: 'Cut the clip under the playhead in two (⌘B). Move the playhead to where you want the cut first.',
-              action: () => dispatch('split_at', { track: contextMenu.trackId, time: playhead }) },
+              title: `Cut the clip under the playhead in two (${chordLabel('Mod+KeyB')}). Move the playhead to where you want the cut first.`,
+              action: () => useStore.getState().splitTrackAt(contextMenu.trackId, playhead) },
             { label: 'Duplicate',
-              title: 'Add a copy of this clip right after it (⌘D)',
+              title: `Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`,
               action: () => dispatch('duplicate_clip', { clip_id: contextMenu.clipId }) },
             { label: 'Delete',
               title: 'Remove this clip and close the gap (⌫)',
               action: () => dispatch('ripple_delete', { clip_id: contextMenu.clipId }) },
-            { label: 'Mute clip',
-              title: 'Silence just this clip (sets its volume to −60 dB)',
-              action: () => dispatch('set_volume', { target: contextMenu.clipId, db: -60 }) },
-            { sep: true },
-            { label: menuTrack?.muted ? 'Unmute track' : 'Mute track',
-              title: 'Toggle sound for the whole track — the M box on its label does the same',
-              action: () => dispatch('set_track_muted', { track: contextMenu.trackId }) },
+            ...(menuTrackHasAudio
+              ? [
+                  { label: 'Mute clip',
+                    title: 'Silence just this clip (sets its volume to −60 dB)',
+                    action: () => dispatch('set_volume', { target: contextMenu.clipId, db: -60 }) },
+                  { sep: true },
+                  { label: menuTrack?.muted ? 'Unmute track' : 'Mute track',
+                    title: 'Toggle sound for the whole track — the M box on its label does the same',
+                    action: () => dispatch('set_track_muted', { track: contextMenu.trackId }) },
+                ]
+              : [{ sep: true }]),
             { label: menuTrack && isTrackLocked(menuTrack) ? 'Unlock track' : 'Lock track',
               title: 'Mark the track locked — a 🔒 appears on its label',
               action: () => dispatch('set_track_locked', { track: contextMenu.trackId }) },

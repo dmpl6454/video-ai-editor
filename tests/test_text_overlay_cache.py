@@ -227,20 +227,28 @@ def test_build_overlay_chain_bakes_text_when_not_preview(tmp_path: Path):
     assert len(extra_inputs) > 0
 
 
-def test_build_overlay_chain_still_bakes_stickers_in_preview_mode(tmp_path: Path):
+def test_build_overlay_chain_skips_stickers_in_preview_mode(tmp_path: Path):
+    """Preview skips stickers for the same reason it skips text: StickerLayer
+    draws them client-side, and a second, server-baked copy is a GHOST —
+    frozen at the pre-drag position for the whole gesture and the
+    commit→re-render gap, so dragging showed two stickers and releasing left
+    one behind at the old spot. Export (preview=False, asserted just above)
+    still bakes them; a client cannot erase a baked pixel, so smooth direct
+    manipulation requires the client to own them.
+    """
     sticker_src = tmp_path / "sticker.png"
     Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(sticker_src)
     edl = _edl_with_sticker(sticker_src)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    filter_str, extra_inputs, _ = build_overlay_chain(
+    filter_str, extra_inputs, final_label = build_overlay_chain(
         edl, cache_dir, source_label="[v]", out_label="[vout]",
         first_input_index=5, out_w=320, out_h=180, preview=True,
     )
-    # Stickers are NOT text — preview must still bake them (no client-side
-    # sticker pixel renderer exists), unlike the text-skip case above.
-    assert filter_str != ""
-    assert len(extra_inputs) > 0
+    assert filter_str == ""
+    assert extra_inputs == []
+    # Nothing to composite → callers must keep using the untouched source.
+    assert final_label == "[v]"
 
 
 # ---------- TextClip transform.opacity (was a dead field) ----------
