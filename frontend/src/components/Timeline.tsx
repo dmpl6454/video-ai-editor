@@ -164,6 +164,11 @@ export function Timeline() {
   const zoom = useStore((s) => s.timelineZoom)
   const setZoomStore = useStore((s) => s.setTimelineZoom)
   const snapEnabled = useStore((s) => s.snapEnabled)
+  // Undo/Redo + transport now live in this toolbar (see the JSX below).
+  const opsLen = useStore((s) => s.ops.length)
+  const redoAvailable = useStore((s) => s.redoAvailable)
+  const isPlaying = useStore((s) => s.isPlaying)
+  const setPlaying = useStore((s) => s.setPlaying)
   const [dpr] = useState(window.devicePixelRatio || 1)
   const [size, setSize] = useState({ w: 800, h: 240 })
   const [waveTick, setWaveTick] = useState(0)  // bump to force redraw when peaks arrive
@@ -562,7 +567,14 @@ export function Timeline() {
         // left-edge scrim (clipped to the rounded clip rect) and switch to
         // light text.
         ctx.font = '10px var(--font-ui)'
-        const label = isMediaClip(c) ? baseName(c.src) : ('text' in c ? c.text : '')
+        // An emptied text clip is labelled rather than left blank. Clearing the
+        // box is now a real edit (see Properties.commitText), so a clip with no
+        // text is a normal state to be in — and an unlabelled bar reads as a
+        // broken clip, which is what the old "never commit blank" guard was
+        // trying to avoid by refusing the edit entirely.
+        const label = isMediaClip(c)
+          ? baseName(c.src)
+          : ('text' in c ? (c.text.trim() || '(empty)') : '')
         const txt = label.slice(0, Math.max(0, Math.floor(w / 6)))
         if (txt && drewThumbs) {
           ctx.save()
@@ -604,7 +616,11 @@ export function Timeline() {
         // that was the entire feedback. Drawn for every clip, not just the
         // selected one, so an animated clip is identifiable at a glance. Times
         // are CLIP-LOCAL (see EDL schema), hence `c.start + kt`.
-        const kfT = keyframeTimes(c)
+        // fps passed so the collapse window here matches the panel's readout and
+        // the backend's match tolerance — all three are "half a frame", and the
+        // panel and canvas disagreeing on the COUNT is the bug this shares a
+        // constant to avoid.
+        const kfT = keyframeTimes(c, edl?.canvas.fps)
         if (kfT.length && w > 6) {
           const my = y + trackHeight - 7
           ctx.save()
@@ -776,8 +792,14 @@ export function Timeline() {
     cv.style.width = `${labelWidth}px`
     cv.style.height = `${contentH}px`
     const ctx = cv.getContext('2d')!
+    // Device-pixel clear (see StickerLayer's note): a CSS-space clear under the
+    // dpr transform misses the last device column/row at a fractional dpr. This
+    // canvas is TRANSPARENT between its row fills, so stale ink there survives;
+    // the main timeline canvas is exempt only because it repaints an opaque
+    // background over its whole area immediately after clearing.
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, cv.width, cv.height)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, labelWidth, contentH)
     // Ruler-row corner (matches the main canvas's ruler background so the
     // seam between the two canvases is invisible).
     ctx.fillStyle = '#1d1d22'
@@ -822,8 +844,12 @@ export function Timeline() {
     cv.style.width = `${contentW}px`
     cv.style.height = `${contentH}px`
     const ctx = cv.getContext('2d')!
+    // Device-pixel clear — this canvas draws only the playhead over a fully
+    // transparent field, so a missed column keeps a red line that no later
+    // paint covers. Same rule as the label canvas above.
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, cv.width, cv.height)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, contentW, contentH)
     const ph = labelWidth + playhead * zoom
     ctx.strokeStyle = '#ff4d6d'
     ctx.lineWidth = 1.5
@@ -1775,12 +1801,56 @@ export function Timeline() {
 
   return (
     <>
+      {/* Undo/Redo and the transport live HERE, not over the video and not in
+          the top bar. Requested: "The undo, redo button and the time which is on
+          the video needs to come down, these should be placed above the layers
+          where zoom and key shortcuts currently placed."
+
+          Both moved for the same reason they were wrong where they were: the
+          transport floated ON the picture, covering the bottom-centre of the
+          frame — exactly where captions and lower-thirds sit, so the controls
+          obscured the thing being edited. Undo/Redo sat in `.topbar-scroll`,
+          which scrolls horizontally once enough presets are added, so the two
+          most-used buttons in the app could end up off-screen.
+
+          The shortcut hint is the compressible half (it is a reminder, not a
+          control), so it takes `min-width: 0` + ellipsis and gives way first on
+          a narrow window; the buttons and the clock never shrink. */}
       <div className="timeline-toolbar">
-        <span className="small">Zoom</span>
-        <input type="range" min={10} max={600} value={zoom} onChange={(e) => setZoomStore(Number(e.target.value))} style={{ width: 120 }} />
-        <span className="small">{zoom}px/s</span>
-        <div style={{ flex: 1 }} />
-        <span className="small">scroll to pan · {chordLabel('Mod')}+scroll to zoom · {chordLabel('Mod+KeyB')} split · ⌫ delete · {chordLabel('Mod+KeyD')} duplicate</span>
+        <button
+          onClick={() => dispatch('undo')}
+          disabled={opsLen === 0}
+          title={opsLen === 0 ? 'Nothing to undo yet — make an edit first' : `Undo last edit (${chordLabel('Mod+KeyZ')})`}
+        >Undo</button>
+        <button
+          onClick={() => dispatch('redo')}
+          disabled={!redoAvailable}
+          title={redoAvailable ? `Redo (${chordLabel('Mod+Shift+KeyZ')})` : 'Nothing to redo — Redo re-applies an edit you just undid'}
+        >Redo</button>
+        <span className="tb-sep" />
+        <button
+          onClick={() => {
+            // Same two store actions the floating transport used. The third
+            // thing it did — writing <video>.currentTime and the rAF clock
+            // directly — was documented there as "defense in depth" on top of
+            // the playback effect's own proximity check, and it is not reachable
+            // from here: the element belongs to Preview. replayFromStart() moves
+            // the playhead through the store, which is what that effect follows.
+            useStore.getState().replayFromStart()
+            setPlaying(!isPlaying)
+          }}
+          title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+          style={{ minWidth: 30 }}
+        >{isPlaying ? '⏸' : '▶'}</button>
+        <span className="small" style={{ fontVariantNumeric: 'tabular-nums', minWidth: 92 }}>
+          {playhead.toFixed(2)} / {(edl?.duration ?? 0).toFixed(2)}s
+        </span>
+        <span className="tb-sep" />
+        <span className="small tb-zoomlabel">Zoom</span>
+        <input type="range" min={10} max={600} value={zoom} onChange={(e) => setZoomStore(Number(e.target.value))} style={{ width: 78 }} />
+        <span className="small tb-zoomval" style={{ minWidth: 46 }}>{zoom}px/s</span>
+        <div style={{ flex: 1, minWidth: 8 }} />
+        <span className="small tb-hint">scroll to pan · {chordLabel('Mod')}+scroll to zoom · {chordLabel('Mod+KeyB')} split · ⌫ delete · {chordLabel('Mod+KeyD')} duplicate</span>
       </div>
       <div
         className="timeline-canvas-wrap"

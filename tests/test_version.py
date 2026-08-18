@@ -136,3 +136,25 @@ def test_build_win_ps1_verifies_the_packaged_ui_is_not_stale():
     # ...and pyinstaller's own exit code must be asserted: $ErrorActionPreference
     # does NOT trip on a native exe's non-zero exit.
     assert 'throw "pyinstaller failed' in ps1
+
+
+def test_a_dirty_build_id_is_unique_per_build():
+    """`<sha>-dirty` alone does not identify a build.
+
+    During an uncommitted fix round every rebuild reports the identical
+    `<sha>-dirty`, so the badge cannot answer "are you running my fix?" — the
+    one question this whole mechanism exists for. It cost a real round: a fix
+    was verified in a fresh build, reported as still broken, and neither side
+    could establish whether the same bits were on screen.
+
+    The stamp is appended ONLY when the tree is dirty, so a committed build
+    keeps its clean `<sha>` identity and every existing expectation holds.
+    """
+    ps1 = (Path(__file__).resolve().parents[1] / "build_win.ps1").read_text(
+        encoding="utf-8")
+    dirty = [ln for ln in ps1.splitlines()
+             if "-dirty" in ln and not ln.strip().startswith("#")]
+    assert dirty, "build_win.ps1 must still mark a dirty tree"
+    assert any("Get-Date" in ln for ln in dirty), (
+        "a dirty BUILD_ID must carry a per-build stamp (Get-Date), otherwise "
+        "two different builds of uncommitted work report the same identity")

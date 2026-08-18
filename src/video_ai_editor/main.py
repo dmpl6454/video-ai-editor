@@ -1131,18 +1131,30 @@ async def load_project_endpoint(file: UploadFile = File(...)):
     return {"id": sid}
 
 
-_EMOJI_SEQ_RE = re.compile(r"^[0-9a-f]{1,6}(-[0-9a-f]{1,6}){0,7}$")
+# Up to 16 codepoints. The bound is defence-in-depth (the real guard is
+# hex-and-dashes only, so `seq` can never name a path); its size just has to
+# clear the longest real emoji. 8 did not: an RGI kiss sequence with a skin tone
+# on BOTH people is 10 — e.g. 👩🏻‍❤️‍💋‍👨🏿 is
+# `1f469-1f3fb-200d-2764-fe0f-200d-1f48b-200d-1f468-1f3ff`. Those 15 sequences
+# 400'd here while resolving perfectly in `fetch_emoji_png`, so the picker would
+# have shown a swatch that could not load. Found by validating the generated
+# catalogue against this regex rather than by clicking one.
+_EMOJI_SEQ_RE = re.compile(r"^[0-9a-f]{1,6}(-[0-9a-f]{1,6}){0,15}$")
 
 
 @app.get("/api/emoji/{seq}.png")
 def serve_emoji_png(seq: str):
     """Emoji artwork by dash-joined hex codepoints (e.g. `1f60d`, `1f468-200d-1f4bb`).
 
-    TextLayer composites emoji INSIDE a text clip from the same Fluent 3D PNGs
-    the exporter bakes (render/text_overlay.render_text_png). Letting the
-    browser paint them with its own emoji font instead would put the OS design
-    in the preview and Fluent in the delivered file — the same preview/export
-    mismatch stickers already had.
+    TextLayer composites emoji INSIDE a text clip from the same fetched PNGs
+    the exporter bakes (render/text_overlay.render_text_png; Apple/iOS artwork,
+    see ai/emoji.py). Letting the browser paint them with its own emoji font
+    instead would put the OS design in the preview and the fetched set in the
+    delivered file — the same preview/export mismatch stickers already had.
+    This route stays load-bearing on EVERY platform, including a Linux box that
+    happens to be a Mac with Apple Color Emoji installed: the bytes served
+    here are a pinned artwork release, not the local font. A Mac and a Windows
+    viewer must get the same pixels, which is the whole point.
 
     Not session-scoped: emoji artwork is global, shared, and read-only. `seq`
     is validated to hex-and-dashes before it is turned back into characters,
@@ -1161,6 +1173,74 @@ def serve_emoji_png(seq: str):
     # Immutable: the bytes for a codepoint never change, and TextLayer asks
     # for them on every text clip that contains one.
     return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+class PrewarmRequest(BaseModel):
+    emojis: list[str]
+
+
+@app.post("/api/emoji/prewarm")
+def prewarm_emoji(req: PrewarmRequest):
+    """Warm the emoji artwork cache for a list the client is about to draw.
+
+    The picker paints ~1900 swatches and a browser opens ~6 connections per
+    origin, so on a cold cache the artwork trickled in over many seconds. This
+    lets the client say "I am about to need these" once, and the server fetches
+    the misses on a small background pool.
+
+    The CLIENT supplies the list rather than the server deriving it, because the
+    catalogue that decides what the picker draws is generated into the frontend
+    bundle. Having the server keep its own copy would create two lists that must
+    agree and no mechanism to make them — warming the wrong set is worse than
+    not warming, since it looks like it worked.
+
+    Returns immediately; `GET` the same path for progress. Never errors on a
+    fetch failure: this is an optimisation, and anything it misses is fetched
+    on demand exactly as before.
+    """
+    from .ai.emoji import prewarm
+    # Bounded: the full RGI set is ~3.8k, so anything much past that is a client
+    # bug or an abusive caller, not a picker.
+    if len(req.emojis) > 5000:
+        raise HTTPException(400, "too many emoji to prewarm")
+    return prewarm(req.emojis)
+
+
+@app.get("/api/emoji/prewarm")
+def prewarm_emoji_status():
+    from .ai.emoji import warm_state
+    return warm_state()
+
+
+_RESTYLED_SESSIONS: set[str] = set()
+_RESTYLE_LOCK = threading.Lock()
+
+
+def _restyle_session_stickers_once(sid: str, session_dir: Path) -> None:
+    """Bring an existing project's copied emoji artwork up to the current set.
+
+    Hung off the SERVING path rather than session load: this is the one place
+    the stale bytes actually reach a user, and a project nobody opens costs
+    nothing. Guarded to once per session per process — the work is a stat plus
+    a byte compare per sticker, but there is no reason to repeat it per <img>.
+
+    Deliberately not fatal and deliberately not announced: an emoji rendering
+    in the right house style is a repair, not an edit the user made, and it
+    changes no EDL state (the clip's `src` path is unchanged — only the bytes
+    behind it, which are a re-fetchable cache artifact).
+    """
+    with _RESTYLE_LOCK:
+        if sid in _RESTYLED_SESSIONS:
+            return
+        _RESTYLED_SESSIONS.add(sid)
+    try:
+        from .ai.emoji import refresh_session_sticker_art
+        changed = refresh_session_sticker_art(session_dir / "uploads" / "stickers")
+        if changed:
+            get_logger().info("restyled %d sticker(s) in %s: %s",
+                              len(changed), sid, ", ".join(changed))
+    except Exception:
+        get_logger().debug("sticker restyle skipped for %s", sid, exc_info=True)
 
 
 @app.get("/api/sessions/{sid}/sticker/{clip_id}")
@@ -1187,6 +1267,7 @@ def serve_sticker_image(sid: str, clip_id: str):
         raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
     from .edl.schema import Sticker
     store = _store(sid)
+    _restyle_session_stickers_once(sid, store.dir)
     found = store.edl.get_clip(clip_id)
     clip = found[1] if found else None
     if not isinstance(clip, Sticker) or not clip.src:

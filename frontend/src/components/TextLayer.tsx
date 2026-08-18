@@ -51,14 +51,23 @@ const ROLE_STYLES: Record<string, {
 // Emoji used to be stripped from text here AND on the server, so typing them
 // into a text clip produced nothing anywhere ("I was unable to apply the
 // emojis through the text section"). They are composited as IMAGES now — the
-// same Fluent 3D artwork the exporter bakes, fetched from /api/emoji/<seq>.png.
-// Drawing them with the browser's own emoji font instead would put the OS
-// design in the preview and Fluent in the delivered file: the exact
-// preview/export mismatch stickers already had.
+// same Apple/iOS artwork the exporter bakes, fetched from
+// /api/emoji/<seq>.png. Drawing them with the browser's own emoji font instead
+// would put the OS design in the preview and the fetched set in the delivered
+// file: the exact preview/export mismatch stickers already had. (The fetched
+// artwork is a pinned release, NOT the local font of the same name — the
+// substitution is never safe, on any platform.)
 //
 // EMOJI_BOX_RATIO must stay equal to text_overlay.py's, or the preview wraps
 // differently from the bake.
 const EMOJI_BOX_RATIO = 1.0
+// Fraction of the box the artwork fills; the rest is side bearing, centred.
+// Mirrors text_overlay.py's EMOJI_INK_RATIO and must move with it. A PNG has no
+// side bearing of its own, and the sources this chain mixes pad their tiles
+// anywhere from 0.000 to 0.131 — so without this, spacing is whatever the
+// artwork happened to ship with, and differs emoji-to-emoji within one line.
+// Advance is unchanged, so wrapping is unaffected on both sides.
+const EMOJI_INK_RATIO = 0.92
 const ZWJ = '\u{200D}'
 const EMOJI_MOD = new Set(['\u{FE0F}', '\u{20E3}',
   '\u{1F3FB}', '\u{1F3FC}', '\u{1F3FD}', '\u{1F3FE}', '\u{1F3FF}'])
@@ -306,7 +315,9 @@ function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, cy: n
       if (paint === 'fill') {
         const im = emojiImage(seg.s)
         if (capMid === null) capMid = capBandMid(ctx, cy)
-        if (im) ctx.drawImage(im, x, capMid - box / 2, box, box)
+        // Drawn at `ink`, centred in the full `box` advance — see EMOJI_INK_RATIO.
+        const ink = box * EMOJI_INK_RATIO
+        if (im) ctx.drawImage(im, x + (box - ink) / 2, capMid - ink / 2, ink, ink)
       }
       x += box
       continue
@@ -356,6 +367,27 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     const ctx = cv.getContext('2d')!
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
+    // CLEAR IN DEVICE PIXELS — the same rule, and the same reason, as
+    // StickerLayer's draw loop (read the long note there). `cv.width` is
+    // `Math.round(width * dpr)` while a CSS-space `clearRect(0,0,width,height)`
+    // under the dpr transform only reaches `width * dpr`, so at a FRACTIONAL
+    // dpr the last device column and row are never erased and hold their ink
+    // forever.
+    //
+    // This layer is the SIBLING of the one the "phantom colour strip" was
+    // fixed in, drawing over the same video with the same sizing, so it had the
+    // identical latent defect — it simply went unreported because glyph ink
+    // reaches the far edge less often than selection chrome does. Fixing one
+    // canvas and leaving the other is why the strip survived three earlier
+    // diagnoses. Fractional dpr is not Windows-only: 125% scaling makes it
+    // routine there, and a Mac on a scaled Retina mode (e.g. 1.7647) hits it
+    // just as well.
+    const clearAll = () => {
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.clearRect(0, 0, cv.width, cv.height)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+
     // If there's neither text nor stickers anywhere, skip RAF entirely.
     // Stickers are drawn + manipulated by <StickerLayer>; this layer is text only.
     const hasAnyText = edl.tracks.some((tk) =>
@@ -363,7 +395,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       tk.clips.some((c) => isText(c))
     )
     if (!hasAnyText) {
-      ctx.clearRect(0, 0, width, height)
+      clearAll()
       publishTextBoxes([])
       return
     }
@@ -390,7 +422,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       }
       lastTime = t
       lastEmojiGen = emojiGeneration()
-      ctx.clearRect(0, 0, width, height)
+      clearAll()
       const boxes: OverlayBox[] = []
 
       // Collect active text clips
@@ -469,7 +501,15 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // text clip produced nothing at all.
         const cleaned = c.text.trim()
         if (!cleaned) continue
-        const text = s.upper ? cleaned.toUpperCase() : cleaned
+        // ALL CAPS: the clip's explicit `style.upper` wins, else the role's own
+        // default. It used to read ONLY the role table, so a lowercase hook or
+        // super was unreachable — "Text layer only shows capital alphabets and
+        // doesn't support the small alphabets". Mirrors
+        // text_overlay.resolve_upper_override; `null`/absent means untouched, so
+        // existing projects keep their capitals.
+        const wantUpper = (c.style as { upper?: boolean | null } | undefined)?.upper
+        const text = (typeof wantUpper === 'boolean' ? wantUpper : s.upper)
+          ? cleaned.toUpperCase() : cleaned
         const maxW = width * 0.86
         const emojiBox = fontPx * EMOJI_BOX_RATIO
         const lines = wrap(ctx, text, maxW, emojiBox)

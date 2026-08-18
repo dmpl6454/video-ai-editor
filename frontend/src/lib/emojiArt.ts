@@ -2,9 +2,15 @@
 //
 // Preview and export must show the SAME pixels, and a Mac and a Windows user
 // opening the same project must too — so an emoji is never painted with the OS
-// font (Apple Color Emoji vs Segoe UI Emoji vs the Fluent 3D art the server
-// bakes are three different designs). The browser fetches the identical artwork
-// the bake uses from `GET /api/emoji/{codepoints}.png`.
+// font (Apple Color Emoji vs Segoe UI Emoji vs the artwork the server bakes are
+// three different designs). The browser fetches the identical artwork the bake
+// uses from `GET /api/emoji/{codepoints}.png`.
+//
+// The set is Apple/iOS artwork (see ai/emoji.py). That is a *fetched, pinned
+// release*, NOT the Mac's locally-installed Apple Color Emoji — so this route
+// stays load-bearing on macOS too, where the two look similar enough that
+// substituting the local font would pass a glance and still differ from the
+// export, and from what a Windows collaborator sees.
 //
 // Lives here, rather than inside the component that draws it, so the arrival
 // signal below is unit-testable: it is the whole bug.

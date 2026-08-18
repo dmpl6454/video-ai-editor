@@ -45,6 +45,35 @@ def _v_track(edl: EDL, track_id: str) -> Track:
     return t
 
 
+def _clone_clip(c, **updates):
+    """Copy a clip so the copy shares NOTHING MUTABLE with the original.
+
+    **`model_copy(update=...)` is SHALLOW in Pydantic v2**, and every caller
+    here wants two independent clips. A shallow copy hands both halves the SAME
+    `Transform` instance, the SAME `effects` list and the SAME `ClipAudio` — so
+    editing one edits both, silently, with no error anywhere.
+
+    Reported as a keyframe bug and it is much wider than that. Measured on a
+    clip split at 4s: `a.transform is b.transform` was True, so
+    `set_clip_transform scale=1.75` on the right half also scaled the left,
+    `add_effect vignette` on one put a vignette on both, and a keyframe added to
+    one appeared on the other — the tester saw "the keyframe also appeared on
+    first half at the same place", plus "marked at the start of the video AND at
+    the end of the first half", which is ONE key at t=0 drawn on both halves at
+    `c.start + 0` (0.0s and 4.0s). All three reported symptoms, one cause.
+
+    It also persists: the aliased object is serialised once per clip, so both
+    clips genuinely carry the duplicated state on disk. Reloading does NOT
+    un-share it retroactively — it just stops the two from tracking each other
+    going forward, which is what made the behaviour look intermittent.
+
+    Every clip-duplicating tool must go through here (split_at, cut_range,
+    duplicate_clip, the batch duplicate). A bare `c.model_copy(update=...)` in
+    this file is a bug; a test enforces that.
+    """
+    return c.model_copy(deep=True, update=updates)
+
+
 # Track types that can hold a media Clip (an uploaded video/audio file).
 # Sticker/text/captions/effect tracks are for their own dedicated clip kinds
 # only — the renderer's collect_text_clips/collect_stickers/build_pip_overlay
@@ -228,6 +257,41 @@ def _rebase_transform_for_lane(edl: EDL, c: Clip, origin: Track, dest: Track) ->
     # where it would instead slide an already-fitted picture and crop the far
     # edge (the same trap `set_clip_fit`'s cover→contain reset exists for).
     tx.x, tx.y, tx.scale = 0.0, 0.0, 1.0
+
+    # The SHAPE has to come off too, and this is the half that was missing.
+    #
+    # Reported as: "when i moved the pip video to the main video, it showed me
+    # this" — a mostly-black frame with the footage cut to a circle off to one
+    # side. Resetting x/y/scale to full-frame while leaving `mask` behind is not
+    # a reset: compositor.py alphamerges a canvas-sized mask PNG for a v1 clip
+    # (see the `c.mask is not None` branch), so the circle chosen to make a
+    # ROUND PIP kept cutting the picture once the clip was the main video, and
+    # the mask's own `position` — a sensible centre for the 1080x1920 canvas it
+    # was authored on — put the hole off-centre on a 1920x1080 one.
+    #
+    # Confirmed against the real session (s_91712d3b26): the second v1 clip
+    # carried mask=circle, fit=cover and framing={x:-0.2, zoom:1.25} after being
+    # moved back from the PIP lane.
+    #
+    # `framing` goes for the same reason one step further out: only render/pip.py
+    # reads it, so on v1 it is invisible dead state that would silently
+    # resurrect the moment the clip was sent back to a PIP lane — a stale crop
+    # from a previous life, which is exactly the class of surprise this whole
+    # function exists to prevent.
+    #
+    # `fit` deliberately STAYS. Unlike the other two it is meaningful on both
+    # lanes, and `cover` on v1 means "fill the frame", which is what
+    # "reset to full-frame" is promising — forcing `contain` here would answer a
+    # move by letterboxing a clip the user never asked to letterbox.
+    dropped = []
+    if getattr(c, "mask", None) is not None:
+        c.mask = None
+        dropped.append("shape")
+    if getattr(c, "framing", None) is not None:
+        c.framing = None
+        dropped.append("framing")
+    if dropped:
+        return f"reset to full-frame ({' and '.join(dropped)} dropped)"
     return "reset to full-frame"
 
 
@@ -832,18 +896,19 @@ def cut_range(store: EDLStore, args: dict) -> dict:
             # split_at: the cut edge is interior to the original shot, so
             # only the outer edges keep their fade (otherwise remove_silences
             # on a faded clip strobes to black at every removed silence).
-            left = c.model_copy(update={"out": c.in_ + left_dur * sf,
-                                        "start": c_start,
-                                        "video_fade_out": 0.0})
-            right = c.model_copy(update={
+            left = _clone_clip(c, out=c.in_ + left_dur * sf,
+                               start=c_start,
+                               video_fade_out=0.0)
+            right = _clone_clip(
+                c,
                 # Unique suffix — a literal 'b' collides with an earlier
                 # cut/split sibling of the same clip (same bug as split_at).
-                "id": f"c_{c.id[2:]}_{uuid4().hex[:6]}",
-                "in_": c.in_ + (end - c_start) * sf,
-                "out": c.out,
-                "start": start,  # will be ripple-adjusted
-                "video_fade_in": 0.0,
-            })
+                id=f"c_{c.id[2:]}_{uuid4().hex[:6]}",
+                in_=c.in_ + (end - c_start) * sf,
+                out=c.out,
+                start=start,  # will be ripple-adjusted
+                video_fade_in=0.0,
+            )
             # Pydantic alias quirk: ensure model carries fresh `in`
             new_clips.append(left)
             new_clips.append(right)
@@ -896,18 +961,18 @@ def split_at(store: EDLStore, args: dict) -> dict:
             # keeps fade-out) instead of each inheriting both — model_copy
             # would otherwise give every fragment its own fade-to-black tail
             # AND fade-from-black head, strobing to black at every cut.
-            left = c.model_copy(update={"out": c.in_ + local,
-                                        "video_fade_out": 0.0})
-            right = c.model_copy(update={
+            left = _clone_clip(c, out=c.in_ + local, video_fade_out=0.0)
+            right = _clone_clip(
+                c,
                 # Unique suffix, not a literal 'b': splitting a clip whose
                 # earlier split-sibling already took c_<id>b produced two
                 # clips with the SAME id, so clip_id-targeted tools hit the
                 # wrong one.
-                "id": f"c_{c.id[2:]}_{uuid4().hex[:6]}",
-                "in_": c.in_ + local,
-                "start": t,
-                "video_fade_in": 0.0,
-            })
+                id=f"c_{c.id[2:]}_{uuid4().hex[:6]}",
+                in_=c.in_ + local,
+                start=t,
+                video_fade_in=0.0,
+            )
             new_clips.append(left)
             new_clips.append(right)
             halves[c.id] = right.id
@@ -1166,7 +1231,7 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
     # effective_duration, since a sped clip ends earlier than its source
     # length suggests (source-based placement left a gap that
     # _ripple_close_gap then had to paper over).
-    dup = c.model_copy(update={"id": f"c_{c.id[2:]}d", "start": c.start + c.effective_duration})
+    dup = _clone_clip(c, id=f"c_{c.id[2:]}d", start=c.start + c.effective_duration)
     track.clips.append(dup)
     _ripple_close_gap(track)
     summary = f"Duplicate {c.id} → {dup.id}"
@@ -1251,9 +1316,28 @@ def add_super_text(store: EDLStore, args: dict) -> dict:
     # Default position: bottom third for super, center for hook.
     from ..edl.schema import Transform
     y_default = canvas.h * (0.75 if role == "super" else 0.5)
+    # LETTER CASE: respect what the caller typed unless told otherwise.
+    #
+    # `super` and `hook` capitalise by ROLE as a house style, which meant typing
+    # "hello" into a super produced "HELLO" with no way to stop it — reported
+    # twice ("Text layer only shows capital alphabets", then "again, i cant write
+    # the text in the small letters"). Making it merely *possible* via a panel
+    # dropdown was not enough: the default still overrode what was typed, and a
+    # default you have to go and find is not support.
+    #
+    # So the DEFAULT here is an explicit False, not None: None means "use the
+    # role's default", which is the behaviour being fixed. The house-style
+    # generators that DO want caps (add_hook_overlay, apply_hook_stack) now pass
+    # upper=True, so the look they produce is unchanged.
+    #
+    # Forward-only, deliberately: an existing clip stores None and keeps its
+    # capitals. Nothing already saved changes appearance.
+    from ..edl.schema import TextStyle
+    upper = args.get("upper")
     clip = TextClip(
         text=text, start=start, end=end, role=role,
         transform=Transform(x=canvas.w / 2, y=y_default),
+        style=TextStyle(upper=bool(upper) if upper is not None else False),
     )
     # Overlap-replace (default): two text clips of the SAME role on the SAME
     # track whose [start, end) windows overlap must not stack — the new one
@@ -1277,7 +1361,10 @@ def add_super_text(store: EDLStore, args: dict) -> dict:
 def add_hook_overlay(store: EDLStore, args: dict) -> dict:
     text = str(args["text"])
     duration = float(args.get("duration", 3.0))
-    return add_super_text(store, {"text": text, "start": 0.0, "end": duration, "role": "hook"})
+    # upper=True explicitly: a generated HOOK is house style, and its all-caps
+    # look must survive add_super_text's switch to respecting the typed case.
+    return add_super_text(store, {"text": text, "start": 0.0, "end": duration,
+                                  "role": "hook", "upper": True})
 
 
 # ---------- The 3-axis hook stack ---------------------------------------------
@@ -1332,7 +1419,10 @@ def apply_hook_stack(store: EDLStore, args: dict) -> dict:
                 if not (isinstance(c, TextClip) and c.role == "hook" and c.start < 1.0)
             ]
     text_result = add_super_text(store, {
+        # See add_hook_overlay: the hook stack is house style, so it keeps caps
+        # explicitly rather than relying on the role default.
         "text": str(text), "start": 0.0, "end": duration, "role": "hook",
+        "upper": True,
     })
 
     # 2) VISUAL axis -------------------------------------------------------
@@ -2283,6 +2373,69 @@ def add_mask(store: EDLStore, args: dict) -> dict:
     return {"summary": summary}
 
 
+def set_pip_framing(store: EDLStore, args: dict) -> dict:
+    """Pan/zoom/rotate the picture INSIDE a PIP's shape.
+
+    `x`/`y` are normalised -1..1 (0 = centred), `zoom` >= 1, `rotation` is
+    degrees and spins the picture within the shape while the shape stays put.
+    This is separate
+    from set_clip_transform on purpose: transform places and sizes the PIP on
+    the canvas, this chooses which part of the source fills it. Only has a
+    visible effect where the element is cropped to a box — a circle shape or
+    fit='cover' — because with the source's own aspect there is nothing to pan
+    within; the summary says so rather than silently doing nothing.
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    t, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("set_pip_framing only supports media clips")
+    from ..edl.schema import Framing
+    cur = getattr(c, "framing", None)
+    c.framing = Framing(
+        x=_num(args, "x", float(getattr(cur, "x", 0.0) or 0.0)),
+        y=_num(args, "y", float(getattr(cur, "y", 0.0) or 0.0)),
+        zoom=_num(args, "zoom", float(getattr(cur, "zoom", 1.0) or 1.0)),
+        # `rotation` turns the PICTURE inside the shape; the shape itself does
+        # not move. Turning the whole element is set_clip_transform's rotation,
+        # and the two compose.
+        rotation=_num(args, "rotation", float(getattr(cur, "rotation", 0.0) or 0.0)),
+    )
+    f = c.framing
+    cropped = (getattr(getattr(c, "mask", None), "type", "") == "circle"
+               or getattr(c, "fit", "contain") == "cover")
+    note = "" if cropped else " (no effect until the PIP is cropped — pick a " \
+                              "shape or turn on Fill frame)"
+    summary = (f"PIP framing {cid}: x={f.x:.2f} y={f.y:.2f} zoom={f.zoom:.2f} "
+               f"rotation={f.rotation:.0f}°{note}")
+    store.commit("set_pip_framing", args, summary)
+    return {"summary": summary, "cropped": cropped}
+
+
+def remove_mask(store: EDLStore, args: dict) -> dict:
+    """Clear a clip's shape mask, returning it to the full frame.
+
+    `add_mask` had no counterpart, so a shape could be applied and never taken
+    off except by Undo — and Undo is no help once other edits have landed on
+    top. Same reasoning as remove_keyframe and TransitionPopover's Remove: a
+    control that can only be turned on is half a control.
+    """
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    _, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("remove_mask only supports media clips")
+    had = getattr(c, "mask", None) is not None
+    c.mask = None
+    summary = f"Mask cleared on {cid}" if had else f"{cid} had no mask"
+    store.commit("remove_mask", args, summary)
+    return {"summary": summary, "had_mask": had}
+
+
 def chroma_key(store: EDLStore, args: dict) -> dict:
     """Set/clear chroma key on a clip. Args: clip_id, color (hex), similarity,
     smoothness, spill_suppress. Pass color=null to clear."""
@@ -2411,9 +2564,45 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     # instead of being stored verbatim and rendered as garbage (VAI-08). The
     # clamp lives on the model deliberately — set_clip_transform is not the
     # only writer (add_keyframe, motion_track and set_property all reach here).
+    #
+    # `time` (clip-local seconds, optional) is what keeps this from DESTROYING an
+    # animation. A bare assignment replaces a Keyframe object with a float, so on
+    # an animated clip it silently deletes every key for that property. That is
+    # not a corner case — it is the exact sequence the Properties panel tells the
+    # user to follow ("move the playhead, press this, then change
+    # scale/position"): press Keyframe, drag the Scale slider, and the key you
+    # just set is gone and the button falls back to "not animated". Measured:
+    # scale went from KF[[0.0, 1.0]] to the scalar 2.0 in one call.
+    #
+    # So when a property already carries keys AND a time is supplied, the value
+    # is written as a keyframe AT that time instead — which is what dragging a
+    # slider means in any editor once a property is animated. With no `time` the
+    # old scalar overwrite stands, deliberately: that is how a caller flattens an
+    # animation back to a constant, and every existing Claude/MCP/template caller
+    # depends on it.
+    kf_time = None
+    if args.get("time") is not None:
+        kf_time = float(_num(args, "time"))
+    keyed: list[str] = []
     for k in ("x", "y", "scale", "rotation", "opacity"):
-        if k in args and args[k] is not None:
-            setattr(c.transform, k, _num(args, k))
+        if k not in args or args[k] is None:
+            continue
+        val = _num(args, k)
+        cur = getattr(c.transform, k)
+        # ANY existing key counts as animated, not `keyframes.is_keyframed`'s
+        # >= 2. The reported flow breaks on a property holding exactly ONE key —
+        # requiring two would leave that first press clobberable, i.e. fix
+        # nothing for the case that was actually reported.
+        kfs, interp = _kf_read(cur, "linear", seed_anchor=False)
+        if kf_time is not None and kfs:
+            from ..edl.schema import Keyframe
+            kfs = [p for p in kfs if abs(p[0] - kf_time) > 1e-3]
+            kfs.append((kf_time, float(val)))
+            kfs.sort(key=lambda p: p[0])
+            setattr(c.transform, k, Keyframe(keyframes=kfs, interp=interp))
+            keyed.append(k)
+        else:
+            setattr(c.transform, k, val)
     # Optional restack, IN THE SAME COMMIT. Dragging a sticker only ever wrote
     # x/y, so with every sticker at the default z=0 the order stayed "latest
     # added on top" and no amount of dragging could bring an older one forward
@@ -2430,8 +2619,15 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
             sib = [getattr(s, "z", 0) for s in t.clips if isinstance(s, _Sticker)]
             c.z = (max(sib) if sib else 0) + 1
             z_note = f" z={c.z}"
-    summary = (f"Transform {cid}: rot={c.transform.rotation} scale={c.transform.scale} "
-               f"x={c.transform.x} y={c.transform.y} opacity={c.transform.opacity}{z_note}")
+    # Report the value AT `time`, not the raw field — an animated property is a
+    # Keyframe object and would otherwise print as a repr in the ops log and in
+    # Claude's tool result.
+    from ..edl.keyframes import sample as _kf_sample
+    at = kf_time or 0.0
+    vals = " ".join(f"{k}={_kf_sample(getattr(c.transform, k), at):g}"
+                    for k in ("rotation", "scale", "x", "y", "opacity"))
+    kf_note = f" (keyed @ {kf_time:.2f}s: {'+'.join(keyed)})" if keyed else ""
+    summary = f"Transform {cid}: {vals}{kf_note}{z_note}"
     store.commit("set_clip_transform", args, summary)
     return {"summary": summary}
 
@@ -2554,9 +2750,7 @@ def bulk_duplicate(store: EDLStore, args: dict) -> dict:
         track, c = res
         if not isinstance(c, Clip):
             continue
-        dup = c.model_copy(update={
-            "id": f"c_{c.id[2:]}d", "start": c.start + c.duration,
-        })
+        dup = _clone_clip(c, id=f"c_{c.id[2:]}d", start=c.start + c.duration)
         track.clips.append(dup)
         new_ids.append(dup.id)
         affected_tracks.add(track.id)
@@ -3295,6 +3489,37 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
 KF_PROPS = ("x", "y", "scale", "rotation", "opacity")
 
 
+def _kf_tol(store: EDLStore) -> float:
+    """How close a time has to be to count as "the same keyframe": half a frame.
+
+    Reported as "I was unable to unmark the keyframes(button), when I move the
+    play head on the marked keyframe."
+
+    This used to be a hardcoded 1e-3 here while the panel armed its ◆ button at
+    0.017 (half a frame at 30fps), so anywhere in the 1–17ms band between them the
+    button went solid, its tooltip promised "Remove the keyframe at the playhead",
+    and the handler answered "no keyframe at 5.99s" and committed nothing. That
+    band is where the playhead essentially ALWAYS is: it is a rAF wall clock, so
+    it lands on an arbitrary float and never re-hits the exact time a key was
+    stored at. Measured with keys at 2.00/3.98/6.00 — removal succeeded at exactly
+    6.000 and failed at 5.999, 5.995, 5.99 and 5.985 with the button lit for all
+    of them.
+
+    Half a FRAME rather than a fixed 17ms because that constant is only correct at
+    30fps: at 60fps a frame is 16.7ms, so a fixed value would arm the control a
+    whole frame away and reintroduce the same mismatch pointing the other way.
+    Floored at 1e-3 so a pathological fps cannot make it stricter than the old
+    behaviour.
+
+    Used by BOTH add (deciding an upsert replaces an existing key rather than
+    stacking a second one a few ms away) and remove — they have to agree, or an
+    add lands a duplicate that the matching remove then deletes in pairs.
+    Mirrored client-side by `keyEps` in frontend/src/lib/overlay.ts.
+    """
+    fps = float(getattr(store.edl.canvas, "fps", 30) or 30)
+    return max(1e-3, 0.5 / max(1.0, fps))
+
+
 def _kf_props_arg(args: dict) -> list[str]:
     """The props one keyframe call targets: `props` (list) or `prop` (single).
 
@@ -3353,6 +3578,7 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
     cid = str(args["clip_id"])
     props = _kf_props_arg(args)
     t = float(args["time"])
+    tol = _kf_tol(store)   # half a frame — see _kf_tol
     interp_arg = str(args.get("interp", "linear"))
     values = args.get("values") if isinstance(args.get("values"), dict) else {}
 
@@ -3377,7 +3603,7 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
             # keying an untouched property pins it rather than jumping it.
             val = float(_kf_sample(cur, t))
         kfs, interp = _kf_read(cur, interp_arg, seed_anchor=len(props) == 1)
-        kfs = [p for p in kfs if abs(p[0] - t) > 1e-3]
+        kfs = [p for p in kfs if abs(p[0] - t) > tol]
         kfs.append((t, val))
         kfs.sort(key=lambda p: p[0])
         setattr(c.transform, prop, Keyframe(keyframes=kfs, interp=interp))
@@ -3398,6 +3624,7 @@ def remove_keyframe(store: EDLStore, args: dict) -> dict:
     cid = str(args["clip_id"])
     props = _kf_props_arg(args)
     t = float(args["time"])
+    tol = _kf_tol(store)   # half a frame — see _kf_tol
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
@@ -3411,7 +3638,7 @@ def remove_keyframe(store: EDLStore, args: dict) -> dict:
         if cur is None or isinstance(cur, (int, float)):
             continue                      # not animated — nothing here to drop
         kfs, interp = _kf_read(cur, "linear")
-        keep = [p for p in kfs if abs(p[0] - t) > 1e-3]
+        keep = [p for p in kfs if abs(p[0] - t) > tol]
         if len(keep) == len(kfs):
             continue                      # no key AT this time
         touched.append(prop)
@@ -3425,7 +3652,7 @@ def remove_keyframe(store: EDLStore, args: dict) -> dict:
             # was survivable while five separate buttons each removed one
             # property; with one button that keys the whole transform it is two
             # clicks from a blank clip, which is how it was finally noticed.
-            gone = next((p[1] for p in kfs if abs(p[0] - t) <= 1e-3), None)
+            gone = next((p[1] for p in kfs if abs(p[0] - t) <= tol), None)
             setattr(c.transform, prop, float(gone) if gone is not None else 0.0)
         elif len(keep) == 1:
             setattr(c.transform, prop, keep[0][1])
@@ -3468,7 +3695,7 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
         #      cache path is unreachable from the browser. StickerLayer draws
         #      stickers client-side now, and without a fetchable PNG it fell
         #      back to painting the emoji with the SYSTEM font: the preview
-        #      showed the OS glyph while the export baked Twemoji, i.e. the
+        #      showed the OS glyph while the export baked the fetched art, i.e. the
         #      sticker visibly changed artwork the moment you let go of it.
         #   2. A session that owns its own copy survives the cache being
         #      cleared, and `.vae` bundling/remapping (storage_project's
@@ -3480,7 +3707,16 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
             dst_dir = store.dir / "uploads" / "stickers"
             dst_dir.mkdir(parents=True, exist_ok=True)
             dst = dst_dir / Path(png_path).name
-            if not dst.exists():
+            # Re-copy when the canonical artwork has CHANGED, not only when the
+            # session copy is missing. `if not dst.exists()` froze each session
+            # on whatever style was cached the first time that emoji was used,
+            # so a project could hold two styles at once — reported as "why is
+            # this emoji different from the iOS version" with a 256px Fluent 3D
+            # 😂 sitting beside a 160px Apple 🤣 in one frame. The style
+            # namespace (`emoji/apple2/`) makes the SHARED cache switch cleanly;
+            # nothing was refreshing the per-session copies it feeds.
+            if not dst.exists() or dst.stat().st_size != Path(png_path).stat().st_size \
+                    or dst.read_bytes() != Path(png_path).read_bytes():
                 _shutil.copy2(png_path, dst)
             src_arg = str(dst)
         except OSError:
@@ -3771,12 +4007,18 @@ def add_text(store: EDLStore, args: dict) -> dict:
     color = str(args.get("color", "#FFFFFF"))
     if not re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", color):
         raise ValueError(f"color must be #RRGGBB or #RRGGBBAA hex, got {color!r}")
+    # Letter case defaults to the TYPED case — see the long note in
+    # add_super_text. `upper=None` (the schema default, meaning "use the role's
+    # default") is exactly the behaviour being fixed, so a new clip records an
+    # explicit choice; pass upper=True for the all-caps house look.
+    upper_arg = args.get("upper")
     style = TextStyle(
         font=str(args.get("font", "Inter-Black")),
         size=float(args.get("size", 96)),
         color=color,
         stroke=str(args.get("stroke", "#000000")),
         stroke_w=float(args.get("stroke_w", 4)),
+        upper=bool(upper_arg) if upper_arg is not None else False,
     )
     tc = TextClip(text=text, start=float(args["start"]), end=float(args["end"]),
                   role=role, transform=tx, style=style,
@@ -3817,20 +4059,51 @@ def apply_text_template(store: EDLStore, args: dict) -> dict:
     end = float(args.get("end", start + 3.0))
 
     presets: dict[str, dict] = {
+        # NOT role="caption", though that is the look this preset wants.
+        #
+        # Reported as "The hashtag text can't be repositioned with cursor or the
+        # coordinates." `caption` is the one role whose position is owned
+        # SERVER-SIDE by the captions block: resolve_anchor_overrides pins it to
+        # (None, None), _y_for_role ignores transform_y for it, TextLayer's
+        # resolveAnchor returns {ax: null, ay: null}, and StickerLayer refuses to
+        # publish a draggable box for it. All four are correct for a real caption
+        # TRACK, where the block lays every line out — and all four applied here
+        # by accident, because the role was chosen for its FONT.
+        #
+        # The giveaway is that `add_text` puts this clip on the generic `text`
+        # track, not a captions track: nothing owns its position, so nothing
+        # should be overriding it. A hashtag is a standalone overlay the user
+        # placed, so it gets the default role and stays positionable.
+        #
+        # Cost, stated plainly: the default role is Inter-BOLD where caption is
+        # Inter-BLACK, so the glyphs are weight 700 rather than 900. Asking for
+        # Inter-Black explicitly does not work — it is `_STYLE_SENTINEL_FONT`,
+        # i.e. indistinguishable from "font not set", on every role except
+        # caption (whose role font genuinely IS Inter-Black). Fixing that needs a
+        # nullable `style.font`, the same treatment `style.upper` just got. A
+        # slightly lighter weight is a far smaller defect than a control that
+        # does nothing.
         "hashtag_chunky": {"text": f"#{hashtag.lstrip('#')}" if hashtag else text_default,
-                           "role": "caption",
+                           "size": 64, "stroke_w": 5,
                            "x": canvas.w/2, "y": canvas.h*0.86},
         "callout_arrow":  {"text": text_default or "→",
                            "role": "label",
                            "x": canvas.w*0.6, "y": canvas.h*0.4, "size": 96},
+        # `upper` is stated explicitly on the two hook-role presets. They used to
+        # inherit the hook role's all-caps default, and add_text now defaults to
+        # respecting the typed case (see its note) — so without this, picking a
+        # NAMED preset would quietly render in a different case than before. A
+        # preset is house style: it declares its own look rather than inheriting
+        # a default that can move under it. The other presets are unaffected;
+        # their roles never capitalised.
         "big_question":   {"text": text_default,
-                           "role": "hook",
+                           "role": "hook", "upper": True,
                            "x": canvas.w/2, "y": canvas.h*0.18},
         "end_card_handle":{"text": handle or text_default,
                            "role": "lower_third",
                            "x": canvas.w/2, "y": canvas.h*0.92, "size": 80},
         "countdown_3_2_1":{"text": "3 · 2 · 1",
-                           "role": "hook",
+                           "role": "hook", "upper": True,
                            "x": canvas.w/2, "y": canvas.h/2, "size": 220,
                            "anim_in": "pop", "anim_out": "fade"},
         "watermark_handle":{"text": handle or text_default,
@@ -4213,6 +4486,8 @@ DISPATCH: dict[str, DispatchFn] = {
     "add_transition": add_transition,
     "remove_transition": remove_transition,
     "add_mask": add_mask,
+    "remove_mask": remove_mask,
+    "set_pip_framing": set_pip_framing,
     "chroma_key": chroma_key,
     # M5: vision-driven find + style match
     "find_moments": find_moments,

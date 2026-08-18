@@ -175,11 +175,50 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   z-index: 5; flex-shrink: 0;
   position: relative;
 }
-.splitter::after {                 /* a subtle grip dots/line, centered */
-  content: ''; position: absolute; inset: 0;
+/* The grip: a SHORT pill at the middle of the handle, transparent until
+   hovered. This is the hover affordance — see the band note below for why the
+   bar itself must not be one. */
+.splitter::after {
+  content: ''; position: absolute;
+  top: 50%; left: 50%; transform: translate(-50%, -50%);
+  border-radius: 2px;
   background: transparent;
 }
-.splitter:hover, .splitter:active { background: var(--accent-2, #5b8dff); }
+.splitter-vertical::after   { width: 2px; height: 28px; }
+.splitter-horizontal::after { width: 28px; height: 2px; }
+
+/* THE BAR ITSELF NEVER CHANGES COLOUR ON HOVER. Only the grip lights.
+   Reported THREE times as a "phantom colour" on the right side of the video.
+   The handle sits flush against the preview pane (measured: pane ends at
+   x=1314, splitter starts at x=1314, 6px wide, full height), so moving the
+   pointer toward the right of the picture — onto an emoji parked there, say —
+   lit a full-height bar hard against the frame.
+   Round 1 blamed #fca608, a sticker's own artwork clipped at the frame edge —
+   a different thing entirely, which is why fixing it left this behind.
+   Round 2 dimmed this hover from #5b8dff to #3d3d48, which treated the
+   problem as BRIGHTNESS. It is not: re-measured on the packaged build with a
+   differential screenshot, the pointer landing on the seam still changed
+   6px x 670px from rgb(44,44,52) to rgb(61,61,72) — a 670px band appearing
+   beside the picture is conspicuous at any brightness, and dimming it also
+   made the handle harder to find, so it lost on both counts.
+   The real error is the SHAPE. "You can grab this" only needs to mark the
+   grab POINT, so a 2x28px grip now lights instead and the bar stays exactly
+   the colour it was — measured after: 56 changed pixels, none of them
+   adjacent to the frame edge. Verified the same for the horizontal splitter,
+   which had the identical full-width band under the picture.
+   `:active` still takes the full accent, because by then the user is
+   deliberately dragging the handle and the band IS the feedback. */
+.splitter:hover { background: var(--line, #2a2a33); }
+.splitter:hover::after { background: #7a8090; }
+.splitter:active { background: var(--accent-2, #5b8dff); }
+.splitter:active::after { background: transparent; }
+/* Must come AFTER the rules above, not with the other .splitter-disabled rules
+   higher up: `.splitter-disabled:hover::after` and `.splitter:hover::after`
+   have equal specificity (0,2,1), so source order is what decides. A disabled
+   handle shows no grip because there is nothing to grab. */
+.splitter-disabled:hover::after, .splitter-disabled:active::after {
+  background: transparent;
+}
 /* Visual width stays slim, but the grid tracks were 5px — widen to 6px and
    rely on cursor + color; if still hard to grab, bump the grid track + this to 8px. */
 .splitter-vertical   { width: 6px; height: 100%; cursor: col-resize; }
@@ -375,21 +414,10 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   font-size: 14px;
   text-align: center;
 }
-.transport {
-  position: absolute;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0,0,0,0.6);
-  backdrop-filter: blur(8px);
-  border-radius: 999px;
-  padding: 6px 12px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-variant-numeric: tabular-nums;
-  border: 1px solid rgba(255,255,255,0.08);
-}
+/* .transport (the pill that floated at bottom-centre OVER the picture) was
+   removed with the controls it styled — they now live in .timeline-toolbar.
+   Kept as a note rather than a dead rule so nobody re-adds a floating overlay
+   on top of the caption/lower-third region by reviving the class. */
 
 .timeline-pane {
   background: var(--bg-1);
@@ -404,12 +432,61 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   height: 32px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 0 10px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-2);
 }
 .timeline-toolbar .small { font-size: 11px; color: var(--text-dim); }
+
+/* Undo/Redo + the transport moved into this bar, so it now holds controls and
+   not just readouts. Two rules keep it usable on a narrow window:
+   - buttons stay compact and never shrink (flex-shrink:0 on the whole bar's
+     children), because a control that reflows under the pointer is worse than
+     one that is slightly cramped;
+   - the shortcut hint is the ONLY flexible item: it is a reminder, not a
+     control, so it gives way first and ellipsises instead of pushing Export-
+     adjacent controls off the edge the way `.topbar-scroll` used to. */
+.timeline-toolbar > * { flex-shrink: 0; }
+.timeline-toolbar button {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 18px;
+}
+.timeline-toolbar .tb-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+  margin: 0 2px;
+}
+.timeline-toolbar .tb-hint {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Ellipsis alone is not enough. Measured at a 950px window: the pane is 438px
+   and the FIXED items (two buttons, transport, clock, zoom slider, readout,
+   gaps) come to 475px on their own — so the hint can shrink to zero and the bar
+   still overflows. Things therefore drop out in order of how little they are
+   needed, which is what "the shortcuts and zoom can be compressed if required"
+   asks for:
+     1. the shortcut hint  — a reminder, not a control
+     2. the "Zoom" label   — the slider and the px/s readout say what it is
+     3. the px/s readout   — the slider position still shows it
+   Undo/Redo, the transport and the clock never drop; they are the reason the
+   bar exists.
+
+   Container queries rather than media queries because the sidebars are
+   RESIZABLE — pane width is not a function of window width, so a media query
+   would compress at the wrong moments. Degrades to the ellipsis above if
+   unsupported. */
+.timeline-pane { container-type: inline-size; }
+@container (max-width: 620px) { .timeline-toolbar .tb-hint { display: none; } }
+@container (max-width: 470px) { .timeline-toolbar .tb-zoomlabel { display: none; } }
+@container (max-width: 400px) { .timeline-toolbar .tb-zoomval { display: none; } }
 
 .timeline-canvas-wrap {
   flex: 1;

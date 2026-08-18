@@ -28,8 +28,29 @@ export const HANDLE = 7          // half-size of a corner handle, display px
 export const HANDLE_HIT = 13     // click tolerance around a handle
 export const DEL_R = 9           // radius of the ✕ delete handle, display px
 export const DEL_GAP = 14        // gap between box corner and the ✕ center
+export const ROT_R = 8           // radius of the rotate grip, display px
+export const ROT_GAP = 26        // stem length from the box's TOP edge
+export const ROT_HIT = 15        // click tolerance around the grip
 
 const CORNER_SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const
+
+/**
+ * Where the ROTATE grip sits, in the box's LOCAL (rotated) frame: on a short
+ * stem above the top edge, the arrangement Word/PowerPoint/Canva all use, so
+ * the gesture needs no explanation.
+ *
+ * Local, not screen, coordinates — the caller has already translated and
+ * rotated into the box's frame, so the grip travels with the box as it turns
+ * and stays "above the top edge" rather than "above on screen".
+ *
+ * `flip` moves it BELOW instead, for a box close enough to the canvas top that
+ * the grip would be drawn off it — the same reasoning (and the same failure)
+ * as the ✕ handle's corner search: chrome that renders outside the overlay
+ * canvas is invisible and unclickable, so the control silently does not exist.
+ */
+export function rotateHandleLocal(hh: number, flip = false): { lx: number; ly: number } {
+  return { lx: 0, ly: flip ? hh + ROT_GAP : -hh - ROT_GAP }
+}
 
 /**
  * Where to put the ✕ delete handle, in the box's LOCAL (rotated) frame.
@@ -78,7 +99,9 @@ export function drawSelectionChrome(
   ctx: CanvasRenderingContext2D,
   hw: number, hh: number,
   opts: { dragging: boolean; resizing: boolean; showDelete: boolean
-          deleteAt?: { lx: number; ly: number } },
+          deleteAt?: { lx: number; ly: number }
+          showRotate?: boolean; rotateAt?: { lx: number; ly: number }
+          rotating?: boolean },
 ): void {
   ctx.strokeStyle = ACCENT
   if (opts.dragging) {
@@ -98,6 +121,34 @@ export function drawSelectionChrome(
     const pad = opts.resizing ? HANDLE + 1 : HANDLE
     ctx.fillRect(sx * hw - pad, sy * hh - pad, pad * 2, pad * 2)
   }
+  // The rotate grip: a stem from the top edge to a small circle. Drawn before
+  // the ✕ early-return below so it survives on a box that has no delete
+  // handle (a PIP), and hidden while MOVING for the same reason the ✕ is —
+  // except during a rotate, where it is the thing being dragged.
+  if (opts.showRotate && (!opts.dragging || opts.rotating)) {
+    const at = opts.rotateAt ?? rotateHandleLocal(hh)
+    const edgeY = at.ly < 0 ? -hh : hh
+    ctx.strokeStyle = ACCENT
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.moveTo(0, edgeY)
+    ctx.lineTo(at.lx, at.ly)
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(at.lx, at.ly, opts.rotating ? ROT_R + 1 : ROT_R, 0, Math.PI * 2)
+    ctx.fillStyle = opts.rotating ? ACCENT : 'rgba(20,20,24,0.9)'
+    ctx.fill()
+    ctx.strokeStyle = ACCENT
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+    // A circular arrow, so the grip reads as "turn me" rather than "resize me".
+    ctx.beginPath()
+    ctx.arc(at.lx, at.ly, ROT_R * 0.45, Math.PI * 0.25, Math.PI * 1.75)
+    ctx.strokeStyle = opts.rotating ? '#fff' : ACCENT
+    ctx.lineWidth = 1.6
+    ctx.stroke()
+  }
+
   // Hidden mid-gesture: a drag that ends over the ✕ must not read as a delete
   // click, and it cuts chrome noise while moving.
   if (!opts.showDelete || opts.dragging) return

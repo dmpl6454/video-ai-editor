@@ -7,14 +7,12 @@ import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
-import { chordLabel } from '../keymap/engine'
 
 interface SessionRow { id: string; name: string }
 
 export function TopBar() {
   const name = useStore((s) => s.sessionName)
   const dispatch = useStore((s) => s.dispatch)
-  const redoAvailable = useStore((s) => s.redoAvailable)
   const pendingOps = useStore((s) => s.pendingOps)
   const exporting = useStore((s) => s.exporting)
   const exportUrl = useStore((s) => s.exportUrl)
@@ -303,16 +301,10 @@ export function TopBar() {
           past the visible edge with no visual cue that scrolling the
           TOOLBAR ITSELF (not the page) would reveal it — issues 9/10. */}
       <div className="topbar-scroll">
-        <button
-          onClick={() => dispatch('undo')}
-          disabled={opsLen === 0}
-          title={opsLen === 0 ? 'Nothing to undo yet — make an edit first' : `Undo last edit (${chordLabel('Mod+KeyZ')})`}
-        >Undo</button>
-        <button
-          onClick={() => dispatch('redo')}
-          disabled={!redoAvailable}
-          title={redoAvailable ? `Redo (${chordLabel('Mod+Shift+KeyZ')})` : 'Nothing to redo — Redo re-applies an edit you just undid'}
-        >Redo</button>
+        {/* Undo/Redo MOVED to the timeline toolbar (Timeline.tsx). They were
+            in `.topbar-scroll`, which scrolls horizontally once enough presets
+            are added — so the app's two most-used buttons could end up
+            off-screen with no cue that the toolbar itself scrolls. */}
         {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
           <button
             key={r}

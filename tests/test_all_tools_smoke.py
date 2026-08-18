@@ -166,6 +166,8 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "color_grade": {"clip_id": "c1", "brightness": 0.05, "contrast": 1.1, "saturation": 1.1},
         "apply_lut": {"clip_id": "c1", "lut_path": os.devnull, "intensity": 0.5},
         "add_mask": {"clip_id": "c1", "type": "circle", "feather": 8.0},
+        "remove_mask": {"clip_id": "c1"},
+        "set_pip_framing": {"clip_id": "c1", "x": 0.2, "y": -0.1, "zoom": 1.4},
         "chroma_key": {"clip_id": "c1", "color": "#00FF00", "similarity": 0.4,
                        "smoothness": 0.1, "spill_suppress": 0.4},
         "add_transition": {"at": 2.0, "type": "fade", "duration": 0.5},
