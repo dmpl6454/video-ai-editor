@@ -24,7 +24,11 @@ export interface TextClip {
   role?: string
   // Per-clip style overrides; backend defaults ('#FFFFFF' / 'Inter-Black')
   // mean "use the role style" — TextLayer mirrors that sentinel rule.
-  style?: { font?: string; size?: number; color?: string; stroke?: string; stroke_w?: number }
+  // `upper` is TRI-STATE, not a plain boolean: null/absent means "use the role's
+  // own default" (super and hook are capitalised as a house style), so existing
+  // projects keep their capitals and only an explicit false lowercases one.
+  style?: { font?: string; size?: number; color?: string; stroke?: string
+            stroke_w?: number; upper?: boolean | null }
   anim_in?: string | null
   anim_out?: string | null
   speaker?: string | null

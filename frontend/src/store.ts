@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
+import { deletedLabel } from './lib/deletedLabel'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -153,6 +154,26 @@ interface State {
   liveTransform: { clipId: string; scale?: number; rotation?: number; opacity?: number
                    dx?: number; dy?: number } | null
 
+  // FRAMING MODE — which clip (if any) currently has the crop/reposition view
+  // open over the preview, plus what its framing looked like when the mode was
+  // entered so Cancel can put it back exactly.
+  //
+  // This used to be implicit: the view appeared whenever the selected v1 clip
+  // happened to have `fit: 'cover'`, which made the "Fill frame" checkbox do two
+  // unrelated jobs — set a render property AND open an editing mode — and gave
+  // no way to say "I'm done" without changing the render. Requested as: a button
+  // to enter framing and an Apply button to leave it.
+  //
+  // In the store rather than local state because the two halves live in
+  // different components: the buttons are in Properties, the view is in Preview.
+  //
+  // `before` is what Cancel restores. Snapshotting it also fixes the documented
+  // trade-off in the old checkbox, whose untick reset the transform to IDENTITY
+  // rather than to whatever it was before cover was entered — so ticking and
+  // unticking to compare silently discarded a zoom you had set under `contain`.
+  framing: { clipId: string
+             before: { fit?: string; x?: number; y?: number; scale?: number } } | null
+
   // Client-side live color filter — the Color panel's mirror of liveTransform.
   // Set while a brightness/contrast/saturation slider drags so Preview applies
   // a CSS filter() approximation instantly; cleared the same way liveTransform
@@ -162,6 +183,7 @@ interface State {
 
   // setters
   setLiveTransform(t: State['liveTransform']): void
+  setFraming(f: State['framing']): void
   setLiveFilter(f: State['liveFilter']): void
   setSelection(id: string | null): void
   toggleSelection(id: string): void
@@ -255,6 +277,7 @@ export const useStore = create<State>((set, get) => ({
   outMark: null,
   playbackRate: 1,
   liveTransform: null,
+  framing: null,
   liveFilter: null,
   uploading: false,
   uploadProgress: null,
@@ -276,7 +299,15 @@ export const useStore = create<State>((set, get) => ({
   timelineH: readStoredPanelSize('vai.timelineH', 280),
   rightPanelOpen: readStoredBool('vai.rightPanelOpen', true),
 
-  setSelection: (id) => set({ selection: id, multiSelection: id ? [] : [] }),
+  setSelection: (id) => set((s) => ({
+    selection: id, multiSelection: id ? [] : [],
+    // Leaving a clip ENDS its framing session. The crop view is already gated on
+    // the selected clip, so a stale entry never draws — but it would silently
+    // reopen the moment that clip was selected again, and its `before` snapshot
+    // would by then describe a state from minutes ago, making Cancel restore
+    // something the user had long since moved on from.
+    framing: s.framing && s.framing.clipId === id ? s.framing : null,
+  })),
   toggleSelection: (id) => {
     const s = get()
     if (s.selection === id) {
@@ -326,6 +357,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setPlaybackRate: (r) => set({ playbackRate: r }),
   setLiveTransform: (t) => set({ liveTransform: t }),
+  setFraming: (f) => set({ framing: f }),
   setLiveFilter: (f) => set({ liveFilter: f }),
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
@@ -515,6 +547,13 @@ export const useStore = create<State>((set, get) => ({
   dispatch: async (tool, args = {}) => {
     const sid = get().sessionId
     if (!sid) return null
+    // Resolved BEFORE the request: the toast fires after it, and refreshSoon()
+    // may already have replaced the EDL with one that no longer holds the clip
+    // — at which point there is nothing left to name.
+    const deleteIds = tool === 'bulk_delete'
+      ? ((args.clip_ids as string[] | undefined) ?? [])
+      : tool === 'ripple_delete' ? [String(args.clip_id ?? '')] : []
+    const deleteMsg = deleteIds.length ? deletedLabel(get().edl, deleteIds) : ''
     set({ pendingOps: get().pendingOps + 1 })
     try {
       // We KEEP the previous export's download link after an edit, but the UI
@@ -543,14 +582,9 @@ export const useStore = create<State>((set, get) => ({
       // Offer a quick Undo on destructive deletes — covers every entry point
       // (keyboard, Properties Delete, timeline context menu) in one spot. The
       // backend's own undo is the restore; 'undo' isn't a delete so it can't loop.
-      if (tool === 'ripple_delete' || tool === 'bulk_delete') {
-        const count = tool === 'bulk_delete'
-          ? ((args.clip_ids as unknown[] | undefined)?.length ?? 0)
-          : 1
-        toast.action(
-          count > 1 ? `${count} clips deleted` : 'Clip deleted',
-          { label: 'Undo', onClick: () => { void get().dispatch('undo') } },
-        )
+      if (deleteMsg) {
+        toast.action(deleteMsg,
+          { label: 'Undo', onClick: () => { void get().dispatch('undo') } })
       }
       return res
     } catch (e) {
@@ -685,9 +719,31 @@ export const useStore = create<State>((set, get) => ({
     // split itself. Selecting the piece under the playhead is also what every
     // other editor does after a cut. Shared by ⌘B and the timeline's
     // right-click "Split at playhead" so the two can't diverge.
+    //
+    // This ran only when something was ALREADY selected, which left the
+    // commonest path with no selection at all: split with nothing selected and
+    // you get two clips and an empty Properties panel — so no keyframe button,
+    // no transform fields, nothing to act on until you happen to click a clip.
+    // Reported as "the keyframe should be applied even if the clip or split is
+    // not selected". A cut is a deliberate act on a specific piece of footage;
+    // ending it with nothing selected is never what the user meant.
     const halves = (res?.result as { halves?: Record<string, string> } | null)?.halves
+    if (!halves) return
     const sel = get().selection
-    if (halves && sel && halves[sel]) set({ selection: halves[sel] })
+    if (sel) {
+      // Only follow a selection this cut actually divided. A selection that
+      // survived untouched is left alone — splitAtPlayhead loops one split per
+      // track under a multi-selection, so the later calls see a `sel` that is
+      // already the FIRST track's new right half. Claiming those too would walk
+      // the selection to whichever track happened to be split last.
+      if (halves[sel]) set({ selection: halves[sel] })
+      return
+    }
+    // Nothing was selected. Every entry here is a clip this cut divided, and
+    // the right half by construction STARTS at the cut — which is where the
+    // playhead is — so it is the piece under the playhead.
+    const ids = Object.values(halves)
+    if (ids.length === 1) set({ selection: ids[0] })
   },
 
   rippleDeleteSelection: async () => {

@@ -17,6 +17,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store'
+import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
 
 const PRESETS = [
   { name: 'countdown_3_2_1', label: '3 · 2 · 1', title: 'Center-screen countdown (pop in, fade out)', needsField: false },
@@ -59,12 +60,20 @@ export function TextTool() {
     return () => window.removeEventListener('mousedown', close)
   }, [presetsOpen])
 
+  // A 3s default must not outlive the PICTURE. Dropped at the playhead it used
+  // to run past the end of v1, and since edl.duration is a max over every track,
+  // that lone overlay held the whole timeline open and playback ran on into black
+  // — reported as "the total duration was 4 secs but the video ran to 4.4 secs"
+  // (real session: v1 ended at 4.000, the text clip sat at 1.375-4.375).
+  const defaultEnd = (start: number) =>
+    defaultOverlayEnd(start, 3, videoContentEnd(useStore.getState().edl))
+
   const addDefaultText = async () => {
     const start = useStore.getState().playhead
     const res = await dispatch('add_text', {
       text: 'Your text',
       start,
-      end: start + 3,
+      end: defaultEnd(start),
       role: 'super',
       // Never replace an existing overlay from the UI tool (see header note).
       allow_stack: true,
@@ -79,7 +88,7 @@ export function TextTool() {
     const res = await dispatch('apply_text_template', {
       name,
       start,
-      end: start + 3,
+      end: defaultEnd(start),
       // apply_text_template picks the slot it needs per preset; passing the
       // one typed value into all three slots keeps the UI a single field.
       fields: { text: v, hashtag: v, handle: v },

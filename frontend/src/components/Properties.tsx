@@ -1,8 +1,10 @@
 import React from 'react'
 import { useStore } from '../store'
-import { isMediaClip } from '../types'
+import { isMediaClip, clipEnd, type AnyClip } from '../types'
 import { baseName } from '../lib/paths'
+import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
 import { chordLabel } from '../keymap/engine'
+import { setLivePipFraming } from '../lib/pipDraw'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -78,48 +80,58 @@ function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, tit
 // 0.1, so it is a permitted, silent outcome of a mis-typed number.
 const SHORT_OVERLAY_S = 0.5
 
-/** Banner: "this clip isn't on screen at the playhead" (+ jump), and a warning
- *  for a too-short overlay.
+// Roles whose ROLE default is ALL CAPS, so the "Role default" option can say so
+// instead of leaving the user to discover it by typing. Mirrors the `upper: true`
+// rows in TextLayer's ROLE_STYLES and text_overlay.py's — a third list, but a
+// purely cosmetic one: being wrong here mislabels a dropdown option, it does not
+// change a pixel.
+const ROLE_FORCES_CAPS = new Set(['super', 'hook'])
+
+// The font each role actually renders in when `style.font` is unset. Needed
+// because 'Inter-Black' is the schema default AND the "never touched" sentinel,
+// so a hook clip whose style.font is unset renders in Bebas Neue, not Inter.
+// Mirrors ROLE_STYLES in render/text_overlay.py; label-only, like the set above.
+const ROLE_FONTS: Record<string, string> = {
+  super: 'Anton-Regular', hook: 'BebasNeue-Regular', lower_third: 'Montserrat-Bold',
+  caption: 'Inter-Black', label: 'Inter-Bold', watermark: 'Inter-Bold',
+}
+
+// Bundled faces with NO lowercase letterforms: their lowercase slots contain
+// capitals, so "As typed" cannot show lowercase in them and no code change
+// could make it. Measured, not assumed — in Bebas Neue at 170px, 'a' rasterises
+// byte-identically to 'A' (4448 ink px each) and 'hello' to 'HELLO'; Anton, by
+// contrast, differs (33176 vs 35043). This is the OTHER half of "Text layer only
+// shows capital alphabets": the forced-caps rule was one cause, the Hook role's
+// typeface is the other, and fixing only the first leaves Hook still all-caps.
+const CAPS_ONLY_FONTS = new Set(['BebasNeue-Regular'])
+
+/** Warning for an overlay too short to ever be seen.
  *
- *  Round-5 manual finding M-02 was filed as "rotation sometimes doesn't work".
- *  Rotation worked; the selected sticker was 0.10s long and started at 6.78s
- *  while the playhead sat at 1.02s, so a dozen correct `set_clip_transform`
- *  commits changed the EDL and nothing on screen. Every control in this panel
- *  edits a clip you may not be looking at, and nothing said so — the panel read
- *  `playhead` only for a keyframe-button tooltip. This is the missing feedback,
- *  not a new capability.
+ *  This used to ALSO carry "Not visible at the playhead (6.25s) — this clip runs
+ *  0.00–4.00s. Edits here still apply. [Jump to clip]". That has been removed on
+ *  request: it fired constantly, most of all right after a split, where it
+ *  reported an ordinary state as though something were wrong. The condition it
+ *  described is normal — selecting a clip the playhead is not inside is how you
+ *  edit one — and the two real problems behind it were fixed at the source
+ *  instead: `splitTrackAt` now selects the piece UNDER the playhead (so the
+ *  common case never arises), and the keyframe button clamps its time into the
+ *  clip (so the one control the banner's "edits here still apply" was quietly
+ *  wrong about now behaves).
+ *
+ *  The too-short warning stays because it reports something genuinely broken:
+ *  round-5 finding M-02 was filed as "rotation sometimes doesn't work", and the
+ *  truth was a 0.10s sticker — three frames at 30fps — that no amount of
+ *  correct `set_clip_transform` commits could make visible.
  */
 function ClipWindowNotice({ start, end }: { start: number; end: number }) {
-  const playhead = useStore((s) => s.playhead)
-  const setPlayhead = useStore((s) => s.setPlayhead)
-  const outside = playhead < start || playhead >= end
-  const tooShort = end - start < SHORT_OVERLAY_S
-  if (!outside && !tooShort) return null
+  if (end - start >= SHORT_OVERLAY_S) return null
   return (
     <div style={{
       fontSize: 11, lineHeight: 1.5, marginBottom: 8, padding: '6px 8px',
       borderRadius: 4, border: '1px solid var(--line)',
       background: 'rgba(245,158,11,0.12)', color: 'var(--text)',
     }}>
-      {outside && (
-        <div>
-          Not visible at the playhead ({playhead.toFixed(2)}s) — this clip runs{' '}
-          {start.toFixed(2)}–{end.toFixed(2)}s. Edits here still apply.{' '}
-          <button
-            onClick={() => setPlayhead(start + Math.min(0.05, (end - start) / 2))}
-            style={{
-              background: 'var(--bg-3)', border: '1px solid var(--line)',
-              borderRadius: 3, padding: '0 6px', fontSize: 11, cursor: 'pointer',
-              color: 'inherit',
-            }}
-          >Jump to clip</button>
-        </div>
-      )}
-      {tooShort && (
-        <div style={{ marginTop: outside ? 4 : 0 }}>
-          Only {(end - start).toFixed(2)}s long — raise Duration below to see it.
-        </div>
-      )}
+      Only {(end - start).toFixed(2)}s long — raise Duration below to see it.
     </div>
   )
 }
@@ -134,23 +146,21 @@ function isKeyframed(v: unknown): boolean {
  *  Tolerance is half a frame at 30fps — the playhead lands on frame
  *  boundaries and the stored time is a float, so exact equality never
  *  matches and the ◆ could never light up (or be removed). */
-function keyAt(v: unknown, t: number): boolean {
+function keyAt(v: unknown, t: number, fps?: number): boolean {
   if (!isKeyframed(v)) return false
   const kfs = (v as { keyframes: [number, number][] }).keyframes
-  return kfs.some((k) => Math.abs((k?.[0] ?? -1) - t) < 0.017)
+  const eps = keyEps(fps)
+  return kfs.some((k) => Math.abs((k?.[0] ?? -1) - t) < eps)
 }
 
-function asScalar(v: unknown, fallback: number): number {
-  if (typeof v === 'number') return v
-  if (v && typeof v === 'object') {
-    const kfs = (v as { keyframes?: unknown[] }).keyframes
-    if (Array.isArray(kfs) && kfs.length) {
-      const last = kfs[kfs.length - 1] as [number, number]
-      return last?.[1] ?? fallback
-    }
-  }
-  return fallback
-}
+// asScalar() used to live here and returned the LAST keyframe's value for an
+// animated property. Every panel field read through it, so on a clip with keys
+// at 0→1.0 and 4→3.0 the Scale slider showed 3.00 at every playhead position.
+// Replaced by lib/overlay's sampleKF(v, localT, fallback) — the same
+// interpolation the renderer (edl/keyframes.py) and the canvas layers use — so
+// the inspector reports the pose actually on screen. Do not reintroduce a
+// "just take a number out of it" helper: the value of an animated property is
+// meaningless without a time.
 
 export function Properties() {
   const edl = useStore((s) => s.edl)
@@ -165,6 +175,8 @@ export function Properties() {
   // some selections.
   const setPlayhead = useStore((s) => s.setPlayhead)
   const setLiveTransform = useStore((s) => s.setLiveTransform)
+  const framing = useStore((s) => s.framing)
+  const setFraming = useStore((s) => s.setFraming)
 
   if (!sel || !edl) return (
     <div className="props">
@@ -203,6 +215,7 @@ export function Properties() {
         trackLabel={clip.t.label ?? clip.t.id}
         canRaise={canRaise}
         canLower={canLower}
+        playhead={playhead}
         dispatch={dispatch}
       />
     )
@@ -214,6 +227,7 @@ export function Properties() {
         c={c as unknown as TextClipLike}
         trackLabel={clip.t.label ?? clip.t.id}
         canvas={edl.canvas}
+        playhead={playhead}
         dispatch={dispatch}
       />
     )
@@ -231,17 +245,15 @@ export function Properties() {
   const speed = typeof speedRaw === 'number' ? speedRaw : 1.0
   const audio = (c as unknown as { audio?: { gain_db?: number; fade_in?: number; fade_out?: number; mute?: boolean } }).audio
   const tx = (c as unknown as { transform?: { x?: unknown; y?: unknown; rotation?: unknown; scale?: unknown; opacity?: unknown } }).transform
-  const rotation = asScalar(tx?.rotation, 0)
-  const scale = asScalar(tx?.scale, 1)
-  const opacity = asScalar(tx?.opacity, 1)
-  const xVal = asScalar(tx?.x, 0)
-  const yVal = asScalar(tx?.y, 0)
   const gain = audio?.gain_db ?? 0
   const fadeIn = audio?.fade_in ?? 0
   const fadeOut = audio?.fade_out ?? 0
   const muted = !!audio?.mute
   // Another top-level Clip field types.ts doesn't declare (see the note below).
   const fitCover = (c as unknown as { fit?: string }).fit === 'cover'
+  // Framing mode is per-clip: selecting a different clip must not leave the
+  // crop view open over one it does not belong to.
+  const isFramingThis = framing?.clipId === c.id
   // Visual fade-from/to-black — top-level Clip fields (NOT audio.*), rendered
   // by compositor._build_clip_video_chain. types.ts omits them, hence the cast.
   const vf = c as unknown as { video_fade_in?: number; video_fade_out?: number }
@@ -253,7 +265,38 @@ export function Properties() {
   const colorParams = colorEffect?.params ?? {}
 
   const clipStart = (c as unknown as { start?: number }).start ?? 0
-  const localT = Math.max(0, playhead - clipStart)
+  // CLAMPED to the clip's own span, not just floored at 0.
+  //
+  // A keyframe time is clip-local, and the timeline draws each one at
+  // `clip.start + t` and skips any that falls outside the clip's rect. So a
+  // playhead sitting PAST the selected clip produced a keyframe at a time the
+  // clip does not contain: stored, counted in the panel's "N keys" readout,
+  // and impossible to see or reach on the timeline. Reported as "it didn't
+  // show up in the video layer, yet the keyframe was marked".
+  //
+  // Very easy to hit right after a split, where the selection is the LEFT half
+  // and the playhead is in the right. The banner above says "Not visible at
+  // the playhead … Edits here still apply", which is true of every other field
+  // and was quietly false of this one.
+  const clipSpan = Math.max(0, (clipEnd(c as AnyClip) ?? clipStart) - clipStart)
+  const localT = Math.min(Math.max(0, playhead - clipStart), clipSpan)
+
+  // Transform values are read AT THE PLAYHEAD, which is why they are derived
+  // here rather than beside the other fields above — they depend on localT.
+  //
+  // These used to come from asScalar(), which returns the LAST keyframe's value
+  // on an animated property. On a clip with keys at 0→1.0 and 4→3.0 the Scale
+  // slider therefore read 3.00 everywhere along the timeline, including where
+  // the picture plainly showed 1.5. That was merely wrong to look at while a
+  // slider drag overwrote the whole animation; now that a drag writes a key AT
+  // the playhead, it would also mean nudging the slider snapped the clip from
+  // its real value to the last key's. Sampling is the same math the renderer
+  // and the canvas layers use (lib/overlay.sampleKF mirrors edl/keyframes.py).
+  const rotation = sampleKF(tx?.rotation as KFNum | undefined, localT, 0)
+  const scale = sampleKF(tx?.scale as KFNum | undefined, localT, 1)
+  const opacity = sampleKF(tx?.opacity as KFNum | undefined, localT, 1)
+  const xVal = sampleKF(tx?.x as KFNum | undefined, localT, 0)
+  const yVal = sampleKF(tx?.y as KFNum | undefined, localT, 0)
   // ONE keyframe button for the whole transform.
   //
   // There used to be five — one per animatable property (scale, rotation,
@@ -280,16 +323,13 @@ export function Properties() {
   const kfValues: Record<string, unknown> = {
     scale: tx?.scale, rotation: tx?.rotation, opacity: tx?.opacity, x: tx?.x, y: tx?.y,
   }
-  const kfFallback: Record<string, number> = {
-    scale: 1, rotation: 0, opacity: 1, x: xVal, y: yVal,
-  }
   // Every distinct keyframe time on the clip, so the panel can SHOW them.
   const kfTimes = [...new Set(KF_PROPS.flatMap((p) => {
     const v = kfValues[p]
     return isKeyframed(v) ? (v as { keyframes: [number, number][] }).keyframes.map((k) => k[0]) : []
   }))].sort((a, b) => a - b)
   const kfAnimated = kfTimes.length > 0
-  const kfHere = KF_PROPS.some((p) => keyAt(kfValues[p], localT))
+  const kfHere = KF_PROPS.some((p) => keyAt(kfValues[p], localT, edl.canvas.fps))
 
   const KeyframeButton = () => (
     <button
@@ -298,12 +338,17 @@ export function Properties() {
         ? `Remove the keyframe at the playhead (${localT.toFixed(2)}s into the clip)`
         : `Add a keyframe at the playhead (${localT.toFixed(2)}s into the clip) — `
           + 'pins scale, rotation, opacity and position as they are now'}
+      // Deliberately sends NO `values`. add_keyframe pins whatever each
+      // property reads as AT `time` when it is left out — including the
+      // interpolated value mid-animation — which is precisely "key the current
+      // pose". The panel used to compute them itself with asScalar(), which
+      // returns the LAST key's value, not the value at the playhead: with keys
+      // at 0→1.0 and 4→3.0, pressing this at t=2 stored 3.0 where the clip
+      // actually showed 2.0. So the one button whose contract is "changes
+      // nothing, just pins it" visibly altered the animation. The backend
+      // samples correctly for scalars too, so there is nothing left to pass.
       onClick={() => dispatch(kfHere ? 'remove_keyframe' : 'add_keyframe', {
         clip_id: c.id, props: [...KF_PROPS], time: localT,
-        ...(kfHere ? {} : {
-          values: Object.fromEntries(
-            KF_PROPS.map((p) => [p, asScalar(kfValues[p], kfFallback[p])])),
-        }),
       })}
       style={{
         background: kfHere ? 'var(--accent)' : 'var(--bg-3)',
@@ -477,14 +522,192 @@ export function Properties() {
             the video, only the aspect ratio gets changed"). 'Fill frame' is
             scale-up-and-crop; combine it with Transform scale/X/Y below to pick
             which part of the frame is visible. */}
-        <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-          <input type="checkbox" checked={fitCover}
-            onChange={() => dispatch('set_clip_fit', {
-              clip_id: c.id, fit: fitCover ? 'contain' : 'cover',
-            })}
-            style={{ marginRight: 4 }} />
-          Fill frame (crop to canvas instead of letterboxing)
-        </label>
+        {/* V1 gets an explicit MODE, not a checkbox. Framing is a gesture with a
+            beginning and an end, and the checkbox conflated it with the render
+            property it needs: ticking it both set fit:'cover' AND opened the
+            crop view, so there was no way to say "done" without also changing
+            how the clip renders. Requested as a button to start framing and an
+            Apply button to finish.
+
+            The drags themselves still commit live, exactly as before — Apply
+            closes the view, it does not defer the edit. Cancel is the one real
+            behaviour change, and it is a fix: it restores the fit AND the
+            transform captured on entry, where unticking used to reset x/y/scale
+            to IDENTITY and silently discard a zoom set under `contain`.
+
+            A PIP keeps the checkbox: `fit` there is only a render property (the
+            crop view is v1-only), so there is no mode to enter or leave. */}
+        {clip.t.id === 'v1' ? (
+          isFramingThis ? (
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button
+                onClick={() => setFraming(null)}
+                title="Finish framing and close the crop view — your changes are already applied"
+                style={{ background: 'var(--accent)', fontWeight: 600 }}
+              >Apply</button>
+              <button
+                onClick={() => {
+                  // Put back exactly what was there on entry: the fit first,
+                  // because set_clip_fit resets the transform on a cover→contain
+                  // change and would otherwise undo the restore that follows it.
+                  const b = framing?.before ?? {}
+                  const wasCover = b.fit === 'cover'
+                  if (!wasCover) {
+                    void dispatch('set_clip_fit', { clip_id: c.id, fit: 'contain' })
+                  }
+                  void dispatch('set_clip_transform', {
+                    clip_id: c.id,
+                    x: b.x ?? 0, y: b.y ?? 0, scale: b.scale ?? 1,
+                  })
+                  setFraming(null)
+                }}
+                title="Discard this framing session and restore the clip as it was"
+              >Cancel</button>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                Drag the picture in the preview; scroll to zoom.
+              </span>
+            </div>
+          ) : (
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button
+                onClick={() => {
+                  // Snapshot BEFORE the fit change, or the snapshot records the
+                  // state this very click created and Cancel becomes a no-op.
+                  setFraming({ clipId: c.id,
+                               before: { fit: fitCover ? 'cover' : 'contain',
+                                         x: xVal, y: yVal, scale } })
+                  if (!fitCover) void dispatch('set_clip_fit', { clip_id: c.id, fit: 'cover' })
+                }}
+                title="Open the crop view over the preview to choose which part of the frame is visible"
+              >Adjust framing…</button>
+              {fitCover && (
+                <button
+                  onClick={() => dispatch('set_clip_fit', { clip_id: c.id, fit: 'contain' })}
+                  title="Stop filling the frame — letterbox the whole picture instead"
+                >Letterbox</button>
+              )}
+              <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                {fitCover ? 'Filling the frame (cropped).' : 'Letterboxed — bars top/bottom.'}
+              </span>
+            </div>
+          )
+        ) : (
+          <>
+            <label style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+              <input type="checkbox" checked={fitCover}
+                onChange={() => dispatch('set_clip_fit', {
+                  clip_id: c.id, fit: fitCover ? 'contain' : 'cover',
+                })}
+                style={{ marginRight: 4 }} />
+              Fill frame (crop the PIP to the canvas shape)
+            </label>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
+              Off: the PIP keeps its source shape. On: it is centre-cropped to the
+              canvas aspect. Choosing the Circle shape below crops to a square.
+            </div>
+          </>
+        )}
+      </Section>
+      )}
+
+      {/* PIP shape. Offered only on a v2+ video lane, because render/pip.py is
+          the only path that cuts these: it applies the mask to the SCALED
+          element, so the shape fits the picture-in-picture itself. On v1 a mask
+          goes through effects.render_mask_png against the whole canvas, which
+          is a different feature with different geometry — showing these buttons
+          there would promise a circular clip and deliver a circle in the middle
+          of a full-frame shot.
+
+          Only the shapes that actually render appear. Mask.type also permits
+          heart/star/mirror, which render_mask_png falls through to "fully
+          visible" — a pre-existing no-op, and not something to surface as a
+          button until it draws something. */}
+      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && (
+      <Section label="PIP shape">
+        <div className="row" style={{ gap: 6 }}>
+          {([
+            ['Rectangle', null],
+            ['Circle', 'circle'],
+            ['Rounded', 'rounded'],
+          ] as const).map(([label, shape]) => {
+            const cur = (c as unknown as { mask?: { type?: string } | null }).mask?.type ?? null
+            const active = cur === shape
+            return (
+              <button
+                key={label}
+                onClick={() => dispatch(
+                  shape ? 'add_mask' : 'remove_mask',
+                  shape ? { clip_id: c.id, type: shape, feather: 0 } : { clip_id: c.id },
+                )}
+                style={{
+                  flex: 1, fontSize: 11, padding: '3px 6px', borderRadius: 3,
+                  cursor: 'pointer', color: 'inherit',
+                  background: active ? 'var(--accent)' : 'var(--bg-3)',
+                  border: `1px solid ${active ? 'var(--accent)' : 'var(--line)'}`,
+                }}
+              >{label}</button>
+            )
+          })}
+        </div>
+        {/* Framing WITHIN the shape. Separate from Transform below, which moves
+            and sizes the PIP on the canvas: these choose which part of the
+            source lands inside the circle/cropped box. Only meaningful when the
+            element is actually cropped, so say so rather than offering three
+            sliders that do nothing on a source-shaped PIP. */}
+        {(() => {
+          const pc = c as unknown as {
+            mask?: { type?: string } | null; fit?: string
+            framing?: { x?: number; y?: number; zoom?: number; rotation?: number } | null
+          }
+          const cropped = pc.mask?.type === 'circle' || pc.fit === 'cover'
+          const fr = pc.framing ?? {}
+          const set = (p: Record<string, number>) =>
+            dispatch('set_pip_framing', { clip_id: c.id, ...p })
+          if (!cropped) {
+            return (
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+                Pick Circle, or turn on Fill frame above, to reframe the picture
+                inside the shape.
+              </div>
+            )
+          }
+          return (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 4 }}>
+                Framing inside the shape
+              </div>
+              <Slider min={1} max={4} step={0.05} value={fr.zoom ?? 1}
+                format={(v) => `zoom ${v.toFixed(2)}`}
+                onChange={(v) => set({ zoom: v })} />
+              <Slider min={-1} max={1} step={0.02} value={fr.x ?? 0}
+                format={(v) => `pan X ${v.toFixed(2)}`}
+                onChange={(v) => set({ x: v })} />
+              <Slider min={-1} max={1} step={0.02} value={fr.y ?? 0}
+                format={(v) => `pan Y ${v.toFixed(2)}`}
+                onChange={(v) => set({ y: v })} />
+              {/* Turns the PICTURE inside the shape; the shape stays put. The
+                  element's own rotation (Transform below, or the handle above
+                  the box in the preview) turns shape and picture together, and
+                  the two compose — a PIP can sit at 20° with its footage
+                  levelled at -20° inside. */}
+              <Slider min={-180} max={180} step={1} value={fr.rotation ?? 0}
+                format={(v) => `rotate inside ${v.toFixed(0)}°`}
+                onLive={(v) => setLivePipFraming({ id: c.id,
+                                                   x: fr.x ?? 0, y: fr.y ?? 0,
+                                                   rotation: v })}
+                onChange={(v) => { setLivePipFraming(null); set({ rotation: v }) }} />
+              <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 2 }}>
+                Or <strong>Alt-drag the PIP</strong> in the preview to pan the
+                picture inside the shape. Pan only moves where there is margin —
+                zoom in first if nothing happens. To turn the whole PIP instead,
+                drag the <strong>handle above its box</strong> in the preview.
+              </div>
+            </div>
+          )
+        })()}
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+          Drag the PIP in the preview to move it; drag a corner to resize.
+        </div>
       </Section>
       )}
 
@@ -509,7 +732,7 @@ export function Properties() {
                     style={{
                       background: 'none', border: 'none', padding: 0, cursor: 'pointer',
                       fontSize: 10, textDecoration: 'underline',
-                      color: Math.abs(t - localT) < 0.017 ? 'var(--accent)' : 'var(--text-dim)',
+                      color: Math.abs(t - localT) < keyEps(edl.canvas.fps) ? 'var(--accent)' : 'var(--text-dim)',
                     }}
                   >{t.toFixed(2)}s</button>
                 </span>
@@ -521,35 +744,42 @@ export function Properties() {
             </span>
           )}
         </div>
+        {/* Every transform edit carries the playhead as `time`. On a property
+            with no keyframes the backend just sets the scalar, exactly as
+            before; on an animated one it writes a key AT the playhead instead
+            of replacing the whole animation with a number. Without this, the
+            sequence this very panel recommends below — key it, move the
+            playhead, change a value — deleted the key on the last step and left
+            the clip static. */}
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <Slider min={0.1} max={4} step={0.05} value={scale}
             format={(v) => `scale ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, scale: v })}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v })} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v, time: localT })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <Slider min={-180} max={180} step={1} value={rotation}
             format={(v) => `rotation ${v.toFixed(0)}°`}
             onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v })} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v, time: localT })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <Slider min={0} max={1} step={0.05} value={opacity}
             format={(v) => `opacity ${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, opacity: v })}
-            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v })} />
+            onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v, time: localT })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <label style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80, display: 'flex', alignItems: 'center', gap: 4 }}>
             x:
             <NumberField value={xVal} dp={0} step={1} width={56}
-              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, x: n })} />
+              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, x: n, time: localT })} />
             {isKeyframed(tx?.x) ? '· animated' : ''}
           </label>
           <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
             y:
             <NumberField value={yVal} dp={0} step={1} width={56}
-              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, y: n })} />
+              onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, y: n, time: localT })} />
             {isKeyframed(tx?.y) ? '· animated' : ''}
           </label>
         </div>
@@ -578,21 +808,31 @@ interface StickerLike {
   transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
 }
 
-function StickerProps({ c, trackLabel, canRaise, canLower, dispatch }: {
+function StickerProps({ c, trackLabel, canRaise, canLower, playhead, dispatch }: {
   c: StickerLike
   trackLabel: string
   canRaise: boolean
   canLower: boolean
+  playhead: number
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   const tx = c.transform ?? {}
-  const x = asScalar(tx.x, 0), y = asScalar(tx.y, 0)
-  const scale = asScalar(tx.scale, 1)
-  const rotation = asScalar(tx.rotation, 0)
-  const opacity = asScalar(tx.opacity, 1)
   const start = c.start ?? 0
   const duration = Math.max(0.1, (c.end ?? start + 3) - start)
-  const setTx = (p: Record<string, number>) => dispatch('set_clip_transform', { clip_id: c.id, ...p })
+  // Read and write AT the playhead, for the same reasons as the media-clip
+  // inspector above: a keyframed sticker's fields showed the last key's value
+  // rather than the one on screen, and every edit here replaced the animation
+  // with a scalar. Stickers are keyframable (add_keyframe takes Clip, TextClip
+  // and Sticker alike), so leaving this panel alone would have fixed the bug
+  // only for media clips.
+  const localT = Math.min(Math.max(0, playhead - start), duration)
+  const x = sampleKF(tx.x as KFNum | undefined, localT, 0)
+  const y = sampleKF(tx.y as KFNum | undefined, localT, 0)
+  const scale = sampleKF(tx.scale as KFNum | undefined, localT, 1)
+  const rotation = sampleKF(tx.rotation as KFNum | undefined, localT, 0)
+  const opacity = sampleKF(tx.opacity as KFNum | undefined, localT, 1)
+  const setTx = (p: Record<string, number>) =>
+    dispatch('set_clip_transform', { clip_id: c.id, ...p, time: localT })
   const setTiming = (p: { start?: number; end?: number }) =>
     dispatch('set_clip_timing', { clip_id: c.id, ...p })
 
@@ -691,24 +931,40 @@ interface TextClipLike {
   // were missing here (though types.ts declared them), which is why the outline
   // and animation fields looked unavailable to the inspector even though BOTH
   // renderers already honoured them.
+  //
+  // It happened AGAIN with `upper`: types.ts had it and this did not, so the
+  // panel could not read the field it was written to set. This local copy exists
+  // only because the props type is inlined here; anything added to TextStyle has
+  // to land in three places (schema.py, types.ts, and this), and tsc only catches
+  // the third once something reads it.
   style?: {
     font?: string; size?: number; color?: string
-    stroke?: string; stroke_w?: number
+    stroke?: string; stroke_w?: number; upper?: boolean | null
   }
   anim_in?: string | null
   anim_out?: string | null
   transform?: { x?: unknown; y?: unknown; opacity?: unknown }
 }
 
-function TextProps({ c, trackLabel, canvas, dispatch }: {
+function TextProps({ c, trackLabel, canvas, playhead, dispatch }: {
   c: TextClipLike
   trackLabel: string
   canvas: { w: number; h: number }
+  playhead: number
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
-  const x = asScalar(c.transform?.x, canvas.w / 2)
-  const y = asScalar(c.transform?.y, canvas.h * 0.85)
-  const opacity = asScalar(c.transform?.opacity, 1)
+  // Sampled at the playhead, and transform writes go through set_clip_transform
+  // with a `time` — see the media-clip inspector. A TextClip does carry a
+  // Transform (schema.py defaults it to x=540,y=1700), so it is keyframable and
+  // was subject to the same clobbering; the stale comment on set_clip_transform
+  // claiming "text clips don't" have one is what makes that easy to miss.
+  const txLocalT = Math.min(Math.max(0, playhead - (c.start ?? 0)),
+                            Math.max(0, (c.end ?? 0) - (c.start ?? 0)))
+  const x = sampleKF(c.transform?.x as KFNum | undefined, txLocalT, canvas.w / 2)
+  const y = sampleKF(c.transform?.y as KFNum | undefined, txLocalT, canvas.h * 0.85)
+  const opacity = sampleKF(c.transform?.opacity as KFNum | undefined, txLocalT, 1)
+  const setTx = (p: Record<string, number>) =>
+    dispatch('set_clip_transform', { clip_id: c.id, ...p, time: txLocalT })
   const isCaption = c.role === 'caption'
   const size = c.style?.size ?? 96
   const rawColor = c.style?.color ?? '#FFFFFF'
@@ -720,6 +976,18 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
   const rawStroke = c.style?.stroke ?? '#000000'
   const stroke = /^#[0-9a-fA-F]{6}/.test(rawStroke) ? rawStroke.slice(0, 7) : '#000000'
   const strokeW = c.style?.stroke_w ?? 4
+  // Tri-state, so '' (role default) is a real, distinct choice — not the same as
+  // an explicit false. A checkbox could not express it, and defaulting it to
+  // false would silently un-capitalise every existing hook and super.
+  const upperSel = typeof c.style?.upper === 'boolean' ? (c.style.upper ? 'on' : 'off') : ''
+  // The font this clip RENDERS in: an explicit style.font, else the role's.
+  // 'Inter-Black' doubles as the schema default and the "unset" sentinel, so it
+  // cannot be taken at face value for a role clip.
+  const effectiveFont = c.style?.font && c.style.font !== 'Inter-Black'
+    ? c.style.font
+    : (ROLE_FONTS[c.role ?? ''] ?? 'Inter-Black')
+  // "As typed" is being asked for, in a face that has no lowercase to show.
+  const capsOnlyFont = upperSel === 'off' && CAPS_ONLY_FONTS.has(effectiveFont)
   const animIn = c.anim_in ?? ''
   const animOut = c.anim_out ?? ''
   const start = c.start
@@ -736,9 +1004,28 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
     dispatch('set_clip_timing', { clip_id: c.id, ...p })
 
   const commitText = (v: string) => {
-    // Skip blank commits — an empty TextClip renders nothing everywhere and
-    // is only recoverable through this same (now-empty-looking) inspector.
-    if (v.trim() && v !== c.text) void setProp('text', v)
+    // Clearing the box CLEARS THE TEXT. Blank commits used to be skipped here,
+    // on the theory that an empty TextClip renders nothing and is "only
+    // recoverable through this same (now-empty-looking) inspector".
+    //
+    // That reasoning does not hold and the guard caused the reported bug:
+    // "when I applied the text, and delete the text by backspace or delete, the
+    // previous was still showing up, it should be empty and no text should be
+    // there." Selecting all and deleting left the box empty while the preview
+    // and the export kept the OLD string — the panel and the render disagreeing
+    // about what the clip says, which is strictly worse than an empty overlay.
+    //
+    // Nor is it unrecoverable: the clip keeps its bar on the timeline and stays
+    // selectable, so typing again is one click away — and the bar now reads
+    // "(empty)" rather than looking like a broken blank clip. The renderer has
+    // always handled this correctly: collect_text_clips skips a clip whose text
+    // is blank, so no PNG is baked and no overlay is composited. Verified —
+    // setting text='' caches 0 PNGs and emits no overlay.
+    //
+    // Deleting the CLIP is deliberately not done here: emptying a text box and
+    // removing an element from the timeline are different intentions, and Delete
+    // (right there in this panel) already does the second one.
+    if (v !== c.text) void setProp('text', v)
   }
   // (The former local `commitNumber` guard now lives in the shared NumberField
   // component at the top of this file, which every numeric input routes
@@ -810,7 +1097,7 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
               <option value="Inter-Black">Inter Black (default)</option>
               <option value="Inter-Bold">Inter Bold</option>
               <option value="Anton-Regular">Anton</option>
-              <option value="BebasNeue-Regular">Bebas Neue</option>
+              <option value="BebasNeue-Regular">Bebas Neue (capitals only)</option>
               <option value="Montserrat-Bold">Montserrat Bold</option>
             </select>
           </div>
@@ -820,6 +1107,38 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
               onCommit={(n) => void setProp('style.stroke_w', n)} />
           </div>
         </div>
+        {/* Letter case. The caps rule used to be hardcoded in BOTH renderers'
+            role tables with nothing in the schema to override it, so a lowercase
+            hook or super simply could not be made — "Text layer only shows
+            capital alphabets and doesn't support the small alphabets".
+            Three options, not a checkbox, because the field is tri-state: the
+            role default has to stay expressible, or picking it would write an
+            explicit value and freeze the clip against future role changes. */}
+        <div className="row two">
+          <div className="field">
+            <label>Letter case</label>
+            <select key={`u${upperSel}`} defaultValue={upperSel}
+              title="ALL CAPS is the house style for Hook and Super. Choose 'As typed' to keep lowercase."
+              onChange={(e) => {
+                const v = e.target.value
+                void setProp('style.upper', v === '' ? null : v === 'on')
+              }}
+              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+              <option value="">Role default{ROLE_FORCES_CAPS.has(c.role ?? '') ? ' (ALL CAPS)' : ''}</option>
+              <option value="on">ALL CAPS</option>
+              <option value="off">As typed</option>
+            </select>
+          </div>
+          <div className="field" />
+        </div>
+        {capsOnlyFont && (
+          // Without this the control looks broken: you pick "As typed", nothing
+          // changes, and the reason is in the typeface rather than the setting.
+          <div style={{ fontSize: 10, color: 'var(--warn, #d8a657)', marginTop: -2 }}>
+            Bebas Neue has no lowercase letters — its lowercase slots are drawn as
+            capitals, so this stays uppercase. Pick another font to see lowercase.
+          </div>
+        )}
         <div className="row two">
           <div className="field">
             <label>Outline color</label>
@@ -857,7 +1176,7 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
             "more controls for the text like opacity"). */}
         <Slider min={0} max={1} step={0.05} value={opacity}
           format={(v) => `opacity ${v.toFixed(2)}`}
-          onChange={(v) => setProp('transform.opacity', v)} />
+          onChange={(v) => setTx({ opacity: v })} />
       </Section>
 
       <Section label={`Position (canvas px, ${canvas.w}×${canvas.h})`}>
@@ -877,12 +1196,12 @@ function TextProps({ c, trackLabel, canvas, dispatch }: {
             <div className="field">
               <label>X</label>
               <NumberField value={x} dp={0} step={1}
-                onCommit={(n) => void setProp('transform.x', n)} />
+                onCommit={(n) => void setTx({ x: n })} />
             </div>
             <div className="field">
               <label>Y</label>
               <NumberField value={y} dp={0} step={1}
-                onCommit={(n) => void setProp('transform.y', n)} />
+                onCommit={(n) => void setTx({ y: n })} />
             </div>
           </div>
         )}

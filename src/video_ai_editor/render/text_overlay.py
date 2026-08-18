@@ -83,8 +83,16 @@ def _strip_emoji(s: str) -> str:
 # the text section"). Rather than bundle a ~10MB colour-emoji font (which
 # Pillow can only draw at its own fixed bitmap sizes, and which would still
 # differ from what the browser paints), each emoji is composited as an IMAGE —
-# the very same Fluent 3D PNG a sticker uses. One artwork source for the whole
+# the very same fetched PNG a sticker uses (Apple/iOS artwork; see ai/emoji.py
+# for why it is fetched rather than fonted). One artwork source for the whole
 # app, identical on macOS and Windows, identical between preview and export.
+#
+# NAME COLLISION, worth reading twice: this module ALSO has a bundled Noto
+# fallback for non-Latin TEXT, and the two are unrelated. The emoji artwork is
+# fetched PNGs from a pinned release; the text fallback is a local font file.
+# Trying to draw an emoji with the text font would put us straight back in the
+# "Pillow can only draw colour emoji at fixed bitmap sizes" hole above, and on
+# a machine without it, back to emoji vanishing entirely.
 
 # An emoji occupies a square this many times the font size. The client mirrors
 # this constant (TextLayer) so the drawn layout matches the baked one.
@@ -99,6 +107,29 @@ def _strip_emoji(s: str) -> str:
 # misaligned on both sides AND disagreeing with each other. Each side now
 # measures the same band from its own font metrics, so they land together.
 EMOJI_BOX_RATIO = 1.0
+
+# Fraction of that box the ARTWORK actually fills; the remainder is side
+# bearing, centred. The advance stays EMOJI_BOX_RATIO, so nothing about
+# wrapping changes — only the paste size and offset.
+#
+# This exists because a text glyph carries its own side bearing and a PNG does
+# not, so an emoji butts straight against the letter beside it — surfaced as
+# "GG🔥" rendering with the G's stroke touching the emoji.
+#
+# The tempting fix is "the artwork already has margin, leave it alone". It does
+# not, and this was measured rather than assumed. Within APPLE ALONE the side
+# margin runs 0.000 (😊 😂 🎉 — literally edge-to-edge) to 0.119 (🔥); across the
+# other sources in the chain it runs 0.000 (Twemoji, Fluent flags) to 0.131
+# (Noto fire). So without a bearing of our own, two emoji SIDE BY SIDE IN ONE
+# LINE are spaced by whatever their respective artists happened to leave — and
+# a face lands flush against neighbouring text every time.
+#
+# 0.92 gives 4% a side: enough to clear a stroked glyph, small enough not to
+# reintroduce the complaint that fixed the previous spacing bug from the other
+# direction (0.32em between emoji read as "the space is too much").
+# TextLayer.tsx mirrors this; the two must move together or the preview spaces
+# differently from the bake.
+EMOJI_INK_RATIO = 0.92
 
 
 _ZWJ = "‍"
@@ -191,7 +222,7 @@ def _emoji_words(text: str) -> list[tuple[bool, str]]:
 
 
 def _emoji_image(cluster: str, box: int) -> Image.Image | None:
-    """Fluent 3D artwork for one emoji cluster, scaled to `box` px. None if
+    """Fetched emoji artwork for one cluster, scaled to `box` px. None if
     unavailable (offline and uncached) — the caller then skips it, which is
     the old strip-it behaviour for that one emoji rather than a broken render."""
     try:
@@ -207,8 +238,8 @@ def _emoji_image(cluster: str, box: int) -> Image.Image | None:
 
 # Per-role rendering style.
 ROLE_STYLES: dict[str, dict] = {
-    "super":       {"font": "Anton-Regular.ttf",        "size": 140, "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 6, "shadow": True},
-    "hook":        {"font": "BebasNeue-Regular.ttf",    "size": 170, "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 7, "shadow": True},
+    "super":       {"font": "Anton-Regular.ttf",        "size": 140, "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 6, "shadow": True, "upper": True},
+    "hook":        {"font": "BebasNeue-Regular.ttf",    "size": 170, "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 7, "shadow": True, "upper": True},
     "lower_third": {"font": "Montserrat-Bold.ttf",      "size": 56,  "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 3, "shadow": True},
     "caption":     {"font": "Inter-Black.ttf",          "size": 64,  "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 5, "shadow": True},
     "label":       {"font": "Inter-Bold.ttf",           "size": 48,  "fill": (255, 255, 255, 255), "stroke": (0, 0, 0, 255), "stroke_w": 3, "shadow": True},
@@ -379,6 +410,28 @@ def _y_for_role(role: str, transform_y: float | None, canvas_h: int) -> float:
     if role == "lower_third":
         return canvas_h - canvas_h * 0.20
     return canvas_h * 0.75
+
+
+def resolve_upper_override(c: TextClip, role: str) -> bool:
+    """Whether this clip renders ALL-CAPS: explicit `style.upper`, else the role.
+
+    The caps rule used to be a hardcoded `role in ("super", "hook")` right at the
+    draw call, with no way to override it from the EDL — so "Text layer only
+    shows capital alphabets and doesn't support the small alphabets" was exactly
+    true of those two roles, in the preview AND the export.
+
+    It now lives in ROLE_STYLES, mirroring the client's own role table
+    (TextLayer.tsx), because that is the one place the two renderers already
+    agree role by role — a second hardcoded list is how they drift.
+
+    `None` means untouched, so an existing project's hooks and supers keep their
+    capitals; only an explicit False lowercases one.
+    """
+    st = getattr(c, "style", None)
+    want = getattr(st, "upper", None) if st is not None else None
+    if isinstance(want, bool):
+        return want
+    return bool(ROLE_STYLES.get(role, ROLE_STYLES["default"]).get("upper", False))
 
 
 def resolve_size_override(c: TextClip) -> float | None:
@@ -576,7 +629,11 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     anchor_y: float | None = None,
                     stroke: tuple[int, int, int, int] | None = None,
                     stroke_w: float | None = None,
-                    opacity: float | None = None) -> Image.Image:
+                    opacity: float | None = None,
+                    # None keeps the role's own default (see resolve_upper_override);
+                    # an explicit bool is the caller's choice. A keyword with a
+                    # None default so every existing caller is unaffected.
+                    upper: bool | None = None) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role.
 
     Emoji are stripped from the text before drawing (bundled fonts have no
@@ -626,8 +683,11 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     max_w = int(canvas_w * 0.86)
     box = int(round(font.size * EMOJI_BOX_RATIO))
     cap_mid = _cap_band_mid(draw, font)
-    lines = _wrap(draw, text.upper() if role in ("super", "hook") else text,
-                  font, max_w, box)
+    # The caps decision comes from ROLE_STYLES (or the caller's explicit
+    # override), not a hardcoded role list — see resolve_upper_override.
+    caps = bool(ROLE_STYLES.get(role, ROLE_STYLES["default"]).get("upper", False)) \
+        if upper is None else upper
+    lines = _wrap(draw, text.upper() if caps else text, font, max_w, box)
     line_h = font.size + 8
     total_h = line_h * len(lines)
     y_center = _y_for_role(role, anchor_y, canvas_h)
@@ -653,10 +713,15 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         cx = x
         for kind, chunk in segs:
             if kind == "emoji":
-                im_e = _emoji_image(chunk, box)
+                # Drawn at `ink`, centred in the full `box` advance — the gap is
+                # ours, not whatever margin this source's tile happens to carry.
+                ink = max(1, int(round(box * EMOJI_INK_RATIO)))
+                pad = (box - ink) / 2
+                im_e = _emoji_image(chunk, ink)
                 if im_e is not None:
                     img.alpha_composite(
-                        im_e, dest=(int(round(cx)), int(round(y + cap_mid - box / 2))))
+                        im_e, dest=(int(round(cx + pad)),
+                                    int(round(y + cap_mid - ink / 2))))
                 cx += box
                 continue
             draw.text((cx, y), chunk, font=font, fill=style["fill"],
@@ -708,6 +773,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
         stroke, stroke_w = resolve_stroke_overrides(c)
         anchor_x, anchor_y = resolve_anchor_overrides(c, role, canvas.w, canvas.h)
         opacity = resolve_opacity_override(c)
+        caps = resolve_upper_override(c, role)
         # Every override is part of the pixels, so every override is part of
         # the key — keyed on the RESOLVED values (sentinels normalize to '')
         # so a sentinel-valued clip shares its PNG with an untouched one.
@@ -720,13 +786,27 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                    f"{'' if anchor_x is None else f'{anchor_x:.2f}'},"
                    f"{'' if anchor_y is None else f'{anchor_y:.2f}'}|"
                    f"{stroke or ''}|{'' if stroke_w is None else f'{stroke_w:.2f}'}|"
-                   f"{'' if opacity is None else f'{opacity:.3f}'}")
+                   f"{'' if opacity is None else f'{opacity:.3f}'}|"
+                   # The RESOLVED caps flag, because the key hashes the RAW text:
+                   # without it, toggling ALL CAPS off keeps serving the
+                   # capitalised PNG forever — the same dead-control bug the
+                   # size/opacity notes above describe. Keyed on the resolved
+                   # value (not `style.upper`) so a clip that explicitly asks for
+                   # its role's own default still shares the untouched clip's PNG.
+                   f"{'U' if caps else 'l'}")
         key = hashlib.sha256(
             # v6: emoji moved from a fixed em-box fraction to the measured cap
             # band, so every PNG holding an emoji changed pixels. The key has no
             # other input that tracks placement, and a stale hit is invisible —
             # the export would silently keep the old misalignment.
-            f"v7|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
+            # v9: the artwork source changed again (Noto 512 -> Apple 160) AND
+            # EMOJI_INK_RATIO gave the emoji a side bearing of its own, so both
+            # the pixels and the placement moved again. Same reasoning: nothing
+            # else in this key tracks either, so without the bump a project that
+            # already has text PNGs would export the OLD artwork indefinitely
+            # while the preview drew the new — the precise mismatch this whole
+            # subsystem exists to prevent.
+            f"v9|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
@@ -734,7 +814,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                                   fill=fill, font_file=font_file,
                                   size=size, anchor_x=anchor_x, anchor_y=anchor_y,
                                   stroke=stroke, stroke_w=stroke_w,
-                                  opacity=opacity)
+                                  opacity=opacity, upper=caps)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired

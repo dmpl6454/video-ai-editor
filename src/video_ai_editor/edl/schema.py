@@ -169,11 +169,55 @@ class Effect(_EDLModel):
 
 
 class Mask(_EDLModel):
-    type: Literal["linear", "mirror", "circle", "rectangle", "heart", "star"]
+    # "rounded" was added for PIP shapes (render/pip.py cuts circle/rounded
+    # procedurally). Widening a Literal is backward-compatible: every EDL that
+    # already validates still does.
+    type: Literal["linear", "mirror", "circle", "rectangle", "rounded", "heart", "star"]
     feather: float = 0.0
     angle: float = 0.0
     position: tuple[float, float] = (540.0, 960.0)
     invert: bool = False
+
+
+class Framing(_EDLModel):
+    """Pan/zoom/rotation of the picture inside a PIP's shape. See Clip.framing.
+
+    `rotation` spins the PICTURE within the shape and leaves the shape itself
+    alone — the circle stays a circle sitting where it was, and the footage
+    turns inside it. That is a different control from `Transform.rotation`,
+    which turns the whole element (shape included) on the canvas, and the two
+    compose: a PIP can sit at 20° on the canvas with its picture levelled at
+    -20° inside.
+    """
+    x: float = 0.0
+    y: float = 0.0
+    zoom: float = 1.0
+    rotation: float = 0.0
+
+    @field_validator("x", "y")
+    @classmethod
+    def _clamp_offset(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("framing offset must be finite")
+        return max(-1.0, min(1.0, float(v)))
+
+    @field_validator("rotation")
+    @classmethod
+    def _clamp_rotation(cls, v: float) -> float:
+        # Bounds live on the model, not the handler, for the reason the module
+        # header gives: set_pip_framing is not the only writer.
+        if not math.isfinite(v):
+            raise ValueError("framing rotation must be finite")
+        return max(-180.0, min(180.0, float(v)))
+
+    @field_validator("zoom")
+    @classmethod
+    def _clamp_zoom(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("framing zoom must be finite")
+        # Below 1 there is less source than box and the crop would run off the
+        # edge into black — the same failure the v1 cover path clamps for.
+        return max(1.0, min(10.0, float(v)))
 
 
 class ChromaKey(_EDLModel):
@@ -213,6 +257,23 @@ class Clip(_EDLModel):
     # video fades above: it changes pixels, so it must invalidate the cached
     # video-only mp4.
     fit: Literal["contain", "cover"] = "contain"
+    # Framing INSIDE a PIP's shape — which part of the source appears in the
+    # circle/rounded/cropped box, and how far zoomed in.
+    #
+    # A separate field from `transform` because the two answer different
+    # questions and a PIP needs both at once: transform.x/y/scale place and size
+    # the element ON THE CANVAS, while this pans and zooms the picture WITHIN
+    # that element. Reusing transform for the second job would make moving a PIP
+    # and reframing it the same control ("if i chose circle i should be able to
+    # frame the pip in the circle").
+    #
+    # `x`/`y` are NORMALISED (-1..1) offsets of the crop window inside the
+    # covered source: 0 is centred, -1/+1 push it to the edges, and the render
+    # clamps to whatever margin the crop actually has, so a value with no room
+    # to move is a no-op rather than a black edge. Normalised rather than pixels
+    # so a canvas resize needs no rescaling pass — the trap the overlay x/y
+    # fields document in CLAUDE.md.
+    framing: Framing | None = None
     effects: list[Effect] = Field(default_factory=list)
     mask: Mask | None = None
     chromakey: ChromaKey | None = None
@@ -254,6 +315,24 @@ class TextStyle(_EDLModel):
     stroke: str = "#000000"
     stroke_w: float = 4
     shadow: tuple[float, float, float, str] | None = (4, 4, 16, "#000000AA")
+    # ALL-CAPS, tri-state: None = use the role's own default (super/hook are
+    # capitalised as a house style; every other role is not). True/False is an
+    # explicit choice that overrides it.
+    #
+    # Reported as "Text layer only shows capital alphabets and doesn't support
+    # the small alphabets": the caps rule lived ONLY in the two renderers'
+    # role tables, with nothing in the schema to override it, so a lowercase
+    # hook or super was unreachable — typing one silently produced caps in both
+    # the preview and the export.
+    #
+    # `None` rather than a `False` default deliberately: every other override on
+    # this model has to use a sentinel value because its schema default is
+    # indistinguishable from "never touched" (see resolve_size_override's known
+    # limitation). A fresh nullable field needs no sentinel, so "unset" and
+    # "explicitly lowercase" stay distinguishable — which matters here, since
+    # defaulting to False would have retroactively un-capitalised every existing
+    # hook and super in every saved project.
+    upper: bool | None = None
 
 
 class TextClip(_EDLModel):

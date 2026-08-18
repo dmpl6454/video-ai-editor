@@ -139,8 +139,10 @@ EDIT_TOOLS = [
        "Set transform properties on any clip (media, sticker, or text): x/y position, "
        "scale, rotation (degrees), opacity — this is THE tool for positioning things on "
        "the canvas. For text and stickers, x/y are ABSOLUTE CANVAS PIXELS (e.g. 540,960 "
-       "= center of a 1080×1920 canvas), and setting a value replaces any keyframes on "
-       "that property with the scalar.",
+       "= center of a 1080×1920 canvas). Without `time`, setting a value REPLACES any "
+       "keyframes on that property with the scalar — that is how you flatten an "
+       "animation back to a constant. Pass `time` to edit an animated property "
+       "without destroying it.",
        "edit",
        {
            "clip_id": {"type": "string"},
@@ -149,6 +151,14 @@ EDIT_TOOLS = [
            "scale": {"type": "number", "description": "1.0 = original size"},
            "rotation": {"type": "number", "description": "Degrees"},
            "opacity": {"type": "number", "description": "0..1"},
+           "time": {
+               "type": "number",
+               "description": "Clip-local seconds. For any property that is ALREADY "
+                              "keyframed, write the value as a keyframe here instead of "
+                              "overwriting the animation with a scalar. Properties with "
+                              "no keyframes are set normally, so it is always safe to "
+                              "pass the playhead position.",
+           },
            "raise_to_front": {
                "type": "boolean",
                "description": "Stickers only: also stack this sticker above every "
@@ -316,6 +326,10 @@ TEXT_TOOLS = [
            "start": {"type": "number"},
            "end": {"type": "number"},
            "role": {"type": "string", "enum": ["super", "hook", "lower_third", "label"], "default": "super"},
+           "upper": {"type": "boolean", "default": False,
+                     "description": "ALL CAPS. Defaults to false, i.e. the text renders "
+                                    "exactly as written — pass true for the all-caps "
+                                    "house-style look of a hook or super."},
            "allow_stack": {"type": "boolean", "default": False,
                             "description": "Keep prior same-role overlapping overlays instead of replacing them."},
        },
@@ -375,7 +389,13 @@ TEXT_TOOLS = [
                     "enum": ["super", "hook", "lower_third", "caption", "label", "watermark", "default"]},
            "x": {"type": "number"}, "y": {"type": "number"},
            "color": {"type": "string", "description": "#RRGGBB text fill override"},
-           "font": {"type": "string", "description": "Bundled font file, e.g. BebasNeue-Regular"},
+           "font": {"type": "string", "description": "Bundled font file, e.g. BebasNeue-Regular. "
+                                                    "NOTE: BebasNeue has no lowercase letterforms — "
+                                                    "its lowercase slots are capitals, so text in it "
+                                                    "renders all-caps whatever `upper` says."},
+           "upper": {"type": "boolean", "default": False,
+                     "description": "ALL CAPS. Defaults to false, i.e. the text renders exactly "
+                                    "as written."},
            "anim_in": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
            "anim_out": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
        },
@@ -398,7 +418,7 @@ TEXT_TOOLS = [
        "Text roles the renderer styles (super/hook/caption/…) + saved text presets.",
        "text", {}),
     _t("add_sticker",
-       "Add a sticker overlay: an emoji character (fetched as Twemoji artwork) or a "
+       "Add a sticker overlay: an emoji character (fetched as Apple/iOS artwork) or a "
        "PNG file path, at a canvas position for a time window.",
        "text",
        {
@@ -673,16 +693,43 @@ EFFECT_TOOLS = [
        "suggesting any install command — never guess at either.",
        "project", {}),
     _t("add_mask",
-       "Add a vector mask to a clip (everything outside is hidden / black-padded).",
+       "Add a vector mask to a clip (everything outside is hidden / black-padded). "
+       "On a PIP (v2+) clip this is the SHAPE of the picture-in-picture: 'circle' "
+       "and 'rounded' are cut to the element itself, so a PIP can be a circle "
+       "instead of a rectangle. 'rectangle' is the default frame shape — use "
+       "remove_mask to go back to it.",
        "effects",
        {
            "clip_id": {"type": "string"},
-           "type": {"type": "string", "enum": ["circle", "rectangle", "linear"]},
-           "feather": {"type": "number", "default": 8.0},
+           "type": {"type": "string", "enum": ["circle", "rounded", "rectangle", "linear"]},
+           "feather": {"type": "number", "default": 8.0,
+                       "description": "Soft edge, v1 clips only — a PIP shape is a hard cut."},
            "position": {"type": "array", "items": {"type": "number"}, "description": "[x, y] in canvas coords"},
            "invert": {"type": "boolean", "default": False},
        },
        ["clip_id", "type"]),
+    _t("remove_mask",
+       "Clear a clip's mask, returning it to the full rectangular frame.",
+       "effects",
+       {"clip_id": {"type": "string"}},
+       ["clip_id"]),
+    _t("set_pip_framing",
+       "Pan/zoom/rotate the picture INSIDE a PIP's shape — which part of the source fills "
+       "the circle or the cropped box. Separate from set_clip_transform, which places "
+       "and sizes the PIP on the canvas. Only visible where the PIP is cropped (a "
+       "circle shape, or fit='cover').",
+       "edit",
+       {
+           "clip_id": {"type": "string"},
+           "x": {"type": "number", "description": "-1..1, 0 = centred (horizontal pan)"},
+           "y": {"type": "number", "description": "-1..1, 0 = centred (vertical pan)"},
+           "zoom": {"type": "number", "description": ">= 1; 1 = just covers the box"},
+           "rotation": {"type": "number",
+                        "description": "degrees, -180..180; turns the PICTURE inside "
+                                       "the shape. The shape itself does not move — "
+                                       "use set_clip_transform's rotation for that."},
+       },
+       ["clip_id"]),
     _t("chroma_key",
        "Green/blue-screen key on a media clip (works on V1 and PIP clips). "
        "Pass color=null to clear an existing key.",

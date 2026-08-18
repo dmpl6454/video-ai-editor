@@ -38,8 +38,17 @@ rm -rf frontend/dist
 # build is indistinguishable from every other (the reason three tester rounds
 # re-reported already-fixed bugs against "v0.3.7").
 BUILD_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# A bare `-dirty` suffix does NOT identify a build. During an uncommitted fix
+# round every rebuild reports the same `<sha>-dirty`, so "is the user running my
+# fix?" — the one question this mechanism exists to answer — becomes
+# unanswerable from the badge. It cost a round on the Windows side: a fix was
+# verified in a new build, reported as still broken, and neither side could tell
+# whether the same bits were on screen. Minute-resolution local time, appended
+# ONLY when dirty, so a committed build keeps its clean `<sha>` identity.
+# Mirrors build_win.ps1 — the two builds must stamp identity the same way, or
+# the platform that doesn't gets the ambiguity back.
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-  BUILD_SHA="${BUILD_SHA}-dirty"
+  BUILD_SHA="${BUILD_SHA}-dirty+$(date +%m%d%H%M)"
 fi
 echo "$BUILD_SHA" > BUILD_ID
 echo "[build] BUILD_ID=$BUILD_SHA"

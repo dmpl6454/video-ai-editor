@@ -30,7 +30,16 @@ Pop-Location
 # so config.build_id() reads this file. Mirrors build_app.sh.
 $BuildSha = (& git rev-parse --short HEAD 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $BuildSha) { $BuildSha = "unknown" }
-if ((& git status --porcelain 2>$null)) { $BuildSha = "$BuildSha-dirty" }
+# A `-dirty` suffix alone does NOT identify a build. During an uncommitted fix
+# round every rebuild reports the same `<sha>-dirty`, so "is the user running my
+# fix?" is unanswerable from the badge — which is the exact question this whole
+# mechanism exists to answer, and it cost a round: a fix was verified in the new
+# build, reported as still broken, and neither side could tell whether the same
+# bits were on screen. The stamp is minute-resolution local time, appended ONLY
+# when dirty, so a committed build keeps its clean `<sha>` identity.
+if ((& git status --porcelain 2>$null)) {
+  $BuildSha = "$BuildSha-dirty+" + (Get-Date -Format "MMddHHmm")
+}
 # Write BOM-LESS. `Set-Content -Encoding utf8` is BOM-less only in PowerShell 7+;
 # under PowerShell 5.1 — which is what `powershell -File build_win.ps1` resolves
 # to, the documented launch command — it prepends EF BB BF. `.strip()` does not

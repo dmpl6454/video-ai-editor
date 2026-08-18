@@ -490,6 +490,66 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     if ec:
         v_chain += "," + ec
 
+    # OPACITY. This chain had NO opacity handling at all, so `Transform.opacity`
+    # was a dead control on v1 — it committed to the EDL, survived a reload and
+    # changed nothing in the picture, in the preview or the export. It was
+    # honoured for PIPs (pip.py), text and stickers, which is why it looked
+    # implemented.
+    #
+    # Worse than merely doing nothing, it made the LIVE preview lie in both
+    # directions. Preview.tsx applies a CSS opacity RELATIVE to what the visible
+    # render already has baked in (liveCssTransform divides by the baked value),
+    # and it reads that baked value from the EDL. So the EDL said 0.3 while the
+    # frame was still at full brightness: dragging further down showed the wrong
+    # amount of dimming, and dragging back UP showed none at all, since CSS
+    # opacity cannot exceed 1 and the "restore" it was counting on never existed.
+    # Reported from the far end of that: "when i reduce the opacity and then i
+    # rotate the main video, the video gets blacked out while rotating."
+    #
+    # A FADE TOWARD BLACK, not an alpha channel — and that difference is the
+    # whole reason this is not simply pip.py's line. A PIP is OVERLAID, so
+    # `format=yuva420p,colorchannelmixer=aa=` lets the layer beneath show
+    # through. v1 is the BASE: there is nothing beneath it, so alpha here would
+    # either be discarded at yuv420p conversion or composited against
+    # undefined ground. Multiplying RGB toward black is what the canvas itself
+    # does (the letterbox is black) and exactly what the browser does when it
+    # fades the element over the black preview pane — so the live preview and
+    # the bake finally agree, which is the point.
+    #
+    # Done in gbrp so the multiply is a true RGB multiply. colorchannelmixer on
+    # YUV input would scale Y *and* the chroma offsets, tinting the picture
+    # toward green as it dims instead of darkening it. The chain converts back
+    # to yuv420p downstream, and this costs a conversion only when opacity is
+    # actually below 1.
+    opa_animated = is_keyframed(tx.opacity)
+    opa_static = float(tx.opacity) if isinstance(tx.opacity, (int, float)) else 1.0
+    if opa_animated:
+        # Keyframed: per-frame multiply. Same geq shape text_overlay.py uses for
+        # an animated text opacity, on RGB rather than on alpha.
+        #
+        # `T`, NOT the chain's lowercase `tvar`. geq's expression namespace is
+        # its own: it exposes X/Y/W/H/N/T, and lowercase `t` is not in it, so a
+        # tvar-built expression dies with "Unknown function in 't-0.0000)...'"
+        # — a whole-graph failure, i.e. the render fails outright rather than
+        # animating wrong. `rotate` above legitimately uses `t`, which is why
+        # reusing tvar here looks right and is not.
+        oe = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{c.start:.4f})")
+        v_chain += (f",format=gbrp,geq=r='r(X\\,Y)*({oe})'"
+                    f":g='g(X\\,Y)*({oe})':b='b(X\\,Y)*({oe})',format=yuv420p")
+    elif opa_static < 0.999:
+        o = max(0.0, min(1.0, opa_static))
+        v_chain += (f",format=gbrp,colorchannelmixer=rr={o:.4f}:gg={o:.4f}:bb={o:.4f}"
+                    f",format=yuv420p")
+    # ...and back to yuv420p EXPLICITLY, so a faded clip leaves this chain in the
+    # same pixel format an untouched one does. libavfilter does auto-negotiate a
+    # conversion into `concat` (verified: a mixed-opacity timeline renders), so
+    # this is not what makes it work — it makes it DETERMINISTIC. Format
+    # negotiation is build-dependent, the two shipping platforms use different
+    # ffmpeg builds (Homebrew vs Gyan), and "it happens to negotiate" is the kind
+    # of thing that holds on the machine it was written on. The neighbouring
+    # `setsar=1` exists for the same reason, for the one parameter concat will
+    # NOT negotiate.
+
     # Chroma key (green/blue screen) — produces transparent regions; on V1 they
     # show through to canvas bg colour, on PiP they show through to the layer below.
     if getattr(c, "chromakey", None) is not None:
@@ -910,6 +970,10 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         out_label="[vpip_final]",
         first_input_index=next_idx,
         out_w=w_out, out_h=h_out,
+        # In preview the PIP's PICTURE is drawn by the browser instead of baked,
+        # so direct manipulation is live; its AUDIO still comes back here. See
+        # the preview branch in pip.py.
+        preview=preview,
     )
     if pip_chain:
         fc = fc + ";" + pip_chain
@@ -969,7 +1033,16 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # gap-collapsing bug (and a trailing gap — music outlasting the video — is
     # extremely common). Those fall through to the re-encode path, which still
     # reuses the cached per-clip chunks and only pays for the assembly.
-    if (preview and chunk_paths is not None and not pip_chain
+    # `not pip_audio_clips`, NOT `not pip_chain`: this path returns BEFORE the
+    # audio fold below, so it must be gated on "this timeline has no PIP at all".
+    # `pip_chain` was a safe proxy for that only while a PIP always emitted video
+    # filters — in preview it no longer does (the browser draws the picture), so
+    # the proxy quietly admitted PIP timelines here and stream-copied the chunks
+    # with the PIP's audio never mixed in. Caught by test_pip_clip_gain_is_honored:
+    # a near-silent v1 plus a full-gain PIP measured -74.2 dB, i.e. silence.
+    # `pip_audio_clips` is appended to unconditionally on both branches, so it is
+    # the honest "are there PIPs" signal.
+    if (preview and chunk_paths is not None and not pip_chain and not pip_audio_clips
             and not overlay_chain and not mask_inputs
             and not _has_v1_gaps(clips, total_duration)
             and on_progress is None and cancel_event is None):
