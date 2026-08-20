@@ -418,6 +418,7 @@ def test_excluded_features_match_the_pyinstaller_spec():
         "bg_remove": "rembg",
         "diarize": "librosa",
         "beats": "librosa",
+        "object_erase": "simple_lama_inpainting",
     }
     for key, lib in depends_on.items():
         f = next(f for f in FEATURES if f.key == key)
@@ -425,6 +426,60 @@ def test_excluded_features_match_the_pyinstaller_spec():
             f"{lib} is no longer excluded from the bundle — {key} should now "
             "set in_packaged_app=True")
         assert not f.in_packaged_app, f"{key} depends on excluded {lib}"
+
+
+def test_the_gpu_fix_names_a_dependency_group_that_exists():
+    """`check_features` forbids composing install commands by hand, so the one it
+    hands out has to be real. It is a dependency GROUP rather than an extra on
+    purpose — `uv sync --all-extras` is the documented dev setup, and an extra
+    would silently add ~1.3GB of NVIDIA wheels to every Windows/Linux checkout,
+    NVIDIA card or not. Groups are not pulled by --all-extras.
+    """
+    import re
+    from pathlib import Path
+
+    from video_ai_editor.ai.features import FEATURES
+
+    f = next(f for f in FEATURES if f.key == "gpu_transcribe")
+    assert "--group cuda" in f.fix, f.fix
+    assert "--extra cuda" not in f.fix, (
+        "an extra would be pulled by --all-extras; this must stay a group")
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8")
+    groups = pyproject.split("[dependency-groups]", 1)
+    assert len(groups) == 2, "no [dependency-groups] table"
+    assert re.search(r"^cuda\s*=\s*\[", groups[1], re.M), (
+        "features.py advertises `uv sync --group cuda` but no such group exists")
+    # And it must NOT also be an extra, which would defeat the whole point.
+    extras = pyproject.split("[project.optional-dependencies]", 1)
+    if len(extras) == 2:
+        before_next_table = extras[1].split("\n[", 1)[0]
+        assert not re.search(r"^cuda\s*=", before_next_table, re.M)
+
+
+def test_gpu_transcription_probe_needs_both_a_device_and_the_math_libraries():
+    """The measured failure mode: the CUDA driver alone made ctranslate2 report a
+    device, the model loaded, and the first forward pass raised
+    "Library cublas64_12.dll is not found or cannot be loaded". A probe that
+    checked only the device would have called that available.
+    """
+    import video_ai_editor.ai.features as F
+    from video_ai_editor.ingest import transcribe as T
+
+    saved_dev, saved_libs = T._resolve_device, F._cuda_math_libs_present
+    try:
+        for dev, libs, expected in [
+            ("cuda", True, True),
+            ("cuda", False, False),     # the box this was found on
+            ("cpu", True, False),       # libs present, device opted out
+            ("cpu", False, False),
+        ]:
+            T._resolve_device = lambda d=dev: d
+            F._cuda_math_libs_present = lambda v=libs: v
+            assert F._gpu_transcribe_ok() is expected, (dev, libs)
+    finally:
+        T._resolve_device, F._cuda_math_libs_present = saved_dev, saved_libs
 
 
 def test_mac_only_exclusions_are_flagged_too():
@@ -448,6 +503,42 @@ def test_mac_only_exclusions_are_flagged_too():
     # route rather than the blanket "run from source".
     assert by_key["captions"].packaged_fix
     assert "whisper.cpp" in by_key["captions"].packaged_fix
+
+
+def test_object_erase_is_gated_on_lama_not_on_cv2():
+    """`object_erase` used to be grouped under the "tracking" Feature and gated
+    on cv2 alone. `ai/lama.py` (the module the handler actually calls) never
+    imports cv2 — its only import is `simple_lama_inpainting`, a BASE pyproject
+    dependency, so the wrong gate was invisible from source (always True there)
+    and reported "available" in BOTH packaged builds, where
+    `simple_lama_inpainting` IS excluded (build_app.sh AND the Windows .spec).
+    A packaged-app user asking to erase an object got a confident "yes" from
+    check_features and then a bare RuntimeError from the real call — exactly
+    the failure class this module exists to prevent, reproduced by grouping
+    rather than by a missing probe.
+    """
+    from video_ai_editor.ai.features import FEATURES
+
+    by_key = {f.key: f for f in FEATURES}
+    assert "object_erase" in by_key, "object_erase needs its OWN Feature entry"
+    obj = by_key["object_erase"]
+    assert obj.tools == ["object_erase"]
+    assert not obj.in_packaged_app, (
+        "simple_lama_inpainting is excluded from both packaged builds")
+
+    tracking = by_key["tracking"]
+    assert "object_erase" not in tracking.tools, (
+        "object_erase must not ride cv2's probe — it doesn't need cv2 at all")
+    assert tracking.tools == ["motion_track", "auto_reframe"]
+
+
+def test_object_erase_probe_matches_what_ai_lama_actually_needs():
+    """The probe must track lama.py's real dependency, not a proxy for it."""
+    from video_ai_editor.ai import features as F
+
+    by_key = {f.key: f for f in F.FEATURES}
+    probe = by_key["object_erase"].probe
+    assert probe() == F._has("simple_lama_inpainting")
 
 
 def test_a_packaged_fix_is_preferred_over_the_blanket_answer(monkeypatch):

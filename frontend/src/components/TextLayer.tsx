@@ -5,6 +5,7 @@
 // edit — only video-track changes trigger an ffmpeg re-render.
 
 import { useEffect, useRef, useState } from 'react'
+import { useStore } from '../store'
 import type { EDL, TextClip } from '../types'
 import {
   sampleKF, publishTextBoxes, getOverlayDrag,
@@ -405,7 +406,19 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     let lastDragId: string | null = null
     let lastEmojiGen = -1
     const draw = () => {
-      const t = videoEl ? videoEl.currentTime : 0
+      // With no v1 clip, `videoEl` is null — there is no `<video>` to poll for
+      // "what time is it". This used to fall back to a hardcoded 0, which
+      // pinned every caption/text clip whose `start <= 0` permanently visible
+      // and OVERLAPPING regardless of the actual playhead, because the
+      // scrubber has no effect on a `t` that is a constant. Reported as
+      // garbled stacked captions over a black frame right after deleting the
+      // v1 clip. `StickerLayer.tsx` already gets this right
+      // (`videoEl ? videoEl.currentTime : useStore.getState().playhead`) —
+      // this is the sibling layer catching up to that fix. `getState()` is an
+      // imperative read, not a subscription, so it needs no extra prop and
+      // cannot go stale inside this self-perpetuating rAF closure the way a
+      // captured prop value would.
+      const t = videoEl ? videoEl.currentTime : useStore.getState().playhead
       const drag = getOverlayDrag()
       // Only redraw when the playhead actually advanced (or first frame) — but
       // ALWAYS redraw while a drag is live, or the text would sit frozen at its

@@ -241,6 +241,146 @@ def test_trim_clip_on_v2_does_not_ripple_overlays():
     assert abs(s.end - 9.0) < 1e-6
 
 
+# ---------- dense caption tracks: many orphans must not all stack ----------
+
+def test_ripple_delete_collapses_MULTIPLE_orphaned_captions_to_ONE_not_a_stack():
+    """auto_caption produces many short, sequential cues covering the entire
+    spoken timeline — so deleting even one ordinary v1 clip routinely orphans
+    SEVERAL consecutive captions at once, not just one. Each used to collapse
+    to the identical [removed_start, removed_start+0.1) stub independently,
+    stacking every one of them on top of each other at that single instant —
+    reported as garbled, overlapping caption text right after a delete.
+    """
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    # v1: c1 [0,20) is the clip about to be deleted; c2 [20,30) survives.
+    # Four caption cues sit entirely inside c1's span — auto_caption's actual
+    # density (short, sequential, no gaps) — plus one BEFORE and one AFTER
+    # c1 that must be left alone / shifted normally.
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=20, start=0, id="c1"),
+                Clip(src=src, in_=0, out=10, start=20, id="c2"),
+            ]),
+            Track(id="captions", type="captions", z=13, clips=[
+                TextClip(id="pre", text="before", start=-2.0, end=-1.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="cap1", text="one", start=2.0, end=6.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="cap2", text="two", start=6.0, end=10.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="cap3", text="three", start=10.0, end=14.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="cap4", text="four", start=14.0, end=18.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="post", text="after", start=25.0, end=27.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+
+    caps = store.edl.get_track("captions").clips
+    texts = {c.id: c for c in caps}
+
+    # The "before" cue (start<=0, untouched) and "after" cue (shifted left by
+    # 20, the removed clip's duration) must both survive normally — this is
+    # NOT about deleting orphans, only about not stacking duplicates.
+    assert "pre" in texts
+    assert abs(texts["pre"].start - (-2.0)) < 1e-6
+    assert "post" in texts
+    assert abs(texts["post"].start - 5.0) < 1e-6   # 25 - 20
+
+    # Exactly ONE of the four orphaned cues (cap1..cap4) survives — the bug was
+    # that all four did, each an identical [0, 0.1) stub.
+    orphaned_ids = {"cap1", "cap2", "cap3", "cap4"}
+    survivors = orphaned_ids & texts.keys()
+    assert len(survivors) == 1, (
+        f"expected exactly 1 surviving orphaned caption, got {len(survivors)}: {survivors}")
+    survivor = texts[next(iter(survivors))]
+    assert abs(survivor.start - 0.0) < 1e-6
+    assert survivor.end > survivor.start
+
+    # Total count: pre + ONE survivor + post = 3, not the original 6.
+    assert len(caps) == 3, f"expected 3 captions after ripple, got {len(caps)}: {sorted(texts)}"
+
+
+def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
+    """'First' means first in track order (== earliest original start for
+    auto_caption's append-in-order construction), not an arbitrary survivor —
+    a deterministic choice matters for reproducible behavior."""
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=10, start=0, id="c1"),
+            ]),
+            Track(id="captions", type="captions", z=13, clips=[
+                TextClip(id="first", text="first", start=1.0, end=2.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="second", text="second", start=5.0, end=6.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    caps = store.edl.get_track("captions").clips
+    assert [c.id for c in caps] == ["first"]
+
+
+def test_a_single_orphaned_clip_still_collapses_exactly_as_before():
+    """A lone orphaned overlay (the case the original tests above cover) must
+    be completely unaffected by the dedup — it is not a 'duplicate' of
+    anything, so it survives exactly as it always did."""
+    store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=4.0, sticker_end=5.0)
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    remaining = store.edl.get_track("stickers").clips
+    assert len(remaining) == 1
+    assert abs(remaining[0].start - 0.0) < 1e-6  # ripple_delete removes ALL of c1 -> removed_start=0
+
+
+def test_dedup_is_per_track_not_global():
+    """Two DIFFERENT overlay tracks each orphaned by the same deletion must
+    each keep their own one survivor — the sticker track's collapse must not
+    suppress the caption track's, or vice versa."""
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=10, start=0, id="c1"),
+            ]),
+            Track(id="stickers", type="sticker", z=11, clips=[
+                Sticker(id="s1", src=src, start=2.0, end=3.0, transform=Transform(x=100, y=100)),
+                Sticker(id="s2", src=src, start=6.0, end=7.0, transform=Transform(x=100, y=100)),
+            ]),
+            Track(id="captions", type="captions", z=13, clips=[
+                TextClip(id="cap1", text="a", start=1.0, end=2.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+                TextClip(id="cap2", text="b", start=5.0, end=6.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    assert len(store.edl.get_track("stickers").clips) == 1
+    assert len(store.edl.get_track("captions").clips) == 1
+
+
 # ---------- text clips ripple the same way ----------
 
 def test_text_clip_ripples_the_same_way_as_a_sticker():

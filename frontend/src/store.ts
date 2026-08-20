@@ -34,14 +34,23 @@ const ASYNC_DISPATCH_TOOLS = new Set([
 const JOB_POLL_MS = 700
 
 /** Submit a tool as a background job and resolve when it finishes, so callers
- *  of `store.dispatch()` see the same promise contract either way. */
+ *  of `store.dispatch()` see the same promise contract either way.
+ *
+ *  `onProgress` reports the job id immediately and then its 0..1 progress on
+ *  every poll. auto_caption is why: it decodes for minutes, and a caller that
+ *  can only render an indefinite spinner is why a working Captions button was
+ *  reported as broken. The job id is handed over so the caller can offer
+ *  Cancel — the backend has always supported it, nothing ever called it. */
 async function runDispatchJob(
   sid: string, tool: string, args: Record<string, unknown>,
+  onProgress?: (p: { jobId: string; progress: number }) => void,
 ): Promise<{ result: { redo_available?: boolean }; edl_hash: string; op: Op | null }> {
   const { job_id } = await api.dispatchAsync(sid, tool, args)
+  onProgress?.({ jobId: job_id, progress: 0 })
   for (;;) {
     await new Promise((r) => setTimeout(r, JOB_POLL_MS))
     const job = await api.getJob(job_id)
+    onProgress?.({ jobId: job_id, progress: job.progress ?? 0 })
     if (job.status === 'completed') {
       return job.result as unknown as
         { result: { redo_available?: boolean }; edl_hash: string; op: Op | null }
@@ -242,7 +251,13 @@ interface State {
   // tool's own result, e.g. add_text's new clip id or auto_caption's cue
   // count) or null on failure — the failure is already surfaced via
   // toast.error here, so callers just need to know it didn't land.
-  dispatch(tool: string, args?: Record<string, unknown>): Promise<DispatchResponse | null>
+  // `opts.onProgress` only fires for ASYNC_DISPATCH_TOOLS (the ones that run
+  // as jobs); everything else resolves too fast to be worth reporting.
+  dispatch(
+    tool: string,
+    args?: Record<string, unknown>,
+    opts?: { onProgress?: (p: { jobId: string; progress: number }) => void },
+  ): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
   // Save the last finished export to disk. In the packaged app this drives the
@@ -459,9 +474,30 @@ export const useStore = create<State>((set, get) => ({
   },
 
   init: async () => {
-    // Try to recover the most recent session, else create a new one.
+    // Reconnect to what THIS BROWSER was last showing, not whatever session
+    // happens to be most recently touched on the SERVER. `listSessions()` is
+    // sorted by each session directory's own mtime (storage.py), which any
+    // client sharing this backend can bump — an MCP tool call, a QA/test
+    // script hitting the API directly, another browser tab. `list[0]` used to
+    // be adopted unconditionally on every launch, so a burst of unrelated
+    // activity elsewhere (this was found via repeated exe rebuild/relaunch
+    // cycles during development, each creating fresh sessions for
+    // verification) could silently swap a user's in-progress project out for
+    // a stranger session on their very next launch — no error, no prompt, just
+    // a different timeline where theirs used to be.
+    //
+    // `vai.sessionId` is the fix: written to localStorage whenever the active
+    // session changes (see the subscribe() below), so THIS browser profile
+    // remembers what it had open regardless of what else touches the shared
+    // backend. Falls through to the original "most recent on the server"
+    // behavior when there is nothing remembered (first-ever launch) or the
+    // remembered session no longer exists (deleted) — unchanged from before
+    // for both of those cases.
     const list = await api.listSessions()
-    const existing = list.sessions[0]
+    let remembered: string | null = null
+    try { remembered = localStorage.getItem('vai.sessionId') } catch { /* private mode */ }
+    const existing = (remembered && list.sessions.find((s) => s.id === remembered))
+      || list.sessions[0]
     const sid = existing?.id ?? (await api.createSession()).id
     get().resetTransient()
     set({ sessionId: sid, sessionName: existing?.name ?? sid })
@@ -544,7 +580,7 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  dispatch: async (tool, args = {}) => {
+  dispatch: async (tool, args = {}, opts) => {
     const sid = get().sessionId
     if (!sid) return null
     // Resolved BEFORE the request: the toast fires after it, and refreshSoon()
@@ -560,7 +596,7 @@ export const useStore = create<State>((set, get) => ({
       // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
       const res: { result: { redo_available?: boolean }; edl_hash: string; op: Op | null } =
         ASYNC_DISPATCH_TOOLS.has(tool)
-          ? await runDispatchJob(sid, tool, args)
+          ? await runDispatchJob(sid, tool, args, opts?.onProgress)
           : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
       if (tool === 'undo' || tool === 'redo') {
         // Undo/redo get an IMMEDIATE (non-debounced) refresh, not the
@@ -759,6 +795,17 @@ export const useStore = create<State>((set, get) => ({
     await get().dispatch('duplicate_clip', { clip_id: sel })
   },
 }))
+
+// Remember the active session per-browser so `init()` (above) can reconnect to
+// it on the next launch instead of blindly adopting whatever session is
+// newest on the shared backend. Covers every path that changes `sessionId` —
+// `init()` itself, and TopBar's switchSession/newSession — without needing
+// each call site to remember to persist it individually.
+useStore.subscribe((state, prevState) => {
+  if (state.sessionId !== prevState.sessionId && state.sessionId) {
+    try { localStorage.setItem('vai.sessionId', state.sessionId) } catch { /* private mode */ }
+  }
+})
 
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the one method this file calls, not the whole class.

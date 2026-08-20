@@ -1,6 +1,8 @@
-/* Spinner for the CC Captions button's long-running "Transcribing…" state.
+/* CC Captions: the split language control, and the progress state that
+   replaces it while a transcription runs.
    Scoped to this component (see the file-ownership note in CaptionsButton.tsx
-   — styles.css is owned elsewhere). */
+   — styles.css is owned elsewhere). All colours come from the app's existing
+   custom properties so this follows the theme rather than restating it. */
 
 .cc-spinner {
   display: inline-block;
@@ -16,4 +18,149 @@
 
 @keyframes cc-spin {
   to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-spinner { animation-duration: 2.4s; }
+}
+
+/* --- idle: [ CC Captions | Auto ▾ ] ------------------------------------- */
+
+.cc-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.cc-wrap .cc-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.cc-wrap .cc-caret {
+  font-size: 10px;
+  padding-left: 5px;
+  padding-right: 5px;
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  color: var(--text-dim, #9aa3b2);
+}
+
+.cc-wrap .cc-caret:hover:not(:disabled) { color: inherit; }
+
+/* --- language menu ------------------------------------------------------ */
+
+/* position/top/left are set inline by CaptionsButton.tsx (fixed, computed from
+   the caret's getBoundingClientRect — the menu is portaled to document.body to
+   escape .topbar's `overflow: hidden`, the same fix TopBar's own popovers
+   needed). Setting `right`/`top` here too would fight the inline `left` under
+   `position: fixed` and stretch the box to an unpredictable width. */
+.cc-menu {
+  z-index: 1000;
+  min-width: 230px;
+  padding: 4px;
+  background: var(--bg-2, #191d24);
+  border: 1px solid var(--line, #2b313b);
+  border-radius: 5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.cc-menu-head {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim, #9aa3b2);
+  padding: 4px 8px 6px;
+}
+
+.cc-menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.cc-menu-item:hover,
+.cc-menu-item:focus-visible { background: var(--bg-3, #232935); }
+
+.cc-menu-item.is-on { background: var(--bg-3, #232935); }
+
+.cc-check {
+  width: 9px;
+  flex: 0 0 9px;
+  color: var(--accent, #5b8dff);
+  font-size: 9px;
+  line-height: 16px;
+}
+
+.cc-menu-label {
+  display: block;
+  font-size: 11px;
+}
+
+.cc-menu-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim, #9aa3b2);
+  margin-top: 1px;
+}
+
+.cc-menu-sep {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--line, #2b313b);
+}
+
+/* --- running: spinner, percentage, ETA, bar, cancel --------------------- */
+
+.cc-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border: 1px solid var(--line, #2b313b);
+  border-radius: 4px;
+  background: var(--bg-2, #191d24);
+}
+
+.cc-busy-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cc-busy-sub {
+  color: var(--text-dim, #9aa3b2);
+  font-size: 10px;
+}
+
+.cc-bar {
+  display: inline-block;
+  width: 54px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-3, #232935);
+  overflow: hidden;
+}
+
+.cc-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent, #5b8dff);
+  transition: width 0.4s linear;
+}
+
+.cc-cancel {
+  font-size: 10px;
+  padding: 1px 6px;
 }

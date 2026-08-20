@@ -3,6 +3,7 @@ import os
 import sys
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 # Single source of truth for the app version — keeps the macOS Info.plist
 # (Finder "Get Info", CFBundleShortVersionString) in lockstep with the VERSION
@@ -33,16 +34,53 @@ datas += collect_data_files('open_clip')
 datas += collect_data_files('faster_whisper')
 hiddenimports += collect_submodules('video_ai_editor')
 hiddenimports += collect_submodules('open_clip')
+# ai/translate.py loads this via `importlib.import_module("argostranslate")` —
+# a STRING, not a static `import argostranslate` — so PyInstaller's analysis
+# has no way to discover it needs bundling at all. The base case failed with
+# `ModuleNotFoundError: No module named 'argostranslate'` at runtime, found by
+# actually exercising the "translate via Argos" code path inside the frozen
+# exe for the first time (every earlier Hindi/Hinglish test happened to use
+# already-Hindi-spoken audio, so `caption_lang` already matched the target and
+# the translation branch was never reached — this bug predates and is
+# independent of adding the Spanish target, which just happened to be the
+# first target tested against non-matching spoken audio in the packaged app).
+# Same failure class as the nvidia-cublas DLL gap above: a dynamic import
+# PyInstaller's static analysis cannot trace.
+hiddenimports += collect_submodules('argostranslate')
 
+binaries = []
 if sys.platform == "win32":
     # pywebview's EdgeChromium/WebView2 backend loads .NET via pythonnet ('clr').
     hiddenimports += ['clr']
+
+    # nvidia-cublas-cu12 / nvidia-cudnn-cu12 (the `cuda` dependency GROUP, `uv
+    # sync --group cuda`) are pure DLL-carrier packages — nothing in this repo
+    # ever does `import nvidia.cublas`, since ingest.transcribe.
+    # _add_cuda_dll_dirs() finds them by globbing site-packages/nvidia/*/bin at
+    # RUNTIME. PyInstaller's static analysis has no import to trace that glob
+    # back to, so without this the packaged exe silently lost the entire GPU
+    # transcription path on the first build after that feature landed — caught
+    # by diffing this build's `dist/` tree against where `ctranslate2.dll`
+    # (a package we DO import, and which therefore WAS bundled automatically)
+    # landed, and finding no `nvidia/` directory at all. Not a crash — the
+    # `_get_model` fallback ladder degrades to CPU/int8 cleanly — but the
+    # measured ~11x speedup (95.2s -> 8.4s for 60s of audio) would have quietly
+    # vanished from every packaged build with nothing in the log to say so.
+    # Guarded: a build on a machine that skipped `--group cuda` must still
+    # succeed, just without the GPU path (exactly like a build with no ffmpeg
+    # on PATH still succeeds — this app never hard-fails on a missing
+    # accelerator).
+    for _cuda_pkg in ("nvidia.cublas", "nvidia.cudnn"):
+        try:
+            binaries += collect_dynamic_libs(_cuda_pkg)
+        except Exception:
+            pass
 
 
 a = Analysis(
     ['src/video_ai_editor/desktop.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

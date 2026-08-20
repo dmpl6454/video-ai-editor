@@ -53,6 +53,17 @@ fi
 echo "$BUILD_SHA" > BUILD_ID
 echo "[build] BUILD_ID=$BUILD_SHA"
 
+# ai/translate.py loads argostranslate via `importlib.import_module("argostranslate")`
+# — a STRING, invisible to PyInstaller's static analysis — so without an explicit
+# collect it is silently absent from the bundle and every translated caption
+# target (Hindi/Hinglish/Spanish, whenever the spoken language doesn't already
+# match) fails at runtime with `ModuleNotFoundError: No module named
+# 'argostranslate'`. This build script does NOT use Video AI Editor.spec (see
+# CLAUDE.md — PyInstaller's CLI mode here regenerates/overwrites the .spec as a
+# side effect, so the two build paths are independent and a fix in one is
+# invisible to the other), which is exactly how this gap was found: the .spec
+# got this same fix first, verified on the Windows build, and this line was
+# still missing here.
 uv run pyinstaller \
   --name "Video AI Editor" \
   --windowed \
@@ -70,6 +81,7 @@ uv run pyinstaller \
   --hidden-import "uvicorn.logging" \
   --hidden-import "video_ai_editor.main" \
   --collect-submodules video_ai_editor \
+  --collect-submodules argostranslate \
   --collect-data webview \
   --exclude-module torch \
   --exclude-module torchcodec \

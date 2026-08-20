@@ -31,10 +31,34 @@ def _augment_path_for_gui_launch() -> None:
         os.environ["PATH"] = os.pathsep.join([*current, *additions])
 
 
+def _avoid_hf_symlink_failures() -> None:
+    """Stop a model download from dying on Windows for lack of a privilege.
+
+    huggingface_hub populates its cache with symlinks into a blob store. Creating
+    one on Windows needs Developer Mode or admin, and without either
+    `snapshot_download` raises
+
+        OSError: [WinError 1314] A required privilege is not held by the client
+
+    partway through — measured on a real first-run download of a whisper model.
+    The hub *warns* that this machine does not support symlinks and then attempts
+    them anyway, so its own detection cannot be relied on. `HF_HUB_DISABLE_SYMLINKS`
+    makes it place real files instead.
+
+    Only ever a default: a user or CI that set the variable keeps their value.
+    Windows-only, since the failure is. The cost is disk when two cache entries
+    share a blob, which for model weights is rare — and a duplicated blob is
+    plainly better than a caption feature that cannot fetch its model.
+    """
+    if _pu.IS_WINDOWS:
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+
+
 # Run at import time — config is imported before any subprocess fires, and by
 # every entrypoint (desktop .app, `uvicorn …:app`, tests), so this is the one
 # universal chokepoint.
 _augment_path_for_gui_launch()
+_avoid_hf_symlink_failures()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
