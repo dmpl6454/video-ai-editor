@@ -4,6 +4,7 @@ Every UI gesture and every Claude tool call lands here. Mutations call
 store.commit() so we get free undo, ops log, and snapshot persistence.
 """
 from __future__ import annotations
+import inspect
 import json
 import os
 import re
@@ -640,6 +641,22 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None
       t >= removed_end          -> shifted left by (removed_end - removed_start)
     Applied to both `start` and `end` independently so a clip straddling the
     cut boundary shrinks rather than teleporting.
+
+    **A track can only keep ONE collapsed clip, not one PER ORPHANED CLIP.**
+    The "snap to the cut point" rule above was written and tested against a
+    single sticker (issues 31/32/50) — fine there, since one stub at
+    `removed_start` is exactly one visible artifact. But auto_caption produces
+    many short, sequential clips covering the ENTIRE spoken timeline, so
+    deleting even one ordinary v1 clip routinely orphans several consecutive
+    caption cues at once — and every one of them collapsed to the IDENTICAL
+    `[removed_start, removed_start+0.1)` stub, stacking N different captions
+    on top of each other at that single instant. Reported as garbled,
+    overlapping caption text right after deleting a clip — this is that
+    "emoji doesn't vanish" convenience turning into a bug once the overlay
+    track is dense rather than sparse. Keeping the FIRST orphaned clip per
+    track preserves the original single-sticker behavior exactly (there is
+    only ever one to keep) while collapsing every duplicate that would
+    otherwise land on the same point down to that one.
     """
     shift = removed_end - removed_start
     if shift <= 0:
@@ -655,15 +672,28 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None
     for track in edl.tracks:
         if track.type not in _OVERLAY_TRACK_TYPES:
             continue
+        kept_a_collapsed_clip = False
+        kept: list = []
         for c in track.clips:
             if not hasattr(c, "start") or not hasattr(c, "end"):
+                kept.append(c)
                 continue
             new_start = remap(c.start)
             new_end = remap(c.end)
+            # Computed BEFORE the minimum-span floor below: a clip whose
+            # original span was wholly inside [removed_start, removed_end)
+            # maps both endpoints to the identical `removed_start`.
+            fully_orphaned = new_start == removed_start and new_end == removed_start
+            if fully_orphaned:
+                if kept_a_collapsed_clip:
+                    continue  # a duplicate stub at the same point — drop it
+                kept_a_collapsed_clip = True
             if new_end <= new_start:
                 new_end = new_start + 0.1  # keep a minimum visible span
             c.start = new_start
             c.end = new_end
+            kept.append(c)
+        track.clips = kept
 
 
 def _rescale_transform_xy(transform, sx: float, sy: float) -> None:
@@ -1563,7 +1593,79 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "lines": seg_count}
 
 
-def auto_caption(store: EDLStore, args: dict) -> dict:
+CAPTION_TARGETS = ("hi", "en", "hinglish", "es")
+
+# The caption language name to use in a user-facing refusal message, per
+# non-English CAPTION_TARGETS entry that routes through translation (i.e.
+# everything except "en", which is Whisper's own translate task and needs no
+# Argos package at all — see the refusal message in _translate_segments_to).
+_TARGET_LABELS = {"hi": "Hindi", "hinglish": "Hindi", "es": "Spanish"}
+
+# Targets that cannot be produced directly by Whisper and instead route
+# through a local Argos translation (see _translate_segments_to). "en" is
+# excluded on purpose — it's Whisper's OWN translate task, needing none of the
+# spoken-language plumbing this drives in auto_caption.
+_TRANSLATED_TARGETS = ("hi", "hinglish", "es")
+# The Argos-side to_code each translated target actually resolves to — distinct
+# from the target ID itself for "hinglish", which is Hindi (`hi`) until the
+# later romanisation step relabels it.
+_TARGET_TO_CODE = {"hi": "hi", "hinglish": "hi", "es": "es"}
+
+
+def _translate_segments_to(segments: list[dict], src_code: str, to_code: str) -> list[dict]:
+    """Get `segments` into `to_code`, pivoting through English when it must.
+
+    Argos's coverage into a given language is uneven — Hindi has exactly ONE
+    package (`en→hi`), Spanish has two (`en→es`, `pt→es`) — so English is
+    routinely not a shortcut, it is the only road in. The direct attempt is
+    tried first anyway (a user may have side-loaded a package, or the source
+    happens to be one of the rarer direct pairs like pt→es), then the two-hop
+    src→en→to_code, and only then do we refuse. Refusing loudly matters: the
+    alternative is a caption track that silently stays in the source language
+    while the UI claims it produced `to_code`.
+
+    **Strips each segment's `words`.** `ai.translate.translate_segments` only
+    overwrites `.text` — the per-word timestamps are still the ORIGINAL
+    language's tokens at their original positions, since a translation does
+    not produce a 1:1 word alignment. `cues_from_segments` prefers `.words`
+    when present and ignores `.text` entirely in that case, so every caption
+    built from a translated segment was silently using the STALE, UNTRANSLATED
+    word list — captions for "a third-language video" (the scenario this
+    entire feature exists for) rendered in English no matter what target was
+    requested, with the summary/`language` field still correctly claiming
+    Hindi/Spanish. Caught by checking the actual rendered cue TEXT end-to-end,
+    which no existing test did for this path — every prior test checked only
+    the routing decision (which language codes were called), never the output
+    a viewer would actually see. Dropping `words` makes `cues_from_segments`
+    fall through to its "no word timing" branch, synthesizing even-spaced
+    pseudo-words from the (correctly) translated `.text` instead.
+    """
+    from ..ai.translate import translate_segments
+
+    def _strip_words(segs: list[dict]) -> list[dict]:
+        return [{k: v for k, v in s.items() if k != "words"} for s in segs]
+
+    if src_code == "en":
+        return _strip_words(translate_segments(segments, from_code="en", to_code=to_code))
+    try:
+        return _strip_words(translate_segments(segments, from_code=src_code, to_code=to_code))
+    except Exception:
+        pass
+    try:
+        via_en = translate_segments(segments, from_code=src_code, to_code="en")
+        return _strip_words(translate_segments(via_en, from_code="en", to_code=to_code))
+    except Exception as e:
+        label = _TARGET_LABELS.get(to_code, to_code)
+        raise RuntimeError(
+            f"{label} captions from {src_code} audio need a {src_code}→{to_code} or "
+            f"{src_code}→en translation package, and neither could be installed: {e}. "
+            f"Captions in English work without any of this (Whisper translates any "
+            f"language to English itself) — pick the English target instead."
+        ) from e
+
+
+def auto_caption(store: EDLStore, args: dict, *,
+                 set_progress=None, cancel_event=None) -> dict:
     """One-call, best-quality auto captions for Hindi + English.
 
     Re-transcribes the V1 source with the large-v3 Whisper model (Metal-
@@ -1574,13 +1676,42 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     Args:
       style    — "default" | "ig_chunky" | "word_emphasis" (default ig_chunky)
       position — "bottom" | "center" | "top"
-      language — force a language (e.g. "hi", "en"); omit to auto-detect
-                 (handles Hinglish code-switching).
+      language — force the SPOKEN language of the footage (e.g. "zh"); omit to
+                 auto-detect. This is the input side, not the caption side.
+      target   — the language the CAPTIONS should be in: "hi" (Devanagari),
+                 "en" or "hinglish" (Hindi romanised into Latin script).
+                 Omit to caption in whatever was spoken, which is the
+                 long-standing behaviour every existing caller relies on.
       model    — override the model (default WHISPER_CAPTION_MODEL = large-v3).
       max_chars / max_cps — caption length + reading-speed knobs.
+
+    How a target is reached, and why each route is the one it is:
+
+      en        Whisper's OWN `task="translate"` — a single decode pass that
+                turns any language into English. No second model, no quality
+                loss from round-tripping, so this is strictly better than
+                transcribing and then translating.
+      hi        Whisper cannot translate INTO Hindi (English is its only
+                target), so non-Hindi audio goes through Whisper→English and
+                then Argos Translate en→hi locally. Hindi audio skips all of
+                that and is simply transcribed.
+      hinglish  Whatever produces Hindi, then `ai.romanize` converts the
+                Devanagari to Latin. Note Whisper already writes English
+                loanwords in Latin when transcribing Hindi, so a code-switched
+                line converts cleanly.
+      es        Same shape as hi: non-Spanish audio goes through Whisper→English
+                then Argos en→es; Spanish audio is simply transcribed. Argos
+                also publishes pt→es directly, tried first for a Portuguese
+                source, but every other language still pivots through English.
+
+    `set_progress` / `cancel_event` are injected by `dispatch()` when the caller
+    runs this as a background job (main.ASYNC_DISPATCH_TOOLS). large-v3 on CPU
+    is several times slower than realtime — measured 202s for a 25s clip — so
+    without them the UI can only show an indefinite spinner, which is how a
+    working feature came to be reported as a dead button.
     """
     from ..config import WHISPER_CAPTION_MODEL
-    from ..ingest.transcribe import transcribe
+    from ..ingest.transcribe import transcribe, model_for
     from ..ingest.caption_format import cues_from_segments
 
     # Same assignment-into-the-EDL hazard as add_caption_track — see there.
@@ -1588,6 +1719,22 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     position = _enum_arg(args, "position", _literal_values(CaptionsConfig, "position"), "bottom")
     language = args.get("language")  # None → auto-detect (Hinglish-friendly)
     model = str(args.get("model") or WHISPER_CAPTION_MODEL)
+    # `target` accepts the aliases the UI, Claude and MCP each reach for.
+    target_raw = (args.get("target") or args.get("target_lang")
+                  or args.get("caption_lang") or "")
+    target = str(target_raw).strip().lower() or None
+    if target in ("hinglish", "hi-latn", "roman", "romanized", "romanised"):
+        target = "hinglish"
+    elif target in ("hindi",):
+        target = "hi"
+    elif target in ("english",):
+        target = "en"
+    elif target in ("spanish", "español", "espanol"):
+        target = "es"
+    if target is not None and target not in CAPTION_TARGETS:
+        raise ValueError(
+            f"auto_caption.target must be one of {list(CAPTION_TARGETS)}, got {target_raw!r}"
+        )
 
     v1 = store.edl.get_track("v1")
     src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
@@ -1597,9 +1744,85 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     if not src.exists():
         raise ValueError(f"auto_caption: source not found: {src}")
 
-    # High-quality re-transcription. backend="auto" picks Metal whisper.cpp.
-    tx = transcribe(src, language=language, model_size=model, backend="auto")
+    # Choosing the decode task needs the SPOKEN language, and it has to be
+    # chosen before the one and only decode pass: Whisper translates into
+    # English and nothing else, so Hindi captions for Chinese audio means
+    # asking Whisper for English here and translating en→hi afterwards. Getting
+    # this wrong costs a whole second decode — minutes — so spend a couple of
+    # seconds identifying the language instead. Cheapest source first: what the
+    # caller told us, then what the upload already transcribed, then a probe.
+    spoken_hint = str(language).lower() if language else ""
+    if not spoken_hint and target in _TRANSLATED_TARGETS:
+        # `spoken_language` rather than the transcript's `language`: after a
+        # Hindi run the stored transcript IS Hindi, and reading that back as
+        # "the audio is Hindi" would send the next run down the no-translation
+        # route for footage that is still Chinese.
+        ing = _current_v1_ingest_json(store)
+        if ing is not None:
+            try:
+                _d = json.loads(ing.read_text(encoding="utf-8"))
+                spoken_hint = str(_d.get("spoken_language")
+                                  or (_d.get("transcript") or {}).get("language") or "").lower()
+            except (OSError, ValueError):
+                spoken_hint = ""
+    if not spoken_hint and target in _TRANSLATED_TARGETS:
+        from ..ingest.transcribe import detect_language
+        spoken_hint = detect_language(src, model) or ""
+
+    task = "transcribe"
+    if target == "en":
+        task = "translate"
+    elif target in _TRANSLATED_TARGETS and spoken_hint and spoken_hint != _TARGET_TO_CODE[target]:
+        task = "translate"
+
+    # `transcribe()` substitutes a translate-capable model when `model` cannot
+    # serve `task="translate"` (turbo was fine-tuned on transcription only —
+    # asked to translate it returns five tokens of ellipses). Resolving it HERE
+    # too, before the decode, is what makes the reported `model` truthful: the
+    # summary, the op log, and the UI toast all read this same `model` variable,
+    # and without this line every one of them would say "turbo" while large-v3
+    # actually ran. `model_for` is idempotent, so transcribe()'s own internal
+    # call is a no-op on top of this — same decode either way, honest reporting
+    # either way.
+    model = model_for(model, task)
+
+    # Reserve the last slice of the progress bar for the post-processing steps
+    # (translate / romanise / cue building), which are fast but not free.
+    DECODE_SHARE = 0.9
+
+    def _on_progress(frac: float, done: float, total: float) -> None:
+        if set_progress is not None:
+            set_progress(frac * DECODE_SHARE)
+
+    def _should_cancel() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    tx = transcribe(src, language=language, model_size=model, backend="auto",
+                    task=task, on_progress=_on_progress,
+                    should_cancel=_should_cancel)
     tx_dict = tx.model_dump()
+    spoken = (tx.language or "").lower()
+    # With task="translate" the text is English whatever was spoken, and
+    # `info.language` still reports the DETECTED source — so record what the
+    # captions are actually in, not what the microphone heard.
+    caption_lang = "en" if task == "translate" else spoken
+    translated_from = None
+
+    if target in _TRANSLATED_TARGETS and caption_lang not in (_TARGET_TO_CODE[target], ""):
+        if set_progress is not None:
+            set_progress(DECODE_SHARE)
+        to_code = _TARGET_TO_CODE[target]
+        tx_dict["segments"] = _translate_segments_to(
+            tx_dict.get("segments", []), caption_lang, to_code)
+        translated_from = caption_lang
+        caption_lang = to_code
+
+    if target == "hinglish":
+        from ..ai.romanize import romanize_segments
+        tx_dict["segments"] = romanize_segments(tx_dict.get("segments", []))
+        caption_lang = "hi-Latn"
+    if set_progress is not None:
+        set_progress(0.97)
 
     # Persist so get_transcript / translate / export_srt see the upgraded text.
     # `src` is the v1 source clip we just re-transcribed — its ingest.json is
@@ -1607,15 +1830,29 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     # media (see _current_v1_ingest_json). Using that clip's own directory,
     # rather than an arbitrary glob hit, guarantees the upgraded transcript
     # lands on the file this clip's src actually reads from.
+    #
+    # What lands here is the CAPTION-language text, not the raw spoken text, so
+    # an .srt export matches what is on screen. `language` must be rewritten to
+    # match: it is the field translate_captions auto-detects its source from,
+    # and leaving the DETECTED language on already-translated text would make a
+    # later "translate to Hindi" try to translate Hindi from Chinese.
+    tx_dict["language"] = caption_lang
     import json as _json
     ingest_json = src.parent / "ingest.json"
-    if not ingest_json.exists():
-        ingest_json.parent.mkdir(parents=True, exist_ok=True)
-        ingest_json.write_text(_json.dumps({"transcript": tx_dict}, ensure_ascii=False), encoding="utf-8")
+    data = {}
+    if ingest_json.exists():
+        try:
+            data = _json.loads(ingest_json.read_text(encoding="utf-8"))
+        except ValueError:
+            data = {}
     else:
-        data = _json.loads(ingest_json.read_text(encoding="utf-8"))
-        data["transcript"] = tx_dict
-        ingest_json.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        ingest_json.parent.mkdir(parents=True, exist_ok=True)
+    data["transcript"] = tx_dict
+    # What the microphone actually heard, kept beside the (possibly translated)
+    # transcript so a second captioning run still knows the footage is Chinese.
+    if spoken:
+        data["spoken_language"] = spoken
+    ingest_json.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     # Build readable cues from the word stream.
     cues = cues_from_segments(
@@ -1633,7 +1870,7 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
     cap.config.enabled = True
     cap.config.style = style  # type: ignore
     cap.config.position = position  # type: ignore
-    cap.config.lang = tx.language
+    cap.config.lang = caption_lang
 
     canvas = store.edl.canvas
     y_pos = canvas.h * (0.85 if position == "bottom"
@@ -1660,11 +1897,26 @@ def auto_caption(store: EDLStore, args: dict) -> dict:
 
     n = len(cap.clips)
     preview = " / ".join(c.text.replace("\n", " ") for c in cap.clips[:2])
-    summary = (f"Auto-captioned ({model}, {tx.language}): {n} {style} cues. "
+    # Name both languages when they differ: "captions came out in a language I
+    # didn't ask for" is unanswerable from a summary that reports only one.
+    if translated_from:
+        # The hardcoded "hi" suffix here used to be correct because Hindi/
+        # Hinglish were the only translated targets — it silently misreported
+        # "via en→hi" for a Spanish run the moment a second target existed.
+        # `_TARGET_TO_CODE[target]` is what `_translate_segments_to` actually
+        # produced, before hinglish's later romanisation step relabels it.
+        how = f"{spoken or '?'}→{caption_lang} via {translated_from}→{_TARGET_TO_CODE[target]}"
+    elif task == "translate":
+        how = f"{spoken or '?'}→en (whisper translate)"
+    else:
+        how = caption_lang or "?"
+    summary = (f"Auto-captioned ({model}, {how}): {n} {style} cues. "
                f"e.g. “{preview[:60]}”")
     store.commit("auto_caption", args, summary)
-    return {"summary": summary, "language": tx.language, "model": model,
-            "cues": n, "style": style,
+    if set_progress is not None:
+        set_progress(1.0)
+    return {"summary": summary, "language": caption_lang, "spoken": spoken or None,
+            "target": target, "model": model, "cues": n, "style": style,
             "sample": [c.as_dict() for c in cues[:3]]}
 
 
@@ -4527,13 +4779,34 @@ DISPATCH: dict[str, DispatchFn] = {
 }
 
 
-def dispatch(store: EDLStore, tool: str, args: dict) -> dict:
+def dispatch(store: EDLStore, tool: str, args: dict, *,
+             set_progress=None, cancel_event=None) -> dict:
+    """The single mutation path. `fn(store, args) -> dict`, nothing else.
+
+    A handler that runs for minutes may additionally declare `set_progress` and
+    /or `cancel_event` keyword parameters; they are passed only when the handler
+    asks for them AND the caller supplied them, so every existing two-argument
+    handler is untouched and chat/MCP callers (which have nowhere to show
+    progress) keep the exact previous behaviour. This is deliberately the same
+    opt-in-by-signature convention api/jobs.py already uses to hand those hooks
+    to a job function — one idea, one spelling, rather than a second mechanism.
+    """
     fn = DISPATCH.get(tool)
     if not fn:
         raise KeyError(f"unknown tool: {tool}")
     _validate_tool_args(tool, args)
+    hooks: dict = {}
+    if set_progress is not None or cancel_event is not None:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):        # builtins / C callables
+            params = {}
+        if set_progress is not None and "set_progress" in params:
+            hooks["set_progress"] = set_progress
+        if cancel_event is not None and "cancel_event" in params:
+            hooks["cancel_event"] = cancel_event
     try:
-        return fn(store, args)
+        return fn(store, args, **hooks)
     except KeyError as e:
         # Handlers read mandatory args as `args["clip_id"]`, so omitting one was
         # an unhandled KeyError -> HTTP 500 with a traceback. Converting it here

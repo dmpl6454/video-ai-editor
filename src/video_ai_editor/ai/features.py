@@ -73,6 +73,55 @@ def _whisper_ok() -> bool:
         return False
 
 
+def _cuda_math_libs_present() -> bool:
+    """Is cuBLAS findable? Three ways, because a false negative here would tell
+    someone to install what they already have — the exact failure this module
+    exists to prevent.
+
+    The CUDA *driver* is not enough: ctranslate2 needs the math libraries, and
+    without them a model loads fine and dies on the first forward pass with
+    "Library cublas64_12.dll is not found or cannot be loaded".
+    """
+    if _has("nvidia.cublas"):                       # the `cuda` extra's wheel
+        return True
+    import ctypes.util
+    if ctypes.util.find_library("cublas"):          # ldconfig on Linux
+        return True
+    # A system-wide CUDA toolkit puts the versioned name on PATH (Windows) or in
+    # a linker dir; find_library misses the Windows spelling, so scan for it.
+    names = ("cublas64_12.dll", "cublas64_13.dll") if sys.platform == "win32" \
+        else ("libcublas.so.12", "libcublas.so")
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        try:
+            if any(os.path.exists(os.path.join(d, n)) for n in names):
+                return True
+        except OSError:                             # unreadable PATH entry
+            continue
+    return False
+
+
+def _gpu_transcribe_ok() -> bool:
+    """Will transcription actually run on the GPU here?
+
+    Deliberately does NOT load a model — this module's contract is import-spec
+    and file-existence checks only, so the agent can call it freely. So it is a
+    claim about configuration, not a guarantee: `transcribe._probe_forward_pass`
+    is what proves execution, at model-load time.
+
+    Both halves are required. A device without the math libraries is the measured
+    failure above; math libraries without a device (or with WHISPER_DEVICE=cpu)
+    means CPU regardless.
+    """
+    try:
+        from ..ingest import transcribe as _t
+        _t._add_cuda_dll_dirs()          # so a wheel install is on PATH to find
+        return _t._resolve_device() == "cuda" and _cuda_math_libs_present()
+    except Exception:
+        return False
+
+
 def _binary(mod: str, attr: str) -> Callable[[], bool]:
     def probe() -> bool:
         try:
@@ -131,12 +180,31 @@ FEATURES: list[Feature] = [
                  "and accept the pyannote EULA for the high-quality model — "
                  "`pyannote_status` reports exactly what is missing.",
             in_packaged_app=False),
-    Feature("tracking", "Motion tracking / auto-reframe / object erase",
-            ["motion_track", "auto_reframe", "object_erase"],
+    Feature("tracking", "Motion tracking / auto-reframe",
+            ["motion_track", "auto_reframe"],
             lambda: _has("cv2"),
             fix=f"`{PIP_EXTRA}` (installs opencv-python)",
             note="auto_reframe uses mediapipe for face/subject detection when "
                  "present, else a saliency heuristic."),
+    # `object_erase` used to be grouped under "tracking" and gated on cv2 —
+    # wrong dependency entirely. `ai/lama.py` (what object_erase actually
+    # calls) never imports cv2; its only import is `simple_lama_inpainting`,
+    # a BASE pyproject dependency, so this was invisible from source (always
+    # True there) and reported "available" in BOTH packaged builds, where
+    # `simple_lama_inpainting` IS excluded (`build_app.sh` AND the Windows
+    # `.spec` both list it). So a packaged-app user asking to erase an object
+    # got a confident "yes" from check_features and then a bare RuntimeError
+    # from the actual call — precisely the failure mode this module exists to
+    # prevent, reproduced by a coarse-grained Feature grouping rather than a
+    # missing probe.
+    Feature("object_erase", "Object removal (LaMa inpainting)",
+            ["object_erase"], lambda: _has("simple_lama_inpainting"),
+            fix=f"`{PIP_EXTRA}` (installs simple-lama-inpainting)",
+            note="Downloads ~200MB of LaMa weights on first use. Runs on CPU "
+                 "even where CUDA is available — the bundled torchscript model "
+                 "has CUDA-tagged ops that crash on Mac, so it always loads "
+                 "with map_location='cpu'.",
+            in_packaged_app=False),
     Feature("beats", "Beat detection / cut-to-music",
             ["auto_cut_to_beats"], lambda: _has("librosa"),
             fix=f"`{PIP_EXTRA}` (installs librosa)",
@@ -155,11 +223,37 @@ FEATURES: list[Feature] = [
                 "(macOS: `brew install ffmpeg-full`; Windows: the full Gyan build)"),
     Feature("upscale", "AI upscaling",
             ["upscale"], _binary("upscale", "available"),
-            fix="download `realesrgan-ncnn-vulkan` and put it in models/realesrgan/ "
-                "(or %APPDATA%/Video AI Editor on Windows)"),
+            fix="`uv run python -m video_ai_editor.cli.setup_ai_binaries --which upscale` "
+                "(downloads realesrgan-ncnn-vulkan, ~45-52MB, and places it where "
+                "ai/upscale.py looks). Manual alternative: download it yourself and put "
+                "it in models/realesrgan/ (or %APPDATA%/Video AI Editor on Windows)."),
     Feature("interpolate", "Smooth slow motion (frame interpolation)",
             ["smooth_slow_motion"], _binary("rife", "available"),
-            fix="download `rife-ncnn-vulkan` and put it in models/rife/"),
+            fix="`uv run python -m video_ai_editor.cli.setup_ai_binaries --which interpolate` "
+                "(downloads rife-ncnn-vulkan, ~430MB — RIFE ships every model generation "
+                "in one archive, there is no smaller official build). Manual alternative: "
+                "download it yourself and put it in models/rife/."),
+    # Not a capability — a SPEED tier for one that already works. It is listed
+    # anyway because "captions take forever" was reported as a broken button,
+    # and this is the answer: measured on 60s of Hindi with large-v3, decode ran
+    # 95.2s on CPU int8 and 8.4s on CUDA float16 (11.3x) for the same transcript,
+    # turning a 3-minute video from ~9.3 minutes into ~25 seconds. Without a
+    # probe the agent cannot tell a user whether their GPU is being used, and
+    # `auto` silently meant CPU until recently — so this is exactly the class of
+    # question this module exists to answer instead of guess.
+    Feature("gpu_transcribe", "GPU-accelerated transcription (NVIDIA)",
+            ["auto_caption", "get_transcript"], _gpu_transcribe_ok,
+            # The whole command, not just `--group cuda`: uv sync PRUNES, so the
+            # short form drops the extras and uninstalls pytest/movis/pyside6
+            # from a dev checkout. Verified with `--dry-run`.
+            fix=f"`{PIP_EXTRA} --group cuda` (adds cuBLAS + cuDNN, ~1.3GB) on a "
+                "machine with an NVIDIA GPU and a current driver",
+            note="Optional speedup, not a requirement — captions work on CPU, "
+                 "roughly 11x slower. Needs an NVIDIA card: there is no Metal "
+                 "backend in ctranslate2, so a Mac always transcribes on CPU.",
+            # The CUDA wheels are in neither bundle, and pip cannot add them to
+            # a frozen app.
+            in_packaged_app=False),
 ]
 
 

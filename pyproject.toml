@@ -68,3 +68,28 @@ dev = [
     "py2app>=0.28.10",
     "pyinstaller>=6.20.0",
 ]
+# GPU transcription. ctranslate2 (faster-whisper's engine) needs CUDA's math
+# libraries, and the DRIVER ALONE IS NOT ENOUGH: on a machine with an RTX 4050
+# and no cuBLAS, `WhisperModel(device="cuda")` loads fine and then dies on the
+# first forward pass with "Library cublas64_12.dll is not found or cannot be
+# loaded" — minutes into a caption job.
+#
+# Worth the ~1.3GB. Measured on 60s of Hindi with large-v3, both batched:
+# decode went from 95.2s on CPU int8 to 8.4s on CUDA float16 — 11.3x — for the
+# SAME transcript (128 words, 294 Devanagari chars, identical text). A 3-minute
+# video goes from ~9.3 minutes as shipped to ~25 seconds. It is the only speed
+# lever measured here that costs nothing in accuracy, because it is the same
+# weights on a different device.
+#
+# A GROUP, not an extra, on purpose: `uv sync --all-extras` is the documented dev
+# setup, and an extra would silently add 1.3GB of NVIDIA wheels to every Windows
+# and Linux checkout including machines with no NVIDIA card. Groups are opt-in
+# (`uv sync --group cuda`) and `--all-extras` does not pull them. Excluded on
+# darwin because ctranslate2 has no Metal backend — a Mac always uses CPU.
+# `ai.features.feature_report()` reports whether it actually took effect, and
+# `ingest.transcribe._add_cuda_dll_dirs` handles the fact that these wheels drop
+# their DLLs somewhere on no Windows search path at all.
+cuda = [
+    "nvidia-cublas-cu12; sys_platform != 'darwin'",
+    "nvidia-cudnn-cu12>=9,<10; sys_platform != 'darwin'",
+]

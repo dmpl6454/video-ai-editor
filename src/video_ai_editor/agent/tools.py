@@ -348,18 +348,34 @@ TEXT_TOOLS = [
            "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
        }),
     _t("auto_caption",
-       "BEST-QUALITY auto captions for Hindi + English (and Hinglish). Re-transcribes "
-       "the video with the large-v3 Whisper model on Metal (far better than the fast "
-       "upload model — clean Hindi, no hallucination loops), then formats the words "
-       "into broadcast-grade cues (≤2 lines, reading-speed limited) and lays down a "
-       "caption track. Auto-detects language by default; pass language='hi' or 'en' to "
-       "force. This is the tool to use when the user asks for accurate captions.",
+       "BEST-QUALITY auto captions for Hindi + English + Spanish (and Hinglish). "
+       "Re-transcribes the video with the large-v3 Whisper model on Metal (far better "
+       "than the fast upload model — clean Hindi, no hallucination loops), then formats "
+       "the words into broadcast-grade cues (≤2 lines, reading-speed limited) and lays "
+       "down a caption track. This is the tool to use when the user asks for accurate "
+       "captions. `target` picks the language the CAPTIONS come out in and works even "
+       "when the footage is in a third language (e.g. Chinese video → Hindi subtitles, "
+       "or Japanese video → Spanish subtitles): 'en' uses Whisper's own translation, "
+       "'hi'/'es' translate locally via Argos (pivoting through English when there is no "
+       "direct package for the spoken language), 'hinglish' is Hindi romanised into Latin "
+       "script. `language` is the separate, input-side hint for what is SPOKEN — leave it "
+       "off to auto-detect.",
        "text",
        {
            "style": {"type": "string", "enum": ["default", "ig_chunky", "word_emphasis"], "default": "ig_chunky"},
            "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
-           "language": {"type": "string", "description": "Force 'hi'/'en'; omit to auto-detect (Hinglish-friendly)"},
-           "model": {"type": "string", "description": "Override Whisper model (default large-v3)"},
+           "target": {"type": "string", "enum": ["hi", "en", "hinglish", "es"],
+                      "description": "Language of the CAPTIONS: 'hi' Devanagari, 'en' English, "
+                                     "'hinglish' romanised Hindi, 'es' Spanish. Omit to caption "
+                                     "in whatever was spoken."},
+           "language": {"type": "string", "description": "Force the SPOKEN language ('hi', 'zh', …); omit to auto-detect (Hinglish-friendly)"},
+           "model": {"type": "string",
+                     "description": "Override Whisper model (default large-v3, most accurate). "
+                                     "'large-v3-turbo' is ~4x faster on Hindi/English/Hinglish "
+                                     "transcription — offer it when the user asks for speed. It "
+                                     "cannot translate, so requesting it with target='en' silently "
+                                     "runs large-v3 instead; the returned `model` field says which "
+                                     "one actually ran."},
            "max_chars": {"type": "integer", "default": 42},
            "max_cps": {"type": "number", "default": 17.0},
        }),

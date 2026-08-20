@@ -632,13 +632,20 @@ def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
 def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONResponse:
     from .api.jobs import JOB_MANAGER
 
-    def _job() -> dict:
+    # Declaring these two parameters is what makes JobManager inject them (it
+    # inspects the signature), and dispatch() then passes them on to any handler
+    # that asks for them. auto_caption is the reason: large-v3 on CPU runs for
+    # minutes, and a job that reports no progress and cannot be stopped is
+    # indistinguishable from a hung app.
+    def _job(set_progress=None, cancel_event=None) -> dict:
         # Re-resolve the store inside the worker: the LRU cache may have
         # evicted and rebuilt it while this job sat queued, and mutating a
         # detached copy would write edits that the next request never sees.
         try:
             with _session_lock(sid):
-                return _dispatch_sync(sid, _store(sid), body)
+                return _dispatch_sync(sid, _store(sid), body,
+                                      set_progress=set_progress,
+                                      cancel_event=cancel_event)
         except HTTPException as e:
             # JobManager records `f"{type(e).__name__}: {e}"`, and an
             # HTTPException stringifies to its repr — unreadable in the UI's
@@ -654,10 +661,12 @@ def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONRes
     )
 
 
-def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest) -> dict:
+def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
+                   set_progress=None, cancel_event=None) -> dict:
     ops_before = len(store.ops.ops)
     try:
-        result = dispatch(store, body.tool, body.args)
+        result = dispatch(store, body.tool, body.args,
+                          set_progress=set_progress, cancel_event=cancel_event)
     except KeyError as e:
         raise HTTPException(400, str(e))
     except ValueError as e:
