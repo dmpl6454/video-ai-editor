@@ -618,7 +618,8 @@ def _ripple_close_gap(track: Track) -> None:
 _OVERLAY_TRACK_TYPES = ("text", "sticker", "captions")
 
 
-def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None:
+def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
+                      v1_now_empty: bool = False) -> None:
     """Shift text/sticker/caption overlays to follow a ripple on the video
     track — the same left-shift `_ripple_close_gap` just applied to V1.
 
@@ -657,6 +658,31 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None
     track preserves the original single-sticker behavior exactly (there is
     only ever one to keep) while collapsing every duplicate that would
     otherwise land on the same point down to that one.
+
+    **`v1_now_empty` drops a fully-orphaned clip instead of collapsing and
+    keeping it, when v1 has NOTHING left after this call.** The one-stub-per-
+    track rule above is right when v1 still has SOME footage — a caption
+    orphaned by a partial cut shouldn't silently vanish while its neighbours
+    are still on screen. But when v1 ends up completely empty, that stub
+    itself becomes the bug: its `[removed_start, removed_start+0.1)` span
+    (usually `[0, 0.1)`, since deleting the last remaining clip typically
+    removes from the very start) still has a non-zero `.end`, and
+    `EDL.recompute_duration()` takes the MAX over every track — so the one
+    stub kept `edl.duration` truthy, `Preview.tsx`'s `!edl?.duration`
+    empty-state check never fired, and a full-screen caption rendered over a
+    black frame instead of the "drop a video" state. Reported as a caption
+    still filling the screen right after deleting the only clip on the main
+    video track.
+
+    This must be scoped to `fully_orphaned` clips ONLY — a clip that was
+    deliberately moved PAST the removed range (e.g. to make room for footage
+    not added yet) is not orphaned by this call at all; it just shifts left
+    like normal and must survive untouched regardless of whether v1 is empty
+    afterward. Wiping every overlay whenever v1 is empty was tried first and
+    broke exactly that case: an overlay dragged out past a clip's end,
+    followed by deleting every v1 clip and adding a new (shorter) one, is a
+    real edit sequence (shorten-then-replace) that must not lose content
+    genuinely waiting for the next clip to arrive.
     """
     shift = removed_end - removed_start
     if shift <= 0:
@@ -685,6 +711,8 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float) -> None
             # maps both endpoints to the identical `removed_start`.
             fully_orphaned = new_start == removed_start and new_end == removed_start
             if fully_orphaned:
+                if v1_now_empty:
+                    continue  # no footage left at all — drop, don't keep a stub
                 if kept_a_collapsed_clip:
                     continue  # a duplicate stub at the same point — drop it
                 kept_a_collapsed_clip = True
@@ -956,7 +984,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
     track.clips = new_clips
     _ripple_close_gap(track)
     if track.id == "v1":
-        _ripple_overlays(store.edl, start, end)
+        _ripple_overlays(store.edl, start, end, v1_now_empty=not track.clips)
     summary = f"Cut {start:.2f}–{end:.2f}s on {track.id} (ripple)"
     store.commit("cut_range", args, summary)
     return {"summary": summary, "clips_after": len(track.clips)}
@@ -1244,7 +1272,7 @@ def ripple_delete(store: EDLStore, args: dict) -> dict:
     track.clips.remove(c)
     _ripple_close_gap(track)
     if track.id == "v1" and removed_start is not None:
-        _ripple_overlays(store.edl, removed_start, removed_end)
+        _ripple_overlays(store.edl, removed_start, removed_end, v1_now_empty=not track.clips)
     summary = f"Delete {c.id} (ripple)"
     store.commit("ripple_delete", args, summary)
     return {"summary": summary}
@@ -1597,30 +1625,33 @@ CAPTION_TARGETS = ("hi", "en", "hinglish", "es")
 
 # The caption language name to use in a user-facing refusal message, per
 # non-English CAPTION_TARGETS entry that routes through translation (i.e.
-# everything except "en", which is Whisper's own translate task and needs no
-# Argos package at all — see the refusal message in _translate_segments_to).
+# everything except "en", which is Whisper's own translate task and never
+# calls into ai.translate at all — see the refusal message in
+# _translate_segments_to).
 _TARGET_LABELS = {"hi": "Hindi", "hinglish": "Hindi", "es": "Spanish"}
 
 # Targets that cannot be produced directly by Whisper and instead route
-# through a local Argos translation (see _translate_segments_to). "en" is
-# excluded on purpose — it's Whisper's OWN translate task, needing none of the
-# spoken-language plumbing this drives in auto_caption.
+# through local ai.translate (MADLAD-400, see _translate_segments_to). "en"
+# is excluded on purpose — it's Whisper's OWN translate task, needing none of
+# the spoken-language plumbing this drives in auto_caption.
 _TRANSLATED_TARGETS = ("hi", "hinglish", "es")
-# The Argos-side to_code each translated target actually resolves to — distinct
-# from the target ID itself for "hinglish", which is Hindi (`hi`) until the
-# later romanisation step relabels it.
+# The ai.translate to_code each translated target actually resolves to —
+# distinct from the target ID itself for "hinglish", which is Hindi (`hi`)
+# until the later romanisation step relabels it.
 _TARGET_TO_CODE = {"hi": "hi", "hinglish": "hi", "es": "es"}
 
 
 def _translate_segments_to(segments: list[dict], src_code: str, to_code: str) -> list[dict]:
     """Get `segments` into `to_code`, pivoting through English when it must.
 
-    Argos's coverage into a given language is uneven — Hindi has exactly ONE
-    package (`en→hi`), Spanish has two (`en→es`, `pt→es`) — so English is
-    routinely not a shortcut, it is the only road in. The direct attempt is
-    tried first anyway (a user may have side-loaded a package, or the source
-    happens to be one of the rarer direct pairs like pt→es), then the two-hop
-    src→en→to_code, and only then do we refuse. Refusing loudly matters: the
+    MADLAD-400 (ai/translate.py) is a single universal model that handles
+    almost any language pair directly, unlike Argos Translate (the previous
+    backend), whose coverage into a given language was uneven enough that a
+    two-hop pivot through English was routinely the ONLY road in for Hindi
+    (exactly one direct package: en→hi). The direct attempt is still tried
+    first — it's the common case now, not a rare shortcut — with the two-hop
+    src→en→to_code kept as a fallback for whatever the model handles poorly
+    or not at all, and only then do we refuse. Refusing loudly matters: the
     alternative is a caption track that silently stays in the source language
     while the UI claims it produced `to_code`.
 
@@ -1639,21 +1670,71 @@ def _translate_segments_to(segments: list[dict], src_code: str, to_code: str) ->
     a viewer would actually see. Dropping `words` makes `cues_from_segments`
     fall through to its "no word timing" branch, synthesizing even-spaced
     pseudo-words from the (correctly) translated `.text` instead.
+
+    **Resegments at real pauses BEFORE translating** (`caption_format.
+    resegment_at_pauses`). Fixing the text without also fixing this was the very
+    next bug in the same path: a raw Whisper/batched segment can hold far more
+    real time than it holds speech — measured on a real clip, one segment ran
+    131.34s-176.16s (44.8s) with a 14.6s silent gap inside it (a scene cut
+    mid-dialogue) — and once translation strips word timing, the pseudo-word
+    fallback above spreads the translated text EVENLY across that whole span,
+    including the dead air. Reported as "captions... doesn't match the speech",
+    immediately after the words-stripping fix made the text correct for the
+    first time and let this timing defect actually reach the screen for the
+    first time too. Splitting on the ORIGINAL word timestamps — before they are
+    thrown away — anchors each translated piece to where it was actually
+    spoken; translating more, smaller pieces costs a little cross-phrase fluency
+    from Argos, which is a far smaller defect than a caption sitting on screen
+    through 14 seconds of silence. `resegment_at_pauses` splits on real SILENCE
+    only, never on sentence punctuation — see its own docstring for why an
+    earlier version of this fix that also split on "." orphaned single words
+    into their own translation unit, which Argos then echoed back untranslated.
+
+    **Falls back to the pre-translation text for any chunk the translator
+    returns blank** (`_fill_empty`, below). Without it, one degenerate
+    translation silently erases that dialogue's caption entirely — a distinct
+    bug from the timing one above, caught the same way: by reading the actual
+    rendered text, not just the routing metadata. Kept as a defensive
+    backstop across the Argos→MADLAD-400 backend swap even though it was
+    never observed with MADLAD — cheap when it never fires.
     """
     from ..ai.translate import translate_segments
+    from ..ingest.caption_format import resegment_at_pauses
 
     def _strip_words(segs: list[dict]) -> list[dict]:
         return [{k: v for k, v in s.items() if k != "words"} for s in segs]
 
+    def _fill_empty(original: list[dict], translated: list[dict]) -> list[dict]:
+        """A dialogue must not vanish because ONE chunk's translation came back
+        blank. `cues_from_segments`'s no-word-timing fallback silently drops a
+        segment whose `.text` is empty/whitespace (its synthesized pseudo-word
+        list filters down to nothing) — so a single degenerate translation
+        would erase that line's caption entirely with no error anywhere, the
+        exact "some dialogues don't get captions" failure mode. Falling back to
+        the PRE-translation text keeps the line on screen — in the wrong
+        language for that one chunk, which is a far smaller defect than a
+        silent gap where speech is happening on screen with nothing under it.
+        """
+        out = []
+        for orig, tr in zip(original, translated):
+            text = (tr.get("text") or "").strip()
+            out.append(tr if text else {**tr, "text": orig.get("text", "")})
+        return out
+
+    segments = resegment_at_pauses(segments)
+
     if src_code == "en":
-        return _strip_words(translate_segments(segments, from_code="en", to_code=to_code))
+        translated = translate_segments(segments, from_code="en", to_code=to_code)
+        return _strip_words(_fill_empty(segments, translated))
     try:
-        return _strip_words(translate_segments(segments, from_code=src_code, to_code=to_code))
+        translated = translate_segments(segments, from_code=src_code, to_code=to_code)
+        return _strip_words(_fill_empty(segments, translated))
     except Exception:
         pass
     try:
         via_en = translate_segments(segments, from_code=src_code, to_code="en")
-        return _strip_words(translate_segments(via_en, from_code="en", to_code=to_code))
+        translated = translate_segments(via_en, from_code="en", to_code=to_code)
+        return _strip_words(_fill_empty(via_en, translated))
     except Exception as e:
         label = _TARGET_LABELS.get(to_code, to_code)
         raise RuntimeError(
@@ -1693,16 +1774,18 @@ def auto_caption(store: EDLStore, args: dict, *,
                 transcribing and then translating.
       hi        Whisper cannot translate INTO Hindi (English is its only
                 target), so non-Hindi audio goes through Whisper→English and
-                then Argos Translate en→hi locally. Hindi audio skips all of
-                that and is simply transcribed.
+                then MADLAD-400 (ai.translate, local — see that module) en→hi.
+                Hindi audio skips all of that and is simply transcribed.
       hinglish  Whatever produces Hindi, then `ai.romanize` converts the
                 Devanagari to Latin. Note Whisper already writes English
                 loanwords in Latin when transcribing Hindi, so a code-switched
                 line converts cleanly.
       es        Same shape as hi: non-Spanish audio goes through Whisper→English
-                then Argos en→es; Spanish audio is simply transcribed. Argos
-                also publishes pt→es directly, tried first for a Portuguese
-                source, but every other language still pivots through English.
+                then MADLAD en→es; Spanish audio is simply transcribed. A
+                direct pt→es (or most other direct pairs) is tried first for a
+                non-English source — MADLAD handles far more pairs directly
+                than the Argos Translate backend this replaced ever could —
+                with the English pivot as the fallback, not the only road in.
 
     `set_progress` / `cancel_event` are injected by `dispatch()` when the caller
     runs this as a background job (main.ASYNC_DISPATCH_TOOLS). large-v3 on CPU
@@ -3631,8 +3714,9 @@ def object_erase(store: EDLStore, args: dict) -> dict:
 
 
 def translate_captions(store: EDLStore, args: dict) -> dict:
-    """Translate the existing captions track to a target language via Argos
-    Translate (local, no cloud). Replaces each caption clip's text in place.
+    """Translate the existing captions track to a target language via
+    MADLAD-400 (local, no cloud — see ai/translate.py). Replaces each
+    caption clip's text in place.
 
     Args:
       target_lang: ISO code (e.g. 'hi', 'es', 'fr', 'en'). Default 'hi'.
@@ -3653,10 +3737,13 @@ def translate_captions(store: EDLStore, args: dict) -> dict:
         return {"summary": f"source and target both '{source}'; nothing to do",
                 "translated": 0}
 
-    try:
-        from ..ai.translate import translate_text
-    except ImportError as e:
-        raise RuntimeError(f"argostranslate not installed: {e}")
+    # ai/translate.py's only module-level imports are stdlib + platformutil —
+    # ctranslate2/sentencepiece/huggingface_hub are lazy-imported inside the
+    # functions that need them, so there's nothing to catch an ImportError
+    # for here. A real failure (missing deps, no network for the first-use
+    # ~3GB model download) surfaces from translate_text() itself with a
+    # message naming the actual cause, caught by the per-clip try/except below.
+    from ..ai.translate import translate_text
 
     n = 0
     for c in cap.clips:
@@ -3667,8 +3754,9 @@ def translate_captions(store: EDLStore, args: dict) -> dict:
             c.text = new_text
             n += 1
         except Exception as e:
-            # Stop the loop on the first failure so we don't waste time on a
-            # bad install / missing language pack.
+            # Stop the loop on the first failure so we don't waste time
+            # translating the rest of a track when the model itself is the
+            # problem (e.g. no network for the first-use model download).
             raise RuntimeError(f"translate failed at clip {n}: {e}")
 
     if cap.config:

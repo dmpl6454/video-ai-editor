@@ -213,10 +213,13 @@ FEATURES: list[Feature] = [
             ["tts_voiceover"], lambda: _has("piper"),
             fix=f"`{PIP_EXTRA}` (installs piper-tts)"),
     Feature("translate", "Caption translation",
-            ["translate_captions"], lambda: _has("argostranslate"),
-            fix="`uv add argostranslate`",
-            note="Language packs download on first use.",
-            in_packaged_app=False),
+            ["translate_captions"], lambda: _has("ctranslate2", "sentencepiece"),
+            fix=f"`{PIP_EXTRA}` (installs ctranslate2 + sentencepiece)",
+            note="Downloads a ~3GB MADLAD-400 translation model on first use. "
+                 "Needs no torch, unlike the Argos-based translator this "
+                 "replaced (which pulled in stanza for sentence splitting) — "
+                 "so unlike before, this is genuinely available in BOTH "
+                 "packaged builds, including macOS's torch-excluded one."),
     Feature("stabilize", "Video stabilization",
             ["stabilize"], _binary("stabilize", "available"),
             fix="install an ffmpeg built with libvidstab "

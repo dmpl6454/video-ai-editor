@@ -358,40 +358,69 @@ def test_spanish_target_accepts_aliases(tmp_path, spy):
         assert out["language"] == "es", f"alias {alias!r} did not normalize to es"
 
 
-def test_the_spec_bundles_argostranslate():
-    """`ai/translate.py` loads Argos via `importlib.import_module("argostranslate")`
-    — a STRING, not a static `import argostranslate` — so PyInstaller's analysis
-    has no way to discover it needs bundling. The packaged exe raised
-    `ModuleNotFoundError: No module named 'argostranslate'` the first time any
-    target actually exercised the translate-via-Argos path (every earlier
-    Hindi/Hinglish test happened to use already-Hindi-spoken audio, so the
-    translation branch was never reached) — meaning EVERY translated target
-    (hi, hinglish, es) was broken in the packaged app for any non-matching
-    spoken language, the exact "third-language video" scenario this feature
-    exists for. No dev path notices this (argostranslate is a plain pip
-    package there); only a real frozen build does, so assert it rather than
-    trusting review to catch a dynamic-import gap again.
+def test_neither_build_excludes_madlads_dependencies():
+    """`ai/translate.py` (MADLAD-400 via CTranslate2) replaced Argos Translate.
+    Argos needed an explicit `collect_submodules`/`--collect-submodules` on
+    BOTH build paths because it loaded itself via a STRING
+    (`importlib.import_module`), invisible to PyInstaller's static analysis —
+    that whole class of bug does not apply here, since `ctranslate2` /
+    `sentencepiece` / `huggingface_hub` are plain static `import` statements
+    (`ctranslate2` in particular is already proven bundling-safe: faster-whisper
+    has always statically imported it for transcription). What CAN still break
+    this is simpler and worth guarding directly: neither build's exclude list
+    accidentally drops one of these three modules.
     """
     from pathlib import Path
-    spec = Path(__file__).resolve().parents[1] / "Video AI Editor.spec"
-    text = spec.read_text(encoding="utf-8")
-    assert "collect_submodules('argostranslate')" in text
+    root = Path(__file__).resolve().parents[1]
+    spec_text = (root / "Video AI Editor.spec").read_text(encoding="utf-8")
+    mac_text = (root / "build_app.sh").read_text(encoding="utf-8")
+    for mod in ("ctranslate2", "sentencepiece", "huggingface_hub"):
+        assert f"'{mod}'" not in spec_text.split("excludes=[")[1].split("]")[0], (
+            f"{mod} must not be excluded from the Windows build")
+        assert f"--exclude-module {mod}" not in mac_text, (
+            f"{mod} must not be excluded from the macOS build")
 
 
-def test_the_macos_build_script_also_bundles_argostranslate():
-    """`build_app.sh` does NOT use Video AI Editor.spec — PyInstaller's CLI mode
-    it invokes there regenerates/overwrites the .spec as a side effect, so the
-    two build paths are independent (see CLAUDE.md). The .spec getting the
-    `collect_submodules('argostranslate')` fix above does nothing for a macOS
-    build; this pins the same fix into the actual macOS build path so this
-    exact gap can't reappear on the one platform we can't test directly.
+def test_huggingface_hub_is_explicitly_collected_on_both_builds():
+    """Found while verifying the MADLAD-400 swap: `huggingface_hub` is a
+    plain STATIC `import huggingface_hub` in ai/translate.py (and in
+    faster_whisper/utils.py, for Whisper's own model auto-download) — but it
+    was silently ABSENT from the built Windows `dist/` tree, verified by
+    listing the actual bundled directories, not by reading the .spec and
+    assuming. The likely cause: huggingface_hub's own `__init__.py`
+    lazy-loads submodules via `__getattr__` rather than eager imports, so
+    `huggingface_hub.snapshot_download` is a runtime attribute resolution
+    invisible to PyInstaller's static analysis — the same blind-spot CLASS as
+    Argos's string-based import, a different mechanism producing it. This
+    also means faster-whisper's OWN model auto-download was silently broken
+    in every previous packaged build whenever a model wasn't already cached —
+    a pre-existing gap this only surfaced because MADLAD's on-demand download
+    exercises the identical call and was actually tested end-to-end in the
+    frozen exe, which the already-cached-model dev/CI path never does.
     """
     from pathlib import Path
-    script = Path(__file__).resolve().parents[1] / "build_app.sh"
-    text = script.read_text(encoding="utf-8")
-    assert "--collect-submodules argostranslate" in text
-    # Must not be sitting in the (unrelated) --exclude-module list either.
-    assert "--exclude-module argostranslate" not in text
+    root = Path(__file__).resolve().parents[1]
+    spec_text = (root / "Video AI Editor.spec").read_text(encoding="utf-8")
+    mac_text = (root / "build_app.sh").read_text(encoding="utf-8")
+    assert "collect_submodules('huggingface_hub')" in spec_text
+    assert "--collect-submodules huggingface_hub" in mac_text
+
+
+def test_no_argostranslate_bundling_directive_survives():
+    """Argos is gone — a leftover `collect_submodules('argostranslate')` or
+    `--collect-submodules argostranslate` would be dead weight bundling a
+    package this app no longer imports at all. (Historical mentions in
+    comments explaining WHY there's no such directive anymore are fine and
+    expected — this only checks for the actual bundling directives, and that
+    the dependency itself is gone from pyproject.toml.)"""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    spec_text = (root / "Video AI Editor.spec").read_text(encoding="utf-8")
+    mac_text = (root / "build_app.sh").read_text(encoding="utf-8")
+    assert "collect_submodules('argostranslate')" not in spec_text
+    assert "--collect-submodules argostranslate" not in mac_text
+    pyproject_text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"argostranslate' not in pyproject_text
 
 
 def test_translate_segments_to_strips_stale_word_level_timing(monkeypatch):
@@ -421,6 +450,43 @@ def test_translate_segments_to_strips_stale_word_level_timing(monkeypatch):
     assert "words" not in out[0], (
         "stale word-level timing survived translation — cues_from_segments "
         "will render the OLD language's words, ignoring the translated text")
+
+
+def test_translate_segments_to_falls_back_to_original_text_when_translation_is_blank():
+    """A degenerate Argos response (empty/whitespace text) must not silently
+    erase that dialogue's caption. `cues_from_segments`'s no-word-timing
+    fallback drops a blank-text segment's synthesized pseudo-words entirely —
+    so with no safety net here, one bad translation call = one missing
+    caption with no error anywhere, which is the "some dialogues don't get
+    captions" failure mode. Falling back to the pre-translation text keeps the
+    line on screen (in the wrong language for just that chunk) instead of
+    vanishing it.
+    """
+    import video_ai_editor.ai.translate as TR
+
+    def fake_translate_segments(segments, from_code="en", to_code="hi"):
+        # First segment translates fine; second comes back blank.
+        out = []
+        for i, s in enumerate(segments):
+            out.append({**s, "text": "" if i == 1 else "अनुवाद"})
+        return out
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(TR, "translate_segments", fake_translate_segments)
+    try:
+        segs = [
+            {"start": 0.0, "end": 1.0, "text": "translates fine",
+             "words": [{"start": 0.0, "end": 1.0, "word": "translates fine"}]},
+            {"start": 2.0, "end": 3.0, "text": "goes blank",
+             "words": [{"start": 2.0, "end": 3.0, "word": "goes blank"}]},
+        ]
+        out = D._translate_segments_to(segs, "en", "hi")
+    finally:
+        monkeypatch.undo()
+    assert out[0]["text"] == "अनुवाद"
+    # The blank one falls back to the ORIGINAL English text rather than
+    # disappearing — better a stray English line than a silent caption gap.
+    assert out[1]["text"] == "goes blank"
 
 
 def test_hinglish_is_not_accidentally_confused_with_spanish():

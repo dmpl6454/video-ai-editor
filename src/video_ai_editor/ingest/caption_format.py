@@ -90,6 +90,99 @@ def _split_into_phrases(words: list[dict], gap_break: float) -> list[list[dict]]
     return phrases
 
 
+def _split_on_silence(words: list[dict], gap_break: float) -> list[list[dict]]:
+    """Cut the stream ONLY where the speaker actually paused — never on
+    sentence-final punctuation alone.
+
+    This is `_split_into_phrases`'s sibling, deliberately narrower, and exists
+    only for `resegment_at_pauses`. A CAPTION boundary and a TRANSLATION-UNIT
+    boundary want opposite things: a cue should end on a sentence so it reads
+    cleanly, but a chunk handed to Argos should stay as LARGE and complete as
+    the real pauses allow, because a small local NMT model translates a short,
+    context-free fragment far worse than a full sentence — often not at all.
+
+    Reusing `_split_into_phrases` here (its `_SENT_END` check fires the instant
+    a word ends in ".", regardless of how small the following gap is) is what
+    orphaned single words in practice: "Say my name. I don't have a clue" has
+    only a 0.2s gap after "name." — real speech, not a pause — yet the period
+    alone was enough to cut "I" away from "don't have a clue" into its own
+    one-word chunk. Measured against the real translator: "I don't have a
+    clue" translates to a coherent 'मैं नहीं हूँ'; "I" alone translates to
+    'I' — Argos echoes an isolated pronoun back untouched. So the sentence-
+    punctuation split didn't just risk quality, it manufactured the very
+    English-leftover-in-a-Hindi-caption defect this whole path exists to fix,
+    right next to the timing fix that was supposed to prevent it.
+    """
+    phrases: list[list[dict]] = []
+    cur: list[dict] = []
+    for i, w in enumerate(words):
+        if not _w_text(w):
+            continue
+        cur.append(w)
+        if _gap_after(words, i) >= gap_break:
+            phrases.append(cur)
+            cur = []
+    if cur:
+        phrases.append(cur)
+    return phrases
+
+
+def resegment_at_pauses(segments: list[dict], gap_break: float = 0.35) -> list[dict]:
+    """Split each segment's OWN word timing into finer segments at real pauses.
+
+    Exists for the translate-pivot caption path (`dispatch._translate_segments_to`)
+    to call BEFORE translating: a Whisper/batched-decode segment can span far
+    more real time than it has actual speech in it — measured on a real clip, one
+    segment ran 131.34s-176.16s (44.8s) but contained a 14.6s silent gap with no
+    words at all (a scene cut mid-dialogue). Once translation strips word-level
+    timing (see `_translate_segments_to`'s docstring — a translation has no 1:1
+    word alignment to remap), `cues_from_segments`'s fallback spreads
+    pseudo-words EVENLY across a segment's full [start,end] span. Evenly across
+    44.8s of which 14.6s is dead air puts translated text on screen well into a
+    scene where nobody is speaking — reported as "captions... doesn't match the
+    speech", right after the words-stripping fix landed and made the TEXT
+    correct for the first time; the fallback's timing model was never exercised
+    end-to-end against a real long/gappy segment before that.
+
+    Splitting BEFORE translation (not after) is what makes this fixable at all:
+    the real word timestamps that reveal the gaps only exist pre-translation, and
+    each resulting piece is translated independently, so per-piece timing stays
+    anchored to where that piece was actually spoken. Segments with no `words`
+    (already translated, or an imported .srt) pass through untouched — there is
+    no finer timing to recover from those.
+
+    **Splits on real silence ONLY** (`_split_on_silence`), never on sentence
+    punctuation the way the caption-cue splitter does. The first version of
+    this fix reused `_split_into_phrases` — right for deciding where a CAPTION
+    should end, wrong for deciding how much text to hand the TRANSLATOR at
+    once. A period ends a phrase even across a 0.2s gap that is just ordinary
+    speech, and cutting there orphaned single words ("I" split off from "I
+    don't have a clue") into their own translation unit — which a small local
+    NMT model frequently just echoes back untranslated, since it has no
+    context to work with. Splitting on real pauses only keeps whole sentences
+    (and short sentence RUNS) together for translation, and still guarantees no
+    chunk straddles genuine dead air — the actual timing defect this function
+    exists to fix.
+    """
+    out: list[dict] = []
+    for seg in segments:
+        words = [w for w in (seg.get("words") or []) if _w_text(w)]
+        if not words:
+            out.append(seg)
+            continue
+        for phrase in _split_on_silence(words, gap_break):
+            if not phrase:
+                continue
+            out.append({
+                **seg,
+                "start": float(phrase[0]["start"]),
+                "end": float(phrase[-1]["end"]),
+                "text": _join(phrase),
+                "words": phrase,
+            })
+    return out
+
+
 def _best_split_index(ws: list[dict], max_chars_total: int, max_dur: float) -> int:
     """Where to cut a phrase that will not fit in one cue.
 

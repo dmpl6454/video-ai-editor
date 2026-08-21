@@ -53,17 +53,30 @@ fi
 echo "$BUILD_SHA" > BUILD_ID
 echo "[build] BUILD_ID=$BUILD_SHA"
 
-# ai/translate.py loads argostranslate via `importlib.import_module("argostranslate")`
-# — a STRING, invisible to PyInstaller's static analysis — so without an explicit
-# collect it is silently absent from the bundle and every translated caption
-# target (Hindi/Hinglish/Spanish, whenever the spoken language doesn't already
-# match) fails at runtime with `ModuleNotFoundError: No module named
-# 'argostranslate'`. This build script does NOT use Video AI Editor.spec (see
-# CLAUDE.md — PyInstaller's CLI mode here regenerates/overwrites the .spec as a
-# side effect, so the two build paths are independent and a fix in one is
-# invisible to the other), which is exactly how this gap was found: the .spec
-# got this same fix first, verified on the Windows build, and this line was
-# still missing here.
+# ai/translate.py (MADLAD-400 via CTranslate2) replaced Argos Translate — see
+# the module's own docstring and Video AI Editor.spec for the history. Argos
+# needed an explicit collect-submodules flag for its own package name here because it
+# loaded itself via a STRING (`importlib.import_module`), invisible to
+# PyInstaller's static analysis on EITHER build path (this script does NOT
+# use Video AI Editor.spec — CLAUDE.md — so the two needed the fix
+# independently, and this one was found missing after the .spec already had
+# it). `ctranslate2`/`sentencepiece` are plain static imports and need no
+# equivalent collect. `huggingface_hub` DOES, despite also being a plain
+# static import: it lazy-loads its own submodules via `__getattr__` rather
+# than eager imports, so `huggingface_hub.snapshot_download` is a runtime
+# attribute resolution invisible to PyInstaller's static walk — found by
+# diffing the Windows `dist/` tree (the .spec fix landed first; this line
+# mirrors it here for the same reason the argostranslate collect had to be
+# independently added to both paths). This one is NOT Argos-specific
+# clean-up — it also fixes faster-whisper's OWN model auto-download
+# (`faster_whisper/utils.py` calls the identical `huggingface_hub.
+# snapshot_download`), silently broken in every previous packaged build
+# whenever a model wasn't already cached. This IS the one build (macOS) that
+# additionally excludes torch below, and Argos's removal is what makes
+# translation actually reachable here at all: Argos pulled in `stanza`
+# (PyTorch-based) for sentence splitting, so on THIS build specifically the
+# old "translate" feature was excluded transitively even though nothing
+# declared it so. MADLAD needs no torch.
 uv run pyinstaller \
   --name "Video AI Editor" \
   --windowed \
@@ -81,7 +94,7 @@ uv run pyinstaller \
   --hidden-import "uvicorn.logging" \
   --hidden-import "video_ai_editor.main" \
   --collect-submodules video_ai_editor \
-  --collect-submodules argostranslate \
+  --collect-submodules huggingface_hub \
   --collect-data webview \
   --exclude-module torch \
   --exclude-module torchcodec \
