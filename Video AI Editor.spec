@@ -34,19 +34,28 @@ datas += collect_data_files('open_clip')
 datas += collect_data_files('faster_whisper')
 hiddenimports += collect_submodules('video_ai_editor')
 hiddenimports += collect_submodules('open_clip')
-# ai/translate.py loads this via `importlib.import_module("argostranslate")` —
-# a STRING, not a static `import argostranslate` — so PyInstaller's analysis
-# has no way to discover it needs bundling at all. The base case failed with
-# `ModuleNotFoundError: No module named 'argostranslate'` at runtime, found by
-# actually exercising the "translate via Argos" code path inside the frozen
-# exe for the first time (every earlier Hindi/Hinglish test happened to use
-# already-Hindi-spoken audio, so `caption_lang` already matched the target and
-# the translation branch was never reached — this bug predates and is
-# independent of adding the Spanish target, which just happened to be the
-# first target tested against non-matching spoken audio in the packaged app).
-# Same failure class as the nvidia-cublas DLL gap above: a dynamic import
-# PyInstaller's static analysis cannot trace.
-hiddenimports += collect_submodules('argostranslate')
+# ai/translate.py (MADLAD-400 via CTranslate2) replaced Argos here — Argos
+# needed an explicit collect_submodules line for its own package name that
+# used to sit right here, because it loaded itself via a STRING
+# (`importlib.import_module("argostranslate")`), invisible to PyInstaller's
+# static analysis. `ctranslate2` and `sentencepiece` turned out fine as plain
+# static imports (verified: both directories land in the built `_internal`
+# tree; `ctranslate2` was already proven safe via faster-whisper). But
+# `huggingface_hub` did NOT — verified by diffing the built `dist/` tree
+# (same method the nvidia-cublas fix below used), it was silently ABSENT
+# despite `ai/translate.py` and `faster_whisper/utils.py` both doing a plain
+# top-level `import huggingface_hub`. The likely cause: huggingface_hub's own
+# `__init__.py` lazy-loads its submodules via `__getattr__` rather than
+# eager imports, so `huggingface_hub.snapshot_download` is a runtime
+# attribute-resolution PyInstaller's static AST walk cannot see — the same
+# class of blind spot as Argos's string-based import, just a different
+# mechanism producing it. This means **faster-whisper's own Whisper-model
+# auto-download was ALSO silently broken in every previous packaged build**
+# whenever a model wasn't already cached — a pre-existing gap this only
+# surfaced because MADLAD's on-demand download exercises the identical call
+# and was actually tested end-to-end in the frozen exe, which the
+# already-cached-model dev/CI path never does.
+hiddenimports += collect_submodules('huggingface_hub')
 
 binaries = []
 if sys.platform == "win32":

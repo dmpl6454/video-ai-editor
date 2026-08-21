@@ -313,7 +313,13 @@ def test_ripple_delete_collapses_MULTIPLE_orphaned_captions_to_ONE_not_a_stack()
 def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
     """'First' means first in track order (== earliest original start for
     auto_caption's append-in-order construction), not an arbitrary survivor —
-    a deterministic choice matters for reproducible behavior."""
+    a deterministic choice matters for reproducible behavior.
+
+    v1 keeps a SECOND clip (c2) after the delete on purpose: deleting the
+    only remaining v1 clip is now its own scenario (see the "v1 fully empty"
+    section below), where the dedup-to-one-stub behavior this test is about
+    no longer applies — everything gets cleared instead.
+    """
     tmp = tempfile.mkdtemp()
     src = str(Path(tmp) / "nonexistent" / "x.mp4")
     edl = EDL(
@@ -321,6 +327,7 @@ def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
         tracks=[
             Track(id="v1", type="video", clips=[
                 Clip(src=src, in_=0, out=10, start=0, id="c1"),
+                Clip(src=src, in_=0, out=5, start=10, id="c2"),
             ]),
             Track(id="captions", type="captions", z=13, clips=[
                 TextClip(id="first", text="first", start=1.0, end=2.0,
@@ -338,11 +345,29 @@ def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
     assert [c.id for c in caps] == ["first"]
 
 
-def test_a_single_orphaned_clip_still_collapses_exactly_as_before():
-    """A lone orphaned overlay (the case the original tests above cover) must
-    be completely unaffected by the dedup — it is not a 'duplicate' of
-    anything, so it survives exactly as it always did."""
-    store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=4.0, sticker_end=5.0)
+def test_a_single_orphaned_clip_still_collapses_when_v1_stays_non_empty():
+    """A lone orphaned overlay must be completely unaffected by the dedup — it
+    is not a 'duplicate' of anything, so it survives exactly as it always did
+    — PROVIDED v1 still has other content afterward. (Deleting v1's only clip
+    is the "v1 fully empty" scenario below, which clears overlays instead.)
+    """
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=10, start=0, id="c1"),
+                Clip(src=src, in_=0, out=5, start=10, id="c2"),
+            ]),
+            Track(id="stickers", type="sticker", z=11, clips=[
+                Sticker(id="s1", src=src, start=4.0, end=5.0, transform=Transform(x=100, y=100)),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
     dispatch(store, "ripple_delete", {"clip_id": "c1"})
     remaining = store.edl.get_track("stickers").clips
     assert len(remaining) == 1
@@ -352,7 +377,8 @@ def test_a_single_orphaned_clip_still_collapses_exactly_as_before():
 def test_dedup_is_per_track_not_global():
     """Two DIFFERENT overlay tracks each orphaned by the same deletion must
     each keep their own one survivor — the sticker track's collapse must not
-    suppress the caption track's, or vice versa."""
+    suppress the caption track's, or vice versa. v1 keeps a second clip so
+    this stays a dedup test rather than a v1-fully-empty one."""
     tmp = tempfile.mkdtemp()
     src = str(Path(tmp) / "nonexistent" / "x.mp4")
     edl = EDL(
@@ -360,6 +386,7 @@ def test_dedup_is_per_track_not_global():
         tracks=[
             Track(id="v1", type="video", clips=[
                 Clip(src=src, in_=0, out=10, start=0, id="c1"),
+                Clip(src=src, in_=0, out=5, start=10, id="c2"),
             ]),
             Track(id="stickers", type="sticker", z=11, clips=[
                 Sticker(id="s1", src=src, start=2.0, end=3.0, transform=Transform(x=100, y=100)),
@@ -379,6 +406,127 @@ def test_dedup_is_per_track_not_global():
     dispatch(store, "ripple_delete", {"clip_id": "c1"})
     assert len(store.edl.get_track("stickers").clips) == 1
     assert len(store.edl.get_track("captions").clips) == 1
+
+
+# ---------- v1 fully empty: overlays are CLEARED, not collapsed to a stub ---
+#
+# _ripple_overlays' one-stub-per-track rule is right when v1 still has SOME
+# content — there's a case for not silently vanishing a caption while its
+# neighbours are still on screen. But once v1 has NOTHING left, that stub
+# itself becomes the bug: a `[0, 0.1)` caption clip still has a non-zero
+# `.end`, `EDL.recompute_duration()` takes the max over every track, so that
+# lone stub kept `edl.duration` truthy — Preview.tsx's `!edl?.duration`
+# empty-state check never fired, and a full-screen caption rendered over a
+# black frame instead of the "drop a video" placeholder.
+
+def test_ripple_delete_of_the_only_v1_clip_clears_captions():
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=10, start=0, id="c1"),
+            ]),
+            Track(id="captions", type="captions", z=13, clips=[
+                TextClip(id="cap1", text="hello", start=1.0, end=2.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    assert store.edl.get_track("v1").clips == []
+    assert store.edl.get_track("captions").clips == []
+    # No lingering stub to hold the timeline open.
+    assert store.edl.duration == 0.0
+
+
+def test_ripple_delete_of_the_only_v1_clip_clears_stickers_and_text_too():
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=10, start=0, id="c1"),
+            ]),
+            Track(id="stickers", type="sticker", z=11, clips=[
+                Sticker(id="s1", src=src, start=2.0, end=3.0, transform=Transform(x=100, y=100)),
+            ]),
+            Track(id="text", type="text", z=10, clips=[
+                TextClip(id="t1", text="HELLO", start=1.0, end=2.0,
+                          transform=Transform(x=100, y=100), role="super"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    assert store.edl.get_track("stickers").clips == []
+    assert store.edl.get_track("text").clips == []
+
+
+def test_cut_range_that_removes_the_entire_v1_clip_clears_captions():
+    """cut_range spanning a v1 clip's whole footprint is functionally a
+    delete — it must clear overlays the same way ripple_delete does."""
+    store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=1.0, sticker_end=2.0)
+    dispatch(store, "cut_range", {"track": "v1", "start": 0.0, "end": 10.0})
+    assert store.edl.get_track("v1").clips == []
+    assert store.edl.get_track("stickers").clips == []
+
+
+def test_overlay_parked_past_the_deleted_footage_survives_even_though_v1_is_now_empty():
+    """The critical boundary case: an overlay deliberately moved PAST all v1
+    content (e.g. to make room for a not-yet-added clip) is NOT orphaned by
+    deleting that content — it just shifts left like normal — and must
+    survive intact even though v1 ends up with zero clips. The full-wipe
+    version of this fix broke exactly this (a real shorten-then-replace edit
+    sequence, pinned separately in test_overlay_move_span.py); the fix is
+    scoped to clips _ripple_overlays actually collapses to a stub, not every
+    overlay that happens to still exist when v1 goes empty.
+    """
+    tmp = tempfile.mkdtemp()
+    src = str(Path(tmp) / "nonexistent" / "x.mp4")
+    edl = EDL(
+        canvas=Canvas(w=1080, h=1920, fps=30),
+        tracks=[
+            Track(id="v1", type="video", clips=[
+                Clip(src=src, in_=0, out=6, start=0, id="c1"),
+            ]),
+            Track(id="captions", type="captions", z=13, clips=[
+                # Parked at t=60 — well past c1's [0,6) span — anticipating a
+                # longer clip to be added later.
+                TextClip(id="parked", text="hello", start=60.0, end=61.0,
+                          transform=Transform(x=100, y=100), role="caption"),
+            ]),
+        ],
+    )
+    edl.recompute_duration()
+    (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
+    store = EDLStore(Path(tmp))
+    dispatch(store, "ripple_delete", {"clip_id": "c1"})
+    assert store.edl.get_track("v1").clips == []
+    caps = store.edl.get_track("captions").clips
+    assert len(caps) == 1, "the parked caption must survive — it was never orphaned"
+    # Shifted left by the removed 6s, same as _ripple_overlays always did.
+    assert abs(caps[0].start - 54.0) < 1e-6
+    assert abs(caps[0].end - 55.0) < 1e-6
+
+
+def test_v1_still_having_clips_does_not_clear_overlays():
+    """The gate is len(v1.clips) == 0 — v1 still holding content (a cut out
+    of the MIDDLE splits one clip into two survivors) keeps the ordinary
+    collapse-to-a-stub behavior, not the new full clear."""
+    store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=4.0, sticker_end=5.0)
+    dispatch(store, "cut_range", {"track": "v1", "start": 3.0, "end": 6.0})
+    assert len(store.edl.get_track("v1").clips) == 2  # cutting the middle splits, doesn't empty
+    # The sticker collapsed to the cut point per the ordinary rule, not cleared.
+    remaining = store.edl.get_track("stickers").clips
+    assert len(remaining) == 1
 
 
 # ---------- text clips ripple the same way ----------

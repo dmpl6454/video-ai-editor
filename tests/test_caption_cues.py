@@ -11,7 +11,7 @@ measured before and after the phrase-first rewrite:
 import pytest
 
 from video_ai_editor.ingest.caption_format import (
-    Cue, build_cues, cues_from_segments,
+    Cue, build_cues, cues_from_segments, resegment_at_pauses,
 )
 
 
@@ -193,3 +193,92 @@ def test_dense_real_world_speech_produces_readable_cues():
     # Every word survives, in order — captions must not drop speech.
     joined = " ".join(c.text.replace("\n", " ") for c in cues)
     assert joined.split() == [w["word"] for w in ws]
+
+
+# --- resegment_at_pauses: the translate-pivot sync bug ---------------------
+#
+# Reproduces a real measured clip: one Whisper/batched-decode segment spanning
+# 131.34s-176.16s (44.8s) with a 14.6s silent gap inside it (a scene cut
+# mid-dialogue). Translation strips word timing (see
+# dispatch._translate_segments_to), and cues_from_segments' fallback then
+# spreads pseudo-words EVENLY across a segment's full span — including 14.6s
+# of dead air — which is what "captions don't match the speech" measured as.
+# resegment_at_pauses must run BEFORE translation discards the real timing.
+
+def _bb_segment() -> dict:
+    ws = (
+        words([("Say", 131.34, 131.76), ("my", 131.76, 131.9), ("name.", 131.9, 132.16),
+               ("I", 132.36, 132.8)])
+        # 3.04s real gap
+        + words([("don't", 135.84, 135.98), ("have", 135.98, 136.04), ("a", 136.04, 136.1),
+                  ("clue", 136.1, 136.56)])
+        # 14.59s real gap — the scene cut
+        + words([("Say", 163.61, 164.05), ("my", 164.05, 164.41), ("name.", 164.41, 164.99)])
+        # 10.39s real gap
+        + words([("Goddamn", 175.38, 175.82), ("right.", 175.82, 176.16)])
+    )
+    text = " ".join(w["word"] for w in ws)
+    return {"start": 131.34, "end": 176.16, "text": text, "words": ws}
+
+
+def test_resegment_splits_a_long_segment_at_its_real_silent_gaps():
+    out = resegment_at_pauses([_bb_segment()], gap_break=0.35)
+    # 4, not 5: splitting is gap-only now (see test below) — "Say my name. I"
+    # stays ONE chunk because the 0.2s gap after "name." is ordinary speech,
+    # not a pause. The split lands after "I" (3.04s real gap), after "clue"
+    # (14.59s — the scene cut), and after the second "name." (10.39s).
+    assert len(out) == 4
+    assert [round(s["start"], 2) for s in out] == \
+        [131.34, 135.84, 163.61, 175.38]
+    assert [round(s["end"], 2) for s in out] == \
+        [132.8, 136.56, 164.99, 176.16]
+    # No piece's span reaches into the gap it was split away from.
+    for a, b in zip(out, out[1:]):
+        assert a["end"] <= b["start"]
+
+
+def test_resegment_does_not_split_on_sentence_punctuation_alone():
+    """The actual regression in the first version of this fix: reusing the
+    caption-cue splitter (which ends a phrase on '.' regardless of gap size)
+    cut "I" away from "don't have a clue" over a mere 0.2s gap — ordinary
+    speech, not a pause — producing a context-free one-word translation unit.
+    Real translator behaviour measured directly: "I don't have a clue"
+    translates to a coherent 'मैं नहीं हूँ'; "I" alone comes back as literally
+    'I', untranslated. Splitting on silence only keeps "Say my name. I"
+    together as one chunk instead of orphaning "I" on its own."""
+    out = resegment_at_pauses([_bb_segment()], gap_break=0.35)
+    assert out[0]["text"] == "Say my name. I"
+
+
+def test_resegment_never_synthesizes_time_across_a_silence_after_translation():
+    """The actual failure mode: pretend-translate (swap text, keep timing
+    untouched — exactly what ai.translate.translate_segments does), strip
+    words the way _translate_segments_to does, then build cues. Without
+    resegmenting first, a single 44.8s cue set would spread text across the
+    14.6s gap; with it, no cue may straddle that gap."""
+    pieces = resegment_at_pauses([_bb_segment()], gap_break=0.35)
+    translated = [{**p, "text": f"tx:{i}"} for i, p in enumerate(pieces)]
+    stripped = [{k: v for k, v in s.items() if k != "words"} for s in translated]
+    cues = cues_from_segments(stripped)
+    assert cues
+    for c in cues:
+        # A cue may not span the 14.59s silent gap between 136.56 and 163.61.
+        assert not (c.start < 136.56 and c.end > 163.61), \
+            f"cue spans the silence: {c.start}-{c.end}"
+
+
+def test_resegment_leaves_a_gapless_segment_untouched():
+    ws = words([("hello", 0.0, 0.3), ("world", 0.3, 0.6)])
+    seg = {"start": 0.0, "end": 0.6, "text": "hello world", "words": ws}
+    out = resegment_at_pauses([seg], gap_break=0.35)
+    assert len(out) == 1
+    assert out[0]["start"] == 0.0
+    assert out[0]["end"] == 0.6
+
+
+def test_resegment_passes_through_a_segment_with_no_words():
+    """Already-translated (words stripped) or an imported .srt: nothing to
+    recover finer timing from, so the segment must pass through unchanged."""
+    seg = {"start": 1.0, "end": 5.0, "text": "no word timing here"}
+    out = resegment_at_pauses([seg])
+    assert out == [seg]

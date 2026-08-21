@@ -17,7 +17,7 @@ to edit it. Everything runs on your machine — only Claude API calls leave it.
 - **Local AI**: faster-whisper + whisper.cpp (Metal, tiny→large-v3), pyannote
   diarization with librosa fallback, Demucs, RIFE smooth slow-mo, Real-ESRGAN
   upscale, LaMa object erase, MediaPipe auto-reframe, OpenCV motion tracker,
-  vidstab, rembg, noisereduce, Argos Translate, Piper TTS.
+  vidstab, rembg, noisereduce, MADLAD-400 translation, Piper TTS.
 - **MCP server** — drive the editor from Claude Code / Cursor / Codex over
   HTTP (see below).
 - **Local CLIP visual search** — `search_media` finds footage by visual
