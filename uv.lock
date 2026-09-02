@@ -5197,7 +5197,7 @@ wheels = [
 
 [[package]]
 name = "video-ai-editor"
-version = "0.3.7"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

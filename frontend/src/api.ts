@@ -19,6 +19,35 @@ export interface Job {
   session_id: string | null
 }
 
+// GET /api/features — ai/features.py::feature_report over HTTP (the same
+// payload the `check_features` chat tool returns). The AI panel greys a tool
+// out BEFORE the click and shows `fix` verbatim instead of a 422 afterwards.
+// `fix` is only present on `unavailable` entries; `packaged_app_excluded`
+// marks features the .app build deliberately leaves out.
+export interface FeatureEntry {
+  key: string; feature: string; tools: string[]
+  note?: string; fix?: string; packaged_app_excluded?: boolean
+}
+export interface FeatureReport {
+  packaged_app: boolean; python: string; anthropic_key_set: boolean
+  available: FeatureEntry[]; unavailable: FeatureEntry[]; summary: string
+}
+
+// GET /api/tools — every dispatch tool with its Anthropic-style input schema.
+// `cancellable` / `reports_progress` are derived server-side from the handler
+// signature (only a handler that takes `cancel_event` stops on Cancel; only one
+// that takes `set_progress` ever moves off 0.0), so a UI must read them here
+// rather than promise a Cancel the backend can't honour.
+export interface JsonSchemaProp {
+  type?: string | string[]; description?: string; default?: unknown
+  enum?: unknown[]; items?: { type?: string }; minimum?: number; maximum?: number
+}
+export interface ToolSchema {
+  name: string; description: string; category?: string
+  cancellable: boolean; reports_progress: boolean
+  input_schema: { type: 'object'; properties: Record<string, JsonSchemaProp>; required: string[] }
+}
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -143,6 +172,35 @@ export const api = {
   getJob: (jobId: string) => http<Job>('GET', `/jobs/${jobId}`),
 
   cancelJob: (jobId: string) => http<Job>('POST', `/jobs/${jobId}/cancel`),
+
+  // `refresh` re-probes the installed optional features (the panel's Refresh
+  // button); otherwise the backend serves its process-lifetime cache — the
+  // probes import six ai.* modules and cost ~2s cold.
+  getFeatures: (refresh = false) =>
+    http<FeatureReport>('GET', `/features${refresh ? '?refresh=1' : ''}`),
+
+  getTools: () => http<{ tools: ToolSchema[] }>('GET', '/tools'),
+
+  // Stores a .srt/.vtt/.ass in the session so `import_srt` can be dispatched
+  // with a real path from the browser. Does NOT import by itself — the caller
+  // follows with dispatch('import_srt', {path}) so the op log and undo see it.
+  // The generic /upload can't take this: it ffmpeg-normalises everything and
+  // 422s on a non-video file.
+  uploadSubtitle: async (sid: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${BASE}/sessions/${sid}/subtitle_upload`, { method: 'POST', body: fd })
+    if (!res.ok) {
+      // Same contract as http(): the raw body rides along in the message and
+      // store.errorMessage() unwraps it. api/hardening.py rewrites every
+      // HTTPException into {error:{message, details}} — there is no `detail`
+      // key on the wire — so the older detail.error/detail parse here found
+      // nothing and the user saw "422 Unprocessable Entity" instead of
+      // "expected a .srt, .vtt or .ass file".
+      throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
+    }
+    return res.json() as Promise<{ path: string; name: string }>
+  },
 
   waveform: (sid: string, src: string, peaksPerSec = 50) =>
     http<{ peaks: number[]; peaks_per_sec: number; duration: number }>(

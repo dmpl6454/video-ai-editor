@@ -11,9 +11,10 @@ Yields events to be SSE-streamed to the client:
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import os
 from typing import AsyncIterator
-from anthropic import Anthropic
+from anthropic import Anthropic, BadRequestError
 from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from ..edl import EDLStore
 from .dispatch import dispatch, get_timeline as _get_timeline
@@ -70,8 +71,9 @@ def _ui_state_block(ui_state: dict | None, tracks: list[dict]) -> str:
 
 def _live_context_block(store: EDLStore, ui_state: dict | None = None) -> str:
     """A fresh, ground-truth snapshot of what's actually on the timeline right
-    now, appended to the system prompt on every API call (never persisted into
-    `history`, so it can never itself go stale).
+    now, sent with every API call as the last block of the trailing user
+    message (never persisted into `history`, so it can never itself go stale;
+    never in `system`, so its churn never invalidates the prompt cache).
 
     Without this, Claude answers "what's in this video" purely from whatever
     it said earlier in the conversation — including about footage from a
@@ -177,6 +179,105 @@ def _anthropic_tools(categories: list[str] | None = None) -> list[dict]:
     ]
 
 
+# Prompt caching. Every chat turn re-sends 96 tool schemas + the house-style
+# system prompt + the whole conversation, and a user turn is typically 2-4
+# create() calls (one per tool round). Two cache breakpoints: the static
+# SYSTEM_PROMPT block (prefix order is tools → system → messages, so this one
+# caches the tool list too) and the last persisted block of the trailing user
+# message, so each tool round re-reads the previous round from cache.
+#
+# The per-call live-context block goes LAST — an extra text block appended
+# after the marked block inside the wire copy of that trailing user message,
+# never into `system`. Position matters: the cache is a prefix cache, and a
+# second system block would sit BEFORE every message, so any change to it
+# (a mutating tool round, a moved playhead) would have invalidated the whole
+# conversation segment and turned the message breakpoint into a fresh write
+# on exactly the rounds it was meant to serve. Trailing the breakpoint, its
+# churn costs only its own (uncached) tokens.
+#
+# Both markers are applied to a per-request copy: persisted history never
+# carries `cache_control` (max 4 per request) nor the live block (it must not
+# go stale — see _live_context_block). VAI_PROMPT_CACHE=0 is the operator kill
+# switch; _CACHE_DISABLED is the runtime one, set only when the API itself
+# rejects `cache_control`.
+CACHE_EPHEMERAL = {"type": "ephemeral"}
+_CACHE_DISABLED = False
+_log = logging.getLogger(__name__)
+
+
+def _prompt_cache_enabled() -> bool:
+    if _CACHE_DISABLED:
+        return False
+    return os.environ.get("VAI_PROMPT_CACHE", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _system_blocks(cached: bool) -> list[dict]:
+    """SYSTEM_PROMPT as the ONLY system block, cacheable. The live context is
+    deliberately not here — see the prompt-caching note above."""
+    head: dict = {"type": "text", "text": SYSTEM_PROMPT}
+    if cached:
+        head["cache_control"] = CACHE_EPHEMERAL
+    return [head]
+
+
+def _request_messages(history: list[dict], cached: bool, live_context: str = "") -> list[dict]:
+    """A copy of `history` for the wire: every stale cache_control stripped,
+    (when cached) one marker on the last persisted block of the last user
+    message, and the live-context block appended AFTER that marker as a
+    separate uncached text block. Plain-string content is promoted to a text
+    block everywhere (not only where the marker lands) so the wire form of a
+    message is the same whether it is the trailing one or history — the
+    prefix the cache is keyed on must be literally identical from one round
+    to the next, and tests/test_prompt_caching.py checks it that way. The
+    live block is omitted when empty (the API rejects an empty text block and
+    `_live_context_block` returns "" on failure). `history` is never mutated.
+
+    chat_turn always ends `history` on a user message (the initial text, or a
+    tool_result); should a caller ever hand over one ending on an assistant
+    turn, neither marker nor live block has a legal home and both are left
+    out rather than sent somewhere they would break the alternation."""
+    out: list[dict] = []
+    for m in history:
+        content = m["content"]
+        if isinstance(content, list):
+            content = [{k: v for k, v in b.items() if k != "cache_control"} for b in content]
+        else:
+            content = [{"type": "text", "text": content}]
+        out.append({**m, "content": content})
+    if not out or out[-1]["role"] != "user":
+        return out
+    last = out[-1]
+    blocks = last["content"]
+    if cached:
+        blocks = [*blocks[:-1], {**blocks[-1], "cache_control": CACHE_EPHEMERAL}]
+    if live_context:
+        blocks = [*blocks, {"type": "text", "text": live_context}]
+    out[-1] = {**last, "content": blocks}
+    return out
+
+
+def _is_cache_control_rejection(e: Exception) -> bool:
+    return isinstance(e, BadRequestError) and "cache_control" in str(e).lower()
+
+
+async def _create_with_cache_fallback(create):
+    """`create(cached)` off the event loop, retried once uncached if — and only
+    if — the API rejected `cache_control` itself (an old proxy, a model without
+    caching). That must degrade to the plain request, not kill chat, and must
+    not be re-attempted on every later round: the rejection flips the
+    process-wide switch. Any other exception takes the caller's normal
+    rollback path unchanged."""
+    global _CACHE_DISABLED
+    try:
+        return await asyncio.to_thread(create, _prompt_cache_enabled())
+    except Exception as e:
+        if not _is_cache_control_rejection(e):
+            raise
+        _CACHE_DISABLED = True
+        _log.warning("prompt caching disabled for this process: %s", e)
+        return await asyncio.to_thread(create, False)
+
+
 TOOL_RESULT_LIMIT = 8000
 
 
@@ -240,21 +341,23 @@ async def chat_turn(
 
     tools = _anthropic_tools()
 
+    def _create(cached: bool):
+        # Live context is recomputed on every call (not once per turn) so a
+        # tool call that mutates the EDL mid-turn (e.g. a destructive batch
+        # op) is reflected before the next round — see _live_context_block's
+        # docstring. It rides as the LAST block of the trailing user message,
+        # behind the cache marker, so that churn never invalidates the cached
+        # tools + SYSTEM_PROMPT + conversation prefix (prompt-caching note).
+        live = _live_context_block(store, ui_state)
+        return client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=4096,
+            system=_system_blocks(cached), tools=tools,
+            messages=_request_messages(history, cached, live))
+
     # Run the tool-use loop
     for turn in range(max_turns):
-        # Recomputed every iteration (not just once) so a tool call that
-        # mutates the EDL mid-turn (e.g. a destructive batch op) is reflected
-        # before the next round — see _live_context_block's docstring.
-        system_with_context = SYSTEM_PROMPT + _live_context_block(store, ui_state)
         try:
-            resp = await asyncio.to_thread(
-                client.messages.create,
-                model=CLAUDE_MODEL,
-                max_tokens=4096,
-                system=system_with_context,
-                tools=tools,
-                messages=history,
-            )
+            resp = await _create_with_cache_fallback(_create)
         except Exception as e:
             # Roll back the trailing user message we appended before this call.
             # If we leave it, the persisted history ends on a user turn; the next
@@ -266,6 +369,15 @@ async def chat_turn(
             yield {"type": "error", "message": _friendly_anthropic_error(e)}
             yield {"type": "done"}
             return
+
+        # Debug-level only: the one place to confirm the cache is actually
+        # hitting (cache_read > 0 from the second create() of a turn on).
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            _log.debug("anthropic usage: cache_read=%s cache_write=%s input=%s",
+                       getattr(usage, "cache_read_input_tokens", 0),
+                       getattr(usage, "cache_creation_input_tokens", 0),
+                       getattr(usage, "input_tokens", 0))
 
         assistant_blocks = []
         any_tool = False

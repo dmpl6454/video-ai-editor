@@ -1,0 +1,448 @@
+/* Left-pane tab strip + the AI tools panel.
+   Imported by LeftPane.tsx / AiPanel.tsx — NOT from styles.css (owned
+   elsewhere). Colours come only from the :root tokens in styles.css; the
+   two data-URI chevrons carry --text-dim's hex because an SVG background
+   can't read a custom property. Motion is transform/opacity only. */
+
+/* ---- tab strip ------------------------------------------------------- */
+
+.left-pane {
+  --left-tabs-h: 34px;
+  min-width: 0;
+}
+
+/* Sticky against .sidebar's scroll; the -10px offsets its 10px padding so
+   the strip sits flush with the pane edge instead of floating 10px in. */
+.left-tabs {
+  position: sticky;
+  top: -10px;
+  z-index: 2;
+  height: var(--left-tabs-h);
+  margin: -10px -10px 8px;
+  padding: 6px 10px 0;
+  display: flex;
+  gap: 2px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+
+.left-tab {
+  position: relative;
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-radius: 4px 4px 0 0;
+  padding: 6px 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  transition: color 120ms ease;
+}
+.left-tab::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent-2);
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.left-tab:hover:not(:disabled) { background: transparent; color: var(--text); }
+.left-tab[aria-selected="true"] { color: var(--text); }
+.left-tab[aria-selected="true"]::after { transform: scaleX(1); }
+.left-tab:active { transform: translateY(1px); }
+
+/* The strip is the heading — MediaBin's own <h2>Media</h2> would repeat it. */
+.left-pane .media-bin > h2 { display: none; }
+
+/* ---- panel chrome ---------------------------------------------------- */
+
+.ai-panel { min-width: 0; overflow-wrap: anywhere; }
+
+/* Second sticky row, parked just under the strip. */
+.ai-panel-head {
+  position: sticky;
+  top: calc(var(--left-tabs-h) - 10px);
+  z-index: 2;
+  margin: 0 -10px;
+  padding: 0 10px 6px;
+  background: var(--bg-1);
+}
+
+.ai-search {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+}
+.ai-search::-webkit-search-cancel-button { cursor: pointer; }
+
+.ai-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.ai-status-text { min-width: 0; }
+.ai-refresh { font-size: 10px; padding: 2px 8px; white-space: nowrap; }
+
+.ai-banner {
+  font-size: 11px;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 4px 0 10px;
+}
+.ai-banner code { font-size: 10.5px; }
+.ai-banner button { display: block; margin-top: 6px; font-size: 11px; padding: 3px 10px; }
+
+.ai-empty { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin: 12px 2px; }
+
+/* Group headings: the 11px uppercase rhythm of the sidebar, plus a rule that
+   runs out to the edge so a long list reads in chapters. */
+.ai-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+.ai-group h3::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.ai-group:first-of-type h3 { margin-top: 6px; }
+
+/* ---- cards ----------------------------------------------------------- */
+
+.ai-card {
+  position: relative;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px 8px 13px;
+  margin-bottom: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  transition: border-color 120ms ease;
+}
+.ai-card:hover { border-color: color-mix(in srgb, var(--line) 60%, var(--text-dim)); }
+/* The 3px rule carries the card's state so the list scans without reading:
+   blue = ready/open, amber = working, green = landed, red = failed. */
+.ai-card::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent-2);
+  opacity: 0.35;
+  transition: opacity 160ms ease;
+}
+.ai-card.is-open::before { opacity: 1; }
+.ai-card.is-running::before { background: var(--warn); opacity: 1; }
+.ai-card.is-done::before { background: var(--good); opacity: 1; }
+.ai-card.is-error::before { background: var(--accent); opacity: 1; }
+.ai-card.is-cancelled::before { background: var(--text-dim); opacity: 1; }
+.ai-card.is-unavailable { opacity: 0.55; }
+.ai-card.is-unavailable::before { background: var(--text-dim); opacity: 1; }
+.ai-card.is-unavailable:hover, .ai-card.is-unavailable:focus-within { opacity: 0.9; }
+
+.ai-card-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 0;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ai-card-head:hover:not(:disabled) { background: transparent; }
+.ai-card-head:hover:not(:disabled) .ai-chevron { color: var(--text); }
+.ai-card-title { min-width: 0; }
+.ai-chevron {
+  flex-shrink: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), color 120ms ease;
+}
+.ai-card-head[aria-expanded="true"] .ai-chevron { transform: rotate(90deg); }
+
+.ai-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+}
+.ai-card-meta:empty { display: none; }
+.ai-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-3);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ai-badge.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.ai-badge.dim { font-weight: 500; text-transform: none; letter-spacing: 0; }
+.ai-copy { font-size: 10px; padding: 1px 8px; margin-left: auto; }
+
+.ai-card-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  margin: 4px 0 0;
+}
+
+.ai-hint { font-size: 10.5px; line-height: 1.45; color: var(--warn); margin: 6px 0 0; }
+
+.ai-unavail { font-size: 11px; line-height: 1.45; color: var(--text); margin-top: 6px; }
+.ai-fix {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 96px;
+  overflow: auto;
+  user-select: text;
+  cursor: text;
+}
+
+/* ---- form ------------------------------------------------------------ */
+
+.ai-card-body { margin-top: 8px; }
+.ai-form { display: flex; flex-direction: column; gap: 7px; }
+.ai-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* Checkbox rows: the control and its label sit on one line in DOM order
+   (input, then label), and any help / error text wraps underneath at full
+   width. The old row-reverse trick put a schema description to the LEFT of
+   the box and pushed the label to the far right. */
+.ai-check-row { display: flex; align-items: center; gap: 6px; }
+.ai-check-row .ai-label { cursor: pointer; }
+.ai-label { font-size: 11px; color: var(--text-dim); }
+.ai-label em { font-style: normal; color: var(--accent); margin-left: 2px; }
+.ai-field-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); opacity: 0.8; }
+.ai-field-err { font-size: 10.5px; color: var(--accent); }
+
+.ai-field input:not([type="checkbox"]):not([type="file"]),
+.ai-field select,
+.ai-field textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  color: var(--text);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  min-width: 0;
+}
+.ai-field textarea { resize: vertical; font-size: 11.5px; line-height: 1.4; }
+.ai-field input[aria-invalid="true"],
+.ai-field select[aria-invalid="true"],
+.ai-field textarea[aria-invalid="true"] { border-color: var(--accent); }
+.ai-field input:disabled, .ai-field select:disabled, .ai-field textarea:disabled { opacity: 0.5; }
+.ai-field input[type="file"] { font-size: 11px; color: var(--text-dim); }
+.ai-field input[type="file"]::file-selector-button {
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 8px;
+  margin-right: 8px;
+  cursor: pointer;
+}
+/* styles.css has no <select> rule — a UA-default control next to the styled
+   inputs is exactly the "template" look to avoid. */
+.ai-field select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 24px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239b9ba5' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+.ai-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ai-time { display: flex; gap: 6px; align-items: stretch; }
+.ai-time input { flex: 1; }
+.ai-time button { font-size: 10px; padding: 2px 8px; white-space: nowrap; }
+
+.ai-bbox { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.ai-bbox-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ai-bbox-cell span { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+/* Four cells in a 200px pane: the UA spinner alone would eat the digits
+   ("0.4" rendered as "0"), so the cells are plain text-sized boxes. */
+.ai-bbox-cell input {
+  padding: 4px 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.ai-bbox-cell input::-webkit-inner-spin-button,
+.ai-bbox-cell input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+.ai-run { width: 100%; margin-top: 8px; font-size: 12px; font-weight: 600; }
+
+/* ---- run states ------------------------------------------------------ */
+
+/* Screen-reader-only live region: the visible "Working… 12s" line ticks
+   every second and is aria-hidden; this one changes only on state
+   transitions (started / 25 % steps / stopping / done), so AT hears the
+   run land instead of ~200 one-second updates. */
+.ai-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.ai-state { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ai-state button { align-self: flex-start; font-size: 11px; padding: 3px 10px; }
+.ai-state-line { font-size: 11px; line-height: 1.45; color: var(--text); }
+.ai-state-error .ai-state-line { color: var(--accent); }
+.ai-state-cancelled .ai-state-line, .ai-state-done .ai-state-line { color: var(--text-dim); }
+.ai-state-done .ai-state-line::before { content: '●'; color: var(--good); margin-right: 5px; font-size: 9px; }
+
+.ai-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  overflow: hidden;
+  position: relative;
+}
+.ai-bar-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transform-origin: left center;
+  transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Indeterminate: a sweep while the job is queued / before real progress. */
+.ai-bar.indeterminate .ai-bar-fill {
+  width: 38%;
+  transform: none;
+  animation: ai-sweep 1.15s ease-in-out infinite;
+}
+@keyframes ai-sweep {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+
+/* ---- results --------------------------------------------------------- */
+
+.ai-result { display: flex; flex-direction: column; gap: 4px; }
+.ai-result-head { font-size: 12px; font-weight: 600; }
+.ai-result-note { font-size: 10.5px; line-height: 1.45; color: var(--text-dim); margin: 0; }
+.ai-result-rows { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ai-result-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--bg-1);
+  border-radius: 4px;
+  padding: 5px 7px;
+}
+.ai-result-row time { font-variant-numeric: tabular-nums; color: var(--accent-2); white-space: nowrap; }
+.ai-result-row .grow { flex: 1; min-width: 0; }
+.ai-result-row small { color: var(--text-dim); }
+.ai-result-row code { font-size: 10.5px; }
+.ai-result-row button { font-size: 10px; padding: 2px 7px; white-space: nowrap; }
+.ai-issue-level {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 1px;
+  min-width: 34px;
+}
+.ai-issue.error .ai-issue-level { color: var(--accent); }
+.ai-issue.warn .ai-issue-level { color: var(--warn); }
+.ai-issue.info .ai-issue-level { color: var(--text-dim); }
+
+.ai-raw { font-size: 10.5px; color: var(--text-dim); }
+.ai-raw summary { cursor: pointer; user-select: none; }
+.ai-raw pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 4px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* ---- interaction states, shared ------------------------------------- */
+
+.ai-panel button:active:not(:disabled) { transform: translateY(1px); }
+.left-tab:focus-visible,
+.ai-panel :is(button, input, select, textarea, summary, pre[tabindex]):focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.left-tab:focus-visible { outline-offset: -2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .left-tab::after, .ai-chevron, .ai-bar-fill, .ai-card, .ai-card::before { transition: none; }
+  .ai-bar.indeterminate .ai-bar-fill { animation: none; width: 100%; opacity: 0.45; }
+}

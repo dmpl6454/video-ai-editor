@@ -3,6 +3,61 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.5.0
+
+### Added
+- **AI panel.** A second tab in the left pane ("Media | AI") lists every
+  AI/auto-edit tool that was chat- or MCP-only (silence and filler removal,
+  beat cuts, auto-reframe, shorts, diarization, translation, stems, upscale,
+  stabilize, background removal, object erase, motion tracking, …) as a
+  searchable catalog with generated forms, background jobs for the slow ones
+  (Cancel where the backend can actually honour it — today `auto_caption`),
+  tool-specific result views, and inline "what's missing and how to fix it"
+  from the new `GET /api/features` (the `check_features` report over HTTP).
+- **Safe-zone overlay.** Approximate TikTok / Reels / Shorts UI occlusion
+  guides over the 9:16 preview so captions and lower-thirds land where the
+  app's own chrome won't cover them.
+- **`GET /api/tools` now reports `cancellable` / `reports_progress`** per tool,
+  derived from the handler signature, so UIs stop promising a Cancel the
+  backend can't deliver.
+- **`POST /api/sessions/{sid}/subtitle_upload`** — stores a .srt/.vtt/.ass in
+  the session so `import_srt` works from the browser without typing a path.
+
+### Fixed
+- **Composite AI tools (remove silences/fillers, beat cut, hook stack, templates) are now a single undo step.**
+  Each of them used to commit once per internal edit, so one click needed a
+  dozen undos to take back; `EDLStore.batch()` collapses the run into one op.
+- **`build_app.sh` no longer overwrites `Video AI Editor.spec`.** PyInstaller's
+  CLI mode wrote its generated spec into the repo root, clobbering the
+  committed Windows spec on every macOS build. It now lands in
+  `build/pyinstaller-spec/` (and `--add-data` sources are absolute, which
+  `--specpath` requires).
+- **Finder "Get Info" showed 0.0.0** for the macOS app: PyInstaller's CLI mode
+  never sets a bundle version, so `build_app.sh` now stamps
+  `CFBundleShortVersionString`/`CFBundleVersion` from `VERSION` before signing.
+- **Version drift.** `pyproject.toml`, `package.json`, `__version__` and
+  `uv.lock` had fallen to 0.3.7/0.1.0 while `VERSION` read 0.4.1; all agree
+  now and a test keeps them that way. (0.4.x shipped without a changelog
+  entry — its build-identity work is documented in CLAUDE.md "Release
+  identity".)
+- **Job errors no longer show a `RuntimeError:` prefix** in toasts and the AI
+  panel.
+
+### Notes
+- Chat turns use Anthropic prompt caching: the tool schemas + static system
+  prompt are one cached prefix and the trailing user/tool-result block is a
+  second breakpoint, so each tool round re-reads the previous one from cache.
+  The per-call live timeline context now travels as an extra block AFTER that
+  breakpoint (inside the trailing user message, never in `system`), so a
+  mutating tool round or a moved playhead no longer invalidates the cached
+  conversation. Behaviour is identical; cached input tokens bill at ~10%.
+  `VAI_PROMPT_CACHE=0` disables it; a backend that rejects `cache_control`
+  disables it for the process automatically.
+- `add_caption_track` and `get_transcript` now resolve the transcript the same
+  way the subtitle exporters do: an imported `<session>/transcript.json` wins
+  over Whisper's `ingest.json`, so "Import subtitles → Captions from
+  transcript" lays the imported cues on the timeline.
+
 ## 0.3.7
 
 ### Added

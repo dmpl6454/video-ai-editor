@@ -1,0 +1,1759 @@
+# AI Video Editor — Research & Roadmap
+
+_Generated 2026-09-03 from a 9-agent research sweep (landscape, capabilities, integrations, OSS, codebase) → synthesis → adversarial critique → final roadmap. ~1.6M tokens, 663 tool calls. Strategic reference; the first milestone shipped from it is in CHANGELOG.md._
+
+## 1. Final roadmap (critiqued, ranked)
+
+### #1 — P0 ship-ready foundation: restore the .spec and single-source the version; notarised build from the spec; packaged app that ships Tier A (MLX + Apple frameworks via a Swift helper) with RAM-tier gating and a model pack manager; HDR/10-bit/Apple Log passthrough and native-fps ingest with a zscale-capable ffmpeg; start YouTube/TikTok/Instagram API audit applications
+
+Nothing else is shippable until the artifact builds, captions work in the shipped app, and iPhone footage looks right; these were mis-ranked as 'low' or rank 2 before. The audit applications cost no code and gate the closed loop months out. ~3 weeks.
+
+### #2 — Foundation refactor (incremental) + eval harness v0: decorator tool registry, consolidation to ~25-30 hot tools with defer_loading via Tool Search, dispatch.py split, schema codegen for types.ts; eval runners with named datasets (ASR, alignment incl. a Hinglish set, diarization, fillers, highlights, retrieval) and per-tool telemetry
+
+Every later rank adds tools to a 4,917-line hand-matched monolith already above Anthropic's 30-50 tool accuracy threshold; 'smartest' is unfalsifiable without evals, and the transcript editor must be gated on them. ~2 weeks up front, then per feature.
+
+### #3 — Transcript layer v2: SpeechAnalyzer (macOS 26) / mlx-whisper / Parakeet-via-sherpa-onnx / IndicConformer routing, Silero VAD gating, vendored CTC forced alignment with the Hinglish transliteration path, token-free diarization (senko on Mac, sherpa-onnx on Windows, Sortformer v2 tier), verbatim filler strategy with a filler-recall KPI
+
+Highest leverage per day: every leader's feature set is built on the transcript, and Apple's free ASR removes model downloads for the 8 GB tier. The Hinglish alignment and filler recall are explicit risks measured by rank 2's harness, not assumed. Unblocks ranks 6, 7, 9, 10, 13. ~2 weeks.
+
+### #4 — AI tools panel + agent trust and economics: capability-aware panel with job progress; reviewable plan preview with cost/time and dry_run; prompt caching, Batches, Haiku routing, model picker; provider registry with BYO keys, Keychain storage and credit meter (Gemini Flash video QA as the first perception provider, Apple Foundation Models as the free English LLM)
+
+Surfaces ~25 invisible tools, makes the agent trustworthy and ~90% cheaper per turn, and lands the provider abstraction that ranks 8, 10 and 15 need instead of leaving it at the tail. ~2 weeks.
+
+### #5 — Studio Sound chain (DeepFilterNet + dereverb + de-ess/hum + auto-mix loudness) and auto-reframe v2 (Vision/MediaPipe + RF-DETR, per-scene strategies, split-screen, non-destructive crop keyframes) with platform safe zones
+
+Both were called 'easy' and high impact yet sat at ranks 9-10; the current reframe destroys the source and the denoiser dulls speech. For a 9:16-first product these two, plus safe zones, return more than masks or OTIO. ~2.5 weeks.
+
+### #6 — Transcript editor: delete words to cut, shorten pauses, retake removal via multi-take detection, search, speakers, click-to-seek, batched cut_words as one undo step
+
+The defining text-based-editing interaction (Descript, Premiere, Resolve, CapCut). dispatch already ripples cuts; what is missing is the source-to-timeline mapping and the panel. Gated on rank 2 evals and rank 3 word timing. ~2.5 weeks — end of the 12-13 week first milestone.
+
+### #7 — Karaoke / word-pop captions with style editor, 15-20 templates, animated text presets filling the empty preset dirs, any-language captions via Apple Translation + IndicTrans2
+
+The most-used short-form feature and the demo differentiator; mixed Devanagari/Latin word timing from rank 3 makes it correct for the house style, and the renderer already draws per-frame text. ~2.5 weeks.
+
+### #8 — Fused multimodal footage index v1: PySceneDetect shots, clip-level Perception Encoder + SigLIP 2 embeddings, script-routed OCR (Vision + PaddleOCR for Devanagari), SoundAnalysis events, emotion features, faces and take clusters, FTS5 with Hinglish normalisation + bge-m3, RRF search; local Qwen3-VL captions benchmarked against Gemini Flash
+
+The retrieval layer that makes the agent smart rather than obedient and the prerequisite for ranks 9-10; re-scoped to 4-5 weeks because motion queries and Hinglish text need clip-level and multilingual embeddings the first plan lacked. Replaces paid per-shot Claude vision.
+
+### #9 — Talking-head and screencast automation bundle: face punch-in and cursor/click-following auto-zoom (recorder event log), jump-cut hiding, auto B-roll from the index and stock, auto SFX and emoji placement
+
+Users perceive this as 'the AI edited my video' (Descript, Submagic, Screen Studio, Cap); the cursor-zoom half directly serves product-demo/UGC-ad videos and reuses the desktop bridge. Everything needed exists after ranks 3, 5 and 8. ~2 weeks.
+
+### #10 — Rough cut from a brief, LLM-scored highlight extraction with rationale, hook-variant matrix with multi-version export and manifest, metadata pack and thumbnails
+
+The headline agentic demos ('make me a 60-second vertical about pricing', 'five best moments', '5 hooks x 1 body x 3 formats') composed through the reviewable plan; the variant matrix is the UGC-ads pattern the competitor cluster and the user's own tooling point at. ~3 weeks.
+
+### #11 — Real-time preview engine (WebCodecs in WKWebView/WebView2, or AVFoundation on Mac) with a shared layout spec for preview/export parity and incremental export around transitions
+
+Every competitor has a live compositor; today each scrub and each agent 'look' is a full ffmpeg render and three hand-mirrored layout implementations keep diverging. Scheduled after the feature ranks because it is 3-4 weeks of engine work whose payoff compounds with the verify loop and rank 14's masks.
+
+### #12 — Pro round-trip and engine upgrades: OTIO/FCPXML/Premiere XML export-import, non-destructive AI derivatives, VTFrameProcessor super-resolution/interpolation/temporal denoise, speed ramps and freeze, keyframes on any field
+
+Lets the agent's cut land in Premiere, Resolve or FCP with originals intact — how pro users trial an AI editor — and cashes the Apple-native temporal models that flip upscaling and slow-motion from 'hard' to 'easy on Mac'. ~3 weeks.
+
+### #13 — Voice: Chatterbox / Kokoro / Indic Parler-TTS with a consent-gated cloning flow and watermarking (retiring GPL Piper), overdub, dubbing pipeline with IndicTrans2 and the Demucs bed, C2PA credentials on export
+
+All MIT/Apache and fast on Apple Silicon; cloned narration and dubbing compete with Kapwing/VEED/HeyGen, and C2PA becomes mandatory the moment any generated audio or pixel is exported (EU AI Act Art. 50). ~2.5 weeks.
+
+### #14 — Object masks (Vision seed -> SAM 2.1 -> Cutie propagation, text prompts via GroundingDINO/Florence-2, TAPIR tracking) driving selective effects and matting; script-to-timeline with teleprompter recording on a generalised multi-track schema
+
+The most-cited pro AI features (Premiere Object Mask, Resolve Magic Mask, IntelliScript) but pro-audience items for a creator-first product, so they follow captions, reframe, B-roll and rough cuts; script alignment forces the multi-track generalisation that multicam review and layered graphics also need. ~6 weeks.
+
+### #15 — Publishing and scheduling under real quotas, performance feedback into hook scoring, and the generative video ladder (local Wan2.2-5B / LTX-2 distilled on 32-64 GB Macs after benchmarking, Draw Things, then Veo/Kling/Runway via the provider layer)
+
+Closes the loop that pro NLEs lack once the audits started at rank 1 have cleared, and fills the last capability hole honestly: small local generators are Tier B on current Apple Silicon (not 'infeasible'), frontier V2V and avatars stay cloud. Sits last because retrieval-first B-roll, plan preview and C2PA must exist before any generated pixel ships. ~3 weeks plus audit calendar.
+
+## 2. Adversarial critique of the synthesis
+
+The synthesis is strong on the agent/EDL architecture and on the honest local/cloud split, but it has four systematic blind spots. (1) It ignores Apple's first-party ML APIs — SpeechAnalyzer, VideoToolbox VTFrameProcessor (temporal super-resolution and frame-rate conversion), SoundAnalysis event classes, subject-lift masks, Foundation Models, Translation — which flip several feasibility calls (temporal SR from 'hard' to 'easy on Mac', audio events to zero-cost) and would remove whole model downloads. (2) It never addresses ingest correctness — HDR/Dolby Vision tone mapping, VFR conform, real-time preview — which are P0 for a Mac-first editor and undermine the ±50 ms word-timing goal that rank 1 is built on. (3) It under-serves the product's own Hinglish focus: no Indic ASR/translation/TTS options, no note that Apple Vision OCR lacks Devanagari, that MobileCLIP is English-only, that BM25 fails on transliteration variance, or that forced alignment has no model for romanized Hinglish; plus the general problem that Whisper-family models drop fillers, so filler removal is not 'easy'. (4) The competitor map omits the UGC-ad/product-demo cluster (Creatify, Arcads, Icon, Screen Studio-style cursor zoom) that the user's own tooling points at, the talking-head specialists (Gling, Recut, AutoPod, Eddie AI), Remotion/Diffusion Studio as agent substrates, and Gemini native video understanding as the cheap cloud baseline for shot QA. Licensing has two contradictions (Essentia is AGPL; madmom is unmaintained) and several unverified community MLX forks are load-bearing for rank 1. Roadmap fixes: make release hygiene, broken packaging, CFR/HDR ingest and the tool-registry refactor rank 0; pull DeepFilterNet and reframe v2 forward; fold the provider layer into the agent upgrade; gate the transcript editor on an eval harness; start platform API audits now; and either state team size or cut the 30-week list to a 12-week first milestone.
+
+### Missing
+
+- APPLE FIRST-PARTY ML STACK IS ALMOST ABSENT. The synthesis says 'Apple Vision' and 'Core ML' but never names the OS-level APIs that replace whole gap rows for free, with zero model download, on the ANE: (1) Speech framework SpeechAnalyzer/SpeechTranscriber (macOS 26) — Apple's new on-device ASR with word timing, what FCP 11.1 uses; a direct alternative to mlx-whisper for rank 1. (2) VideoToolbox VTFrameProcessor (macOS 15.4+): VTSuperResolutionScaler, VTFrameRateConversion, VTLowLatencyFrameInterpolation, VTTemporalNoiseFilter, VTMotionBlur — a hardware temporal super-resolution and interpolation path that makes the 'temporally consistent super-resolution: hard' call wrong on Mac. (3) SoundAnalysis SNClassifySoundRequest with 300+ built-in classes (laughter, applause, music, crowd) — replaces CLAP/PANNs for audio-event tagging at zero cost. (4) VNGenerateForegroundInstanceMaskRequest (subject lift, macOS 14) for any-object matting and VNGeneratePersonSegmentationRequest (only the latter is mentioned). (5) Foundation Models framework (macOS 26, ~3B on-device LLM with guided generation and tool calling) for metadata pack, filler classification, chapter titles — free, offline. (6) Translation framework (macOS 15) for on-device translation. (7) Apple Cinematic framework for depth-based DoF on iPhone cinematic-mode clips. (8) Depth Pro (Apple) alongside Depth Anything. Each of these should be a row in the Tier A table with its minimum macOS version.
+- HDR / COLOR MANAGEMENT / LOG FOOTAGE. iPhone 15-17 shoot Dolby Vision HLG 10-bit HEVC by default; nothing in the synthesis mentions tone mapping (zscale/libplacebo), 10-bit VideoToolbox HEVC encode, HDR passthrough, Apple Log, or color space tagging. An editor whose default output from iPhone footage is washed-out SDR fails the first real test; this is a correctness gap that should precede every AI feature.
+- VARIABLE FRAME RATE (VFR) INGEST. iPhone, screen recordings and Zoom/Meet exports are VFR; word-level cuts, forced-aligned captions and beat sync all drift on VFR unless media is conformed to CFR at ingest. Never mentioned, and it directly undermines the ±50 ms word-timing goal of rank 1 and the transcript editor of rank 3.
+- REAL-TIME PREVIEW ENGINE. The current preview is a full ffmpeg render to a cached file; every competitor named (Resolve, Premiere, FCP, Descript web, CapCut, Kapwing, Clipchamp) has a live compositor (GPU/Metal or WebCodecs+WebGL/Canvas in browser). The synthesis treats this under 'incremental rendering' only. It matters twice: scrubbing latency for humans, and turnaround for the agent's verify loop (every agent step that wants to 'look' costs a render). Options omitted: AVFoundation AVMutableComposition + Core Image (native, HDR-aware, AVPlayer real-time preview), or WebCodecs decode + Canvas/WebGL compositing in the existing React app (what Diffusion Studio/Clipchamp do).
+- VERBATIM / DISFLUENCY-AWARE ASR FOR FILLER REMOVAL. Whisper (and mlx-whisper, parakeet) are trained to DROP 'um', 'uh', 'like', repetitions. A filler-removal feature built on a Whisper transcript will miss most fillers. Not addressed. Options: CrisperWhisper (verbatim, CC-BY-NC — licence-blocked), Whisper initial-prompt trick ('Umm, let me think like, hmm...'), Silero VAD gaps + low-confidence short tokens, or NeMo/Parakeet with disfluency fine-tunes; needs an explicit design decision and an eval set.
+- INDIC / HINGLISH ASR AND ALIGNMENT, despite Hinglish being the product's stated house style. Missing: AI4Bharat IndicWhisper / IndicConformer (MIT), Sarvam Saarika API, Google Chirp for hi/hinglish code-switching; IndicTrans2 (MIT, far better hi<->en than MADLAD-400 and 1/6 the size); Indic Parler-TTS (Apache) and Kokoro/Chatterbox Hindi voices; and crucially the fact that wav2vec2/WhisperX CTC forced alignment has no model for romanized Hinglish (character-set mismatch with Devanagari acoustic models) — the ±50 ms word-timing claim is unproven for the main market. NeMo Forced Aligner (Apache) on romanized text or Whisper DTW timestamps are the realistic fallbacks.
+- APPLE VISION OCR DOES NOT SUPPORT DEVANAGARI. VNRecognizeText's supported languages exclude Hindi; the index design (gap 1) routes OCR through ocrmac. Needs PaddleOCR (Apache) or Tesseract for Devanagari on-screen text, otherwise Hindi lower-thirds and captions in source footage are invisible to search.
+- MULTILINGUAL RETRIEVAL. MobileCLIP is English-only (SigLIP 2 is multilingual); sqlite FTS5 BM25 fails on Hinglish transliteration variance ('paisa'/'paise'/'पैसा'). Needs a multilingual text embedding (bge-m3, multilingual-e5, or Apple NLEmbedding) alongside BM25 in the fusion, and the romanizer applied at index time.
+- GEMINI-CLASS NATIVE VIDEO UNDERSTANDING AS THE CLOUD PATH. The synthesis frames cloud video QA as 'paid Claude vision per shot'. Claude has no video input; Gemini 2.5/3 Flash ingests whole videos at ~1 fps with audio for cents per hour and Twelve Labs Pegasus does the same. This is the cheap, correct cloud baseline the local Qwen3-VL path should be measured against, and the obvious first provider in the BYO-key layer.
+- ANTHROPIC-SPECIFIC COST LEVERS beyond prompt caching: Message Batches API (50% off) for offline index enrichment and shot captions; tool-search / deferred tool loading so 96 tool schemas are not sent on every turn; Haiku for bounded steps. Also a warning that 96-102 tools in one schema is itself an accuracy problem for the planner (tool selection degrades past ~30-40); consolidation or progressive disclosure should be a foundation item.
+- PERCEPTION ENCODER / VIDEO-NATIVE EMBEDDINGS. Meta Perception Encoder (Apache) beats SigLIP 2 on video retrieval; InternVideo2 and Twelve Labs Marengo give clip-level (not keyframe) embeddings. The index design embeds single keyframes only, which cannot answer motion queries ('the moment he throws the ball').
+- SCREENCAST AUTO-ZOOM (cursor/click-following), a distinct category from face-based punch-in: Screen Studio, Tella, Cap, Cursorful, Jitter. Given the desktop bridge already exists (pywebview/avfoundation), logging cursor position and clicks via Quartz events during screen recording makes Screen-Studio-style zooms cheap. Directly relevant to the user's demo/UGC-ad video use case; never mentioned.
+- UGC-AD / PRODUCT-DEMO VIDEO COMPETITOR CLUSTER: Creatify, Arcads, Icon.com, MakeUGC, Poppy AI, Topview.ai, AdCreative, HeyGen UGC, Pencil. These compete on hook-variant generation (N hooks x 1 body), avatar UGC, product-screenshot-to-demo, and ad performance loops. The codebase already has hook_stack; the landscape section treats short-form only as OpusClip/Submagic clipping.
+- TALKING-HEAD AND PODCAST SPECIALISTS NOT NAMED: Gling (retake and silence removal benchmark), Recut (native macOS, silence removal), Timebolt, AutoPod (auto multicam for podcasts), Riverside Magic Clips, Eddie AI (logging-driven assistant editor that builds rough cuts for pro NLEs — the closest analogue to 'rough cut from a brief'), Clipchamp (Microsoft, bundled in Windows), Canva Video, Pictory, Vizard, Munch, LTX Studio (Lightricks, story-to-video on open LTX-2), Google Vids, YouTube Create, Loom AI, Zoom Clips.
+- OPEN-SOURCE EDITOR/AGENT ECOSYSTEM: Remotion (React video with official Claude Code skills — the most common substrate for agent-built videos), Diffusion Studio (browser WebCodecs editor with an agent), OpenCut, Kdenlive 25 AI tools, MoviePy/Editly, davinci-resolve-mcp (mentioned) but not Resolve's free scripting API or Premiere UXP as export targets. Only Cutlass/open-source-cinema/video-use are cited.
+- MUSIC STRUCTURE AND COPYRIGHT: no mention of music copyright pre-check (ACRCloud/AudD fingerprinting, 'will this get Content ID claimed') which is a top creator anxiety; no structure analysis for drops/choruses (allin1, Beat This!, all-in-one segmenters) to place hooks on the chorus; madmom is effectively unmaintained (breaks on numpy 2 / Python 3.12) and Essentia is AGPL-3 — both recommended without caveat while YOLO is rejected for AGPL.
+- DE-REVERB, DE-ESS, HUM REMOVAL, 'SHORTEN PAUSES': DeepFilterNet denoises but does not dereverb; room echo is the most common defect in creator audio. resemble-enhance/VoiceFixer/MossFormer2 (ClearerVoice, Apache) handle it. Descript-style 'shorten long pauses to 0.5 s' (instead of delete) is the higher-quality default and is absent.
+- PLATFORM SAFE-ZONE OVERLAYS (TikTok/IG Reels/Shorts UI occlusion areas) for 9:16 caption and sticker placement — CapCut, Opus and Submagic all ship them; the house-style features here place text without them.
+- TELEPROMPTER + SCRIPT-AWARE RECORDING (Descript, Captions, BigVU): recording against a script makes IntelliScript-style alignment trivial and retake detection exact. The VO recorder exists; the teleprompter and take-marking do not.
+- IMPORT FROM URL (yt-dlp) — every clipping competitor accepts a YouTube/podcast URL; legally gray, needs a policy decision, but its absence is a top-of-funnel gap.
+- ACCESSIBILITY OUTPUTS: audio description generation (VLM narration track for blind viewers), extended AD, and caption compliance (FCC/EAA 2025 timing and reading-rate rules) — a regulatory tailwind like Art. 50 that is not mentioned.
+- COLLABORATION / REVIEW: Frame.io-style timestamped comments and share links, with the agent able to read reviewer comments as edit instructions — a natural extension of the MCP-in-both-directions story; absent.
+- SPEECH-EMOTION / PROSODY FEATURES for highlight scoring (emotion2vec, SenseVoice — both Apache-like), i.e. 'find where she gets excited'; only RMS and laughter are considered.
+- NEAR-DUPLICATE / MULTI-TAKE DETECTION across the bin (perceptual hashing + transcript similarity) — prerequisite for both retake removal and script-to-timeline, not listed as a building block.
+- TRACKING AND VOS ALTERNATIVES TO SAM2 FOR CHEAP PROPAGATION: Cutie (MIT), XMem (MIT) run faster than SAM2 video on MPS; CoTracker3 is CC-BY-NC (do not use); MatAnyone and RVM are non-commercial/GPL (do not use). The masking row names only SAM2/GroundingDINO/Florence-2.
+- LOCAL VIDEO-GEN SMALL MODELS ARE IGNORED: Wan 2.2 TI2V-5B (Apache) runs on a 32-64 GB M4 Max in minutes per 5 s at 720p; LTX-2 distilled/fast and LTX-Video 2B; Mochi (Apache); Open-Sora 2.0 (Apache); Hunyuan Video (licence excludes EU/UK/KR — flag); mlx-video and Draw Things (has a local gRPC/HTTP server usable as a 'local provider') exist. The 82-min-per-2-s figure is Wan 2.2 14B on a 2021 M1 Max — the worst possible pairing.
+- LOCAL IMAGE-GEN OPTIONS: Z-Image-Turbo (Apache, 6B, few seconds on M4), Draw Things server, Apple ImageCreator (Image Playground API, macOS 15.2, free but stylised). Only mflux FLUX.2-klein and Qwen-Image are listed.
+- TTS ALTERNATIVES WITH PERMISSIVE LICENCES beyond Kokoro/Chatterbox: Orpheus (Apache), CSM-1B (Apache), Zonos (Apache, cloning), Dia (Apache), Indic Parler-TTS (Apache). Also missing: consent/likeness verification UX for cloning and a policy for cloning third-party voices found in the footage.
+- DIARIZATION WITHOUT A HF TOKEN: NVIDIA Sortformer (diar_sortformer_4spk-v1, CC-BY-4.0, end-to-end) and NeMo MSDD are the mainstream token-free options and are more proven than the 'aufklarer MLX pyannote ports' cited; senko (fast Apache diarizer) also exists.
+- ASR ALTERNATIVES: Voxtral (Mistral, Apache 2.0, multilingual, strong on Hindi), NVIDIA Canary 1B (CC-BY-4.0, ASR+translation), Moonshine/Kyutai STT for streaming voice input. Not evaluated.
+- WINDOWS/CUDA LADDER FOR EVERY MLX RECOMMENDATION. The synthesis makes MLX the Tier A default but the product also builds for Windows; every MLX-only row (mlx-whisper, mlx-vlm, mlx-audio, demucs-mlx) needs a stated Windows equivalent (faster-whisper CUDA, ONNX Runtime/DirectML, torch CUDA) or Windows becomes a second-class build. Intel Macs are silently dropped by MLX — say so.
+- PACKAGING REALITIES FOR MLX: PyInstaller needs a hook to ship mlx.metallib; hardened-runtime notarization requires every .so/.dylib in mlx/torch/onnxruntime signed; HF Hub downloads need a proxy/offline story; 8 GB M1/M2 Macs (the largest installed base) cannot run Qwen3-VL-8B 4-bit and the RAM tiers (8/16/32/64 GB) are never enumerated per feature.
+- PUBLISHING QUOTA REALITIES: YouTube default quota is 10,000 units/day = 6 uploads/day before a quota extension; unaudited TikTok apps can only post SELF_ONLY/private; Instagram needs a Business/Creator account and a publicly reachable media URL. These gate the 'closed loop' claim more than the API audit itself.
+- EVAL DATASETS FOR THE 'SMARTEST' CLAIM: no benchmark is named for any capability (AMI/VoxConverse DER for diarization, TVSum/SumMe or QVHighlights for highlight extraction, BBC Planet Earth for shot detection is cited, TIMIT/Buckeye for word alignment, MSR-VTT for retrieval). Without them the eval harness (rank 5) has nothing to score.
+- A/B HOOK VARIANTS AND MULTI-VERSION EXPORT ('render 5 hooks x 1 body', 'three thumbnails') as first-class agent outputs — the UGC/ads pattern the user's own tooling (hook video libraries, demo generation) already implies; absent from both gaps and roadmap.
+- AUTO SFX / TRANSITION SOUND PLACEMENT (whoosh on cut, riser before reveal) and auto emoji/sticker placement from transcript — cheap CapCut-class features that use the existing sticker catalog and sidechain mixer; not listed.
+
+### Corrections
+
+- FEASIBILITY: 'Temporally consistent super-resolution — hard' is wrong for macOS. VTSuperResolutionScaler and VTFrameRateConversion (VideoToolbox, macOS 15.4+) are Apple-shipped, ANE-accelerated temporal models callable from pyobjc/Swift helper. Reclassify as 'easy on Mac (macOS 15.4+), hard elsewhere' and drop Real-ESRGAN per-frame as the primary path.
+- FEASIBILITY: Frame interpolation via RIFE ncnn-vulkan (MoltenVK) should be replaced by VTFrameRateConversion / VTLowLatencyFrameInterpolation on Mac; speed-ramp slow-motion (engine gap) becomes cheap.
+- FEASIBILITY: 'Generative T2V/I2V — infeasible locally' is overstated. The evidence is Wan 2.2 14B on an M1 Max. Wan 2.2 TI2V-5B (Apache), LTX-2 distilled and Mochi run as background jobs on M4/M5 Max 48-64 GB in minutes per 5 s; M5-class Neural Accelerators shipped in late 2025. Reclassify as 'Tier B on 48 GB+ Apple Silicon, cloud otherwise' and benchmark on current hardware before deciding.
+- FEASIBILITY: 'Audio-event tagging — 3 days with CLAP/PANNs' should use Apple SoundAnalysis first (zero download, ANE, 300+ classes); CLAP only for free-text audio queries.
+- FEASIBILITY: 'Forced alignment ±50 ms' is only demonstrated for languages with wav2vec2 CTC alignment models; it does not hold for romanized Hinglish (no alignment model; Devanagari acoustic models mismatch Latin script). Either align on Devanagari and map back through the romanizer, or use NeMo Forced Aligner. State this as a risk on rank 1.
+- FEASIBILITY: Whisper DTW word timestamps are typically ±100 ms with outliers, not ±300-500 ms; the bigger problems are hallucination without VAD and segment-boundary drift. Forced alignment is still justified but the stated motivation exaggerates.
+- FEASIBILITY: Filler removal 'easy' is wrong as specified: Whisper-family models suppress disfluencies, so remove_fillers on a Whisper transcript is fundamentally under-recalling. Needs a verbatim-ASR strategy (see missing) and a labelled eval set before it is 'easy'.
+- FEASIBILITY: Apple Vision OCR cannot read Devanagari; the index's OCR stage needs PaddleOCR/Tesseract for Hindi, which changes the 130-210 ms/frame budget.
+- LICENSING: Essentia is AGPL-3.0 (same category the synthesis rejects for Ultralytics YOLO); remove it from the downbeat row. madmom is BSD but unmaintained and incompatible with numpy 2/Python 3.12; prefer Beat This!/allin1 after verifying their weights' licences.
+- LICENSING: Depth Anything V2 — only the Small checkpoint is Apache; Base/Large and Video Depth Anything Large are CC-BY-NC. The row should explicitly forbid upgrading model size. CoTracker3 (CC-BY-NC), MatAnyone (S-Lab non-commercial), RVM (GPL-3), CrisperWhisper (CC-BY-NC) should be added to the do-not-use list.
+- LICENSING: Chatterbox is MIT but the mlx-audio Chatterbox port and DeepFilterNet-in-mlx-audio claims are unverified; several MLX ports named (aufklarer pyannote, whispermlx alignment fork, demucs-mlx, stable-audio-mlx) are small community repos with no maintenance guarantee — the roadmap should not put rank 1 on a fork; use official mlx-whisper + torch-free Silero + a vendored aligner.
+- UNSOURCED LANDSCAPE CLAIMS that the roadmap leans on and should be cited or hedged: Sora app/API shutdown dates (Apr 26 / Sep 24 2026), Premiere AI Assistant public beta Jun 2026, Resolve 21 IntelliSearch, FCP 11 'Creator Studio', Runway Aleph 2, Luma Ray3 Modify, Kling 3.0, 'Descript 43% accuracy gain', 'reviewers report 40% of OpusClip clips discarded', '9-200+ models'. None have a source; a strategy document should mark them as of-date claims.
+- ARCHITECTURAL CLAIM: 'the LLM never watches pixels' contradicts the codebase's own find_moments (Claude vision per shot) and the proposed Qwen3-VL verification; restate as 'pixels are summarised into structured facts by a VLM; the planner consumes facts'.
+- MIS-RANK: Release hygiene ('restore the .spec', single-sourced version, 1 day) and the broken packaged .app are P0 bugs, not 'low impact' or rank 2 — nothing in the roadmap is shippable until the shipped artifact works. Make them rank 0 alongside CFR conform + HDR tone-mapping at ingest.
+- MIS-RANK: The Foundation refactor (tool registry decorator, dispatch.py split, schema codegen) is listed as a gap but absent from the 15-item roadmap, yet every rank adds tools to a 4917-line hand-matched monolith. Put it incrementally at rank 1-2 (start with the decorator registry; split per feature as each rank lands).
+- MIS-RANK: DeepFilterNet Studio Sound is a '3-day swap with outsized quality impact' by the synthesis's own words but sits at rank 9. Pull it (and per-clip loudness auto-mix) into the first two weeks.
+- MIS-RANK: Auto-reframe v2 (rank 10) is called 'second most used short-form feature' and 'easy', and the current implementation destroys the source; it should precede SAM masks (11), OTIO (13) and probably rough-cut (8) for a 9:16-first product.
+- MIS-RANK: BYO-key provider layer (rank 15, 'easy, high') is a prerequisite for rank 5's model picker and for Gemini video QA in rank 4; merge the provider registry into rank 5 and leave only generative-video wiring at the tail.
+- MIS-RANK: SAM 2.1 masks (rank 11) is a pro-NLE feature; for the stated creator/short-form audience, karaoke captions, reframe, B-roll and publishing return more. Move to 13-14 unless the audience changes.
+- MIS-RANK: Publishing/scheduling is 'high impact' and 'both table stakes and whitespace' but has no roadmap slot; given API audit lead times (weeks to months) the audit applications should start at rank 0 even if the code lands later.
+- MIS-RANK: Eval harness should be a gate before rank 3, not part of rank 5 — 'smartest' is unfalsifiable and the transcript editor/word cuts are exactly where regressions will be silent.
+- RANK 4 SCOPE: 3-4 weeks for the fused index assumes one keyframe embedding per shot; add clip-level embeddings (PE/InternVideo2) and a multilingual text embedding or the index answers neither motion nor Hinglish queries.
+- EFFORT TOTAL: the 15 ranks sum to roughly 29-32 engineer-weeks for one developer with zero slack, before the omitted P0s (HDR, VFR, preview engine, refactor). Either state the team size or cut to a 12-week first milestone (ranks 0-3, 5, 6, DeepFilterNet).
+- PLATFORM STATEMENT: Tier A being 'fast via MLX' implicitly drops Intel Macs and makes Windows second-class; the doc should state minimum hardware/OS per feature (e.g. SpeechAnalyzer macOS 26, VTFrameProcessor macOS 15.4, Foundation Models needs Apple Intelligence which does not support Hindi) and RAM tiers (8/16/32/64 GB) per model pack.
+- MODEL RECOMMENDATION: Recommending Claude Haiku for metadata and 'local Qwen3-8B' for offline is fine, but Apple Foundation Models (free, on-device) should be the first choice for English metadata on macOS 26 and Qwen3/Gemma 3 via mlx-lm for Hindi/Hinglish, because Apple Intelligence languages exclude Hindi.
+- MADLAD-400 for Hindi should be replaced or complemented by IndicTrans2 (MIT, ~1 GB, better hi/en quality) — the current 3 GB silent download problem partly disappears.
+
+## 3. What already exists (synthesis view)
+
+video-ai-editor (v0.4.1 in VERSION; ~15.5k Python + ~17k TS) has the right skeleton and several strong pieces; the revised audit also confirms two P0 defects and two ingest facts the critic assumed were absent.
+
+ARCHITECTURE (strong). Pydantic v2 EDL tree (edl/schema.py) is the program; agent/dispatch.py `dispatch(store, tool, args)` is the single mutation path shared by the Claude tool-use loop (agent/loop.py over SSE), UI gestures (POST /dispatch) and external agents via a hand-rolled JSON-RPC MCP server at /mcp. Snapshot undo (30) with persisted redo, ops log, atomic edl.json, .vae project zips. 102 dispatch handlers (96 advertised) with a parametrized smoke test — exactly the 'LLM emits a declarative timeline, deterministic tools execute, everything stays editable' pattern. Caveat: 96-102 tools in one schema is above Anthropic's 30-50 accuracy threshold and costs ~all of the prompt every turn.
+
+RENDERER (strong). One ffmpeg filter_complex compiled from the EDL: keyframed transforms with easing, 13 effects, 6 LUTs, 72 transitions, vector masks, chroma key, PIP, Pillow-rasterised text/sticker overlays with script fallback fonts and emoji artwork, sidechain ducking, loudnorm, HW encoder ladder (VideoToolbox first), hash-keyed preview cache, chunk cache (disabled by any transition), audio-only remux fast path, cancellable jobs. Browser mirrors text/sticker/PIP drawing by hand-duplicated code. Preview is a render-to-file, not a live compositor; every agent 'look' costs a render.
+
+INGEST (verified this pass; corrects the critic). ingest/normalize.py already conforms every upload to CFR (`-fps_mode cfr -r 30`), AAC 48 kHz stereo, injects silent audio for silent sources, probes color_transfer and, for PQ/HLG sources, tries zscale+tonemap(hable) -> colorspace filter -> plain yuv420p. So VFR drift is handled. The real P0 is what it does next: everything is baked to 8-bit SDR H.264 yuv420p at a forced 30 fps (24/60 fps sources judder; 10-bit, HLG/Dolby Vision 8.4 and Apple Log are destroyed, not passed through); the Homebrew ffmpeg it targets usually lacks zscale, so the common path is the washed-out colorspace/yuv420p fallback; export (compositor) is libx264 yuv420p only. iPhone default footage therefore looks wrong on the first real test.
+
+TIER A AI, PRESENT BUT CPU/HEURISTIC. faster-whisper CPU int8 on Mac (whisper.cpp Metal opt-in), raw Whisper DTW word timestamps (~±100 ms, worse at segment edges, no VAD gating so hallucination on silence), language detection, broadcast cue formatter (42 chars, 17 CPS, Devanagari-aware), auto_caption routing hi/en/hinglish/es via MADLAD-400 (3 GB silent download) + Hinglish romanizer + Claude fallback, SRT/VTT/ASS I/O. Diarization: pyannote with HF token else weak MFCC+KMeans. Demucs CPU stems. rembg u2net per frame. LaMa per-frame erase (flickers). open_clip ViT-B-32 over ~4 keyframes per clip (English-only, no OCR/events/faces). find_moments: keyword pre-rank + Claude vision per shot (paid, network). Haar-cascade reframe that re-encodes the source. OpenCV MIL/ViT tracking. Multicam by RMS/ZCR/motion. Heuristic shorts scoring. librosa onsets (not downbeats). noisereduce spectral gate. Piper TTS (upstream archived; maintained fork is GPL-3). Real-ESRGAN and RIFE ncnn binaries. vidstab. Filename-keyword B-roll index. ai/features.py honestly reports availability.
+
+PRODUCT SURFACE. React/canvas timeline (filmstrips, waveforms, snapping, transitions popover, keyframe diamonds, markers, 3 keymaps), Properties inspector, sticker panel with full emoji catalogue, VO recorder via native bridge (no teleprompter, no cursor/click logging), captions button, export modal, Claude chat overlay with live UI context, show templates / brand kit / aesthetic audit / hook stack encoding a 9:16 Hinglish house style (no platform safe zones).
+
+P0 DEFECTS (verified). (1) 'Video AI Editor.spec' has an uncommitted diff (+9/-93) that would break the Windows captions build if committed; build_app.sh does not drive the .spec. (2) Versions disagree: VERSION 0.4.1, pyproject and package.json 0.3.7, __init__ 0.1.0; CHANGELOG stops at 0.3.7. (3) The packaged macOS .app excludes torch/faster-whisper/open_clip/librosa/demucs, so captions, search, stems, diarization and beats do not work in the shipped artifact; nothing auto-downloads models; the DMG is ad-hoc signed with no updater. (4) HDR/fps ingest as above.
+
+OTHER HONEST LIMITS. ~25 AI tools have no UI (chat/MCP only). No transcript editor, karaoke captions, auto zoom, script alignment, auto B-roll, retake/multi-take detection, generative anything, publishing, C2PA, accessibility outputs. Agent: single model string, no prompt caching/batches/tool search, no plan preview, no eval harness (tests cover only context-block construction), max 8 turns, unbounded chat.json. Engine: v1 + one PIP lane, scalar speed (curve accepted but ignored), keyframes only on transform, AI tools bake results by swapping clip.src. Foundation: dispatch.py is 4,917 lines with hand-matched tool names and stale descriptions; types.ts is a partial hand mirror; presets/{brand_kits,end_cards,templates,text_styles,transitions} are empty; Apple emoji PNGs are the only online dependency. Platform: MLX would drop Intel Macs; Windows has no stated equivalent for any MLX-only recommendation.
+
+## 4. Gap analysis
+
+- **[P0] Release hygiene: restore the .spec, single-source the version, changelog, tags, build from the spec**
+  - *whyItMatters*: The uncommitted 93-line .spec deletion would break the Windows build; four version strings disagree; nothing downstream is shippable until the artifact builds reproducibly. Upgraded from 'low' to a gate.
+  - *impact*: critical
+  - *feasibility*: easy
+  - *buildingBlocks*: git checkout -- 'Video AI Editor.spec'; pyproject dynamic version reading VERSION + Vite define; CHANGELOG entries 0.3.8-0.4.1; git tags; build_app.sh invokes PyInstaller via the .spec.
+  - *touches*: Video AI Editor.spec; build_app.sh; VERSION; pyproject.toml; frontend/package.json; src/video_ai_editor/__init__.py; CHANGELOG.md
+  - *effort*: 1 day
+- **[P0] Packaged app that ships Tier A, with a model pack manager, RAM-tier gating and notarization-safe packaging**
+  - *whyItMatters*: The shipped .app cannot caption, search or diarize; 8 GB M1/M2 Macs are the largest installed base and only the Apple-framework rows make that tier viable.
+  - *impact*: critical
+  - *feasibility*: medium
+  - *buildingBlocks*: Hardware detection (chip family, physical RAM) hides/labels features per tier (8/16/32/64 GB). Bundle mlx + numpy + onnxruntime + a Swift helper for Apple frameworks; PyInstaller hook to collect mlx/lib/mlx.metallib; torch packs optional. Model manager with resumable checksummed downloads from your own CDN (HF_ENDPOINT/HF_HUB_OFFLINE), never gated HF repos at runtime. Notarization: sign every nested Mach-O per-binary (not --deep) with disable-library-validation / allow-jit entitlements; CI smoke test loads mlx, onnxruntime, ffmpeg from the notarized build. Kdenlive's bundled-venv packaging is a reference.
+  - *touches*: build_app.sh; Video AI Editor.spec; ai/features.py; cli/setup_ai_binaries.py; config.py; new ModelManager UI; new helpers/AppleML (Swift)
+  - *effort*: 2 weeks
+- **[P0] HDR / 10-bit / Apple Log colour pipeline and native-fps ingest**
+  - *whyItMatters*: iPhone 12-17 default footage is 10-bit HLG wrapped as Dolby Vision 8.4; normalize.py bakes it to 8-bit SDR H.264 at 30 fps and, on the usual zscale-less Homebrew ffmpeg, via the washed-out colorspace fallback. Resolve/FCP/Premiere/iMovie handle HLG natively; most web editors do not — a visible quality differentiator and a correctness bug that precedes every AI feature.
+  - *impact*: critical
+  - *feasibility*: medium
+  - *buildingBlocks*: Ship an ffmpeg build with libzimg (zscale) and hevc_videotoolbox; ingest classifier tags {sdr, hlg, pq, dv8.4, applelog} and preserves native fps (24/25/30/50/60) instead of forcing 30; HDR passthrough mezzanine: hevc_videotoolbox -pix_fmt p010le -profile:v main10 -tag:v hvc1 with bt2020/arib-std-b67 tags (DV RPU dropped -> plain HLG, accepted as HDR by YouTube/Instagram); SDR delivery: zscale linear npl=100 -> tonemap=hable or bt2390 -> bt709 (or libplacebo where Vulkan is available); Apple Log via Apple's LUT (lut3d) before grading; overlays composited in a colour-managed space; export presets 'HDR (HLG) passthrough' vs 'SDR (tone-mapped)'; golden test: iPhone HLG clip round-trips without luminance/saturation shift (ffmpeg signalstats). Windows: NVENC hevc p010 + same zscale chain.
+  - *touches*: ingest/normalize.py; ingest/probe.py; ingest/pipeline.py; render/compositor.py (10-bit encoder ladder); render/effects.py (colour-managed overlays); ExportModal.tsx presets
+  - *effort*: 2 weeks
+- **[P0] Timestamp-native edit units and CFR guarantees for recorded sources**
+  - *whyItMatters*: CFR conform already exists (verified), but internal edit units must stay rational seconds (not frame indices) once native fps is preserved, and the built-in screen/VO recorder must capture CFR directly so word-level cuts and forced-aligned captions never drift.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: ffprobe pts-delta std-dev check to flag VFR; store conformed=true + original fps in the asset record; ScreenCaptureKit minimumFrameInterval for CFR capture; -af aresample=async=1 keeps audio locked; unit tests asserting cut times survive fps changes.
+  - *touches*: ingest/normalize.py; ingest/probe.py; edl/schema.py (time as rational seconds); desktop.py recorder
+  - *effort*: 3 days
+- **[Foundation] Tool registry single source of truth, consolidation to ~25-30 hot tools, deferred loading, dispatch.py decomposition, schema codegen**
+  - *whyItMatters*: 102 hand-matched handlers in a 4,917-line file with stale descriptions; Anthropic documents that tool selection degrades past 30-50 tools and that defer_loading cuts definition tokens >85%. Every roadmap rank adds tools; this is where velocity and planner accuracy are lost. Promoted from 'gap without a roadmap slot' to rank 2, done incrementally.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Decorator registering handler + Pydantic schema together; namespaced verb-level tools (timeline.apply_cutlist, captions.style, audio.enhance) with sub-actions; 3-5 hot tools non-deferred, long tail via Tool Search (BM25/regex variant) with defer_loading; cache breakpoint on a hot tool (deferred tools cannot carry cache_control); split into agent/tools/{edit,text,audio,effects,ai,show}.py; pydantic JSON schema -> json-schema-to-typescript for types.ts; measure planner accuracy on a fixed task set before/after consolidation.
+  - *touches*: agent/dispatch.py; agent/tools.py; agent/loop.py; frontend/src/types.ts; tests/test_all_tools_smoke.py
+  - *effort*: 2 weeks initial, then per-feature
+- **[Foundation] Eval harness with named datasets and telemetry (gate before the transcript editor)**
+  - *whyItMatters*: 'Smartest' is unfalsifiable without evals; word-level cuts and filler removal fail silently. No benchmark was previously named for any capability.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: eval/ runners per capability: ASR WER/RTFx (Open ASR Leaderboard subsets, FLEURS-hi, Kathbath, IndicVoices), word alignment (TIMIT, Buckeye + 200 hand-aligned Hinglish utterances), diarization DER (AMI-IHM, VoxConverse, DIHARD-III, CALLHOME), fillers (PodcastFillers eval-only — annotations non-commercial; Switchboard), highlights (TVSum, SumMe, QVHighlights), shot detection (BBC Planet Earth, RAI, ClipShots), retrieval (MSR-VTT, DiDeMo, Charades-STA + house Hinglish queries), beats (Ballroom, Harmonix), separation (MUSDB18), translation (IN22), TTS (UTMOS + ECAPA similarity), VLM QA (house set vs Gemini Flash). Agent evals: lavfi-synthesised golden projects + prompt suites -> EDL invariant assertions; JSONL telemetry per tool call (cost, latency); CI runs a 5% smoke subset with a budget cap; private house set of own Hinglish footage as tie-breaker.
+  - *touches*: new eval/; tests/agent_evals/; agent/loop.py; api/hardening.py metrics
+  - *effort*: 1-2 weeks, then ongoing
+- **[Apple] SpeechAnalyzer / SpeechTranscriber as the Mac ASR default (macOS 26)**
+  - *whyItMatters*: Apple's on-device ASR with word timing (audioTimeRange), models managed by the OS (no app size, no HF download, no licence), 2.2x faster than whisper-large-v3-turbo in MacStories' 34-min 4K test with comparable accuracy; what FCP 11.1 uses.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Swift helper CLI (Yap-style) wrapping SpeechTranscriber(locale:, attributeOptions:[.audioTimeRange]) + AssetInventory.assetInstallationRequest; DictationTranscriber fallback; check supportedLocales at runtime — Hindi/Hinglish unconfirmed at launch, so keep mlx-whisper/IndicConformer for hi. Validate word timing against TIMIT/Buckeye before relying on it for karaoke.
+  - *touches*: ingest/transcribe.py backend ladder; helpers/AppleML; ai/features.py; config.py WHISPER_BACKEND
+  - *effort*: 1 week
+- **[Apple] VideoToolbox VTFrameProcessor: super-resolution, frame-rate conversion, low-latency interpolation, temporal noise filter, motion blur (macOS 15.4+)**
+  - *whyItMatters*: Apple-shipped, ANE-accelerated temporal models that make 'temporally consistent super-resolution' and smooth slow-motion easy on Mac (FCP's Smooth Slo-Mo / super-res path). Corrects the earlier 'hard' classification and retires RIFE-ncnn and per-frame Real-ESRGAN as the primary path.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Swift helper: VTFrameProcessor.startSession with VTFrameRateConversionConfiguration / VTSuperResolutionScalerConfiguration (check configurationModelStatus, downloadConfigurationModel on first use — needs network once; design an offline message) / VTLowLatencyFrameInterpolation / VTTemporalNoiseFilter; precompute VTOpticalFlow once and reuse across effects; frames via AVAssetReader -> AVAssetWriter HEVC. Verify exact minimum OS for TNF/low-latency SR in headers (likely macOS 26). Windows fallback: RIFE (MIT) + Real-ESRGAN (BSD) via ONNX/DirectML.
+  - *touches*: ai/upscale.py; ai/interpolate.py; render/compositor.py speed ramps; helpers/AppleML
+  - *effort*: 1 week
+- **[Apple] SoundAnalysis built-in classifier for audio-event tagging (macOS 12)**
+  - *whyItMatters*: 300+ labels (laughter, applause, cheering, crowd, music genres/instruments, alarms) at zero download and zero licence risk; replaces CLAP/PANNs for highlight scoring, auto-SFX cues and 'music bed on/off'. No NLE exposes it — a differentiator.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: SNAudioFileAnalyzer + SNClassifySoundRequest(.version1), 1 s windows with overlap, threshold ~0.5, emit timed events into the index; CLAP (ONNX) only for free-text audio queries; PANNs on Windows.
+  - *touches*: new ai/audio_events.py; ai/index.py; ai/shorts.py; helpers/AppleML
+  - *effort*: 3 days
+- **[Apple] Foundation Models on-device LLM for bounded English tasks (macOS 26)**
+  - *whyItMatters*: Free, offline ~3B model with @Generable constrained output and tool calling — ideal for chapter titles, filler classification, metadata pack, caption cleanup, hook variant text. Constraint: ~4k-token context and no Hindi (16 supported languages, none Indic), so Hinglish routes to Claude Haiku or local Qwen3/Gemma 3 via mlx-lm.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Swift helper exposing LanguageModelSession.respond(generating:) as JSON; SystemLanguageModel.availability check (Apple Intelligence on, M1+, supported region/language); chunk transcripts; provider registry entry 'apple_fm' with language capability flags; Windows: Phi Silica (Copilot+) or Haiku.
+  - *touches*: integrations/providers.py; ai/metadata.py; helpers/AppleML
+  - *effort*: 3-5 days
+- **[Apple] Vision subject lift and person segmentation as free matting seeds (macOS 14 / 12)**
+  - *whyItMatters*: VNGenerateForegroundInstanceMaskRequest gives class-agnostic soft masks at source resolution (people, pets, products); VNGeneratePersonSegmentationRequest gives real-time people mattes; both zero download, replacing u2net and avoiding non-commercial MatAnyone/GPL RVM.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Per-frame requests on a background queue; instance IDs are not stable across frames, so IoU-match or hand the seed to SAM2/Cutie for propagation; guided-filter edge refinement; CIBlendWithMask preserves HDR. Windows: BiRefNet (MIT) / MODNet (Apache) via ONNX.
+  - *touches*: ai/bgremove.py; new ai/masks.py; helpers/AppleML
+  - *effort*: 3-5 days
+- **[Apple] Translation framework for zero-setup caption translation (macOS 15; Hindi supported)**
+  - *whyItMatters*: On-device, batch API with per-segment identifiers and automatic language-pack download; removes the 3 GB MADLAD silent download as the default path. Quality below IndicTrans2 for hi<->en, so it is the default tier, not the quality tier.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: TranslationSession.translations(from:) batch with clientIdentifier per cue; LanguageAvailability check; prepareTranslation() pre-download; keep source cue timing; IndicTrans2 (MIT, 1B/200M distilled, CTranslate2) as quality tier; MADLAD only for long-tail languages.
+  - *touches*: ai/translate.py; dispatch auto_caption/translate_captions; helpers/AppleML
+  - *effort*: 3 days
+- **[Apple] Cinematic framework: rack focus and aperture edits on iPhone cinematic-mode clips (macOS 14)**
+  - *whyItMatters*: Unique for iPhone-shot UGC: agent tools 'rack focus to speaker at t' and 'set f/2.8' on the depth script, non-destructive, rendered with CNRenderingSession inside a custom AVVideoCompositor (pairs with the AVFoundation preview path).
+  - *impact*: low
+  - *feasibility*: medium
+  - *buildingBlocks*: CNAssetInfo + script decisions + apertureFNumber; Metal rendering session at .preview/.export quality; requires the native compositor path.
+  - *touches*: new ai/cinematic.py; helpers/AppleML; preview engine
+  - *effort*: 1 week after preview engine
+- **[Apple/Depth] Depth pipeline with licence-safe models: Core ML Depth Anything V2 Small, Video Depth Anything Small, Depth Pro**
+  - *whyItMatters*: Depth drives DoF blur, fog, 2.5D parallax, occlusion-aware reframe. Only the Small checkpoints are Apache (Base/Large are CC-BY-NC — forbid upgrading model size); Depth Pro is under Apple's permissive sample licence for metric depth on keyframes.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: apple/coreml-depth-anything-v2-small on ANE per frame; Video-Depth-Anything-Small via MPS for temporal consistency; Depth Pro for stills/keyframes; ffmpeg per-frame mask blur / displacement.
+  - *touches*: new ai/depth.py; render/effects.py (depth_blur, fog, parallax)
+  - *effort*: 1-2 weeks
+- **[Understanding] Fused multimodal footage index + one natural-language search (revised scope)**
+  - *whyItMatters*: The retrieval layer that makes the agent smart. Revised because single-keyframe CLIP cannot answer motion queries, MobileCLIP is English-only, Vision OCR lacks Devanagari, and BM25 fails on Hinglish transliteration variance.
+  - *impact*: critical
+  - *feasibility*: medium
+  - *buildingBlocks*: PySceneDetect AdaptiveDetector (BSD) for shots; per-shot clip-level embeddings with Meta Perception Encoder PE-Core-B/L over 8-16 frames and PE-AV-small for audio-visual events (Apache; B/S sizes on 8-16 GB); SigLIP 2 (Apache, multilingual) keyframes for the cheap first pass; OCR routed by script: Vision for Latin, PaddleOCR PP-OCRv5 (Apache, ONNX) for Devanagari; SoundAnalysis events; Apple Vision face landmarks + permissive embedding for people; speech emotion (emotion2vec+); text: sqlite FTS5 BM25 over romanized + phonetically normalised Hinglish (IndicXlit) plus bge-m3 (MIT, int8 ONNX) dense vectors; sqlite-vec/LanceDB; reciprocal-rank fusion; optional VLM re-rank. Background job at upload; Batches API for nightly cloud enrichment. Eval on MSR-VTT/Charades-STA + house queries.
+  - *touches*: new ai/index.py; ingest/pipeline.py; ai/clip_search.py and ai/vision.py folded in; dispatch search_media/find_moments/find_broll; api/jobs.py; MediaBin.tsx search; storage.py
+  - *effort*: 4-5 weeks
+- **[Understanding] ASR ladder with VAD and forced alignment (per language, per platform)**
+  - *whyItMatters*: faster-whisper is CPU-only on Mac (~7x slower than MLX); no VAD gating (hallucination on silence); Whisper DTW word timing ~±100 ms with segment-edge drift — enough to justify alignment for karaoke captions and word cuts, but the ±50 ms target is only demonstrated where CTC aligners exist.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Routing table: English on Mac -> SpeechAnalyzer; English/European on Windows -> Parakeet TDT 0.6B v3 (CC-BY-4.0, timestamps) via sherpa-onnx; Hindi/Hinglish -> IndicConformer-600M (MIT) or mlx-whisper large-v3-turbo (MIT, word_timestamps) with Voxtral Mini (Apache, Hindi, no timestamps) for understanding only; live voice input -> Kyutai STT (MLX) or Moonshine (MIT). Silero VAD v5 (MIT, 2 MB) gates segments. Alignment: wav2vec2 CTC (WhisperX-style, vendored, no community fork) for en/fr/de/es/it; Hinglish path in the next row. Keep faster-whisper CUDA and whisper.cpp as fallbacks.
+  - *touches*: ingest/transcribe.py; new ai/align.py; config.py; ai/features.py; cli/setup_ai_binaries.py
+  - *effort*: 1-2 weeks
+- **[Understanding] Hinglish word-level alignment (explicit risk item)**
+  - *whyItMatters*: The house style is Hinglish and no wav2vec2 aligner covers romanized Hinglish; ctc-forced-aligner's MMS weights are CC-BY-NC (blocked); Sarvam APIs return chunk timestamps only. Karaoke captions and word cuts for the main market depend on solving this.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Transliterate romanized tokens -> Devanagari (AI4Bharat IndicXlit, MIT, or indic-transliteration); CTC forced alignment with IndicWav2Vec-Hindi (Apache) via torchaudio.functional.forced_align or NeMo Forced Aligner on IndicConformer; map times back to the romanized transcript; English spans through the English aligner segment-wise; fallback Whisper DTW at ±100 ms. Eval: 200 hand-aligned Hinglish utterances.
+  - *touches*: ai/align.py; ai/romanize.py; eval/alignment
+  - *effort*: 1-2 weeks, quality risk
+- **[Understanding] Verbatim / disfluency-aware transcription strategy for filler removal**
+  - *whyItMatters*: Whisper-family models drop 'um/uh/like' and repetitions, so remove_fillers on their transcripts fundamentally under-recalls (earlier 'easy' rating was wrong). CrisperWhisper (87.8-93.5% disfluency F1) has non-commercial weights — eval reference only. Descript's filler removal is English-only, leaving Hindi/Hinglish fillers (matlab, yaar, haan, toh) as an opening.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Whisper initial_prompt seeded with fillers (partial recall gain); acoustic candidate detector = Silero speech islands with no ASR word coverage, 80-600 ms, low pitch variance, small filler classifier; n-gram repetition detector for stutters/retakes; user-confirmable list; KPI 'filler recall' tracked on PodcastFillers (eval-only) + a house Hinglish set.
+  - *touches*: ingest/transcribe.py; new ai/fillers.py; dispatch remove_fillers
+  - *effort*: 1-2 weeks
+- **[Understanding] Shot understanding: local Qwen3-VL via mlx-vlm benchmarked against Gemini Flash / Twelve Labs Pegasus as the cloud baseline**
+  - *whyItMatters*: find_moments spends Claude vision calls per shot; Claude has no video input at all. Gemini 2.5 Flash ingests whole videos with audio at ~$0.11/hour (Flash-Lite $0.036/h, 50% off batch) and Pegasus at $1.75/h — the cheap, correct cloud baseline. A local 2B-8B VLM makes captions free and offline for the verify loop but must beat or approach that baseline on a house set.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: mlx-vlm (MIT) + Qwen3-VL-8B-Instruct-4bit (~5 GB, 16 GB+) or 2B (8 GB Macs); Florence-2 (MIT) for cheap captions/grounding; provider video_qa(clip, question) -> {gemini_flash, pegasus, local}; send only needed clip offsets; Gemini YouTube-URL ingestion as a legal analysis-only alternative to downloading. Windows: llama.cpp GGUF Qwen3-VL.
+  - *touches*: ai/vision.py; integrations/providers.py; config.py VAI_VLM_MODEL; model packs
+  - *effort*: 1 week
+- **[Understanding] Token-free speaker diarization (licence-corrected)**
+  - *whyItMatters*: Speaker labels drive multicam, per-speaker captions, lower-thirds. Correction: NVIDIA offline Sortformer v1 is CC-BY-NC (unusable); only streaming Sortformer v2 is CC-BY-4.0 (still HF-gated to download — mirror it); pyannote community-1 is gated; the previously cited MLX pyannote ports are unmaintained community forks.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Default: senko (MIT; Silero VAD + CAM++ embeddings + clustering; Core ML on ANE; 1 h in ~8 s on M3; VoxConverse 13.5% DER, weak on AMI 26.5%); Windows: sherpa-onnx diarization (pyannote segmentation + 3D-Speaker embeddings); premium ≤4-speaker tier: streaming Sortformer v2 from own CDN; 'exclusive' word-to-speaker assignment using aligned words; eval DER on AMI/VoxConverse/DIHARD/CALLHOME.
+  - *touches*: ai/diarize.py; cli/setup_pyannote.py; dispatch assign_caption_speakers/add_lower_third
+  - *effort*: 1 week
+- **[Understanding] Active-speaker detection + speaker-driven multicam SmartSwitch**
+  - *whyItMatters*: Multicam and speaker-aware reframe need to know WHO on screen is talking; multicam.py scores by RMS/ZCR/motion. AutoPod's switching rules (speaker-active + wide-shot cadence) are the benchmark.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Light-ASD / LR-ASD on MPS or MediaPipe FaceMesh mouth-aspect-ratio variance as a cheap proxy; per-track VAD when isolated mics exist; switching state machine (min shot length, look-ahead, group shot on crosstalk); review UI for cuts.
+  - *touches*: new ai/asd.py; ai/multicam.py; ai/reframe.py; Timeline.tsx multicam review
+  - *effort*: 2 weeks
+- **[Understanding] Speech emotion / prosody features for highlight scoring**
+  - *whyItMatters*: 'Find where she gets excited' needs more than RMS and laughter; OpusClip's virality score is opaque, a transparent arousal/emotion signal with rationale is a credibility advantage.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: emotion2vec+ (MIT; export to ONNX once to avoid the FunASR dependency); SenseVoice-Small (events + emotion; no Hindi) via sherpa-onnx; arousal proxy from pitch range, energy slope, speech rate from word timings; store per-utterance vectors in the index.
+  - *touches*: ai/index.py; ai/shorts.py
+  - *effort*: 3-5 days
+- **[Understanding] Face/people clustering and near-duplicate / multi-take detection**
+  - *whyItMatters*: 'All shots of Alice' (Resolve/Premiere) and take clustering are prerequisites for speaker naming, retake removal, script-to-timeline and multicam. Neither exists.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Apple Vision face landmarks (ANE) + a permissive embedding (Facenet512 via DeepFace or a Core ML FaceNet; avoid InsightFace models) + HDBSCAN; takes: per-shot pHash sequences (imagehash BSD) + 1-s spectral-peak audio fingerprints (avoid static-linking chromaprint LGPL) + transcript n-gram similarity ≥0.6 + speaker match; rank takes by fillers, pauses, clarity; 'best take' flag.
+  - *touches*: ai/index.py; new ai/takes.py; dispatch name_speakers/remove_retakes; MediaBin people rail
+  - *effort*: 1-2 weeks
+- **[Understanding] Shot-boundary detection upgrade**
+  - *whyItMatters*: ffmpeg select=gt(scene,0.3) misses fades/wipes and over-cuts on flashes; every shot-level feature inherits the errors.
+  - *impact*: low
+  - *feasibility*: easy
+  - *buildingBlocks*: PySceneDetect AdaptiveDetector + HistogramDetector for fades; TransNetV2 (MIT) to refine gradual transitions; eval F1 on BBC Planet Earth / ClipShots.
+  - *touches*: ingest/scenes.py
+  - *effort*: 2 days
+- **[Editing] Transcript editor (text-based editing) with batched cut_words and 'shorten pauses'**
+  - *whyItMatters*: Descript's core interaction, now in Premiere/Resolve/CapCut. dispatch already ripples cut_range; missing are the source-to-timeline mapping through cuts, one-undo-step batching, and the panel. Gated on the eval harness because word-cut regressions are silent.
+  - *impact*: critical
+  - *feasibility*: medium
+  - *buildingBlocks*: Aligned words (rank 3); EDL helper mapping source ranges to timeline ranges per v1 clip; cut_words / shorten_gaps (gaps > 0.8-1.0 s tightened to 0.3-0.5 s with 10 ms crossfades, never before sentence-initial breaths) committing one undo step; React panel with word selection, strikethrough, speaker headers, click-to-seek, search; retake removal from the multi-take detector.
+  - *touches*: new frontend/src/components/TranscriptPanel.tsx; store.ts; agent/dispatch.py (cut_words, shorten_gaps, get_transcript with mapping); edl/schema.py helper; main.py /transcript
+  - *effort*: 2-3 weeks
+- **[Editing] Silence / filler / retake removal UI with smarter cut logic**
+  - *whyItMatters*: remove_silences/remove_fillers exist but are chat-only and filler recall is structurally low (see verbatim ASR row); Gling and Recut set the quality bar; Descript adds 'avoid harsh cuts' analysis.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Silero VAD ranges; filler candidates from the verbatim strategy; rapidfuzz adjacent-sentence retake detection + multi-take clusters; snap edges to silence troughs; LLM pass classifying meaningful pauses; auto-editor (Unlicense) as reference; margin/threshold controls in an AI panel.
+  - *touches*: agent/dispatch.py remove_* handlers; AiPanel.tsx; ingest/transcribe.py VAD ranges
+  - *effort*: 1 week after verbatim ASR
+- **[Editing] Auto zoom: face punch-in for talking heads and cursor/click-following zoom for screencasts**
+  - *whyItMatters*: Descript/Wisecut/AutoCut/Captions punch-ins hide jump cuts; Screen Studio/Cap/Tella/Cursorful cursor zooms are the product-demo standard and directly serve the demo/UGC-ad use case. Keyframes with easing, face detection and the desktop bridge already exist.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Faces: Apple Vision or MediaPipe boxes keep eyes in the upper third; LLM picks emphasis phrases; alternate 100/115/130% framings via edl/keyframes.py. Screencast: during ScreenCaptureKit recording, log mouse positions/clicks/keys via CGEvent.tapCreate listen-only (Accessibility permission; record display ID + scale); cluster clicks into focus regions; zoom keyframes (ease-out-expo, 1.5-2.5x), Catmull-Rom cursor smoothing, idle-cursor hide, click ripple overlay; Windows SetWindowsHookEx(WH_MOUSE_LL). Do not copy Cap's AGPL code.
+  - *touches*: new dispatch auto_zoom / screencast_autozoom; ai/reframe.py face sampling; desktop.py recorder event log; Properties.tsx
+  - *effort*: 1-2 weeks
+- **[Editing] Auto B-roll placement (retrieval-first, stock second, generation last)**
+  - *whyItMatters*: Table stakes for short-form (OpusClip, Submagic, Descript, Firefly Quick Cut); find_broll is a filename index and nothing places clips.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: LLM shot list per transcript segment; PE/SigLIP2 text-to-shot retrieval over the user's library (index row); Pexels/Pixabay/Unsplash stock; placement on v2 at sentence boundaries with fades; cloud/local generation only when nothing matches.
+  - *touches*: ai/broll.py; new dispatch auto_broll; add_clip v2 defaults; integrations/stock.py
+  - *effort*: 1-2 weeks after the index
+- **[Editing] Rough cut from a brief (Quick Cut / Eddie-class)**
+  - *whyItMatters*: The headline agentic demo; Firefly Quick Cut, Underlord, CapCut Auto-Edit, InVideo and Eddie AI all ship it. Composes tools this codebase has, behind a reviewable plan.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Index query + LLM segment selection with rationale -> plan of dispatch calls (cut, hook, captions, music, audit) shown for approval; agent recipe files; apply_hook_stack + audit_aesthetic as finishing pass; blind-rating eval against Eddie on the same footage.
+  - *touches*: agent/system_prompt.py; presets/templates recipes; agent/dispatch.py composite; ChatOverlay plan view
+  - *effort*: 2 weeks after index, transcript editor and plan preview
+- **[Editing] Highlight / clip extraction with LLM rubric and rationale**
+  - *whyItMatters*: OpusClip ClipAnything, Kapwing, Submagic; make_shorts is a heuristic over RMS/shot length/word density. A rubric that explains itself beats an opaque 0-99 score.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Transcript-first rubric (hook, payoff, self-contained, quotable, density) via Haiku / Apple Foundation Models (English) / local Qwen3 (Hinglish); SoundAnalysis laughter/applause peaks + emotion arousal + semantic novelty; snap to sentence then silence trough; eval on QVHighlights/TVSum + house set.
+  - *touches*: ai/shorts.py; dispatch make_shorts; batch pipeline (reframe + captions per short)
+  - *effort*: 1 week
+- **[Editing] Script-to-timeline (IntelliScript) + teleprompter / script-aware recording with take marking**
+  - *whyItMatters*: Resolve's flagship AI feature; recording against a script (BigVU, Captions, Descript) makes alignment trivial and retake detection exact. The VO recorder exists; the teleprompter and take stamps do not.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Scrolling script pane in the recorder; each take stamped with its script range; Needleman-Wunsch alignment of ASR tokens to script lines (or rapidfuzz partial ratio for unscripted takes); best-take scoring (fewest fillers, closest to script, clarity, camera preference); alternates stacked on upper tracks (needs multi-track).
+  - *touches*: new ai/script_align.py; dispatch assemble_from_script; VoRecorder.tsx teleprompter; depends on multi-track schema
+  - *effort*: 2-3 weeks
+- **[Editing] Downbeat/structure detection, auto-montage, and music copyright pre-check**
+  - *whyItMatters*: CapCut beat sync and FCP Montage Maker cut on downbeats and choruses; auto_cut_to_beats uses librosa onsets. Licence corrections: Essentia is AGPL (removed) and madmom is unmaintained (numpy 2 / Py 3.12 breakage). 'Will this get a Content ID claim' is a top creator anxiety no local editor answers.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Beat This! (MIT, PyTorch 2, no madmom) for beats/downbeats; self-similarity + energy chorus detector (allin1 only in an isolated venv with numpy<2); shot selection via index (faces, motion, saliency) on downbeats; fingerprint every imported music track with ACRCloud or AudD (BYO key) and badge 'likely claim' with ISRC, offering a licensed-catalogue swap.
+  - *touches*: ingest/beats.py; dispatch auto_cut_to_beats; new make_montage; new integrations/fingerprint.py; MediaBin badge
+  - *effort*: 1-2 weeks
+- **[Editing] Metadata pack (chapters, titles, descriptions, hashtags, show notes) and thumbnail generation with best-frame picking**
+  - *whyItMatters*: Every publishing tool ships both; pure LLM-over-transcript plus frame scoring. YouTube Test & Compare (3 thumbnails) is Studio-only — document as a manual step.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Apple Foundation Models for English (free, offline), Haiku or local Qwen3 for Hinglish; TextTiling / embedding change points seed chapters; frame scoring (Vision face + expression, Laplacian sharpness, eyes open); Vision subject lift or BiRefNet cutout; Pillow templates reusing text_overlay fonts; optional Z-Image-Turbo / mflux backgrounds.
+  - *touches*: new dispatch generate_metadata; new ai/thumbnail.py; render/text_overlay.py; export UI copy affordance
+  - *effort*: 1 week
+- **[Editing] A/B hook variant matrix and multi-version export as first-class agent outputs**
+  - *whyItMatters*: The UGC-ads pattern (Creatify, Arcads, Pencil): N hooks x 1 body x K formats plus 3 thumbnails, with a manifest and later performance ranking. hook_stack exists; batch render + manifest + loop do not — and the user's own demo/UGC tooling points here.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: variants.render(matrix): render the body once, concat hooks with GOP-aligned cuts (identical encode params; re-encode only the hook segment otherwise), thumbnails from frame picks + overlays, manifest.csv (variant id, hook text, duration, thumbnail, platform, safe-zone check), optional scheduling; ingest Meta/TikTok CSVs to rank hooks; avatar VO via cloud TTS/HeyGen provider when requested.
+  - *touches*: show/hook_stack.py; new dispatch render_variants; render/chunks.py; ExportModal.tsx batch tab
+  - *effort*: 1 week
+- **[Editing] Auto SFX / transition sounds and auto emoji/sticker placement**
+  - *whyItMatters*: Submagic, OpusClip, CapCut and Captions ship these; they reuse the existing sticker catalogue and sidechain mixer.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Rule engine over the cut list: hard cut -> whoosh (-18 dB, 120 ms pre-roll), keyword/reveal -> riser + hit, laughter event -> optional sting; sidechain-duck music under SFX; emoji via transcript token -> lexicon + LLM disambiguation, placed at word time inside safe zones, ≤1 per 6 s; CC0 SFX pack.
+  - *touches*: new dispatch auto_sfx / auto_emoji; render/audio_mix.py; ai/emoji.py
+  - *effort*: 1 week
+- **[Editing] Platform safe-zone overlays and layout constraints (TikTok / Reels / Shorts, title/action-safe 16:9)**
+  - *whyItMatters*: The house-style features place text without knowing where the caption box, username, like rail and progress bar sit; CapCut/Opus/Submagic/Kapwing all ship overlays.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Per-platform safe-zone JSON (px at 1080x1920 + percentages, version-dated; TikTok roughly top 130 / bottom 480 / right 140 / left 44 px, Reels top 220 / bottom 420, Shorts bottom 270-300 / right 120 — verify against current specs); preview toggle; constraint in the caption/sticker layout solver; export lint warns on violations.
+  - *touches*: presets/safe_zones; render/text_overlay.py; frontend TextLayer/StickerLayer; show/aesthetic audit
+  - *effort*: 3 days
+- **[Editing] Import from URL (policy-gated)**
+  - *whyItMatters*: Every clipping competitor accepts YouTube/podcast URLs; absence is a top-of-funnel gap, but YouTube ToS forbid downloading and yt-dlp binaries are GPL.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Own-channel imports via OAuth-verified ownership (YouTube Data API channel match); podcast RSS enclosures (direct MP3, no ToS issue); third-party YouTube URLs -> Gemini analysis-only or require upload; yt-dlp (with yt-dlp-ejs + Deno) as an optional user-installed component, never bundled.
+  - *touches*: new integrations/import_url.py; MediaBin.tsx; desktop.py OAuth
+  - *effort*: 3-5 days
+- **[Captions] Karaoke / word-pop animated captions with style editor and 15-20 template library**
+  - *whyItMatters*: The most-used feature in CapCut/Submagic/Captions/OpusClip; Resolve 20 ships Animated Subtitles. word_emphasis exists but no per-word timing render, no editor, and presets/text_styles is empty. Depends on aligned words (and the Hinglish alignment row for the main market).
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Per-word highlight render in Pillow mirrored in TextLayer.tsx; caption clip schema carries word timings; templates (chunky, minimal, karaoke, hormozi-style); LLM keyword emphasis + emoji; face-aware and safe-zone-aware placement; Devanagari/Latin mixed-script shaping tests.
+  - *touches*: render/text_overlay.py; frontend TextLayer.tsx; Properties.tsx caption section; edl/schema.py caption clip; presets/text_styles
+  - *effort*: 2 weeks
+- **[Captions] Any-language captions and timing-preserving translation (IndicTrans2 + Apple Translation)**
+  - *whyItMatters*: auto_caption routes only hi/en/hinglish/es; translation drops word timings so translated cues cannot be karaoke-styled; MADLAD is a 3 GB silent download and weaker than IndicTrans2 for hi<->en.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Route any ASR language; keep source cue timing and re-wrap; Apple Translation as default tier, IndicTrans2 (MIT, CTranslate2) quality tier, MADLAD long tail, DeepL/Claude optional; model pack progress UI.
+  - *touches*: ai/translate.py; dispatch auto_caption/translate_captions; ai/features.py
+  - *effort*: 1 week
+- **[Captions] Accessibility outputs: audio description track and caption-compliance lint**
+  - *whyItMatters*: WCAG 1.2.5 (AA) requires audio description; the European Accessibility Act applies from June 2025; FCC caption quality rules and DCMP reading-rate guidance apply to broadcast-origin video. No named competitor generates AD; a compliance report sells to enterprise/education.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: VLM shot descriptions -> dialogue gaps >2.5 s from ASR -> LLM condensation to fit -> TTS -> second audio track (extended AD by inserting freeze frames); caption lint: 32-42 chars/line, ≤180-200 wpm, ≥1 s duration, ±100 ms sync, placement away from OCR boxes; report export.
+  - *touches*: new ai/audio_description.py; ai/captions.py lint; ExportModal.tsx
+  - *effort*: 1 week
+- **[Audio] Studio Sound chain: DeepFilterNet denoise + dereverb + de-ess/hum + auto-mix loudness**
+  - *whyItMatters*: Descript Studio Sound (denoise + echo reduction), Adobe Enhance Speech, Resolve Voice Isolation are expected on every talking head; noise_reduce is a stationary gate that dulls sibilants and nothing removes room reverb (the most common creator defect). Called a '3-day swap with outsized impact' and now scheduled in the first weeks.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: DeepFilterNet3 (MIT/Apache, real-time on CPU) with strength slider and A/B; dereverb via resemble-enhance (MIT) or ClearerVoice MossFormer2_SE_48K (Apache) as a background job (~1-2x realtime on MPS); ffmpeg deesser, highpass, 50/60 Hz harmonic notches (avoid GPL pedalboard); chain order dereverb -> denoise -> de-ess -> hum -> loudness; auto-mix: per-clip speechnorm/loudnorm to a dialogue target, VAD-driven ducking (sidechain exists), music tail fade, -14 LUFS export.
+  - *touches*: ai/denoise.py (rename enhance_speech); render/audio_mix.py; new dispatch auto_mix; Properties audio section
+  - *effort*: 1 week
+- **[Audio] Permissively licensed TTS roster with voice cloning behind a consent gate (retire GPL Piper)**
+  - *whyItMatters*: Descript Regenerate, ElevenLabs, HeyGen and Resolve 21 make cloned narration standard; Piper's fork is GPL-3; the earlier synthesis had no consent/likeness policy or Hindi voices.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Chatterbox Multilingual V3 (MIT; 23 languages incl. Hindi; PerTh watermark; zero-shot clone), Kokoro-82M (Apache; 4 Hindi voices, grade C) via mlx-audio / sherpa-onnx ONNX on Windows, Indic Parler-TTS (Apache; best Hindi), Orpheus/CSM-1B (Apache) for English; Zonos/Dia lack Hindi and Mac support. Consent gate: owner records a consent phrase, ECAPA/CAM++ cosine >0.7 between consent sample and reference, refuse cloning any footage speaker without an enrolled match, log consent, watermark outputs (PerTh/AudioSeal); voice-change (not clone) is the default for third parties. Cloud tiers (ElevenLabs, Sarvam Bulbul) BYO key.
+  - *touches*: ai/tts.py; dispatch tts_voiceover (voice, clone_from); VoRecorder.tsx enrolment; integrations/providers.py
+  - *effort*: 1 week
+- **[Audio] Overdub (word-level correction) and AI dubbing pipeline**
+  - *whyItMatters*: Fix a mispronounced word without re-recording (Descript Overdub); Kapwing/VEED/HeyGen/ElevenLabs sell translation + cloned re-voice + M&E bed. All parts exist or land in earlier rows.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Overdub: regenerate the clause with the cloned voice, crossfade at zero crossings, force-align the replacement, patch the transcript. Dubbing: transcript -> IndicTrans2/Apple Translation -> duration-fit Chatterbox multilingual (speed fitting, segment retiming) -> Demucs non-vocal bed -> mux; optional lip-sync.
+  - *touches*: new dispatch overdub; new ai/dub.py; dispatch dub_track; ai/separate.py; TranscriptPanel
+  - *effort*: 2-3 weeks after clone TTS
+- **[Audio] Lip-sync for dubbed speech**
+  - *whyItMatters*: Completes dubbing (HeyGen, Rask, Filmora); commercial-safe models exist but Apple Silicon throughput is low.
+  - *impact*: medium
+  - *feasibility*: hard
+  - *buildingBlocks*: MuseTalk (MIT; Apple Silicon fork ~2-5 fps) or LatentSync 1.6 (Apache; ~18 GB, minutes per clip on MPS); sync.so API cloud fallback; not Wav2Lip (LRS2 non-commercial).
+  - *touches*: new ai/lipsync.py; api/jobs.py long jobs; providers
+  - *effort*: 2 weeks plus quality risk
+- **[Audio] Music/SFX generation and licensed library integrations**
+  - *whyItMatters*: Firefly, ElevenLabs, CapCut generate beds and SFX; every consumer editor bundles licensed music; add_music only takes user files.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: ACE-Step (Apache; ~2x realtime on M2 Max, 16 GB) for beds; Stable Audio Open Small (community licence; free under $1M revenue) for SFX; MMAudio for video-to-foley; avoid MusicGen weights (CC-BY-NC). Libraries: Epidemic Sound Partner API + MCP, Freesound v2 CC filter, Pixabay music; auto-credits block per export.
+  - *touches*: new ai/musicgen.py; new integrations/music.py; dispatch generate_music/generate_sfx/add_music; MediaBin music tab
+  - *effort*: 2 weeks
+- **[Audio] Voice changer, pitch shift, dialogue matcher**
+  - *whyItMatters*: Resolve VoiceConvert/Dialogue Matcher and CapCut voice effects; cheap wins.
+  - *impact*: low
+  - *feasibility*: easy
+  - *buildingBlocks*: ffmpeg rubberband/asetrate; OpenVoice V2 (MIT) tone-colour conversion; dialogue matcher = per-clip loudnorm + spectral EQ match.
+  - *touches*: render/audio_mix.py; new dispatch tools
+  - *effort*: 3-5 days
+- **[VFX] Object masks with propagation and text-prompted selection (licence-safe roster)**
+  - *whyItMatters*: Premiere Object Mask and Resolve Magic Mask are the most-cited pro AI features; masks here are vector shapes only, so 'blur her face' or 'brighten the product' is impossible. Roster corrected: CoTracker3 (CC-BY-NC), MatAnyone (non-commercial), RVM (GPL) are excluded; SAM 3 has its own licence and unproven MPS support.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Seed: Vision subject lift / click; refine: SAM 2.1 small (Apache) on MPS; propagate: Cutie (MIT) or XMem (MIT) — lighter than SAM2 video on MPS (benchmark J&F on DAVIS 2017 at 720p); text prompts: GroundingDINO / Florence-2 (MIT); point/motion tracking: TAPIR/BootsTAPIR (Apache) replacing OpenCV MIL; cached alpha PNG/ProRes 4444 sequences; schema gains a raster/tracked mask variant; alphamerge/maskedmerge inside/outside effects; click-to-mask in Preview.
+  - *touches*: new ai/masks.py (sam2, cutie); edl/schema.py Mask; render/effects.py + compositor.py; Preview/StickerLayer UI; ai/track.py
+  - *effort*: 3 weeks
+- **[VFX] Matting and background removal upgrade**
+  - *whyItMatters*: u2net per frame gives soft edges and haloing; Vision person/foreground masks and BiRefNet are cleaner and faster.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Apple Vision person segmentation (real-time, ANE) for people; VNGenerateForegroundInstanceMask for objects; BiRefNet (MIT) via rembg session on Windows/MPS; guided-filter edge refinement.
+  - *touches*: ai/bgremove.py; ai/features.py
+  - *effort*: 3-5 days
+- **[VFX] Temporally consistent object removal**
+  - *whyItMatters*: object_erase is LaMa per frame and flickers; Runway Aleph, CapCut and Filmora remove cleanly. ProPainter is non-commercial; DiffuEraser/MiniMax-Remover need 12-33 GB CUDA.
+  - *impact*: medium
+  - *feasibility*: hard
+  - *buildingBlocks*: Local best effort: LaMa + optical-flow (VTOpticalFlow on Mac / OpenCV DIS) propagation of the inpainted patch with Cutie masks; cloud fallback via Runway Aleph API.
+  - *touches*: ai/lama.py; providers
+  - *effort*: 2 weeks, quality-limited locally
+- **[VFX] Auto reframe v2 (per-scene strategies, split-screen, non-destructive crop keyframes)**
+  - *whyItMatters*: Second most used short-form feature after captions; the Haar cascade fails on profiles and groups and re-encodes the source, destroying it. Pulled forward ahead of masks and OTIO for a 9:16-first product.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Apple Vision face/body detection or MediaPipe FaceMesh/Pose (Apache) + RF-DETR nano (Apache; avoid AGPL YOLO) + ASD when available; per-scene strategies (track one, split two, wide for groups, screencast letterbox); Kalman smoothing with scene resets; write crop/pan keyframes instead of swapping src; Vision subject lift for product shots.
+  - *touches*: ai/reframe.py; dispatch auto_reframe; render/compositor.py crop keyframes; Properties Framing
+  - *effort*: 1-2 weeks
+- **[VFX] Colour match across shots and look-from-reference (HDR-aware)**
+  - *whyItMatters*: FCP Match Color, Premiere Color Match, Colourlab AI; here only manual color_grade and 6 LUTs, and Apple Log footage has no conversion.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Reinhard/MKL colour transfer per shot guided by scene detection with skin-tone protection, computed in the working colour space; Apple Log LUT; export .cube; reference-frame picker UI.
+  - *touches*: new ai/colormatch.py; render/effects.py; dispatch apply_lut/color_grade
+  - *effort*: 1-2 weeks
+- **[VFX] Face restoration and eye-contact correction**
+  - *whyItMatters*: Retouch is cheap (GFPGAN Apache; skip CodeFormer/KEEP non-commercial); eye-contact (Descript, VEED, Captions) has no permissively licensed production model and NVIDIA Maxine is RTX-only.
+  - *impact*: low
+  - *feasibility*: hard
+  - *buildingBlocks*: GFPGAN v1.3 per frame on MPS with temporal blending; gaze: research-grade warp model with confidence gating or a cloud partner; treat as a later research task.
+  - *touches*: new ai/facefix.py; new ai/gaze.py
+  - *effort*: 1 week retouch; 3+ weeks gaze, uncertain
+- **[Generative] Video generation ladder: local small models on 32-64 GB Macs, Draw Things as a local provider, cloud otherwise (reclassified from 'infeasible locally')**
+  - *whyItMatters*: Generative extend / T2V / I2V B-roll is the biggest capability hole. The '82 min per 2 s' evidence was Wan 2.2 14B on a 2021 M1 Max; Wan2.2 TI2V-5B (Apache, 720p24) and LTX-2 distilled run via mlx-video (MIT) as background jobs on M4/M5 Max 32-64 GB — no published Mac timings, so benchmark before committing. Mochi/Open-Sora are not Mac-viable; HunyuanVideo's licence excludes EU/UK/KR.
+  - *impact*: high
+  - *feasibility*: hard
+  - *buildingBlocks*: Provider ladder: mlx-video Wan2.2-5B / LTX-2 distilled (≥32 GB; verify LTX-2 community licence terms) -> Draw Things gRPC server (GPL app, gRPC boundary keeps the editor clean) -> BYO-key cloud (fal.ai queue with webhooks: Wan/Kling/Veo 3.1/LTX-2; Runway Gen-4 for extend); generate 480-720p, ≤5 s, retrieval-first so generation is last resort; C2PA/generated flag on every output; per-tier RAM guidance in the model manager.
+  - *touches*: new integrations/genvideo.py; new ai/localgen.py; dispatch generate_broll/extend_clip; credit meter; edl Clip.generated
+  - *effort*: 2 weeks cloud path; 1 week local after benchmark
+- **[Generative] Cloud-only frontier: prompt-based V2V (restyle/relight/replace), avatars, generative transitions/performance transfer**
+  - *whyItMatters*: Runway Aleph, Luma Modify, Filmora prompt editing, HeyGen/Arcads avatars define the 2026 frontier; all need 24 GB+ CUDA or are non-commercial locally (RelightVid, Wan-Animate); LivePortrait (MIT) is the only practical local piece.
+  - *impact*: medium
+  - *feasibility*: infeasible-locally
+  - *buildingBlocks*: Runway Aleph / Luma Modify / HeyGen APIs via the provider layer; results land as new clips with derivation metadata; consent + watermark policy for avatars; deprioritise until a local model is practical.
+  - *touches*: integrations/genvideo.py; integrations/avatar.py; dispatch edit_by_prompt
+  - *effort*: 1-2 weeks after provider layer
+- **[Generative] Local image generation for title cards, backgrounds, thumbnails, stickers**
+  - *whyItMatters*: Practical today on Mac unlike video; Firefly/Canva/CapCut ship it.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Apple ImageCreator (macOS 15.4; free; stylised only) for stickers/illustrations; Z-Image-Turbo (Apache; 6B; 8 steps; MPS; ~16 GB) and mflux FLUX.2-klein 4B for photoreal; Qwen-Image (Apache); Draw Things server; avoid FLUX.1-dev (non-commercial); Ideogram/gpt-image via providers for text-heavy thumbnails; 8 GB Macs get ImageCreator + 4-bit klein-small only.
+  - *touches*: new ai/imagegen.py; dispatch generate_image; StickerPanel custom image path
+  - *effort*: 1 week
+- **[Enhance] Gyro-accurate stabilisation**
+  - *whyItMatters*: Gyroflow beats vidstab on GoPro/DJI/Insta360 footage and is open source.
+  - *impact*: low
+  - *feasibility*: easy
+  - *buildingBlocks*: Gyroflow CLI when gyro metadata is present; vidstab fallback.
+  - *touches*: ai/stabilize.py; cli/setup_ai_binaries.py
+  - *effort*: 3 days
+- **[Engine] Real-time preview engine (WebCodecs in the WebView or AVFoundation) with preview/export parity and incremental export**
+  - *whyItMatters*: Every named competitor has a live compositor; here preview is a full ffmpeg render, one cross-dissolve disables the chunk cache, and text/PIP/crop math is hand-duplicated between Python and TypeScript (CLAUDE.md records repeated divergences). It matters twice: human scrubbing latency and the agent's verify loop (each 'look' costs a render).
+  - *impact*: high
+  - *feasibility*: hard
+  - *buildingBlocks*: Path B (cross-platform): WebCodecs VideoDecoder + Canvas2D/WebGL compositing in the existing React app — full WebCodecs in WKWebView/Safari 26, WebView2 on Windows; Diffusion Studio core (MPL-2.0) as reference; 720p HEVC proxies; decoded-GOP cache. Path A (Mac-only, HDR-aware, Cinematic/VT compatible): AVMutableComposition + custom AVVideoCompositor (Metal/Core Image) + AVPlayer via a Swift bridge. Either way: agent verify uses frame seeks (tens of ms) not renders; a server-emitted layout spec JSON consumed by both the browser and Pillow removes the hand mirrors; export re-renders only seam windows with xfade and stream-copies the rest; ffmpeg stays the deterministic renderer for tests.
+  - *touches*: frontend preview layer (new); render/chunks.py; render/transitions.py; render/text_overlay.py, render/pip.py + lib/* mirrors -> shared layout spec; helpers/AppleML (Path A)
+  - *effort*: 3-4 weeks
+- **[Engine] Speed ramps, freeze frame, reverse, and keyframes on any numeric field**
+  - *whyItMatters*: Schema accepts a speed curve and Clip.reverse but renders scalar 1.0; only transform fields are keyframable; leaders animate blur, colour, volume, crop and mask position. VTFrameRateConversion makes smooth slow-motion cheap on Mac.
+  - *impact*: medium
+  - *feasibility*: medium
+  - *buildingBlocks*: Piecewise setpts/atempo segments from the curve; VTFrameRateConversion (Mac) / RIFE (Windows) for slow segments; loop filter for freeze; reverse in bounded chunks; generalise edl/keyframes.py to any numeric field with per-filter ffmpeg expressions (eq, volume, geq, crop).
+  - *touches*: render/compositor.py speed_factor; edl/keyframes.py; edl/schema.py; render/effects.py; render/audio_mix.py; Properties.tsx
+  - *effort*: 2-3 weeks
+- **[Engine] Multiple video/audio tracks, compound clips, adjustment layers**
+  - *whyItMatters*: The model is one sequential v1 plus one PIP lane; script-to-timeline alternates, multicam review, layered graphics and pro round-trips need arbitrary tracks.
+  - *impact*: medium
+  - *feasibility*: hard
+  - *buildingBlocks*: Track family generalisation in schema and dispatch (_v_track_for_media), compositor overlay stacking order, timeline lanes UI.
+  - *touches*: edl/schema.py; agent/dispatch.py (many handlers); render/compositor.py; Timeline.tsx; timelineLayout.ts
+  - *effort*: 3-4 weeks
+- **[Engine] Non-destructive AI derivatives and OTIO / FCPXML / Premiere XML export and import**
+  - *whyItMatters*: reframe/upscale/bg-remove/stabilise/denoise swap clip.src, losing originals and recipes; Descript/OpusClip/Captions/Gling/Recut/Eddie all export to pro NLEs and it is how pro users trial an AI editor. OTIO is the interchange the agent-editing literature recommends.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Clip.derived_from + recipe record with toggle/regenerate; OpenTimelineIO 0.18 (Apache) adapters (FCPXML 1.11+ for FCP and Resolve import, Premiere XML/UXP, AAF, CMX EDL); markers, transitions, originals with effect metadata; import auto-editor JSON. Resolve scripting is Studio-only; use FCPXML or davinci-resolve-mcp.
+  - *touches*: edl/schema.py; agent/dispatch.py AI handlers; storage.py; new export/otio.py; main.py route; ExportModal.tsx
+  - *effort*: 1-2 weeks
+- **[Engine] Motion-graphics and text template library filling the empty presets directories**
+  - *whyItMatters*: CapCut/Canva ship hundreds of animated text, lower-third and end-card templates; here 4 anim presets and five empty preset dirs. Remotion would need a company licence to embed; reimplement natively.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Data-driven anim engine (spring, typewriter, word-by-word, blur-in) in text_overlay.py mirrored via the shared layout spec; 20-30 JSON presets; 10 starter brand kits and end cards; optional Lottie via rlottie for badges.
+  - *touches*: presets/*; render/text_overlay.py; frontend TextLayer.tsx; Properties.tsx; apply_text_template
+  - *effort*: 2 weeks
+- **[Engine] Split-screen layouts, GIF export, batch export per preset, screen+camera recording, doodle**
+  - *whyItMatters*: Tier-2 checklist items still unbuilt; plain ffmpeg or reuse of the recorder bridge (which the screencast auto-zoom row also needs).
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: ffmpeg xstack/hstack, palettegen for GIF, loop over apply_export_preset, ScreenCaptureKit (CFR) via the pywebview js_api pattern in desktop.py.
+  - *touches*: render/compositor.py; dispatch add_layout; desktop.py; ExportModal.tsx
+  - *effort*: 2-3 weeks total
+- **[Platform] AI tools panel with capability-aware UI**
+  - *whyItMatters*: ~25 finished AI tools are invisible to non-chat users and feature_report fix strings never reach the screen; the cheapest way to make the product look as capable as it is.
+  - *impact*: critical
+  - *feasibility*: easy
+  - *buildingBlocks*: Left-rail panel grouped by category reading /api/tools and a new /api/features (with RAM-tier and OS-version gating), disabled state with fix CTA, job progress rows from api/jobs.py.
+  - *touches*: new frontend/src/components/AiPanel.tsx; store.ts; main.py /api/features; ai/features.py
+  - *effort*: 1-2 weeks
+- **[Platform] Agent trust and economics: plan preview with cost/time estimate, prompt caching, Batches, model picker, provider registry with BYO keys and credit meter, local LLM fallback**
+  - *whyItMatters*: Kapwing/Underlord plan-then-approve is the trust pattern; today Claude mutates turn by turn with undo as the only net. A single model string with no caching wastes money (30-min transcript ~18k tokens per pass; cached -90%; Batches -50%). The provider registry is a prerequisite for Gemini video QA and cloud generation, so it merges here instead of sitting at the tail.
+  - *impact*: high
+  - *feasibility*: easy
+  - *buildingBlocks*: Plan-as-JSON tool list with dry_run (extend from cut_range) and diff summary; auto-accept threshold; Anthropic prompt caching on system prompt + transcript prefix; Haiku for bounded steps, adaptive thinking for planning; Batches for offline enrichment; provider registry (Anthropic, Gemini, Twelve Labs, fal.ai queue + webhooks, Replicate, Runway, ElevenLabs, HeyGen, ACRCloud, Apple FM, mlx_lm.server / llama.cpp local) with keys in macOS Keychain / Windows Credential Manager via keyring; per-job cost estimate and monthly meter; all optional.
+  - *touches*: agent/loop.py; agent/system_prompt.py; agent/dispatch.py dry_run; ChatOverlay.tsx; new integrations/providers.py; config.py; Settings UI
+  - *effort*: 2 weeks
+- **[Platform] Agent ergonomics and recipes: tool progress streaming, adaptive turns, memory summarisation, voice input, skills**
+  - *whyItMatters*: Long jobs are silent inside chat, max_turns=8 truncates multi-step edits, chat.json grows unbounded, voice prompts are trivial with local ASR, and repeatable jobs ('podcast -> 5 shorts') have no packaging (Runway Skills, Descript templates).
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: JobManager progress -> SSE events; summarise older history; mic -> SpeechAnalyzer/Kyutai -> prompt; Markdown/JSON recipes with parameters invoked from chat or the AI panel, tied to save_show_template.
+  - *touches*: agent/loop.py; api/jobs.py; ChatOverlay.tsx; presets/templates; show/templates.py
+  - *effort*: 1-2 weeks
+- **[Platform] MCP in both directions and review-comment ingestion**
+  - *whyItMatters*: Descript/Runway/Epidemic/Frame.io MCPs show the ecosystem; the server here is hand-rolled JSON-RPC without auth or resources, the agent cannot consume external MCPs, and reviewer comments (Frame.io V4, own share links) as edit instructions is a natural extension.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Official mcp Python SDK, bearer auth, resources (transcript, timeline, index) and prompts; Anthropic MCP connector in loop.py to call Epidemic Sound, Runway, Frame.io; own share page with timecoded comments; review.ingest_comments() -> proposed cut list through the approval gate; comment text treated as untrusted data.
+  - *touches*: agent/mcp_server.py; agent/loop.py; config.py; new integrations/frameio.py; share page
+  - *effort*: 2 weeks
+- **[Platform] Stock media integrations**
+  - *whyItMatters*: Pexels/Pixabay/Unsplash are free and every editor exposes them; feeds auto B-roll.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: Pexels (200/hr), Pixabay (24-h cache rule), Unsplash (download event), attribution records mirrored into session uploads.
+  - *touches*: new integrations/stock.py; MediaBin.tsx stock tab; find_broll
+  - *effort*: 3-5 days
+- **[Platform] Publishing and scheduling with quota realities, and the performance feedback loop**
+  - *whyItMatters*: OpusClip, Submagic, Meta Edits and CapCut close the loop; pro NLEs do not. Gating facts: YouTube videos.insert now has its own default 100/day bucket (verify per project) with extension via compliance audit; unaudited TikTok apps post SELF_ONLY; Instagram needs a professional account, a public media URL and ≤100 posts/24 h; audits take weeks to months, so applications start at rank 1 even though code lands late.
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: YouTube resumable upload + app verification; TikTok Content Posting audit; Instagram Graph via a presigned R2/S3 URL; Postiz self-host / Ayrshare to skip audits; mandatory human approval before any post; per-platform audited/unaudited status in UI; default 'export + deep-link to native uploader' until audits pass; later YouTube Analytics / Instagram Insights retention curves into agent context for hook scoring and next-edit suggestions.
+  - *touches*: new integrations/publish.py; integrations/analytics.py; ExportModal.tsx; desktop.py OAuth; agent/system_prompt.py
+  - *effort*: 3 weeks plus audit calendar
+- **[Platform] C2PA content credentials and AI-disclosure flags on export**
+  - *whyItMatters*: EU AI Act Art. 50 is in force; platforms read C2PA and expose 'altered content' fields; nothing marks generated assets.
+  - *impact*: medium
+  - *feasibility*: easy
+  - *buildingBlocks*: c2pa-python signing at export; Clip.generated propagated from every generative/TTS tool; platform disclosure fields in publish; audio watermark passthrough (PerTh).
+  - *touches*: render/compositor.py export; edl/schema.py; ExportModal.tsx
+  - *effort*: 3-5 days
+- **[Platform] Signed and notarised builds, auto-update, CI packaging, Windows installer, and the cross-platform capability ladder**
+  - *whyItMatters*: Ad-hoc signed DMG with no updater blocks distribution; every MLX-only recommendation needs a stated Windows equivalent or Windows becomes second-class; Intel Macs are silently dropped by MLX and must be declared unsupported (or served CPU/ONNX).
+  - *impact*: high
+  - *feasibility*: medium
+  - *buildingBlocks*: Developer ID + notarytool in GitHub Actions building from the .spec; update check against /api/version releases; Inno Setup for Windows; single provider interface with capability flags so features degrade rather than vanish: mlx-whisper -> faster-whisper CUDA / sherpa-onnx; mlx-vlm -> llama.cpp; mlx-audio -> sherpa-onnx Kokoro; demucs-mlx -> torch CUDA; Apple Vision/SoundAnalysis/VT -> ONNX (BiRefNet, PANNs, RIFE, Real-ESRGAN); SpeechAnalyzer -> Parakeet v3; Foundation Models -> Phi Silica / Haiku; CI matrix per OS.
+  - *touches*: build_app.sh; Video AI Editor.spec; .github/workflows/ci.yml; desktop.py; ai/features.py capability flags
+  - *effort*: 2 weeks
+- **[Platform] Brand kit auto-extraction and redistributable emoji artwork**
+  - *whyItMatters*: Brand kits are typed by hand and preset dirs are empty; Apple emoji PNGs fetched from a GitHub mirror are proprietary and the only online dependency in an offline app.
+  - *impact*: low
+  - *feasibility*: easy
+  - *buildingBlocks*: Brandfetch Logo API or local k-means palette from a logo; Google Fonts picker; bundle Noto Emoji (Apache/OFL) offline with the Apple set as a user-installed option.
+  - *touches*: show/brand_kit.py; presets/brand_kits; ai/emoji.py; frontend lib/emojiArt.ts; build assets
+  - *effort*: 1 week
+
+## 5. Landscape
+
+Survey of AI-powered video editors as of Sept 2026, drawn from ~45 web searches and ~20 fetched official/changelog pages (2025-2026 sources). Three clear structural trends: (1) AGENTIC EDITING is now table stakes — Descript Underlord (model picker: Claude/GPT/Gemini, MCP + Zapier + API), Adobe Premiere AI Assistant (public beta June 18 2026, Project panel + Timeline scope), Adobe Firefly Quick Cut + Firefly AI Assistant, Kapwing AI agent with editable/auto-accepted plans, CapCut AI Auto-Edit, Filmora AI Mate/Copilot 3.0, InVideo v4 agent (30-min videos from one prompt), HeyGen Video Agent, Mirage Agent (ex-Captions), ChatCut (connects ChatGPT/Codex or Claude Code), Runway Agent + Agent Skills + Runway MCP, Meta Edits AI assistant (coming). (2) MULTI-MODEL AGGREGATION — editors are becoming routers: Adobe Firefly 30+ partner models (Veo 3.1, Kling 3.0/Omni, Runway Gen-4.5, Nano Banana 2, ElevenLabs), Runway (Kling 3.0, WAN 3.0, Hailuo 3.0, Ideogram, Grok Imagine + Model Router), VEED (Veo 3.1, Sora, Kling 3.0, Hailuo, Seedance, own Fabric 1.0), Kapwing (9 models), InVideo (200+ models), Filmora (Sora 2, Veo 3.1, Seedance 2.0, Kling 2.5, GPT Image 2, Nano Banana 2, Topaz), Higgsfield (80+ apps). OpenAI Sora app shut down Apr 26 2026, API ends Sep 24 2026 — everyone is re-pointing to Veo/Kling/Seedance. (3) IN-CONTEXT VIDEO EDITING MODELS (edit-the-pixels-by-prompt) — Runway Aleph 2 (frame-level edits propagate; Edit Studio), Luma Ray3 Modify (16 keyframes, motion/performance preservation, HDR/EXR), Pika (Pikaswaps/Pikadditions/Pikaffects), Filmora Prompt Video Editing + Video Extender, Adobe Firefly layer/prompt editing + Generative Extend, DaVinci AI Set Extender, Google Flow Insert/Remove, SAM3 text-prompted segmentation. Pro NLEs (Resolve 21, Final Cut Pro w/ Apple Creator Studio, Premiere 26) push on local-Neural-Engine masking, search (IntelliSearch, Transcript Search, Media Intelligence), audio AI, and script-to-timeline (IntelliScript), while short-form tools (OpusClip, Submagic, Captions) compete on virality scoring, reframing, B-roll, and publish/scheduling loops. Whitespace for 'smartest AI editor': a true multimodal understanding of footage + agentic timeline control + model routing + still-editable layers (Mirage's 'every layer stays editable' and ChatCut's 'real tracks' are the closest), taste/virality feedback loops, and open agent access (MCP). Coverage caveats: WebSearch budget exhausted before I could verify Premiere 25.x Media Intelligence specifics, Descript's full non-Underlord feature list, and Wondershare Virbo/DemoCreator; those entries are marked as from general knowledge / lower confidence.
+
+- **CapCut — AI Auto-Edit** — One-tap edit that turns raw footage into a paced, music-synced cut: scene recognition, speech transcription, quality scoring, then automatic assembly with color correction, audio leveling and transitions.
+  - *category*: Agentic / auto-assembly
+  - *howItWorks*: Multi-stage pipeline (scene detection → ASR → clip quality scoring → narrative assembly). Free tier includes basic AI auto-cut; Pro ($8/mo) adds AI HD upscaling, long-video generation, voice cloning.
+  - *whoHasIt*: CapCut (mobile, desktop, web)
+  - *notes*: Stand-out: distribution (dominant mobile editor, tight TikTok publish loop). Sources: bibigpt.co/en/features/capcut-2026-ai-suite-explained, solidaitech.com/2026/05/capcut.html, capcut.com/tools/desktop-ai-power
+- **CapCut — Seedance 2.0 / Seedream 5.0 / SeedMusic generative stack** — ByteDance's in-house models embedded in CapCut: Seedance 2.0 (text/image → 15-second clips, multi-shot), Seedream 5.0 image gen, SeedMusic for audio ideas; customizable 'AI effects' powered by Seedance (no presets).
+  - *category*: Generative video/image/audio
+  - *howItWorks*: Dreamina Seedance 2.0 rolled into CapCut March 2026 (briefly paused over Hollywood copyright complaints, resumed with safeguards; not yet in US at time of sources).
+  - *whoHasIt*: CapCut / Dreamina (ByteDance)
+  - *notes*: Only major editor with a vertically-integrated frontier video model. Sources: bibigpt.co/en/features/capcut-ai-seedance-2-explained, tiktok.com/@capcut, capcut.com/tools/ai-video-generator
+- **CapCut — Script-to-Video + AI Writer** — AI writer generates five scripts; 'Generate video' converts a script into a product/explainer video with auto visuals, voiceover and transitions.
+  - *category*: Text-to-video
+  - *howItWorks*: Web-based; LLM script gen → stock/generated visual matching → TTS (269-voice library) → auto captions.
+  - *whoHasIt*: CapCut web
+  - *notes*: Sources: capcut.com/tools/script-to-video-maker, capcut.com/tools/ai-writer
+- **CapCut — Instant Captions, TTS, Auto Reframe, Auto Cutout, Smart Search, AI Avatars** — Instant captions in 130+ languages, 269 TTS voices, auto reframe for aspect ratios, auto cutout/background removal, selfie enhancement/retouch, Smart Search of media, AI avatars for faceless creators, podcast editing, voice cloning (Pro), object erasure, auto color grading.
+  - *category*: Assistive editing toolkit
+  - *howItWorks*: 'AI is no longer a separate tab, it is baked into every tool.' Desktop version exposes these as first-class panels.
+  - *whoHasIt*: CapCut desktop + mobile
+  - *notes*: Integrations: TikTok direct publish, Douyin/Xiaohongshu/Bilibili export presets. Sources: capcut.com/tools/desktop-ai-power, fluxnote.io/guides/capcut-ai-features-free-vs-paid-2026, en.wikipedia.org/wiki/CapCut
+- **Descript — Underlord AI co-editor (Agent)** — Prompt-driven agent that executes whole workflows: rough cut, filler/retake removal, captions with custom styling, split/reformat for aspect ratios, pans/zooms/fades, audio reverb/levels, translation, B-roll, Eye Contact + Studio Sound, layout styling, brand-match from a screenshot, build a video from an idea, extend footage from existing frames, convert slides/docs to video with TTS/avatars.
+  - *category*: Agentic editing
+  - *howItWorks*: Acts on the transcript/document model. Model picker: Auto, Claude (Fable 5, Haiku 4.5, Sonnet 5, Opus 5 + Thinking), GPT 5.4/5.5, Gemini 3.1 Pro / 3.5 Flash. Credits consumed per reasoning + tool execution. Callable via Zapier, Descript API, and Descript MCP from Claude/ChatGPT. Text-only (no voice) input; non-deterministic; cannot edit during recording.
+  - *whoHasIt*: Descript (desktop + web), 'Season 6' / Agent Underlord 'Vibe Editing'
+  - *notes*: Stand-out: most mature text-based editing + first NLE-grade agent with BYO frontier model choice and MCP exposure. Sources: help.descript.com Underlord article, descript.com/blog/article/descript-season-6-meet-underlord, letscompareai.com Underlord update
+- **Descript — text-based editing core (transcript editing, filler removal, Studio Sound, Eye Contact, Regenerate, AI speech, remote recording)** — Edit video by editing the transcript; automatic filler word/retake removal; Studio Sound noise/voice enhancement; Eye Contact correction; AI-generated show notes, blog posts, social clips; remote recording up to 10 guests at 4K; royalty-free media library.
+  - *category*: Text-based NLE
+  - *howItWorks*: Transcript is the primary editing surface; AI features exposed as one-click effects and via Underlord.
+  - *whoHasIt*: Descript
+  - *notes*: Full 2026 list of non-Underlord effects (Regenerate/overdub, Translate, green screen) not re-verified after search budget ran out — general knowledge. Sources: descript.com/blog/article/descript-season-6-meet-underlord, chatcut.io/blog/best-ai-video-editors
+- **Runway — Gen-4 / Gen-4 Turbo / Gen-4.5 video models** — Text-to-video and image-to-video with first-frame input; Gen-4.5 (Dec 2025) marketed as best-in-class; ProRes 4444 + PCM audio / PNG-sequence export (Aug 2026) for editorial handoff.
+  - *category*: Generative video
+  - *howItWorks*: Available on all paid plans; Turbo free; API + web.
+  - *whoHasIt*: Runway
+  - *notes*: Source: runway.com/changelog
+- **Runway — Aleph / Aleph 2.0 in-context video editing + Edit Studio** — Bring footage, describe the change: add VFX, change season/weather, relight, replace/remove objects, generate new camera angles, predict next shot. Aleph 2.0 (May 2026) makes frame-level edits that propagate through the clip; Edit Studio is the UI; also exposed via Runway MCP.
+  - *category*: Prompt-based video-to-video editing
+  - *howItWorks*: In-context video model conditioned on source video + prompt; SAM3 text-prompted segmentation (Jul 2026) extracts objects as transparent WebM.
+  - *whoHasIt*: Runway
+  - *notes*: Stand-out: closest thing to a 'photoshop for video' editing model. Sources: runway.com/changelog, vidofy.ai/en/models/runway/gen-4-aleph
+- **Runway — Act-Two motion capture + Runway Characters** — Act-Two (Jun 2025): drive a character with a phone video — head, face, body, hands; voice change inside interface. Runway Characters (Feb 2026): real-time intelligent avatars via API/web.
+  - *category*: Performance capture / avatars
+  - *howItWorks*: Video-driven performance transfer; no mocap rig.
+  - *whoHasIt*: Runway
+  - *notes*: Source: runway.com/changelog
+- **Runway — Agent, Chat Mode, Workflows, Agent Skills, Model Router, MCP** — Chat Mode (Jun 2025) conversational generation; Timeline/Studio assembly inside Agent; Workflows (Oct 2025) node-based pipelines publishable as Apps; Agent Skills (Jul 2026) templates for ads/commercials/localization; Model Router (Jul 2026) auto-picks model on cost/latency with capacity fallback; Runway MCP (Aug 2026) gives external agents access to workflows/router; Projects + Brand Kits accessible in Agent.
+  - *category*: Agentic / orchestration
+  - *howItWorks*: Third-party models offered inside Runway: Kling 3.0, WAN 3.0, Ideogram 4.0, Grok Imagine 1.5, MiniMax Hailuo 3.0; images: Seedream 5.0 (+Pro Layers), Nano Banana 2; audio: Seed Audio 1.0 (120s speech/SFX/music), ElevenLabs v3 with audio tags.
+  - *whoHasIt*: Runway
+  - *notes*: Stand-out: model-agnostic routing + MCP; enterprise SSO, credit analytics. Source: runway.com/changelog
+- **Adobe Premiere — AI Assistant (public beta)** — Conversational agent inside Premiere that picks Premiere tools and executes multi-step work: organize footage into bins by scene, prepare media, transcript-driven prep, markers, build stringouts, assemble a first cut; maintains conversation history for iterative refinement.
+  - *category*: Agentic editing
+  - *howItWorks*: Scope is Project panel + Timeline ('if you can do it there, AI Assistant can help'). Public beta June 18 2026 alongside Creative Agent expansion across Photoshop/Illustrator/Frame.io/InDesign.
+  - *whoHasIt*: Adobe Premiere (26.x beta)
+  - *notes*: Model backend not confirmed (helpx pages timed out). Sources: community.adobe.com AI Assistant announcement, helpx.adobe.com premiere-ai-assistant, news.adobe.com/news/2026/06, kompozy.io/reviews/premiere-ai-assistant
+- **Adobe Premiere — Object Mask (AI), 20x faster tracking, Color Mode** — Hover-and-click AI masks of complex moving subjects with Sharp/Smooth edge modes (26.2); shape masks from toolbar; tracking 20x faster; Color Mode beta (pro color tools designed for editors, GA later 2026); Film Impact effects; searchable Sequence Index.
+  - *category*: Masking / color
+  - *howItWorks*: Sensei/Firefly segmentation integrated into Essential Graphics/Effects; After Effects gets AI Object Matte + Refine Edge.
+  - *whoHasIt*: Adobe Premiere 26 / After Effects 26
+  - *notes*: Sources: provideocoalition.com (Sundance 2026), blog.adobe.com 2026/04/15, redsharknews.com premiere-26
+- **Adobe Premiere — Firefly Generative Extend + Firefly app integration** — Drag clip edge to generate extra frames of video and non-dialogue audio (Firefly Video Model). Premiere now connects to the Firefly app for partner models (Google, OpenAI, Runway, etc.) and Firefly Boards storyboards import directly into Premiere.
+  - *category*: Generative
+  - *howItWorks*: Firefly integrated in timeline + Effects panel rather than separate app.
+  - *whoHasIt*: Adobe Premiere
+  - *notes*: Media Intelligence search panel / caption translation (25.x) not re-verified — general knowledge. Sources: bluelightningtv.com 2026/01/22 and 2026/03/09, dailyexcelsior.com
+- **Adobe Firefly video editor — Quick Cut + layer/prompt editing + Firefly AI Assistant** — Quick Cut (Feb 2026) builds a first-draft story cut from raw footage via natural-language brief (aspect ratio, pacing, optional B-roll); timeline treats objects as layers editable by prompt (Dec 2025); multi-track timeline with text-based editing; Enhance Speech, noise/reverb, level balancing, one-click color looks; Firefly AI Assistant (coming) for multi-step orchestration; Adobe Stock 800M+ assets.
+  - *category*: Agentic / browser NLE
+  - *howItWorks*: Aggregates 30+ models: Firefly Video, Kling 3.0 + 3.0 Omni, Veo 3.1, Runway Gen-4.5, Nano Banana 2; audio: Generate Music (Firefly Music Model), Generate Speech (Firefly Speech or ElevenLabs), Generate Sound Effects incl. voice-guided SFX (Aug 2026). Seamless round-trip to Premiere.
+  - *whoHasIt*: Adobe Firefly (web)
+  - *notes*: Stand-out: commercially-safe first-party models + partner marketplace in one timeline. Sources: techcrunch.com 2026/02/25, techcrunch.com 2025/12/16, blog.adobe.com 2026/08/20, helpx.adobe.com firefly generate-speech
+- **DaVinci Resolve 20 — AI IntelliScript** — Paste a script; Resolve transcribes clips, aligns dialogue to script lines and auto-builds a timeline with alternate takes stacked.
+  - *category*: Script-to-timeline
+  - *howItWorks*: DaVinci Neural Engine speech-to-text + alignment. Free in Resolve 20 per CineD; Larry Jordan lists as Studio.
+  - *whoHasIt*: Blackmagic DaVinci Resolve 20+
+  - *notes*: Sources: engadget.com IntelliScript, larryjordan.com, cined.com
+- **DaVinci Resolve 20 — Neural Engine suite (Multicam SmartSwitch, Animated Subtitles, Audio Assistant, IntelliCut, Dialogue Matcher, VoiceConvert, Set Extender, Magic Mask 2, Depth Map 2, SuperScale, UltraNR, Beat Markers, IntelliTrack, audio panning-to-video, Fairlight dialogue separator)** — SmartSwitch auto-selects camera by active speaker/lip movement; Animated Subtitles word-level kinetic captions; Audio Assistant auto-mixes; IntelliCut removes silence, splits per speaker, builds ADR lists; Dialogue Matcher matches tone/level/room across clips; VoiceConvert applies voice models preserving inflection; Set Extender fills frame by prompt; Magic Mask 2 tracking; Depth Map 2; SuperScale 3x/4x; UltraNR denoise; Beat Markers; IntelliTrack drives tracking/stabilization/panning.
+  - *category*: Assistive AI toolkit (local)
+  - *howItWorks*: Runs locally on GPU via Neural Engine; most advanced items Studio-only ($295 one-time).
+  - *whoHasIt*: DaVinci Resolve 20 (May 2025)
+  - *notes*: Stand-out: on-device, no credits, integrated across Edit/Color/Fairlight/Fusion. Sources: larryjordan.com, newsshooter.com 2025/05/27, thepostflow.com
+- **DaVinci Resolve 21 — IntelliSearch, CineFocus, Face Age Transformer, Face Reshaper, Blemish Removal, Motion Deblur, UltraSharpen, AI Speech Generator, SlateID, Voice-to-Subtitle, Photo page** — IntelliSearch finds clips containing named objects/people in the media pool; CineFocus click-to-set focal point with bokeh/aperture controls; slider-based face aging/de-aging; face reshaping; auto blemish removal; motion deblur; UltraSharpen; AI Speech Generator with 4 built-in voices or custom voice cloned from ~10s audio (adjust speed/pitch/inflection); SlateID reads slate metadata; new Photo page with RAW, Lightroom catalog import, Apple Photos.
+  - *category*: Assistive AI toolkit (local)
+  - *howItWorks*: Released June 2026 (announced NAB April 2026); most face/optics tools Studio-only; IntelliSearch + SlateID in free.
+  - *whoHasIt*: DaVinci Resolve 21
+  - *notes*: Sources: cgchannel.com 2026/06, petapixel.com 2026/06/03, businesswire.com 20260414, redsharknews.com resolve-21
+- **Kapwing — AI agent editing with multimodal understanding, editable plans, characters** — Chat-with-AI editing ('Find the dunks from the third quarter'), Smart Crop that frames the speaker, streaming responses, agent plans that show cost/prompts/models and can be edited; auto-accept for plans <40 credits; Character Consistency reuse across chats; AI Video Assistant with auto-prompt enhancement.
+  - *category*: Agentic / browser editor
+  - *howItWorks*: LLM planner over tool calls; credits per model; 9 integrated models: Veo, Kling, Sora, Wan, Seedance, MiniMax, ChatGPT Image, Nano Banana, Pika, Seedream, Lightricks; TTS via ElevenLabs.
+  - *whoHasIt*: Kapwing (web)
+  - *notes*: Stand-out: transparent, editable agent plans with cost preview. Sources: kapwing.com/help/release-notes-march-2026, kapwing.com/ai, techradar.com kapwing review
+- **Kapwing — Smart Cut, Repurpose Studio, Clip Maker, Dubbing, Article-to-Video, B-roll generator, Subtitler, Upscale, Clean Audio** — Silence/filler removal, long→short repurposing with auto resize, AI dubbing 40+ languages / translation 100+ languages, text/PDF→video, B-roll generation, subtitles, background removal, upscaling, noise removal, lip sync, AI avatars; team review comments in workspace.
+  - *category*: Assistive toolkit
+  - *howItWorks*: Browser-based; credit metering now bills dubbing on portion of media actually used.
+  - *whoHasIt*: Kapwing
+  - *notes*: Sources: kapwing.com/ai, kapwing.com/help/release-notes-march-2026
+- **VEED — Fabric 1.0 proprietary avatar/lip-sync model + multi-model generator** — Fabric 1.0: upload image + script/audio → talking video with natural lip sync up to 60s; 60+ avatars, 120+ languages; Talking Photo; AI Animation; VideoGPT; text-to-video and image-to-video across Veo 3.1, Sora, Kling 3.0, Hailuo 2.3, Seedance 1.0.
+  - *category*: Generative / avatars
+  - *howItWorks*: Model marketplace pages per model; credit-based.
+  - *whoHasIt*: VEED (web)
+  - *notes*: Stand-out: own avatar foundation model plus third-party routing. Sources: veed.io, fluxnote.io veed-ai-video-generator-review, youtube Fabric 1.0
+- **VEED — production suite (auto subtitles 125+ languages, AI dubbing w/ voice preservation, Eye Contact, Magic Cut, voice cleaner, clip/reel generators, translator, script generator, music generator)** — Subtitles claimed 99.9% accuracy; dubbing preserving voice; eye-contact correction; Magic Cut silence removal; noise removal; AI Clip Generator and AI Reel Generator for repurposing; AI Voice Cloning; AI Music Generator; image generator/upscaler.
+  - *category*: Assistive toolkit
+  - *howItWorks*: Browser; credits per AI action.
+  - *whoHasIt*: VEED
+  - *notes*: Sources: veed.io, g2.com veed reviews, allthingsai.work veed
+- **OpusClip — ClipAnything 2.0** — Multimodal model reads visual, audio and sentiment cues across any genre (gaming, sports, vlogs, interviews) to find clip-worthy moments; 2.0 adds natural-language search ('find every time I mention pricing').
+  - *category*: Long-to-short clipping
+  - *howItWorks*: Vision + ASR + sentiment scoring → ranked clips; AI Virality Score rates hook strength, emotional flow, perceived value, trend alignment.
+  - *whoHasIt*: OpusClip
+  - *notes*: Stand-out: virality scoring feedback loop; 10M+ users. Sources: opus.pro, aitoolsdevpro.com opus-clip-guide, nextclip.pro opusclip-review
+- **OpusClip — ReframeAnything, AI B-roll, animated captions, relayout, scheduler + integrations** — Auto subject-tracking reframe to 9:16/1:1/16:9 with manual override; AI-generated and stock B-roll inserted contextually; animated captions >97% accuracy, 20+ languages; AI relayout; CTA elements; one-click publish/scheduling; API for CMS/workflow automation.
+  - *category*: Repurposing pipeline
+  - *howItWorks*: Imports from YouTube, Google Drive, Vimeo, Zoom, Rumble, Twitch, Facebook, LinkedIn, X, Loom, Riverside, StreamYard.
+  - *whoHasIt*: OpusClip
+  - *notes*: Sources: opus.pro, barndoor.ai opusclip
+- **InVideo AI v4 — agentic prompt-to-video up to 30 minutes + Smart Magic Box editor** — One prompt → full production-ready video up to 30 min; edit via natural-language instructions in 'Smart Magic Box'; simultaneous 16:9/9:16/1:1 export; v4 avatars with micro-expressions; voiceover 50+ languages, up to 6 voices per video; voice cloning; subtitles; translation.
+  - *category*: Agentic text-to-video
+  - *howItWorks*: LLM script + generative sequencing + computer-vision stock matching over 16M iStock/Storyblocks assets; bundles 200+ models incl. Veo 3.1, Sora 2, Kling 3.0, Seedance 2.0, Nano Banana Pro, ElevenLabs music.
+  - *whoHasIt*: InVideo AI
+  - *notes*: Sources: truescho.com invideo-ai-review-2026, aitoolsdevpro.com invideo-guide, fluxnote.io invideo pricing
+- **Wondershare Filmora 15 — AI Mate / AI Copilot Editing 3.0** — Conversational assistant that turns an idea into a short video in one click (AI Mate, v15.1) and accepts natural-language editing commands (Copilot 3.0).
+  - *category*: Agentic assistant
+  - *howItWorks*: Desktop app; LLM over Filmora tool set.
+  - *whoHasIt*: Filmora 15 (Nov 2025 →)
+  - *notes*: Sources: filmora.wondershare.com whats-new, techradar.com filmora 2026 review
+- **Filmora 15 — Prompt Video Editing, AI Video Extender, Generative Enhance, multi-model generation** — Add/replace/remove objects via text prompt; extend footage forward/backward by prompt; Generative Enhance restores low-res/compressed footage; generate video with Sora 2, Veo 3.1, Seedance 2.0, Kling 2.5; images with GPT Image 2, Nano Banana 2; Topaz AI upscaling.
+  - *category*: Generative editing
+  - *howItWorks*: Cloud credits inside desktop NLE.
+  - *whoHasIt*: Filmora 15.x (2026)
+  - *notes*: Source: filmora.wondershare.com/whats-new-in-filmora-video-editor.html
+- **Filmora 15 — assistive toolkit (AI Eye Contact, Night View enhancer, Retouch/makeup, planar tracking, smart scene cut, video translation w/ lip-sync, audio suite, teleprompter)** — AI Eye Contact (15.5.2), AI Night View low-light enhancer, Retouch makeup, planar tracking, multi-mask workflow, Smart Scene Cut, AI Video Translation with lip sync, AI TTS/STT, music + SFX generators, audio enhancer/denoise/vocal remover/audio stretch, portrait cutout, object remover, face mosaic, color palette matching, teleprompter in screen recorder, animated charts, motion blur, multi-frame effects, chapter progress bar.
+  - *category*: Assistive toolkit
+  - *howItWorks*: Mix of local and cloud AI; versions 15.5–15.7 shipped May–Jul 2026.
+  - *whoHasIt*: Filmora 15 (Win/Mac/mobile)
+  - *notes*: Sources: filmora.wondershare.com whats-new, atomisystems.com filmora-15-review
+- **Captions (by Mirage) — Mirage Agent + AI Edit** — Agent that plans, creates, edits and designs the video — performance, cuts, graphics, score — with every layer staying live and editable until publish; AI Edit auto-applies cuts/zooms/captions; AI Zoom, AI Scale, AI Denoise, AI Teleprompter; 20+ models for music/SFX/visuals.
+  - *category*: Agentic mobile/web editor
+  - *howItWorks*: Custom Rust/Metal/Vulkan/WebGPU rendering engine spanning browser, iPhone and cloud; Mirage Agent directs proprietary + third-party models. Company rebranded Captions→Mirage Sept 2025.
+  - *whoHasIt*: Captions app (iOS, web, desktop); Mirage API for bulk generation/captioning
+  - *notes*: Stand-out: 'every layer editable' human+AI collaborative engine. Sources: mirage.app, prizmad.com captions-ai review, apps.apple.com Captions
+- **Mirage — Avatar X, Casting Voices, Finding Voices, AI Twin, dubbing** — Avatar X (Jul 2026) generates the whole performance; Casting Voices (Jun 2025) avatar video from audio; Finding Voices (Dec 2025) expressive audio; AI Twin from a selfie; lip-sync dubbing 29–30+ languages preserving tone; 100+ caption templates with keyword emphasis.
+  - *category*: Foundation models / avatars
+  - *howItWorks*: Proprietary foundation models; API access.
+  - *whoHasIt*: Mirage / Captions
+  - *notes*: Sources: mirage.app, edimakor.hitpaw.com captions-mirage-review
+- **Pika 2.5 — Pikaffects, Pikaswaps, Pikadditions, Pikaframes, Pikascenes, Ingredients, Pika Studio** — Physics-simulation effects (Squish, Inflate, Melt, Explode, Crush, Cake-ify, Levitate…); swap objects via text/image; insert characters/objects into real footage; up to 5 keyframe images → up to 25s; scene composition from ingredient images; auto sound-effect generation; timeline/layer Studio editor; 20–45s generation speed.
+  - *category*: Generative / effects-first editing
+  - *howItWorks*: 1080p max; tiers $0/$8/$28/$76.
+  - *whoHasIt*: Pika
+  - *notes*: Stand-out: fastest iteration, playful effect vocabulary. Sources: genra.ai pika-2-5-guide, weshop.ai pika review 2026, pixflow.net best-ai-video-generator
+- **Luma Dream Machine — Ray3 / Ray3.14 / Ray3.2 + Modify Video** — Reasoning-driven video model; Modify Video transforms footage while preserving motion, performance and camera; Start/End frame + up to 16 keyframes per clip; motion transfer, skeletal performance tracking, facial performance transfer for up to 8 faces, lip-sync preservation; character reference; product replacement, relighting, environment changes; Reframe; native 1080p, HDR 16-bit, EXR ACES export; up to 18–20s Modify clips; Ray3.14 4x faster/3x cheaper.
+  - *category*: Generative / video-to-video
+  - *howItWorks*: Web + API; original audio preserved in Modify/Reframe; no native audio gen for T2V/I2V.
+  - *whoHasIt*: Luma AI; used inside Adobe, Envato, Fal
+  - *notes*: Stand-out: pro-grade HDR/EXR pipeline and keyframe direction. Sources: lumalabs.ai/ray, lumalabs.ai/news/ray3-modify, lumalabs.ai/news/ray3_14
+- **OpenAI Sora 2 (discontinued)** — Photoreal physics, synchronized dialogue/SFX audio, Cameos (insert verified likeness/voice), storyboard shot-by-shot control, social feed, video extension. App/web shut down Apr 26 2026 (Disney partnership exit); API (Sora 2 / 2 Pro) ends Sep 24 2026; data deleted.
+  - *category*: Generative video (sunset)
+  - *howItWorks*: Was available via app and API; partners (VEED, InVideo, Filmora, Kapwing, Higgsfield) still list it until API sunset.
+  - *whoHasIt*: OpenAI
+  - *notes*: Roadmap implication: don't depend on a single third-party model. Sources: help.openai.com sora discontinuation, the-decoder.com, venturebeat.com sora-2 debut
+- **Google Flow + Veo 3.1** — Ingredients-to-Video (multi-reference control of characters/objects/style), Frames-to-Video (start+end frame), Extend (continue from last second; >60s narratives), Insert objects with correct lighting/shadow, Remove objects (coming), rich native 48kHz audio across all modes, SceneBuilder timeline to sequence clips; Flow merged with Whisk and ImageFX into one pipeline; 4K.
+  - *category*: AI filmmaking tool
+  - *howItWorks*: Veo 3.1 via Flow, Gemini app, Gemini API, Vertex AI.
+  - *whoHasIt*: Google
+  - *notes*: Sources: blog.google veo-updates-flow, studio.aifilms.ai veo-31, vidau.ai google-flow-2026
+- **Canva — Magic Studio video (Magic Video, AI Highlights, Magic Media, Beat Sync, Magic Eraser, Magic Resize, AI voiceover, AI Avatars, Video Background Remover, Veo 3)** — Magic Video auto-assembles 60s videos from clips/photos with templates/music and optional prompt; text/image-to-video clips (≤8s; Veo 3 with audio for Pro+); Highlights auto-picks best moments into shorts; Beat Sync cuts to music; object eraser; auto resize per platform; TTS 25+ languages; avatars.
+  - *category*: Design-first editor
+  - *howItWorks*: Shared AI credits across Magic Studio; premium AI video tools made free April 2026 (30s AI gen on free per one source; 5 lifetime credits per another — conflicting).
+  - *whoHasIt*: Canva
+  - *notes*: Stand-out: brand-kit and design-system context. Sources: perplexityaimagazine.com canva-ai-2026, clipcat.com canva guide, fluxnote.io canva review
+- **Microsoft Clipchamp — Auto Compose + AI toolkit** — Auto Compose builds a first-draft montage from uploaded media with style, length (30s/full) and aspect choice; AI voiceover 400+ voices with pace/pitch/emotion; AI subtitles 80+ languages; transcript export SRT; Auto Cut silence removal (>3s pauses); noise suppression; image background removal; Image Creator; Copilot-assisted script suggestions.
+  - *category*: Consumer editor (Windows/M365)
+  - *howItWorks*: Bundled in Windows 11 and Microsoft 365; free tier.
+  - *whoHasIt*: Microsoft Clipchamp
+  - *notes*: Sources: clipchamp.com/en/blog/ai-video-editing-tools, support.microsoft.com auto composition, bityclips.com clipchamp-review-2026
+- **Final Cut Pro 11 — Magnetic Mask, Transcribe to Captions, Smart Conform, Enhance Light & Color, Smooth Slo-Mo, Voice Isolation** — Magnetic Mask isolates people/objects without green screen; Transcribe to Captions with Apple language model; Smart Conform reframes for vertical/square; auto color enhance; frame-generated slo-mo (4K120 iPhone); Voice Isolation; spatial video editing.
+  - *category*: Pro NLE (on-device Neural Engine)
+  - *howItWorks*: Optimized for M-series Neural Engine; local, no credits.
+  - *whoHasIt*: Apple Final Cut Pro 11 (Nov 2024)
+  - *notes*: Sources: apple.com newsroom FCP 11, cined.com FCP 11
+- **Final Cut Pro — Apple Creator Studio update (Jan 2026): Generate Captions, Edit Detection, Beat Detection, Transcript Search, Montage Maker, Auto Mask, Match Color, Creator Themes** — Generate Captions places subtitles on timeline; Edit Detection splits rendered video back into original clips; Beat Detection visualizes beats; Transcript Search finds soundbites; Montage Maker automated montages; Auto Mask; enhanced Match Color; send frames to Pixelmator Pro; multi-aspect Creator Themes.
+  - *category*: Pro NLE (Apple Intelligence)
+  - *howItWorks*: Part of Apple Creator Studio bundle; on-device.
+  - *whoHasIt*: Apple Final Cut Pro (11.x, 2026)
+  - *notes*: Sources: digitalcameraworld.com FCP AI search, nofilmschool.com apple-final-cut-pro-update, macrumors.com 2026/01/28
+- **Meta Edits — AI assistant, AI generation, Restyle, segmentation, desktop version** — Text-to-video generation inside Edits (Apr 2026); AI Restyle changes visual look; AI segmentation for object-level effects; AI image animation; automated editing suggestions; auto-captions; teleprompter; beat markers; storyboard; A/B testing; Inspiration feed search; expanded analytics; AI assistant (coming) that uses Instagram retention/views data to brainstorm; desktop version with mobile sync (coming).
+  - *category*: Creator mobile editor (Instagram)
+  - *howItWorks*: Free as of May 2026; deep Reels publish + analytics loop.
+  - *whoHasIt*: Meta / Instagram Edits
+  - *notes*: Stand-out: closed loop from performance data back into editing suggestions. Sources: techcrunch.com 2026/06/11, techbriefly.com 2026/04/27, inro.social edits guide
+- **HeyGen — Avatar IV/V + Video Agent** — Photoreal avatars (0.02s facial sync, micro-expressions, gesture control); Video Agent (Sep 2025) does scripting, visual selection, avatar animation, VO, transitions, delivery from a paragraph prompt (B-roll from Sora 2); translation 175+ languages / 3,200+ accents with phoneme-matched lip sync; July 2026: Video Podcast, HyperFrames, 30-min avatar videos, website-to-video, Figma-to-video.
+  - *category*: Avatar-first agentic video
+  - *howItWorks*: Web + API; built-in editor.
+  - *whoHasIt*: HeyGen
+  - *notes*: Sources: heygen.com january-2026-release, diyai.io heygen-review, bigvu.tv heygen review
+- **Submagic — captions + Magic Clips + auto-zoom/B-roll/eye-contact workflow** — AI captions 99% across 123 languages; Magic Clips extracts high-engagement moments from ≤30-min content with captions/B-roll/formatting; auto-zooms, sound effects, B-roll library, silence removal, eye contact correction, basic scheduling/publishing (2026).
+  - *category*: Short-form finishing
+  - *howItWorks*: Upload → one click → 80–90% finished in <5 min.
+  - *whoHasIt*: Submagic
+  - *notes*: Sources: submagic.co/ai-caption, thebusinessdive.com submagic-review, skybreakai.com submagic-review-2026
+- **Pictory — script/blog/PPT-to-video + Avatar Clone** — Scene-based editor pulling B-roll and AI voiceover from text; blog-to-video, PPT-to-video, audio-to-video; Avatar Clone (May 2026) builds digital twin from photo/short clip + voice sample to narrate scripts.
+  - *category*: Text-to-video (marketing)
+  - *howItWorks*: Web; stock + TTS assembly.
+  - *whoHasIt*: Pictory
+  - *notes*: Sources: pictory.ai/blog/pictory-vs-heygen, softwarereviews.com pictory-vs-heygen
+- **ChatCut — chat-driven NLE that accepts external coding agents** — Describe edits in plain English; agent makes structural edits, fine cuts, captions (103 languages, word-level), B-roll, music (generated), voiceover (32 voices), AI motion graphics from a sentence, stock and AI-generated video; everything lands as editable changes on real multi-track timeline; can connect user's own ChatGPT/Codex or Claude Code as the agent.
+  - *category*: Agentic editing
+  - *howItWorks*: Text-based editing + agent tool calls over a real timeline.
+  - *whoHasIt*: ChatCut (web)
+  - *notes*: Stand-out: BYO-agent architecture (Claude Code/Codex as the editor brain). Sources: chatcut.io/features, chatcut.io/docs/what-is-chatcut, producthunt.com chatcut
+- **Higgsfield — multi-model creative suite (Kling 3.0, Seedance 2.0, Wan 2.6, Veo 3, Sora 2, Hailuo 02, Flux Kontext, GPT Image, Seedream 5.0) + 80 apps** — One subscription across frontier models plus 80+ purpose-built apps: Face Swap, Video Face Swap, Lipsync Studio, AI Headshot, cinematic camera-move presets; 'choose model per scene, not per project' workflow.
+  - *category*: Model aggregator
+  - *howItWorks*: Web credits; Kling 3.0 offers multi-shot (up to 5–6 cuts), start/end frame, element tagging for consistency, 3–15s at 720p/1080p/4K, native audio.
+  - *whoHasIt*: Higgsfield
+  - *notes*: Sources: higgsfield.ai/kling-3.0, geo.higgsfield.ai features 2026, higgsfield.ai blog best-ai-video-generators-2026
+- **Kling 3.0 (Kuaishou) — multi-shot, native audio, editable timeline** — Single architecture generating video + native audio + multi-shot scenes; scene-based generation with editable timelines; character consistency via element tagging; physics-driven motion; start/end frame control; up to 4K.
+  - *category*: Generative video model
+  - *howItWorks*: Available natively and via Runway, Adobe Firefly (3.0 + Omni), VEED, Filmora (2.5), Higgsfield, InVideo.
+  - *whoHasIt*: Kuaishou Kling; integrated across most editors
+  - *notes*: Now the most widely embedded third-party model post-Sora. Sources: higgsfield.ai/kling-3.0, runway.com/changelog, blog.adobe.com 2026/04/15
+- **Adobe Frame.io Drive + Frame.io V4 panel + Creative Agent** — Frame.io Drive mounts cloud projects locally with streaming + caching; V4 panel inside Premiere beta; Creative Agent (AI Assistant) now spans Frame.io for review workflows.
+  - *category*: Collaboration / review integration
+  - *howItWorks*: Enterprise rollout Apr 2026.
+  - *whoHasIt*: Adobe
+  - *notes*: Sources: blog.adobe.com 2026/04/15, provideocoalition.com Sundance 2026
+- **Cross-product pattern — AI B-roll insertion** — Contextual B-roll (stock or generated) inserted automatically over talking-head footage.
+  - *category*: Feature pattern
+  - *howItWorks*: Transcript/semantic segmentation → asset retrieval or generation → placement.
+  - *whoHasIt*: OpusClip, Submagic, Kapwing, Descript Underlord, Adobe Firefly Quick Cut, ChatCut, HeyGen Video Agent, InVideo
+  - *notes*: Table stakes for short-form; differentiation is in relevance and style-matching.
+- **Cross-product pattern — Eye-contact correction** — AI re-targets gaze to camera for teleprompter/read-from-screen footage.
+  - *category*: Feature pattern
+  - *howItWorks*: Face landmark + eye region synthesis.
+  - *whoHasIt*: Descript, VEED, Filmora 15.5, Submagic, Captions
+  - *notes*: Commoditized; ship as a one-toggle effect.
+- **Cross-product pattern — Generative Extend / Video Extender** — Generate additional frames at head/tail of a clip to fix timing.
+  - *category*: Feature pattern
+  - *howItWorks*: Video diffusion conditioned on boundary frames (and audio for Adobe).
+  - *whoHasIt*: Adobe Premiere/Firefly, Filmora AI Video Extender, Google Flow Extend, Runway, Descript Underlord ('extend footage')
+  - *notes*: Adobe extends non-dialogue audio too — an edge worth matching.
+- **Cross-product pattern — Natural-language footage search** — Find moments or clips by describing content ('every time I mention pricing', 'dunks from the third quarter', clips containing a person/object).
+  - *category*: Feature pattern
+  - *howItWorks*: Multimodal embeddings over transcript + frames.
+  - *whoHasIt*: OpusClip ClipAnything 2.0, Kapwing agent, DaVinci IntelliSearch (21), Final Cut Transcript Search, CapCut Smart Search, Adobe Premiere Media Intelligence (unverified this session)
+  - *notes*: Core primitive for a 'smartest' editor — the agent's retrieval layer.
+- **Cross-product pattern — Script/idea-to-timeline** — Go from script or one-line idea to an assembled timeline.
+  - *category*: Feature pattern
+  - *howItWorks*: Either align script to transcribed footage (IntelliScript) or generate/assemble assets (InVideo, CapCut, Pictory, HeyGen, Descript 'build from an idea').
+  - *whoHasIt*: DaVinci IntelliScript, InVideo v4, CapCut Script-to-Video, Pictory, HeyGen Video Agent, Descript Underlord, Filmora AI Mate, Canva Magic Video
+  - *notes*: Two distinct sub-problems (align vs. generate); the leaders do both.
+- **Cross-product pattern — Auto-multicam / speaker switching** — Automatically cut between camera angles based on who is speaking.
+  - *category*: Feature pattern
+  - *howItWorks*: Speaker diarization + lip-movement detection.
+  - *whoHasIt*: DaVinci Multicam SmartSwitch; Descript/Riverside-style multi-guest layouts
+  - *notes*: Podcast/video-pod use case; pairs with Audio Assistant-style auto-mix.
+- **Cross-product pattern — Voice cloning / AI speech / dubbing with lip-sync** — Cloned or synthetic voices, script-to-VO with emotion tags, translation with re-lipsynced mouths.
+  - *category*: Feature pattern
+  - *howItWorks*: ElevenLabs (Adobe, Kapwing, Runway, InVideo), Firefly Speech, DaVinci AI Speech Generator (10s clone), CapCut voice cloning, HeyGen 175+ languages, VEED, Captions 29+ languages, Filmora translation w/ lip-sync.
+  - *whoHasIt*: Nearly universal
+  - *notes*: ElevenLabs is the de facto partner; DaVinci does it on-device.
+- **Cross-product pattern — Agent exposure via MCP/API/Zapier** — Editors expose their agent or tools to external agents.
+  - *category*: Platform pattern
+  - *howItWorks*: Descript MCP + API + Zapier; Runway MCP + API; ChatCut accepts Claude Code/Codex; Mirage API; OpusClip API; HeyGen API.
+  - *whoHasIt*: Descript, Runway, ChatCut, Mirage, OpusClip, HeyGen
+  - *notes*: Emerging differentiator: be both an agent and a tool other agents can call.
+- **Cross-product pattern — Performance-data feedback loops** — Use audience retention/engagement data to guide edits or predict virality.
+  - *category*: Platform pattern
+  - *howItWorks*: OpusClip Virality Score; Meta Edits analytics + upcoming insight-driven assistant + A/B testing; Submagic/OpusClip scheduling; CapCut TikTok loop.
+  - *whoHasIt*: OpusClip, Meta Edits, Submagic, CapCut
+  - *notes*: Largest whitespace for pro tools (Premiere/Resolve/FCP have none).
+- **Cross-product pattern — 'Everything stays editable' layered AI output** — AI-generated results land as real, hand-editable timeline objects rather than baked renders.
+  - *category*: Architecture pattern
+  - *howItWorks*: Mirage/Captions custom engine; ChatCut real multi-track tracks; Adobe Firefly object layers; Runway Edit Studio; Kling editable timelines.
+  - *whoHasIt*: Mirage, ChatCut, Adobe Firefly, Runway, Kling
+  - *notes*: Key to trust for pro users; recommended core principle for the roadmap.
+
+## 6. Capability survey
+
+Catalog of the AI video-editing capability space as of Sept 2026, compiled from ~45 web searches (2025–2026 sources) plus direct reads of key GitHub/model pages. Cross-cutting findings: (1) Almost the entire "smart editor" checklist now has an open-weight, locally runnable implementation; the exceptions where cloud still clearly wins are frontier text-to-video quality (Gemini Omni Flash / Wan 3.0 / MiniMax H3 / Seedance 2.0 lead the Artificial Analysis arena), gaze redirection (NVIDIA Maxine is the only production-grade option), and multimodal video embeddings at scale (Twelve Labs Marengo 3.0). (2) The transcript is the backbone: WhisperX / faster-whisper / NVIDIA Parakeet-TDT-v3 (RTFx ~3300, CC-BY-4.0) + pyannote Community-1 give word-level timestamps and speakers, and silence/filler removal, captions, dubbing, highlight extraction, chaptering, multicam, script-to-timeline and LLM agent editing are all built on top of it — this is the cheapest, highest-leverage layer to nail first. (3) The 2026 product frontier is agentic NL editing (Descript Underlord with a Claude model picker and hosted MCP server, Loopdesk, open-source video-use/Cutlass/Crayotter, ffmpeg MCP servers); the key architectural insight from the open-source-cinema analysis is that an LLM should emit an EDL/OpenTimelineIO JSON timeline that deterministic tools execute, rather than "watching" video. (4) Commercial baselines to beat: Premiere Pro 26 (on-device Object Mask, Media Intelligence search, Generative Extend, 27-language caption translation), DaVinci Resolve 20/21 (IntelliScript, Multicam SmartSwitch, Animated Subtitles, Set Extender, Audio Assistant), Descript (Underlord, Studio Sound, Eye Contact, Automatic Multicam, Green Screen), Opus Clip (virality score 0-99, ~40% clip discard rate reported), CapCut/Submagic/Captions for styled captions, HeyGen Avatar IV / Synthesia for avatars, ElevenLabs for dubbing ($0.33-2.20/min), Topaz Video AI for restoration. (5) Licensing is a real roadmap constraint: Wav2Lip (LRS2 data), F5-TTS weights, XTTS, Fish Speech, RelightVid are non-commercial; MuseTalk (MIT), LatentSync (Apache-2.0), Chatterbox/Kokoro (MIT/Apache), Wan 2.2 (Apache-2.0), ACE-Step 1.5 (Apache-2.0), SeedVR2/FlashVSR (Apache-2.0), Demucs (MIT), pyannote (MIT), Lighthouse (Apache-2.0) are safe; MatAnyone/KEEP carry NTU S-Lab license. (6) Local hardware reality: the "cheap" tier (ASR, scene detection, reframe, captions, beat sync, stem separation, speech enhancement, RIFE, Real-ESRGAN, Kokoro/Chatterbox TTS, SAM2 masking) runs on CPU or 8GB GPU / any Apple Silicon; the "mid" tier (MuseTalk/LatentSync lip-sync, EchoMimicV3 avatars at 12-16GB, Wan 2.2 5B / LTX-2 FP8, ProPainter inpainting, MatAnyone matting) needs a 16-24GB GPU; the "heavy" tier (Wan 2.2 A14B/S2V/Animate at 80GB unsharded, DiffuEraser 720p at 33GB, SeedVR2 on H100) is cloud or high-end only. On Mac, MLX-Video / Rapid-MLX run LTX-2.x and Wan 2.1/2.2 with 32GB minimum, 64GB+ recommended. Extra capabilities not in the original checklist but table-stakes in 2026 products were added: speech enhancement, foley/video-to-audio, stem separation + auto-duck, face restoration, video relighting, rotoscoping/masking, auto-zoom/jump-cut smoothing, and agentic NL editing.
+
+### items
+
+- **Transcript foundation: ASR + word timestamps + speaker diarization** — Word-accurate transcript with per-word timing and speaker labels for every clip. Not a user-facing feature by itself but the substrate for auto-cut, captions, dubbing, highlight extraction, chaptering, multicam, script-to-timeline and LLM agent editing.
+  - *category*: Foundation / analysis
+  - *howItWorks*: WhisperX = faster-whisper (large-v3) + forced phoneme alignment giving <100 ms word timestamps + pyannote diarization; ~70x realtime on GPU. NVIDIA Parakeet-TDT-0.6B-v3 (CC-BY-4.0, 25 European languages, word/segment/char timestamps, RTFx ~3,332, 6.34% avg WER on HF leaderboard, 2GB RAM, CPU path via NeMo-Speech.cpp) is the fast alternative. pyannote.audio Community-1 (MIT) for diarization locally; pyannoteAI Precision-2 API is ~4 pts better DER (AMI 12.9% vs 17.0%) and 2.2-2.6x faster. Cloud options used by clip tools: Deepgram Nova-3, ElevenLabs Scribe (adds emotional event tags).
+  - *whoHasIt*: Every major tool (Descript, Premiere Speech-to-Text, Resolve transcription, CapCut, Opus Clip). Open source: WhisperX (BSD-2), faster-whisper, Parakeet, pyannote, OpenCut-AI, pyVideoTrans, clippyme.
+  - *notes*: Local difficulty: EASY. Runs on CPU or any Apple Silicon; GPU makes it near-instant. Gotchas: pyannote model weights have their own gating/terms; Whisper hallucinates on silence (use VAD gating); Parakeet is English/European only. Sources: https://github.com/m-bain/whisperX, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3, https://github.com/pyannote/pyannote-audio, https://localaimaster.com/blog/whisperx-guide
+- **Auto-cut: silence + filler-word removal (text-based editing)** — Automatically remove dead air, 'um/uh/like/you know', false starts and repeated takes; edit the video by deleting words in the transcript. Descript's Underlord reportedly improved filler-removal accuracy 43% in its 2026 upgrade.
+  - *category*: Editing automation
+  - *howItWorks*: Two signals: (a) audio amplitude / VAD thresholds for silence (auto-editor, ffmpeg silencedetect), (b) Whisper word-level transcript with a customizable filler list; cut ranges are padded and snapped to silence troughs to avoid clipped words, then rendered via ffmpeg or emitted as EDL/XML. Repeated-take detection = fuzzy matching of adjacent sentences. Better systems keep a small margin and optionally crossfade audio; LLM pass can classify 'meaningful pause' vs dead air.
+  - *whoHasIt*: Descript, Premiere (filler-word detection), Resolve, CapCut, AutoCut plugin, Wisecut, Loom, Riverside. Open source: auto-editor, tightcut (faster-whisper + ffmpeg, local), benpiper/auto-video-editor (CUDA), SilenceTrimmer (macOS Swift), CutClean, OpenCut-AI Smart Cut.
+  - *notes*: Local difficulty: EASY (weekend project on top of the transcript layer). Quality differentiators: language-aware filler lists, not cutting breaths mid-phrase, preserving comedic pauses, undo granularity. Sources: https://github.com/AndreaGiulianini/tightcut, https://github.com/benpiper/auto-video-editor, https://github.com/topics/auto-editor, https://openclip.app/blog/tools-removing-silence-videos
+- **Scene / shot boundary detection** — Split footage into shots (hard cuts, fades, wipes) for scene-aware reframing, B-roll matching, color matching, per-scene captions and 'Scene Edit Detection' of already-edited video.
+  - *category*: Foundation / analysis
+  - *howItWorks*: PySceneDetect (content/threshold detectors on frame histograms, CPU-only) is the fast baseline; TransNetV2 (3D-CNN on 48x27 frame windows, PyPI transnetv2-pytorch) handles gradual transitions much better. 2025 comparison on 200 videos: PySceneDetect 65.5% vs TransNetV2 87.0% shot accuracy; both score F1 0.75-0.82 with low transition IoU (0.18-0.25). Best practice is coarse-to-fine: PySceneDetect first, TransNetV2 to refine fades/wipes. 2026 research: OmniShotCut (shot-query transformer) improves transition localization.
+  - *whoHasIt*: Premiere Scene Edit Detection, Resolve Neural Engine scene cut detection, every clip tool internally.
+  - *notes*: Local difficulty: EASY. TransNetV2 runs fine on CPU/MPS for typical videos. Sources: https://github.com/soCzech/TransNetV2, https://pypi.org/project/transnetv2-pytorch/, https://arxiv.org/html/2604.24762v2
+- **Auto-captions + styled / animated (karaoke, word-pop) subtitles** — Burned-in or sidecar captions with word-by-word highlight, emoji/keyword emphasis, brand templates, multi-line layout, and platform-safe positioning; the single most-used feature in short-form tools.
+  - *category*: Captions
+  - *howItWorks*: Word timestamps from WhisperX/Parakeet -> grouping into caption chunks by duration/char limits/punctuation -> style engine (ASS/SSA with \k karaoke tags, or programmatic overlay via Pillow/Skia/HTML canvas) -> ffmpeg burn-in. 'Smart' layers: LLM picks keywords to emphasize and emoji, avoids covering faces (face detection), respects safe zones per platform. Resolve 20's AI Animated Subtitles does highlighted-word animation natively.
+  - *whoHasIt*: CapCut, Submagic, Captions.ai, Opus Clip, Descript, Resolve 20 (AI Animated Subtitles), Premiere (auto captions + 27-language translation). Open source: word-by-word-captions (WhisperX-based), whisperx-subtitles-replicate, OpenShorts, clippyme.
+  - *notes*: Local difficulty: EASY-MEDIUM (ASR is easy; a polished style engine with dozens of templates and text layout is real product work). Sources: https://github.com/xezpeleta/word-by-word-captions, https://www.cined.com/davinci-resolve-20-released-with-handful-of-ai-assisted-features/, https://phantomeditor.video/blog/whats-new-premiere-pro-26-2026
+- **Translation + AI dubbing + lip-sync** — Translate the transcript, re-voice it in the speaker's cloned voice with timing preserved, optionally re-render mouth movements to match the new language.
+  - *category*: Localization
+  - *howItWorks*: Pipeline: ASR (Whisper) -> LLM/MT translation (GPT/Claude/Gemini/DeepSeek/Ollama, or M2M100/NLLB) -> duration-aware TTS with voice clone (CosyVoice 2, F5-TTS, Chatterbox, XTTS) with speed-fitting/segment retiming -> optional stem separation (Demucs) to keep music/SFX bed -> lip-sync model. Lip-sync tiers: Wav2Lip (GAN + SyncNet, zero-shot, mid-range GPU, but non-commercial due to LRS2 training data) -> MuseTalk (latent-space inpainting, MIT, 30+ fps realtime) -> LatentSync 1.6 (audio-conditioned latent diffusion, Apache-2.0, current preferred local production baseline, wants ~24GB / RTX 4090 class) -> Alibaba Sonic (adds emotion-driven expression). Cloud: ElevenLabs Dubbing ($0.33-0.50/min automatic, Dubbing v2 $2.20/min, 100+ languages), HeyGen Video Translate, Rask (130+ languages), Sync Labs lipsync-2 API (~$0.04-0.13/sec, ~30-min cap, preserves original speaker).
+  - *whoHasIt*: ElevenLabs, HeyGen, Rask, Sync Labs, Captions, Premiere (caption translation only), Descript (translation + dubbing). Open source: pyVideoTrans (one-click ASR->translate->dub->mux, supports faster-whisper, Ollama, CosyVoice/F5-TTS, Edge-TTS), Union.ai Whisper+M2M+XTTS+SadTalker demo, openshorts (dubbing).
+  - *notes*: Local difficulty: MEDIUM for translate+dub (all CPU/8GB-GPU friendly), HARD for lip-sync (MuseTalk works on 8-12GB; LatentSync needs 24GB; identity drift and teeth artifacts are the main quality problems; occluded/profile faces fail). Licensing matters: MuseTalk MIT + LatentSync Apache are the only commercially safe local options. Sources: https://github.com/jianchang512/pyvideotrans, https://tomodahinata.com/en/blog/ai-lip-sync-talking-head-model-selection-guide-2026, https://lipsync.com/compare/wav2lip-vs-latentsync, https://elevenlabs.io/dubbing-api, https://lipsync.com/compare/sync-so-vs-heygen
+- **Voice clone / TTS voiceover (+ word-level 'overdub' correction)** — Generate narration from script, clone the creator's voice from a few seconds of audio, and regenerate a single mispronounced word in-place (Descript Overdub/Regenerate pattern).
+  - *category*: Audio generation
+  - *howItWorks*: Zero-shot voice cloning models: Chatterbox / Chatterbox-Turbo (MIT, 5-sec reference, won 65.3% vs ElevenLabs 24.5% in a blind test), Kokoro-82M (Apache-2.0, 54 fixed voices, no cloning, runs on CPU / 2-3GB VRAM, 36x realtime on T4), CosyVoice 2 (inline emotion tags: happy/sad/angry/surprised), F5-TTS (flow matching, top quality but CC-BY-NC weights), Fish Audio S2 (lowest WER on Seed-TTS-Eval, open version CC-BY-NC-SA), XTTS v2 (CPML, non-commercial), Orpheus 3B (Apache). Word-replacement = regenerate a clause with the cloned voice and crossfade at zero-crossings; align via forced alignment. Cloud: ElevenLabs v3 ($0.10/1k chars, 70+ languages).
+  - *whoHasIt*: Descript (Overdub/Regenerate), ElevenLabs, HeyGen, Pictory/InVideo (stock AI voices). Open source: OpenCut-AI (6-sec clone, Sarvam/Smallest AI), pyVideoTrans.
+  - *notes*: Local difficulty: EASY (Kokoro/Chatterbox run on CPU or any Mac). Consent/verification for cloning is a product-policy requirement. Commercial-safe: Kokoro, Chatterbox, Orpheus, CosyVoice; avoid F5-TTS/XTTS/Fish weights for commercial use. Sources: https://findskill.ai/blog/best-open-source-tts-2026/, https://rarebuildsoftware.com/blog/best-open-source-voice-cloning-2026, https://localaimaster.com/blog/best-local-tts-models
+- **Speech enhancement / 'Studio Sound' (extra, not in original list)** — Remove room echo, hiss, hum, keyboard/traffic noise and make lav/phone audio sound studio-recorded. Table stakes in Descript, Premiere, Riverside, Resolve.
+  - *category*: Audio cleanup
+  - *howItWorks*: DeepFilterNet2/3 (full-band 48 kHz, real-time factor 0.04 on a laptop i5 CPU, open source) for denoise/dereverb; Resemble Enhance (latent conditional flow matching; higher quality but can hallucinate content); ClearerVoice-Studio MossFormer2 SE 48K (benchmarked against both). Adobe Enhance Speech and Descript Studio Sound are the commercial references (a podcaster shootout found Descript introduces fewer artifacts).
+  - *whoHasIt*: Descript Studio Sound, Adobe Enhance Speech (Premiere/Podcast), Resolve Voice Isolation, Riverside, CapCut. Open source: DeepFilterNet, resemble-enhance, ClearerVoice-Studio.
+  - *notes*: Local difficulty: EASY (DeepFilterNet runs realtime on CPU). Add a 'strength' slider and A/B toggle; over-processing kills sibilants. Sources: https://arxiv.org/pdf/2205.05474, https://github.com/resemble-ai/resemble-enhance, https://arxiv.org/pdf/2506.19398, https://thepodcasthaven.com/adobe-speech-enhancement-vs-descript-studio-sound-a-shootout/
+- **Smart reframe / auto-crop per platform (16:9 -> 9:16, 1:1, 4:5)** — Keep the subject (or active speaker) framed when converting to vertical; per-scene strategies (track one face, split-screen two speakers, wide when many faces, letterbox screencasts) with smoothed virtual camera motion.
+  - *category*: Reframing / repurposing
+  - *howItWorks*: YOLOv8/v11 person detection + MediaPipe FaceMesh; active speaker chosen by mouth-aspect-ratio variance (clippyme) or a proper ASD model (TalkNet / Light-ASD / LoCoNet); saliency + pose + segmentation cues (auto-vertical-reframe uses YOLOv11-seg); scene detection resets the camera; Kalman/EMA smoothing with speed and zoom adapted per scene; crop rendered via ffmpeg crop filter keyframes. Resolve Neural Engine Smart Reframe and Premiere Auto Reframe (Sensei motion tracking) are the commercial equivalents.
+  - *whoHasIt*: Premiere Auto Reframe, Resolve Smart Reframe, Opus Clip, CapCut, Vizard, Klap, LumiClip. Open source: clippyme (YOLOv8 + FaceMesh), openshorts (TRACK/GENERAL/SPLIT/SCREENCAST modes), KazKozDev/auto-vertical-reframe (YOLOv11-seg + MediaPipe + saliency).
+  - *notes*: Local difficulty: EASY-MEDIUM. Runs on CPU (YOLO nano) or Apple Silicon. Hard parts are aesthetics: avoiding jitter, handling speaker hand-offs, screen-share + face layouts. Sources: https://github.com/fralapo/clippyme, https://github.com/mutonby/openshorts, https://github.com/KazKozDev/auto-vertical-reframe
+- **Background removal / video matting / rotoscoping & masking** — Green-screen-free subject cutout with alpha, one-click object masks that track across the clip (Resolve Magic Mask / Premiere Object Mask), text-prompted segmentation ('mask the red car').
+  - *category*: VFX
+  - *howItWorks*: SAM 2 (click on frame 0, memory-based propagation to all frames) and SAM 3 (Nov 20 2025; text/concept prompts, multi-object video tracking; SAM 3.1 adds real-time multiplexing) for masks; Grounding DINO for text-to-box; MatAnyone / MatAnyone 2 (CVPR 2025/2026, consistent memory propagation on Cutie, first-frame mask -> pixel-level alpha up to 1080p) and ViTMatte/InSPyReNet for hair-level alpha; RVM (Robust Video Matting) for realtime CPU-ish background removal. Premiere 26's Object Mask runs entirely on-device with 20x faster tracking.
+  - *whoHasIt*: Premiere 26 Object Mask, Resolve Magic Mask, Descript AI Green Screen, CapCut, Runway. Open source: SAM2/SAM3 (Ultralytics integration), Sammie-Roto 2 (cross-platform desktop roto GUI, updated Aug 2026), RotoAI (SAM2 + Grounding DINO, hybrid local/Colab), MatAnyone, Replicate sam2removevideobackground.
+  - *notes*: Local difficulty: MEDIUM. SAM2 small/tiny runs on 8GB GPU or Apple MPS at usable speed; MatAnyone needs a mid GPU; long clips need chunked propagation. MatAnyone is NTU S-Lab licensed (check commercial terms). Sources: https://ai.meta.com/blog/segment-anything-model-3/, https://github.com/Zarxrax/Sammie-Roto-2, https://github.com/sPappalard/RotoAI, https://github.com/pq-yang/MatAnyone, https://winbuzzer.com/2026/01/20/adobe-launches-premiere-pro-26-with-ai-powered-object-mask-feature-xcxwbn/
+- **Object removal / video inpainting (incl. shadow & reflection removal)** — Erase people, logos, mics, boom poles, or a distracting sign from a moving shot; also outpaint/extend the frame (Resolve AI Set Extender).
+  - *category*: VFX
+  - *howItWorks*: Mask (SAM2/3) -> inpainting model. ProPainter (flow-guided propagation + transformer, the classic baseline, modest VRAM), DiffuEraser (UNet + BrushNet branch + temporal attention, uses ProPainter as prior; beats ProPainter on completeness/temporal consistency; 12GB @ 640x360, 20GB @ 960x540, 33GB @ 1280x720; Apache-2.0 but inherits ProPainter license via prior), MiniMax-Remover (simplified DiT, minimax-optimized distillation, 6 steps no CFG, fast), EffectErase (CVPR 2026, Fudan; also removes shadows/reflections/surface deformation, open source), Inpaint-Anything main_2026 branch (SAM3 text prompts + ProPainter). Wan 2.1/2.2 VACE does masked video editing + outpainting in ComfyUI. Cloud: Runway Aleph (object removal by prompt), Kling.
+  - *whoHasIt*: Runway Aleph, Resolve (Set Extender for outpaint), CapCut, Adobe Firefly generative fill in Premiere workflow. Open source: ProPainter, DiffuEraser, MiniMax-Remover, EffectErase, Inpaint-Anything, Wan VACE.
+  - *notes*: Local difficulty: MEDIUM-HARD. ProPainter is feasible on 8-12GB; diffusion removers need 20GB+ at 720p and are slow (DiffuEraser ~5 min for 250 frames at 720p on a large GPU). Sources: https://github.com/lixiaowen-xw/DiffuEraser, https://github.com/zibojia/MiniMax-Remover, https://arxiv.org/pdf/2604.01693, https://github.com/geekyutao/Inpaint-Anything, https://docs.comfy.org/tutorials/video/wan/vace
+- **Generative B-roll / text-to-video** — Generate cutaway shots from the transcript ('show a coffee shop at dawn'), stock-style inserts, or full clips, with or without native audio.
+  - *category*: Generative
+  - *howItWorks*: Cloud frontier (Artificial Analysis T2V-with-audio arena, Aug 2026): Gemini Omni Flash 1238, Wan 3.0 1237, MiniMax H3 Max 1235, MiniMax H3 1227, Seedance 2.0 1221, then Wan 2.7, HappyHorse-1.1, Kling 3.0 Pro (1108). Veo 3.1 ($0.15/s fast) has native audio + 4K portrait/landscape; Kling 3.0 (~$0.10/s) adds multi-shot storyboard mode; Runway Gen-4.5 still favored for camera/motion-brush control; Sora 2 was deprecated (API shutdown Sept 24 2026) per reporting. Open weights: Wan 2.2 (Apache-2.0; T2V/I2V A14B MoE ~27B needs 80GB unsharded but 12-24GB with FP8/offload/GGUF; TI2V-5B does 5s 720p in <9 min on a consumer GPU; 5B GGUF from 8GB), LTX-2 / 2.3 (22B DiT, first open model with synchronized audio+video, up to 4K/50fps, FP8 + CPU/disk offload for 3090/4090/5090; modes T2V/I2V/V2V/A2V/keyframe interpolation/'Retake' region regeneration; check tiered licenses), HunyuanVideo 1.5 (~14GB with FP8+offload on a 4090, near Kling 1.5 quality), CogVideoX, Mochi 1. B-roll selection in editors: LLM proposes a shot list from transcript; retrieval-first from user library/stock via CLIP similarity (OpenCut-AI does this), generate only when nothing matches. Descript reports B-roll placement accuracy 60%->92% in its 2026 Underlord upgrade.
+  - *whoHasIt*: Descript (B-roll), Premiere (Firefly text-to-video + Send to Firefly), Runway, InVideo, Pictory, CapCut, BIGVU, Captions. Open source: Wan 2.2, LTX-2, HunyuanVideo, ComfyUI workflows, OpenCut-AI CLIP B-roll matcher.
+  - *notes*: Local difficulty: HARD for generation (minutes per 5-second clip on consumer GPUs; Apple Silicon needs 32-64GB via MLX-Video); EASY for retrieval-based B-roll from a library. Hybrid strategy recommended: local retrieval + cloud API (Veo/Kling/Wan API) for generation with a credit model. Sources: https://artificialanalysis.ai/video/leaderboard/text-to-video, https://github.com/Wan-Video/Wan2.2, https://github.com/Lightricks/LTX-2, https://www.thundercompute.com/blog/best-open-source-ai-video-generation-models, https://pinggy.io/blog/best_video_generation_ai_models/, https://loopdesk.ai/blog/best-ai-video-editing-tools-2026
+- **Image-to-video, keyframe interpolation & generative extend** — Animate a still (product shot, thumbnail, storyboard frame), bridge two keyframes, or extend a clip a few seconds to cover a cut / hold a reaction (Premiere Generative Extend, launched Jan 16 2026 on the Firefly video model).
+  - *category*: Generative
+  - *howItWorks*: Wan 2.2 I2V-A14B (MoE high-noise/low-noise experts) and TI2V-5B; LTX-2 I2V + keyframe interpolation + duration head; FramePack-style architectures get I2V running on 6-8GB GPUs at reduced length/quality; Wan VACE reference-to-video (R2V) for identity-consistent inserts. Generative extend = conditioning on the last N frames (video continuation) — LTX-2 and Wan VACE support extension; cloud: Premiere Generative Extend, Runway, Kling, Veo 3.1 (frames-to-video).
+  - *whoHasIt*: Premiere Generative Extend, Runway, Kling, Veo 3.1, Pika, Luma. Open source: Wan 2.2, LTX-2, FramePack, VACE.
+  - *notes*: Local difficulty: HARD (same as T2V; slightly easier because conditioning constrains the problem). Extend of real footage is the most editor-relevant sub-feature and the one users will pay for. Sources: https://ltx.io/blog/best-open-source-video-generation-models, https://findaivideo.com/blog/best-open-source-ai-video-models-2026-wan-ltx, https://community.adobe.com/announcements-727/generative-extend-is-now-in-premiere-pro-1546584
+- **Prompt-based video-to-video editing (restyle, relight, change camera angle, replace objects)** — 'Make it golden hour', 'turn this into an over-the-shoulder shot', 'change her jacket to red' on existing footage, preserving the scene; plus style transfer and relighting.
+  - *category*: Generative editing
+  - *howItWorks*: Runway Aleph (Jul 25 2025; in-context video transformation: new camera angles, object removal, relighting; Adobe partnership Dec 2025 puts a 'Runway AI' panel in Premiere/After Effects with round-trip). Open weights: Wan 2.1/2.2 VACE (unified R2V/V2V/masked-edit/outpaint with control signals in ComfyUI), LTX-2 V2V + Retake, Wan2.2-Animate-14B (Sep 19 2025; character animation and replacement from a reference image — an open Act-Two alternative). Relighting: IC-Light (image) -> RelightVid (video, text/background/env-map control, CC-BY-NC-SA), Light-A-Video (training-free), LightCtrl (2026, training-free), DiffusionRenderer.
+  - *whoHasIt*: Runway Aleph (+ Premiere/AE panel), Luma Modify, Kling, Adobe Firefly (style transfer via Send to Firefly). Open source: Wan VACE, Wan-Animate, LTX-2, RelightVid, Light-A-Video.
+  - *notes*: Local difficulty: HARD-VERY HARD (VACE 14B and Wan-Animate want 24GB+ with offload; RelightVid is non-commercial). Cloud API integration is the pragmatic route for v1. Sources: https://filmora.wondershare.com/trending-topic/runway-aleph-video-model.html, https://stable-diffusion-art.com/wan-vace-v2v/, https://github.com/Aleafy/RelightVid, https://arxiv.org/pdf/2603.27083
+- **Music / beat sync + auto-soundtrack generation + auto-ducking** — Cut or place clips on beats, auto-generate a royalty-free bed that matches mood/length, and duck music under speech.
+  - *category*: Audio
+  - *howItWorks*: Beat/onset/downbeat tracking with librosa (onset-based beat tracking), madmom RNNDownBeatProcessor + DBNDownBeatTrackingProcessor (better downbeats), Essentia (better for EDM/drops); export EDL markers (emjjkk/beat-detection) or drive ffmpeg cut lists; MVAA (2025) is a music-driven video auto-alignment system that preserves content. Generation: ACE-Step 1.5 (Jan 2026, Apache-2.0, ~4-min tracks with vocals, <10 s per song on a 3090, runs on Mac/AMD/Intel/CUDA), YuE 7B (lyrics-to-song), MusicGen Stereo (30-s beds), Stable Audio Open 1.5 (sound design/textures); video-to-music alignment research (VidMuse/'Video Echoed in Music', Nov 2025). Cloud: ElevenLabs Eleven Music ($0.15/min), Suno, Udio. Auto-duck = VAD/transcript speech ranges -> sidechain gain envelope (OpenCut-AI ships this).
+  - *whoHasIt*: CapCut auto beat sync, Descript, Wisecut (auto music), Premiere Remix + auto-ducking, Resolve AI Audio Assistant. Open source: librosa, madmom, Essentia, ACE-Step, MusicGen, OpenCut-AI music gen + auto-duck.
+  - *notes*: Local difficulty: EASY for beat sync/ducking; MEDIUM for generation (ACE-Step runs on a Mac or 8-12GB GPU; licensing of outputs is clean under Apache). Sources: https://github.com/ace-step/ACE-Step-1.5, https://arxiv.org/html/2506.18881v1, https://github.com/emjjkk/beat-detection, https://www.spheron.network/blog/deploy-open-source-ai-music-generation-gpu-cloud-2026/
+- **Foley / video-to-audio SFX generation (extra, not in original list)** — Generate synchronized sound effects for silent or AI-generated B-roll (footsteps, doors, ambience) and add/edit sounds for a clicked object.
+  - *category*: Audio
+  - *howItWorks*: MMAudio (flow matching, joint video+text -> audio with frame-level sync module; current open SOTA baseline), ThinkSound (NeurIPS 2025, Qwen team; MLLM chain-of-thought stages: foley generation -> object-centric refinement via clicks/regions -> NL audio editing; uses MMAudio's MM-DiT backbone), HunyuanVideo-Foley (Aug 2025), Kling-Foley (commercial research), ControlFoley (2026). Cloud: ElevenLabs Sound Effects ($0.12/min), Veo 3 / LTX-2 generate audio natively.
+  - *whoHasIt*: Kling, Veo 3, LTX-2 (native), ElevenLabs SFX, CapCut AI sound. Open source: MMAudio, ThinkSound, HunyuanVideo-Foley.
+  - *notes*: Local difficulty: MEDIUM (MMAudio runs on ~8-12GB GPU; ThinkSound heavier). Strong differentiator when paired with generated B-roll. Sources: https://github.com/QwenAudio/ThinkSound, https://replicate.com/zsxkib/mmaudio, https://arxiv.org/pdf/2508.16930
+- **Stem separation / vocal isolation (extra, not in original list)** — Split a mixed track into vocals/drums/bass/other (6-stem with guitar/piano) to remove background music from interviews, keep the M&E bed during dubbing, or extract dialogue for enhancement.
+  - *category*: Audio
+  - *howItWorks*: Demucs v4 htdemucs / htdemucs_6s (Meta, MIT; hybrid waveform+spectrogram transformer U-Net; 9.20 dB SDR on MUSDB18-HQ); Ultimate Vocal Remover (UVR) GUI aggregates MDX-Net, Demucs and other models locally. Used inside dubbing pipelines (pyVideoTrans) to preserve music under new speech.
+  - *whoHasIt*: Adobe (Remix/vocal separation), Resolve Fairlight, LALAL.ai, Moises. Open source: Demucs, UVR.
+  - *notes*: Local difficulty: EASY (CPU-capable, fast on GPU/MPS). Sources: https://github.com/facebookresearch/demucs, https://stemsplit.io/blog/demucs-local-setup-guide
+- **Highlight / viral-clip extraction (long -> short)** — Find the 5-15 self-contained moments in a 60-minute podcast/webinar, score them, cut on sentence boundaries, reframe, caption and export per platform. Opus Clip scores clips 0-99; reviewers report ~40% of generated clips get discarded and low-score clips often outperform.
+  - *category*: Repurposing
+  - *howItWorks*: Transcript-first: LLM (Gemini/GPT/Claude/local Llama-Qwen via Ollama) scores segments on hook strength, emotional payoff, quotability, self-containedness, density (clippyme's rubric; AI-Youtube-Shorts-Generator uses hooks/emotional peaks/opinion bombs/revelations/conflict/quotables/story peaks/practical value); fallback TextTiling lexical topic segmentation; clip edges snap to word -> sentence -> silence-trough boundaries. Multimodal signals: laughter/applause audio events, energy/pitch peaks, ElevenLabs Scribe emotional tags, on-screen changes. Academic MR-HD models (Moment-DETR, QD-DETR, CG-DETR, UVCOM, TR-DETR, R2-Tuning) are packaged in LINE's Lighthouse library (Apache-2.0; QVHighlights/TVSum/YouTube Highlights) for query-based moment retrieval and saliency; VideoHighlighter (Ollama-based local analyzer) does visual search + auto highlights offline.
+  - *whoHasIt*: Opus Clip, Vizard, Klap, Submagic, Descript (Underlord clips), CapCut long-to-short, Riverside Magic Clips, Loopdesk. Open source: clippyme, openshorts (MIT, Docker, MCP server for agents), AI-Youtube-Shorts-Generator, VideoHighlighter, Lighthouse.
+  - *notes*: Local difficulty: EASY-MEDIUM with a local LLM (quality tracks the LLM; Gemini/Claude-class models beat 8B local models materially). 'Virality score' credibility is a known weakness — consider showing rationale instead of a number. Sources: https://github.com/fralapo/clippyme, https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator, https://github.com/line/lighthouse, https://github.com/Aseiel/VideoHighlighter, https://bigvu.tv/blog/opus-clip-tested-2026-where-ai-wins-40-percent-discard/, https://help.opus.pro/docs/article/virality-score
+- **Script-to-video / script-to-timeline (IntelliScript)** — Two distinct products: (a) paste a script or blog URL and get an assembled video from stock/generated footage + AI voice (Pictory, InVideo); (b) feed a script and have the editor assemble a rough cut from YOUR footage, matching takes to lines and stacking alternates (Resolve 20/21 AI IntelliScript).
+  - *category*: Assembly
+  - *howItWorks*: (a) LLM splits script into scenes -> per-scene visual query -> stock API / CLIP retrieval / T2V generation -> TTS narration -> captions -> beat-aware assembly; InVideo's 2026 version is agentic/conversational and generates storyboards ('Vision'). (b) Transcribe all takes, fuzzy-align transcript to script (IntelliScript tolerates non-exact wording), pick best take per line (fewest fillers, no overlaps, camera preference), lay alternates on upper tracks. Descript's Underlord does 'read your script, watch your video, decide' and can trim to a duration/topic or extract by speaker.
+  - *whoHasIt*: Pictory, InVideo, Fliki, Descript Underlord, Resolve 20/21 IntelliScript, Loopdesk. Open source: Crayotter (multimodal agent text-to-video), OpenCut-AI (text edit), Cutlass.
+  - *notes*: Local difficulty: MEDIUM. (b) is mostly alignment + heuristics on top of the transcript layer and is a high-value pro feature with few open implementations; (a) depends on stock licensing or generation. Sources: https://www.engadget.com/apps/davinci-resolve-20s-latest-ai-feature-can-create-an-entire-timeline-based-on-a-script-120009351.html, https://www.dpreview.com/news/1769061312/davinci-resolves-latest-version-adds-more-than-100-new-features/, https://pictory.ai/blog/what-is-the-best-ai-video-generator-2026, https://invideo.io/make/storyboard/
+- **Auto color match / auto balance / AI grade** — Match all shots in a scene to a reference frame, neutralize exposure/white balance before grading, apply a 'look' from a reference image or film stock, and export as a 3D LUT.
+  - *category*: Color
+  - *howItWorks*: Classical: histogram/Reinhard/MKL color transfer per shot, guided by scene detection and face/skin-tone protection. Neural: NILUT (AAAI 2024, implicit neural 3D LUTs that emulate real LUTs), AI_color_grade_lut (pix2pix + kNN -> LUT), NCST (2024, neural color style transfer for video with params convertible to LUTs for Resolve), LumiVideo (2025/26, agentic diffusion-based LUT generation from references). Commercial: Colourlab AI 3.2 (OFX plugin in Resolve/Premiere/FCP; AI Color Match, AI Balance, Region Matching, ACES-aware), Resolve Neural Engine auto color/color match, Premiere Color Match.
+  - *whoHasIt*: Resolve, Premiere, Colourlab AI, Filmora, CapCut. Open source: NILUT, AI_color_grade_lut, NCST, ray-cast/lut.
+  - *notes*: Local difficulty: MEDIUM (deterministic transfer + LUT export is easy; a good 'look from reference' with skin protection and temporal stability is real work). Sources: https://github.com/mv-lab/nilut, https://github.com/andjoer/AI_color_grade_lut, https://arxiv.org/pdf/2604.02409, https://colourlab.ai/colourlab-ai-pro-2025/
+- **Upscale / denoise / deblur / restore** — 2-4x super-resolution with temporal consistency, noise/grain and compression-artifact removal, deblur, low-light recovery, SDR->HDR.
+  - *category*: Enhancement
+  - *howItWorks*: Frame-based (fast, some flicker): Real-ESRGAN, Real-CUGAN, Anime4K via Video2X / Waifu2x-Extension-GUI. Temporal diffusion restorers (2026 best practice, ComfyUI): SeedVR2 (ByteDance, one-step diffusion adversarial post-training, 3B and 7B, Apache-2.0; 1 H100 handles 100x720x1280, 4 H100s for 1080p/2K) and FlashVSR 1.1 (Nov 2025; 4x VSR, ~17 FPS at 768x1408 on an A100, sparse attention, Apache-2.0); 'downscale-first' restoration for noisy sources. Commercial: Topaz Video AI (Starlight Precise, Proteus, Iris, Nyx, Rhea, Artemis, etc.; local on NVIDIA/AMD/Apple Silicon or cloud credits; $299/yr personal, $699/yr pro).
+  - *whoHasIt*: Topaz Video AI, Resolve Super Scale/Neural Engine, Premiere (basic), Adobe (VideoGigaGAN research). Open source: SeedVR2, FlashVSR, Real-ESRGAN, Video2X, ComfyUI nodes.
+  - *notes*: Local difficulty: EASY for Real-ESRGAN-class (runs on Mac/8GB GPU), HARD for SeedVR2/FlashVSR-class (H100/A100 territory; community GGUF/FP8 ports exist for 24GB cards at low res). Sources: https://github.com/ByteDance-Seed/SeedVR, https://github.com/OpenImagingLab/FlashVSR, https://artokun.mintlify.app/blog/video-upscale-comfyui, https://www.topazlabs.com/topaz-video
+- **Frame interpolation / smooth slow-motion / fps conversion** — 24->60/120 fps, 4-8x slow motion, smoothing of AI-generated video, and LTX-2 style temporal upscaling of generated clips.
+  - *category*: Enhancement
+  - *howItWorks*: RIFE (real-time intermediate flow estimation) family: Practical-RIFE 4.25 recommended default, 4.26 (Sep 2024, no ensemble), 4.24+ tuned for post-processing diffusion-generated video; available as ComfyUI nodes (rife47/49 recommended in some nodes) and inside Video2X/Topaz (Apollo/Chronos/Aion models). GIMM-VFI and other 2024-25 flow models trade speed for quality on large motion.
+  - *whoHasIt*: Topaz Video AI, Resolve Speed Warp (optical flow), Premiere Optical Flow, CapCut. Open source: Practical-RIFE, ComfyUI-Frame-Interpolation, Video2X.
+  - *notes*: Local difficulty: EASY (RIFE runs on CPU/MPS/any GPU). Sources: https://github.com/hzwer/Practical-RIFE, https://www.runcomfy.com/comfyui-nodes/ComfyUI-Frame-Interpolation/RIFE-VFI
+- **Stabilization** — Remove handheld shake and rolling shutter; gyro-accurate stabilization for action cams/drones; visual-only for everything else.
+  - *category*: Enhancement
+  - *howItWorks*: Gyroflow 1.6.x (open source; uses recorded gyro/IMU data from GoPro, Insta360, Sony, DJI, Runcam, blackbox; plugins for Premiere, FCP, Resolve) gives the most accurate results when metadata exists. Without gyro: feature-tracking + trajectory smoothing (OpenCV/ffmpeg vidstab), or learned stabilizers; Topaz Video AI is the reference for visual-only (drones). Crop/zoom vs. warp trade-off; can pair with inpainting/outpainting to avoid crop.
+  - *whoHasIt*: Gyroflow, Topaz, Premiere Warp Stabilizer, Resolve, CapCut, Wondershare. Open source: Gyroflow, ffmpeg vidstab, OpenCV.
+  - *notes*: Local difficulty: EASY (integrate Gyroflow/vidstab; both CPU-friendly). Sources: https://gyroflow.xyz/, https://www.cined.com/gyroflow-free-advanced-open-source-video-stabilization-tool/, https://try.wideframe.com/blog/top-ai-tools-for-video-stabilization/
+- **Face restoration / retouch (extra, not in original list)** — Sharpen and de-artifact faces in webcam/Zoom/upscaled footage, skin smoothing, teeth/eye enhancement, consistent across frames.
+  - *category*: Enhancement
+  - *howItWorks*: KEEP (video face super-resolution, Kalman-inspired feature propagation on CodeFormer; handles in-the-wild video; Real-ESRGAN background enhancement; NTU S-Lab license), CodeFormer / GFPGAN per-frame (flicker without temporal handling), Resolve Face Refinement (Neural Engine), Adobe/Descript beauty filters.
+  - *whoHasIt*: Resolve Face Refinement, Topaz Iris model, CapCut retouch. Open source: KEEP, CodeFormer, GFPGAN.
+  - *notes*: Local difficulty: MEDIUM (per-frame is easy; temporal consistency and avoiding 'plastic' identity drift is the hard part). Sources: https://github.com/jnjaby/KEEP
+- **Eye-contact / gaze correction** — Redirect eyes toward the lens for teleprompter readers and off-axis webcams, on pre-recorded video or live.
+  - *category*: Talking-head polish
+  - *howItWorks*: NVIDIA Maxine Eye Contact (Broadcast app for RTX users; Maxine SDK / NIM for developers): face tracking -> 2D landmarks + 6-DoF head pose -> eye-patch crop -> encoder estimates gaze angle + embedding -> decoder redirects gaze; includes blink/temporal handling. Open source is thin: chihfanhsu/gaze_correction (2019 warping CNN + GAN gaze redirection), dtoyoda10/eye-contact-cnn (CNN + optical-flow warping), WangWilly/gaze-correction-cam (macOS virtual camera, MediaPipe), MediaPipe-based reading-stabilization cams.
+  - *whoHasIt*: Descript AI Eye Contact, Captions.ai, NVIDIA Broadcast/Maxine, FaceTime/Teams (live), Filmora (via Maxine).
+  - *notes*: Local difficulty: HARD to reach production quality (needs a trained redirection model + failure detection for glasses/extreme angles); NVIDIA-only for Maxine. Consider licensing Maxine NIM or shipping as best-effort with confidence gating. Sources: https://docs.nvidia.com/nim/maxine/eye-contact/latest/overview.html, https://github.com/chihfanhsu/gaze_correction, https://github.com/WangWilly/gaze-correction-cam
+- **Chaptering, summaries, titles, descriptions, hashtags, show notes** — Auto YouTube chapters with timestamps, SEO titles (multiple variants), descriptions, social captions, key quotes, and per-clip hooks.
+  - *category*: Metadata / publishing
+  - *howItWorks*: Transcript + scene boundaries -> LLM with timestamp-aware prompting (topic segmentation via TextTiling or embedding change-points to seed chapters). Video-native: Gemini 2.5+/Interactions API accepts video files or public YouTube URLs (up to 10 videos per request) and returns chapters with timestamps/summaries; local alternative Qwen3-VL (256K context, second-level video indexing, Text-Timestamp Alignment) or InternVL3 via vLLM/Ollama.
+  - *whoHasIt*: YouTube auto chapters, Descript, Opus Clip, Riverside, Vizard, CapCut. Open source: hamelsmu YouTube Chapter Generator gist (Gemini), AI-Video-Transcriber, VideoHighlighter.
+  - *notes*: Local difficulty: EASY (text LLM over transcript); MEDIUM for video-native local VLM (Qwen3-VL 7-32B fits on 24GB; hours-long videos need frame sampling). Sources: https://ai.google.dev/gemini-api/docs/video-understanding, https://gist.github.com/hamelsmu/520b0bdc416a835674b3f8e830a8e521, https://github.com/qwenlm/qwen3-vl
+- **Thumbnail generation + A/B testing** — Pull best frames (faces, expressions, sharpness), composite text/face cutouts in a channel style, generate variants, and run YouTube Test & Compare (up to 3 thumbnails; since Dec 4 2025 also titles and title+thumbnail; winner by watch-time share, 1-2 weeks).
+  - *category*: Metadata / publishing
+  - *howItWorks*: Frame scoring (face detection, expression, sharpness, eye-open) -> subject cutout (SAM/matting) -> layout templates -> text rendering. Generative: Google Nano Banana Pro / Nano Banana 2 (Gemini image; ~94% text-render accuracy), GPT Image 2, FLUX.2, Seedream 4.5, Qwen-Image; Ideogram for typography. NanoThumbnail (open source, Gemini/Replicate).
+  - *whoHasIt*: PostEverywhere, getimg.ai, Fliki, ThumbMagic, Cliprise, VidIQ/TubeBuddy (testing), YouTube Studio Test & Compare. Open source: NanoThumbnail.
+  - *notes*: Local difficulty: EASY for frame-pick + template compositing; local image gen with FLUX/Qwen-Image needs 12-24GB (or Apple Silicon via MLX) and text rendering lags Nano Banana Pro. Sources: https://github.com/yoanbernabeu/NanoThumbnail, https://www.notelm.ai/blog/youtube-thumbnail-ab-testing, https://www.cliprise.app/learn/guides/getting-started/ai-youtube-thumbnail-generator-guide-2026
+- **Semantic search inside footage (visual, audio, dialogue, on-screen text)** — 'Find the shot where she laughs holding the red mug', 'all wide shots at sunset', 'moments a dog barks', 'similar visuals / alternate takes' across the whole bin; also query-based moment retrieval for B-roll matching.
+  - *category*: Search / media intelligence
+  - *howItWorks*: Cloud SOTA: Twelve Labs Marengo 3.0 (512-dim multimodal embeddings across visual/audio/dialogue/OCR; 100+ languages; via Bedrock/SaaS; pairs with Qdrant/Elastic). Local: per-shot frame embeddings with CLIP / SigLIP 2 / InternVideo2 / LanguageBind into a vector DB (sqlite-vec, LanceDB, Qdrant) + transcript BM25 + OCR (PaddleOCR) + audio tagging (CLAP/PANNs) fused with reciprocal rank fusion; VLM re-ranking (Qwen3-VL) for precision; Lighthouse MR-HD models for sub-shot moment localization. Premiere's Media Intelligence (GA Apr 2025) searches by visual content, sounds, and finds similar visuals/alternate takes; Premiere 26 processing is on-device.
+  - *whoHasIt*: Premiere Media Intelligence, Twelve Labs (Jockey agent), Frame.io, Resolve (basic metadata), Loopdesk. Open source: VideoHighlighter (Ollama), Lighthouse, OpenCut-AI CLIP matcher, RotoAI (Grounding DINO).
+  - *notes*: Local difficulty: MEDIUM (CLIP/SigLIP + sqlite is a few days; quality of fusion/re-ranking and indexing speed for terabytes is the long tail). Great fit for Apple Silicon (CoreML CLIP). Sources: https://www.twelvelabs.io/blog/marengo-3-0, https://github.com/line/lighthouse, https://github.com/Aseiel/VideoHighlighter, https://msyeditor.com/adobe-premiere-pro-ai-features-2026/
+- **Multicam auto-switch / active speaker detection** — Cut between camera angles (or podcast layouts) automatically to whoever is speaking, with sensible hold times and group shots on crosstalk.
+  - *category*: Multicam
+  - *howItWorks*: If per-person audio tracks exist (Riverside/Descript style): energy/VAD per track + diarization -> switching state machine with min-shot-length, look-ahead and reaction-shot rules. Single mixed audio: audio-visual ASD models — TalkNet-ASD (baseline), Light-ASD / LR-ASD (IJCV 2025, 94.06% mAP AVA, lightweight), LoCoNet (CVPR 2023; with TalkNCE 95.5% mAP), LASER (2025, lip-landmark assisted); cheap proxy = MediaPipe mouth-aspect-ratio variance (clippyme). Resolve 20 AI Multicam SmartSwitch and Descript Automatic Multicam do this commercially; Descript also switches to multi-speaker layouts.
+  - *whoHasIt*: Descript Automatic Multicam, Resolve 20 Multicam SmartSwitch, Riverside, Ecamm/vMix (live). Open source: TalkNet-ASD, Light-ASD, LoCoNet, LASER_ASD, clippyme.
+  - *notes*: Local difficulty: MEDIUM (ASD models are small and run on CPU/MPS; the editorial rules are where quality lives). Sources: https://github.com/Junhua-Liao/Light-ASD, https://github.com/SJTUwxz/LoCoNet_ASD, https://help.descript.com/hc/en-us/articles/28736507904525-Automatic-multicam, https://www.newsshooter.com/2025/05/27/davinci-resolve-20-final-release/
+- **Auto zoom / punch-in, jump-cut smoothing, callouts, B-roll placement (talking-head automation)** — Make a single static talking-head look multi-cam: emphasis zooms on key phrases, punch-in/out to hide jump cuts after silence removal, animated callouts, and B-roll/image overlays at the right sentences.
+  - *category*: Editing automation
+  - *howItWorks*: Transcript emphasis detection (LLM picks emphasis words / topic shifts / questions) + audio energy -> keyframed scale/position around the face (face detection keeps eyes in the upper third) -> alternate 100%/115%/130% framings across cuts so jump cuts read as angle changes; Descript's 'hide jump cuts' also uses AI to morph/patch. B-roll placement = LLM proposes shot list per segment -> CLIP retrieval from library/stock -> generation fallback; overlays timed to sentence boundaries. Wisecut, AutoCut (Premiere/Resolve plugin: AutoZoom based on cuts/speech/emotion), Captions.ai, BIGVU, Descript Underlord all ship this.
+  - *whoHasIt*: Descript, Wisecut, AutoCut, Captions.ai, BIGVU, Opus Clip. Open source: OpenCut-AI (CLIP B-roll overlays), openshorts.
+  - *notes*: Local difficulty: EASY-MEDIUM (all built on transcript + face detection; no heavy models). High perceived value per engineering hour. Sources: https://www.opus.pro/blog/best-auto-zoom-in-tools, https://www.autocut.com/en/autozoom/, https://github.com/Ekaanth/OpenCut-AI, https://www.descript.com/underlord
+- **AI transitions & effects (motion-aware, generative, character/motion transfer)** — Transitions that follow in-frame motion, generated 'morph' transitions between unrelated shots, auto-applied effect templates by content, and performance/motion transfer onto characters.
+  - *category*: Effects
+  - *howItWorks*: Rule-based: Filmora aligns transitions to tracked motion; CapCut auto-applies template transitions/effects by beat and scene. Generative: CineTrans (Aug 2025, masked diffusion for cinematic transitions), VACE/LTX-2 keyframe interpolation between two shots, Premiere Generative Extend to cover a cut. Motion/performance transfer: Runway Act-One/Act-Two (drive a character from a performance video), Wan2.2-Animate-14B (open, Sept 2025; character animation + replacement from reference image). Effect templates: LLM chooses from a catalog given transcript mood/scene type.
+  - *whoHasIt*: CapCut, Filmora, Runway Act-Two, Premiere/AE, Resolve Fusion. Open source: CineTrans, Wan-Animate, LTX-2, VACE.
+  - *notes*: Local difficulty: EASY for rule-based/template selection; HARD for generative transitions and motion transfer (24GB+ GPUs, minutes per shot). Sources: https://arxiv.org/pdf/2508.11484, https://github.com/Wan-Video/Wan2.2, https://filmora.wondershare.com/video-transition.html, https://www.capcut.com/explore/ai-transition-edit
+- **Avatar presenters / talking-head generation from image + audio/script** — Photoreal presenter from a still + script (explainers, ads, localized spokespeople), with gestures/body motion; custom avatars from a short recording.
+  - *category*: Avatars
+  - *howItWorks*: Commercial: HeyGen Avatar IV (facial micro-expressions, gesture control; top in 2026 tests), Synthesia, Tavus, Hedra. Research/open (image + audio -> video): OmniHuman (ByteDance, full-body from one image), Wan2.2-S2V-14B (Aug 26 2025, Apache-2.0; cinematic speech-to-video, beats Hunyuan-Avatar/OmniHuman in their tests; CosyVoice TTS integrated; 80GB unsharded), EchoMimicV3 (AAAI 2026, 1.3B unified multi-modal; 12-16GB VRAM via ComfyUI), Hallo3 (video DiT portrait animation), Sonic, InfiniteTalk (long-form, heavier), daVinci-MagiHuman (2026, 15B Apache-2.0, ~2 s per clip on an H100). Pipeline: script -> TTS (clone) -> S2V/talking-head model -> optional background matting/composite -> captions.
+  - *whoHasIt*: HeyGen, Synthesia, Descript (avatar-hosted explainers via Underlord), InVideo, Tavus, Hedra. Open source: Wan-S2V, EchoMimicV3, Hallo3, OmniHuman (weights limited), MagiHuman.
+  - *notes*: Local difficulty: HARD (EchoMimicV3 is the realistic local entry at 12-16GB; Wan-S2V needs cloud/H100 or aggressive offload). Consent/deepfake policy and watermarking required. Sources: https://github.com/antgroup/echomimic_v3, https://huggingface.co/Wan-AI/Wan2.2-S2V-14B, https://www.forasoft.com/learn/ai-for-video-engineering/articles-ai/tavus-heygen-synthesia-lip-sync-avatars-production, https://www.spheron.network/blog/self-host-ai-avatar-generator-heygen-alternative-2026/
+- **Agentic natural-language editing ('edit by prompt' orchestration layer)** — 'Cut this webinar into a 90-second clip about pricing, add captions, punch in on the CEO, and export vertical' — an agent that reads the transcript/analysis, plans, calls editing tools, and shows a reviewable diff. This is the 2026 differentiator that makes all other features composable.
+  - *category*: Orchestration / UX
+  - *howItWorks*: Descript Underlord: agent with a model picker (includes Claude Sonnet 4.5), can read script, 'watch' video, trim to duration/topic, extract by speaker, add zooms/layouts/callouts, hide jump cuts; Descript also exposes a hosted MCP server so Claude can import media, run Underlord edits, manage compositions and export. Open source patterns: video-use (Claude Code skill: agent reads transcript + analysis, proposes strategy, emits an EDL, ffmpeg executes — 'the LLM never watches the video'), Cutlass (LLM-first editor), Crayotter (multimodal agent), openshorts MCP server, ffmpeg MCP servers (Video_Editor_MCP, vibevideo-mcp, FFmpeg Micro), mazsola2k/ai-video-editor (vision-LLM pipeline). Key infra: OpenTimelineIO 0.18.1 (JSON .otio timelines an LLM can generate; converts to FCPXML/AAF/Resolve). Best practice: tools return structured facts (transcript, shots, faces, beats, embeddings), the LLM plans + edits a declarative timeline, deterministic renderer executes; VLM (Gemini/Qwen3-VL) only for verification/QA passes.
+  - *whoHasIt*: Descript Underlord, Loopdesk, InVideo agent (Apr 2026), Premiere AI assistant features, Opus Clip. Open source: video-use, Cutlass, Crayotter, MCP servers, OTIO.
+  - *notes*: Local difficulty: MEDIUM (engineering-heavy, not GPU-heavy; a local 8-14B LLM handles tool calls but planning quality improves markedly with frontier models; design for BYO-API-key). Sources: https://github.com/ismael-joffroy-chandoutis/open-source-cinema/blob/master/Agent-Driven-Editing-2026.md, https://www.solosoft.dev/post/video-use-ai-editing-2026/, https://emergent.sh/news/cutlass-open-source-llm-first-video-editor, https://www.usecarly.com/blog/claude-descript-integration/, https://github.com/kush36agrawal/video_editor_mcp
+- **Local hardware feasibility & runtime strategy** — Which tiers of the checklist can run on the user's machine (CPU / Apple Silicon / 8-24GB NVIDIA) versus need cloud, and how competitors split it (Premiere 26 runs Object Mask on-device; Topaz offers local or cloud credits; Descript is cloud).
+  - *category*: Infrastructure
+  - *howItWorks*: Tier A (CPU/Apple Silicon/8GB GPU): ASR + diarization, silence/filler cut, scene detection, captions, reframe, beat sync, Demucs, DeepFilterNet, Kokoro/Chatterbox TTS, RIFE, Real-ESRGAN, SAM2 small, CLIP/SigLIP search, ASD, thumbnails from frames, LLM chaptering with a local 7-14B model. Tier B (16-24GB GPU or 32-64GB Mac): MuseTalk/LatentSync lip-sync, EchoMimicV3, ProPainter, MatAnyone, Wan 2.2 5B / Wan 2.1 1.3B, LTX-2 FP8, HunyuanVideo 1.5 FP8 (~14GB), ACE-Step, MMAudio, Qwen3-VL 7-32B, FLUX thumbnails. Tier C (cloud/H100): Wan 2.2 A14B/S2V/Animate at full precision, SeedVR2/FlashVSR, DiffuEraser 720p, frontier T2V (Veo 3.1, Kling 3.0, Wan 3.0, Seedance 2.0), Marengo embeddings, Maxine gaze. Mac specifics: MLX-Video / Rapid-MLX run LTX-2.x, Wan 2.1/2.2, CogVideoX-Fun behind an OpenAI-compatible API; 32GB minimum, 64GB+ recommended; models take 20-42GB disk; Wan 2.1 1.3B is the realistic choice on 32GB.
+  - *whoHasIt*: On-device leaders: Premiere 26 (Object Mask), Resolve Neural Engine, Topaz (local), OpenCut-AI (self-hosted), Gyroflow. Cloud-first: Descript, Opus Clip, HeyGen, Runway, ElevenLabs.
+  - *notes*: Recommendation: ship Tier A fully local by default, Tier B as optional downloadable model packs with hardware detection, Tier C via BYO-key cloud providers (Veo/Kling/Wan/ElevenLabs/Sync Labs/Twelve Labs) with a credit meter; use ComfyUI or Diffusers as an embedded backend for Tier B/C-lite. Sources: https://rapidmlx.com/docs/models/families/video, https://note.com/mikai_daichi/n/nab2a5d452f83?hl=en, https://localaimaster.com/blog/local-ai-video-generation, https://www.compute-market.com/blog/best-gpu-for-ai-video-generation-2026
+
+
+## 7. Integration & platform survey
+
+Integration catalog for an AI video editor, researched Sept 2026 (~60 web searches + ~40 primary-doc fetches; search budget hit 200/200). Key takeaways for the roadmap: (1) Stock media: Pexels/Pixabay/Unsplash are free API-key services with hotlink/attribution/caching rules (Pexels 200/hr default, unlimited on request; Pixabay 100/min + 24h cache rule; Unsplash 50/hr demo -> 1000-5000/hr prod, must fire /download event); Storyblocks and Epidemic/Artlist are partner-contract APIs (Storyblocks HMAC-SHA256 on api.videoblocks.com; Epidemic now self-serve API key + official MCP server; Artlist enterprise-only). (2) TTS: ElevenLabs $0.05-0.10/1k chars, OpenAI gpt-4o-mini-tts ~$0.015/min, Azure $16/M chars, Deepgram Aura-2 $0.03/1k; local Kokoro-82M (Apache 2.0) is the commercial-safe default, Chatterbox (MIT) for cloning, XTTS is non-commercial. (3) ASR: cloud is a commodity at $0.15-0.36/hr (AssemblyAI $0.15-0.21/hr, Deepgram $0.26/hr, OpenAI $0.36/hr, ElevenLabs Scribe $0.22/hr, Gemini 3.5 Transcribe $0.30/hr); local WhisperX/faster-whisper/Parakeet-TDT (6.3% WER, ~50x Whisper throughput, CC-BY) give word timestamps + diarization at zero marginal cost. (4) LLM agents: Claude Opus 5 $5/$25, Sonnet 5 $3/$15, Haiku 4.5 $1/$5 (batch -50%, cache -90%); GPT-5.6 Terra $2/$12, Luna $0.20/$1.20; Gemini 3.8 Flash $0.75/$3.75 with native video input. (5) Generative video is $0.03-0.70/s (Veo 3.1 Lite $0.05/s 1080p, Runway Gen-4 Turbo $0.05/s, Kling ~$0.075/s, Luma Ray 3.2 $0.03-0.24/s, Sora 2 $0.10-0.70/s and shutting down Sept 24 2026); fal.ai is the best aggregator (queue API, webhooks, 30-50% cheaper than Replicate); open-weight Wan 2.2 (Apache 2.0), LTX-2.3 (native audio+video), HunyuanVideo 1.5 run on 8-24GB VRAM. (6) GPU: Modal per-second H100 $3.95/hr with $30/mo free, RunPod H100 $1.99-3.29/hr pods; fal H100 $1.89/hr. (7) Publishing is the hardest integration: YouTube 10k units/day with videos.insert=1600 units and a compliance audit for more; TikTok requires an app audit or all posts are SELF_ONLY private; Instagram needs a public video URL, 100 posts/24h, app review; X is pay-per-use ($0.015/post, $0.20 with link) with no free tier; LinkedIn/Threads/Bluesky/Pinterest free but gated by review. Unified APIs (Ayrshare, Buffer, Postiz) abstract this. (8) Storage: R2 ($0.015/GB, zero egress) beats S3 ($0.09/GB egress) for video delivery; use Dropbox Chooser and Google Picker + drive.file scope to avoid CASA audits. (9) Design/brand: Canva Connect (OAuth PKCE, exports), Figma REST (tiered rate limits from Nov 2025), Brandfetch Brand API ($99/mo, free Logo API), Google Fonts Developer API (free, API key). (10) MCP is the emerging plugin surface: Epidemic Sound MCP (beta), Kinocut/ffmpeg-mcp, davinci-resolve-mcp, fcpxml-mcp; Anthropic's connector directory has 1,625 MCP integrations; Remotion's hosted MCP is deprecated (shutdown after Aug 31 2026). (11) Engineering lessons: keep a human approval gate before publish, word timestamps must be within 30-40ms, burned-in animated captions need ASS/karaoke via FFmpeg, and EU AI Act Art. 50 (Aug 2, 2026) makes C2PA content credentials a pipeline stage.
+
+### items
+
+- **Pexels API** — Free photo + video library (search, curated/popular, per-video multiple resolutions). Best default stock source for B-roll because video files are returned directly with quality/width/height/link and there is no per-asset fee.
+  - *category*: Stock media
+  - *howItWorks*: REST, `Authorization: <API key>` header. Endpoints /v1/search, /videos/search, /videos/popular with orientation, size, min/max duration params. Default 200 req/hr, 20k/month; unlimited is free on request with a demo showing attribution. License: free commercial use, no attribution required but Pexels asks for 'Photo by X on Pexels' credit; must not build a competing stock site. Pexels rejects AI-generated uploads, so the library is real footage.
+  - *whoHasIt*: Canva, Descript-style editors, Loopdesk, most open-source editors and Shotstack users.
+  - *notes*: Local/open alternative: none (it is already free); mirror the JSON + download files into your own R2 bucket to survive rate limits. Sources: pexels.com/api/documentation, help.pexels.com articles on higher limits.
+- **Unsplash API** — Free high-quality photography (no video). Useful for title cards, thumbnails, and image-to-video seeds.
+  - *category*: Stock media
+  - *howItWorks*: REST with `Authorization: Client-ID <key>`. Demo mode 50 req/hr; production 1,000 req/hr (5,000 on approved apps per help center) after 'Apply for Production'. Hard rules: hotlink `photo.urls.*` (do not rehost), fire `GET /photos/:id/download` every time a user downloads, show photographer + Unsplash attribution with UTM links. Enterprise/paid tiers are negotiated privately; Unsplash+ premium content is not in the free API.
+  - *whoHasIt*: Figma, Notion, Canva, Squarespace; most AI editors that expose an image picker.
+  - *notes*: Open alternative: Openverse (WordPress) API for CC images. Sources: unsplash.com/documentation, help.unsplash.com API guidelines.
+- **Pixabay API** — Free photos, illustrations, vectors and video with several video renditions (large/medium/small/tiny). Second free B-roll source to widen coverage.
+  - *category*: Stock media
+  - *howItWorks*: REST GET /api/ and /api/videos/ with `key=` query param. 100 requests per 60 s, HTTP 429 above that; results must be cached 24h; hotlinking is not allowed for permanent embedding, download and serve yourself. Content License allows commercial use without attribution. Pixabay explicitly allows AI training on its content and accepts AI-generated uploads (flag them in UI).
+  - *whoHasIt*: WeVideo, Lumen5-style tools, many n8n/Make video automations.
+  - *notes*: Sources: pixabay.com/api/docs, picdefense.io Pixabay license risk profile.
+- **Storyblocks API** — Unlimited-download licensed footage, After Effects templates, music and SFX with a business-grade license. The de-facto stock partner for AI video editors.
+  - *category*: Stock media
+  - *howItWorks*: REST at https://api.videoblocks.com (and audioblocks/graphicstock hosts). Auth is HMAC: each request carries APIKEY (public), EXPIRES (unix seconds) and HMAC = hex(SHA-256-HMAC(secretKey + EXPIRES, resourcePath)); route must match the signed resource. Endpoints for search, details, download links per project/user. Pricing is not public; partner/enterprise contract, typically per-active-user or revenue share negotiated with BD (business-solutions/api page). No self-serve key.
+  - *whoHasIt*: Descript, Pictory, Lumen5, WeVideo, Biteable, Powtoon, Prezi, Magix, LumaTouch (2025 renewed partner list).
+  - *notes*: Open alternative: Pexels/Pixabay for footage; Mixkit for free templates. Node client: npm storyblocks-api. Sources: documentation.storyblocks.com, PRNewswire Jan 2025 partner release, Storyblocks API PDF v1.8.
+- **Getty Images / Shutterstock / Adobe Stock APIs** — Premium, indemnified, editorial-grade footage and images; Shutterstock and Adobe Stock now also serve AI-generated clips with IP indemnification.
+  - *category*: Stock media
+  - *howItWorks*: OAuth2 client-credentials or API key; search, license and download endpoints per asset with license tracking. Pricing is contract-based (Getty images start ~$200 each; Shutterstock/Adobe Stock partner plans are custom).
+  - *whoHasIt*: Adobe Premiere/Express (Adobe Stock native), Canva Pro (Getty/Shutterstock content), enterprise video tools.
+  - *notes*: Only worth it for an enterprise tier. Sources: attentioninsight.com 2025 stock API roundup, plainlyvideos.com stock video API review.
+- **Epidemic Sound Partner Content API + MCP** — 55k+ tracks, 250k+ SFX, stems, AI Soundmatch (video-to-music), semantic search, beat detection, HLS previews, AI voiceover, and a track-versions endpoint that retimes a track to a target duration. All-inclusive license (mechanical, sync, performance, global, forever, no Content ID claims). Now self-serve with an official MCP server.
+  - *category*: Music / SFX
+  - *howItWorks*: REST at developers.epidemicsite.com; `Authorization: Bearer <API key>` plus `x-partner-user-id` header carrying your anonymized user id (end users need no Epidemic account, the partner holds the license). Flow: list collections -> search/soundmatch -> download track (MP3 128/320 kbps, WAV, stems). Self-serve signup issues a key instantly with a free prototyping tier; production access level and pricing are set in the partnership agreement (not public). MCP server (beta) exposes search, similar, SFX, voiceover, track adaptation, download; OAuth for Claude Desktop/Cursor, API key for Claude Code.
+  - *whoHasIt*: Squarespace, Lightworks, elevate.io, Blaze, Storybeat, Technogym, Tezza, Unfold.
+  - *notes*: Keep the API key server-side only. Open alternative: Free Music Archive / ccMixter (CC), or generate with Stable Audio Open. Sources: developers.epidemicsite.com (auth, getting-started, mcp), epidemicsound.com/business/developers.
+- **Artlist Enterprise API** — Curated royalty-free music catalog (Artlist also has SFX, footage, templates, but the API documents music). Search by vocal type, BPM, duration, category; returns waveform URLs, artwork, artist metadata for a native in-app player.
+  - *category*: Music / SFX
+  - *howItWorks*: REST documented at developer.artlist.io (llms.txt index, MCP option mentioned). Enterprise-only: access, auth credentials and licensing terms are negotiated with an account manager; support via enterprise-api-support@artlist.io. License covers global distribution across client projects including apps/software.
+  - *whoHasIt*: Enterprise creative tools; Artlist's own Motion Array editor. Less common than Epidemic in AI editors.
+  - *notes*: Sources: developer.artlist.io, artlist.io enterprise pages, help.artlist.io Enterprise plan explained.
+- **Freesound API v2** — Large Creative-Commons SFX database with content-based similarity search and audio-feature analysis. Good for free SFX suggestions ('whoosh', 'click') with license filtering.
+  - *category*: Music / SFX
+  - *howItWorks*: REST at freesound.org/apiv2. Token auth (`token=` or Authorization header) for search/previews; OAuth2 required to download original files. Filter by `license:` (CC0, CC-BY, CC-BY-NC). Rate limits 60 req/min and 2,000/day (write ops 30/min, 500/day). Free; attribution required for CC-BY.
+  - *whoHasIt*: Audacity, Ardour plugins, open-source editors, Blender add-ons.
+  - *notes*: Store license + attribution text per clip and render an auto-credits block. Sources: freesound.org/docs/api/overview.html, resources_apiv2.html.
+- **ElevenLabs Sound Effects + Eleven Music API** — Generative SFX and full music tracks (Music licensed via Merlin/Kobalt; film/TV/games excluded from standard plan).
+  - *category*: Music / SFX
+  - *howItWorks*: REST with `xi-api-key` header; POST /v1/sound-generation (text + duration) and /v1/music. Pay-as-you-go: SFX $0.12/min, Music $0.15/min of generated audio, billed per generation.
+  - *whoHasIt*: CapCut-style generators, Loopdesk, Pictory-class tools.
+  - *notes*: Open alternative: Stable Audio Open Small/Medium weights (Hugging Face; Community License free under $1M revenue) for local SFX/music; Google Lyria 3 is usage-priced but training data undisclosed. Sources: elevenlabs.io/pricing/api, stability.ai licensing comparison.
+- **Suno / Udio / Stable Audio 3 (AI music)** — Song-with-vocals generation. Licensing is the deciding factor: Suno now caps downloads per tier (from Sept 2026) and settled with Warner; Udio disabled downloads (Oct 2025) after UMG settlement; Sony litigation continues against both. Stable Audio 3.0 is the only one with fully licensed training data, open weights and uncapped downloads.
+  - *category*: Music / SFX
+  - *howItWorks*: All three expose HTTP APIs with API-key auth and async job polling. Commercial rights require paid tiers (Suno publishing/sync on premium; Stable Audio paid tier includes commercial use).
+  - *whoHasIt*: Few editors embed Suno directly due to legal exposure; CapCut and Descript use in-house libraries.
+  - *notes*: Recommend Stable Audio (API or self-host) for anything embedded; treat Suno/Udio as optional connectors. Sources: stability.ai explainer, mystats.music Suno legal guide 2026, dubspot 2026 roundup.
+- **ElevenLabs TTS / Voice Cloning / Dubbing** — Highest-quality voices, 32+ languages, Flash v2.5 ~75 ms latency, v3 for emotion. Also instant/professional cloning, speech-to-speech, voice isolator, and end-to-end dubbing.
+  - *category*: TTS
+  - *howItWorks*: REST/WebSocket with `xi-api-key`; POST /v1/text-to-speech/{voice_id} (and /with-timestamps for word/character alignment, needed for caption sync). API pricing: Flash/Turbo $0.05 per 1k chars, Multilingual v2 and v3 $0.10 per 1k; Dubbing v1 $0.33/min (watermark) or $0.50/min, v2 $2.20/min; Voice changer and isolator $0.12/min. Plan credits apply first, then USD overage.
+  - *whoHasIt*: Captions, Submagic, HeyGen (as engine), Runway API (resells ElevenLabs per-character), Opus Clip, most AI editors.
+  - *notes*: Sources: elevenlabs.io/pricing/api, elevenlabs.io/docs/overview/models.
+- **OpenAI TTS (gpt-4o-mini-tts, tts-1)** — Cheap steerable voices with instruction prompts ('speak like a sports announcer'). No cloning.
+  - *category*: TTS
+  - *howItWorks*: POST /v1/audio/speech with Bearer API key. gpt-4o-mini-tts $0.60/M text tokens + $12/M audio tokens (~$0.015/min); tts-1 $15/M chars, tts-1-hd $30/M chars. No word timestamps, so align with ASR afterwards.
+  - *whoHasIt*: Many indie editors and n8n workflows.
+  - *notes*: Sources: developers.openai.com/api/docs/pricing, OpenAI community pricing threads.
+- **Azure AI Speech TTS** — 400+ neural voices, SSML control, custom neural voice (enterprise), word-boundary events for caption sync.
+  - *category*: TTS
+  - *howItWorks*: REST/SDK with subscription key + region (or Entra ID). $16/M chars neural, $22/M Neural HD (cut from $30 in Mar 2026); 500k chars/month free; commitment tiers down to $7.50/M.
+  - *whoHasIt*: Clipchamp, Microsoft ecosystem tools, Pictory.
+  - *notes*: Sources: texttolab Azure pricing 2026, speechactors Azure plans.
+- **Deepgram Aura-2 TTS** — Low-latency, cheap English/multilingual TTS from the same vendor as Nova-3 ASR; one key covers both.
+  - *category*: TTS
+  - *howItWorks*: POST /v1/speak with `Authorization: Token <key>`. Aura-2 $0.030 per 1k chars, Aura-1 $0.015; $200 free credit shared with ASR.
+  - *whoHasIt*: Voice-agent products; a good bundle option for an editor already using Deepgram ASR.
+  - *notes*: Source: deepgram.com/pricing.
+- **Local TTS: Kokoro-82M, Piper, Chatterbox, XTTS-v2** — Zero-marginal-cost narration on-device. Kokoro-82M (Apache 2.0, 54 voices, 9 languages incl. en/es/fr/hi/it/ja/pt/zh) runs faster than real time on CPU; Piper is smallest/fastest but robotic (0.03 RTF, good CPU fallback); Chatterbox (MIT) does voice cloning; XTTS-v2 clones from seconds of audio but is CPML non-commercial and unmaintained since Coqui shut down.
+  - *category*: TTS
+  - *howItWorks*: Kokoro: `pip install kokoro soundfile` + espeak-ng, KPipeline(lang_code)(text, voice='af_heart') -> 24 kHz audio; Apple Silicon MPS supported; community ONNX builds exist for Electron/WASM. Piper ships ONNX models with a C++/Python CLI.
+  - *whoHasIt*: Open-source editors, offline/privacy-first tools; localaimaster and codesota 2026 guides rank Kokoro as the default.
+  - *notes*: License is the decisive filter: Kokoro/Chatterbox commercial-safe, XTTS not. Sources: github.com/hexgrad/kokoro, localclaw.io local TTS guide 2026, contracollective Kokoro vs Piper vs XTTS.
+- **Anthropic Claude API (editing agent brain)** — Primary reasoning model for the edit agent: transcript-to-cut planning, moment detection, caption styling, tool-calling over the timeline. Native tool use, strict JSON tool schemas, server-side web search/fetch, MCP connector, prompt caching, batch API, 1M context.
+  - *category*: LLM / agents
+  - *howItWorks*: POST /v1/messages with `x-api-key`; official SDKs (Python/TS/Go/Java/Ruby/C#/PHP). Pricing per 1M tokens: Opus 5 $5/$25, Sonnet 5 $3/$15 (from Sept 1 2026), Haiku 4.5 $1/$5, Fable 5.1 $10/$50. Batch API -50%, cached input -90%. Use `thinking: {type: 'adaptive'}` + `output_config.effort`; MCP servers attach via `mcp_servers` + `mcp_toolset` (beta header mcp-client-2025-11-20). Managed Agents (beta) can host the loop + sandbox.
+  - *whoHasIt*: Loopdesk (agentic editor), Claude-Code-Video-Toolkit, DaVinci/FCP MCP users, Descript Underlord-class features (vendor undisclosed).
+  - *notes*: Cost driver: moment detection on a 30-min transcript is ~18k input tokens per pass; cache the transcript prefix. Sources: claude-api skill model table (cached 2026-06-24), cloudzero/finout Claude pricing 2026.
+- **OpenAI GPT-5.x API** — Alternative/secondary LLM (function calling, structured outputs, vision). Useful for cheap routing tiers.
+  - *category*: LLM / agents
+  - *howItWorks*: Responses/Chat Completions with Bearer key. Per 1M tokens (Sept 2026): gpt-5.6-sol $4/$20, gpt-5.6-terra $2/$12, gpt-5.6-luna $0.20/$1.20, gpt-5.5 $5/$30, gpt-5-mini $0.25/$2. Batch -50%.
+  - *whoHasIt*: Opus Clip, Submagic, Captions, most 2024-era AI editors.
+  - *notes*: Source: developers.openai.com/api/docs/pricing.
+- **Google Gemini API (LLM + native video understanding)** — Only frontier API that ingests full video natively (1h+), so it doubles as scene/moment detector without a separate frame pipeline. Also Veo and Gemini TTS behind the same key.
+  - *category*: LLM / agents
+  - *howItWorks*: generateContent with `x-goog-api-key` or Vertex ADC. Gemini 3.8/3.7 Flash $0.75/$3.75 per 1M tokens (rising to $1.50/$7.50 Jan 2027), 3.5 Flash $1.50/$9, 3.1 Pro $2/$12 (<200k). Video input billed as tokens (~$0.10/s effective on Pro per forasoft; agentic video mode cuts tokens up to 88%). Files API for >20MB uploads; YouTube URLs accepted.
+  - *whoHasIt*: Opus Clip competitors, YouTube-adjacent tools; open-source-cinema recommends it for rough-cut evaluation.
+  - *notes*: Local alternative: Qwen2.5/3-VL or LLaVA-Video via vLLM for frame sampling; Twelve Labs for indexed search. Source: ai.google.dev/gemini-api/docs/pricing.
+- **Local LLMs (Ollama / vLLM: Llama, Qwen3, Mistral)** — Offline fallback for captions cleanup, title generation, simple tool calling; keeps user footage transcripts on-device.
+  - *category*: LLM / agents
+  - *howItWorks*: OpenAI-compatible HTTP on localhost (Ollama :11434, vLLM). Free; needs 8-24GB RAM/VRAM for 8B-32B models. Tool-calling quality lags Claude/GPT for multi-step timeline agents, so route only bounded tasks locally.
+  - *whoHasIt*: Privacy-focused desktop editors; hobbyist forks of open-source editors.
+  - *notes*: Design the agent layer as provider-agnostic (tool schema + JSON) so local models plug in.
+- **Deepgram Nova-3 ASR** — Cheapest accurate cloud STT with word timestamps, diarization, smart formatting, keyterm prompting; billed per second.
+  - *category*: ASR
+  - *howItWorks*: POST /v1/listen (file or URL) or WebSocket streaming with `Authorization: Token <key>`; callbacks via `callback=` URL. Pre-recorded $0.0043/min mono, $0.0052 multilingual; streaming $0.0048/$0.0058 (search results also cite $0.0077 streaming); $200 free credit.
+  - *whoHasIt*: Many clip tools and voice agents; Riverside-class recorders.
+  - *notes*: Source: deepgram.com/pricing.
+- **AssemblyAI Universal ASR** — High-accuracy async STT with speaker labels, sentiment, entity detection, translation add-ons, and LeMUR (LLM over transcripts).
+  - *category*: ASR
+  - *howItWorks*: POST /v2/transcript with audio_url + `authorization` header; poll or webhook. Universal-3.5 Pro $0.21/hr, Universal-2 $0.15/hr; diarization +$0.02/hr; streaming $0.15-0.45/hr billed on session duration; $50 free.
+  - *whoHasIt*: Opus Clip-class tools, podcast editors.
+  - *notes*: Source: assemblyai.com/pricing.
+- **OpenAI Whisper / gpt-4o-transcribe** — Simple multipart transcription API, 99 languages, optional diarization variant.
+  - *category*: ASR
+  - *howItWorks*: POST /v1/audio/transcriptions (25MB file limit, verbose_json for word timestamps on whisper-1). whisper-1 and gpt-4o-transcribe $0.006/min, gpt-4o-mini-transcribe $0.003/min, live $0.017/min; diarize variant ~2.5x.
+  - *whoHasIt*: Ubiquitous in indie tools.
+  - *notes*: Source: developers.openai.com/api/docs/pricing.
+- **ElevenLabs Scribe v2 STT** — STT with word timestamps, diarization, audio-event tags; pairs with ElevenLabs dubbing for one-vendor localization.
+  - *category*: ASR
+  - *howItWorks*: POST /v1/speech-to-text with xi-api-key. $0.22/hr async, $0.39/hr realtime; entity detection +$0.07/hr, keyterms +$0.05/hr.
+  - *whoHasIt*: Tools already on ElevenLabs TTS.
+  - *notes*: Source: elevenlabs.io/pricing/api.
+- **Google Gemini 3.5 Transcribe / Chirp 3** — New dedicated Google STT (Aug 2026): 2.6% English WER, diarization + word timestamps on files up to 1h; live variant over WebSockets.
+  - *category*: ASR
+  - *howItWorks*: Gemini API model ids gemini-3.5-transcribe / -live. $0.005/min file, $0.009/min live (~$0.30/hr); Chirp 3 (Cloud STT v2) $0.016/min.
+  - *whoHasIt*: New; likely adopted by Google-stack tools.
+  - *notes*: Sources: eesel.ai and spokenly.app Gemini 3.5 Transcribe writeups, openrouter Chirp 3.
+- **Local ASR: WhisperX / faster-whisper / whisper.cpp / Parakeet-TDT / Voxtral** — Word-aligned transcripts + diarization on-device. WhisperX = faster-whisper (CTranslate2) + wav2vec2 forced alignment + pyannote diarization, up to 70x realtime on GPU, large-v2 fits in <8GB VRAM. NVIDIA Parakeet-TDT-0.6B-v3: 6.34% WER (beats large-v3), ~49x Whisper throughput, no silence hallucinations, CC-BY-4.0, but only English + 25 European languages. distil-whisper ~6x faster within 1% WER. whisper.cpp/MLX for Apple Silicon (2-3x realtime large-v3 on M3/M4).
+  - *category*: ASR
+  - *howItWorks*: Python packages (whisperx, faster-whisper), C++ (whisper.cpp with Metal/CUDA), NeMo for Parakeet. Hardware payback vs cloud after ~1,700-2,500 audio hours.
+  - *whoHasIt*: Open-source editors (Kdenlive uses whisper), Descript-class desktop apps for offline mode, Loopdesk-style local pipelines.
+  - *notes*: Word timestamps must land within 30-40 ms for karaoke captions; use forced alignment, not raw Whisper segments. Sources: digitalapplied.com self-hosted Whisper 2026, forasoft WhisperX deep-dive, openwhispr Parakeet vs Whisper.
+- **pyannoteAI diarization (cloud) / pyannote.audio (OSS)** — Speaker diarization and voiceprint identification; Precision-2 for production, Community-1 open model.
+  - *category*: ASR
+  - *howItWorks*: REST job API with API key; Developer plan EUR19/mo for 125 hours; free trial 150 hours. Open-source pyannote.audio (MIT) runs locally via Hugging Face weights (gated download).
+  - *whoHasIt*: WhisperX, Riverside, meeting tools.
+  - *notes*: Sources: pyannote.ai pricing/changelog, github.com/pyannote/pyannote-audio.
+- **DeepL API** — Best-in-class MT for European languages plus glossaries and document translation; used for subtitle and dubbing-script translation.
+  - *category*: Translation
+  - *howItWorks*: POST /v2/translate with `Authorization: DeepL-Auth-Key`. As of July 2026 legacy API Free/Pro are closed to new signups; new customers choose Developer or Growth ($26/mo incl. 12M chars/yr, overage $27.50/M). Legacy Pro was $5.49/mo + $25/M chars.
+  - *whoHasIt*: Subtitle tools (Subtitle Edit, Happy Scribe), CapCut competitors.
+  - *notes*: Sources: eesel.ai DeepL pricing 2026, chatscontrol DeepL API plans 2026.
+- **Google Cloud Translation / Translation LLM** — 189 languages, NMT plus Gemini-based Translation LLM and Adaptive Translation (few-shot fine-tune).
+  - *category*: Translation
+  - *howItWorks*: REST v3 with OAuth/ADC or API key. NMT $20/M chars (first 500k/month free per third-party summaries; Google page says 100k for new customers); Translation LLM $10/M in + $10/M out; Adaptive $25+$25/M; documents $0.08/page.
+  - *whoHasIt*: YouTube auto-translate ecosystem, most global editors.
+  - *notes*: Sources: cloud.google.com/products/translate/pricing, buildmvpfast translation pricing July 2026.
+- **Local MT: NLLB-200 / MADLAD-400 / LLM translation** — Offline subtitle translation. NLLB-200-distilled-600M covers 200 languages in a small footprint; MADLAD-400-3B covers 400+ languages incl. long-tail but is ~12GB (quantizable). LLMs (Claude/Gemini/Qwen) give better idiom handling for scripts.
+  - *category*: Translation
+  - *howItWorks*: Hugging Face transformers / CTranslate2 for fast CPU inference; LibreTranslate wraps Argos models as a self-hosted REST API.
+  - *whoHasIt*: Open-source subtitle tools, privacy-focused editors.
+  - *notes*: Sources: picovoice open-source translation 2026, silnlp NLLB vs MADLAD issue.
+- **Runway API (Gen-4/4.5, Aleph, third-party models)** — Video gen (text/image-to-video, video-to-video editing via Aleph), image gen, plus resold third-party models (Wan, Seedance, Grok Imagine, ElevenLabs) behind one credit system.
+  - *category*: Image / video generation
+  - *howItWorks*: REST at api.dev.runwayml.com with Bearer API key scoped to an organization; tasks are async (POST then poll /tasks/{id}). Credits $0.01 each bought per org; Gen-4 Turbo 5 credits/s ($0.05/s), Gen-4.5 $0.12/s, third-party 5-68 credits/s; response metadata reports realized cost. App credits and API credits are separate.
+  - *whoHasIt*: Canva, Adobe (via partner), many AI editors.
+  - *notes*: Sources: docs.dev.runwayml.com/guides/pricing, unifically Gen-4 API guide.
+- **Google Veo 3.1 (Gemini API / Vertex)** — Top-tier text/image-to-video with native audio; Lite/Fast/Standard tiers.
+  - *category*: Image / video generation
+  - *howItWorks*: Gemini API predictLongRunning with API key; poll operation. 1080p: Lite $0.05/s, Fast $0.12/s, Standard $0.40/s; 720p Lite $0.03/s; 4K $0.60/s; audio adds ~50%.
+  - *whoHasIt*: YouTube Shorts (Dream Screen), fal/Replicate resell.
+  - *notes*: Sources: buildmvpfast AI video pricing July 2026, veo3ai.io API pricing.
+- **OpenAI Sora 2 API** — sora-2 $0.10/s (720p), sora-2-pro $0.30/s 720p, $0.70/s 1080p. Legacy: the Sora 2 API shuts down Sept 24 2026.
+  - *category*: Image / video generation
+  - *howItWorks*: POST /v1/videos with Bearer key; async job polling.
+  - *whoHasIt*: Few, given the sunset.
+  - *notes*: Do not build on it. Sources: developers.openai.com pricing, cometapi AI video pricing 2026.
+- **Kling API (Kuaishou)** — Strong motion/character consistency, lip-sync and motion-control models (Kling 3.0, O3, O1).
+  - *category*: Image / video generation
+  - *howItWorks*: REST with JWT signed from access key + secret key; async tasks. Prepaid resource packages from $9.80; Kling 3.0/O3 from ~$0.075/s, range $0.08-0.42/s by model/mode; failed tasks are not charged; no free tier; consumer credits do not transfer to API.
+  - *whoHasIt*: fal.ai, Replicate, WaveSpeed, EvoLink resell it; many Asian and indie editors.
+  - *notes*: Sources: costbench Kling API pricing, wavespeed Kling API pricing explained.
+- **Luma Dream Machine API (Ray 3.2, Uni-1.1)** — Video gen plus a Reframe endpoint (aspect-ratio outpainting) that is directly useful for vertical repurposing.
+  - *category*: Image / video generation
+  - *howItWorks*: REST with Bearer key, async generations. Ray 3.2 per 5s block: 540p $0.15, 720p $0.30, 1080p $1.20 (T2V/I2V); V2V $0.72-2.16; Reframe $0.06-0.36/s; HDR 2x, EXR 3x. Older Ray 2 ~$0.08/s. Scale plans $2,100-3,800/mo for reserved throughput.
+  - *whoHasIt*: Adobe (Firefly partner model), Canva.
+  - *notes*: Sources: lumalabs.ai/api/pricing, eesel.ai Luma pricing 2026.
+- **fal.ai (generative media aggregator)** — 600-1000+ image/video/audio models (Kling, Veo, Wan, LTX, Seedance, FLUX, lipsync) behind one queue API; typically 30-50% cheaper than Replicate and fastest cold starts for diffusion.
+  - *category*: Image / video generation
+  - *howItWorks*: Queue REST at queue.fal.run (submit -> request_id -> poll/stream/SSE or HMAC-signed webhook), `Authorization: Key <id:secret>`. Output-based pricing: Wan 2.5 $0.05/s, Kling 2.5 Turbo Pro $0.07/s, Veo 3 $0.40/s, Seedance 2.0 1080p $0.68/s; GPU-seconds H100 $1.89/hr, H200 $2.10/hr, B200 $3.49/hr. No free tier.
+  - *whoHasIt*: Loopdesk, Captions-class tools, most indie AI editors in 2026.
+  - *notes*: Sources: fal.ai/pricing, teamday fal vs Replicate 2026, aiphotolabs fal review.
+- **Replicate (now Cloudflare)** — Broadest public model catalog (incl. non-generative: upscalers, segmentation, Demucs, Whisper) with per-second GPU billing; acquired by Cloudflare Dec 2025, pricing unchanged.
+  - *category*: Image / video generation
+  - *howItWorks*: POST /v1/predictions with `Authorization: Bearer r8_...`, webhooks or polling. Hardware: CPU $0.0001/s, T4 $0.000225/s, L40S $0.000975/s, A100-80 $0.0014/s, H100 $0.001525/s ($5.49/hr); official models per-output (FLUX 1.1 Pro $0.04, FLUX Dev $0.025, Ideogram v3 $0.09). Cold boots 3s-2min on obscure models.
+  - *whoHasIt*: Many SaaS editors for upscaling/background removal.
+  - *notes*: Sources: replicate.com/pricing, spheron Replicate pricing 2026.
+- **Image generation APIs (gpt-image-2, FLUX 2, Ideogram 3, Grok Imagine)** — Thumbnails, title cards, B-roll stills, image-to-video seeds. Ideogram is best for readable in-image text (thumbnail titles).
+  - *category*: Image / video generation
+  - *howItWorks*: OpenAI gpt-image-2 $5/M text in + $30/M image out (~$0.005-0.21/image), gpt-image-1-mini $2/$8; FLUX 2 Pro ~$0.055/image; Ideogram 3.0 $0.03-0.09/image; xAI grok-imagine-image-2.0 $0.04/image, grok-imagine-video-1.5 $0.08/s. All API-key REST, sync or async.
+  - *whoHasIt*: Canva, Adobe Express (Firefly), Opus Clip thumbnails.
+  - *notes*: Local alternative: FLUX.1-dev/Schnell, SDXL, Qwen-Image via ComfyUI. Sources: developers.openai.com pricing, docs.x.ai/docs/models, buildmvpfast AI image pricing.
+- **Open-weight video models (Wan 2.2, LTX-2.3, HunyuanVideo 1.5, CogVideoX, Mochi)** — Local generation: Wan 2.2 (Apache 2.0) is the safest default and best for humans, 5B GGUF runs from 8GB VRAM; LTX-2.3 is the only OSS model generating synced audio+video in one pass (up to 4K/50fps); HunyuanVideo 1.5 runs on one RTX 4090 (~14GB FP8).
+  - *category*: Image / video generation
+  - *howItWorks*: ComfyUI / diffusers pipelines; or run on Modal/RunPod/fal for burst capacity at GPU-second pricing.
+  - *whoHasIt*: LTX Studio, open-source editor forks, ComfyUI-based pipelines.
+  - *notes*: Sources: thundercompute open-source video models 2026, ltx.io landscape guide, localaimaster local video gen.
+- **Modal (serverless GPU)** — Per-second serverless containers for burst rendering, WhisperX, Demucs, diffusion; scales to zero; Python-first.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: `modal` SDK decorators deploy functions/web endpoints; token auth. GPU/s: T4 $0.000164, L4 $0.000222, A10 $0.000306, L40S $0.000542, A100-80 $0.000694, H100 $0.001097 (~$3.95/hr), H200 $0.001261, B200 $0.001736; CPU $0.0000131/core-s; $30/mo free (Starter), $100 (Team).
+  - *whoHasIt*: Substack, Suno (historically), many AI startups' media pipelines.
+  - *notes*: Best for bursty per-user jobs; RunPod cheaper for sustained load. Source: modal.com/pricing.
+- **RunPod (pods + serverless)** — Cheapest sustained GPUs; serverless endpoints with flex/active workers and per-second billing.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: REST/GraphQL + API key; Docker image workers. Pods (community/secure): RTX 4090 $0.34/$0.74, L40S $0.79/$0.99, A100 PCIe $1.19/$1.39, H100 PCIe $1.99/$2.89, H100 SXM $2.69/$3.29, H200 $3.59/$4.59, B200 $5.98/$6.79 per hr. Serverless: 4090 $1.10/hr, L40S $1.75, A100 $2.72, H100 $4.79/hr.
+  - *whoHasIt*: Self-hosted Wan/ComfyUI services, indie AI editors.
+  - *notes*: Sources: runpod.io/pricing, gmicloud RunPod vs Modal billing.
+- **Remotion + Remotion Lambda (React rendering)** — Programmatic motion graphics/captions in React, rendered locally, on Lambda (your AWS account, pennies per minute) or Cloud Run.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: npm packages; Lambda deploys renderer functions into your AWS. Licensing: free for individuals/teams <=3; 'Creators' $25/seat/mo, 'Automators' $0.01/render with $100/mo minimum (Lambda renders count). Hosted Remotion MCP deprecated (shutdown after Aug 31 2026).
+  - *whoHasIt*: Submagic-style caption renderers, Loopdesk, many SaaS video generators.
+  - *notes*: Sources: remotion.dev/docs/license/faq, remotion.dev/docs/lambda/cost-example, remotion.dev/docs/ai/mcp.
+- **FFmpeg / MLT / OpenTimelineIO (open render stack)** — FFmpeg for encode/filters/ASS karaoke captions; MLT (melt) as a headless NLE with XML timelines; OTIO as the interchange timeline (to FCPXML/AAF/EDL) so agents can emit editable projects for Premiere/Resolve/FCP.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: CLI/libraries, LGPL/GPL (ship LGPL FFmpeg build for proprietary apps). Hosted FFmpeg APIs (FFmpeg Micro, Very Good FFmpeg) exist for post-processing.
+  - *whoHasIt*: Kdenlive/Shotcut (MLT), every editor uses FFmpeg; OTIO used by Pixar, Netflix, Resolve import.
+  - *notes*: Sources: open-source-cinema Agent-Driven-Editing-2026, forasoft AI editor engineering article (ASS \k tags).
+- **Render-as-a-service APIs (Shotstack, Creatomate, JSON2Video)** — JSON-timeline to MP4 rendering with templates, merge fields, stock/TTS bundled; fastest path if you do not want to run FFmpeg fleets.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: REST + API key, async render + webhook. Shotstack $0.20/min on $39/mo subscription, $0.30/min PAYG ($75 upfront), 10 free credits; Creatomate Essential $54/mo for 2,000 credits (~143 min 720p, TTS extra); JSON2Video $49.95/mo for 200 min Full HD (TTS included), Hobby $16.95/mo.
+  - *whoHasIt*: n8n/Make/Zapier automations, Blotato, marketing video generators.
+  - *notes*: Sources: shotstack.io/pricing, json2video comparisons, wireflow Creatomate vs Shotstack.
+- **Mux / Cloudflare Stream / Cloudinary (transcode + delivery)** — Ingest, transcode to HLS, thumbnails, and playback for previews/shares. Mux: input free (basic), storage $0.0024/min, delivery 100k free min then $0.0008/min (Plus/Premium input $0.025-0.038/min); Cloudinary credit plans $89-224/mo (25GB free); Cloudflare Stream bundles with R2.
+  - *category*: Cloud render / GPU
+  - *howItWorks*: REST + token auth, direct uploads (UpChunk/tus), webhooks on asset.ready.
+  - *whoHasIt*: Riverside, Frame.io-style review tools, Loom.
+  - *notes*: Sources: buildmvpfast video streaming pricing June 2026, verygoodffmpeg transcoding API comparison.
+- **YouTube Data API v3 + Analytics/Reporting APIs** — Upload (resumable), set thumbnails, captions, playlists, schedule publishAt; Analytics API for real-time custom reports, Reporting API for bulk daily reports.
+  - *category*: Social publishing
+  - *howItWorks*: OAuth 2.0 (youtube.upload, youtube.force-ssl, yt-analytics.readonly); Google requires app verification for these sensitive scopes. Quota: 10,000 units/day per project; videos.insert 1,600 units (newer console shows separate daily buckets of 100 videos.insert + 100 search.list), videos.update/thumbnails.set/playlistItems.insert 50, captions.insert 400. More quota requires the YouTube API Services compliance audit (and re-audit every 12 months / on change of control). Unverified apps' uploads may be locked private.
+  - *whoHasIt*: Descript, Opus Clip, Riverside, Buffer, every publishing tool.
+  - *notes*: Sources: developers.google.com/youtube/v3/guides/quota_and_compliance_audits, determine_quota_cost, getphyllo YouTube API limits.
+- **TikTok Content Posting API** — Direct Post (publish) and Upload-to-Inbox (draft) for video/photo; requires app audit for public posts.
+  - *category*: Social publishing
+  - *howItWorks*: OAuth 2.0 with video.publish / video.upload scopes; POST /v2/post/publish/video/init/ with FILE_UPLOAD (chunked PUT, 5-64MB chunks) or PULL_FROM_URL (verified domain), then poll /status/fetch/. Unaudited clients: max 5 users per 24h and all posts forced SELF_ONLY (private), and those posts stay private even after audit. Free.
+  - *whoHasIt*: Opus Clip, Buffer, Ayrshare, Mixpost, Postiz (all audited).
+  - *notes*: Plan the audit early; UI must show TikTok's privacy/commercial-content toggles. Sources: developers.tiktok.com Content Posting API docs, docs.mixpost.app direct-post audit, postpeer TikTok API 2026.
+- **Instagram Graph API (Reels/Stories publishing + Insights)** — Publish Reels, feed video, carousels, Stories for Business/Creator accounts; insights for reach/plays.
+  - *category*: Social publishing
+  - *howItWorks*: Meta App Review for instagram_business_content_publish (Instagram Login) or instagram_content_publish + pages_read_engagement (Facebook Login). Flow: POST /{ig-user-id}/media (media_type=REELS, public video_url or resumable rupload.facebook.com) -> poll status_code=FINISHED -> POST /media_publish. Limit 100 API posts per 24h rolling; check GET /{ig-id}/content_publishing_limit. Free.
+  - *whoHasIt*: All scheduling tools, Opus Clip, Submagic.
+  - *notes*: Video must be on a public URL: serve from R2/S3 with signed but public-fetchable links. Source: developers.facebook.com/docs/instagram-platform/content-publishing.
+- **Facebook Pages Video API / LinkedIn Videos API** — Facebook: POST /{page-id}/videos via Resumable Upload API (graph-video host deprecated) with pages_manage_posts. LinkedIn: Videos API initializeUpload -> 4MB-part PUTs with ETags -> finalizeUpload, MP4 3s-30min, up to 5GB (500MB for ads), optional captions/thumbnail; new templateName/linkbackContext fields for attribution deeplinks (v202602+).
+  - *category*: Social publishing
+  - *howItWorks*: OAuth 2.0; LinkedIn needs Community Management API product approval and headers Linkedin-Version (YYYYMM) + X-Restli-Protocol-Version 2.0.0; w_member_social or w_organization_social. Both free.
+  - *whoHasIt*: Buffer, Hootsuite, Ayrshare, Clipchamp (LinkedIn attribution partner).
+  - *notes*: Sources: developers.facebook.com/docs/video-api, learn.microsoft.com LinkedIn Videos API (2026-02).
+- **X (Twitter) API v2** — Post with video via chunked media upload; pay-per-use since Feb 6 2026 for new developers.
+  - *category*: Social publishing
+  - *howItWorks*: OAuth 2.0 PKCE (user context). POST /2/media/upload INIT/APPEND (<5MB segments)/FINALIZE + STATUS polling, then POST /2/tweets with media_id. $0.015 per post created ($0.20 if it contains a link), $0.005 per read, no free tier; legacy Basic $200/mo and Pro $5k/mo only for existing subscribers; Enterprise ~$42k/mo.
+  - *whoHasIt*: Buffer, Ayrshare, Typefully.
+  - *notes*: Sources: postproxy X API pricing 2026, socialcrawl X API 2026.
+- **Threads / Bluesky / Pinterest / Vimeo APIs** — Threads (Meta): free, App Review required, publish + insights + webhooks. Bluesky (AT Protocol): free, app-password or OAuth, video via video.bsky.app service, 5,000 points/hr rate cap. Pinterest: free, video pins, per-category rate limits. Vimeo: free API for all plans, tus resumable or pull upload; free-account apps must request upload access (manual review up to 5 business days); storage caps per plan.
+  - *category*: Social publishing
+  - *howItWorks*: OAuth 2.0 (Threads, Pinterest, Vimeo), AT Protocol XRPC (Bluesky).
+  - *whoHasIt*: Postiz, Buffer (11 channels incl. Threads/Bluesky/Mastodon), Ayrshare (13+).
+  - *notes*: Sources: blotato social media API guide 2026, docs.bsky.app, help.vimeo.com API upload access, developer.vimeo.com.
+- **Unified social APIs (Ayrshare, Buffer API, Postiz, Post for Me, Zernio)** — One endpoint for 9-30+ networks; they hold the TikTok/Meta/YouTube audits so you can ship publishing on day one and migrate to direct APIs later.
+  - *category*: Social publishing
+  - *howItWorks*: REST + API key; per-profile linking via hosted OAuth. Pricing free (Buffer, Postiz OSS self-host) to $599/mo (Ayrshare Business).
+  - *whoHasIt*: Many AI clip tools launch on Ayrshare; Postiz is the open-source option.
+  - *notes*: Sources: buffer.com social media API roundup 2026, zernio Ayrshare alternatives.
+- **Google Drive (Picker + Drive API)** — Import footage from Drive and save exports back; the Picker keeps you in the non-sensitive drive.file scope.
+  - *category*: Cloud storage
+  - *howItWorks*: OAuth 2.0 + API key; Picker JS (setOAuthToken, setFileIds since Jan 2025) returns file IDs; Drive API resumable upload in 256KB multiples. drive.file needs no verification/CASA; drive or drive.readonly are restricted scopes requiring CASA Tier 2 annual assessment. Free (Drive quota is the user's).
+  - *whoHasIt*: Descript, Canva, Kapwing, Frame.io.
+  - *notes*: Sources: developers.google.com/workspace/drive/picker, Google restricted-scope verification docs, deepstrike CASA 2025.
+- **Dropbox (Chooser/Saver + API v2)** — Chooser/Saver drop-ins need no production approval; full API for sync needs scoped app + production approval.
+  - *category*: Cloud storage
+  - *howItWorks*: dropins.js with app key; Chooser returns preview links or direct links (expire in 4h, so download immediately); Saver pushes exports. API v2 OAuth 2.0 PKCE with scoped permissions (files.content.read/write). Free.
+  - *whoHasIt*: Canva, Kapwing, Frame.io, Riverside.
+  - *notes*: Sources: dropbox.com/developers/chooser, Dropbox OAuth guide.
+- **Object storage: Cloudflare R2 vs AWS S3 (and B2/Wasabi)** — Your own asset store for uploads, renders, and public URLs required by Instagram/TikTok PULL_FROM_URL.
+  - *category*: Cloud storage
+  - *howItWorks*: S3-compatible API (R2 works with AWS SDKs). R2: $0.015/GB-mo, Class A $4.50/M, Class B $0.36/M, zero egress; S3: ~$0.023/GB-mo + $0.09/GB egress. Example 500GB stored + 2TB served: S3 ~$191/mo vs R2 ~$7.50/mo.
+  - *whoHasIt*: Most 2025+ video startups on R2; enterprises on S3 + CloudFront.
+  - *notes*: Sources: egresscost.com Cloudflare R2, codercops R2 vs S3 2026.
+- **Canva Connect API** — Upload assets into Canva, create designs from brand templates (autofill), export finished designs (PNG/MP4/PDF) back into the editor; enterprise-only autofill/brand templates.
+  - *category*: Design assets
+  - *howItWorks*: OAuth 2.0 Authorization Code + PKCE (SHA-256), scopes like asset:write, design:content:read, brandtemplate:content:read; REST with OpenAPI spec and TS starter kit; async export jobs. Public integrations need Canva review; private integrations require Canva Enterprise. Free API.
+  - *whoHasIt*: Shopify (Canva Connect app), HubSpot, Adobe Express competitors.
+  - *notes*: Sources: canva.dev/docs/connect, canva-connect-api-starter-kit, agentsapis Canva API 2026.
+- **Figma REST API** — Pull frames/components as PNG/SVG for lower-thirds and title templates; variables for brand tokens.
+  - *category*: Design assets
+  - *howItWorks*: OAuth 2.0 or personal access token. Rate limits (since Nov 17 2025) depend on seat + plan: Tier 1 (GET file/nodes/images) 10-20 req/min for Dev/Full seats, only ~20/month for View/Collab seats; Tier 2 25-100/min; Tier 3 50-150/min; 429 with Retry-After. Free API, but users need paid seats for real throughput.
+  - *whoHasIt*: Design-to-video tools, Lottie pipelines.
+  - *notes*: Sources: developers.figma.com/docs/rest-api/rate-limits, Figma forum rate-limit threads.
+- **GIPHY / Tenor / LottieFiles / Iconify** — GIFs, stickers and clips (GIPHY: beta keys 100 calls/hr, production keys reviewed case-by-case and now paid, 'Powered by GIPHY' attribution required; Tenor: free on Google infra, searchfilter=sticker). LottieFiles: Lottie/dotLottie animations + runtime SDKs; Icons8 animated icons. Iconify: open icon sets via CDN/API.
+  - *category*: Design assets
+  - *howItWorks*: API-key REST for GIPHY/Tenor; LottieFiles developer portal + OSS players.
+  - *whoHasIt*: CapCut, Kapwing, Canva (GIPHY), Descript (stickers).
+  - *notes*: Sources: developers.giphy.com/docs/api, developers.google.com/tenor, developers.lottiefiles.com.
+- **Google Fonts Developer API** — Metadata for all Google Fonts families (variants, subsets, WOFF2/TTF URLs, variable axes, tags) to build a font picker; fonts are OFL so bundling for render is fine.
+  - *category*: Brand kits + fonts
+  - *howItWorks*: GET https://www.googleapis.com/webfonts/v1/webfonts?key=API_KEY&sort=popularity|trending&capability=WOFF2|VF&family=&subset=&category=. Free; API key only, no quota pricing (third-party sites claiming paid tiers are wrong).
+  - *whoHasIt*: Canva, CapCut, Remotion (@remotion/google-fonts), Figma.
+  - *notes*: Local alternative: Fontsource npm packages / self-host the OFL files. Source: developers.google.com/fonts/docs/developer_api.
+- **Brandfetch Brand API / Logo API** — Auto-build a brand kit from a domain: logos (SVG/PNG, light/dark), colors with roles, fonts, socials.
+  - *category*: Brand kits + fonts
+  - *howItWorks*: REST with Bearer API key. Logo API free up to 500k req/month; Brand API free 100 requests then $99/mo for 100 brands with $0.10 per extra call.
+  - *whoHasIt*: HubSpot, Airtable integrations, marketing video generators.
+  - *notes*: Alternatives: Logo.dev, Context.dev; or extract palette from uploaded logo with a local k-means. Sources: docs.brandfetch.com, brandfetch.com/developers/brand-api.
+- **PostHog (product analytics, replay, flags, errors)** — Usage analytics for the editor itself, session replay of editing sessions, feature flags for AI model rollouts, error tracking; generous free tier; self-hostable (open source).
+  - *category*: Analytics
+  - *howItWorks*: JS/React/Electron/Python SDKs with project key; free monthly: 1M events, 5k replays, 1M flag requests, 100k exceptions; then per-event ($0.00031/event at scale, ~$1,240 at 5M). Mixpanel free to 20M events but MTU-priced beyond; Segment for CDP routing.
+  - *whoHasIt*: Most YC-era AI tools; alternatives Mixpanel, Amplitude, Sentry for errors.
+  - *notes*: Sources: posthog.com/pricing, fastero PostHog vs Amplitude vs Mixpanel 2026.
+- **Creator analytics APIs (YouTube Analytics, Instagram Insights, TikTok Research/Creator APIs, Phyllo)** — Post-publish performance loop: views, retention, demographics per clip to feed back into the agent's moment-scoring.
+  - *category*: Analytics
+  - *howItWorks*: YouTube Analytics API (yt-analytics.readonly) real-time queries vs Reporting API bulk; Instagram insights_basic/insights_advanced scopes via Graph API; TikTok Display/Research/Creator Search Insights APIs (2025-26 expansion with video-level metrics and demographics). Aggregators like Phyllo unify creator data.
+  - *whoHasIt*: Opus Clip (virality feedback), Buffer analytics, vidIQ.
+  - *notes*: Sources: getphyllo social API guide 2026, developers.google.com/youtube/analytics.
+- **Twelve Labs (Marengo/Pegasus video understanding)** — Index footage for semantic search ('find the moment she laughs'), embeddings, and long-video summarization/Q&A up to 1h; available on AWS Bedrock too.
+  - *category*: Video understanding
+  - *howItWorks*: REST with API key; create index -> upload -> search/generate. Free 10 hours indexing (90-day index); Developer: Marengo indexing $2.50/hr + $4 per 1k search queries + $0.09/hr infra; Pegasus input $1.75/hr + $7.50/M output tokens; Embed API per-token.
+  - *whoHasIt*: Media companies, sports clipping tools; Bedrock customers.
+  - *notes*: Local alternative: CLIP/SigLIP frame embeddings + PySceneDetect + Qwen-VL. Source: twelvelabs.io/pricing.
+- **HeyGen / Synthesia / sync.so / Hedra (avatars + lip sync)** — Talking-head generation, video translation with lip re-sync. HeyGen API pay-as-you-go from $5, billed per second ($0.0167-0.0667/s; Avatar V ~$3/min), includes TTS, Video Translation, MCP server; Synthesia API only on Enterprise (~$899+/mo). sync.so lipsync-2/pro: $5-249/mo plans + $0.04-0.05/s API. Hedra Character-3 for animated characters.
+  - *category*: Avatars / lip-sync
+  - *howItWorks*: REST + API key, async video jobs with webhooks/polling.
+  - *whoHasIt*: Captions (Mirage in-house), Canva (HeyGen), Descript (Overdub), Opus Clip.
+  - *notes*: Sources: heygen.com/api-pricing, g2 HeyGen API pricing, sync.so/pricing, lipsync.com pricing guide.
+- **Audio cleanup: Adobe Enhance Speech, Krisp, Auphonic, Demucs (OSS)** — Studio Sound-style denoise/de-reverb, loudness normalization, stem separation for music ducking. Adobe Enhance Speech has a free web tool (API via Firefly Services enterprise); Krisp SDK for real-time (60 min/day free consumer); Auphonic REST for leveling/loudness; Demucs htdemucs (MIT) for vocals/music separation locally.
+  - *category*: Audio cleanup
+  - *howItWorks*: Cloud: REST + key. Local: `pip install demucs` (GPU recommended), DeepFilterNet/RNNoise for denoise, ffmpeg loudnorm for -14/-16 LUFS.
+  - *whoHasIt*: Descript (Studio Sound), Riverside (Magic Audio), DaVinci Resolve 20, Opus Clip.
+  - *notes*: Sources: mixinggpt audio cleanup 2026, towardsai Demucs API article, opus.pro denoise roundup.
+- **MCP servers and the plugin ecosystem** — Expose the editor to agents (Claude, Cursor) and consume third-party MCPs. Existing: Epidemic Sound MCP (beta, OAuth or API key), HeyGen MCP, Artlist MCP, Kinocut (87 FFmpeg tools), ffmpeg-mcp, davinci-resolve-mcp (202 features), fcpxml-mcp-server (34 tools), Premiere MCP (early), Remotion MCP (deprecated). Anthropic connector directory lists 1,625 MCP integrations; Claude Code plugin marketplace has 55+ official plugins; Claude Desktop extensions are one-click local MCP installs.
+  - *category*: MCP / plugins
+  - *howItWorks*: Implement a remote MCP server (Streamable HTTP, OAuth 2.1) for the live tool surface plus an optional plugin bundling Skills/commands; submit to Anthropic's connector directory (annotations + review). Claude API attaches servers via mcp_servers + mcp_toolset (beta mcp-client-2025-11-20).
+  - *whoHasIt*: Epidemic Sound, HeyGen, Canva (MCP), Figma (MCP), DaVinci/FCP community servers.
+  - *notes*: Sources: developers.epidemicsite.com/docs/mcp, fast.io MCP video servers, awesome-claude-connectors, sunpeak connector submission guide Aug 2026, open-source-cinema agent editing 2026.
+- **NLE host integrations (Premiere UXP, DaVinci Resolve scripting, FCPXML/OTIO export)** — Ship the AI editor as a panel/plugin inside pro NLEs or round-trip timelines. Premiere Pro UXP (v25.6+) exposes sequences, tracks, clips, markers with TypeScript declarations (@adobe/premierepro); Resolve has a Python/Lua scripting API; FCP via FCPXML; OTIO converts to AAF/EDL for any NLE.
+  - *category*: MCP / plugins
+  - *howItWorks*: UXP plugin manifest + JS; Resolve scripting via DaVinciResolveScript module; OTIO Python lib (Apache 2.0).
+  - *whoHasIt*: Descript (Premiere export), Opus Clip (XML export), Captions, Frame.io panel.
+  - *notes*: Sources: developer.adobe.com/premiere-pro/uxp, open-source-cinema Agent-Driven-Editing-2026.
+- **Adobe Firefly Services / Frame.io / Riverside / Zoom ingest** — Firefly Services API for generative fill/expand and video (enterprise, indemnified); Frame.io V4 API + Camera-to-Cloud for review/approval and asset ingest; Riverside/Zoom cloud recordings as import sources (Zoom cloud_recording.completed webhook, Recall.ai bots).
+  - *category*: Adjacent platforms
+  - *howItWorks*: OAuth/server-to-server (Adobe IMS), Frame.io OAuth 2.0 with webhooks, Zoom OAuth + webhooks; Zapier bridges exist (Zoom -> Frame.io).
+  - *whoHasIt*: Enterprise post-production stacks; Descript and Riverside have Zoom imports.
+  - *notes*: Sources: developer.adobe.com Firefly guide, blog.frame.io ecosystem 2025, recall.ai Zoom recordings.
+- **Content credentials / disclosure (C2PA)** — EU AI Act Article 50 (in force Aug 2 2026) requires machine-readable marking of AI-generated/manipulated media; C2PA Content Credentials (manifest + watermark + logging) should be a render-pipeline stage.
+  - *category*: Compliance
+  - *howItWorks*: c2pa-rs / c2pa-node open-source SDK signs exports with a certificate; YouTube/TikTok/Meta read C2PA labels and also have their own 'altered content' disclosure fields in publish APIs.
+  - *whoHasIt*: Adobe (Content Credentials), Sora/Veo outputs (SynthID/C2PA), TikTok auto-labels.
+  - *notes*: Source: forasoft AI editor engineering article (sixth station).
+- **Workflow automation (Zapier, Make, n8n webhooks)** — Let users trigger renders from forms/CMS and push finished videos to 6,000+ apps; n8n is self-hostable.
+  - *category*: Adjacent platforms
+  - *howItWorks*: Expose REST + webhooks + API keys; publish a Zapier app (OAuth) and n8n community node.
+  - *whoHasIt*: Shotstack, Creatomate, JSON2Video, HeyGen, Opus Clip all ship Zapier/Make integrations.
+  - *notes*: Low effort, high distribution; follows naturally from a public API.
+
+
+## 8. Open-source building blocks
+
+Catalog of ~50 open-source building blocks for a fully local AI video editor on Apple Silicon, compiled from 2025-2026 sources (benchmarks, repos, model cards). Headline findings: (1) ASR is solved locally — whisper.cpp (Metal/Core ML), mlx-whisper and parakeet-mlx all run many-x realtime; on an M4, Parakeet-TDT-0.6B via Core ML/MLX transcribes a clip in ~0.2-0.5 s vs ~1.0-1.2 s for Whisper large-v3-turbo (MLX/whisper.cpp) and ~7 s for faster-whisper (CPU-only on Mac). (2) The fastest path on Mac is almost always an MLX port (demucs-mlx ~73x realtime on M4 Max, rife-mlx, yolo-mlx 170 FPS nano on M4 Pro, mlx-audio for Kokoro/Chatterbox/Parakeet, mlx-vlm for Qwen3-VL video captioning, mlx-video for Wan/LTX) or an Apple-published Core ML package (SAM2, Depth Anything V2 small at ~25-33 ms/frame on M3/M1 Max, MobileCLIP); PyTorch MPS works but is 2-30x slower and has gaps (no FP8, no complex tensors historically, 4 GB tensor cap). (3) Licensing is the real roadmap constraint: permissive (MIT/Apache/BSD) — whisper.cpp, MLX, SAM 2.1, BiRefNet, rembg, Demucs, RIFE, Real-ESRGAN, PySceneDetect, Kokoro, Chatterbox, OpenVoice v2, MADLAD-400, RF-DETR, Depth Anything 3 + V2-small, LivePortrait, MuseTalk, LatentSync, ACE-Step, Wan 2.2, Silero VAD, PaddleOCR, Florence-2, GroundingDINO, GFPGAN, DeepFilterNet, auto-editor; restricted or non-commercial — Ultralytics YOLO (AGPL), SAM 3 (custom SAM License), NLLB-200 (CC-BY-NC), Depth Anything V2 base/large (CC-BY-NC), XTTS v2 (CPML non-commercial, company defunct), F5-TTS weights (CC-BY-NC), MusicGen weights (CC-BY-NC), Stable Audio Open (Stability Community License, <$1M revenue), SVD (Stability community), LTX-2 (community license, >$10M revenue pays), Wav2Lip (LRS2 non-commercial), CodeFormer/ProPainter (NTU S-Lab non-commercial), InsightFace models (non-commercial), BRIA RMBG-2.0 (paid commercial), Piper (now GPL-3 fork), pyannote community-1 (CC-BY-4.0, attribution). (4) Generative video (Wan 2.2, LTX-2) is technically runnable on 64 GB Macs but not practical (82 min per 2-second Wan clip on M1 Max; 13-14 min for LTX-2 GGUF); treat as roadmap-later or cloud-hybrid, while image/music/TTS generation is practical today. (5) macOS-native frameworks accessible from Python via pyobjc (Vision OCR ~130-210 ms/frame on M3 Max via ocrmac; person segmentation, face landmarks, optical flow) and VideoToolbox (ffmpeg h264/hevc_videotoolbox ~8.5x faster than software encode) are free, fast, and commercially clean.
+
+### items
+
+- **whisper.cpp** — C/C++ port of OpenAI Whisper; runs entirely on-device with Metal GPU and optional Core ML encoder on the Apple Neural Engine. Enables transcripts, captions, and timestamps for text-based editing. License: MIT (Whisper weights MIT).
+  - *category*: ASR / transcription
+  - *howItWorks*: Build with -DWHISPER_COREML=1 (generate the Core ML encoder with the provided script) and/or GGML_METAL; call the `whisper-cli` binary or use Python bindings (pywhispercpp, whisper-cpp-python); quantize models with the `quantize` tool (Q5_0 etc.).
+  - *notes*: Models: 75 MiB (tiny) to 2.9 GiB (large) on disk; RAM ~273 MB to ~3.9 GB. Reported RTF on Metal: large-v3 fp16 ~1.0x on M1, ~1.8x on M3, ~2.6x on M4, ~2.5x on M2 Pro; small q5 ~6-12x; tiny q5 ~24-38x. Core ML encoder gives >3x over CPU. In an M4 head-to-head, large-v3-turbo-q5_0 with Core ML took 1.23 s for a test clip vs 1.02 s for mlx-whisper. Sources: github.com/ggml-org/whisper.cpp, justvoice.ai whisper benchmark, github.com/anvanvan/mac-whisper-speedtest.
+  - *whoHasIt*: ggml-org (Georgi Gerganov). Used by MacWhisper, Whisper Transcription, VoiceInk and many Mac apps.
+- **mlx-whisper / lightning-whisper-mlx** — Apple MLX implementation of Whisper (in ml-explore/mlx-examples) with 4-bit quantization support and word-level timestamps; typically the fastest Whisper on Mac from pure Python. License: MIT.
+  - *category*: ASR / transcription
+  - *howItWorks*: `pip install mlx-whisper`; `mlx_whisper.transcribe(path, path_or_hf_repo='mlx-community/whisper-large-v3-turbo', word_timestamps=True)`. Pre-converted models on Hugging Face (mlx-community).
+  - *notes*: On an M4 24 GB, whisper-large-v3-turbo (unquantized) transcribed the test clip in 1.02 s, beating whisper.cpp+CoreML (1.23 s), insanely-fast-whisper 4-bit (1.13 s), WhisperKit (2.22 s), whisper-mps (5.4 s) and faster-whisper int8 (7.0 s). lightning-whisper-mlx claims 10x whisper.cpp but measured slower (1.82 s). Source: github.com/anvanvan/mac-whisper-speedtest.
+  - *whoHasIt*: Apple ml-explore (mlx-examples); community forks (whispermlx = WhisperX on MLX).
+- **faster-whisper (CTranslate2)** — Whisper on CTranslate2 with int8/fp16; up to 4x faster than openai-whisper on CPU/CUDA. On Mac it is CPU-only (Apple Accelerate backend, no Metal), so it is the slowest local option on Apple Silicon. License: MIT.
+  - *category*: ASR / transcription
+  - *howItWorks*: `pip install faster-whisper`; `WhisperModel('large-v3', device='cpu', compute_type='int8').transcribe(audio, beam_size=5)`; supports VAD filtering and batched inference.
+  - *notes*: ~3x realtime for large-v3 on M-series CPU; measured 6.96 s on M4 vs ~1 s for MLX/whisper.cpp. Still useful as a portable fallback and because WhisperX builds on it. Sources: github.com/SYSTRAN/faster-whisper, mac-whisper-speedtest.
+  - *whoHasIt*: SYSTRAN. Backend of WhisperX and many transcription servers.
+- **WhisperKit (Argmax)** — Swift/Core ML Whisper runtime that splits work across ANE and GPU; streaming, on-device, RTF well below 1.0. Python side is `whisperkittools` (model generation) plus a CLI; the runtime itself is Swift. License: MIT.
+  - *category*: ASR / transcription
+  - *howItWorks*: Swift Package (macOS 14+); from Python either shell out to the `whisperkit-cli` or bridge via a small Swift helper. `pip install whisperkittools` generates Core ML models.
+  - *notes*: Recommended model large-v3-v20240930 (626 MB) or large-v3-turbo. Measured 2.22 s on M4 for the test clip (slower than MLX for batch but excellent for streaming/low power). Sibling packages: SpeakerKit (pyannote v4 diarization), TTSKit (Qwen3-TTS). Source: github.com/argmaxinc/WhisperKit.
+  - *whoHasIt*: Argmax Inc. Used by Mac dictation apps (e.g., Superwhisper-class tools).
+- **NVIDIA Parakeet TDT 0.6B v2/v3 via parakeet-mlx / FluidAudio Core ML** — 600M-param multilingual (v3: 25 European languages) ASR with token-and-duration transducer; fastest local ASR on Mac and accurate on clean speech. License: CC-BY-4.0 (commercial OK with attribution).
+  - *category*: ASR / transcription
+  - *howItWorks*: `pip install parakeet-mlx` then `parakeet_mlx.from_pretrained('mlx-community/parakeet-tdt-0.6b-v3').transcribe(path)` (returns sentence/word timestamps). Core ML variant via FluidAudio (Swift) for ANE.
+  - *notes*: M4 head-to-head: FluidAudio Core ML 0.19 s, parakeet-mlx 0.50 s vs ~1.0 s for Whisper large-v3-turbo on MLX. An hour of audio transcribed in just over a minute on an M3 MacBook Pro; RTF ~0.08-0.10 on M2/M3 Pro. Weaker than Whisper on accents/noisy audio and non-European languages. Sources: github.com/senstella/parakeet-mlx, huggingface.co/nvidia/parakeet-tdt-0.6b-v3, soniqo.audio/guides/parakeet.
+  - *whoHasIt*: NVIDIA (weights); senstella (MLX port); FluidInference (Core ML).
+- **WhisperX / stable-ts (forced alignment)** — Post-processes Whisper output with wav2vec2 forced alignment to get word-level timestamps at roughly +/-50 ms (vs +/-500 ms in vanilla Whisper) and attaches pyannote speaker labels. Essential for caption karaoke, jump-cuts on words, and transcript-based editing. License: BSD-4-Clause (WhisperX), MIT (stable-ts).
+  - *category*: ASR / word timestamps + diarization
+  - *howItWorks*: `pip install whisperx`; `whisperx.load_model(...)`, `whisperx.align(segments, align_model, ...)`, `whisperx.DiarizationPipeline(...)`. Mac: run on CPU or use the `whispermlx` fork (mlx-whisper backend, same alignment/diarization).
+  - *notes*: Alignment models are per-language wav2vec2 checkpoints (~300 MB-1.2 GB). Whole stack fits under 8 GB RAM. Sources: github.com/m-bain/whisperX, github.com/KalebJS/whispermlx.
+  - *whoHasIt*: Max Bain (Oxford); widely used in captioning tools.
+- **CLIP / SigLIP 2 / open_clip (frame embeddings for semantic search)** — Image-text embedding models so users can type 'the shot where she laughs at the beach' and find frames/clips; also drives auto-tagging and near-duplicate detection. SigLIP 2 (Google, Apache-2.0) beats CLIP on retrieval and is multilingual; OpenAI CLIP is MIT; open_clip is MIT.
+  - *category*: Semantic search / retrieval
+  - *howItWorks*: PyTorch MPS: `open_clip.create_model_and_transforms('ViT-B-16-SigLIP2-...')` or `transformers` AutoModel for google/siglip2-*; encode 1-2 fps keyframes, store vectors in sqlite/FAISS/LanceDB. MLX: `mlx_clip` (harperreed) or mlx-examples/clip for CLIP weights; SigLIP 2 needs a transformers/MPS or Core ML path.
+  - *notes*: ViT-B/16 SigLIP2 ~375 MB fp16 (~200M params); ViT-B class models encode several hundred images/s on M-series GPU (batch), so a 1-hour video at 1 fps embeds in well under a minute. For lowest latency use Apple MobileCLIP (see separate entry). Sources: huggingface.co/blog/siglip2, github.com/harperreed/mlx_clip.
+  - *whoHasIt*: Google (SigLIP 2), OpenAI/LAION (CLIP/open_clip); used by NVIDIA VSS, Photos-style search apps.
+- **Apple MobileCLIP / MobileCLIP2** — Apple's fast CLIP family designed for ANE; S0 matches OpenAI ViT-B/16 zero-shot while 4.8x faster and 2.8x smaller. Ideal for real-time scrub-search and on-device tagging. License: code MIT, model weights under Apple ML Research Model TOU (check before commercial shipping).
+  - *category*: Semantic search / retrieval
+  - *howItWorks*: Loads through open_clip (`pip install -e .` from apple/ml-mobileclip, weights on Hugging Face); iOS/macOS demo app with Core ML exports; Python path is open_clip on MPS or coremltools conversion.
+  - *notes*: Sizes: S0 11.4M img + 63.4M txt (1.5 ms + 3.3 ms on iPhone), S2 35.7M (3.6 ms), B 86.3M (10.4 ms), L/14 304M (57.9 ms). Mac latencies are similar or better. Source: github.com/apple/ml-mobileclip.
+  - *whoHasIt*: Apple ML Research.
+- **SAM 2 / SAM 2.1 (Segment Anything 2)** — Promptable image + video segmentation with mask propagation across frames (click an object once, track it through the clip) — the basis for object-aware effects, selective color, blur, cut-outs. License: Apache-2.0 (checkpoints and code); Apple's Core ML packages Apache-2.0. Note Ultralytics' SAM2 wrapper is AGPL.
+  - *category*: Segmentation / object tracking
+  - *howItWorks*: `pip install -e .` from facebookresearch/sam2 (torch>=2.5.1); `predictor.init_state(video)`, `add_new_points_or_box(...)`, `propagate_in_video(state)`; device='mps' works for image and video predictor (some ops fall back to CPU). Apple's Core ML: `huggingface-cli download apple/coreml-sam2-{small,baseplus,large}` (image only; SAM2 Studio app). Ultralytics also wraps SAM2 (AGPL).
+  - *notes*: Checkpoints: tiny 38.9M, small 46M, base+ 80.8M, large 224.4M params (~150-900 MB). A100 speeds 91/85/64/40 FPS; Apple Silicon MPS is several-x slower but interactive for the small models; Core ML variants target ANE (fp16) and currently do image segmentation only; video Core ML in development. Sources: github.com/facebookresearch/sam2, huggingface.co/apple/coreml-sam2-small, github.com/alexhaugland/segment-anything-2-coreml.
+  - *whoHasIt*: Meta FAIR; Apple published Core ML ports; used in Roboflow, Ultralytics, ComfyUI nodes.
+- **SAM 3 / SAM 3.1** — 848M-param unified model that detects, segments and tracks all instances of a text concept ('all the dogs') or visual prompt across a video; 270K+ concepts. Big upgrade for 'find and mask every X'. License: custom 'SAM License' (commercial use allowed with restrictions; derivatives must stay under SAM License) — not Apache like SAM 2.
+  - *category*: Segmentation / open-vocabulary detection + tracking
+  - *howItWorks*: Official repo requires Python 3.12, PyTorch 2.7, CUDA 12.6. Mac forks (Sompote/SAM3_CPU, MaximeLglr/sam3-apple-silicon) patch it to run on CPU or MPS; `pip install -e .` then same predictor API with device='mps'.
+  - *notes*: Reported MPS inference 30-120 s per image on Apple Silicon (vs 0.5-2 s on CUDA), Intel Mac CPU 5-15 min — usable for offline batch, not interactive today; ~3.4 GB fp16 weights. Sources: github.com/facebookresearch/sam3, github.com/Sompote/SAM3_CPU.
+  - *whoHasIt*: Meta FAIR; community Mac ports.
+- **rembg** — One-call background removal wrapper over ONNX models (u2net, u2netp, isnet-general-use, isnet-anime, several BiRefNet variants, SAM, and BRIA RMBG as default). Good for stills, thumbnails, per-frame cutouts. License: MIT for rembg; each model has its own license (BRIA RMBG-2.0 requires a paid commercial agreement; u2net Apache-2.0; BiRefNet MIT).
+  - *category*: Background removal
+  - *howItWorks*: `pip install 'rembg[cpu]'` (Python >=3.11); `remove(img, session=new_session('birefnet-general'))`; process video by iterating frames with OpenCV/PyAV and reusing the session. onnxruntime CoreML EP is not the default; several users report the CoreML provider hangs on some models, so CPU EP is the safe default on Mac.
+  - *notes*: Model sizes: u2netp ~4 MB, u2net ~170 MB, isnet ~170 MB, BiRefNet ~900 MB, bria-rmbg ~1.02 GB. Per-frame CPU latency ranges from ~50 ms (u2netp) to ~1-2 s (BiRefNet at 1024^2) on M-series CPU; use MPS/PyTorch BiRefNet or vision.cpp GGUF for speed. Source: github.com/danielgatis/rembg.
+  - *whoHasIt*: Daniel Gatis; widely embedded in local bg-removal apps.
+- **BiRefNet (incl. BiRefNet-GGUF / vision.cpp)** — High-resolution dichotomous segmentation and matting (general, portrait, matting, HR, lite, dynamic-resolution variants); consistently better edges/hair than u2net-class models and the current open-weights default for clean cutouts. License: MIT.
+  - *category*: Background removal / matting
+  - *howItWorks*: `AutoModelForImageSegmentation.from_pretrained('ZhengPeng7/BiRefNet', trust_remote_code=True).to('mps')`, run at 1024x1024; or via rembg's birefnet-* sessions; or lightweight ggml runtime with Acly/BiRefNet-GGUF (F16 440 MB, quantized variants) through vision.cpp.
+  - *notes*: ~0.2B params; needs ~5.5 GB memory at 1024^2; under 1 s/frame on a datacenter GPU, roughly 1-3 s/frame on M-series MPS (fp16) — fine for stills and short clips, batch for video. Sources: github.com/ZhengPeng7/BiRefNet, huggingface.co/Acly/BiRefNet-GGUF.
+  - *whoHasIt*: Zheng Peng et al. (Nankai); adopted by fal, Replicate, Runware, rembg, LibreYOLO.
+- **Apple Vision framework via pyobjc (person segmentation, face landmarks, OCR, optical flow, saliency)** — Zero-download, ANE-accelerated OS APIs: VNGeneratePersonSegmentationRequest (person matte), VNDetectFaceLandmarksRequest, VNRecognizeTextRequest (OCR), VNGenerateOpticalFlowRequest, saliency, VNTrackObjectRequest. Commercially clean and fast; great baseline for portrait bg-removal, face-aware crop and burned-in text detection. License: MIT (pyobjc wrappers); OS APIs free.
+  - *category*: macOS-native vision (segmentation/OCR/faces)
+  - *howItWorks*: `pip install pyobjc-framework-Vision` (v12.2.2, Py 3.10-3.15); build a VNImageRequestHandler from a CGImage/CVPixelBuffer per frame and run requests; `ocrmac` wraps OCR specifically.
+  - *notes*: OCR: ~207 ms accurate / ~131 ms fast / ~174 ms LiveText per image on M3 Max. Person segmentation runs real-time (used by FaceTime/Portrait mode). Requires macOS; no cross-platform story. Sources: pypi.org/project/pyobjc-framework-Vision, github.com/straussmaximilian/ocrmac.
+  - *whoHasIt*: Apple; wrapped by Ronald Oussoren (pyobjc).
+- **Demucs (htdemucs) via demucs-mlx / mlx-audio-separator** — Separate vocals/drums/bass/other (6-stem adds piano/guitar) for music ducking, vocal isolation, remixing, and cleaning dialogue. Meta's Demucs code is MIT; MLX ports MIT. mlx-audio-separator also runs BS-Roformer/MelBand-Roformer/MDX/VR (UVR-community) checkpoints.
+  - *category*: Audio stem separation
+  - *howItWorks*: `pip install demucs-mlx` -> `Separator().separate_audio_file('song.wav')` returns dict of stems; or `pip install mlx-audio-separator` for Roformer/MDX models; original `pip install demucs` (PyTorch) works on CPU; MPS historically broken for htdemucs due to complex tensors.
+  - *notes*: demucs-mlx: 3:15 track in 2.7 s on M4 Max (~73x realtime), 2.6x faster than PyTorch MPS (6.9 s); another MLX port reports a 7-min song in 12 s. mlx-audio-separator: 1.4-2.5x over upstream audio-separator on M4 mini. htdemucs weights ~80 MB per model; ~2-4 GB RAM. Sources: github.com/ssmall256/demucs-mlx, github.com/ssmall256/mlx-audio-separator, medium.com (Andrade Olivier).
+  - *whoHasIt*: Meta (Demucs); ssmall256 / lextoumbourou (MLX ports); Demucs-GUI; UVR community models.
+- **RIFE 4.25 (Practical-RIFE) via rife-mlx** — Real-time intermediate flow estimation for 2x/4x/arbitrary frame-rate conversion and smooth slow-mo; tiny model. License: MIT (Practical-RIFE code and official 4.25 weights).
+  - *category*: Frame interpolation / slow motion
+  - *howItWorks*: `pip install rife-mlx` -> `rife-mlx -i in.mp4 -o out.mp4 --multi 2` (preserves audio) or `rife_mlx` Python API; torch-free MLX inference, arbitrary timestep. Alternatives: Practical-RIFE PyTorch with device='mps', rife-ncnn-vulkan macOS binary (MoltenVK).
+  - *notes*: 5.66M params, ~23 MB fp32 / 22.7 MB quantized MLX. The HF card does not publish FPS; RIFE 4.x is designed for real-time 1080p on mid GPUs, and community reports place M-series MLX at roughly real-time for 1080p 2x. Sources: huggingface.co/mlx-community/RIFE-4.25, github.com/hzwer/Practical-RIFE.
+  - *whoHasIt*: hzwer (Megvii/Practical-RIFE); mlx-community port; used by SVP, Flowframes, Topaz-alikes.
+- **Real-ESRGAN (+ spandrel / chaiNNer / Core ML conversion)** — GAN super-resolution for 2x/4x upscaling and de-compression; models x4plus, x4plus_anime_6B, x2plus, realesr-animevideov3 (video), realesr-general-x4v3 (tiny). License: BSD-3-Clause (weights included).
+  - *category*: Upscaling / enhancement
+  - *howItWorks*: `pip install realesrgan basicsr` and `RealESRGANer(scale, model_path, model=RRDBNet(...), device='mps')` per frame; or load any ESRGAN-family checkpoint with `spandrel` on MPS; or use the portable realesrgan-ncnn-vulkan macOS binary; or convert to Core ML (coremltools) for ANE — reported up to ~78x faster than CPU PyTorch.
+  - *notes*: x4plus RRDBNet ~64 MB (16.7M params); animevideov3 ~2 MB. On MPS, 1080p->4K with x4plus is roughly 1-3 s/frame on M2/M3 Pro class (tile for memory); realesr-general-x4v3 / animevideov3 are ~10x faster and suit video. Upstream PR #902 added MPS support. Sources: github.com/xinntao/Real-ESRGAN, medium.com/@ronregev (Core ML approach), chaiNNer docs.
+  - *whoHasIt*: Xintao Wang (Tencent ARC); chaiNNer, IOPaint plugin, Upscayl.
+- **PySceneDetect** — OpenCV/PyAV-based shot boundary detection (ContentDetector, AdaptiveDetector, ThresholdDetector for fades, HistogramDetector, HashDetector) with ffmpeg/mkvmerge splitting. Foundation for auto-clipping, chapter markers, and per-shot analysis. License: BSD-3-Clause.
+  - *category*: Scene / shot detection
+  - *howItWorks*: `pip install scenedetect[opencv]`; `scene_list = detect('v.mp4', AdaptiveDetector())`; `split_video_ffmpeg(...)`. v0.7.1 (July 2026) with config-file support; use `--downscale` for speed.
+  - *notes*: Accuracy (v0.7 defaults): AdaptiveDetector F1 91.6 on BBC Planet Earth, 73.9 on AutoShot; HistogramDetector best for fades (F1 75.3 on ClipShots). Speed is decode-bound: hundreds of fps at 480p downscale on M-series CPU. Sources: github.com/Breakthrough/PySceneDetect, scenedetect.com/benchmarks.
+  - *whoHasIt*: Brandon Castellano; used in dataset pipelines, auto-highlight tools.
+- **Kokoro-82M (via kokoro / mlx-audio)** — 82M-param StyleTTS2-based TTS with 54 voices in 8 languages; near-XTTS quality without cloning, trained only on permissive/synthetic audio. Default pick for voiceover and AI narration. License: Apache-2.0.
+  - *category*: Text-to-speech
+  - *howItWorks*: `pip install kokoro soundfile` + espeak-ng; `KPipeline(lang_code='a')(text, voice='af_heart')` (24 kHz). MLX: `pip install mlx-audio`; `load_model('mlx-community/Kokoro-82M-bf16').generate(text, voice='af_heart')`; also Core ML conversions.
+  - *notes*: ~327 MB weights; runs many-x realtime on CPU and faster on MLX (a paragraph in well under a second on M-series). No voice cloning. Sources: huggingface.co/hexgrad/Kokoro-82M, github.com/Blaizzy/mlx-audio, localaimaster.com Kokoro guides.
+  - *whoHasIt*: hexgrad; bundled in many local TTS apps.
+- **Piper (piper1-gpl)** — Very small VITS/ONNX TTS for low-compute narration; quality is 'GPS voice' but ~15-30x realtime on CPU with <1 GB. Original rhasspy/piper (MIT) archived Oct 2025; active fork is OHF-Voice/piper1-gpl under GPL-3.0 (copyleft implications for embedding).
+  - *category*: Text-to-speech
+  - *howItWorks*: `pip install piper-tts`; Python API and HTTP server; voices are ONNX files (~20-60 MB each) run with onnxruntime.
+  - *notes*: Use only if GPL is acceptable or as a subprocess. Sources: github.com/OHF-Voice/piper1-gpl, promptquorum.com piper/coqui guide.
+  - *whoHasIt*: Open Home Foundation (Home Assistant).
+- **Coqui XTTS v2** — 17-language zero-shot voice cloning TTS; sounds human but >10x slower than Piper and heavy. License: Coqui Public Model License (non-commercial) and Coqui shut down Jan 2024 — no one can grant a commercial license. Roadmap note: avoid for shipping products; consider Chatterbox/OpenVoice instead.
+  - *category*: Text-to-speech / voice cloning
+  - *howItWorks*: `pip install coqui-tts` (community fork) -> `TTS('tts_models/multilingual/multi-dataset/xtts_v2').tts_to_file(text, speaker_wav=..., language='en')`; device 'mps' partially supported.
+  - *notes*: ~1.9 GB weights; ~1-3x realtime on M-series. Sources: promptquorum.com XTTS license guide, localaimaster.com Kokoro vs XTTS vs Chatterbox.
+  - *whoHasIt*: Coqui (defunct); idiap maintains fork.
+- **Chatterbox (Resemble AI) — Turbo / Nano / Multilingual v3** — MIT-licensed zero-shot voice cloning from 5-10 s of audio with emotion exaggeration and paralinguistic tags ([laugh]); Multilingual v3 covers 23+ languages. Best permissive-license cloning option for dubbing and narration. License: MIT.
+  - *category*: Text-to-speech / voice cloning
+  - *howItWorks*: `pip install chatterbox-tts`; `ChatterboxTTS.from_pretrained(device='mps')`, `.generate(text, audio_prompt_path=ref.wav)`. MLX ports via mlx-audio and Jimmi42/chatterbox-turbo-apple-silicon.
+  - *notes*: Turbo 350M, Nano 110M (3x realtime on 8 CPU cores), Multilingual 500M. MPS gives 2-3x over CPU; faster-than-realtime on M-series. Sources: github.com/resemble-ai/chatterbox, huggingface.co/Jimmi42/chatterbox-tts-apple-silicon-code.
+  - *whoHasIt*: Resemble AI.
+- **OpenVoice V2 (MyShell / MIT)** — Instant voice cloning by separating tone color from style; base TTS (MeloTTS) generates speech, a tone-color converter applies the reference speaker's timbre. Natively EN/ES/FR/ZH/JA/KO. Also works as a voice-conversion filter on existing dialogue. License: MIT (V1 and V2), free for commercial use.
+  - *category*: Voice cloning / tone-color conversion
+  - *howItWorks*: Clone repo, `pip install -e .`, install MeloTTS; `ToneColorConverter(...).convert(audio_src_path, src_se, tgt_se, output_path)`; device 'mps' or 'cpu'. A Core ML conversion mirror exists (aoiandroid/OpenVoiceV2-CoreML-mirror).
+  - *notes*: Checkpoints ~500 MB; conversion runs faster than realtime on M-series. Sources: github.com/myshell-ai/OpenVoice, huggingface.co/aoiandroid/OpenVoiceV2-CoreML-mirror.
+  - *whoHasIt*: MyShell + MIT.
+- **F5-TTS (f5-tts-mlx)** — Flow-matching TTS with zero-shot cloning from ~3 s reference; excellent quality. Code MIT (f5-tts-mlx MIT) but official weights are CC-BY-NC-4.0 — non-commercial unless retrained.
+  - *category*: Voice cloning TTS
+  - *howItWorks*: `pip install f5-tts-mlx`; `python -m f5_tts_mlx.generate --text ... --ref-audio ref.wav`; 4-bit/8-bit quantized variants available.
+  - *notes*: A sample generated in ~4 s on M3 Max; CPU PyTorch ~6x realtime. Sources: github.com/lucasnewman/f5-tts-mlx, localaimaster.com F5-TTS guide.
+  - *whoHasIt*: SWivid (F5-TTS); Lucas Newman (MLX port).
+- **Qwen3-TTS via MLX (mlx-audio, QwenTTS, TTSKit)** — Alibaba's Qwen3-TTS (0.6B/1.7B) with voice design and 5-second cloning; strong multilingual quality; runs fully offline on Apple Silicon through MLX. License: Apache-2.0 (Qwen3 family) — verify the TTS model card.
+  - *category*: Text-to-speech / voice cloning
+  - *howItWorks*: `pip install mlx-audio` (Qwen3-TTS supported) or Argmax TTSKit (Swift, Core ML); community wrappers kapi2800/qwen3-tts-apple-silicon and NickBouwhuis/QwenTTS.
+  - *notes*: Upstream MLX PR was still open as of Aug 2026; use mlx-audio's implementation. Sources: github.com/Blaizzy/mlx-audio, murmurtts.com Qwen3-TTS Mac status.
+  - *whoHasIt*: Alibaba Qwen; Blaizzy (mlx-audio); Argmax.
+- **MADLAD-400 (3B-MT) via CTranslate2 / MLX** — Google's 400+-language T5 MT model; the permissive choice for subtitle translation. License: Apache-2.0.
+  - *category*: Translation
+  - *howItWorks*: `ct2-transformers-converter --model google/madlad400-3b-mt --quantization int8` then `ctranslate2.Translator(path).translate_batch(tokens)` with `<2xx>` language token (CTranslate2 uses Apple Accelerate on arm64); or quantized MLX safetensors (INT4/INT8) — reported mixed results with generic mlx-lm.
+  - *notes*: 3B params: 11.8 GB fp32, ~3 GB CTranslate2 int8, 1.65 GB GGUF. Roughly 20-60 tokens/s on M-series CPU int8; sentence-level batching keeps SRT translation to seconds per minute of dialogue. A 2026 benchmark preferred small LLM translators (Hy-MT2-1.8B-4bit on MLX: 0.08-0.17 s/sentence, 1.5 GB) over MADLAD/NLLB for quality. Sources: huggingface.co/google/madlad400-3b-mt, forum.opennmt.net, github.com/kargnas/cctrans benchmark.
+  - *whoHasIt*: Google Research; CTranslate2 (OpenNMT).
+- **NLLB-200 (distilled 600M / 1.3B)** — Meta's 200-language MT; well supported by CTranslate2 int8 and fast, but License: CC-BY-NC-4.0 — non-commercial only. Use for prototyping, swap to MADLAD or an Apache LLM translator for shipping.
+  - *category*: Translation
+  - *howItWorks*: `ct2-transformers-converter --model facebook/nllb-200-distilled-600M --quantization int8`; `Translator.translate_batch(tokens, target_prefix=[['fra_Latn']])`.
+  - *notes*: 600M: ~0.06-0.21 s per sentence on CPU int8, ~1.5 GB RAM. Sources: huggingface.co/facebook/nllb-200-distilled-600M, cctrans benchmark.
+  - *whoHasIt*: Meta AI.
+- **Small LLM translators / general LLMs on MLX (mlx-lm, Hy-MT2, TranslateGemma, Qwen3)** — Instruction LLMs served via mlx-lm give translation, summarization, title/hook generation and the natural-language command layer of the editor. MLX is the fastest local LLM path on Mac (~230 tok/s small models; 25-30x PyTorch MPS). Licenses vary: Qwen3 Apache-2.0, Gemma terms, Hy-MT2 (check).
+  - *category*: Translation / NL editing brain
+  - *howItWorks*: `pip install mlx-lm`; `mlx_lm.load('mlx-community/Qwen3-8B-4bit')`, `generate(...)`; OpenAI-compatible server via `mlx_lm.server` or Rapid-MLX/Ollama (now MLX-backed on Apple Silicon).
+  - *notes*: Hy-MT2-1.8B-4bit: 0.75 s load, 1.5 GB, 0.08-0.17 s per sentence on Apple Silicon. Sources: arxiv.org/abs/2511.05502 (MLX vs MPS study), cctrans benchmark, ollama.com/blog/mlx.
+  - *whoHasIt*: Apple ml-explore; Alibaba, Google, Tencent (models).
+- **Ultralytics YOLO26 / YOLO11 (+ yolo-mlx, Core ML export)** — Detection, segmentation, pose, tracking (ByteTrack/BoT-SORT) for auto-reframe, subject tracking, highlight detection. YOLO26 is NMS-free and exports cleanly to Core ML .mlpackage for ANE. License: AGPL-3.0 (or paid Enterprise) — copyleft risk for a closed product; yolo-mlx is also AGPL.
+  - *category*: Object detection / tracking / pose
+  - *howItWorks*: `pip install ultralytics`; `YOLO('yolo26n.pt').track(source, device='mps')`; `model.export(format='coreml', nms=False)` then run with coremltools; MLX-native via thewebAI/yolo-mlx.
+  - *notes*: yolo-mlx on M4 Pro: 170.6 FPS (26n), 105 (26s), 54.6 (26m), 43.6 (26l), 24.3 (26x); pose on M3 Pro 104 FPS (n). Model sizes 5-140 MB. Sources: github.com/thewebAI/yolo-mlx, docs.ultralytics.com/integrations/coreml.
+  - *whoHasIt*: Ultralytics.
+- **RF-DETR (Roboflow)** — Real-time DETR that is first past 60 mAP on COCO; Nano-Large detection, segmentation and keypoint variants under Apache-2.0 — the drop-in permissive alternative to AGPL YOLO. (XL/2XL and rfdetr_plus are under Roboflow PML 1.0.)
+  - *category*: Object detection / segmentation (permissive)
+  - *howItWorks*: `pip install rfdetr`; `RFDETRMedium().predict(img, threshold=0.5)`; PyTorch MPS works; export to ONNX then coremltools for ANE.
+  - *notes*: Nano 30.5M params 48.4 AP 2.3 ms; Small 53.0 AP; Medium 54.7 AP; Large 56.5 AP 6.8 ms (T4 TensorRT). Expect ~30-80 FPS for Nano/Small on M-series GPU. Source: github.com/roboflow/rf-detr, blog.roboflow.com/rf-detr-vs-alternatives.
+  - *whoHasIt*: Roboflow.
+- **Grounding DINO (+ Grounded-SAM-2)** — Text-prompted detection ('red car', 'person holding phone') producing boxes that can seed SAM 2 masks — enables 'select the X' editing without training. License: Apache-2.0.
+  - *category*: Open-vocabulary detection
+  - *howItWorks*: `pip install -e .` from IDEA-Research/GroundingDINO (or `transformers` GroundingDinoForObjectDetection); CPU-only mode supported; MPS via transformers implementation; chain to SAM 2 for masks.
+  - *notes*: Swin-T variant ~700 MB, 48.4 AP zero-shot; ~1-2 s/image on MPS. Alternative: Florence-2 phrase grounding (MIT, smaller). Source: github.com/IDEA-Research/GroundingDINO.
+  - *whoHasIt*: IDEA Research.
+- **Florence-2 (base 0.23B / large 0.77B)** — Single small seq2seq model that does detailed captioning, object detection, OCR with regions, phrase grounding and region proposals — a cheap way to auto-describe every shot for search and to detect on-screen text. License: MIT.
+  - *category*: Vision foundation (caption/OD/OCR/grounding)
+  - *howItWorks*: `transformers` AutoModelForCausalLM with trust_remote_code on device 'mps' (fp16); prompt tokens like '<MORE_DETAILED_CAPTION>', '<OD>', '<OCR_WITH_REGION>'. Community MLX ports exist.
+  - *notes*: ~0.5-1.5 GB; ~0.3-1 s per frame on M-series GPU for captions. Source: huggingface.co/microsoft/Florence-2-large.
+  - *whoHasIt*: Microsoft.
+- **mlx-vlm + Qwen3-VL / Qwen2.5-VL (video understanding)** — Run vision-language models locally to caption clips, summarize footage, answer 'where does the presenter mention pricing', pick highlights, and generate B-roll suggestions. Qwen3-VL-8B is competitive with the older 72B on video tasks. License: mlx-vlm MIT; Qwen3-VL Apache-2.0.
+  - *category*: Video-language model (captioning, search, QA)
+  - *howItWorks*: `pip install -U mlx-vlm` (v0.6.17, Aug 2026); `model, processor = load('mlx-community/Qwen3-VL-8B-Instruct-4bit')`; `generate(model, processor, prompt, video='clip.mp4')` (samples frames); supports Qwen2/2.5/3-VL, Gemma 4, Phi-4, MiniCPM, Moondream, DeepSeek-OCR, GLM-OCR.
+  - *notes*: 4-bit 8B ~5 GB RAM; 2B ~1.5 GB. Prefix caching gives up to 24.7x speedup on repeated video analysis; MLX-native VLM inference reported 21-87% higher throughput than alternatives on Apple Silicon. Sources: pypi.org/project/mlx-vlm, arxiv.org/html/2601.19139v2, github.com/codingstark-dev/qwen2.5-vl-apple-silicon.
+  - *whoHasIt*: Blaizzy (Prince Canuma); Alibaba Qwen.
+- **Depth Anything V2 (Core ML) / Video Depth Anything / Depth Anything 3** — Monocular depth for parallax/2.5D effects, depth-of-field blur, fog, relighting and ControlNet conditioning; Video Depth Anything adds temporal consistency for arbitrary-length clips; Depth Anything 3 (Nov 2025) recovers geometry from any views. Licenses: V2-Small Apache-2.0, V2 Base/Large/Giant CC-BY-NC-4.0; Video-DA Small Apache / Base+Large CC-BY-NC; DA3 Apache-2.0.
+  - *category*: Depth estimation
+  - *howItWorks*: Apple Core ML: `apple/coreml-depth-anything-v2-small` (F16 49.8 MB, F32 99.2 MB) via coremltools `MLModel.predict`; PyTorch: repo checks MPS automatically; `transformers` pipeline('depth-estimation'); Video-DA: `python run.py --input_video x --encoder vits`.
+  - *notes*: Core ML V2-Small F16: 32.8 ms/frame on M1 Max, 24.6 ms on M3 Max at 518x396 — real-time 1080p-scaled depth. Params: Small 24.8M, Base 97.5M, Large 335M, Giant 1.3B. Sources: huggingface.co/apple/coreml-depth-anything-v2-small, github.com/DepthAnything/Depth-Anything-V2, github.com/DepthAnything/Video-Depth-Anything, github.com/ByteDance-Seed/Depth-Anything-3.
+  - *whoHasIt*: ByteDance/HKU; Apple published Core ML port.
+- **LivePortrait** — Animate a still portrait or retarget expressions/eyes/lips on a portrait video using a driving video; supports v2v editing. Useful for talking-head fixes and reaction shots. License: MIT (weights on HF marked MIT).
+  - *category*: Portrait animation / lip-sync (video-driven)
+  - *howItWorks*: Clone, `pip install -r requirements_macOS.txt`, `PYTORCH_ENABLE_MPS_FALLBACK=1 python inference.py -s src.jpg -d drive.mp4`; ComfyUI MPS nodes exist. Animals mode not available on macOS (X-Pose dependency).
+  - *notes*: ~20x slower than an RTX 4090 on Apple Silicon (roughly 1-3 fps at 512px); weights ~400 MB. Sources: github.com/KlingAIResearch/LivePortrait, huggingface.co/KlingTeam/LivePortrait.
+  - *whoHasIt*: Kuaishou Kling team.
+- **MuseTalk 1.5 / LatentSync 1.6 / Wav2Lip (audio-driven lip-sync)** — Regenerate mouth movements to match new audio (dubbing, translated voiceover). MuseTalk (latent-inpainting, 256px face, real-time class) — code MIT, model 'any purpose incl. commercial'; LatentSync (audio-conditioned SD, 512px, best quality) — Apache-2.0; Wav2Lip — research weights trained on LRS2, not commercially usable.
+  - *category*: Lip-sync / dubbing
+  - *howItWorks*: MuseTalk: Python 3.10, MMLab deps, `python -m scripts.inference` (community 'MuseTalk on Apple Silicon' variant uses MPS + Apple Vision landmarks instead of OpenMMLab). LatentSync: `source setup_env.sh`, `./inference.sh` (8 GB VRAM for 1.5, 18 GB for 1.6 -> feasible on 24-32 GB unified memory via MPS, slow). Wav2Lip: legacy PyTorch, CPU/MPS fine but licensing blocks shipping.
+  - *notes*: MuseTalk 30+ fps on V100; on M-series expect ~2-5 fps; LatentSync minutes per clip on MPS. Sources: github.com/TMElyralab/MuseTalk, github.com/bytedance/LatentSync, lipsync.com open-source comparison, tomodahinata.com license guide.
+  - *whoHasIt*: Tencent Music (MuseTalk), ByteDance (LatentSync), IIIT-H (Wav2Lip).
+- **MusicGen (musicgen-mlx / mlx-audiocraft)** — Text-to-music (small 300M, medium 1.5B, large/stereo-large 3.3B). Code MIT but weights CC-BY-NC-4.0 — outputs cannot be used commercially; keep for prototyping or non-commercial features.
+  - *category*: Music generation
+  - *howItWorks*: MLX ports: github.com/andrade0/musicgen-mlx (`MusicGen.get_pretrained('facebook/musicgen-small').generate([prompt])`) or theashishmaurya/mlx-audiocraft (adds AudioGen); original audiocraft on CPU/MPS.
+  - *notes*: M4 Max, MLX: small generates 8 s in 6.3 s (1.3x realtime); stereo-large ~0.3x realtime. Downloads 1.2/3.2/6.5 GB; 8-16 GB RAM. Sources: github.com/andrade0/musicgen-mlx, github.com/facebookresearch/audiocraft/issues/198.
+  - *whoHasIt*: Meta; community MLX ports.
+- **ACE-Step v1 (3.5B) / v1.5** — Diffusion-based full-song generator with lyrics/vocals; the permissive alternative to MusicGen/Suno for background tracks. License: Apache-2.0.
+  - *category*: Music generation (commercial-safe)
+  - *howItWorks*: Clone, `pip install -e .`, `acestep --port 7865` (Gradio) or Python pipeline; macOS supported with bf16 disabled; flags `--cpu_offload`, `--torch_compile`.
+  - *notes*: MacBook M2 Max: 26.4 s for 1 minute of audio at 27 steps (2.27x realtime) vs 2.2 s on A100. Weights ~7 GB; needs 16 GB+ unified memory. Source: github.com/ace-step/ACE-Step.
+  - *whoHasIt*: ACE Studio + StepFun.
+- **Stable Audio Open Small (stable-audio-mlx)** — 0.5B text-to-audio model producing up to 11 s stereo 44.1 kHz clips; best for SFX and ambiences, not vocals. License: Stability AI Community License (free below $1M annual revenue; otherwise commercial license).
+  - *category*: Sound-effects / audio generation
+  - *howItWorks*: MLX port github.com/sandst1/stable-audio-mlx (CLI + sampler UI); or stable-audio-tools on MPS.
+  - *notes*: Few seconds per clip on M-series via MLX. Source: huggingface.co/stabilityai/stable-audio-open-small.
+  - *whoHasIt*: Stability AI.
+- **Wan 2.2 / LTX-2 via mlx-video (and ComfyUI GGUF on MPS)** — Open-weights video generators runnable on Mac: Wan 2.2 (T2V-14B, TI2V-5B, I2V-14B; Apache-2.0, no claims on outputs) and LTX-2/2.3/2.5 (19B, synchronized audio; LTX-2 Community License — free under $10M revenue). mlx-video (MIT) provides MLX-native pipelines; Rapid-MLX exposes an OpenAI-compatible /v1/videos API.
+  - *category*: Generative video (text/image-to-video)
+  - *howItWorks*: `pip install git+https://github.com/Blaizzy/mlx-video.git` (Python 3.11+, MLX >=0.22); `uv run mlx_video.ltx_2.generate --prompt ...`; or ComfyUI with GGUF-quantized checkpoints on MPS (FP8 checkpoints do not work on Metal).
+  - *notes*: Reality check on M1 Max 64 GB: Wan 2.2 14B Q4 GGUF at 832x480, 33 frames = 82 minutes; LTX-2 19B distilled Q4 at 768x512, 33 frames = 13-14 min with the official 2-stage workflow producing NaN on MPS. LTX-2.5 distilled low-RAM path serves on 24 GB Macs. M5's Neural Accelerators reportedly 3.8x M4 for diffusion — expect this to become practical within a hardware generation. Sources: github.com/Blaizzy/mlx-video, lilting.ch LTX-2 vs Wan 2.2 on M1 Max, rapidmlx.com video docs, ltx.io open-source guide.
+  - *whoHasIt*: Alibaba (Wan), Lightricks (LTX); Blaizzy (mlx-video).
+- **AnimateDiff / Stable Video Diffusion (legacy generative video)** — Earlier-generation motion modules: AnimateDiff v3 (Apache-2.0; 1.56 GB motion module + SD1.5, SDXL beta needs ~13 GB) and SVD-XT (2B, 25 frames at 576x1024, ~180 s on A100 80 GB; Stability community license). Superseded by Wan/LTX for quality; still useful for stylized loops via diffusers on MPS.
+  - *category*: Generative video (legacy)
+  - *howItWorks*: `diffusers` AnimateDiffPipeline / StableVideoDiffusionPipeline with device 'mps' (fp16, attention slicing); ComfyUI on Mac.
+  - *notes*: SVD-XT on M2/M3 Max takes several minutes per 25-frame clip; AnimateDiff 16 frames at 512 ~1-3 min. Sources: github.com/guoyww/AnimateDiff, huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt.
+  - *whoHasIt*: Yuwei Guo et al. (AnimateDiff), Stability AI (SVD).
+- **mflux (FLUX.1/FLUX.2, Z-Image, Qwen-Image, Krea 2, SeedVR2)** — MLX-native image generation and editing toolkit: text-to-image, image-to-image, in-context editing, inpainting, ControlNet (canny/depth), LoRA, plus SeedVR2 video/image upscaling and depth extraction. Ideal for thumbnails, title cards, B-roll stills. License: MIT (model licenses vary: FLUX.1-schnell Apache, FLUX.1-dev non-commercial, Qwen-Image Apache).
+  - *category*: Generative images / thumbnails / upscaling
+  - *howItWorks*: `uv tool install --upgrade mflux`; `mflux-generate --model flux2-klein-4b --prompt ... -q 8`; Python API via `Flux1`/`Flux2` classes.
+  - *notes*: 8-bit quantization keeps 4B-6B models within 16 GB; FLUX.2 4B generates 1024^2 in ~10-20 s on M3/M4 Max; M5 reported 3.8x M4 on FLUX-dev-4bit. Sources: github.com/filipstrand/mflux, rapidmlx.com.
+  - *whoHasIt*: mflux-community (Filip Strand).
+- **ffmpeg (xfade, drawtext/libass, lut3d, VideoToolbox)** — The universal decode/filter/encode backbone: xfade (50+ built-in transitions: fade, dissolve, wipe*, slide*, circleopen, pixelize, radial, zoomin, hlslice, squeezeh...), drawtext (text/animated captions), subtitles/ass (styled burn-in via libass), lut3d (.cube color grades), haldclut, vidstab (stabilization), scale/crop/overlay, silencedetect/loudnorm (EBU R128), and h264_videotoolbox/hevc_videotoolbox/prores_videotoolbox hardware encoders on Apple Silicon. License: LGPL-2.1+/GPL depending on build flags (libx264/libx265 make it GPL; VideoToolbox-only builds can stay LGPL).
+  - *category*: Core media engine / compositing / encode
+  - *howItWorks*: Subprocess via `ffmpeg-python`, `ffmpegio`, or PyAV; `-filter_complex '[0][1]xfade=transition=dissolve:duration=1:offset=4'`; `-vf 'lut3d=grade.cube'`; `-c:v hevc_videotoolbox -b:v 12M` (no CRF; use bitrate or -q:v). Extended GLSL transitions via scriptituk/xfade-easing (custom expressions, 60+ GL transitions) or ffmpeg-gl-transition builds.
+  - *notes*: VideoToolbox encode ~8.5x faster than software x264 on M1 Max; HEVC smaller at same quality. xfade requires same resolution/fps/pixel format inputs. Custom Apple Silicon builds (aagedal/ffmpeg-apple-silicon) bundle libass, libplacebo, etc. Sources: github.com/scriptituk/xfade-easing, medium.com/@marc.griffith VideoToolbox, ffmpeg-cookbook.com.
+  - *whoHasIt*: FFmpeg project; every editor (Resolve, Premiere via bundled decoders, CapCut, Descript) sits on it or equivalents.
+- **MoviePy 2.x** — High-level Python compositing: clips as time->ndarray functions, CompositeVideoClip, TextClip, concatenation, effects; v2.0 (Jan 2025) broke the API (fx module, `with_*` methods) and re-added OpenCV for resize/rotate in Aug 2025. Good for prototyping and rendering timelines programmatically; slower than raw ffmpeg filtergraphs. License: MIT.
+  - *category*: Python video composition
+  - *howItWorks*: `pip install moviepy`; `VideoFileClip('a.mp4').subclipped(0,5).with_effects([vfx.Resize(0.5)])`, `CompositeVideoClip([...]).write_videofile(out, codec='h264_videotoolbox')`.
+  - *notes*: Frame-by-frame Python loop; ~30-100 fps at 1080p for simple ops on M-series. Sources: zulko.github.io/moviepy, pypi.org/project/moviepy.
+  - *whoHasIt*: Zulko and community.
+- **OpenCV (opencv-python) + PyAV** — Frame decoding/encoding (AVFoundation backend on macOS, VideoToolbox hardware decode via `cv2.CAP_PROP_HW_ACCELERATION`), optical flow (Farneback/DIS/RAFT-free), template matching, histograms, color transfer, ORB features, tracking (CSRT/KCF), DNN module. PyAV gives precise, frame-accurate demux/decode with timestamps. Licenses: Apache-2.0 (OpenCV), BSD-3 (PyAV).
+  - *category*: Frame I/O and classic CV
+  - *howItWorks*: `pip install opencv-python av`; `cv2.VideoCapture(path, cv2.CAP_AVFOUNDATION)`; `av.open(path).decode(video=0)` for PTS-accurate frames; feed ndarrays to any model.
+  - *notes*: Universal arm64 wheels; VideoToolbox decode of 4K HEVC runs 200+ fps on M-series. Used by PySceneDetect, mediapipe, MoviePy.
+  - *whoHasIt*: OpenCV Foundation; PyAV maintainers.
+- **MediaPipe Tasks (Face Landmarker, Pose, Hand, Image Segmenter, Object Detector)** — Google's on-device solutions: 478-point face mesh with 52 blendshapes, 33-point pose, hands, selfie/hair segmentation, AutoFlip-style smart crop. Enables face-tracking effects, auto-reframe, gesture triggers. License: Apache-2.0.
+  - *category*: Face/pose landmarks (real-time)
+  - *howItWorks*: `pip install mediapipe` (macOS arm64 wheels for Python 3.10-3.12; 3.13 lags); `vision.FaceLandmarker.create_from_options(...)`, `detect_for_video(mp_image, timestamp_ms)`; models are small .task files (~few MB).
+  - *notes*: CPU-only delegate on macOS Python (GPU delegate not exposed) but still real-time: face mesh ~100+ fps at 720p on M-series. Sources: ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker/python, github.com/google-ai-edge/mediapipe.
+  - *whoHasIt*: Google AI Edge.
+- **Silero VAD v5/v6** — ~2 MB MIT-licensed VAD (6000+ languages) that finds speech segments: powers silence removal, jump-cuts, chunking for ASR, and dead-air trimming. License: MIT.
+  - *category*: Voice activity detection
+  - *howItWorks*: `pip install silero-vad`; `get_speech_timestamps(read_audio(f), load_silero_vad(), return_seconds=True)`; ONNX runtime path 4-5x faster; MLX port (Silero-VAD-v5-MLX, 309K params, 1.2 MB).
+  - *notes*: <1 ms per 30 ms chunk on one CPU thread; MLX port 23x realtime streaming on M2 Max. Sources: github.com/snakers4/silero-vad, huggingface.co/posts/aufklarer/249758642951487.
+  - *whoHasIt*: Silero team; used by WhisperX, faster-whisper VAD filter, FluidAudio.
+- **pyannote.audio 3.1 / speaker-diarization-community-1 (+ MLX/Core ML ports)** — Who-spoke-when for multicam switching, speaker-labelled captions and per-speaker audio fixes. community-1 (2025) improves DER (e.g., 20.3% vs 24.5% on AliMeeting) and is CC-BY-4.0 (attribution required; 3.1 is MIT). Native Apple ports: FluidAudio (Core ML, Swift), aufklarer MLX models (segmentation 5.7 MB + WeSpeaker 25 MB, Apache-2.0), Argmax SpeakerKit (pyannote v4).
+  - *category*: Speaker diarization
+  - *howItWorks*: `pip install pyannote.audio`; `Pipeline.from_pretrained('pyannote/speaker-diarization-community-1', token=...)`, `.to(torch.device('mps'))`; combine with WhisperX word timestamps. Requires HF gated-model acceptance.
+  - *notes*: ~25x realtime on GPU; ~30 s for a 45-minute meeting on an M1 with CPU/MPS; embedding ~25 ms per segment on M2 Max. Sources: huggingface.co/pyannote/speaker-diarization-community-1, pyannote.ai/blog/community-1, blog.ivan.digital diarization on Apple Silicon.
+  - *whoHasIt*: pyannoteAI (Herve Bredin); FluidInference; Argmax.
+- **PaddleOCR 3.x (PP-OCRv5/v6) / RapidOCR / Tesseract** — Detect and read burned-in text, slides, lower-thirds for search, translation and auto-blur. PaddleOCR 3.7 (June 2026) ships PP-OCRv6 tiny/small/medium (1.5M/7.7M/34.5M params), 100+ languages, table/layout parsing, and PaddleOCR-VL; Tesseract is the tiny fallback (Apache-2.0, ~0.8 s/page CPU). Licenses: Apache-2.0 for both.
+  - *category*: OCR (on-screen text)
+  - *howItWorks*: `pip install paddlepaddle paddleocr` (arm64 macOS CPU wheels; reported 6.1x speedup on M4 for tiny); `PaddleOCR(lang='en').predict(frame)`; RapidOCR runs the same PP-OCR models on onnxruntime with fewer deps; `pytesseract` for Tesseract. On Mac, ocrmac (Apple Vision) is faster and simpler for Latin scripts.
+  - *notes*: PP-OCRv5 mobile det+rec ~100-200 ms/frame on M-series CPU; run only on scene-change keyframes. Sources: github.com/PaddlePaddle/PaddleOCR, codesota.com PaddleOCR vs Tesseract.
+  - *whoHasIt*: Baidu (PaddleOCR), Google/HP legacy (Tesseract), RapidAI.
+- **ocrmac (Apple Vision / LiveText OCR from Python)** — Thin MIT wrapper over VNRecognizeTextRequest and LiveText giving text, confidence and normalized bounding boxes with no model downloads; the best speed/accuracy per watt on Mac for most languages.
+  - *category*: OCR (macOS-native)
+  - *howItWorks*: `pip install ocrmac`; `ocrmac.OCR(pil_image, recognition_level='fast', language_preference=['en-US']).recognize()`; `framework='livetext'` for stronger recognition (macOS Sonoma+).
+  - *notes*: M3 Max: 207 ms accurate, 131 ms fast, 174 ms LiveText per image. Source: github.com/straussmaximilian/ocrmac.
+  - *whoHasIt*: Maximilian Strauss; Apple Vision underneath.
+- **DeepFilterNet 3 / resemble-enhance (MLX)** — Remove background noise and restore dialogue: DeepFilterNet3 is a real-time full-band (48 kHz) enhancer (MIT/Apache dual license) with Core ML and MLX ports; resemble-enhance adds a denoiser plus bandwidth-extending enhancer (MIT; multimodalart/resemble-enhance-mlx port).
+  - *category*: Speech denoise / enhancement
+  - *howItWorks*: `pip install deepfilternet` -> `enhance(model, df_state, audio)` or CLI `deepFilter noisy.wav`; also available inside mlx-audio (STS section) and speech-swift; resemble-enhance MLX via its HF repo.
+  - *notes*: DeepFilterNet3 model ~2 MB, faster than realtime on a single CPU core; resemble-enhance ~1x realtime on M-series MLX. Sources: github.com/Rikorose/DeepFilterNet, huggingface.co/multimodalart/resemble-enhance-mlx, github.com/Blaizzy/mlx-audio.
+  - *whoHasIt*: Hendrik Schroeter (DFN), Resemble AI.
+- **auto-editor** — CLI that removes silence or static sections and exports cut lists to Premiere, Resolve, FCP XML, ShotCut, Kdenlive; supports dB thresholds, motion detection and boolean combinations. Reference implementation of 'jump-cut my talking head'. License: Unlicense (public domain).
+  - *category*: Editing automation (silence/motion cuts)
+  - *howItWorks*: `pip install auto-editor`; `auto-editor in.mp4 --edit audio:threshold=-30dB --margin 0.2s --export premiere`; embeddable as a subprocess or reuse its timeline JSON.
+  - *notes*: Decode-bound; a 1-hour 1080p file analyzes in ~1-2 min on M-series. Source: github.com/WyattBlue/auto-editor.
+  - *whoHasIt*: WyattBlue.
+- **IOPaint / LaMa (image inpainting) and ProPainter (video inpainting)** — LaMa removes objects/logos/watermarks from frames in one pass (Apache-2.0; IOPaint Apache-2.0 with mps device, archived Aug 2025 but stable); ProPainter does temporally consistent video object removal with SAM masks but is NTU S-Lab License 1.0 (non-commercial without permission).
+  - *category*: Object removal / inpainting
+  - *howItWorks*: `pip3 install iopaint; iopaint start --model=lama --device=mps` (HTTP API + batch CLI); LaMa via `simple-lama-inpainting` on MPS per frame; ProPainter: clone and run `inference_propainter.py` on CPU/MPS (slow).
+  - *notes*: LaMa ~200 MB, ~0.2-0.5 s per 1080p frame on M-series GPU. ProPainter needs ~10+ GB and runs minutes per short clip on MPS. Sources: github.com/Sanster/IOPaint, github.com/sczhou/ProPainter.
+  - *whoHasIt*: Sanster (IOPaint), Samsung AI (LaMa), S-Lab NTU (ProPainter).
+- **GFPGAN / CodeFormer (face restoration)** — Restore low-quality faces in old or compressed footage and clean up lip-sync outputs. GFPGAN v1.3 is Apache-2.0 (commercial OK); CodeFormer is higher quality but NTU S-Lab License (non-commercial without permission).
+  - *category*: Face restoration / enhancement
+  - *howItWorks*: `pip install gfpgan basicsr facexlib`; `GFPGANer(model_path, upscale=2, bg_upsampler=RealESRGANer).enhance(img)` on MPS; CodeFormer `inference_codeformer.py --input_path video.mp4 -w 0.7`. Both integrate as IOPaint plugins.
+  - *notes*: GFPGAN ~330 MB; ~0.3-0.8 s/frame at 1080p on M-series GPU. Sources: github.com/TencentARC/GFPGAN, github.com/sczhou/CodeFormer.
+  - *whoHasIt*: Tencent ARC; S-Lab NTU.
+- **InsightFace / DeepFace / FaceNet (face recognition & clustering)** — Cluster people across footage ('all shots of Alice'). InsightFace code is MIT but its pretrained models are non-commercial without a license; DeepFace (MIT) wraps FaceNet/ArcFace variants with mixed weight licenses; Apple Vision face landmarks + a permissive embedding model is the clean path.
+  - *category*: Face identity / clustering
+  - *howItWorks*: `pip install insightface onnxruntime` (`FaceAnalysis(providers=['CPUExecutionProvider'])`) or `pip install deepface` (`DeepFace.represent(img, model_name='Facenet512')`); cluster embeddings with HDBSCAN.
+  - *notes*: buffalo_l pack ~300 MB; ~20-40 ms per face on M-series CPU. Source: insightface.ai licensing pages, deepface docs.
+  - *whoHasIt*: DeepInsight (InsightFace), Sefik Serengil (DeepFace).
+- **MLX (Apple array framework)** — Apple's NumPy-like framework with lazy evaluation and unified memory (zero-copy CPU/GPU); the fastest general path on Mac for LLM/VLM/audio/diffusion inference and fine-tuning; v0.31.x (Apr 2026). Most of the fastest entries above (mlx-whisper, parakeet-mlx, demucs-mlx, rife-mlx, yolo-mlx, mlx-audio, mlx-vlm, mlx-video, mflux) are MLX ports. License: MIT.
+  - *category*: Acceleration / runtime
+  - *howItWorks*: `pip install mlx mlx-lm`; convert PyTorch weights with each project's convert script; supports quantized (4/8-bit) safetensors; macOS-only (Apple Silicon), Swift and C++ bindings available; Ollama now uses MLX on Apple Silicon.
+  - *notes*: LLM throughput ~230 tok/s vs ~7-9 tok/s for PyTorch MPS in a 2025 comparative study (arxiv 2511.05502); 19-27% speedups on M4; M5 Neural Accelerators give further gains. Sources: github.com/ml-explore/mlx, arxiv.org/abs/2511.05502, machinelearning.apple.com M5 MLX post.
+  - *whoHasIt*: Apple ml-explore.
+- **Core ML + coremltools 9 (Apple Neural Engine)** — Deployment runtime that schedules across CPU/GPU/ANE; coremltools 9.0 (Nov 2025) adds macOS 26 targets, stateful models, int8 I/O, direct PyTorch conversion, quantization/palettization/pruning. Apple publishes ready Core ML packages for SAM2, Depth Anything V2, MobileCLIP, FastViT, etc. Best for low-latency, low-power per-frame models (encoders, depth, segmentation). License: BSD-3 (coremltools).
+  - *category*: Acceleration / runtime
+  - *howItWorks*: `pip install coremltools`; `ct.convert(traced_model, inputs=[ct.TensorType(shape=...)], compute_units=ct.ComputeUnit.ALL, minimum_deployment_target=ct.target.macOS15)`; run from Python with `MLModel.predict` or ship .mlpackage to a Swift helper. Ultralytics, whisper.cpp, WhisperKit, FluidAudio, SAM2 Studio all rely on it.
+  - *notes*: Examples: Depth Anything V2 small 25-33 ms/frame; Parakeet Core ML 0.19 s vs 0.50 s MLX on M4; whisper.cpp Core ML encoder >3x CPU. Caveats: fixed shapes preferred, ANE fp16 only, conversion friction for custom ops. Sources: apple.github.io/coremltools, huggingface.co/apple collections.
+  - *whoHasIt*: Apple.
+- **PyTorch MPS backend** — Metal backend for PyTorch — the universal fallback that lets most research repos (SAM2, BiRefNet, LivePortrait, Chatterbox, GFPGAN, ACE-Step, diffusers) run on Mac GPUs with `device='mps'`. Known limits: no FP8 dtypes on Metal, ~4 GB single-tensor cap, historic gaps for complex tensors and some ops (use PYTORCH_ENABLE_MPS_FALLBACK=1). License: BSD-3.
+  - *category*: Acceleration / runtime
+  - *howItWorks*: `pip install torch`; `model.to('mps')`; set `PYTORCH_ENABLE_MPS_FALLBACK=1` for unsupported ops; prefer fp16/bf16; batch small.
+  - *notes*: Typically 2-5x slower than MLX for the same model and 25-30x slower for LLM decode; still the quickest way to get any new paper running on Mac. Sources: arxiv.org/abs/2511.05502, lilting.ch MPS video-gen notes, LivePortrait/Chatterbox docs.
+  - *whoHasIt*: PyTorch Foundation / Apple contributions.
+- **mlx-audio (unified speech stack)** — Single MIT library exposing 20+ TTS models (Kokoro, Qwen3-TTS, Chatterbox via community, OmniVoice, Voxtral...), 15+ STT (Whisper, Parakeet, Qwen3-ASR, VibeVoice-ASR), and STS/enhancement (DeepFilterNet, MossFormer2, SAM-Audio separation) plus MiniMax Music 3 — all MLX-native with an OpenAI-style server.
+  - *category*: TTS / STT / enhancement toolkit
+  - *howItWorks*: `pip install mlx-audio` (Python 3.10+, ffmpeg); `load_model('mlx-community/Kokoro-82M-bf16').generate(text, voice=...)`; `mlx_audio.server` for HTTP.
+  - *notes*: Good single dependency for the audio half of the editor; benchmarks not published in README but models run faster than realtime on M-series. Source: github.com/Blaizzy/mlx-audio.
+  - *whoHasIt*: Blaizzy (Prince Canuma).
+

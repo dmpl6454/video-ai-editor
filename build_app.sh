@@ -77,16 +77,30 @@ echo "[build] BUILD_ID=$BUILD_SHA"
 # (PyTorch-based) for sentence splitting, so on THIS build specifically the
 # old "translate" feature was excluded transitively even though nothing
 # declared it so. MADLAD needs no torch.
+#
+# PyInstaller's CLI mode WRITES a fresh "<name>.spec" into --specpath, which
+# defaulted to the repo root — clobbering the committed `Video AI Editor.spec`
+# that the Windows build (build_win.ps1) and tests/test_transcribe_backend.py
+# ::test_spec_bundles_faster_whisper_data_files depend on. Emit the throwaway
+# spec under build/ (git-ignored, .gitignore:8) instead. Relative --add-data
+# SOURCES are resolved against the spec's directory, not the CWD (PyInstaller
+# building/build_main.py, format_binaries_and_datas(workingdir=spec_dir)), so
+# every source below is made absolute with $ROOT; destinations are unaffected.
+# --workpath/--distpath still default to ./build and ./dist.
+ROOT="$(pwd)"
+SPEC_DIR="$ROOT/build/pyinstaller-spec"
+mkdir -p "$SPEC_DIR"
 uv run pyinstaller \
   --name "Video AI Editor" \
   --windowed \
   --noconfirm \
+  --specpath "$SPEC_DIR" \
   --osx-bundle-identifier com.user.videoaieditor \
-  --add-data "frontend/dist:frontend/dist" \
-  --add-data "fonts:fonts" \
-  --add-data "presets:presets" \
-  --add-data "VERSION:." \
-  --add-data "BUILD_ID:." \
+  --add-data "$ROOT/frontend/dist:frontend/dist" \
+  --add-data "$ROOT/fonts:fonts" \
+  --add-data "$ROOT/presets:presets" \
+  --add-data "$ROOT/VERSION:." \
+  --add-data "$ROOT/BUILD_ID:." \
   --hidden-import "uvicorn.lifespan.on" \
   --hidden-import "uvicorn.protocols.websockets.auto" \
   --hidden-import "uvicorn.loops.auto" \
@@ -118,7 +132,8 @@ uv run pyinstaller \
   --exclude-module noisereduce \
   src/video_ai_editor/desktop.py
 
-# PyInstaller's CLI mode (used here, not the .spec — see CLAUDE.md) has no
+# PyInstaller's CLI mode (used here, not the committed .spec — the generated
+# one lands in $SPEC_DIR via --specpath, see above and CLAUDE.md) has no
 # flag for arbitrary Info.plist keys, so NSMicrophoneUsageDescription is
 # added as a post-build step. Without it, macOS TCC silently denies mic
 # access and navigator.mediaDevices is undefined in the webview regardless
@@ -129,6 +144,16 @@ if [ -f "$PLIST" ]; then
   /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Record a voiceover track for your video.'" "$PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'Record a voiceover track for your video.'" "$PLIST"
   echo "[build] added NSMicrophoneUsageDescription to Info.plist"
+  # PyInstaller's CLI mode has no version flag either, so CFBundleShortVersionString
+  # ships as "0.0.0" (Finder "Get Info", crash reports, the DMG's own metadata)
+  # unless it is stamped here — the .spec's `version=` kwarg only exists on
+  # the spec (Windows) path. Same source of truth as /api/version: VERSION.
+  APP_VERSION="$(tr -d '[:space:]' < VERSION)"
+  for KEY in CFBundleShortVersionString CFBundleVersion; do
+    /usr/libexec/PlistBuddy -c "Set :$KEY $APP_VERSION" "$PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :$KEY string $APP_VERSION" "$PLIST"
+  done
+  echo "[build] stamped Info.plist CFBundleShortVersionString/CFBundleVersion = $APP_VERSION"
 else
   echo "[build] WARNING: $PLIST not found — mic usage description NOT added"
 fi

@@ -20,6 +20,7 @@ M2 routes:
   GET  /api/sessions/{sid}/history            → chat history
 """
 from __future__ import annotations
+import inspect
 import json
 import re
 import shutil
@@ -45,7 +46,7 @@ from .edl import EDLStore
 from .edl.schema import Canvas, Clip
 from .ingest import ingest_upload
 from .render import render_preview, render_export
-from .agent.dispatch import dispatch, list_tools
+from .agent.dispatch import DISPATCH, dispatch, list_tools
 from .agent.loop import chat_turn
 
 @asynccontextmanager
@@ -214,9 +215,43 @@ def version():
     return {"version": APP_VERSION, "build": build_id()}
 
 
+def _handler_hook_flags(name: str) -> dict:
+    """Which optional job hooks a handler actually observes. dispatch() injects
+    `set_progress`/`cancel_event` by signature (agent/dispatch.py::dispatch), so
+    the signature IS the contract: a tool without `cancel_event` keeps running
+    after POST /jobs/{id}/cancel and commits anyway, and one without
+    `set_progress` sits at 0.0 until it completes. The UI must not offer
+    Cancel or a % bar for those — advertising the flags is how it knows."""
+    fn = DISPATCH.get(name)
+    try:
+        params = inspect.signature(fn).parameters if fn else {}
+    except (TypeError, ValueError):        # builtins / C callables
+        params = {}
+    return {"cancellable": "cancel_event" in params,
+            "reports_progress": "set_progress" in params}
+
+
 @app.get("/api/tools")
 def tools():
-    return {"tools": list_tools()}
+    return {"tools": [{**t, **_handler_hook_flags(t["name"])} for t in list_tools()]}
+
+
+_FEATURE_REPORT_CACHE: dict | None = None
+
+
+@app.get("/api/features")
+def features(refresh: int = 0):
+    """The `check_features` payload (ai/features.py::feature_report) over HTTP,
+    so the AI panel can grey a tool out BEFORE the click and show the exact
+    `fix` string instead of a 422 afterwards. Memoised: the probes import six
+    ai.* modules and resolve a torch device — measured 2.2 s cold — and the
+    answer only changes when someone installs something, which is what
+    `?refresh=1` (the panel's Refresh button) is for."""
+    global _FEATURE_REPORT_CACHE
+    if refresh or _FEATURE_REPORT_CACHE is None:
+        from .ai.features import feature_report
+        _FEATURE_REPORT_CACHE = feature_report()
+    return _FEATURE_REPORT_CACHE
 
 
 # ---- MCP server: let external agents (Claude Code / Cursor / Codex) drive the
@@ -451,6 +486,35 @@ async def audio_upload(sid: str, file: UploadFile = File(...),
         })
 
     return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash()}
+
+
+_SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt", ".ass"})
+
+
+@app.post("/api/sessions/{sid}/subtitle_upload")
+async def subtitle_upload(sid: str, file: UploadFile = File(...)):
+    """Store a .srt/.vtt/.ass in the session so `import_srt` can run from the
+    browser without the user typing a path. `/upload` cannot take this job:
+    it ffmpeg-normalises everything it receives and 422s on a non-video.
+
+    Deliberately does NOT dispatch. The AI panel follows up with
+    dispatch("import_srt", {path}) itself, so the import goes through the one
+    mutation path and lands in the op log / undo like every other edit.
+    """
+    _store(sid)                                  # 404 on an unknown session
+    safe_name = _safe_filename(file.filename, "captions.srt")
+    if Path(safe_name).suffix.lower() not in _SUBTITLE_SUFFIXES:
+        raise HTTPException(422, {
+            "error": "unsupported_subtitle",
+            "message": f"expected a .srt, .vtt or .ass file, got {safe_name!r}",
+        })
+    uploads = session_dir(sid) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    dst = uploads / safe_name
+    with dst.open("wb") as f:
+        while chunk := await file.read(1 << 20):
+            f.write(chunk)
+    return {"path": str(dst), "name": dst.name}
 
 
 def _match_canvas_to_source(store, probe) -> None:

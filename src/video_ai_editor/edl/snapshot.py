@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Literal
+from contextlib import contextmanager
+from typing import Iterator, Literal
 from .schema import EDL, Clip, empty_edl
 from .ops_log import OpsLog
 
@@ -38,6 +39,8 @@ class EDLStore:
         self.edl: EDL = self._load_edl()
         self.ops: OpsLog = self._load_ops()
         self._redo_stack: list[EDL] = self._load_redo_stack()
+        # >0 while inside batch(): commit() then records nothing (see batch).
+        self._batch_depth = 0
         # Seed snapshot 0 = initial state so undo can walk back to it.
         # Without this, undo can never restore "before any ops were applied"
         # because the first snapshot is taken inside commit() AFTER the first op.
@@ -159,6 +162,12 @@ class EDLStore:
 
     def commit(self, tool: str, args: dict, summary: str, by: str = "user") -> None:
         """Persist current EDL after a mutation; record op; manage undo snapshots."""
+        if self._batch_depth:
+            # Inside batch(): keep the duration honest for the next sub-tool's
+            # timeline math, but no snapshot, no op, no redo clear — the
+            # enclosing composite commits once when the batch closes.
+            self.edl.recompute_duration()
+            return None
         prev_hash = self._last_hash()
         self.edl.recompute_duration()
         new_hash = self.edl.hash()
@@ -173,6 +182,48 @@ class EDLStore:
         self._redo_stack.clear()
         self._save_redo_stack()
         return op
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Fold every commit() made inside the block into none at all, so the
+        caller can persist a whole composite edit with ONE commit — one op,
+        one snapshot, one undo step.
+
+        Why: undo() walks back exactly one snapshot per commit. Composites
+        such as remove_silences let each inner cut_range commit and then
+        added a "summary" commit whose snapshot was identical to the one
+        before it — so the first ⌘Z did nothing visible and a clip with ten
+        silences needed eleven undos. Re-entrant: nested batches
+        (apply_template → apply_hook_stack → add_super_text) collapse into
+        the outermost one. Nothing touches disk until the enclosing commit,
+        so a crash mid-composite leaves the pre-composite state on disk
+        rather than a half-applied one.
+
+        An exception escaping the block rolls the IN-MEMORY tree back too.
+        Deferring persistence alone was not enough: this store is cached
+        process-wide (main._STORES) and nothing reloads it on error, so a
+        remove_silences that died on its seventh cut left six cuts in
+        `store.edl` with no op behind them — invisible to undo, and folded
+        into whatever the user committed NEXT ("add_text" would snapshot the
+        six cuts plus the text as one step). Before batch() existed each
+        inner commit kept memory and disk consistent; this keeps that
+        guarantee. Every level snapshots its own entry state, so a nested
+        block that fails and is caught by the enclosing composite (the
+        apply_template → apply_hook_stack pattern, which logs the failure and
+        carries on) loses exactly its own edits and nothing above it. The
+        deep copy is per batch entry, not per inner commit — composites nest
+        two or three deep at most.
+        """
+        before = self.edl.model_copy(deep=True)
+        self._batch_depth += 1
+        try:
+            yield
+        except BaseException:
+            self.edl = before
+            self.edl.recompute_duration()
+            raise
+        finally:
+            self._batch_depth -= 1
 
     def _assert_reloadable(self, payload: str, tool: str) -> None:
         """Refuse to persist an EDL that could not be read back.

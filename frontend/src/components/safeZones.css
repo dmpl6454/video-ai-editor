@@ -1,0 +1,140 @@
+/* Safe-zone overlay (components/SafeZones.tsx): approximate TikTok / Reels /
+   Shorts UI-occlusion guides over the 9:16 preview, the ad-hoc guide rects
+   other panels publish (lib/guideRects.ts), and the top-bar <select> that
+   drives it. Scoped to this component — styles.css is owned elsewhere. Every
+   colour is one of the app's tokens; the only literals are the hatch / outline
+   alphas, which have to composite over arbitrary footage, and the chevron's
+   data-URI fill (a CSS variable cannot reach inside url()). Motion is opacity
+   and transform only — nothing here triggers layout or paint on the <video>. */
+
+/* --- overlay --------------------------------------------------------------- */
+
+.safe-zones {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Mandatory: StickerLayer beneath owns every click and drag on the picture
+     (stickers, text AND the direct video drag). */
+  pointer-events: none;
+}
+
+.safe-zone {
+  position: absolute;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(255, 77, 109, 0.28) 0 6px,
+    transparent 6px 12px
+  );
+  outline: 1px dashed rgba(255, 255, 255, 0.55);
+  outline-offset: -1px;
+  animation: safe-zone-in 160ms ease-out both;
+}
+
+.safe-zone-label {
+  position: absolute;
+  left: 6px;
+  top: 5px;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+/* The action rail is a ~55px column on a 405px-wide preview: write its label
+   down the strip instead of across the picture. */
+.safe-zone.is-tall .safe-zone-label {
+  writing-mode: vertical-rl;
+  left: auto;
+  right: 5px;
+  top: 6px;
+}
+
+.guide-rect {
+  position: absolute;
+  outline: 2px solid var(--accent-2);
+  outline-offset: -1px;
+  animation: safe-zone-in 120ms ease-out both;
+}
+
+.guide-rect-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 2px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: var(--bg-0);
+  background: var(--accent-2);
+  border-radius: 3px;
+}
+
+/* Bottom-right on purpose: top-left is Preview's error chip and top-right its
+   "⚙ Rendering…" chip. */
+.safe-zones-platform {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 7px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
+}
+
+@keyframes safe-zone-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* --- top-bar control -------------------------------------------------------- */
+
+.safe-zone-select {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text);
+  background-color: var(--bg-3);
+  /* Chevron in --text-dim (#9b9ba5); the native arrow is hidden by appearance:none. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath d='M1 2.5l3 3 3-3' fill='none' stroke='%239b9ba5' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 8px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 24px 3px 10px;
+  cursor: pointer;
+  /* The native popup follows the control's colour scheme; without this the
+     option list opens light-on-white inside a dark toolbar. */
+  color-scheme: dark;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.safe-zone-select:hover { background-color: #2f2f37; }   /* = button:hover in styles.css */
+
+.safe-zone-select:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+.safe-zone-select:active { transform: translateY(1px); }
+
+/* A platform is active: the pill picks up the guide colour so the state reads
+   from across the room, the same way the overlay's platform chip does. */
+.safe-zone-select.is-on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .safe-zone,
+  .guide-rect { animation: none; }
+  .safe-zone-select { transition: none; }
+}

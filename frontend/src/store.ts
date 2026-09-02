@@ -7,6 +7,7 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 import { deletedLabel } from './lib/deletedLabel'
+import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -24,8 +25,10 @@ export interface DispatchResponse {
 // through the job queue instead — the same 202-and-poll path Export has used
 // since round 3. Must stay in step with main.py's ASYNC_DISPATCH_TOOLS; the
 // backend permits `wait=0` for any tool, so a drift here costs latency, not
-// correctness.
-const ASYNC_DISPATCH_TOOLS = new Set([
+// correctness. Exported so the AI panel can tell which of its cards run as a
+// job (tests/test_qa_round5.py regexes the `const ASYNC_DISPATCH_TOOLS = new
+// Set([` literal — keep it on one line, in this file).
+export const ASYNC_DISPATCH_TOOLS = new Set([
   'remove_background', 'object_erase', 'upscale', 'stabilize',
   'smooth_slow_motion', 'vocal_isolate', 'instrumental_isolate',
   'motion_track', 'auto_caption', 'multicam',
@@ -90,12 +93,14 @@ export function errorMessage(e: unknown): string {
         ?? (typeof body.detail === 'string'
               ? body.detail
               : body.detail?.message ?? body.detail?.error)
-      if (msg) return msg
+      if (msg) return stripExceptionPrefix(msg)
     } catch {
       // not a JSON tail — fall through to the raw text
     }
   }
-  return raw
+  // Job failures arrive as "RuntimeError: …" (api/jobs.py records the class
+  // name) — see lib/dispatchErrors.ts for why the prefix is dropped.
+  return stripExceptionPrefix(raw)
 }
 
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
@@ -251,12 +256,20 @@ interface State {
   // tool's own result, e.g. add_text's new clip id or auto_caption's cue
   // count) or null on failure — the failure is already surfaced via
   // toast.error here, so callers just need to know it didn't land.
-  // `opts.onProgress` only fires for ASYNC_DISPATCH_TOOLS (the ones that run
-  // as jobs); everything else resolves too fast to be worth reporting.
+  // `opts.onProgress` only fires for tools that run as jobs — the
+  // ASYNC_DISPATCH_TOOLS, or any tool with `opts.asJob` (the AI panel sets it
+  // for the slow-but-not-ML tools so they don't hold a request worker under
+  // the session lock); everything else resolves too fast to be worth
+  // reporting. `opts.onError` receives the same message the failure toast
+  // shows, so a caller with its own status area can mirror it.
   dispatch(
     tool: string,
     args?: Record<string, unknown>,
-    opts?: { onProgress?: (p: { jobId: string; progress: number }) => void },
+    opts?: {
+      onProgress?: (p: { jobId: string; progress: number }) => void
+      onError?: (message: string) => void
+      asJob?: boolean
+    },
   ): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
   doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
@@ -595,7 +608,7 @@ export const useStore = create<State>((set, get) => ({
       // We KEEP the previous export's download link after an edit, but the UI
       // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
       const res: { result: { redo_available?: boolean }; edl_hash: string; op: Op | null } =
-        ASYNC_DISPATCH_TOOLS.has(tool)
+        (ASYNC_DISPATCH_TOOLS.has(tool) || opts?.asJob)
           ? await runDispatchJob(sid, tool, args, opts?.onProgress)
           : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
       if (tool === 'undo' || tool === 'redo') {
@@ -629,7 +642,10 @@ export const useStore = create<State>((set, get) => ({
       // a network hiccup) left the user staring at a UI that looked like
       // nothing happened, with no error anywhere (issue 15-adjacent: "no
       // persistent error surface for a failed edit").
-      toast.error(errorMessage(e))
+      const msg = errorMessage(e)
+      opts?.onError?.(msg)
+      if (isCancelMessage(msg)) toast.info(msg)   // the user asked for this — not red
+      else toast.error(msg)
       return null
     } finally {
       set({ pendingOps: Math.max(0, get().pendingOps - 1) })

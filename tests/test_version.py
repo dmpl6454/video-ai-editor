@@ -158,3 +158,37 @@ def test_a_dirty_build_id_is_unique_per_build():
     assert any("Get-Date" in ln for ln in dirty), (
         "a dirty BUILD_ID must carry a per-build stamp (Get-Date), otherwise "
         "two different builds of uncommitted work report the same identity")
+
+
+# --- single-sourcing ---------------------------------------------------------
+# VERSION read 0.4.1 while pyproject.toml / package.json / uv.lock said 0.3.7
+# and `__version__` said 0.1.0 — four answers to "what am I running". Every
+# place that states a version must agree with the VERSION file.
+
+def test_version_is_single_sourced_everywhere():
+    import json
+    import tomllib
+
+    import video_ai_editor
+
+    root = VERSION_FILE.parent
+    expected = VERSION_FILE.read_text().strip()
+
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["version"] == expected
+
+    package = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
+    assert package["version"] == expected
+    lock = json.loads((root / "frontend/package-lock.json").read_text(encoding="utf-8"))
+    assert lock["version"] == expected
+    assert lock["packages"][""]["version"] == expected
+
+    assert video_ai_editor.__version__ == expected
+
+    uv_lock = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
+    ours = [p["version"] for p in uv_lock["package"] if p["name"] == "video-ai-editor"]
+    assert ours == [expected], ours
+
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    first_heading = next(ln for ln in changelog.splitlines() if ln.startswith("## "))
+    assert first_heading == f"## {expected}"

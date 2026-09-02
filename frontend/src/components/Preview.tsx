@@ -5,6 +5,7 @@ import { isMediaClip, type Clip } from '../types'
 import { TextLayer } from './TextLayer'
 import { StickerLayer } from './StickerLayer'
 import { CropReposition } from './CropReposition'
+import { SafeZones } from './SafeZones'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
 import { ErrorBoundary } from './ErrorBoundary'
 import { chordLabel } from '../keymap/engine'
@@ -1112,6 +1113,11 @@ export function Preview() {
         {edl && boxSize.w > 0 && (
           <TextLayer edl={edl} videoEl={ref.current} width={boxSize.w} height={boxSize.h} />
         )}
+        {/* Safe-zone / guide-rect overlay. Above text so the hatch reads over
+            the captions it exists to place; below CropReposition, which
+            replaces the whole picture while framing. pointer-events:none —
+            StickerLayer keeps every click. See SafeZones.tsx. */}
+        {edl && boxSize.w > 0 && <SafeZones canvas={edl.canvas} width={boxSize.w} height={boxSize.h} />}
         {/* CapCut-style crop/reposition view. Deliberately LAST (topmost) —
             it fully replaces the view above (raw uncropped source, zoomed
             out) while active, so sticker/text interaction is unavailable

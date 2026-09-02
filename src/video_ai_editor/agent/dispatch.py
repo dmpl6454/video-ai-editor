@@ -874,16 +874,17 @@ def get_clip(store: EDLStore, args: dict) -> dict:
 
 
 def get_transcript(store: EDLStore, args: dict) -> dict:
-    # Transcript lives in the session dir as ingest.json, one per uploaded
-    # source. Resolve the file that belongs to the clip CURRENTLY on v1 —
-    # not an arbitrary glob hit — so a stale transcript from a prior upload
-    # in this session is never returned for the video actually on the timeline.
-    import json
-    ingest_json = _current_v1_ingest_json(store)
-    if ingest_json is None:
+    # Two writers, one reader (see _load_transcript): an explicitly imported
+    # `<session>/transcript.json` wins, else the whisper `ingest.json` that
+    # belongs to the clip CURRENTLY on v1 — never an arbitrary glob hit, so a
+    # stale transcript from a prior upload in this session is never returned
+    # for the video actually on the timeline. This used to read the ingest
+    # side only, so remove_fillers / find_moments / generate_hook ignored a
+    # subtitle file the user had just imported.
+    transcript = _load_transcript(store)
+    if transcript is None:
         return {"segments": [], "language": None, "duration": 0.0}
-    data = json.loads(ingest_json.read_text(encoding="utf-8"))
-    return data.get("transcript") or {"segments": [], "language": None, "duration": 0.0}
+    return transcript.model_dump()
 
 
 # ---------- edits ----------
@@ -1476,12 +1477,15 @@ def apply_hook_stack(store: EDLStore, args: dict) -> dict:
                 c for c in prior.clips
                 if not (isinstance(c, TextClip) and c.role == "hook" and c.start < 1.0)
             ]
-    text_result = add_super_text(store, {
-        # See add_hook_overlay: the hook stack is house style, so it keeps caps
-        # explicitly rather than relying on the role default.
-        "text": str(text), "start": 0.0, "end": duration, "role": "hook",
-        "upper": True,
-    })
+    # add_super_text commits on its own; batch() folds that into the single
+    # apply_hook_stack commit below so the whole stack is one undo step.
+    with store.batch():
+        text_result = add_super_text(store, {
+            # See add_hook_overlay: the hook stack is house style, so it keeps
+            # caps explicitly rather than relying on the role default.
+            "text": str(text), "start": 0.0, "end": duration, "role": "hook",
+            "upper": True,
+        })
 
     # 2) VISUAL axis -------------------------------------------------------
     v1 = store.edl.get_track("v1")
@@ -1565,13 +1569,17 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     cap.config.style = style  # type: ignore
     cap.config.position = position  # type: ignore
 
-    import json
-    ingest_json = _current_v1_ingest_json(store)
+    # Resolve through _load_transcript, which knows BOTH transcript writers:
+    # `<session>/transcript.json` (import_srt) wins over the whisper
+    # `ingest.json`. Reading only the ingest side meant "Import subtitles →
+    # Captions from transcript" laid down zero (or the old whisper) cues — the
+    # imported file never reached the timeline, and on a packaged Mac without
+    # faster-whisper that import is the only caption path there is.
+    transcript = _load_transcript(store)
     cap.clips = []
     seg_count = 0
-    if ingest_json is not None:
-        data = json.loads(ingest_json.read_text(encoding="utf-8"))
-        tx = data.get("transcript") or {}
+    if transcript is not None:
+        tx = transcript.model_dump()
         canvas = store.edl.canvas
         y_pos = canvas.h * (0.85 if position == "bottom" else 0.5 if position == "center" else 0.15)
 
@@ -2284,14 +2292,16 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
     # Apply cuts back-to-front so timeline coords stay valid mid-cut
     ranges_to_cut.sort(reverse=True)
     n = 0
-    for s, e in ranges_to_cut:
-        try:
-            cut_range(store, {"track": track_id, "start": s, "end": e})
-            n += 1
-        except ValueError:
-            continue
+    # One user action = one undo step: batch() swallows each cut_range's own
+    # commit so the single commit below is the only op/snapshot recorded.
+    with store.batch():
+        for s, e in ranges_to_cut:
+            try:
+                cut_range(store, {"track": track_id, "start": s, "end": e})
+                n += 1
+            except ValueError:
+                continue
     summary = f"Removed {n} silences (threshold {threshold_db}dB, min {min_dur}s)"
-    # The individual cut_range commits already log; add a final summary op too.
     store.commit("remove_silences", args, summary)
     return {"summary": summary, "cuts": n}
 
@@ -2323,12 +2333,13 @@ def remove_fillers(store: EDLStore, args: dict) -> dict:
 
     ranges.sort(reverse=True)
     n = 0
-    for s, e in ranges:
-        try:
-            cut_range(store, {"track": track_id, "start": s, "end": e})
-            n += 1
-        except ValueError:
-            continue
+    with store.batch():  # one undo step for the whole pass (see remove_silences)
+        for s, e in ranges:
+            try:
+                cut_range(store, {"track": track_id, "start": s, "end": e})
+                n += 1
+            except ValueError:
+                continue
     summary = f"Removed {n} filler words"
     store.commit("remove_fillers", args, summary)
     return {"summary": summary, "cuts": n}
@@ -2357,12 +2368,13 @@ def auto_cut_to_beats(store: EDLStore, args: dict) -> dict:
     beat_tl_times = [music_clip.start + t for t in beat_times if t >= 0]
     cuts = beat_tl_times[::max(1, subdivision)]
     n = 0
-    for t in cuts:
-        try:
-            split_at(store, {"track": "v1", "time": t})
-            n += 1
-        except (ValueError, KeyError):
-            continue
+    with store.batch():  # one undo step for all the splits (see remove_silences)
+        for t in cuts:
+            try:
+                split_at(store, {"track": "v1", "time": t})
+                n += 1
+            except (ValueError, KeyError):
+                continue
     summary = f"Cut V1 at {n} beats (every {subdivision})"
     store.commit("auto_cut_to_beats", args, summary)
     return {"summary": summary, "splits": n, "beats_total": len(beat_times)}
@@ -4243,7 +4255,8 @@ def apply_template(store: EDLStore, args: dict) -> dict:
     if args.get("with_hook_stack", True):
         try:
             hook_text = inputs.get("hook") or inputs.get("text")
-            hook_info = apply_hook_stack(store, {"text": hook_text} if hook_text else {})
+            with store.batch():  # fold the stack's commit into this template's
+                hook_info = apply_hook_stack(store, {"text": hook_text} if hook_text else {})
             info.setdefault("applied", []).append(
                 f"hook_stack({hook_info.get('axes', {})})"
             )

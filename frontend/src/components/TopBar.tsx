@@ -7,6 +7,7 @@ import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
+import { SafeZoneToggle } from './SafeZones'
 
 interface SessionRow { id: string; name: string }
 
@@ -312,6 +313,7 @@ export function TopBar() {
             onClick={() => dispatch('set_aspect_ratio', { ratio: r })}
           >{r}</button>
         ))}
+        <SafeZoneToggle />
         <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
         <TextTool />
         <CaptionsButton />

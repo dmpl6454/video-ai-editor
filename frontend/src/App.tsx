@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from './store'
 import { TopBar } from './components/TopBar'
-import { MediaBin } from './components/MediaBin'
+import { LeftPane } from './components/LeftPane'
 import { Preview } from './components/Preview'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Timeline } from './components/Timeline'
@@ -74,7 +74,7 @@ export default function App() {
     <div className="app" style={appVars}>
       <TopBar />
       <aside className="sidebar left">
-        <MediaBin />
+        <LeftPane />
       </aside>
       <Splitter
         orientation="vertical"

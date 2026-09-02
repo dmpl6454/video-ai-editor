@@ -185,6 +185,12 @@ export function useKeymap() {
         (tag === 'INPUT' && TEXT_INPUT_TYPES.has((tgt as HTMLInputElement).type || 'text'))
       // Genuine text fields keep every key for typing.
       if (isTextEntry) return
+      // An explicit opt-out scope. Generated forms (the AI panel) are dense
+      // with checkboxes and buttons that a keyboard user reaches by Tab and
+      // toggles with Space — the one key the transport shortcut below would
+      // otherwise take from them. Inside such a scope the control wins,
+      // exactly as a text field does; everywhere else the rule stays.
+      if (tgt?.closest?.('[data-keymap-ignore]')) return
 
       // A focused non-text control (range slider, checkbox, button, select)
       // still keeps its own navigation keys, but global shortcuts — above all
