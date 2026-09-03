@@ -472,7 +472,10 @@ print_summary() {
   # earlier --sign-only run would otherwise be reported (size, sha256) as
   # if it were this run's notarized artifact.
   if [ "$DMG_BUILT" = 1 ]; then
-    size="$(du -h "$DMG" | cut -f1)"
+    # Apparent size, not allocated blocks: plain `du -h` reported 142M for the
+    # 126M image after stapler rewrote it (APFS block slack), which disagreed
+    # with build_dmg.sh's own line and with what the sha256 covers.
+    size="$(du -Ah "$DMG" | cut -f1), $(stat -f %z "$DMG") bytes"
     sha="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
     echo "dmg           : $DMG ($size)"
     echo "sha256        : $sha"
