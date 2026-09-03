@@ -57,6 +57,15 @@ at the repo root, surfaced at `/api/version` and in the editor's top bar.
   way the subtitle exporters do: an imported `<session>/transcript.json` wins
   over Whisper's `ingest.json`, so "Import subtitles → Captions from
   transcript" lays the imported cues on the timeline.
+- **Notarized macOS release pipeline.** `build_notarize.sh` takes
+  `build_app.sh`'s ad-hoc-signed bundle, re-signs it inside-out with a
+  Developer ID (every `.so`/`.dylib` first, then the bundle with
+  `entitlements.plist`, no `--deep`), notarizes and staples the app, then
+  builds, signs, notarizes and staples the DMG, and refuses to finish unless
+  `spctl` reports `Notarized Developer ID` for both. `build_app.sh` is
+  unchanged (still the ad-hoc dev path); `build_dmg.sh` gained `VAE_APP` /
+  `VAE_DMG` overrides with the same defaults. `VAE_SIGN_IDENTITY=- … --sign-only`
+  is a keychain-free dry run. Setup in CLAUDE.md → "Notarized release".
 
 ## 0.3.7
 
