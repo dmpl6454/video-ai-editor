@@ -16,6 +16,8 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
+from html import escape as _escape
 from pathlib import Path
 
 # Absolute (not `from .`): the frozen PyInstaller EXE runs this file as the
@@ -62,9 +64,20 @@ def _diag(msg: str) -> None:
         pass
 
 
-def _wait_for_server(url: str, timeout: float = 15.0) -> bool:
+def _wait_for_server(url: str, timeout: float = 15.0,
+                     abort: Callable[[], bool] | None = None) -> bool:
+    """Poll `url` until it answers 200, or `timeout` elapses.
+
+    `abort` is checked between attempts and short-circuits the wait. The only
+    caller that passes one uses it for "the server thread already recorded a
+    crash": no amount of further polling can make a dead uvicorn answer, and
+    staring at a splash for the full startup timeout when the reason is
+    already known is the same silent failure this path exists to remove.
+    """
     end = time.time() + timeout
     while time.time() < end:
+        if abort is not None and abort():
+            return False
         try:
             with urllib.request.urlopen(url, timeout=0.5) as r:
                 if r.status == 200:
@@ -150,6 +163,22 @@ def _ensure_frontend_built() -> None:
               "Fix the build or your UI will not match the source.")
 
 
+# Set by _serve when uvicorn dies, read by the startup watcher. A crash (port
+# already bound, a bad import) is knowable in ~1s, so the launcher must not sit
+# out the whole startup timeout before saying anything.
+_SERVER_ERROR: str | None = None
+
+
+def _last_exception_line(traceback_text: str) -> str:
+    """The trailing `Type: message` line of a traceback, sized for a window.
+
+    That last line is the only part a user can act on ("Address already in
+    use"); the frames above it belong in the log, which _diag already writes.
+    """
+    lines = [ln.strip() for ln in traceback_text.strip().splitlines() if ln.strip()]
+    return lines[-1][:200] if lines else "unknown error"
+
+
 def _serve(host: str, port: int) -> None:
     """Run uvicorn in this thread.
 
@@ -161,6 +190,7 @@ def _serve(host: str, port: int) -> None:
     through _diag so a real import/bind failure is never indistinguishable
     from "still importing".
     """
+    global _SERVER_ERROR
     try:
         import uvicorn
         # log_config=None is required, not optional, in a windowed/frozen
@@ -175,9 +205,25 @@ def _serve(host: str, port: int) -> None:
         uvicorn.run("video_ai_editor.main:app", host=host, port=port,
                     reload=False, log_level="warning", access_log=False,
                     log_config=None)
+    except SystemExit as e:
+        # The arm that actually fires in production. uvicorn does NOT raise on
+        # the two failures a user hits — a port already in use, or a fatal
+        # startup error — it LOGS and calls sys.exit(1). In a daemon thread
+        # that raises SystemExit, which `except Exception` does not catch
+        # (SystemExit derives from BaseException), so without this arm
+        # _SERVER_ERROR stayed None, the watcher's abort predicate never
+        # tripped, and the honest "why it failed" page was unreachable code:
+        # the user waited out the whole startup timeout instead.
+        _SERVER_ERROR = (
+            f"the backend exited during startup (code {e.code}). "
+            f"Another copy of Video AI Editor may already be running."
+        )
+        _diag(f"server thread exited via SystemExit(code={e.code})")
     except Exception:
         import traceback
-        _diag("server thread crashed:\n" + traceback.format_exc())
+        tb = traceback.format_exc()
+        _SERVER_ERROR = _last_exception_line(tb)
+        _diag("server thread crashed:\n" + tb)
 
 
 def _avfoundation_default_audio_index() -> str:
@@ -329,6 +375,54 @@ def _post_multipart_file(url: str, field_name: str, file_path: Path,
         return _json.loads(resp.read().decode("utf-8"))
 
 
+# Characters no mainstream filesystem accepts in a leaf, minus the separators
+# (those are split off first, below). The Windows set is the strict superset and
+# is applied on both platforms, so the same project proposes the same filename
+# on either OS.
+_UNSAFE_LEAF_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def _suggested_save_name(disk_name: str, suggested: str | None) -> str:
+    """The name the native Save dialog proposes.
+
+    `disk_name` is the export's real leaf under `exports/` — today
+    `export_<edl hash>.mp4`, which means nothing to a user and is byte-identical
+    every time the same timeline is exported, so two exports of two different
+    cuts can land on the same proposed filename. The backend now sends a human
+    one alongside it; nothing about WHERE the file is written changes, only what
+    the dialog offers.
+
+    Falls back to `disk_name` whenever the suggestion is missing (an older
+    backend that doesn't send one), empty, or sanitises down to nothing: a
+    dialog proposing a hash is far better than one that fails to open.
+
+    The EXTENSION always comes from `disk_name`. The export is .mp4 or .mov and
+    the bytes are what they are — a suggestion carrying a different container
+    (or none at all) must not mislabel the saved file.
+    """
+    ext = Path(disk_name).suffix
+    if not isinstance(suggested, str):
+        return disk_name
+    # Take the last path segment first (both separators, on both platforms):
+    # stripping the separators instead would fuse "a/b.mp4" into "ab.mp4".
+    leaf = re.split(r"[\\/]", suggested)[-1]
+    stem = _UNSAFE_LEAF_CHARS.sub("", leaf).strip()
+    # Drop a trailing container extension — the disk one is re-applied below.
+    # An allowlist, not "any short suffix": a title legitimately ending in
+    # ".2026" or ".v2" must keep it rather than lose a piece of its name.
+    for known in (ext, ".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"):
+        if known and stem.lower().endswith(known.lower()):
+            stem = stem[: -len(known)]
+            break
+    # Leading dots would make it a hidden file; trailing ones are stripped by
+    # Windows anyway.
+    stem = stem.strip().strip(".").strip()
+    # APFS/HFS+ and NTFS cap a leaf at 255 *bytes*, and a name derived from a
+    # project title can be non-ASCII, so truncate the encoded form.
+    stem = stem.encode("utf-8")[:200].decode("utf-8", "ignore").strip()
+    return (stem + ext) if stem else disk_name
+
+
 class _Api:
     """Bridge exposed to the frontend as `window.pywebview.api`.
 
@@ -457,10 +551,20 @@ class _Api:
 
         return {"ok": True, **result}
 
-    def save_export(self, session_id: str, filename: str) -> str | None:
+    def save_export(self, session_id: str, filename: str,
+                    suggested_name: str | None = None) -> str | None:
         """Copy an exported file to a user-chosen location via the native
         save dialog. Returns the chosen destination path, or None if the
-        session/file is invalid or the user cancelled the dialog."""
+        session/file is invalid or the user cancelled the dialog.
+
+        `filename` LOCATES the file: it is the export's real leaf in the
+        session's `exports/` dir. `suggested_name` is only what the dialog
+        proposes — the export response carries it so the user is offered
+        something like "beach-clip-2026-09-04.mp4" instead of the edl hash.
+        It is optional in both directions: an older frontend calls this with
+        two arguments and gets exactly the old behaviour, and a backend that
+        sends no name falls back to the hash rather than failing.
+        """
         if not is_valid_session_id(session_id):
             return None
         # Reject any filename that isn't a bare leaf (e.g. "../../etc/passwd")
@@ -475,7 +579,8 @@ class _Api:
                          # importable (e.g. under pytest) without a GUI toolkit
         win = webview.windows[0]
         dest = win.create_file_dialog(
-            webview.FileDialog.SAVE, save_filename=filename,
+            webview.FileDialog.SAVE,
+            save_filename=_suggested_save_name(filename, suggested_name),
         )
         if not dest:
             return None
@@ -524,6 +629,139 @@ class _Api:
         return dest_path
 
 
+# Window chrome for everything shown BEFORE the editor loads. Kept in step with
+# frontend/src/styles.css (--bg-0 / --text / --text-dim): these pages live in the
+# same window the editor then loads into, so a mismatched background is a visible
+# flash at hand-off — and pywebview's own default is white.
+_BG = "#0e0e10"
+_FG = "#e6e6eb"
+_FG_DIM = "#9b9ba5"
+
+# How long to wait for the backend before putting ANY window on screen. A warm
+# start answers in ~1.5s, so the ordinary case still goes straight to the editor
+# with no splash at all and behaves exactly as it did before; only a slow start
+# (35s measured on the notarized 0.5.0 DMG's first launch) gets the splash —
+# which is the case where the old behaviour was a bouncing Dock icon and nothing
+# else for half a minute.
+_SPLASH_AFTER_S = 2.0
+# Past the startup timeout we keep checking quietly. A Mac slower than the build
+# box can finish a cold start late, and healing into the editor beats making the
+# user quit and relaunch. Bounded so the thread cannot outlive a real failure.
+_LATE_RETRY_FOR_S = 600.0
+_LATE_RETRY_EVERY_S = 2.0
+
+
+def _status_page(headline: str, lines: list[str], *, busy: bool) -> str:
+    """A self-contained page for the window while there is no editor to show.
+
+    Everything is inline on purpose: this is displayed precisely when
+    `frontend/dist` is NOT being served yet, so a single external stylesheet,
+    font or image reference would render as a broken box at the exact moment
+    the user is deciding whether the app is working.
+
+    The content fades in on a delay, so a backend that answers a moment after
+    the window opens hands over to the editor before any of this is legible —
+    a fast launch shows the app's own background colour and nothing more.
+    """
+    body = "\n  ".join(f"<p>{_escape(ln)}</p>" for ln in lines)
+    spinner = '<div class="spin"></div>' if busy else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Video AI Editor</title><style>
+  html,body{{height:100%;margin:0;background:{_BG};color:{_FG};
+    font:13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;
+    -webkit-font-smoothing:antialiased;-webkit-user-select:none;cursor:default}}
+  .wrap{{height:100%;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;padding:0 48px;text-align:center;
+    animation:fade .35s ease .4s both}}
+  h1{{font-size:15px;font-weight:600;margin:0;letter-spacing:.2px}}
+  /* Body is user-select:none so the window feels native, but the failure page
+     prints the app.log path — the one actionable string on it — and a user
+     being told to look at a file they cannot copy is a dead end. */
+  p{{margin:0;max-width:520px;color:{_FG_DIM};
+    -webkit-user-select:text;user-select:text;cursor:text}}
+  .spin{{width:18px;height:18px;border-radius:50%;border:2px solid #ffffff22;
+    border-top-color:{_FG_DIM};animation:rot .8s linear infinite}}
+  @keyframes rot{{to{{transform:rotate(360deg)}}}}
+  @keyframes fade{{from{{opacity:0}}to{{opacity:1}}}}
+</style></head><body><div class="wrap">
+  {spinner}
+  <h1>{_escape(headline)}</h1>
+  {body}
+</div></body></html>"""
+
+
+def _splash_html() -> str:
+    return _status_page("Starting Video AI Editor", [
+        "Warming up the video engine. The first launch after installing takes "
+        "the longest — later ones are quick.",
+    ], busy=True)
+
+
+def _startup_failed_html(url: str, timeout: float, error: str | None) -> str:
+    """What the window says when the backend never answered.
+
+    Exiting silently here (the old behaviour) is indistinguishable from the app
+    refusing to launch, and it happens on exactly the machines nobody tested on
+    — slower than the build box. Everything below is something the recipient of
+    a DMG can actually do.
+    """
+    log = _pu.user_data_dir("Video AI Editor") / "logs" / "app.log"
+    lines = []
+    if error:
+        lines.append(f"The engine stopped with: {error}")
+    else:
+        lines.append(f"The engine did not answer on {url} within "
+                     f"{timeout:.0f} seconds.")
+    lines.append("If another copy of Video AI Editor is already open, quit it "
+                 "and open this one again.")
+    lines.append(f"Details are in {log}")
+    if not error:
+        # Only honest while the watcher is still polling — a crashed server
+        # thread never comes back, so that branch does not make the promise.
+        lines.append("Still checking — the editor will open here by itself if "
+                     "the engine answers.")
+    return _status_page("The editor could not start", lines, busy=False)
+
+
+def _open_editor_when_ready(window, url: str, health_url: str,
+                            timeout: float) -> None:
+    """Hold the splash until the backend answers, then hand the window over.
+
+    Deliberately a daemon thread of our own rather than `webview.start(func=…)`:
+    pywebview starts that one non-daemon, so a user who gives up and closes the
+    splash would keep a process alive until the poll finished.
+
+    `Window.load_url`/`load_html` are safe from here — both wait on the window's
+    `shown` event and marshal to the UI thread (AppHelper.callAfter on Cocoa),
+    and `load_url` only clears the pending-event flags, so the Windows
+    accelerator-key handler bound to `events.loaded` survives the hand-off and
+    fires again for the editor.
+    """
+    try:
+        if _wait_for_server(health_url, timeout=timeout,
+                            abort=lambda: _SERVER_ERROR is not None):
+            window.load_url(url)
+            return
+        err = _SERVER_ERROR
+        _diag((f"backend crashed before serving {url}: {err}" if err else
+               f"backend didn't answer on {url} within {timeout:.0f}s")
+              + " — the window is showing the failure page.")
+        window.load_html(_startup_failed_html(url, timeout, err))
+        if err:
+            return  # the server thread is gone; polling it cannot help
+        deadline = time.time() + _LATE_RETRY_FOR_S
+        while time.time() < deadline:
+            time.sleep(_LATE_RETRY_EVERY_S)
+            if _SERVER_ERROR:
+                return
+            if _wait_for_server(health_url, timeout=1.0):
+                window.load_url(url)
+                return
+    except Exception:
+        import traceback
+        _diag("startup hand-off failed:\n" + traceback.format_exc())
+
+
 def main() -> None:
     _ensure_frontend_built()
     host = os.environ.get("VAE_HOST", "127.0.0.1")
@@ -536,20 +774,33 @@ def main() -> None:
     # hard-coded 15s default on a loaded Windows box, so the launcher gave up
     # before uvicorn bound (E2E report ISSUE-05). Default to 60s; overridable.
     startup_timeout = float(os.environ.get("VAE_STARTUP_TIMEOUT", "60"))
-    if not _wait_for_server(f"{url}/api/health", timeout=startup_timeout):
-        _diag(f"backend didn't start on {url} within {startup_timeout:.0f}s — "
-              f"the window would open with nothing to show. Check the log next to this line.")
-        sys.exit(1)
+    health_url = f"{url}/api/health"
 
     import webview
+    # Give the backend a moment to answer BEFORE creating the window: a warm
+    # start wins that race and opens straight into the editor, exactly as it
+    # always did. Only a slow start gets a window it has something to say in —
+    # previously it got no window at all, then (past the timeout) a process
+    # that exited without a word, which reads as "the app won't launch".
+    ready = _wait_for_server(health_url, timeout=_SPLASH_AFTER_S)
     window = webview.create_window(
         title="Video AI Editor",
-        url=url,
+        url=url if ready else None,
+        html=None if ready else _splash_html(),
         width=1480, height=920,
         min_size=(1100, 700),
         easy_drag=False,
+        background_color=_BG,
         js_api=_Api(host, port),
     )
+    if not ready:
+        # Spend the rest of the caller's budget waiting, then say so on screen.
+        threading.Thread(
+            target=_open_editor_when_ready,
+            args=(window, url, health_url,
+                  max(1.0, startup_timeout - _SPLASH_AFTER_S)),
+            daemon=True,
+        ).start()
     if _pu.IS_WINDOWS:
         # WebView2 honors browser accelerator keys by default, so F5 reloads
         # the editor mid-session and Ctrl+F/Ctrl+P/Ctrl+W open find/print/

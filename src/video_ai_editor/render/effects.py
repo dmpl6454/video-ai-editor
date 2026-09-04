@@ -169,7 +169,15 @@ def _hflip(_: dict, uid: str = "") -> str:
 
 
 def _vflip(_: dict, uid: str = "") -> str:
-    return "vflip"
+    # ",copy" is load-bearing, not decorative. vflip emits a NEGATIVE-stride
+    # view of its input rather than new pixels; handing that straight to
+    # h264_videotoolbox SIGBUSes the whole ffmpeg process (rc=-10) on the
+    # static ffmpeg 7.0 we bundle, killing the render with no usable stderr.
+    # `copy` materialises a normal positive-stride buffer and costs one frame
+    # memcpy. Brew's ffmpeg 8 happens to survive without it, so this only
+    # reproduces against the shipped binary — see tests/test_render_correctness
+    # ::test_effect_renders_valid_mp4[vflip-params9].
+    return "vflip,copy"
 
 
 def _rgb_split(p: dict, uid: str = "") -> str:

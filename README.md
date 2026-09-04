@@ -3,7 +3,11 @@
 [![CI](https://github.com/dmpl6454/video-ai-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/dmpl6454/video-ai-editor/actions/workflows/ci.yml)
 
 Local, chat-driven, CapCut-class video editor. Upload a video, tell Claude how
-to edit it. Everything runs on your machine — only Claude API calls leave it.
+to edit it. Your media never leaves your machine: all decoding, rendering and
+export happen on-device. Three things do use the network — chat (Claude API),
+emoji artwork (fetched once from a CDN, then cached locally so preview and
+export stay pixel-identical), and the first-use download of optional AI models
+(captions, translation). None of them carry your video.
 
 - **100 dispatch tools** (94 advertised to the chat agent) covering every CapCut feature pillar (multi-track
   timeline, keyframes, effects, masks, chroma key, transitions, color grading,

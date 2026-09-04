@@ -13,9 +13,22 @@ def _augment_path_for_gui_launch() -> None:
     winget-installed ffmpeg (Gyan.FFmpeg) is famously NOT put on PATH — so we
     also probe its package dir. Append (don't prepend) so we never override a
     deliberately-chosen binary."""
+    extra: list[str] = []
+    # A frozen build SHIPS its own ffmpeg/ffprobe (build_app.sh --add-binary),
+    # so put that directory on PATH as well. `_pu.FFMPEG`/`FFPROBE` already
+    # resolve to the bundled ABSOLUTE paths — this is for whatever resolves a
+    # bare name itself: a third-party library, or a child process that only
+    # inherits PATH. Empty from source, so the dev path is untouched.
+    #
+    # This function used to add ONLY the Homebrew/MacPorts dirs, never the
+    # bundle's own, which is one half of why the shipped DMG could not decode a
+    # single frame on a Mac without Homebrew (the other half is that
+    # `_pu.FFMPEG` was a bare name — see platformutil.resolve_tool).
+    bundled = _pu.bundled_bin_dir()
+    if bundled:
+        extra.append(str(bundled))
     if _pu.IS_WINDOWS:
         localappdata = os.environ.get("LOCALAPPDATA", "")
-        extra = []
         if localappdata:
             # Gyan.FFmpeg / BtbN unzip locations; glob the winget packages dir.
             wg = Path(localappdata) / "Microsoft" / "WinGet" / "Packages"
@@ -23,8 +36,8 @@ def _augment_path_for_gui_launch() -> None:
                 extra += [str(p) for p in wg.glob("Gyan.FFmpeg*/**/bin") if p.is_dir()]
             extra.append(str(Path(localappdata) / "Programs" / "ffmpeg" / "bin"))
     else:
-        extra = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
-                 "/usr/local/sbin", str(Path.home() / ".local" / "bin")]
+        extra += ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+                  "/usr/local/sbin", str(Path.home() / ".local" / "bin")]
     current = os.environ.get("PATH", "").split(os.pathsep)
     additions = [d for d in extra if d and d not in current and os.path.isdir(d)]
     if additions:

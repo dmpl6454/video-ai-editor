@@ -7,7 +7,8 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 import { deletedLabel } from './lib/deletedLabel'
-import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
+import { isCancelMessage } from './lib/dispatchErrors'
+import { errorMessage } from './lib/errorMessage'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -63,45 +64,14 @@ async function runDispatchJob(
   }
 }
 
-// api.ts's http() throws `Error("422 Unprocessable Entity: {json envelope}")`
-// with the raw response body appended. The body is usually the hardening
-// error envelope ({error:{message}}) or a FastAPI detail — pull the human-
-// readable message out so toasts show e.g. "auto_caption: no clip on v1 to
-// caption" instead of a wall of JSON.
-// The backend's error envelope (api/hardening.py) hardcodes
-//   message = "request failed"
-// for EVERY HTTPException whose detail is a dict, and puts the real dict under
-// `error.details`. So reading `error.message` first — as this used to — meant a
-// carefully written server-side explanation ("a cached overlay image was
-// corrupted; your media is fine") could never reach a toast: the user always saw
-// "request failed". Prefer details.message and fall back to the sentinel.
-export function errorMessage(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e)
-  const jsonStart = raw.indexOf('{')
-  if (jsonStart !== -1) {
-    try {
-      const body = JSON.parse(raw.slice(jsonStart)) as {
-        error?: { message?: string; details?: unknown }
-        detail?: string | { error?: string; message?: string }
-      }
-      const d = body.error?.details
-      const detailMsg = d && typeof d === 'object' && !Array.isArray(d)
-        ? (d as { message?: string }).message
-        : undefined
-      const msg = detailMsg
-        ?? body.error?.message
-        ?? (typeof body.detail === 'string'
-              ? body.detail
-              : body.detail?.message ?? body.detail?.error)
-      if (msg) return stripExceptionPrefix(msg)
-    } catch {
-      // not a JSON tail — fall through to the raw text
-    }
-  }
-  // Job failures arrive as "RuntimeError: …" (api/jobs.py records the class
-  // name) — see lib/dispatchErrors.ts for why the prefix is dropped.
-  return stripExceptionPrefix(raw)
-}
+// Re-exported from lib/errorMessage so the many `import { errorMessage } from
+// '../store'` call sites keep working. The implementation moved there because
+// api.ts needed the SAME reader: it had its own, built on `body.detail.error`
+// — a key api/hardening.py's envelope never emits — so every upload/voiceover/
+// project-load failure showed as a bare "422 Unprocessable Entity" while the
+// backend's sentence sat unread in `error.details.message`. One reader, one
+// wire format, no second copy to drift.
+export { errorMessage }
 
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
 // SSR (no `localStorage`), an unset key (`null` -> NaN -> falls through to
@@ -152,6 +122,11 @@ interface State {
   exporting: boolean
   exportUrl: string | null
   exportFilename: string | null // leaf name of the finished export (for the native save dialog)
+  // Human name to OFFER for that file (`Beach_Trip_2026-09-04.mp4`) — the
+  // on-disk leaf is `export_<edl-hash>.mp4`, which is the render cache key
+  // and unreadable as a proposed download. Null on a backend that predates
+  // the field; every consumer falls back to `exportFilename`.
+  exportSuggestedName: string | null
   exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
   exportError: string | null
   exportProgress: number        // 0..1 live ffmpeg progress
@@ -313,6 +288,7 @@ export const useStore = create<State>((set, get) => ({
   exporting: false,
   exportUrl: null,
   exportFilename: null,
+  exportSuggestedName: null,
   exportStatus: null,
   exportError: null,
   exportProgress: 0,
@@ -664,7 +640,8 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     set({
-      exporting: true, exportUrl: null, exportFilename: null, exportStatus: 'queued',
+      exporting: true, exportUrl: null, exportFilename: null,
+      exportSuggestedName: null, exportStatus: 'queued',
       exportError: null, exportProgress: 0, exportJobId: null,
     })
     const POLL_MS = 500           // tight enough that the bar feels live
@@ -689,8 +666,10 @@ export const useStore = create<State>((set, get) => ({
           // Stamp the export with the current history length so the UI can flag
           // it "outdated" once the user edits past this point.
           set({ exportUrl: job.result.url, exportFilename: job.result.filename,
+                exportSuggestedName: job.result.suggested_filename ?? null,
                 exportStatus: null, exportProgress: 1, exportGen: get().ops.length })
-          await triggerDownload(job.result.url, job.result.filename, sid)
+          await triggerDownload(job.result.url, job.result.filename, sid,
+                                job.result.suggested_filename)
           return
         }
         if (job.status === 'failed') {
@@ -717,12 +696,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   downloadExport: async () => {
-    const { exportUrl, exportFilename, sessionId } = get()
+    const { exportUrl, exportFilename, exportSuggestedName, sessionId } = get()
     if (!exportUrl) return
     // Derive the leaf name from the URL if we somehow lack the stored filename
     // (e.g. an export from before this field existed).
     const filename = exportFilename || exportUrl.split('/').pop() || 'export.mp4'
-    await triggerDownload(exportUrl, filename, sessionId)
+    await triggerDownload(exportUrl, filename, sessionId, exportSuggestedName ?? undefined)
   },
 
   cancelExport: async () => {
@@ -826,7 +805,7 @@ useStore.subscribe((state, prevState) => {
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the one method this file calls, not the whole class.
 interface PywebviewBridge {
-  pywebview?: { api?: { save_export?: (sid: string, filename: string) => Promise<string | null> } }
+  pywebview?: { api?: { save_export?: (sid: string, filename: string, suggested?: string) => Promise<string | null> } }
 }
 
 // A finished export needs to reach the user's disk. In a real browser an
@@ -840,11 +819,19 @@ interface PywebviewBridge {
 // `window.pywebview`, so it falls through to the anchor path unchanged.
 // Kept module-scoped (not in a component) so it can fire from the store's
 // polling loop.
-async function triggerDownload(url: string, filename: string, sessionId: string | null): Promise<void> {
+// `filename` is the file's real leaf under <session>/exports/ — the bridge
+// resolves the source by it, so it must stay exact. `suggested` is only what
+// the user is OFFERED as a destination; the hash name is correct but unreadable.
+async function triggerDownload(url: string, filename: string, sessionId: string | null,
+                               suggested?: string): Promise<void> {
   const py = (window as unknown as PywebviewBridge).pywebview
   if (py?.api?.save_export && sessionId) {
     try {
-      const saved = await py.api.save_export(sessionId, filename)
+      // Pass `suggested` THROUGH to the bridge. Threading it this far and then
+      // dropping it made the human export name work in browser-dev and do nothing
+      // in the packaged app — the only place the native dialog exists, i.e. the
+      // only place the fix was for. desktop.py ignores a missing 3rd arg.
+      const saved = await py.api.save_export(sessionId, filename, suggested)
       if (saved) {
         toast.success(`Saved to ${saved}`)
         return
@@ -860,7 +847,7 @@ async function triggerDownload(url: string, filename: string, sessionId: string 
   }
   const a = document.createElement('a')
   a.href = url
-  a.download = filename
+  a.download = suggested || filename
   a.style.display = 'none'
   document.body.appendChild(a)
   a.click()
