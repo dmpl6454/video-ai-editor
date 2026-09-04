@@ -11,6 +11,7 @@ import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
+import { ApiKeySettings } from './components/ApiKeySettings'
 import { ExportModal } from './components/ExportModal'
 import { ToastHost } from './components/Toast'
 import { Splitter } from './components/Splitter'
@@ -138,6 +139,7 @@ export default function App() {
       <ChatOverlay />
       <Help />
       <ShortcutsSettings />
+      <ApiKeySettings />
       <FileDropOverlay />
     </div>
     <ExportModal />

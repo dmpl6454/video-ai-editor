@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, errorMessage } from '../store'
+import { keyIsMissing, useApiKey } from '../lib/apiKey'
+import { openApiKeySettings } from './ApiKeySettings'
 
 type ChatEvent =
   | { type: 'text_delta'; text: string }
@@ -23,6 +25,12 @@ export function ChatOverlay() {
   const refresh = useStore((s) => s.refresh)
   const renderPreview = useStore((s) => s.renderPreview)
 
+  // Chat is the ONE feature that needs a key. When we KNOW there isn't one
+  // (never on 'unknown' — see lib/apiKey), say so where the failure would
+  // otherwise happen, and offer the fix inline: the alternative the user was
+  // left with was a mid-conversation auth error and a dotfile to hand-create.
+  const keyMissing = keyIsMissing(useApiKey((s) => s.status))
+
   const [open, setOpen] = useState(true)
   const [msgs, setMsgs] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -35,7 +43,7 @@ export function ChatOverlay() {
 
   async function send() {
     const text = input.trim()
-    if (!text || !sid || busy) return
+    if (!text || !sid || busy || keyMissing) return
     setInput('')
     setMsgs((m) => [...m, { role: 'user', text }])
     setBusy(true)
@@ -146,9 +154,24 @@ export function ChatOverlay() {
             <button onClick={() => setOpen(false)}>×</button>
           </header>
           <div className="body" ref={bodyRef}>
-            {msgs.length === 0 && (
+            {keyMissing && (
+              <div style={{
+                background: 'var(--bg-2)', border: '1px solid var(--line)',
+                borderLeft: '2px solid var(--warn)', borderRadius: 6,
+                padding: '8px 10px', marginBottom: 10, color: 'var(--text)',
+              }}>
+                <div style={{ marginBottom: 6 }}>
+                  Chat needs your Anthropic API key. Everything else in the
+                  editor works without one.
+                </div>
+                <button onClick={openApiKeySettings} style={{ fontSize: 11 }}>
+                  🔑 Add API key
+                </button>
+              </div>
+            )}
+            {msgs.length === 0 && !keyMissing && (
               <div style={{ color: 'var(--text-dim)' }}>
-                Try: <em>"Apply my brand kit @quicksolutions.in with #techtips, generate a hook,
+                Try: <em>"Apply my brand kit @yourhandle with #yourtag, generate a hook,
                 burn IG-style captions, then audit and render the preview."</em>
               </div>
             )}
@@ -188,8 +211,10 @@ export function ChatOverlay() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder={busy ? 'Working…' : 'Tell Claude what to do — Enter to send'}
-              disabled={busy}
+              placeholder={keyMissing
+                ? 'Add an Anthropic API key above to use chat'
+                : busy ? 'Working…' : 'Tell Claude what to do — Enter to send'}
+              disabled={busy || keyMissing}
             />
           </footer>
         </div>

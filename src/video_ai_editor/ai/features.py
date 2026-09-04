@@ -122,6 +122,49 @@ def _gpu_transcribe_ok() -> bool:
         return False
 
 
+def _tts_ok() -> bool:
+    """Piper's Python package AND the espeak-ng dictionaries it phonemizes with.
+
+    `_has("piper")` alone was not merely optimistic here, it was the most
+    dangerous answer this module can give. In the packaged app piper imports
+    fine, so TTS reported AVAILABLE — and then `tts_voiceover` KILLED THE WHOLE
+    PROCESS (audited against the shipped bundle: `/api/health` 200, run the
+    tool, no process). `piper/phonemize_espeak.py` hands
+    `<piper package dir>/espeak-ng-data` straight to espeak-ng, and espeak-ng
+    answers a missing phoneme table with `exit(1)` — inside our own
+    interpreter, so there is no exception to catch, no traceback, and every
+    other session in the process dies with it. `build_app.sh` did not collect
+    that data (it is package DATA, invisible to PyInstaller's import analysis),
+    so the app was inviting users into a crash. It now passes
+    `--collect-data piper`; this probe is the second half, so a build that ever
+    loses the data again reports the feature missing instead of fatal.
+
+    Cheap and non-raising, per this module's contract: `find_spec` locates the
+    package WITHOUT importing it (importing piper is itself a risk here), and
+    the rest is one `os.path.isfile`. `phontab` is the marker rather than the
+    directory, because an empty `espeak-ng-data/` fails exactly the same way.
+    """
+    try:
+        spec = importlib.util.find_spec("piper")
+    except (ImportError, ValueError, AttributeError):
+        return False
+    if spec is None:
+        return False
+    # Frozen builds go through PyInstaller's FrozenImporter, which sets
+    # submodule_search_locations to [<sys._MEIPASS>/piper] — the same directory
+    # piper's own `Path(__file__).parent` resolves to there.
+    roots = list(getattr(spec, "submodule_search_locations", None) or [])
+    if not roots and spec.origin:
+        roots = [os.path.dirname(spec.origin)]
+    for root in roots:
+        try:
+            if os.path.isfile(os.path.join(root, "espeak-ng-data", "phontab")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _binary(mod: str, attr: str) -> Callable[[], bool]:
     def probe() -> bool:
         try:
@@ -210,8 +253,19 @@ FEATURES: list[Feature] = [
             fix=f"`{PIP_EXTRA}` (installs librosa)",
             in_packaged_app=False),
     Feature("tts", "Text-to-speech voiceover",
-            ["tts_voiceover"], lambda: _has("piper"),
-            fix=f"`{PIP_EXTRA}` (installs piper-tts)"),
+            ["tts_voiceover"], _tts_ok,
+            fix=f"`{PIP_EXTRA}` (installs piper-tts, which carries its own "
+                "espeak-ng-data)",
+            # piper IS bundled in both packaged builds, so the blanket "run from
+            # source" answer would be wrong; what a bundle can be missing is
+            # piper's espeak-ng DATA, and nothing can be pip-installed into a
+            # frozen app to add it.
+            packaged_fix="this build is missing piper's espeak-ng-data (voice "
+                         "synthesis would take the app down, so it is reported "
+                         "unavailable instead); rebuild with `--collect-data "
+                         "piper`, or run the app from source",
+            note="Voices download on first use (~60MB each) into the app's "
+                 "cache dir."),
     Feature("translate", "Caption translation",
             ["translate_captions"], lambda: _has("ctranslate2", "sentencepiece"),
             fix=f"`{PIP_EXTRA}` (installs ctranslate2 + sentencepiece)",

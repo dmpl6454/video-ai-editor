@@ -1,8 +1,16 @@
 // Fetch wrappers around the FastAPI backend.
 
 import type { EDL, SessionInfo, Op } from './types'
+import { responseError } from './lib/errorMessage'
 
 const BASE = '/api'
+
+// The Anthropic API key settings routes, written ONCE so a path that differs
+// from the backend is a one-line fix rather than a hunt. Both calls TOLERATE a
+// 404 (`supported: false`) instead of throwing: a build of this frontend can be
+// served by a backend that predates the endpoints, and a settings affordance
+// that crashes the app is worse than one that quietly isn't there.
+const API_KEY_PATH = '/settings/api-key'
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
@@ -48,21 +56,62 @@ export interface ToolSchema {
   input_schema: { type: 'object'; properties: Record<string, JsonSchemaProp>; required: string[] }
 }
 
+// Answer of both /settings/api-key calls. `supported: false` means the backend
+// has no such route (404) — the UI hides the whole affordance in that case.
+export interface ApiKeyStatus { configured: boolean; supported: boolean }
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: body ? { 'content-type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${text}`)
-  }
+  // responseError is the ONE reader of api/hardening.py's error envelope
+  // (lib/errorMessage.ts) — the backend's sentence, never a bare status line.
+  if (!res.ok) throw await responseError(res)
   return res.json()
 }
 
 export const api = {
   health: () => http<{ ok: boolean }>('GET', '/health'),
+
+  // GET → is a key configured? The key itself is NEVER returned; the backend
+  // answers a boolean, so nothing here can leak it into the DOM or a log.
+  getApiKeyStatus: async (): Promise<ApiKeyStatus> => {
+    const res = await fetch(`${BASE}${API_KEY_PATH}`)
+    if (res.status === 404) return { configured: false, supported: false }
+    if (!res.ok) throw await responseError(res)
+    try {
+      const body = (await res.json()) as { configured?: boolean }
+      return { configured: !!body.configured, supported: true }
+    } catch {
+      // A body that isn't JSON means this path is being answered by something
+      // other than the settings route (the SPA static mount, a proxy) — treat
+      // it exactly like a 404.
+      return { configured: false, supported: false }
+    }
+  },
+
+  // POST the key. Nothing echoes it back — the response is the same boolean.
+  setApiKey: async (key: string): Promise<ApiKeyStatus> => {
+    const res = await fetch(`${BASE}${API_KEY_PATH}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key }),
+    })
+    if (res.status === 404) return { configured: false, supported: false }
+    if (!res.ok) throw await responseError(res)
+    try {
+      const body = (await res.json()) as { configured?: boolean }
+      return { configured: body.configured ?? true, supported: true }
+    } catch {
+      // A 2xx whose body is not JSON did NOT come from the settings route (an
+      // older backend's SPA catch-all answers 200 with index.html). Reporting
+      // success here would tell the user their key was saved when it was not,
+      // so mirror the 404 arm and let the caller show 'unsupported'.
+      return { configured: false, supported: false }
+    }
+  },
 
   listSessions: () => http<{ sessions: { id: string; name: string }[] }>('GET', '/sessions'),
 
@@ -85,15 +134,7 @@ export const api = {
     fd.append('duck', String(opts.duck ?? true))
     fd.append('volume_db', String(opts.volumeDb ?? -12))
     const res = await fetch(`${BASE}/sessions/${sid}/audio_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{ src: string; duration: number; edl_hash: string }>
   },
 
@@ -105,15 +146,7 @@ export const api = {
     fd.append('transcribe', String(opts.transcribe ?? true))
     if (opts.whisperModel) fd.append('whisper_model', opts.whisperModel)
     const res = await fetch(`${BASE}/sessions/${sid}/upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{
       src: string
       normalized: string
@@ -190,15 +223,12 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     const res = await fetch(`${BASE}/sessions/${sid}/subtitle_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      // Same contract as http(): the raw body rides along in the message and
-      // store.errorMessage() unwraps it. api/hardening.py rewrites every
-      // HTTPException into {error:{message, details}} — there is no `detail`
-      // key on the wire — so the older detail.error/detail parse here found
-      // nothing and the user saw "422 Unprocessable Entity" instead of
-      // "expected a .srt, .vtt or .ass file".
-      throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }
+    // Same reader as http(): api/hardening.py rewrites every HTTPException
+    // into {error:{message, details}} — there is no `detail` key on the wire —
+    // so the old detail.error parse found nothing and the user saw
+    // "422 Unprocessable Entity" instead of
+    // "expected a .srt, .vtt or .ass file".
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{ path: string; name: string }>
   },
 
@@ -222,15 +252,7 @@ export const api = {
     fd.append('start', String(start))
     fd.append('gain_db', String(gainDb))
     const res = await fetch(`${BASE}/sessions/${sid}/vo_record`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{ clip_id: string; src: string; duration: number; summary: string }>
   },
 
@@ -240,14 +262,7 @@ export const api = {
     fd.append('add_at_playhead', String(addAtPlayhead))
     fd.append('playhead', String(playhead))
     const res = await fetch(`${BASE}/sessions/${sid}/sticker_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{ src: string; filename: string; edl_hash?: string }>
   },
 
@@ -255,14 +270,7 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     const res = await fetch(`${BASE}/load_project`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await responseError(res)
     return res.json() as Promise<{ id: string }>
   },
 }

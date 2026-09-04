@@ -5,6 +5,8 @@ import { api } from '../api'
 import { toast } from '../toast'
 import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
+import { openApiKeySettings } from './ApiKeySettings'
+import { useApiKey } from '../lib/apiKey'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
 import { SafeZoneToggle } from './SafeZones'
@@ -36,6 +38,12 @@ export function TopBar() {
   // it so nobody ships a stale file by mistake.
   const exportStale = !!exportUrl && opsLen > exportGen
   const savedStale = !!savedUrl && opsLen > savedGen
+  // Key status for the 🔑 affordance below. Shown only once we have a real
+  // answer: 'unsupported' (the backend has no settings route) hides it, so an
+  // older backend behaves exactly as it always did, and 'unknown' hides it too
+  // rather than offering a control that may vanish a moment later.
+  const keyStatus = useApiKey((st) => st.status)
+  const showKeyButton = keyStatus === 'missing' || keyStatus === 'configured'
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -336,6 +344,20 @@ export function TopBar() {
         ))}
         <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
         <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
+        {showKeyButton && (
+          // The ONLY in-app route to a working chat pane. Without it the
+          // documented fix was hand-creating a dotfile in a Finder-hidden
+          // folder — an instruction a packaged video editor cannot give.
+          <button
+            onClick={openApiKeySettings}
+            title={keyStatus === 'missing'
+              ? 'Claude chat is off — add your Anthropic API key'
+              : 'Anthropic API key for Claude chat'}
+            style={{ fontSize: 12, color: keyStatus === 'missing' ? 'var(--warn)' : undefined }}
+          >
+            🔑{keyStatus === 'missing' ? ' Add key' : ''}
+          </button>
+        )}
         {appVersion && (
           <span title={appBuild ? `App version ${appVersion} · build ${appBuild}` : 'App version'}
                 style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>

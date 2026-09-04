@@ -180,6 +180,119 @@ def _store(sid: str) -> EDLStore:
         return _STORES[sid]
 
 
+# --- the video engine must exist before we blame the user's footage ---
+#
+# ffmpeg/ffprobe are the app's engine: import, thumbnail, waveform, preview and
+# export all shell out to them. When they cannot be resolved, EVERY one of those
+# fails — and until this preflight existed each failed by telling the user
+# something untrue. `upload`'s catch-all relabelled the FileNotFoundError from
+# `subprocess` as "Couldn't import this file — it may not be a valid video",
+# sending people to re-encode footage that was fine; the render path was worse,
+# since `render_preview` only ever maps RuntimeError, so a missing binary fell
+# through to hardening's generic handler as HTTP 500 "internal server error"
+# with the reason discarded into a log nobody opens. `/readyz` has known the
+# real answer all along (503 + `{"missing": ["ffmpeg"]}`) and nothing in the app
+# ever calls it.
+#
+# Confirmed against the shipped DMG, where it is the default state rather than
+# an edge case: nothing bundles ffmpeg, so a Mac without Homebrew cannot import,
+# preview, thumbnail or export anything at all.
+
+_VIDEO_ENGINE_OK = False
+
+
+def _video_engine_missing() -> list[str]:
+    """Which of the ffmpeg binaries this machine cannot resolve (empty = fine).
+
+    Cheap by construction, which is what lets the high-frequency routes
+    (/thumb fires once per filmstrip tile) call it per request: once both are
+    found we latch and never probe again, and while one is MISSING we re-probe
+    every call — that path is already broken, so the cost is irrelevant, and it
+    means installing ffmpeg fixes a running app without a restart.
+
+    `shutil.which` and not `Path.exists`: the names come from `_pu.FFMPEG` /
+    `_pu.FFPROBE`, and `which` resolves both a bare name against PATH (today)
+    and an absolute path directly (if a bundled binary is ever wired in), so
+    this keeps answering correctly either way.
+    """
+    global _VIDEO_ENGINE_OK
+    if _VIDEO_ENGINE_OK:
+        return []
+    missing = [n for n in (_pu.FFMPEG, _pu.FFPROBE) if not shutil.which(n)]
+    if not missing:
+        _VIDEO_ENGINE_OK = True
+    return missing
+
+
+def _video_engine_detail(missing: list[str]) -> dict:
+    """The 422 body for a missing engine.
+
+    `error` is a DISTINCT discriminator, not the media-failure ones — the whole
+    point is that a client (and a user) can tell "this app is missing a
+    dependency" from "this file is bad". `message` is where the frontend reads
+    the human sentence from (hardening nests a dict detail under
+    `error.details`, and store.ts::errorMessage reads `details.message` first),
+    so the actionable text must live there rather than only in `fix`.
+    """
+    install = ("Install it with Homebrew — open Terminal and run "
+               "`brew install ffmpeg` — then restart the app."
+               if _pu.IS_MAC else
+               "Install it with `winget install Gyan.FFmpeg` (the full "
+               "variant), then restart the app.")
+    return {
+        "error": "ffmpeg_missing",
+        # Names, not paths: once the binaries are bundled these are absolute
+        # paths inside the .app, which mean nothing to a user and needlessly
+        # expose the install layout.
+        "missing": [Path(n).name for n in missing],
+        "message": ("This app needs ffmpeg to read and render video, and it "
+                    "isn't installed on this computer. Nothing is wrong with "
+                    "your file. " + install),
+        "fix": install,
+    }
+
+
+def _require_video_engine() -> None:
+    """Fail fast, before any work that would misreport the cause.
+
+    422 rather than 503: `_dispatch_sync` already answers a missing external
+    tool with 422 ("An external tool failed"), so this stays inside the one
+    status code this file uses for "actionable, and not your fault" — and the
+    envelope + detail dict is the shape the frontend already knows how to
+    surface. `/readyz` keeps its 503, which is a different question (is this
+    process ready to serve) asked by a different consumer.
+    """
+    missing = _video_engine_missing()
+    if missing:
+        raise HTTPException(422, _video_engine_detail(missing))
+
+
+def _missing_binary_http(e: OSError) -> HTTPException:
+    """Map a FileNotFoundError escaping the render layer onto an actionable 422.
+
+    `subprocess` raises this when the BINARY itself can't be executed, so the
+    render never started and there is no ffmpeg stderr for
+    `_render_failure_message` to classify — which is exactly why this case, and
+    only this case, used to reach the client as a bare 500. Re-probing rather
+    than assuming: if the engine is present the missing file is something else
+    (a source, a LUT), and saying "install ffmpeg" would be its own wrong answer.
+    """
+    missing = _video_engine_missing()
+    if missing:
+        return HTTPException(422, _video_engine_detail(missing))
+    # Engine present, so something ELSE was not found. Deliberately worded
+    # without naming ffmpeg (that would be the same wrong-cause mistake in the
+    # other direction) and without naming the clip's source (it might be a LUT,
+    # a font, a helper binary — `_render_failure_message` is the one that gets
+    # to be specific, and it needs stderr this path never produced).
+    name = getattr(e, "filename", None) or str(e)
+    return HTTPException(422, {
+        "error": "missing_file",
+        "message": f"Couldn't finish — a file this needed is missing: {name}.",
+        "ffmpeg": str(e)[-400:],
+    })
+
+
 # --- shared models ---
 
 class DispatchRequest(BaseModel):
@@ -252,6 +365,66 @@ def features(refresh: int = 0):
         from .ai.features import feature_report
         _FEATURE_REPORT_CACHE = feature_report()
     return _FEATURE_REPORT_CACHE
+
+
+# --- settings: the Anthropic API key ---
+#
+# Until these two routes existed, the ONLY way to give the shipped app a key was
+# to hand-create `~/Library/Application Support/Video AI Editor/.env` — a hidden
+# file in a folder Finder hides — which is not a route a non-technical user has.
+# The chat pane was therefore permanently dead in the DMG for anyone who did not
+# already know that path. Everything about the key itself (validation, the
+# merge-preserving 0600 write, rebinding the live process) is in `apikey.py`;
+# these are just the HTTP surface.
+
+class ApiKeyRequest(BaseModel):
+    key: str
+
+
+@app.get("/api/settings/api-key")
+def get_api_key_status():
+    """Whether a key is configured — a BOOL and nothing else.
+
+    Never returns the key, not even masked: a last-4 hint is a credential
+    fragment served to anything that can reach localhost, and it buys the UI
+    nothing that "configured" doesn't. `path` is only where to look if the user
+    wants to edit the file by hand.
+    """
+    from .apikey import is_configured, user_env_path
+    return {"configured": is_configured(), "path": str(user_env_path())}
+
+
+@app.post("/api/settings/api-key")
+def set_api_key(body: ApiKeyRequest):
+    """Save an Anthropic key and enable AI features without a restart."""
+    from .apikey import (KEY_SHAPE_HINT, apply_key_to_process, looks_like_key,
+                         save_key, user_env_path)
+    key = (body.key or "").strip()
+    if not looks_like_key(key):
+        # A dict detail so the sentence lands in `error.details.message`, which
+        # is where store.ts::errorMessage looks first (hardening hardcodes
+        # `error.message` to "request failed" for every dict detail).
+        raise HTTPException(400, {"error": "invalid_api_key",
+                                  "message": KEY_SHAPE_HINT})
+    try:
+        path = save_key(key)
+    except OSError as e:
+        # Never include `key` in an error path — this is the one place a
+        # credential could leak into a log line or a toast.
+        get_logger().error("could not write the API key file: %s", e)
+        raise HTTPException(422, {
+            "error": "api_key_not_saved",
+            "message": (f"Couldn't write {user_env_path()} — check that the "
+                        f"folder exists and is writable."),
+        }) from e
+    apply_key_to_process(key)
+    # `anthropic_key_set` is memoised in the report above, so without this the
+    # AI panel would keep showing "needs ANTHROPIC_API_KEY" on a key it just
+    # accepted, for the life of the process.
+    global _FEATURE_REPORT_CACHE
+    _FEATURE_REPORT_CACHE = None
+    get_logger().info("ANTHROPIC_API_KEY saved to %s", path)
+    return {"configured": True, "path": str(path)}
 
 
 # ---- MCP server: let external agents (Claude Code / Cursor / Codex) drive the
@@ -367,6 +540,7 @@ async def vo_record(sid: str, file: UploadFile = File(...),
     code to a session-local AAC mp4 for clean playback in the timeline pipeline.
     """
     sd = session_dir(sid)
+    _require_video_engine()   # the AAC transcode below shells out to ffmpeg
     vo_dir = sd / "uploads" / "vo"
     vo_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _safe_filename(file.filename, "vo.webm")
@@ -377,13 +551,18 @@ async def vo_record(sid: str, file: UploadFile = File(...),
 
     # Normalize to AAC mp4 so the audio mixer can splice it cleanly
     norm = vo_dir / f"vo_{int(time.time())}.m4a"
-    proc = subprocess.run(
-        [_pu.FFMPEG, "-y", "-i", str(raw),
-         "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
-         str(norm)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **_pu.SUBPROCESS_FLAGS,
-    )
+    try:
+        proc = subprocess.run(
+            [_pu.FFMPEG, "-y", "-i", str(raw),
+             "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+             str(norm)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **_pu.SUBPROCESS_FLAGS,
+        )
+    except FileNotFoundError as e:
+        # Lost the race with the preflight above (binary removed mid-request),
+        # or ffmpeg is present but not executable. Say so instead of a bare 500.
+        raise _missing_binary_http(e)
     if proc.returncode != 0:
         raise HTTPException(422, {"error": f"vo transcode failed: {proc.stderr[-800:]}"})
     raw.unlink(missing_ok=True)
@@ -447,6 +626,10 @@ async def audio_upload(sid: str, file: UploadFile = File(...),
                        volume_db: float = Form(-12.0)):
     """Upload an audio file (mp3/wav/m4a) and optionally append to the music track."""
     store = _store(sid)
+    # ffprobe is what reads the duration below, and that probe's except-clause
+    # reports `{"error": str(e)}` with no `message` key — so a missing binary
+    # surfaced to the user as the envelope's "request failed".
+    _require_video_engine()
     sd = session_dir(sid)
     audio_dir = sd / "uploads" / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -550,6 +733,9 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
                  transcribe: bool = Form(True),
                  whisper_model: str = Form("")):
     store = _store(sid)
+    # BEFORE the bytes are spooled and long before the catch-all below can
+    # relabel a missing binary as "it may not be a valid video".
+    _require_video_engine()
     sd = session_dir(sid)
     uploads = sd / "uploads"
     uploads.mkdir(exist_ok=True)
@@ -567,6 +753,14 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
         res = ingest_upload(dst, uploads / dst.stem, transcribe_audio=False)
     except HTTPException:
         raise
+    except FileNotFoundError as e:
+        # Ahead of the catch-all on purpose. `subprocess` raises this when the
+        # BINARY is unavailable, and the message below would then blame the
+        # user's footage for the app's own missing dependency — the exact
+        # mislabelling this arm exists to stop. (The preflight above catches
+        # the normal case; this covers ffmpeg disappearing mid-request and any
+        # other binary ingest reaches for.)
+        raise _missing_binary_http(e) from e
     except Exception as e:
         # ANY ingest failure (unreadable container, exotic codec, corrupt
         # file, ffprobe/ffmpeg error, JSON parse, etc.) must be a clean 422 —
@@ -902,6 +1096,9 @@ def make_preview(sid: str, wait: int = 1):
     where the request thread shouldn't block on a 30s render.
     """
     store = _store(sid)
+    # Both branches, so a `wait=0` caller gets the same crisp answer up front
+    # instead of a job that queues, runs and fails with a stringified OSError.
+    _require_video_engine()
     if wait:
         try:
             res = render_preview(store.edl, store.dir)
@@ -915,13 +1112,28 @@ def make_preview(sid: str, wait: int = 1):
             raise HTTPException(422, {"error": "render_failed",
                                       "message": _render_failure_message(tail, msg),
                                       "ffmpeg": tail})
+        except FileNotFoundError as e:
+            # NOT covered by the RuntimeError arm: the render layer wraps
+            # ffmpeg's *stderr* in a RuntimeError, but a binary that cannot be
+            # EXECUTED never produces stderr — subprocess raises before the
+            # process exists. That is the one render failure that reached the
+            # user as an opaque 500.
+            raise _missing_binary_http(e) from e
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl  # safe — render_preview only reads
     session_dir_snapshot = store.dir
 
     def _job() -> dict:
-        res = render_preview(edl_snapshot, session_dir_snapshot)
+        try:
+            res = render_preview(edl_snapshot, session_dir_snapshot)
+        except FileNotFoundError as e:
+            # jobs.py stores `f"{type(e).__name__}: {e}"` verbatim as job.error,
+            # so an unmapped OSError shows the user "FileNotFoundError: [Errno
+            # 2] No such file or directory: 'ffmpeg'". Same sentence as the
+            # sync path instead. (ffmpeg can vanish between the preflight above
+            # and the job actually running.)
+            raise RuntimeError(_missing_binary_http(e).detail["message"]) from e
         return _preview_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="preview", fn=_job, session_id=sid)
@@ -980,6 +1192,7 @@ def stream_preview(sid: str, h: str | None = None):
         # plus a full traceback (logged twice), while the very same failure via
         # POST produced a clean, actionable 422. The <video> element polls THIS
         # url, so it was the shape the UI hit most often.
+        _require_video_engine()
         try:
             res = render_preview(store.edl, store.dir)
         except RuntimeError as e:
@@ -988,6 +1201,8 @@ def stream_preview(sid: str, h: str | None = None):
             raise HTTPException(422, {"error": "render_failed",
                                       "message": _render_failure_message(tail, msg),
                                       "ffmpeg": tail}) from e
+        except FileNotFoundError as e:
+            raise _missing_binary_http(e) from e
         # Only serve what the caller ASKED for. This used to return whatever
         # the current EDL rendered to, even when `h` named a different render:
         # a mid-playback range request would then receive bytes from a file of
@@ -1014,6 +1229,7 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     client where the request might time out (most browsers/proxies)."""
     store = _store(sid)
     body = body or ExportRequest()
+    _require_video_engine()
     if wait:
         # Mirror the preview path's RuntimeError→422 handling. Without it an
         # ffmpeg failure fell through to hardening's generic handler as an
@@ -1029,6 +1245,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
                 "message": _render_failure_message(tail, msg),
                 "ffmpeg": tail,
             })
+        except FileNotFoundError as e:
+            raise _missing_binary_http(e) from e
         return _export_payload(sid, res)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl
@@ -1046,6 +1264,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             # user-facing instead of a 2000-char ffmpeg stderr dump.
             msg = str(e)
             raise RuntimeError(_render_failure_message(msg[-400:], msg)) from e
+        except FileNotFoundError as e:
+            raise RuntimeError(_missing_binary_http(e).detail["message"]) from e
         return _export_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
@@ -1135,6 +1355,7 @@ def get_waveform(sid: str, src: str, peaks_per_sec: int = 50):
         raise HTTPException(403, "src must be inside the session workdir")
     if not target.exists():
         raise HTTPException(404, "src not found")
+    _require_video_engine()          # waveform_peaks decodes through ffmpeg
     from .render.waveform import waveform_peaks
     return waveform_peaks(target, sd / "cache" / "waveforms",
                           peaks_per_sec=peaks_per_sec)
@@ -1161,11 +1382,16 @@ def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
     if not target.exists():
         raise HTTPException(404, "src not found")
     h = max(16, min(int(h), 270))
+    # Free after the first success (the check latches), which matters here:
+    # one timeline paint issues a /thumb per filmstrip tile.
+    _require_video_engine()
     from .render.thumbs import thumbnail_for
     try:
         p = thumbnail_for(target, sd_root / "cache" / "thumbs", t=float(t), height=h)
     except RuntimeError as e:
         raise HTTPException(422, str(e))
+    except FileNotFoundError as e:
+        raise _missing_binary_http(e) from e
     return FileResponse(p, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=3600"})
 

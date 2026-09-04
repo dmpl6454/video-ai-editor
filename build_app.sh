@@ -2,13 +2,18 @@
 # Build a macOS .app bundle via PyInstaller. Run:
 #   uv run bash build_app.sh
 #
-# Output: dist/Video AI Editor.app
+# Output: dist/Video AI Editor.app  (arm64 ONLY — see MIN_MACOS below and the
+#         DMG name in build_dmg.sh; a universal2 build is out of scope.)
 # Caveats:
-#   - ffmpeg / piper / realesrgan binaries must be on PATH at runtime
-#     (not bundled). For a redistributable build, add them via --add-binary.
+#   - ffmpeg + ffprobe ARE bundled (static, --add-binary); the build FAILS if
+#     they cannot be found, because an app that ships without them cannot
+#     decode a frame on a Mac with no Homebrew. realesrgan / rife / whisper-cli
+#     are still optional drop-ins resolved from PATH or the models/ dir.
 #   - Heavy ML libs (torch, demucs, mediapipe, faster-whisper) are excluded
-#     to keep the bundle small (~150MB). Users who need those features run
-#     the dev `uv run video-ai-editor` instead.
+#     to keep the bundle small. Users who need those features run the dev
+#     `uv run video-ai-editor` instead. (Bundling ffmpeg/ffprobe adds ~95MB
+#     and piper's espeak-ng-data ~24MB on top of the old ~150MB — a working
+#     app is worth the download.)
 #   - First launch may be slow as macOS verifies the unsigned bundle.
 
 set -euo pipefail
@@ -90,6 +95,134 @@ echo "[build] BUILD_ID=$BUILD_SHA"
 ROOT="$(pwd)"
 SPEC_DIR="$ROOT/build/pyinstaller-spec"
 mkdir -p "$SPEC_DIR"
+
+# --- ffmpeg + ffprobe ARE the app; bundle them -------------------------------
+# The shipped DMG did not contain them, and `_pu.FFMPEG`/`FFPROBE` were BARE
+# names resolved through PATH while config.py's PATH augmentation added only
+# Homebrew/MacPorts directories — never the bundle's own. Result on an audited
+# notarized build: on a Mac with no Homebrew the app launched, and importing,
+# previewing, thumbnailing and exporting every single file failed. Bundling is
+# only half the fix; `platformutil.resolve_tool()` is the other half (an
+# --add-binary payload nobody looks for changes nothing).
+#
+# Source, in priority order. The winner is echoed, and a miss is FATAL: a
+# silent skip here recreates exactly the blocker this exists to fix.
+#   1. $VAE_FFMPEG_DIR                                  — explicitly staged
+#   2. ~/.cache/video-ai-editor/ffmpeg-static/<plat>     — the staged cache
+#   3. the `static-ffmpeg` PyPI package, fetched into (2)
+#
+# They must be STATIC. A Homebrew ffmpeg links ~40 dylibs under /opt/homebrew,
+# none of which are in the bundle, so copying one in yields a binary that dies
+# in dyld on every machine but this one — which would look exactly like the bug
+# we are fixing, with an extra day of confusion. The otool gate below refuses
+# anything that references a non-system library.
+FFBIN_PLATFORM="darwin_$(uname -m)"
+FFBIN_CACHE="$HOME/.cache/video-ai-editor/ffmpeg-static/$FFBIN_PLATFORM"
+FFBIN_STAGE="$ROOT/build/ffmpeg-bundle"
+
+ffbin_pair_ok() {   # $1 = dir holding both binaries
+  [ -n "${1:-}" ] && [ -x "$1/ffmpeg" ] && [ -x "$1/ffprobe" ]
+}
+
+FFBIN_SRC=""
+FFBIN_FROM=""
+if ffbin_pair_ok "${VAE_FFMPEG_DIR:-}"; then
+  FFBIN_SRC="$VAE_FFMPEG_DIR"; FFBIN_FROM="VAE_FFMPEG_DIR=$VAE_FFMPEG_DIR"
+elif ffbin_pair_ok "$FFBIN_CACHE"; then
+  FFBIN_SRC="$FFBIN_CACHE"; FFBIN_FROM="staged cache $FFBIN_CACHE"
+else
+  echo "[build] no staged ffmpeg pair — fetching via the static-ffmpeg package"
+  # One path per line, not `print(*...)`: a cache path with a space in it would
+  # otherwise be unsplittable.
+  FFBIN_FETCH="$(uv run --with 'static-ffmpeg==3.0' python -c \
+    'from static_ffmpeg import run
+ff, fp = run.get_or_fetch_platform_executables_else_raise()
+print(ff)
+print(fp)' 2>/dev/null || true)"
+  FFBIN_A="$(printf '%s\n' "$FFBIN_FETCH" | sed -n '1p')"
+  FFBIN_B="$(printf '%s\n' "$FFBIN_FETCH" | sed -n '2p')"
+  if [ -f "$FFBIN_A" ] && [ -f "$FFBIN_B" ]; then
+    mkdir -p "$FFBIN_CACHE"
+    cp -f "$FFBIN_A" "$FFBIN_CACHE/ffmpeg"
+    cp -f "$FFBIN_B" "$FFBIN_CACHE/ffprobe"
+    chmod 755 "$FFBIN_CACHE/ffmpeg" "$FFBIN_CACHE/ffprobe"
+    FFBIN_SRC="$FFBIN_CACHE"; FFBIN_FROM="static-ffmpeg (fetched into $FFBIN_CACHE)"
+  fi
+fi
+
+if ! ffbin_pair_ok "$FFBIN_SRC"; then
+  echo "[build] FATAL: no ffmpeg+ffprobe to bundle — refusing to ship an app" >&2
+  echo "        that cannot decode a single frame on a Mac without Homebrew." >&2
+  echo "        Fix by either:" >&2
+  echo "          * staging a STATIC pair and pointing VAE_FFMPEG_DIR at it, or" >&2
+  echo "          * putting them in $FFBIN_CACHE, or" >&2
+  echo "          * making 'uv run --with static-ffmpeg==3.0' work (network access)." >&2
+  exit 1
+fi
+
+rm -rf "$FFBIN_STAGE"
+mkdir -p "$FFBIN_STAGE"
+# Copy rather than --add-binary straight from the source: the staged cache
+# copies are mode 0551 (read-only), and owning the mode here keeps signing and
+# any later re-run from tripping over it.
+cp -f "$FFBIN_SRC/ffmpeg" "$FFBIN_STAGE/ffmpeg"
+cp -f "$FFBIN_SRC/ffprobe" "$FFBIN_STAGE/ffprobe"
+chmod 755 "$FFBIN_STAGE/ffmpeg" "$FFBIN_STAGE/ffprobe"
+
+# Provenance gate. These two binaries are fetched from a third party and then
+# carry OUR Developer ID signature into a notarized DMG, so "it downloaded and
+# it is portable" is not enough — otool proves portability, not provenance.
+# Digests are pinned in packaging/ffmpeg-static.sha256; a mismatch is fatal.
+FFBIN_SUMS="$ROOT/packaging/ffmpeg-static.sha256"
+if [ -f "$FFBIN_SUMS" ]; then
+  if ( cd "$FFBIN_STAGE" && grep -v '^#' "$FFBIN_SUMS" | shasum -a 256 -c --status ); then
+    echo "[build] ffmpeg/ffprobe digests match packaging/ffmpeg-static.sha256"
+  else
+    echo "[build] FATAL: bundled ffmpeg/ffprobe do NOT match the pinned digests in" >&2
+    echo "        packaging/ffmpeg-static.sha256. Refusing to sign and notarize" >&2
+    echo "        binaries nobody has vetted." >&2
+    ( cd "$FFBIN_STAGE" && shasum -a 256 ffmpeg ffprobe ) >&2
+    echo "        If this change is intentional, re-verify the new build's licence" >&2
+    echo "        config (ffmpeg -version) and update the pin file." >&2
+    exit 1
+  fi
+else
+  echo "[build] WARNING: $FFBIN_SUMS missing — bundling unverified binaries" >&2
+fi
+
+echo "[build] bundling ffmpeg/ffprobe from: $FFBIN_FROM"
+for FFBIN in ffmpeg ffprobe; do
+  echo "[build]   $FFBIN: $(file -b "$FFBIN_STAGE/$FFBIN")"
+  # `|| true` inside the substitution: grep -v exits 1 when it filters
+  # everything out, which is the GOOD case, and pipefail would call that a
+  # failure.
+  FFBIN_NONSYS="$(otool -L "$FFBIN_STAGE/$FFBIN" | tail -n +2 | awk '{print $1}' \
+    | grep -v -e '^/usr/lib/' -e '^/System/' || true)"
+  if [ -n "$FFBIN_NONSYS" ]; then
+    echo "[build] FATAL: $FFBIN is not portable — it links non-system libraries" >&2
+    echo "        that are NOT in the bundle, so it would fail in dyld on any" >&2
+    echo "        machine but this one:" >&2
+    printf '          %s\n' $FFBIN_NONSYS >&2
+    exit 1
+  fi
+done
+
+# The oldest macOS this bundle can honestly claim. The static ffmpeg above is
+# built against the macOS 12 SDK (`otool -l | grep -A3 LC_BUILD_VERSION` ->
+# minos 12.0), and arm64 macOS starts at 11.0 anyway, so 12.0 is the binding
+# constraint. Stamped into Info.plist below so Launch Services refuses an
+# older system with a clear message instead of a dyld crash.
+MIN_MACOS="12.0"
+FFBIN_MINOS="$(otool -l "$FFBIN_STAGE/ffmpeg" 2>/dev/null \
+  | awk '$1=="minos"{print $2; exit}' || true)"
+if [ -n "$FFBIN_MINOS" ]; then
+  echo "[build]   bundled ffmpeg minos=$FFBIN_MINOS; Info.plist will claim $MIN_MACOS"
+  if [ "$(printf '%s\n%s\n' "$FFBIN_MINOS" "$MIN_MACOS" | sort -V | tail -1)" != "$MIN_MACOS" ]; then
+    echo "[build] WARNING: the bundled ffmpeg needs macOS $FFBIN_MINOS but the" >&2
+    echo "        bundle claims $MIN_MACOS — raise MIN_MACOS in build_app.sh." >&2
+  fi
+fi
+
 uv run pyinstaller \
   --name "Video AI Editor" \
   --windowed \
@@ -99,8 +232,11 @@ uv run pyinstaller \
   --add-data "$ROOT/frontend/dist:frontend/dist" \
   --add-data "$ROOT/fonts:fonts" \
   --add-data "$ROOT/presets:presets" \
+  --add-data "$ROOT/packaging/THIRD-PARTY-NOTICES.md:." \
   --add-data "$ROOT/VERSION:." \
   --add-data "$ROOT/BUILD_ID:." \
+  --add-binary "$FFBIN_STAGE/ffmpeg:." \
+  --add-binary "$FFBIN_STAGE/ffprobe:." \
   --hidden-import "uvicorn.lifespan.on" \
   --hidden-import "uvicorn.protocols.websockets.auto" \
   --hidden-import "uvicorn.loops.auto" \
@@ -110,6 +246,7 @@ uv run pyinstaller \
   --collect-submodules video_ai_editor \
   --collect-submodules huggingface_hub \
   --collect-data webview \
+  --collect-data piper \
   --exclude-module torch \
   --exclude-module torchcodec \
   --exclude-module torchvision \
@@ -131,6 +268,61 @@ uv run pyinstaller \
   --exclude-module simple_lama_inpainting \
   --exclude-module noisereduce \
   src/video_ai_editor/desktop.py
+
+# --- prove the binaries actually landed --------------------------------------
+# `--add-binary` is a request, not a receipt, and a bundle that quietly lost
+# ffmpeg is indistinguishable from a working one until a user tries to import a
+# video. PyInstaller 6 relocates BINARY entries into Contents/Frameworks and
+# cross-links them into Contents/Resources (building/osx.py) — the two places
+# platformutil.bundled_binary() looks — so anywhere else is a packaging change
+# that has silently un-fixed this, and is fatal here rather than at runtime on
+# someone's machine.
+APP_DIR="dist/Video AI Editor.app"
+for FFBIN in ffmpeg ffprobe; do
+  FFBIN_IN_APP=""
+  for FFBIN_CAND in "$APP_DIR/Contents/Frameworks/$FFBIN" \
+                    "$APP_DIR/Contents/Resources/$FFBIN"; do
+    if [ -f "$FFBIN_CAND" ]; then FFBIN_IN_APP="$FFBIN_CAND"; break; fi
+  done
+  if [ -z "$FFBIN_IN_APP" ]; then
+    echo "[build] FATAL: $FFBIN is not in the bundle where the app looks for it." >&2
+    echo "        Found instead:" >&2
+    find "$APP_DIR" -maxdepth 4 -name "$FFBIN" -print >&2 || true
+    echo "        If PyInstaller's layout moved, teach" >&2
+    echo "        platformutil._bundle_payload_dirs() the new location too." >&2
+    exit 1
+  fi
+  # BUNDLE already chmods BINARY entries to 0755; make it explicit anyway, so a
+  # non-executable copy fails the BUILD rather than every ffmpeg call at runtime.
+  chmod 755 "$FFBIN_IN_APP"
+  [ -x "$FFBIN_IN_APP" ] || { echo "[build] FATAL: $FFBIN_IN_APP is not executable" >&2; exit 1; }
+  echo "[build] bundled ${FFBIN_IN_APP#$APP_DIR/} ($(du -h "$FFBIN_IN_APP" | cut -f1))"
+done
+
+# piper's espeak-ng dictionaries (--collect-data piper). Without them
+# `tts_voiceover` does not fail — espeak-ng calls exit(1) and takes the whole
+# app process with it, and check_features reported TTS "available" the whole
+# time. ai/features.py::_tts_ok now probes for this same file, so a bundle that
+# loses it degrades to "unavailable" instead of crashing; this check keeps it
+# from being lost in the first place.
+# (Resources is where DATA lands; the Frameworks path is the cross-link, and is
+# checked too so a layout flip warns about nothing.)
+ESPEAK_TAB=""
+for ESPEAK_CAND in "$APP_DIR/Contents/Resources/piper/espeak-ng-data/phontab" \
+                   "$APP_DIR/Contents/Frameworks/piper/espeak-ng-data/phontab"; do
+  if [ -f "$ESPEAK_CAND" ]; then ESPEAK_TAB="$ESPEAK_CAND"; break; fi
+done
+if [ -n "$ESPEAK_TAB" ]; then
+  echo "[build] bundled piper espeak-ng-data ($(du -sh "$(dirname "$ESPEAK_TAB")" | cut -f1))"
+else
+  echo "[build] FATAL: piper espeak-ng-data missing from the bundle." >&2
+  echo "        espeak-ng calls exit(1) when it cannot find phontab, which takes the" >&2
+  echo "        WHOLE app process down — a user loses the editor by clicking a button." >&2
+  echo "        Fatal, not a warning, for the same reason the ffmpeg gate is: a bundle" >&2
+  echo "        that can hard-kill the app must not be shippable." >&2
+  echo "        Fix: ensure --collect-data piper is passed and piper is importable." >&2
+  exit 1
+fi
 
 # PyInstaller's CLI mode (used here, not the committed .spec — the generated
 # one lands in $SPEC_DIR via --specpath, see above and CLAUDE.md) has no
@@ -154,6 +346,17 @@ if [ -f "$PLIST" ]; then
       || /usr/libexec/PlistBuddy -c "Add :$KEY string $APP_VERSION" "$PLIST"
   done
   echo "[build] stamped Info.plist CFBundleShortVersionString/CFBundleVersion = $APP_VERSION"
+  # State the architecture requirement instead of leaving it silent. This build
+  # is arm64-ONLY (a universal2 build would need every wheel in the venv as a
+  # fat binary); on an Intel Mac it simply cannot launch, and nothing told the
+  # user so. LSMinimumSystemVersion is the honest half of that we can express in
+  # the plist: it makes Launch Services refuse an older macOS with a readable
+  # message rather than letting dyld fail, and $MIN_MACOS is the bundled
+  # ffmpeg's own minimum (checked above). The architecture itself is announced
+  # in the DMG's NAME and volume label — see build_dmg.sh.
+  /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MIN_MACOS" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $MIN_MACOS" "$PLIST"
+  echo "[build] stamped Info.plist LSMinimumSystemVersion = $MIN_MACOS (arm64-only build)"
 else
   echo "[build] WARNING: $PLIST not found — mic usage description NOT added"
 fi

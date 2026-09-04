@@ -49,7 +49,14 @@ set -o errtrace
 trap 'echo "[notarize] ERROR: \"$BASH_COMMAND\" failed (exit $?) at line $LINENO" >&2' ERR
 
 DEFAULT_APP="dist/Video AI Editor.app"
-DMG_BASENAME="Video-AI-Editor.dmg"
+# Version- and arch-tagged, so the artifact a user downloads states the one
+# requirement they cannot discover any other way: this build is arm64-only and
+# an Intel Mac cannot launch it at all. Kept in sync with build_dmg.sh's own
+# default (which derives the arch tag from the built binary); if the two ever
+# disagree the explicit VAE_DMG passed below still wins, so the artifact and
+# the notarization/stapling always refer to the same file.
+VERSION_TAG="$(tr -d "[:space:]" < VERSION 2>/dev/null || echo 0.0.0)"
+DMG_BASENAME="Video-AI-Editor-${VERSION_TAG}-AppleSilicon.dmg"
 ENTITLEMENTS="entitlements.plist"
 # notarytool --wait polls Apple; typical turnaround is 1-10 min, occasionally
 # longer under load. 30m is generous without hanging a terminal forever.

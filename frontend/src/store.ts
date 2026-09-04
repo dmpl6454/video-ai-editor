@@ -7,7 +7,8 @@ import { api } from './api'
 import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 import { deletedLabel } from './lib/deletedLabel'
-import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
+import { isCancelMessage } from './lib/dispatchErrors'
+import { errorMessage } from './lib/errorMessage'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -63,45 +64,14 @@ async function runDispatchJob(
   }
 }
 
-// api.ts's http() throws `Error("422 Unprocessable Entity: {json envelope}")`
-// with the raw response body appended. The body is usually the hardening
-// error envelope ({error:{message}}) or a FastAPI detail — pull the human-
-// readable message out so toasts show e.g. "auto_caption: no clip on v1 to
-// caption" instead of a wall of JSON.
-// The backend's error envelope (api/hardening.py) hardcodes
-//   message = "request failed"
-// for EVERY HTTPException whose detail is a dict, and puts the real dict under
-// `error.details`. So reading `error.message` first — as this used to — meant a
-// carefully written server-side explanation ("a cached overlay image was
-// corrupted; your media is fine") could never reach a toast: the user always saw
-// "request failed". Prefer details.message and fall back to the sentinel.
-export function errorMessage(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e)
-  const jsonStart = raw.indexOf('{')
-  if (jsonStart !== -1) {
-    try {
-      const body = JSON.parse(raw.slice(jsonStart)) as {
-        error?: { message?: string; details?: unknown }
-        detail?: string | { error?: string; message?: string }
-      }
-      const d = body.error?.details
-      const detailMsg = d && typeof d === 'object' && !Array.isArray(d)
-        ? (d as { message?: string }).message
-        : undefined
-      const msg = detailMsg
-        ?? body.error?.message
-        ?? (typeof body.detail === 'string'
-              ? body.detail
-              : body.detail?.message ?? body.detail?.error)
-      if (msg) return stripExceptionPrefix(msg)
-    } catch {
-      // not a JSON tail — fall through to the raw text
-    }
-  }
-  // Job failures arrive as "RuntimeError: …" (api/jobs.py records the class
-  // name) — see lib/dispatchErrors.ts for why the prefix is dropped.
-  return stripExceptionPrefix(raw)
-}
+// Re-exported from lib/errorMessage so the many `import { errorMessage } from
+// '../store'` call sites keep working. The implementation moved there because
+// api.ts needed the SAME reader: it had its own, built on `body.detail.error`
+// — a key api/hardening.py's envelope never emits — so every upload/voiceover/
+// project-load failure showed as a bare "422 Unprocessable Entity" while the
+// backend's sentence sat unread in `error.details.message`. One reader, one
+// wire format, no second copy to drift.
+export { errorMessage }
 
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
 // SSR (no `localStorage`), an unset key (`null` -> NaN -> falls through to

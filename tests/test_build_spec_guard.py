@@ -51,7 +51,10 @@ def test_build_app_sh_emits_its_spec_outside_the_repo_root():
 
 def test_build_app_sh_add_data_sources_are_absolute():
     pairs = re.findall(r'--add-data\s+"([^"]+):([^"]+)"', _code())
-    assert len(pairs) == 5, pairs
+    # frontend/dist, fonts, presets, THIRD-PARTY-NOTICES.md, VERSION, BUILD_ID.
+    # The count is a tripwire: bump it deliberately when a payload is added, so
+    # nothing slips into the shipped bundle unreviewed.
+    assert len(pairs) == 6, pairs
     for src, _dst in pairs:
         assert src.startswith("$ROOT/"), (
             f"--add-data source {src!r} is relative: with --specpath, PyInstaller "
