@@ -38,12 +38,14 @@ export function TopBar() {
   // it so nobody ships a stale file by mistake.
   const exportStale = !!exportUrl && opsLen > exportGen
   const savedStale = !!savedUrl && opsLen > savedGen
-  // Key status for the 🔑 affordance below. Shown only once we have a real
-  // answer: 'unsupported' (the backend has no settings route) hides it, so an
-  // older backend behaves exactly as it always did, and 'unknown' hides it too
-  // rather than offering a control that may vanish a moment later.
+  // Key status for the 🔑 affordance below. Only 'unsupported' (the backend
+  // has no settings route, i.e. an older build) hides it, so that case behaves
+  // exactly as it always did. 'unknown' now SHOWS it: a failed status probe is
+  // not evidence the control is useless, and the chat's own auth error tells
+  // the user in words to "click the key button in the toolbar" — hiding it
+  // there pointed them at something that was not on screen.
   const keyStatus = useApiKey((st) => st.status)
-  const showKeyButton = keyStatus === 'missing' || keyStatus === 'configured'
+  const showKeyButton = keyStatus !== 'unsupported'
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)

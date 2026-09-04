@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 
 from video_ai_editor import apikey
 from video_ai_editor import main as _main
+from video_ai_editor import platformutil as _pu
 from video_ai_editor.main import app
 
 
@@ -74,8 +75,14 @@ def test_engine_probe_latches_only_on_success(monkeypatch):
     monkeypatch.setattr(_main, "_VIDEO_ENGINE_OK", False)
 
     monkeypatch.setattr(_main.shutil, "which", lambda _n: None)
-    assert _main._video_engine_missing() == ["ffmpeg", "ffprobe"]
-    assert _main._video_engine_missing() == ["ffmpeg", "ffprobe"]  # re-probed
+    # The probe reports the names it actually looked up, which are _pu.FFMPEG /
+    # _pu.FFPROBE — "ffmpeg.exe"/"ffprobe.exe" on Windows, and absolute bundle
+    # paths in a frozen app. Compare against those, not a macOS-shaped literal:
+    # hardcoding ["ffmpeg", "ffprobe"] failed the windows-latest CI job, which is
+    # the source of truth for Windows behaviour (CLAUDE.md, Testing conventions).
+    expected = [_pu.FFMPEG, _pu.FFPROBE]
+    assert _main._video_engine_missing() == expected
+    assert _main._video_engine_missing() == expected  # re-probed, not latched
 
     monkeypatch.setattr(_main.shutil, "which", lambda n: f"/usr/bin/{n}")
     assert _main._video_engine_missing() == []

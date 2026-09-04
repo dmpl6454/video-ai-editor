@@ -18,6 +18,22 @@ interface Msg {
   args?: Record<string, unknown>
   result?: unknown
   ok?: boolean
+  /** Render the key dialog's button under this message. Set only for the
+   *  backend's key errors, which are the one chat failure the user can fix
+   *  from here — telling them to click a button is weaker than giving them
+   *  the button. */
+  keyAction?: boolean
+}
+
+/** Does this error message name the API key as the problem?
+ *
+ *  Matches the copy `agent/loop.py::_KEY_HOWTO` is appended to (both the
+ *  no-key and the bad-key line say "Anthropic API key"). Deliberately narrow:
+ *  the credit-balance line says "Anthropic API credit balance" and must NOT
+ *  offer a key dialog, since re-pasting the same key fixes nothing there.
+ *  A miss costs only the button — the sentence itself already explains it. */
+function isKeyError(message: string): boolean {
+  return /anthropic api key/i.test(message)
 }
 
 export function ChatOverlay() {
@@ -113,7 +129,14 @@ export function ChatOverlay() {
             // EDL changed → refresh store + preview
             refresh().then(() => renderPreview())
           } else if (evt.type === 'error') {
-            setMsgs((m) => [...m, { role: 'assistant', text: `Error: ${evt.message}` }])
+            const keyErr = isKeyError(evt.message)
+            setMsgs((m) => [...m, { role: 'assistant', text: `Error: ${evt.message}`,
+                                    keyAction: keyErr }])
+            // The backend just told us something about the key that our cached
+            // status may not reflect (it drives the banner, the input's enabled
+            // state and the TopBar affordance's colour). Only on a key error —
+            // a rate limit says nothing about whether a key exists.
+            if (keyErr) void useApiKey.getState().refresh()
           }
         }
       }
@@ -183,7 +206,16 @@ export function ChatOverlay() {
                   </div>
                 )}
                 {m.role === 'assistant' && (
-                  <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>{m.text}</div>
+                  <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>
+                    {m.text}
+                    {m.keyAction && (
+                      <div style={{ marginTop: 6 }}>
+                        <button onClick={openApiKeySettings} style={{ fontSize: 11 }}>
+                          🔑 Add API key
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
                 {m.role === 'tool' && (
                   <div style={{

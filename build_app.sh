@@ -9,11 +9,15 @@
 #     they cannot be found, because an app that ships without them cannot
 #     decode a frame on a Mac with no Homebrew. realesrgan / rife / whisper-cli
 #     are still optional drop-ins resolved from PATH or the models/ dir.
-#   - Heavy ML libs (torch, demucs, mediapipe, faster-whisper) are excluded
-#     to keep the bundle small. Users who need those features run the dev
-#     `uv run video-ai-editor` instead. (Bundling ffmpeg/ffprobe adds ~95MB
-#     and piper's espeak-ng-data ~24MB on top of the old ~150MB — a working
-#     app is worth the download.)
+#   - Heavy ML libs (torch, demucs, mediapipe) are excluded to keep the bundle
+#     small. Users who need those features run the dev `uv run video-ai-editor`
+#     instead. (Bundling ffmpeg/ffprobe adds ~95MB and piper's espeak-ng-data
+#     ~24MB on top of the old ~150MB — a working app is worth the download.)
+#   - faster-whisper IS bundled (it used to be excluded) — see the
+#     --collect-data faster_whisper block below. Captions are a headline
+#     feature, not an optional extra, and excluding it left the shipped DMG
+#     answering the Captions button with "run the app from source", which a
+#     DMG recipient cannot do.
 #   - First launch may be slow as macOS verifies the unsigned bundle.
 
 set -euo pipefail
@@ -223,6 +227,42 @@ if [ -n "$FFBIN_MINOS" ]; then
   fi
 fi
 
+# --- faster-whisper IS bundled; captions are not an optional extra ------------
+# This build used to list faster-whisper among the excludes below, so the DMG
+# answered the Captions button with transcribe.py's "run the app from source
+# (`uv sync --all-extras`)" — advice a DMG recipient cannot act on, on the one
+# feature they are most likely to reach for. whisper.cpp was the documented
+# escape hatch and is not a real one either: Homebrew's `whisper-cli` is a
+# 43-byte wrapper around @rpath/libwhisper + libggml, so shipping it would mean
+# dylib surgery AND a new ggml auto-downloader.
+#
+# It does NOT drag torch in: faster-whisper runs on ctranslate2 (already
+# bundled for MADLAD translation), and the only torch reference on the path is
+# ctranslate2/specs/model_spec.py's, which is inside a try/except ImportError.
+# Verified by running the real transcribe() path with every module excluded
+# below made unimportable — a full decode with word timestamps, zero leakage.
+# The torch exclusion below therefore stays exactly as it was.
+#
+# The three added flags are each load-bearing, and none of them is implied by
+# the import that pulls the package in:
+#   --collect-data faster_whisper  Silero VAD ships as a DATA FILE inside the
+#     package (faster_whisper/assets/silero_vad_v6.onnx). PyInstaller collects
+#     the module graph but never a package's data, so without this the app
+#     imports faster_whisper fine and dies inside `transcribe(vad_filter=True)`
+#     with onnxruntime's NoSuchFile — the exact bug the Windows .spec's
+#     collect_data_files('faster_whisper') exists to stop. transcribe.py's
+#     _DECODE_MODES ladder degrades to vad_filter=False, so the cost is caption
+#     QUALITY rather than the feature; this line is what keeps full quality.
+#   --collect-submodules faster_whisper  every submodule is statically imported
+#     from its __init__ today, so this is cheap (7 modules) insurance against
+#     that changing upstream rather than a fix for anything.
+#   --hidden-import onnxruntime  vad.py imports it INSIDE SileroVADModel.
+#     __init__, and the hook that collects onnxruntime's provider dylibs only
+#     runs for a package that is in the graph. onnxruntime is already in this
+#     bundle via piper, so this costs nothing here and is not something to rely
+#     on staying true.
+# `av` (decode_audio), `tokenizers` and `huggingface_hub` (already collected
+# above, for the model auto-download) come in as plain static imports.
 uv run pyinstaller \
   --name "Video AI Editor" \
   --windowed \
@@ -245,14 +285,16 @@ uv run pyinstaller \
   --hidden-import "video_ai_editor.main" \
   --collect-submodules video_ai_editor \
   --collect-submodules huggingface_hub \
+  --collect-submodules faster_whisper \
+  --hidden-import onnxruntime \
   --collect-data webview \
   --collect-data piper \
+  --collect-data faster_whisper \
   --exclude-module torch \
   --exclude-module torchcodec \
   --exclude-module torchvision \
   --exclude-module mediapipe \
   --exclude-module demucs \
-  --exclude-module faster_whisper \
   --exclude-module librosa \
   --exclude-module scipy \
   --exclude-module matplotlib \
@@ -322,6 +364,77 @@ else
   echo "        that can hard-kill the app must not be shippable." >&2
   echo "        Fix: ensure --collect-data piper is passed and piper is importable." >&2
   exit 1
+fi
+
+# --- prove faster-whisper actually landed -------------------------------------
+# Same rule as the ffmpeg gate: --collect-* is a REQUEST, not a receipt. A
+# bundle that quietly lost faster-whisper is indistinguishable from a working
+# one until a recipient presses Captions and is told to "run the app from
+# source" — the very failure this build now exists to fix. Fatal, not a warning,
+# because that message cannot be acted on from a DMG.
+#
+# faster_whisper is PURE PYTHON, so its code lives compressed in the PYZ
+# archive inside the executable and leaves NO directory in the .app to look for
+# (`strings` on the exe finds nothing either — verified). Three receipts, each
+# covering what the others cannot:
+#
+# 1. Its DATA. Losing this costs caption quality silently (see _DECODE_MODES).
+FW_VAD=""
+for FW_CAND in "$APP_DIR/Contents/Resources/faster_whisper/assets/silero_vad_v6.onnx" \
+               "$APP_DIR/Contents/Frameworks/faster_whisper/assets/silero_vad_v6.onnx"; do
+  if [ -f "$FW_CAND" ]; then FW_VAD="$FW_CAND"; break; fi
+done
+if [ -z "$FW_VAD" ]; then
+  echo "[build] FATAL: faster-whisper's Silero VAD asset is not in the bundle." >&2
+  echo "        (DATA lands in Contents/Resources; Frameworks is the cross-link.)" >&2
+  echo "        Without it every caption run falls back to vad_filter=False —" >&2
+  echo "        transcription still works, but at reduced quality, silently." >&2
+  echo "        Fix: ensure --collect-data faster_whisper is passed." >&2
+  exit 1
+fi
+echo "[build] bundled faster_whisper assets ($(du -sh "$(dirname "$FW_VAD")" | cut -f1))"
+
+# 2. Its NATIVE dependencies. `av` (faster_whisper.audio.decode_audio) and
+#    `tokenizers` carry extension modules, so unlike faster_whisper itself they
+#    DO leave a directory — and nothing else in this app imports either one, so
+#    finding them is proof that faster-whisper's own import graph was walked
+#    rather than just its data copied. Missing, the import fails at runtime even
+#    though the Python code is present.
+for FW_NATIVE in av tokenizers; do
+  FW_NATIVE_DIR=""
+  for FW_CAND in "$APP_DIR/Contents/Frameworks/$FW_NATIVE" \
+                 "$APP_DIR/Contents/Resources/$FW_NATIVE"; do
+    if [ -d "$FW_CAND" ]; then FW_NATIVE_DIR="$FW_CAND"; break; fi
+  done
+  if [ -z "$FW_NATIVE_DIR" ]; then
+    echo "[build] FATAL: $FW_NATIVE is not in the bundle, so faster-whisper cannot" >&2
+    echo "        import there — captions would fail at runtime with the Python" >&2
+    echo "        code present and no clue why." >&2
+    echo "        Check that faster-whisper has not returned to the exclude list." >&2
+    exit 1
+  fi
+  echo "[build] bundled $FW_NATIVE ($(du -sh "$FW_NATIVE_DIR" | cut -f1))"
+done
+
+# 3. The module code itself, which neither of the above can show. PYZ-00.toc is
+#    PyInstaller's OWN record of every module it put in the archive, written by
+#    the run that just succeeded. A layout change that moves it is not a broken
+#    bundle, so that case warns; a toc that exists and does NOT list the module
+#    is exactly the silent loss this block is for.
+PYZ_TOC="build/Video AI Editor/PYZ-00.toc"
+if [ -f "$PYZ_TOC" ]; then
+  if grep -q "'faster_whisper.transcribe'" "$PYZ_TOC"; then
+    echo "[build] PYZ archive lists faster_whisper.transcribe"
+  else
+    echo "[build] FATAL: faster_whisper is NOT in the PYZ archive — the app would" >&2
+    echo "        raise ImportError and tell the user to run from source, which is" >&2
+    echo "        impossible from a DMG. Its data/native deps landed, so this is a" >&2
+    echo "        module-graph problem: check the exclude list and the collect flags." >&2
+    exit 1
+  fi
+else
+  echo "[build] WARNING: $PYZ_TOC not found — cannot confirm the PYZ holds" >&2
+  echo "        faster_whisper (PyInstaller's work-dir layout may have moved)." >&2
 fi
 
 # PyInstaller's CLI mode (used here, not the committed .spec — the generated

@@ -46,8 +46,9 @@ class Feature:
     #
     # "a packaged bundle" means EITHER build, because the two exclude lists are
     # not the same: `build_app.sh` (macOS) additionally drops torch,
-    # torchvision, torchaudio, faster_whisper, open_clip, timm and scipy, which
-    # the Windows `.spec` keeps. Deriving the flag from the `.spec` alone left
+    # torchvision, torchaudio, open_clip, timm and scipy, which the Windows
+    # `.spec` keeps. (faster_whisper was on that list too until captions were
+    # made to work from the DMG.) Deriving the flag from the `.spec` alone left
     # every macOS user of the packaged app with exactly the impossible advice
     # this field exists to prevent (`visual_search` → "run uv sync", inside a
     # frozen .app). Marking a feature False costs nothing on the build where it
@@ -183,16 +184,34 @@ FEATURES: list[Feature] = [
             _whisper_ok,
             fix=f"`{PIP_EXTRA}` (installs faster-whisper), or drop a whisper.cpp "
                 "binary + ggml model in the models/ dir",
-            # faster-whisper IS bundled on Windows and is NOT on macOS
-            # (build_app.sh excludes it), so on a packaged Mac this reports
-            # unavailable and the pip half of `fix` above is impossible. The
-            # binary half is not — whisper.cpp is a drop-in — so this feature
-            # gets a route rather than the blanket "run from source".
-            packaged_fix="drop a whisper.cpp binary (`whisper-cli`) + a ggml model "
-                         "into the models/ dir, or run the app from source — the "
-                         "packaged macOS build excludes faster-whisper and nothing "
-                         "can be pip-installed into a frozen app",
-            note="First use of the caption model downloads it (~1.5GB for large-v3)."),
+            # faster-whisper is now bundled in BOTH packaged builds. It used to
+            # be `--exclude-module`d on macOS, so the notarized DMG answered the
+            # Captions button with transcribe.py's "run the app from source
+            # (`uv sync --all-extras`)" — on the one feature a video editor is
+            # most likely to reach for, and advice a DMG recipient cannot act
+            # on. The whisper.cpp escape hatch this text used to lead with is
+            # not a real one either: Homebrew's `whisper-cli` is a wrapper that
+            # links @rpath dylibs, so it is not a drop-in without dylib surgery.
+            # Reaching this line in a frozen app therefore means the BUNDLE is
+            # broken, not that the feature was deliberately left out — say so,
+            # since a packaging fault and a deliberate omission need different
+            # responses from whoever reads it. The drop-in route stays named
+            # because it does still work inside a bundle for anyone who has a
+            # portable whisper-cli.
+            packaged_fix="this build is supposed to ship faster-whisper and does "
+                         "not appear to — a packaging fault, not a missing extra, "
+                         "so please report it. Workaround: put a portable "
+                         "whisper.cpp binary (`whisper-cli`) + a ggml model in the "
+                         "models/ dir, or run the app from source. Nothing can be "
+                         "pip-installed into a frozen app.",
+            # Measured, not estimated: the large-v3 repo is 3.09GB on disk
+            # (model.bin alone is 3,087,284,237 bytes) and `small` is ~465MB.
+            # This note said "~1.5GB" and was the only warning a user got
+            # before a multi-gigabyte download started.
+            note="Captions transcribe with large-v3, downloaded on first use "
+                 "(~3GB, once, cached). The quick transcript made when you "
+                 "import a clip uses `small` instead (~465MB). Set "
+                 "WHISPER_CAPTION_MODEL to a smaller name to skip the big one."),
     Feature("noise_reduce", "Background-noise removal",
             ["noise_reduce"], lambda: _has("noisereduce", "soundfile"),
             fix=f"`{PIP_EXTRA}`",
@@ -350,7 +369,12 @@ def feature_report() -> dict:
                 # A feature with a route that works inside a bundle (a drop-in
                 # binary) gets that route, not the blanket "run from source".
                 entry["fix"] = f.packaged_fix
-                entry["packaged_app_excluded"] = True
+                # …but only call it EXCLUDED if it actually is. captions now
+                # ships in both packaged builds and still carries a packaged_fix
+                # (for the "bundled but somehow missing" case), so stamping this
+                # unconditionally told the UI to grey out a feature the build
+                # contains and label it deliberately left out.
+                entry["packaged_app_excluded"] = not f.in_packaged_app
             elif frozen and not f.in_packaged_app:
                 entry["fix"] = PACKAGED_FIX
                 entry["packaged_app_excluded"] = True

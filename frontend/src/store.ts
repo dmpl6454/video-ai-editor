@@ -122,6 +122,11 @@ interface State {
   exporting: boolean
   exportUrl: string | null
   exportFilename: string | null // leaf name of the finished export (for the native save dialog)
+  // Human name to OFFER for that file (`Beach_Trip_2026-09-04.mp4`) — the
+  // on-disk leaf is `export_<edl-hash>.mp4`, which is the render cache key
+  // and unreadable as a proposed download. Null on a backend that predates
+  // the field; every consumer falls back to `exportFilename`.
+  exportSuggestedName: string | null
   exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
   exportError: string | null
   exportProgress: number        // 0..1 live ffmpeg progress
@@ -283,6 +288,7 @@ export const useStore = create<State>((set, get) => ({
   exporting: false,
   exportUrl: null,
   exportFilename: null,
+  exportSuggestedName: null,
   exportStatus: null,
   exportError: null,
   exportProgress: 0,
@@ -634,7 +640,8 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     set({
-      exporting: true, exportUrl: null, exportFilename: null, exportStatus: 'queued',
+      exporting: true, exportUrl: null, exportFilename: null,
+      exportSuggestedName: null, exportStatus: 'queued',
       exportError: null, exportProgress: 0, exportJobId: null,
     })
     const POLL_MS = 500           // tight enough that the bar feels live
@@ -659,8 +666,10 @@ export const useStore = create<State>((set, get) => ({
           // Stamp the export with the current history length so the UI can flag
           // it "outdated" once the user edits past this point.
           set({ exportUrl: job.result.url, exportFilename: job.result.filename,
+                exportSuggestedName: job.result.suggested_filename ?? null,
                 exportStatus: null, exportProgress: 1, exportGen: get().ops.length })
-          await triggerDownload(job.result.url, job.result.filename, sid)
+          await triggerDownload(job.result.url, job.result.filename, sid,
+                                job.result.suggested_filename)
           return
         }
         if (job.status === 'failed') {
@@ -687,12 +696,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   downloadExport: async () => {
-    const { exportUrl, exportFilename, sessionId } = get()
+    const { exportUrl, exportFilename, exportSuggestedName, sessionId } = get()
     if (!exportUrl) return
     // Derive the leaf name from the URL if we somehow lack the stored filename
     // (e.g. an export from before this field existed).
     const filename = exportFilename || exportUrl.split('/').pop() || 'export.mp4'
-    await triggerDownload(exportUrl, filename, sessionId)
+    await triggerDownload(exportUrl, filename, sessionId, exportSuggestedName ?? undefined)
   },
 
   cancelExport: async () => {
@@ -796,7 +805,7 @@ useStore.subscribe((state, prevState) => {
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the one method this file calls, not the whole class.
 interface PywebviewBridge {
-  pywebview?: { api?: { save_export?: (sid: string, filename: string) => Promise<string | null> } }
+  pywebview?: { api?: { save_export?: (sid: string, filename: string, suggested?: string) => Promise<string | null> } }
 }
 
 // A finished export needs to reach the user's disk. In a real browser an
@@ -810,11 +819,19 @@ interface PywebviewBridge {
 // `window.pywebview`, so it falls through to the anchor path unchanged.
 // Kept module-scoped (not in a component) so it can fire from the store's
 // polling loop.
-async function triggerDownload(url: string, filename: string, sessionId: string | null): Promise<void> {
+// `filename` is the file's real leaf under <session>/exports/ — the bridge
+// resolves the source by it, so it must stay exact. `suggested` is only what
+// the user is OFFERED as a destination; the hash name is correct but unreadable.
+async function triggerDownload(url: string, filename: string, sessionId: string | null,
+                               suggested?: string): Promise<void> {
   const py = (window as unknown as PywebviewBridge).pywebview
   if (py?.api?.save_export && sessionId) {
     try {
-      const saved = await py.api.save_export(sessionId, filename)
+      // Pass `suggested` THROUGH to the bridge. Threading it this far and then
+      // dropping it made the human export name work in browser-dev and do nothing
+      // in the packaged app — the only place the native dialog exists, i.e. the
+      // only place the fix was for. desktop.py ignores a missing 3rd arg.
+      const saved = await py.api.save_export(sessionId, filename, suggested)
       if (saved) {
         toast.success(`Saved to ${saved}`)
         return
@@ -830,7 +847,7 @@ async function triggerDownload(url: string, filename: string, sessionId: string 
   }
   const a = document.createElement('a')
   a.href = url
-  a.download = filename
+  a.download = suggested || filename
   a.style.display = 'none'
   document.body.appendChild(a)
   a.click()

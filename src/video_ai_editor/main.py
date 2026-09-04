@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
@@ -84,7 +85,8 @@ def _validate_ai_config() -> None:
     if not ANTHROPIC_API_KEY:
         log.warning(
             "ANTHROPIC_API_KEY is not set — the 'Tell Claude what to do' chat "
-            "pane will be disabled. Add it to .env to enable AI features."
+            "pane will be disabled. Set it in .env, or paste a key into the "
+            "app's key button in the toolbar (applies without a restart)."
         )
     elif not ANTHROPIC_API_KEY.startswith("sk-"):
         log.warning(
@@ -1216,9 +1218,82 @@ def stream_preview(sid: str, h: str | None = None):
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
 
 
-def _export_payload(sid: str, res) -> dict:
-    return {"path": str(res.path), "filename": res.path.name,
-            "url": f"/api/sessions/{sid}/files/exports/{res.path.name}"}
+def _first_v1_source_stem(edl) -> str:
+    """The footage name a user would recognise: the earliest v1 clip's source.
+
+    Reads `.src` off whatever v1 holds and splits on BOTH separators — a `.vae`
+    authored on Windows stores backslash paths that `Path()` on POSIX treats as
+    part of the filename. Ingest writes `uploads/<stem>/<stem>.normalized.mp4`,
+    so the `.normalized` infix is stripped the same way `dispatch.py` already
+    does when it names a derived file.
+    """
+    for t in edl.tracks:
+        if t.id != "v1":
+            continue
+        clips = [c for c in t.clips if getattr(c, "src", None)]
+        for c in sorted(clips, key=lambda c: float(getattr(c, "start", 0.0) or 0.0)):
+            leaf = str(c.src).replace("\\", "/").split("/")[-1]
+            stem = Path(leaf).stem
+            if stem.endswith(".normalized"):
+                stem = stem[: -len(".normalized")]
+            if stem:
+                return stem
+    return ""
+
+
+def _suggested_export_name(sid: str, edl, suffix: str) -> str:
+    """A human name to OFFER for a finished export — never where it is written.
+
+    The file on disk keeps `export_<edl-hash>.mp4`: that name IS the render
+    cache key, and `desktop.py::save_export` locates the file by the response's
+    `filename`, so neither may change. This is only what the native Save dialog
+    and the browser download propose as a destination, where a hash is
+    unreadable and three cuts of one edit produce three names a recipient
+    cannot tell apart.
+
+    Source order is "what the user would call it": the first v1 clip's footage,
+    then the session name when someone actually chose one (it defaults to the
+    session id, which is another hash), then a plain word. `_safe_filename`
+    does the sanitising, so the result keeps only `[A-Za-z0-9._-]` and is legal
+    on NTFS as well as APFS — this string is handed straight to a save dialog.
+    """
+    base = _first_v1_source_stem(edl)
+    if not base:
+        try:
+            meta = read_meta(sid)
+            # isinstance, not just try/except: read_meta returns whatever
+            # json.loads produced, so a meta.json holding a valid but non-object
+            # document (`[]`, `"x"`, `3`) raises AttributeError on .get — which
+            # is neither OSError nor ValueError and would 500 an export that had
+            # already rendered successfully.
+            name = str(meta.get("name") or "") if isinstance(meta, dict) else ""
+        except (OSError, ValueError):
+            # A malformed meta.json must not fail an export that already
+            # rendered — this whole function is a nicety over a working file.
+            name = ""
+        base = name if name and name != sid else ""
+    # `suffix` comes from our own allowlisted container, but it is about to be
+    # concatenated into a filename, so re-check its shape rather than trust it.
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,8}", suffix or ""):
+        suffix = ".mp4"
+    # Sanitise the BASE alone and re-append the stamp, so a name that survives
+    # nothing (an all-Devanagari stem) degrades to `video_<sig>_<date>` rather
+    # than to a bare date with no hint of what it is.
+    stem = Path(_safe_filename(f"{(base or 'video')[:48]}{suffix}",
+                               f"video{suffix}")).stem
+    return f"{stem}_{date.today().isoformat()}{suffix}"
+
+
+def _export_payload(sid: str, res, edl=None) -> dict:
+    """Existing fields are a contract: `filename` is the ON-DISK leaf that
+    `desktop.py::save_export` resolves under `<session>/exports/`, and an older
+    frontend still reads only these three. `suggested_filename` is additive —
+    a client that has never heard of it keeps working unchanged."""
+    out = {"path": str(res.path), "filename": res.path.name,
+           "url": f"/api/sessions/{sid}/files/exports/{res.path.name}"}
+    if edl is not None:
+        out["suggested_filename"] = _suggested_export_name(sid, edl, res.path.suffix)
+    return out
 
 
 @app.post("/api/sessions/{sid}/export")
@@ -1247,7 +1322,7 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             })
         except FileNotFoundError as e:
             raise _missing_binary_http(e) from e
-        return _export_payload(sid, res)
+        return _export_payload(sid, res, store.edl)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl
     session_dir_snapshot = store.dir
@@ -1266,7 +1341,7 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             raise RuntimeError(_render_failure_message(msg[-400:], msg)) from e
         except FileNotFoundError as e:
             raise RuntimeError(_missing_binary_http(e).detail["message"]) from e
-        return _export_payload(sid, res)
+        return _export_payload(sid, res, edl_snapshot)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
     return JSONResponse(

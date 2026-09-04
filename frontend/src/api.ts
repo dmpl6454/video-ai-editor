@@ -19,7 +19,11 @@ export interface Job {
   kind: string
   status: JobStatus
   progress: number          // 0..1; export reports live ffmpeg progress
-  result: { path: string; filename: string; url: string } | null
+  // `filename` is the ON-DISK leaf (`export_<hash>.mp4`) — what the native
+  // save bridge resolves under <session>/exports/. `suggested_filename` is
+  // the human name to OFFER instead, and is optional: a backend older than
+  // it simply omits the field.
+  result: { path: string; filename: string; url: string; suggested_filename?: string } | null
   error: string | null
   created_at: number
   started_at: number | null
@@ -185,7 +189,7 @@ export const api = {
     `${BASE}/sessions/${sid}/preview.mp4${hash ? `?h=${hash}` : ''}`,
 
   export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' } = {}) =>
-    http<{ path: string; filename: string; url: string }>(
+    http<{ path: string; filename: string; url: string; suggested_filename?: string }>(
       'POST',
       `/sessions/${sid}/export`,
       opts
