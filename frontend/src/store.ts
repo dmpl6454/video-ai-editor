@@ -802,10 +802,29 @@ useStore.subscribe((state, prevState) => {
   }
 })
 
+// What desktop.py's `_Api.save_export_result` resolves to. Every field is
+// optional because the object crosses a hand-written boundary (pywebview
+// serialises whatever Python returned) — treat it as untyped data, not a
+// promise. `cancelled` is the ONLY outcome that must stay silent.
+interface SaveExportResult {
+  ok?: boolean
+  path?: string | null
+  cancelled?: boolean
+  reason?: string
+  error?: string | null
+}
+
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
-// js_api — only the one method this file calls, not the whole class.
+// js_api — only the methods this file calls, not the whole class. Both save
+// methods are optional, and that is the compatibility contract in the
+// direction TypeScript can see: `frontend/dist` is rebuilt independently of
+// the app (CLAUDE.md, Release identity), so THIS bundle can find itself
+// talking to an older bridge that only has `save_export`.
 interface PywebviewBridge {
-  pywebview?: { api?: { save_export?: (sid: string, filename: string, suggested?: string) => Promise<string | null> } }
+  pywebview?: { api?: {
+    save_export?: (sid: string, filename: string, suggested?: string) => Promise<string | null>
+    save_export_result?: (sid: string, filename: string, suggested?: string) => Promise<SaveExportResult | string | null>
+  } }
 }
 
 // A finished export needs to reach the user's disk. In a real browser an
@@ -824,25 +843,52 @@ interface PywebviewBridge {
 // the user is OFFERED as a destination; the hash name is correct but unreadable.
 async function triggerDownload(url: string, filename: string, sessionId: string | null,
                                suggested?: string): Promise<void> {
-  const py = (window as unknown as PywebviewBridge).pywebview
-  if (py?.api?.save_export && sessionId) {
+  const api = (window as unknown as PywebviewBridge).pywebview?.api
+  if (api && sessionId && (api.save_export_result || api.save_export)) {
     try {
       // Pass `suggested` THROUGH to the bridge. Threading it this far and then
       // dropping it made the human export name work in browser-dev and do nothing
       // in the packaged app — the only place the native dialog exists, i.e. the
       // only place the fix was for. desktop.py ignores a missing 3rd arg.
-      const saved = await py.api.save_export(sessionId, filename, suggested)
-      if (saved) {
-        toast.success(`Saved to ${saved}`)
+      if (api.save_export_result) {
+        const r = await api.save_export_result(sessionId, filename, suggested)
+        // A path (either shape) means it landed on disk.
+        if (typeof r === 'string' && r) { toast.success(`Saved to ${r}`); return }
+        if (r && typeof r === 'object') {
+          if (r.ok && r.path) { toast.success(`Saved to ${r.path}`); return }
+          // A cancel is a decision, not a failure: stay silent, exactly as
+          // before. EVERYTHING ELSE gets said out loud — the bridge returns
+          // None for five different reasons and this branch reading them all
+          // as "cancelled" is what made the shipped export bug undiagnosable
+          // (no dialog, no toast, nothing).
+          if (r.cancelled) return
+          toast.error(r.error || 'The export could not be saved.')
+          return
+        }
+        // Neither shape. Reported rather than swallowed: this bridge always
+        // returns an object, so a null/undefined here is the CALL misbehaving,
+        // not a user changing their mind.
+        toast.error('The export could not be saved.')
+        return
+      } else if (api.save_export) {
+        const saved = await api.save_export(sessionId, filename, suggested)
+        if (saved) {
+          toast.success(`Saved to ${saved}`)
+          return
+        }
+        // An OLDER bridge, which cannot tell us why: a cancel and a failure are
+        // the same `null`, so stay silent rather than guess. Falling through to
+        // the anchor click below wouldn't help either (same WKWebView/WebView2
+        // limitation) and would toast a success that did not happen.
         return
       }
-      // User cancelled the native dialog — nothing was saved, and falling
-      // through to the anchor click below wouldn't help (same WKWebView/
-      // WebView2 limitation), so just stop here without a false success toast.
+    } catch (e) {
+      // The bridge call itself threw. We are inside pywebview, where the
+      // `<a download>` fallback cannot download anything (and navigates the
+      // WKWebView into an inescapable fullscreen player), so report it instead
+      // of falling through to a "downloading…" toast that is not true.
+      toast.error(`The export could not be saved: ${errorMessage(e)}`)
       return
-    } catch {
-      // Bridge call itself failed (e.g. older packaged build without the
-      // bridge) — fall through to the anchor path as a best effort.
     }
   }
   const a = document.createElement('a')

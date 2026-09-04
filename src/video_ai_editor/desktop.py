@@ -4,11 +4,13 @@ Usage:
     uv run python -m video_ai_editor.desktop
 """
 from __future__ import annotations
+import errno
 import mimetypes
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -65,14 +67,27 @@ def _diag(msg: str) -> None:
 
 
 def _wait_for_server(url: str, timeout: float = 15.0,
-                     abort: Callable[[], bool] | None = None) -> bool:
-    """Poll `url` until it answers 200, or `timeout` elapses.
+                     abort: Callable[[], bool] | None = None,
+                     owned: Callable[[], bool] | None = None) -> bool:
+    """Poll `url` until it answers 200 FROM OUR OWN BACKEND, or `timeout` elapses.
 
     `abort` is checked between attempts and short-circuits the wait. The only
     caller that passes one uses it for "the server thread already recorded a
     crash": no amount of further polling can make a dead uvicorn answer, and
     staring at a splash for the full startup timeout when the reason is
     already known is the same silent failure this path exists to remove.
+
+    `owned` answers "is the thing on that port ours?" and is why a bare 200 is
+    not enough. A stranger already holding the port (a dev `uvicorn` on 8765 is
+    the case that shipped) answers `/api/health` with a perfectly good 200 while
+    OUR uvicorn is exiting with SystemExit(1) — the health poll wins the race,
+    the window opens against the foreign editor, and every session, render and
+    export then lands in the OTHER process's workdir. That is exactly how the
+    "no save dialog appears on export" report happened: the export rendered into
+    a workdir this process had never heard of, so `save_export` could not find
+    the file. So the predicate is checked ALONGSIDE the 200, not after it: an
+    un-owned 200 keeps waiting (and eventually reports failure) instead of being
+    silently adopted.
     """
     end = time.time() + timeout
     while time.time() < end:
@@ -80,11 +95,80 @@ def _wait_for_server(url: str, timeout: float = 15.0,
             return False
         try:
             with urllib.request.urlopen(url, timeout=0.5) as r:
-                if r.status == 200:
+                if r.status == 200 and (owned is None or owned()):
                     return True
         except Exception:
-            time.sleep(0.1)
+            pass
+        # Sleep on every non-answer, including a 200 we refuse to adopt — the
+        # sleep used to live in the `except` arm only, which would spin hot
+        # against a foreign server that answers instantly.
+        time.sleep(0.1)
     return False
+
+
+# The `uvicorn.Server` this process created, set by `_serve` before it binds.
+# `Server.started` flips True only once OUR socket is listening, which is the
+# identity proof `_wait_for_server` needs: a TCP listen is exclusive, so if our
+# server is up, whatever answers on that port IS us. It is deliberately not a
+# token echoed by a route — that would need `main.py` to grow an endpoint, and a
+# bind is a stronger claim than an echo anyway.
+_SERVER: object | None = None
+
+
+def _server_is_ours() -> bool:
+    """True once this process's own uvicorn has finished binding and starting."""
+    srv = _SERVER
+    return bool(srv is not None and getattr(srv, "started", False))
+
+
+# EADDRINUSE, spelled per-platform. Windows reports WSAEADDRINUSE (10048) in
+# `OSError.errno` for socket calls, which is a different number from POSIX's 48.
+_BUSY_ERRNOS = frozenset(
+    e for e in (getattr(errno, "EADDRINUSE", None),
+                getattr(errno, "WSAEADDRINUSE", None)) if e is not None
+)
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    """True only when something is ALREADY LISTENING on (host, port).
+
+    A pre-bind probe, so a collision is diagnosed in words before the window
+    appears rather than being inferred from uvicorn's exit code. It costs one
+    bind+close (microseconds) on the normal path and never touches the network.
+
+    Two details are load-bearing:
+
+    * `SO_REUSEADDR` mirrors what asyncio's `create_server` sets for a listener
+      on POSIX. Without it a connection left in TIME_WAIT by the PREVIOUS run of
+      this app (its local port IS this one) makes the probe fail, and we would
+      refuse to launch over a port uvicorn can bind perfectly well — turning a
+      relaunch-right-after-quit into "another copy is already running".
+    * Only EADDRINUSE counts. Any other failure (an unresolvable host, EACCES,
+      an address family mismatch) means "cannot tell", and the caller must then
+      behave exactly as it did before this probe existed rather than refusing to
+      start over a question it could not answer.
+    """
+    try:
+        family, socktype, proto, _canon, sockaddr = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM)[0]
+    except OSError:
+        return False
+    try:
+        with socket.socket(family, socktype, proto) as s:
+            if not _pu.IS_WINDOWS:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(sockaddr)
+    except OSError as e:
+        return e.errno in _BUSY_ERRNOS
+    return False
+
+
+def _port_conflict_message(host: str, port: int, url: str) -> str | None:
+    """The sentence to show when the port is already taken, else None."""
+    if not _port_in_use(host, port):
+        return None
+    return (f"port {port} already in use — another program is answering on "
+            f"{url}, so this copy could not start its own engine.")
 
 
 def _frontend_is_stale(repo: Path, dist: Path) -> bool:
@@ -190,7 +274,7 @@ def _serve(host: str, port: int) -> None:
     through _diag so a real import/bind failure is never indistinguishable
     from "still importing".
     """
-    global _SERVER_ERROR
+    global _SERVER_ERROR, _SERVER
     try:
         import uvicorn
         # log_config=None is required, not optional, in a windowed/frozen
@@ -202,9 +286,29 @@ def _serve(host: str, port: int) -> None:
         # crashes this daemon thread before uvicorn ever binds the socket.
         # The app's own JSON/file logging (api/hardening.py) already covers
         # everything uvicorn's logging would, so skipping it here is free.
-        uvicorn.run("video_ai_editor.main:app", host=host, port=port,
-                    reload=False, log_level="warning", access_log=False,
-                    log_config=None)
+        #
+        # Config+Server rather than `uvicorn.run(...)`: for this configuration
+        # (no reload, one worker) `run()` is literally `Server(config).run()`
+        # plus a trailing `if not server.started: sys.exit(3)`, which is
+        # replicated below — so the runtime behaviour is unchanged. What we gain
+        # is a handle on the Server, whose `started` flag is the only honest
+        # answer to "is the backend on that port MINE?" (see `_server_is_ours`).
+        config = uvicorn.Config("video_ai_editor.main:app", host=host, port=port,
+                                reload=False, log_level="warning",
+                                access_log=False, log_config=None)
+        server = uvicorn.Server(config)
+        _SERVER = server
+        server.run()
+        # The tail of `uvicorn.run` is `if not server.started: sys.exit(3)`,
+        # which covers a startup that failed WITHOUT raising (a lifespan
+        # error): `run()` just returns. Record it for the watcher rather than
+        # re-raising it — a `sys.exit` on this daemon thread would only become
+        # a SystemExit the arm below has to translate anyway, and the watcher
+        # would otherwise poll a server that is already gone for the whole
+        # startup timeout.
+        if not server.started and _SERVER_ERROR is None:
+            _SERVER_ERROR = "the backend stopped before it finished starting up."
+            _diag("server thread returned without ever starting")
     except SystemExit as e:
         # The arm that actually fires in production. uvicorn does NOT raise on
         # the two failures a user hits — a port already in use, or a fatal
@@ -553,9 +657,39 @@ class _Api:
 
     def save_export(self, session_id: str, filename: str,
                     suggested_name: str | None = None) -> str | None:
-        """Copy an exported file to a user-chosen location via the native
-        save dialog. Returns the chosen destination path, or None if the
-        session/file is invalid or the user cancelled the dialog.
+        """LEGACY shape of `save_export_result`: the destination path, or None.
+
+        Kept because `frontend/dist` is rebuilt independently of the app and a
+        stale bundle has shipped before (CLAUDE.md, Release identity), so an
+        older store.ts must keep working against a newer bridge. That bundle
+        cannot tell a failure from a cancel — which is the bug
+        `save_export_result` exists to fix — but None is what it already
+        handles, so its behaviour is unchanged rather than newly wrong.
+        """
+        res = self.save_export_result(session_id, filename, suggested_name)
+        return res.get("path") if res.get("ok") else None
+
+    def save_export_result(self, session_id: str, filename: str,
+                           suggested_name: str | None = None) -> dict:
+        """Copy an exported file to a user-chosen location via the native save
+        dialog, and say WHICH of the several non-successes happened.
+
+        Returns one of:
+          {"ok": True,  "path": "/Users/…/cut.mp4"}
+          {"ok": False, "cancelled": True}
+          {"ok": False, "reason": <slug>, "error": <sentence for the user>}
+
+        The distinction is the whole point. This returned a bare `str | None`
+        for five different outcomes — invalid session id, a filename that is not
+        a bare leaf, the source file not existing, a failed copy, and the user
+        cancelling — and `store.ts` reads a falsy result as "cancelled" and
+        deliberately shows NOTHING. So the shipped DMG's headline bug ("no save
+        dialog appears on export", root cause: the window was driving a foreign
+        backend, so the rendered file was in another process's workdir and the
+        `src.exists()` guard rejected it) produced total silence: no dialog, no
+        toast, no log line. A cancel must stay silent — a toast every time
+        someone changes their mind is noise — but everything else has to be
+        distinguishable from it, here AND in the log.
 
         `filename` LOCATES the file: it is the export's real leaf in the
         session's `exports/` dir. `suggested_name` is only what the dialog
@@ -566,26 +700,57 @@ class _Api:
         sends no name falls back to the hash rather than failing.
         """
         if not is_valid_session_id(session_id):
-            return None
+            _diag(f"save_export: rejected an invalid session id {session_id!r}")
+            return {"ok": False, "reason": "bad_session",
+                    "error": "The app could not identify this project, so the "
+                             "export was not saved. Reopen the project and "
+                             "export again."}
         # Reject any filename that isn't a bare leaf (e.g. "../../etc/passwd")
         # before it ever touches the filesystem — the same belt-and-suspenders
         # posture as storage.delete_session's path-traversal guard.
         if not filename or Path(filename).name != filename:
-            return None
+            _diag(f"save_export: rejected a non-leaf filename {filename!r}")
+            return {"ok": False, "reason": "bad_filename",
+                    "error": "The export's file name was rejected as unsafe, "
+                             "so nothing was saved."}
         src = session_path(session_id) / "exports" / filename
         if not src.exists():
-            return None
-        import webview  # lazy: mirrors main()'s import, keeps this module
-                         # importable (e.g. under pytest) without a GUI toolkit
-        win = webview.windows[0]
-        dest = win.create_file_dialog(
-            webview.FileDialog.SAVE,
-            save_filename=_suggested_save_name(filename, suggested_name),
-        )
+            # The reported failure. The path is the diagnosis (it names the
+            # workdir this process is actually using), so it goes in the log —
+            # not in a toast, where a user cannot do anything with it.
+            _diag(f"save_export: no such export on disk: {src}")
+            return {"ok": False, "reason": "missing_file",
+                    "error": f"The exported file is not where the app expects "
+                             f"it ({filename}). Export again, then save. If "
+                             f"another copy of Video AI Editor is open, quit "
+                             f"it first."}
+        try:
+            import webview  # lazy: mirrors main()'s import, keeps this module
+                             # importable (e.g. under pytest) without a GUI toolkit
+            win = webview.windows[0]
+            dest = win.create_file_dialog(
+                webview.FileDialog.SAVE,
+                save_filename=_suggested_save_name(filename, suggested_name),
+            )
+        except Exception as e:
+            # A dialog that never opened is precisely the reported symptom, so
+            # it must never be silent again.
+            _diag(f"save_export: the native save dialog failed: {e!r}")
+            return {"ok": False, "reason": "dialog_failed",
+                    "error": f"The Save dialog could not be opened ({e})."}
         if not dest:
-            return None
+            return {"ok": False, "cancelled": True}
         dest_path = dest if isinstance(dest, str) else dest[0]
-        shutil.copy2(src, dest_path)
+        try:
+            shutil.copy2(src, dest_path)
+        except OSError as e:
+            # Previously this raised out through the js_api bridge, which
+            # store.ts caught and answered with an `<a download>` click plus
+            # "Export complete — downloading…" — a FALSE success, in a window
+            # where that anchor cannot download anything.
+            _diag(f"save_export: copy to {dest_path} failed: {e!r}")
+            return {"ok": False, "reason": "copy_failed",
+                    "error": f"Could not write the file to {dest_path} ({e})."}
         # macOS Spotlight's `com.apple.metadata.mdflagwriter` daemon marks some
         # freshly-created files with UF_HIDDEN within ~1s (the same daemon behind
         # this repo's `.pth` hidden-flag gotcha — see CLAUDE.md). When it hits a
@@ -626,7 +791,7 @@ class _Api:
                 subprocess.run(["explorer", f"/select,{dest_path}"], **_pu.SUBPROCESS_FLAGS)
         except Exception:
             pass
-        return dest_path
+        return {"ok": True, "path": dest_path}
 
 
 # Window chrome for everything shown BEFORE the editor loads. Kept in step with
@@ -708,7 +873,9 @@ def _startup_failed_html(url: str, timeout: float, error: str | None) -> str:
     log = _pu.user_data_dir("Video AI Editor") / "logs" / "app.log"
     lines = []
     if error:
-        lines.append(f"The engine stopped with: {error}")
+        # "could not start", not "stopped": the port-collision arm never gets
+        # as far as running, and that is now the likeliest reader of this page.
+        lines.append(f"The engine could not start — {error}")
     else:
         lines.append(f"The engine did not answer on {url} within "
                      f"{timeout:.0f} seconds.")
@@ -739,7 +906,8 @@ def _open_editor_when_ready(window, url: str, health_url: str,
     """
     try:
         if _wait_for_server(health_url, timeout=timeout,
-                            abort=lambda: _SERVER_ERROR is not None):
+                            abort=lambda: _SERVER_ERROR is not None,
+                            owned=_server_is_ours):
             window.load_url(url)
             return
         err = _SERVER_ERROR
@@ -754,7 +922,8 @@ def _open_editor_when_ready(window, url: str, health_url: str,
             time.sleep(_LATE_RETRY_EVERY_S)
             if _SERVER_ERROR:
                 return
-            if _wait_for_server(health_url, timeout=1.0):
+            if _wait_for_server(health_url, timeout=1.0,
+                                owned=_server_is_ours):
                 window.load_url(url)
                 return
     except Exception:
@@ -763,13 +932,27 @@ def _open_editor_when_ready(window, url: str, health_url: str,
 
 
 def main() -> None:
+    global _SERVER_ERROR
     _ensure_frontend_built()
     host = os.environ.get("VAE_HOST", "127.0.0.1")
     port = int(os.environ.get("VAE_PORT", "8765"))
     url = f"http://{host}:{port}"
 
-    server_thread = threading.Thread(target=_serve, args=(host, port), daemon=True)
-    server_thread.start()
+    # Refuse, rather than adopt or relocate. If something else already holds the
+    # port we cannot serve on it, and the alternative — quietly binding a free
+    # port instead — would be worse than it looks: WORKDIR is per-USER, not
+    # per-port, so two copies of this app would then read-modify-write the same
+    # `edl.json`/snapshots with no cross-process lock (`_session_lock` is a
+    # threading.Lock). Today's refusal keeps a second copy from corrupting the
+    # first one's projects, and the honest failure page tells the user which
+    # copy to quit. Set VAE_PORT to run a second instance deliberately.
+    conflict = _port_conflict_message(host, port, url)
+    if conflict:
+        _SERVER_ERROR = conflict
+        _diag(f"not starting the backend: {conflict} "
+              f"(set VAE_PORT to use a different port)")
+    else:
+        threading.Thread(target=_serve, args=(host, port), daemon=True).start()
     # The frozen bundle's first cold import (torch et al.) can exceed the old
     # hard-coded 15s default on a loaded Windows box, so the launcher gave up
     # before uvicorn bound (E2E report ISSUE-05). Default to 60s; overridable.
@@ -782,18 +965,48 @@ def main() -> None:
     # always did. Only a slow start gets a window it has something to say in —
     # previously it got no window at all, then (past the timeout) a process
     # that exited without a word, which reads as "the app won't launch".
-    ready = _wait_for_server(health_url, timeout=_SPLASH_AFTER_S)
+    ready = (not conflict) and _wait_for_server(
+        health_url, timeout=_SPLASH_AFTER_S,
+        abort=lambda: _SERVER_ERROR is not None, owned=_server_is_ours)
+
+    # pywebview ships ALLOW_DOWNLOADS=False, and with it OFF every `<a download>`
+    # in the app is completely INERT in the packaged build: WKWebView's
+    # navigation policy returns "cancel" for a download action, so there is no
+    # file, no dialog and no error — the click does nothing at all. That is why
+    # the native `save_export` bridge had to exist for exports, and it is also
+    # why "↓ .vae" silently did nothing: saving your project was broken in the
+    # .app while working fine in browser-dev. Switching it on makes pywebview's
+    # Cocoa DownloadDelegate run, which puts up a real NSSavePanel defaulted to
+    # ~/Downloads with the anchor's suggested filename — so the .vae link works,
+    # and the export's anchor fallback becomes a genuine second route rather
+    # than a dead end. Set BEFORE create_window: the flag is read by the
+    # navigation-policy delegate installed during window creation.
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True
+    except (AttributeError, TypeError) as e:
+        # Guarded because this is a nicety and `main()` is the launch path: if a
+        # future pywebview renames the mapping, the app must still open with
+        # inert download links rather than die with an AttributeError before the
+        # window exists. tests/test_allow_downloads.py fails loudly in CI if the
+        # setting disappears, which is where that should be noticed.
+        _diag(f"could not enable downloads ({e}) — <a download> links will be inert")
+
     window = webview.create_window(
         title="Video AI Editor",
         url=url if ready else None,
-        html=None if ready else _splash_html(),
+        # A known collision goes STRAIGHT to the explanation: there is nothing
+        # to wait for, so a splash would only delay the one thing the user can
+        # act on.
+        html=None if ready else (
+            _startup_failed_html(url, startup_timeout, conflict) if conflict
+            else _splash_html()),
         width=1480, height=920,
         min_size=(1100, 700),
         easy_drag=False,
         background_color=_BG,
         js_api=_Api(host, port),
     )
-    if not ready:
+    if not ready and not conflict:
         # Spend the rest of the caller's budget waiting, then say so on screen.
         threading.Thread(
             target=_open_editor_when_ready,

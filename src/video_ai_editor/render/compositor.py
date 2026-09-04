@@ -21,6 +21,7 @@ from ..edl import EDL
 from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
+from ._probe_cache import source_has_audio as _source_has_audio, source_is_audible as _source_is_audible
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
 from .pip import build_pip_overlay_chain, collect_pip_clips
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
@@ -581,6 +582,51 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
+def _audio_mix_has_real_source(edl: EDL) -> bool:
+    """True when ANY audible source reaches the final mix, on any lane.
+
+    Only used to decide whether `loudnorm` may run. Normalising loudness is
+    meaningless on a mix that is pure digital silence, and worse than
+    meaningless: loudnorm measures -inf LUFS, computes an infinite gain and
+    emits NaN samples, which the AAC encoder rejects with
+    "Input contains (near) NaN/+-Inf" -> "Error encoding a frame: Invalid
+    argument" (-22) and the export dies with rc=234. That is PRE-EXISTING and
+    reachable three ways, all verified: a v1 whose track is muted (the mute is
+    `volume=0`, i.e. exact silence), a timeline with no clips at all (pure
+    `anullsrc` gap filler), and now a clip whose source has no audio stream.
+    Preview never ran loudnorm, so only export ever failed.
+
+    Reachable a FOURTH way, which is the one that shipped: a normalized
+    upload of a silent source, whose welded AAC track is present but inaudible.
+
+    Cheap in practice: it short-circuits on the first audible clip, which on any
+    ordinary timeline is the first v1 clip, so it costs ONE cached level probe
+    (`-vn` audio-only decode of that clip's trim range). Only an all-silent
+    timeline pays for a probe per clip — and that one is about to skip an
+    encode-killing filter, so the probes buy the export.
+    """
+    for t in edl.tracks:
+        # Every lane the audio mix reads: v1/v2 (video), a1 (audio), music, vo.
+        if t.type not in ("video", "audio", "music", "vo") or t.muted:
+            continue
+        for c in t.clips:
+            if not isinstance(c, Clip):
+                continue
+            if c.duration <= 0 or (c.audio is not None and c.audio.mute):
+                continue
+            # CONTENT, not stream presence. `ingest/normalize.py` welds a
+            # digitally-silent AAC track onto every no-audio upload and
+            # `main.py::upload` points the clip at that normalized file, so a
+            # silent screen recording — the ordinary case — HAS an audio
+            # stream. Gating on presence therefore let loudnorm run on an
+            # inaudible mix and export still died with
+            # "Input contains (near) NaN/+-Inf" (rc=234); measured on a real
+            # normalized upload, not hypothesised.
+            if _source_is_audible(c.src, c.in_, c.out):
+                return True
+    return False
+
+
 def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str:
     """Per-clip audio chain: resample + atempo for speed + gain/fade/mute.
 
@@ -589,7 +635,40 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str
     on render. The fade is positioned relative to the clip's LOCAL audio
     (which is `-ss/-to`-trimmed and starts at t=0), since concat then
     sequences these clips into the timeline absolute time.
+
+    A source with NO audio stream gets SILENCE from a filter source instead of
+    `input_label` — see the branch below.
     """
+    if not _source_has_audio(c.src):
+        # A file with no audio stream cannot be referenced as [i:a] at all:
+        # ffmpeg fails to BIND the graph ("Stream specifier ':a' in filtergraph
+        # description … matches no streams" -> "Error binding filtergraph
+        # inputs/outputs") and the WHOLE render dies with rc=234, so one silent
+        # clip took every preview and export down with it. The mirror of the
+        # `[i:v]`-on-an-audio-file failure that `_has_video`/`_v_track_for_media`
+        # exist to prevent.
+        #
+        # Substitute silence spanning exactly the timeline slot this clip
+        # occupies, so the audio timeline stays aligned with the video:
+        # effective_duration, i.e. AFTER speed, which is also why no atempo
+        # runs here (the silence is generated at its post-speed length rather
+        # than being resampled into it). anullsrc is a filter SOURCE, so this
+        # adds no `-i` and cannot shift the clip input indices [0..N-1] that
+        # the mask-input pass depends on.
+        #
+        # Same shape as the gap filler in `_build_filter_complex` — including
+        # the explicit `sample_fmts=fltp` — because concat refuses inputs whose
+        # link parameters differ and does not auto-convert, and anullsrc's own
+        # default format is not what a decoded clip negotiates to.
+        #
+        # Gain/fade/mute are deliberately NOT applied: every one of them is
+        # inaudible on silence, and their fade anchors are source-time
+        # positions that this generated stream does not have.
+        return (f"anullsrc=channel_layout=stereo:sample_rate=48000:"
+                f"d={max(0.001, c.effective_duration):.3f},"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:"
+                f"channel_layouts=stereo{label_out}")
+
     a_chain = (f"{input_label}aresample=async=1:first_pts=0,"
                f"aformat=channel_layouts=stereo:sample_rates=48000")
     if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
@@ -1065,6 +1144,14 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         pa_labels: list[str] = []
         for j, c in enumerate(pip_audio_clips):
             input_idx = pre_pip + j
+            # A PIP whose source has no audio stream contributes nothing to the
+            # mix, and referencing its [i:a] fails to bind the WHOLE graph (see
+            # _build_clip_audio_chain). Skipped rather than replaced with
+            # silence — mixing silence in is a no-op — but `continue` inside the
+            # loop, NOT a filtered list: `j` indexes pip_inputs, which pip.py
+            # appends one-per-clip in this exact order.
+            if not _source_has_audio(c.src):
+                continue
             delay_ms = max(0, int(round(c.start * 1000)))
             chain = (f"[{input_idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
@@ -1078,15 +1165,18 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             chain += pa_label
             pa_parts.append(chain)
             pa_labels.append(pa_label)
-        # Mix pip audio with main audio
-        mix_inputs = a_label + "".join(pa_labels)
-        mixed_label = "[a_with_pip]"
-        pa_parts.append(
-            f"{mix_inputs}amix=inputs={1 + len(pa_labels)}:duration=first"
-            f":dropout_transition=0:normalize=0{mixed_label}"
-        )
-        fc = fc + ";" + ";".join(pa_parts)
-        a_label = mixed_label
+        # Mix pip audio with main audio. Every PIP being silent leaves nothing
+        # to fold, and an `amix=inputs=1` around the main audio would be a
+        # pointless (and mis-labelled) stage.
+        if pa_labels:
+            mix_inputs = a_label + "".join(pa_labels)
+            mixed_label = "[a_with_pip]"
+            pa_parts.append(
+                f"{mix_inputs}amix=inputs={1 + len(pa_labels)}:duration=first"
+                f":dropout_transition=0:normalize=0{mixed_label}"
+            )
+            fc = fc + ";" + ";".join(pa_parts)
+            a_label = mixed_label
 
     # Mix in music + voiceover tracks (with optional ducking against main audio).
     # Loudnorm only runs on export — preview skips it (see audio_mix docstring).
@@ -1094,7 +1184,10 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         edl,
         main_audio_label=a_label,
         first_input_index=next_idx,
-        apply_loudnorm=not preview,
+        # Export normalises loudness; preview never has. The extra condition is
+        # the NaN guard — see `_audio_mix_has_real_source`. `and` short-circuits,
+        # so a preview pays nothing for it.
+        apply_loudnorm=not preview and _audio_mix_has_real_source(edl),
     )
     if audio_chain:
         fc = fc + ";" + audio_chain
@@ -1394,6 +1487,9 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     a_labels: list[str] = []
     for i, c in enumerate(clips):
         idx = i + 1  # +1 because video_only is input 0
+        # A clip whose source has no audio gets its silence from a filter
+        # SOURCE, so this input goes unread — harmless (ffmpeg opens it and
+        # asks nothing of it) and it keeps `idx` 1:1 with `i`.
         inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
         fc_parts.append(_build_clip_audio_chain(
             c, input_label=f"[{idx}:a]", label_out=f"[a{i}]"
@@ -1419,7 +1515,12 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     # per-clip gain/fade/mute + adelay + amix). Skipping this dropped every
     # PIP clip's audio from the remuxed preview.
     next_idx = 1 + len(clips)
-    pip_clips = [c for _tid, c in collect_pip_clips(edl)]
+    # Only PIP sources that actually carry audio (an [i:a] on one that doesn't
+    # fails to bind the whole graph — see _build_clip_audio_chain). This path
+    # builds its own input list, so a silent PIP is simply never opened and the
+    # `idx`/`next_idx` arithmetic below stays 1:1 with the inputs.
+    pip_clips = [c for _tid, c in collect_pip_clips(edl)
+                 if _source_has_audio(c.src)]
     if pip_clips:
         pa_labels: list[str] = []
         for j, c in enumerate(pip_clips):

@@ -10,6 +10,7 @@ filter chain text, and the final audio label to map.
 """
 from __future__ import annotations
 from pathlib import Path
+from ._probe_cache import source_has_audio as _source_has_audio
 from ..edl import EDL
 from ..edl.schema import Clip
 
@@ -76,6 +77,19 @@ def build_audio_mix(
     for t in edl.tracks:
         if t.type == "audio" and not t.muted:
             vo_clips += [c for c in t.clips if isinstance(c, Clip)]
+
+    # Drop sources with NO audio stream before they reach the graph. Both loops
+    # below open the file with `-i` and then reference `[<idx>:a]`, which cannot
+    # bind for a stream that does not exist — "Stream specifier ':a' … matches
+    # no streams" -> "Error binding filtergraph inputs/outputs", rc=234, and the
+    # ENTIRE render dies, not just that clip. Very reachable: the UI accepts a
+    # drop of any media onto these lanes, so a silent screen recording dragged
+    # onto the music lane took the whole export down. Skipped rather than given
+    # generated silence because mixing silence into an `amix` is a no-op —
+    # unlike a v1 clip, whose silence must occupy its slot in the concat to keep
+    # the timeline aligned (see compositor._build_clip_audio_chain).
+    music_clips = [c for c in music_clips if _source_has_audio(c.src)]
+    vo_clips = [c for c in vo_clips if _source_has_audio(c.src)]
 
     if not music_clips and not vo_clips:
         # Still apply loudnorm on the speech-only path if a target is set
