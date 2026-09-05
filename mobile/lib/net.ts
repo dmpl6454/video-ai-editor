@@ -49,8 +49,14 @@ export type HostClass =
    * and the link only exists while the VPN is up. The Mac deliberately
    * advertises these — `api/pairing.py::host_candidates` appends them "so a
    * Tailscale-only setup still has something to show — the phone is the side
-   * that decides whether to warn about them" — so the phone owes the user a
-   * warning, not a refusal.
+   * that decides whether to warn about them".
+   *
+   * What the phone decided, after a CFNetwork probe built with this app's own
+   * ATS dictionary: cleartext to 100.64/10 is REFUSED BY ATS (see
+   * `isAtsCleartextPermitted`), so the honest answer is a named refusal that
+   * points at the Wi-Fi address, not a warning that implies the address works.
+   * The class stays distinct from `public` precisely so that refusal can be
+   * specific instead of "do not use it".
    */
   | "cgnat"
   /** A routable address or a real domain name. */
@@ -115,12 +121,52 @@ export function classifyHost(raw: string): HostClass {
 }
 
 /**
+ * Whether the address is PRIVATE — not routable on the public internet, and so
+ * not a place a stolen pairing payload could send this phone's bearer token.
+ *
+ * This is a question about the address itself, and CGNAT counts: 100.64/10 is
+ * carrier-grade NAT space, it is what a Tailscale interface hands out, and
+ * `api/pairing.py::is_private_ipv4` accepts 100.64-127 for exactly that reason.
+ *
+ * It deliberately does NOT answer "can this phone actually load
+ * `http://<host>`" — see `isAtsCleartextPermitted`. Conflating the two is the
+ * bug this pair of functions exists to keep apart.
+ */
+export function isPrivateHost(host: string): boolean {
+  const c = classifyHost(host);
+  return (
+    c === "private" || c === "link-local" || c === "mdns" || c === "loopback" || c === "cgnat"
+  );
+}
+
+/**
  * Whether iOS will let us reach this host over cleartext HTTP under the ATS
  * exception in app.json (`NSAllowsLocalNetworking: true` with
  * `NSAllowsArbitraryLoads: false`). That exception covers link-local, RFC-1918
  * and `.local` names — and nothing else. A public host over http:// is blocked
  * by ATS before any packet leaves, which is a completely different failure
  * from "the Mac is asleep" and is why `classifyHost` exists.
+ *
+ * WHY CGNAT IS NOT IN THIS SET, THOUGH IT USED TO BE
+ * --------------------------------------------------
+ * This function once returned true for 100.64/10, on the reasoning that a
+ * Tailscale interface is a VPN tunnel rather than a cleartext LAN hop and so
+ * "Apple's exception is not what governs it". That reasoning is wrong, and a
+ * native CFNetwork probe compiled with this app's verbatim ATS dictionary
+ * proved it: NSAllowsLocalNetworking exempts loopback, link-local, RFC-1918
+ * and `.local` ONLY. A `http://100.87.x.x:8765` load is refused by ATS inside
+ * the app, before any packet reaches the tunnel — the VPN being up changes
+ * nothing, because the request never gets that far. The docstring on the
+ * `cgnat` class six lines up said as much all along while this function
+ * contradicted it, so the phone told users a Tailscale address worked and
+ * then failed on it forever.
+ *
+ * The honest fix is to keep it out of this set — NOT to widen ATS. Adding
+ * NSAllowsArbitraryLoads, or an exception domain covering 100.64/10, would
+ * trade one clear "use the Wi-Fi address instead" message for cleartext loads
+ * permitted to any host that resolves into that range, and App Review asks for
+ * a justification we do not have. `pair.ts` refuses these addresses at pairing
+ * time and says which address to use instead.
  *
  * TWO SEPARATE CONSTRAINTS, OFTEN CONFUSED
  * ----------------------------------------
@@ -131,15 +177,10 @@ export function classifyHost(raw: string): HostClass {
  * `http://my-mac.local:8765` is refused". So `.local` passes ATS and is then
  * turned away with a 421 by the server. `pair.ts` is where that second
  * constraint is enforced, before a round trip is spent discovering it.
- *
- * `cgnat` is included: ATS does not cover 100.64/10, but a Tailscale interface
- * is a VPN tunnel rather than a cleartext LAN hop, and Apple's exception is not
- * what governs it. It is listed here so a Tailscale-only Mac is diagnosed as
- * reachable-but-VPN-dependent rather than as "not a local address".
  */
-export function isLocalNetworkHost(host: string): boolean {
+export function isAtsCleartextPermitted(host: string): boolean {
   const c = classifyHost(host);
-  return c === "private" || c === "link-local" || c === "mdns" || c === "loopback" || c === "cgnat";
+  return c === "private" || c === "link-local" || c === "mdns" || c === "loopback";
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +269,10 @@ export function diagnoseLocalNetwork(input: DiagnosisInput): LocalNetworkDiagnos
 
   // (c) — ATS refuses cleartext to anything outside the local-network
   // exception, so no amount of waiting or permission-granting will help. This
-  // is checked first because it is the only branch that is certain.
-  if (!isLocalNetworkHost(host)) return { kind: "not_local" };
+  // is checked first because it is the only branch that is certain. A CGNAT
+  // (Tailscale) address lands here too, and `diagnosisMessage` says so in its
+  // own words rather than with the generic "that is not a local address".
+  if (!isAtsCleartextPermitted(host)) return { kind: "not_local" };
 
   // (d) — permission has demonstrably been granted at least once. iOS does not
   // silently revoke it, so the phone is fine and the Mac is not answering.
@@ -245,6 +288,19 @@ export function diagnoseLocalNetwork(input: DiagnosisInput): LocalNetworkDiagnos
   return { kind: "permission_denied" };
 }
 
+/**
+ * The one sentence every screen uses for a Tailscale/CGNAT address, so the
+ * pairing refusal, the advisory and the connection diagnosis cannot drift into
+ * telling the user three different stories about the same address.
+ *
+ * It names the fix, not the mechanism: "use the Wi-Fi address" is the only
+ * thing the user can act on. The reason it is unfixable on this side is in
+ * `isAtsCleartextPermitted` — ATS refuses the load before it leaves the app,
+ * so having the VPN up does not help and there is nothing to retry.
+ */
+export const CGNAT_UNREACHABLE_ADVICE =
+  "iPhone blocks plain HTTP to a VPN address like this one, so this app can never reach your Mac there — turning the VPN on does not change it. Use the Wi-Fi address your Mac's Phone panel shows instead, which looks like 192.168.1.20.";
+
 /** One sentence per diagnosis. Written to be shown as-is. */
 export function diagnosisMessage(d: LocalNetworkDiagnosis, host: string): string {
   switch (d.kind) {
@@ -253,6 +309,14 @@ export function diagnosisMessage(d: LocalNetworkDiagnosis, host: string): string
     case "permission_denied":
       return "iPhone is blocking this app from reaching your local network. Turn on Local Network for Video AI Editor in Settings, then try again.";
     case "not_local":
+      // Two very different addresses arrive here and they need different
+      // advice. A Tailscale address is one the MAC ITSELF advertises
+      // (`api/pairing.py::host_candidates`), so "that is not your local
+      // network, check the pairing panel" sends the user back to the panel
+      // that just gave them the address — the loop this branch exists to break.
+      if (classifyHost(host) === "cgnat") {
+        return `${host} is a Tailscale (VPN) address. ${CGNAT_UNREACHABLE_ADVICE}`;
+      }
       return `${host} is not an address on your local network. The Mac app is reached over Wi-Fi at an address like 192.168.1.20 — check the pairing panel on your Mac.`;
     case "mac_unreachable":
       return `No answer from ${host}. Check that your Mac is awake, on the same Wi-Fi, and that Video AI Editor is open on it.`;

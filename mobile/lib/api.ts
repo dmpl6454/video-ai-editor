@@ -166,7 +166,7 @@ export class ApiClient {
     const controller = new AbortController();
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     // WHY THE FLAG: both a timeout and a caller cancel come back from fetch as
-    // the SAME `AbortError`, and `apiErrorFromThrow` cannot tell them apart —
+    // the SAME abort, and `apiErrorFromThrow` cannot tell them apart —
     // so every timeout used to be reported as `kind: "cancelled"`. "cancelled"
     // is not in `connection.ts::CONNECTION_KINDS`, so `reduceFailure` returned
     // the state unchanged and a sleeping Mac never moved the connection off
@@ -175,6 +175,15 @@ export class ApiClient {
     // closed lid failed in complete silence. Recording which abort fired is the
     // whole fix — `"timeout"` is already a connection kind with its own
     // sentence, so the reducer, the banner and the retry path all start working.
+    //
+    // AND WHY THE FLAG IS NOW THE ONLY EVIDENCE THAT COUNTS: the fix above was
+    // still leaning on `apiErrorFromThrow` recognising an abort by its shape,
+    // and that recognition was written for React Native's whatwg-fetch. expo
+    // installs its own `fetch` over the top of RN's, and an expo/fetch abort
+    // has `name === "Error"` and a "fetch failed: …" message, so the shape
+    // check matched nothing in a real build and BOTH branches were dead —
+    // timeouts and cancels alike landed on `kind: "network"`. So the two facts
+    // only this method holds are now passed explicitly and consulted FIRST.
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -211,9 +220,14 @@ export class ApiClient {
       return (await res.json()) as T;
     } catch (e) {
       // The caller's own signal wins when both fired: a user who tapped Cancel
-      // should not be told their Mac is unreachable.
+      // should not be told their Mac is unreachable, and `cancelled` keeps the
+      // failure out of `connection.ts::CONNECTION_KINDS` — so the connection
+      // stays up, the media token survives, and no red banner appears for an
+      // action the user deliberately took.
+      const callerAborted = opts.signal?.aborted === true;
       throw apiErrorFromThrow(e, {
-        timedOut: timedOut && opts.signal?.aborted !== true,
+        timedOut: timedOut && !callerAborted,
+        cancelled: callerAborted,
         timeoutMs,
       });
     } finally {

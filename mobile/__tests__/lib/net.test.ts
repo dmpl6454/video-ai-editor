@@ -11,12 +11,15 @@ import {
   DEFAULT_PORT,
   diagnoseLocalNetwork,
   diagnosisMessage,
-  isLocalNetworkHost,
+  isAtsCleartextPermitted,
+  isPrivateHost,
   isValidPort,
   LOCAL_NETWORK_GRACE_MS,
   LOCAL_NETWORK_RETRY_MS,
   MAX_THUMBS_IN_FLIGHT,
 } from "../../lib/net";
+
+import appConfig from "../../app.json";
 
 describe("classifyHost", () => {
   it("recognises loopback", () => {
@@ -48,9 +51,15 @@ describe("classifyHost", () => {
     // The boundaries, which the Mac also draws at 64 and 127.
     expect(classifyHost("100.63.255.255")).toBe("public");
     expect(classifyHost("100.128.0.1")).toBe("public");
-    // Reachable, but not via the ATS local-networking exception — see the
-    // note on isLocalNetworkHost.
-    expect(isLocalNetworkHost("100.87.139.4")).toBe(true);
+    // Private in the routing sense — a stolen payload pointed here is not
+    // leaving the user's own mesh…
+    expect(isPrivateHost("100.87.139.4")).toBe(true);
+    // …and yet UNREACHABLE, which is the distinction this pair of functions
+    // exists to keep. A CFNetwork probe built with this app's own ATS
+    // dictionary showed NSAllowsLocalNetworking does not cover 100.64/10, so
+    // iOS refuses the cleartext load inside the app. When these two agreed,
+    // the app told users a Tailscale address worked and then failed forever.
+    expect(isAtsCleartextPermitted("100.87.139.4")).toBe(false);
   });
 
   it("recognises link-local and unique-local", () => {
@@ -84,14 +93,52 @@ describe("classifyHost", () => {
   });
 });
 
-describe("isLocalNetworkHost", () => {
+describe("isAtsCleartextPermitted", () => {
   it("matches exactly what the ATS exception in app.json permits", () => {
-    expect(isLocalNetworkHost("10.0.0.5")).toBe(true);
-    expect(isLocalNetworkHost("169.254.1.1")).toBe(true);
-    expect(isLocalNetworkHost("mac.local")).toBe(true);
-    expect(isLocalNetworkHost("127.0.0.1")).toBe(true);
-    expect(isLocalNetworkHost("example.com")).toBe(false);
-    expect(isLocalNetworkHost("8.8.8.8")).toBe(false);
+    // NSAllowsLocalNetworking exempts loopback, link-local, RFC-1918 and
+    // `.local` — that list, and nothing else.
+    expect(isAtsCleartextPermitted("10.0.0.5")).toBe(true);
+    expect(isAtsCleartextPermitted("192.168.1.20")).toBe(true);
+    expect(isAtsCleartextPermitted("169.254.1.1")).toBe(true);
+    expect(isAtsCleartextPermitted("mac.local")).toBe(true);
+    expect(isAtsCleartextPermitted("127.0.0.1")).toBe(true);
+    expect(isAtsCleartextPermitted("example.com")).toBe(false);
+    expect(isAtsCleartextPermitted("8.8.8.8")).toBe(false);
+  });
+
+  it("excludes CGNAT across the whole 100.64/10 block", () => {
+    // The regression this file exists to prevent: the function's own docstring
+    // said ATS does not cover 100.64/10 while the function returned true for
+    // it. Every boundary of the block, so a future edit cannot let one end
+    // back in.
+    for (const host of ["100.64.0.1", "100.87.139.4", "100.127.255.254"]) {
+      expect(isAtsCleartextPermitted(host)).toBe(false);
+      expect(isPrivateHost(host)).toBe(true);
+    }
+  });
+
+  it("refuses to be satisfied by widening ATS in app.json", () => {
+    // The tempting "fix" is NSAllowsArbitraryLoads, or an exception domain for
+    // the Tailscale range. Both trade one clear message for cleartext loads to
+    // anything that resolves into that range, so the manifest is pinned here
+    // next to the predicate that depends on it.
+    const ats = (
+      appConfig as unknown as {
+        expo: { ios: { infoPlist: { NSAppTransportSecurity: Record<string, unknown> } } };
+      }
+    ).expo.ios.infoPlist.NSAppTransportSecurity;
+    expect(ats.NSAllowsArbitraryLoads).toBe(false);
+    expect(ats.NSAllowsLocalNetworking).toBe(true);
+    expect(ats.NSExceptionDomains).toBeUndefined();
+  });
+});
+
+describe("isPrivateHost", () => {
+  it("answers the routing question, not the ATS one", () => {
+    expect(isPrivateHost("10.0.0.5")).toBe(true);
+    expect(isPrivateHost("100.87.139.4")).toBe(true);
+    expect(isPrivateHost("8.8.8.8")).toBe(false);
+    expect(isPrivateHost("attacker.example")).toBe(false);
   });
 });
 
@@ -134,6 +181,28 @@ describe("diagnoseLocalNetwork", () => {
     expect(
       diagnoseLocalNetwork({ host: "example.com", hasEverConnectedLocally: true, elapsedMs: 999_999 }),
     ).toEqual({ kind: "not_local" });
+  });
+
+  it("calls a Tailscale address hopeless, and says why in its own words", () => {
+    // Before the CFNetwork probe this returned `retry` and then
+    // `permission_denied`, i.e. the app spent twelve seconds and then sent the
+    // user to a Settings toggle that has no effect on an ATS refusal.
+    const vpn = "100.87.139.4";
+    expect(
+      diagnoseLocalNetwork({ host: vpn, hasEverConnectedLocally: false, elapsedMs: 0 }),
+    ).toEqual({ kind: "not_local" });
+    expect(
+      diagnoseLocalNetwork({ host: vpn, hasEverConnectedLocally: true, elapsedMs: 999_999 }),
+    ).toEqual({ kind: "not_local" });
+
+    const message = diagnosisMessage({ kind: "not_local" }, vpn);
+    expect(message).toMatch(/VPN/i);
+    // The user's next action, spelled out. "That is not a local address" is
+    // useless here: the Mac's own pairing panel is where they got this one.
+    expect(message).toMatch(/Wi-Fi address/i);
+    expect(message).toMatch(/192\.168/);
+    // And it is NOT the generic public-host sentence.
+    expect(message).not.toBe(diagnosisMessage({ kind: "not_local" }, "example.com"));
   });
 
   it("retries quietly on a first run while the permission prompt may be up", () => {

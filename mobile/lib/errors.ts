@@ -206,35 +206,119 @@ export function apiErrorFromResponse(
 }
 
 /**
+ * The messages an abort actually arrives with, per transport.
+ *
+ * WHY A MESSAGE LIST AND NOT A NAME OR A CLASS CHECK — this is the whole bug:
+ *
+ * This guard used to be `e.name === "AbortError" || e.message === "Aborted"`,
+ * which is the shape React Native's whatwg-fetch polyfill produces. But expo
+ * REPLACES the global fetch: `expo/src/winter/runtime.native.ts` runs
+ * `install('fetch', …)` unconditionally unless `EXPO_PUBLIC_USE_RN_FETCH` is
+ * set, and this app does not set it. expo/fetch rejects with a `FetchError`
+ * (expo/src/winter/fetch/FetchErrors.ts) whose constructor never assigns
+ * `this.name`, so `e.name` is the INHERITED "Error" — and it rewrites the
+ * message to `fetch failed: <original>`. Running that real class gives:
+ *
+ *   name "Error", message "fetch failed: Fetch request has been canceled"
+ *   name "Error", message "fetch failed: The operation was aborted."
+ *
+ * Neither old guard matched either one, so every abort fell through to
+ * `kind: "network"` — which IS in `connection.ts::CONNECTION_KINDS`. A user
+ * tapping Stop therefore knocked the connection to retrying/unreachable,
+ * cleared the media token (killing the player and every thumbnail), and got a
+ * red "Could not reach your Mac." banner for something they chose to do.
+ *
+ * `e.constructor.name === "FetchError"` is deliberately NOT used: Metro's
+ * release minifier mangles class names, so it would pass in Jest and fail in
+ * the production binary — precisely the class of defect this file already
+ * shipped once. Checked, not assumed: `expo export --platform ios` produces a
+ * Hermes bundle that contains the literals "fetch failed: " and "The operation
+ * was aborted" but NOT the bare identifier `FetchError`. Message text survives
+ * minification; the class identity does not.
+ *
+ * One more thing that check turned up, and which explains the split below:
+ * "Fetch request has been canceled" is absent from the JS bundle entirely,
+ * because it is not a JS string. It is the `reason` on
+ * `FetchRequestCanceledException` in expo/ios/Fetch/FetchExceptions.swift (and
+ * its Android twin), crosses the bridge at runtime, and only then gets the
+ * "fetch failed: " prefix from FetchError. So the full message is assembled
+ * from a native half and a JS half and can only be matched as text.
+ */
+const ABORT_MESSAGES: readonly RegExp[] = [
+  // React Native's whatwg-fetch polyfill, and the DOMException an
+  // AbortController raises directly. Kept because both are still reachable:
+  // EXPO_PUBLIC_USE_RN_FETCH=1 restores RN's fetch, and expo's own
+  // AbortSignal patch throws DOMExceptions.
+  /^aborted$/i,
+  /^fetch is aborted$/i,
+  // expo/fetch, signal-already-aborted path (fetch.ts) and DOMException's
+  // standard reason. Arrives as "fetch failed: The operation was aborted."
+  /\bthe operation was aborted\b/i,
+  // expo/fetch, native cancel path. ios/Fetch/FetchExceptions.swift and its
+  // Android twin both say "Fetch request has been canceled" (one 'l'); the
+  // second spelling is defensive, not observed.
+  /\bfetch request has been cancell?ed\b/i,
+];
+
+/**
+ * Last-resort abort detection, used only when the caller could not tell us.
+ * `lib/chat.ts` and `lib/upload.ts` drive their own fetches and call
+ * `apiErrorFromThrow` with no context, so this path still has to work.
+ */
+function looksLikeAbort(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e.name === "AbortError") return true;
+  return ABORT_MESSAGES.some((re) => re.test(e.message));
+}
+
+function timeoutError(cause: unknown, timeoutMs: number | undefined): ApiError {
+  const secs = timeoutMs === undefined ? null : Math.round(timeoutMs / 1000);
+  return new ApiError({
+    kind: "timeout",
+    message:
+      secs === null
+        ? STATUS_FALLBACK.timeout
+        : `Your Mac did not answer within ${secs} second${secs === 1 ? "" : "s"}.`,
+    cause,
+  });
+}
+
+function cancelledError(cause: unknown): ApiError {
+  return new ApiError({ kind: "cancelled", message: STATUS_FALLBACK.cancelled, cause });
+}
+
+/** What the caller knows that the error object cannot say for itself. */
+export interface ThrowContext {
+  /**
+   * The transport's OWN deadline fired. Only `ApiClient.request` can know
+   * this, because both a timeout and a cancel abort the same controller.
+   */
+  timedOut?: boolean;
+  /** How long that deadline was, so the sentence can name it. */
+  timeoutMs?: number;
+  /**
+   * The CALLER's `AbortSignal` is aborted — i.e. a person tapped Stop. This is
+   * the failure the user asked for and must stay out of the connection kinds.
+   */
+  cancelled?: boolean;
+}
+
+/**
  * Build the ApiError for a request that never produced a response.
  *
- * `opts.timedOut` is the caller's answer to the one question this function
- * cannot answer for itself. RN's fetch rejects with an `AbortError` whether the
- * transport's own timeout fired or the caller cancelled, and the two mean
- * opposite things: a cancel is the failure the user asked for and is shown
- * neutrally, while a timeout is a Mac that is not answering and MUST move the
- * connection state. `ApiClient.request` tracks which one happened; nobody else
- * can, so nobody else should guess.
+ * INTENT IS CHECKED BEFORE SHAPE, and that ordering is the fix. Whether an
+ * abort was a timeout or a cancel is a fact about the CALLER, not about the
+ * error — the two are indistinguishable once fetch has rejected, and they mean
+ * opposite things: a cancel is shown neutrally and leaves the connection
+ * alone, while a timeout is a Mac that is not answering and MUST move the
+ * connection state. `ApiClient.request` already tracks both, so it is asked
+ * first; `looksLikeAbort` is only the fallback for callers that cannot say.
  */
-export function apiErrorFromThrow(
-  e: unknown,
-  opts: { timedOut?: boolean; timeoutMs?: number } = {},
-): ApiError {
+export function apiErrorFromThrow(e: unknown, opts: ThrowContext = {}): ApiError {
   if (isApiError(e)) return e;
-  if (e instanceof Error && (e.name === "AbortError" || e.message === "Aborted")) {
-    if (opts.timedOut) {
-      const secs = opts.timeoutMs === undefined ? null : Math.round(opts.timeoutMs / 1000);
-      return new ApiError({
-        kind: "timeout",
-        message:
-          secs === null
-            ? STATUS_FALLBACK.timeout
-            : `Your Mac did not answer within ${secs} second${secs === 1 ? "" : "s"}.`,
-        cause: e,
-      });
-    }
-    return new ApiError({ kind: "cancelled", message: STATUS_FALLBACK.cancelled, cause: e });
-  }
+  if (opts.timedOut) return timeoutError(e, opts.timeoutMs);
+  if (opts.cancelled) return cancelledError(e);
+  if (looksLikeAbort(e)) return cancelledError(e);
   return new ApiError({ kind: "network", message: STATUS_FALLBACK.network, cause: e });
 }
 

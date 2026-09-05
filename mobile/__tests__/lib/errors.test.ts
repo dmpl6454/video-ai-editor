@@ -5,6 +5,12 @@
  * means a real server-side explanation can never reach a user.
  */
 
+// The REAL class expo/fetch rejects with. Imported rather than re-typed so the
+// abort fixtures below are derived from the shipping transport, not from a
+// belief about it — believing the RN shape is what put this defect in a build.
+import { FetchError } from "expo/src/winter/fetch/FetchErrors";
+
+import { isConnectionFailure } from "../../lib/connection";
 import {
   ApiError,
   apiErrorFromResponse,
@@ -158,16 +164,112 @@ describe("apiErrorFromThrow", () => {
     expect(apiErrorFromThrow(original)).toBe(original);
   });
 
-  it("reads an abort as a cancellation, not a network failure", () => {
+  it("reads React Native's whatwg-fetch abort as a cancellation", () => {
+    // The shape this file was originally written against. It is NOT what runs
+    // in this app (see the expo/fetch cases below) but it is still reachable —
+    // EXPO_PUBLIC_USE_RN_FETCH=1 restores RN's fetch — so it must keep working.
     const abort = new Error("Aborted");
     abort.name = "AbortError";
     expect(apiErrorFromThrow(abort).kind).toBe("cancelled");
   });
 
+  describe("expo/fetch, which is the fetch this app actually runs", () => {
+    /**
+     * These are not hand-written guesses. `expo/src/winter/runtime.native.ts`
+     * replaces the global fetch with expo's own unless EXPO_PUBLIC_USE_RN_FETCH
+     * is set (this app does not set it), and expo/fetch rejects through the
+     * REAL `FetchError` imported below — a class that never assigns
+     * `this.name` and rewrites the message as "fetch failed: <original>".
+     *
+     * Constructing them through the real class rather than typing the strings
+     * out is the point: if expo changes either the wrapper or the wording, this
+     * suite fails here instead of the app silently regressing to `network` on
+     * device. Asserting the derived shape first is what proves the fixture is
+     * still the production shape and not a stale copy of it.
+     */
+    // `name` stays "Error" because FetchError's constructor never sets it —
+    // this is exactly why the old `e.name === "AbortError"` guard was dead.
+    const nativeCancel = FetchError.createFromError(
+      // ios/Fetch/FetchExceptions.swift and its Android twin both raise this.
+      new Error("Fetch request has been canceled"),
+    );
+    // expo/src/winter/fetch/fetch.ts throws this when the signal is already
+    // aborted before the request starts.
+    const preAborted = new FetchError("The operation was aborted.", { cause: "user" });
+
+    it("has the shape that defeated the old name/message guards", () => {
+      expect(nativeCancel.name).toBe("Error");
+      expect(nativeCancel.message).toBe("fetch failed: Fetch request has been canceled");
+      expect(preAborted.name).toBe("Error");
+      expect(preAborted.message).toBe("fetch failed: The operation was aborted.");
+      for (const e of [nativeCancel, preAborted]) {
+        expect(e.name === "AbortError" || e.message === "Aborted").toBe(false);
+      }
+    });
+
+    it("still classifies a native cancel as a cancellation", () => {
+      expect(apiErrorFromThrow(nativeCancel).kind).toBe("cancelled");
+    });
+
+    it("still classifies an already-aborted signal as a cancellation", () => {
+      expect(apiErrorFromThrow(preAborted).kind).toBe("cancelled");
+    });
+
+    it("does NOT rely on the class name, which Metro mangles in release", () => {
+      // A minified release build renames `FetchError` to something like `n`.
+      // Reproduce that by keeping the message and losing the identity: the
+      // classification must be unchanged.
+      class MinifiedFetchError extends Error {}
+      Object.defineProperty(MinifiedFetchError, "name", { value: "n" });
+      const minified = new MinifiedFetchError("fetch failed: Fetch request has been canceled");
+      expect(minified.constructor.name).toBe("n");
+      expect(apiErrorFromThrow(minified).kind).toBe("cancelled");
+    });
+  });
+
+  it("reports the caller's timeout as a timeout whatever the error looks like", () => {
+    // The transport's deadline is a fact only ApiClient.request holds, so it
+    // is believed over the error object — which under expo/fetch says nothing
+    // useful anyway.
+    const e = FetchError.createFromError(new Error("Fetch request has been canceled"));
+    const err = apiErrorFromThrow(e, { timedOut: true, timeoutMs: 12_000 });
+    expect(err.kind).toBe("timeout");
+    expect(err.message).toBe("Your Mac did not answer within 12 seconds.");
+  });
+
+  it("reports the caller's cancel as a cancellation whatever the error looks like", () => {
+    // The mirror case, and the one that matters on screen: a user tapping Stop
+    // must never be told their Mac is unreachable.
+    const err = apiErrorFromThrow(new TypeError("Network request failed"), { cancelled: true });
+    expect(err.kind).toBe("cancelled");
+    expect(isCancellation(err)).toBe(true);
+  });
+
+  it("keeps a cancellation out of the connection kinds, and a timeout in", () => {
+    // WHY THIS ASSERTION EXISTS: `network` IS a connection kind. Every abort
+    // used to land there, so tapping Stop ran `store.noteFailure`, which knocked
+    // the connection to retrying and called `clearMediaToken()` — killing the
+    // player and every thumbnail for a deliberate user action.
+    expect(isConnectionFailure(apiErrorFromThrow(new Error("x"), { cancelled: true }))).toBe(false);
+    expect(isConnectionFailure(apiErrorFromThrow(new Error("x"), { timedOut: true }))).toBe(true);
+  });
+
+  it("names the timeout in seconds, singular included", () => {
+    expect(apiErrorFromThrow(new Error("x"), { timedOut: true, timeoutMs: 1_000 }).message).toBe(
+      "Your Mac did not answer within 1 second.",
+    );
+    expect(apiErrorFromThrow(new Error("x"), { timedOut: true }).message).toMatch(/in time/);
+  });
+
   it("treats anything else as an ambiguous network failure", () => {
     // This is the "TypeError: Network request failed" case; lib/net.ts is what
-    // turns the ambiguity into a diagnosis.
+    // turns the ambiguity into a diagnosis. It must NOT be widened by the abort
+    // patterns — a real unreachable Mac reported as "cancelled" would be silent.
     expect(apiErrorFromThrow(new TypeError("Network request failed")).kind).toBe("network");
+    expect(apiErrorFromThrow(new Error("fetch failed: Software caused connection abort")).kind).toBe(
+      "network",
+    );
+    expect(apiErrorFromThrow("a string").kind).toBe("network");
   });
 });
 

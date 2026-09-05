@@ -17,17 +17,25 @@
  * be short enough to read off a screen and type in by hand, and why a
  * photograph of a stale QR is not a live credential.
  *
- * WHY THERE IS NO URL SCHEME REGISTERED FOR THIS.
- * `app.json` deliberately has no `scheme`, and the app installs no deep-link
- * handler. If `vae://` were a registered scheme, any web page the user visited
- * could hand the app a pairing payload — silently re-pointing the phone at an
- * attacker's host, or at a host of the attacker's choosing on the user's own
- * network. A pairing payload is a bearer credential plus a destination; it may
- * only enter this app through a deliberate physical act (pointing the camera
- * at the Mac's own screen) or through the user typing it. `vae://` here is
- * therefore just a self-describing string that this module parses; the OS
- * never sees it. `__tests__/lib/pair.test.ts` pins that invariant by asserting
- * app.json declares no scheme.
+ * WHY NO URL CAN DELIVER ONE OF THESE.
+ * `vaepair:` is not a registered scheme and the app installs no deep-link
+ * handler. If a URL could hand the app a pairing payload, any web page the
+ * user visited could silently re-point their phone at an attacker's host, or
+ * at a host of the attacker's choosing on the user's own network. A pairing
+ * payload is a bearer credential plus a destination; it may only enter this
+ * app through a deliberate physical act (pointing the camera at the Mac's own
+ * screen) or through the user typing it. `vaepair:` here is just a
+ * self-describing string that this module parses; the OS never sees it.
+ *
+ * The app DOES declare `scheme: "videoaieditor"` — it has to, or expo-linking
+ * throws at launch in a release build (see `app/_layout.tsx`). That scheme is
+ * a way in, so the deep-link surface behind it is kept empty on purpose:
+ * `extra.router.sitemap: false` in app.json removes expo-router's built-in
+ * `_sitemap` route listing, and `app/+not-found.tsx` replaces expo-router's
+ * `Unmatched` screen so an unmatched `videoaieditor://…` lands on a dead end
+ * that echoes nothing back. `__tests__/lib/pair.test.ts` pins that no code
+ * feeds a URL to this parser; `__tests__/release/linking.test.ts` pins the
+ * production linking table.
  *
  * WHY THE CODE IS STILL TREATED AS A SECRET.
  * Anyone who photographs it inside the ten-minute window can claim a token and
@@ -37,7 +45,13 @@
  * see `lib/vault.ts`.
  */
 
-import { classifyHost, DEFAULT_PORT, isValidPort } from "./net";
+import {
+  CGNAT_UNREACHABLE_ADVICE,
+  classifyHost,
+  DEFAULT_PORT,
+  isPrivateHost,
+  isValidPort,
+} from "./net";
 
 /** Bumped only if the payload's meaning changes; unknown versions are refused
  *  rather than best-effort parsed, because a misread host is a wrong Mac. */
@@ -59,6 +73,7 @@ export type PairParseFailure =
   | "host_not_local"
   | "host_is_loopback"
   | "host_is_mdns"
+  | "host_is_vpn"
   | "bad_port"
   | "missing_code"
   | "bad_code";
@@ -104,6 +119,8 @@ export function pairFailureMessage(reason: PairParseFailure): string {
       return "That code has your Mac's private loopback address in it, which no other device can reach. Turn on local network mode in the Mac app's Phone panel and show the code again.";
     case "host_is_mdns":
       return "Your Mac only answers to the numeric address shown in its Phone panel, not to a .local name. Use the address the Mac is showing.";
+    case "host_is_vpn":
+      return `That code has your Mac's Tailscale (VPN) address in it. ${CGNAT_UNREACHABLE_ADVICE}`;
     case "bad_port":
       return "That pairing code has an invalid port.";
     case "missing_code":
@@ -163,13 +180,29 @@ export function parsePairPayload(raw: string): PairParseResult {
   // answer. Nothing the Mac produces carries an mDNS name; `host_candidates()`
   // only ever emits IPv4 literals.
   if (hostClass === "mdns") return { ok: false, reason: "host_is_mdns" };
-  if (hostClass === "public") return { ok: false, reason: "host_not_local" };
-  // `cgnat` (100.64/10) falls through and is ACCEPTED. The Mac appends those
-  // addresses on purpose — `host_candidates()`'s docstring says a Tailscale-only
-  // setup should "still have something to show" and that "the phone is the side
-  // that decides whether to warn about them". Refusing here told a user their
-  // own Mac's QR code was an attack, with no way forward, on precisely the
-  // setup the backend anticipated. `hostAdvisory` is the warning instead.
+  // Stated as "must be private" rather than "must not be `public`", because
+  // this is the line that keeps a scanned bearer credential off the internet:
+  // a new HostClass added later should have to opt IN to being pairable.
+  if (!isPrivateHost(host)) return { ok: false, reason: "host_not_local" };
+  // `cgnat` (100.64/10 — Tailscale) is refused, and this refusal has been
+  // rewritten twice, so the history matters.
+  //
+  //   1. Originally it fell into `host_not_local`: "That pairing code points
+  //      somewhere outside your local network. Do not use it." The Mac appends
+  //      these addresses ON PURPOSE (`host_candidates()`: a Tailscale-only
+  //      setup should "still have something to show"), so the app was calling
+  //      the user's own QR code an attack, with no way forward.
+  //   2. So it was ACCEPTED with a warning from `hostAdvisory` saying it works
+  //      while the VPN is up. That is worse in a different way: it is false. A
+  //      CFNetwork probe compiled with this app's verbatim ATS dictionary
+  //      showed NSAllowsLocalNetworking does not cover 100.64/10, so iOS
+  //      refuses the cleartext load inside the app — every request fails, VPN
+  //      or no VPN, and the app had just promised the address was fine.
+  //   3. Hence its own named refusal, which neither accuses the user nor lies
+  //      to them: it says the address cannot work over plain HTTP and names
+  //      the one that can. Widening ATS to make (2) true is not on the table;
+  //      see `isAtsCleartextPermitted`.
+  if (hostClass === "cgnat") return { ok: false, reason: "host_is_vpn" };
 
   const port = fields.port === undefined ? DEFAULT_PORT : Number(fields.port);
   if (!isValidPort(port)) return { ok: false, reason: "bad_port" };
@@ -182,22 +215,26 @@ export function parsePairPayload(raw: string): PairParseResult {
 }
 
 /**
- * A sentence to show ALONGSIDE an accepted host, or null when there is nothing
- * worth saying.
+ * A sentence to show ALONGSIDE a host the app is already pointed at, or null
+ * when there is nothing worth saying.
  *
- * Separate from `pairFailureMessage` because these are not refusals: the
- * address works, and the user simply needs to know what it depends on. The
- * honesty rule for this app is that a screen never implies more than it can
- * do — a VPN address that stops working when the tunnel drops is exactly that
- * kind of fact.
+ * Separate from `pairFailureMessage` because it is shown next to an address
+ * that is in play rather than one being rejected at the scanner — `connect.tsx`
+ * renders it for `conn.host`, which can be a Mac saved long before this build.
+ * The honesty rule for this app is that a screen never implies more than it
+ * can do; an address the phone cannot legally send a cleartext byte to is
+ * exactly that kind of fact, and staying silent about a saved Mac that never
+ * connects is the failure this exists to prevent.
  */
 export function hostAdvisory(host: string): string | null {
   if (classifyHost(host) !== "cgnat") return null;
-  return (
-    "That is a VPN address, not a Wi-Fi one. It works while the VPN is up on " +
-    "both this iPhone and your Mac — iPhone's Local Network permission does " +
-    "not apply to it, so if it stops working, check the VPN first."
-  );
+  // This used to read "it works while the VPN is up". It does not work at all:
+  // ATS refuses cleartext to 100.64/10 (see `isAtsCleartextPermitted`), which
+  // is why `parsePairPayload` now refuses such a host outright. The advisory
+  // survives for the one address that can still reach this function — a
+  // Tailscale host saved by a build that accepted it — because a saved Mac
+  // that silently never connects needs the same sentence, not silence.
+  return `That is a VPN address, not a Wi-Fi one. ${CGNAT_UNREACHABLE_ADVICE}`;
 }
 
 /**

@@ -7,6 +7,13 @@
  * order: that the Mac does the work, what to do on the Mac first, and exactly
  * what went wrong when something does.
  *
+ * RETRY IS NOT A PROBE. On this screen, "try again" most often means "finish
+ * the pairing that the Local Network prompt interrupted" — there is no
+ * credential yet, so a probe could only send an anonymous `whoami`, which the
+ * Mac answers 401 and which the reducer turns into "Your Mac no longer
+ * recognises this phone" on a phone that has never been paired. The store's
+ * `reconnect()` owns that distinction; this screen just calls it.
+ *
  * THREE FAILURE BRANCHES, NOT ONE. iOS reports "blocked by Local Network
  * permission", "denied months ago", "that address can never work" and "the Mac
  * is asleep" with one identical error. `lib/net.ts` reasons them apart and
@@ -63,7 +70,7 @@ export default function Connect() {
   const pairWith = useStore((s) => s.pairWith);
   const useSaved = useStore((s) => s.useSaved);
   const forget = useStore((s) => s.forget);
-  const probe = useStore((s) => s.probe);
+  const reconnect = useStore((s) => s.reconnect);
 
   const [mode, setMode] = useState<Mode>("scan");
   const [permission, requestPermission] = useCameraPermissions();
@@ -95,6 +102,20 @@ export default function Connect() {
     },
     [pairWith],
   );
+
+  // Retry re-submits an unfinished pairing through `pairWith` and otherwise
+  // re-checks with the bearer — `reconnect()` decides which. It is marked busy
+  // like any other pairing attempt, because when there IS a pending payload
+  // this tap sends the claim code and a second tap would send it again.
+  const onRetry = useCallback(async () => {
+    setBusy(true);
+    setScanError(null);
+    try {
+      await reconnect();
+    } finally {
+      setBusy(false);
+    }
+  }, [reconnect]);
 
   const onScanned = useCallback(
     ({ data }: { data: string }) => {
@@ -154,7 +175,16 @@ export default function Connect() {
       kicker="Video AI Editor"
       title="Connect to your Mac"
       lede="Your clips, your edits and every render stay on the Mac. This phone is the remote control — it does no editing of its own."
-      header={<StatusStrip line={line} status={conn.status} onRetry={probe} />}
+      header={
+        <StatusStrip
+          line={line}
+          status={conn.status}
+          busy={busy}
+          onRetry={() => {
+            void onRetry();
+          }}
+        />
+      }
     >
       {conn.status === "blocked" && (
         <Note tone="danger" title="iPhone is blocking the connection">
@@ -285,7 +315,17 @@ export default function Connect() {
   );
 }
 
-function StatusStrip({ line, status, onRetry }: { line: string; status: string; onRetry: () => void }) {
+function StatusStrip({
+  line,
+  status,
+  busy,
+  onRetry,
+}: {
+  line: string;
+  status: string;
+  busy: boolean;
+  onRetry: () => void;
+}) {
   const tone = statusTone(status);
   const canRetry = status !== "connected" && status !== "connecting" && status !== "idle";
   return (
@@ -307,7 +347,7 @@ function StatusStrip({ line, status, onRetry }: { line: string; status: string; 
           {line}
         </Type>
       </View>
-      {canRetry && <Button label="Retry" variant="ghost" onPress={onRetry} />}
+      {canRetry && <Button label="Retry" variant="ghost" busy={busy} onPress={onRetry} />}
     </View>
   );
 }

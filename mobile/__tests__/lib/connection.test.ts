@@ -272,7 +272,14 @@ describe("the auto-retry loop is actually wired up", () => {
     const hook = read("lib/useAutoReconnect.ts");
     expect(hook).toContain("shouldAutoRetry(");
     expect(hook).toContain("retryDelay(");
-    expect(hook).toContain("probe()");
+    // Strip comments before asserting on the call site. This assertion used to
+    // read `expect(hook).toContain("probe()")` and kept passing after the retry
+    // target moved to reconnect(), because a WHY-comment in the hook mentions
+    // the old name — a pin satisfied by prose instead of by a call, which is
+    // the exact failure this describe block exists to catch.
+    const code = hook.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).toContain("reconnect()");
+    expect(code).not.toContain("probe()");
     // It must not poll while the app is in the background: iOS freezes timers
     // anyway, but a timer that survives would spend the rate-limit budget on
     // requests nobody is waiting for.

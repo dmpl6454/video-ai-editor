@@ -138,16 +138,50 @@ describe("parsePairPayload", () => {
     expect(pairFailureMessage("host_is_mdns")).toMatch(/numeric address/i);
   });
 
-  it("accepts a Tailscale (CGNAT) host and warns instead of refusing", () => {
-    // `api/pairing.py::host_candidates` appends 100.64/10 deliberately, "so a
-    // Tailscale-only setup still has something to show — the phone is the side
-    // that decides whether to warn about them". Refusing told the user their
-    // own Mac's QR code was an attack, with no way forward.
+  it("refuses a Tailscale (CGNAT) host, and names the address that works", () => {
+    // Two wrong answers preceded this one. First `host_not_local` — "points
+    // somewhere outside your local network. Do not use it." — for an address
+    // the MAC ITSELF advertises (`api/pairing.py::host_candidates` appends
+    // 100.64/10 so "a Tailscale-only setup still has something to show").
+    // Then `ok: true` plus a warning that it "works while the VPN is up",
+    // which a CFNetwork probe built with this app's ATS dictionary disproved:
+    // NSAllowsLocalNetworking does not cover 100.64/10, so iOS refuses the
+    // cleartext load and every request fails, tunnel up or not.
     const payload = { host: "100.87.139.4", port: 8765, code: CODE };
-    expect(parsePairPayload(serialisePairPayload(payload))).toEqual({ ok: true, payload });
+    expect(parsePairPayload(serialisePairPayload(payload))).toEqual({
+      ok: false,
+      reason: "host_is_vpn",
+    });
+
+    const message = pairFailureMessage("host_is_vpn");
+    expect(message).toMatch(/VPN/i);
+    // The whole point of a separate reason: it must say what to use instead.
+    expect(message).toMatch(/Wi-Fi address/i);
+    expect(message).toMatch(/192\.168/);
+    // It must not read as an accusation — that was the first wrong answer.
+    expect(message).not.toMatch(/do not use it/i);
+
+    // The advisory is the same story for a Mac saved by a build that accepted
+    // one of these; `connect.tsx` renders it for `conn.host`.
     expect(hostAdvisory("100.87.139.4")).toMatch(/VPN/i);
+    expect(hostAdvisory("100.87.139.4")).toMatch(/Wi-Fi address/i);
     // And an ordinary LAN address gets no advisory at all.
     expect(hostAdvisory("192.168.1.20")).toBeNull();
+  });
+
+  it("refuses every address in the CGNAT block, not just the one seen in the wild", () => {
+    for (const host of ["100.64.0.1", "100.87.139.4", "100.127.255.254"]) {
+      expect(parsePairPayload(serialisePairPayload({ host, port: 8765, code: CODE }))).toEqual({
+        ok: false,
+        reason: "host_is_vpn",
+      });
+    }
+    // Either side of the block is an ordinary public address and keeps the
+    // ordinary refusal, so the boundary cannot drift.
+    expect(parsePairPayload(serialisePairPayload({ host: "100.63.255.255", port: 8765, code: CODE }))).toEqual({
+      ok: false,
+      reason: "host_not_local",
+    });
   });
 
   it("accepts the long parameter spellings the Mac may emit", () => {
@@ -216,7 +250,8 @@ describe("pairFailureMessage", () => {
   it("says what to do for every reason, and never repeats itself", () => {
     const reasons: PairParseFailure[] = [
       "empty", "not_a_pair_payload", "unsupported_version", "missing_host", "bad_host",
-      "host_not_local", "host_is_loopback", "bad_port", "missing_code", "bad_code",
+      "host_not_local", "host_is_loopback", "host_is_mdns", "host_is_vpn",
+      "bad_port", "missing_code", "bad_code",
     ];
     const messages = reasons.map(pairFailureMessage);
     for (const m of messages) expect(m.length).toBeGreaterThan(10);

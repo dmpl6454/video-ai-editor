@@ -5,8 +5,14 @@
  * route from everything else.
  */
 
+// The REAL class expo/fetch rejects with — see the note on ABORT_SHAPES below.
+// Imported rather than re-typed so an abort fixture cannot drift away from the
+// transport that actually ships.
+import { FetchError } from "expo/src/winter/fetch/FetchErrors";
+
 import { ApiClient, DEFAULT_TIMEOUT_MS } from "../../lib/api";
-import { ApiError } from "../../lib/errors";
+import { isConnectionFailure } from "../../lib/connection";
+import { ApiError, isCancellation } from "../../lib/errors";
 
 interface Call {
   url: string;
@@ -310,50 +316,143 @@ describe("withToken", () => {
   });
 });
 
-describe("timeouts", () => {
-  /** A fetch that never settles until its signal aborts. */
-  function hangingFetch() {
+describe("timeouts and cancellation", () => {
+  /**
+   * The two abort shapes this transport can actually produce.
+   *
+   * `expo` is the one that runs in this app: `expo/src/winter/runtime.native.ts`
+   * installs expo's own fetch over React Native's unless EXPO_PUBLIC_USE_RN_FETCH
+   * is set, and it is not set anywhere in this project. Built through the REAL
+   * `FetchError`, so `name` is the inherited "Error" and the message is
+   * "fetch failed: Fetch request has been canceled" — neither of which the old
+   * `e.name === "AbortError" || e.message === "Aborted"` guard matched.
+   *
+   * `rn` is the legacy whatwg-fetch shape. The suite drives BOTH because
+   * pinning only `rn` — which is what it used to do — is precisely how the
+   * timeout and cancel branches came to be dead code in a shipping build while
+   * every test stayed green.
+   */
+  const ABORT_SHAPES = {
+    expo: () => FetchError.createFromError(new Error("Fetch request has been canceled")),
+    rn: () => {
+      const e = new Error("Aborted");
+      e.name = "AbortError";
+      return e;
+    },
+  } as const;
+
+  /** A fetch that never settles until its signal aborts, then rejects as `shape`. */
+  function hangingFetch(shape: keyof typeof ABORT_SHAPES) {
     global.fetch = jest.fn(
       (_url: unknown, init: unknown) =>
         new Promise((_resolve, reject) => {
           const signal = (init as { signal: AbortSignal }).signal;
-          signal.addEventListener("abort", () => {
-            const e = new Error("Aborted");
-            e.name = "AbortError";
-            reject(e);
-          });
+          signal.addEventListener("abort", () => reject(ABORT_SHAPES[shape]()));
         }),
     ) as unknown as typeof fetch;
   }
 
-  it("reports a request that never answers as a TIMEOUT, not a cancellation", async () => {
-    // This assertion used to read `kind: "cancelled"`, and it was pinning the
-    // bug rather than the behaviour. `"cancelled"` is not in
-    // `connection.ts::CONNECTION_KINDS`, so the reducer ignored it and a
-    // sleeping Mac left the bar reading "Connected". `edit.tsx` and
-    // `import.tsx` both suppress cancellations, so the failure was silent on
-    // screen as well as in the state.
-    jest.useFakeTimers();
-    hangingFetch();
+  const shapes = Object.keys(ABORT_SHAPES) as (keyof typeof ABORT_SHAPES)[];
 
-    const promise = client().health();
-    const assertion = expect(promise).rejects.toMatchObject({ kind: "timeout" });
-    jest.advanceTimersByTime(DEFAULT_TIMEOUT_MS + 1);
-    await assertion;
-    jest.useRealTimers();
+  describe.each(shapes)("with a %s abort", (shape) => {
+    it("reports a request that never answers as a TIMEOUT, not a cancellation", async () => {
+      // This assertion used to read `kind: "cancelled"`, and it was pinning the
+      // bug rather than the behaviour. `"cancelled"` is not in
+      // `connection.ts::CONNECTION_KINDS`, so the reducer ignored it and a
+      // sleeping Mac left the bar reading "Connected". `edit.tsx` and
+      // `import.tsx` both suppress cancellations, so the failure was silent on
+      // screen as well as in the state. Under expo/fetch it was worse still:
+      // the abort was not recognised at all and came out as `network`.
+      jest.useFakeTimers();
+      hangingFetch(shape);
+
+      const promise = client().health();
+      const assertion = expect(promise).rejects.toMatchObject({
+        kind: "timeout",
+        // The sentence the retry path and the banner were written around.
+        message: "Your Mac did not answer within 12 seconds.",
+      });
+      jest.advanceTimersByTime(DEFAULT_TIMEOUT_MS + 1);
+      await assertion;
+      jest.useRealTimers();
+    });
+
+    it("still reports a CALLER's abort as a cancellation", async () => {
+      // The other half: a cancel is the one failure the user asked for, and it
+      // must stay neutral — never "your Mac did not answer".
+      jest.useFakeTimers();
+      hangingFetch(shape);
+
+      const controller = new AbortController();
+      const promise = client().request("GET", "/api/health", { signal: controller.signal });
+      const assertion = expect(promise).rejects.toMatchObject({ kind: "cancelled" });
+      controller.abort();
+      await assertion;
+      jest.useRealTimers();
+    });
+
+    it("keeps a user's cancel OUT of the connection kinds", async () => {
+      // chat.tsx, export.tsx and import.tsx all pass real AbortSignals. When
+      // this came back as `network` — a CONNECTION_KIND — a tap on Stop ran
+      // store.noteFailure, dropped the connection to retrying/unreachable and
+      // called client.clearMediaToken(), so the player and every thumbnail died
+      // and a red banner appeared for something the user chose to do.
+      jest.useFakeTimers();
+      hangingFetch(shape);
+
+      const controller = new AbortController();
+      const promise = client().request("GET", "/api/health", { signal: controller.signal });
+      controller.abort();
+
+      const error = await promise.then(
+        () => { throw new Error("expected the request to reject"); },
+        (e: unknown) => e,
+      );
+      expect(isConnectionFailure(error)).toBe(false);
+      expect(isCancellation(error)).toBe(true);
+      jest.useRealTimers();
+    });
+
+    it("counts a timeout AS a connection failure so the reducer moves", async () => {
+      jest.useFakeTimers();
+      hangingFetch(shape);
+
+      const promise = client().health();
+      const settled = promise.then(
+        () => { throw new Error("expected the request to reject"); },
+        (e: unknown) => e,
+      );
+      jest.advanceTimersByTime(DEFAULT_TIMEOUT_MS + 1);
+      const error = await settled;
+      expect(isConnectionFailure(error)).toBe(true);
+      expect(isCancellation(error)).toBe(false);
+      jest.useRealTimers();
+    });
   });
 
-  it("still reports a CALLER's abort as a cancellation", async () => {
-    // The other half: a cancel is the one failure the user asked for, and it
-    // must stay neutral — never "your Mac did not answer".
+  it("lets the caller's cancel win when the timeout fires in the same tick", async () => {
+    // Both aborts race on one controller. The user's intent is the one that
+    // must survive: being told "your Mac did not answer" for a tap on Stop is
+    // a lie, and a timeout would move the connection state as a side effect.
     jest.useFakeTimers();
-    hangingFetch();
+    hangingFetch("expo");
 
     const controller = new AbortController();
     const promise = client().request("GET", "/api/health", { signal: controller.signal });
     const assertion = expect(promise).rejects.toMatchObject({ kind: "cancelled" });
     controller.abort();
+    jest.advanceTimersByTime(DEFAULT_TIMEOUT_MS + 1);
     await assertion;
     jest.useRealTimers();
+  });
+
+  it("still reports a genuine transport failure as a network failure", async () => {
+    // The guard against over-widening: an unreachable Mac must NOT be quietly
+    // reclassified as a cancellation, or the failure disappears from the UI.
+    global.fetch = jest.fn(async () => {
+      throw new TypeError("Network request failed");
+    }) as unknown as typeof fetch;
+
+    await expect(client().health()).rejects.toMatchObject({ kind: "network" });
   });
 });
