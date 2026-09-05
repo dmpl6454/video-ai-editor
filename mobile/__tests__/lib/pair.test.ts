@@ -47,10 +47,19 @@ describe("no pairing payload can arrive from a URL", () => {
    * absence of any code that feeds a URL to the parser, so that is asserted
    * directly against the source.
    */
-  it("declares no URL scheme of its own in app.json", () => {
-    // A `vae://` scheme would make the payload grammar itself addressable from
-    // the web, which is a different and worse thing than an opaque bundle id.
-    expect("scheme" in appConfig.expo).toBe(false);
+  it("declares a URL scheme (release builds crash without one) and nothing else URL-shaped", () => {
+    // The original design here was "no scheme", and it shipped a build that
+    // opened and closed instantly on the first device install: expo-router
+    // resolves the root URL through expo-linking at startup, and in a
+    // production build expo-linking THROWS when the manifest has no scheme
+    // (only a console.warn in __DEV__, so no dev run or unit test ever saw
+    // it). The property this describe block protects never depended on the
+    // scheme — it is the NEXT test, that no code feeds a URL to the pairing
+    // parser. __tests__/release/scheme.test.ts pins the scheme's presence.
+    expect(typeof appConfig.expo.scheme).toBe("string");
+    expect(appConfig.expo.scheme.length).toBeGreaterThan(0);
+    // Still no hand-written URL types: the only registration is the one
+    // `scheme` line, which prebuild turns into CFBundleURLTypes itself.
     const plist = appConfig.expo.ios.infoPlist as Record<string, unknown>;
     expect(plist.CFBundleURLTypes).toBeUndefined();
   });

@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "start": "expo start",
-    "ios": "expo start --ios",
+    "ios": "expo run:ios",
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"

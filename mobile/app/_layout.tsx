@@ -13,10 +13,17 @@
  * text before the Connect screen appeared to say what was wrong. The screen
  * renders first; `ConnectionBar` narrates the probe.
  *
- * A NOTE ON DEEP LINKS: there are none, deliberately. `app.json` declares no
- * URL scheme and nothing here registers a linking handler, because a pairing
- * payload is a bearer credential and must not be something a web page can hand
- * to this app. See the header of `lib/pair.ts`.
+ * A NOTE ON THE URL SCHEME: app.json declares `scheme: "videoaieditor"` and it
+ * must stay. It is NOT for deep links — nothing here registers a linking
+ * handler and no screen reads route params to pair (a pairing payload is a
+ * bearer credential; it only ever arrives via the camera scan or manual entry
+ * in lib/pair.ts). The scheme exists because expo-router resolves the app's
+ * root URL through expo-linking at startup, and in a RELEASE build with no
+ * scheme expo-linking throws ("Cannot make a deep link into a standalone app
+ * with no custom scheme defined") before any ErrorBoundary exists — the app
+ * opened and closed instantly on the first device install. In development it
+ * is only a console warning, which is why no test or dev run ever saw it.
+ * __tests__/release/scheme.test.ts pins this.
  */
 
 // Imported one weight at a time, from the per-weight entry points rather than
