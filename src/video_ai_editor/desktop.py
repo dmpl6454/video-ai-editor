@@ -524,13 +524,50 @@ class _Api:
         return dest_path
 
 
+def _resolve_bind_host(requested: str) -> tuple[str, bool]:
+    """Decide what the HTTP socket binds to, and whether that is off-machine.
+
+    Returns `(bind_host, public)`.
+
+    The bind address is chosen ONCE, here, before uvicorn starts — which is
+    exactly why `POST /api/pair/lan` answers `restart_required`. Turning the
+    toggle on cannot move a socket that is already listening on 127.0.0.1.
+
+    `public` is reported to `api.pairing` so that `auth_required()` stays true
+    for the life of the process even if the user turns the toggle back off. A
+    toggle cannot un-bind a socket, so it must not be able to disarm the
+    authentication in front of one either.
+    """
+    from .api import pairing
+    if requested not in {"127.0.0.1", "localhost", "::1"}:
+        # An operator who set VAE_HOST explicitly gets what they asked for —
+        # and if that is not loopback, auth is armed regardless of the toggle.
+        return requested, True
+    if pairing.lan_enabled():
+        return "0.0.0.0", True
+    return requested, False
+
+
 def main() -> None:
     _ensure_frontend_built()
-    host = os.environ.get("VAE_HOST", "127.0.0.1")
+    requested_host = os.environ.get("VAE_HOST", "127.0.0.1")
     port = int(os.environ.get("VAE_PORT", "8765"))
-    url = f"http://{host}:{port}"
+    bind_host, public = _resolve_bind_host(requested_host)
 
-    server_thread = threading.Thread(target=_serve, args=(host, port), daemon=True)
+    # Tell the app process what it is actually listening on BEFORE the server
+    # thread starts: uvicorn.run() imports video_ai_editor.main in THIS process,
+    # so api.auth reads this state when it installs its middleware.
+    from .api import pairing
+    pairing.mark_bound_public(public)
+    pairing.set_server_port(port)
+
+    # The window and the JS bridge always dial loopback. A wildcard bind is not
+    # a usable URL, and _Api posts to /vo_record — that request must never leave
+    # the machine.
+    ui_host = "127.0.0.1" if bind_host in {"0.0.0.0", "::"} else bind_host
+    url = f"http://{ui_host}:{port}"
+
+    server_thread = threading.Thread(target=_serve, args=(bind_host, port), daemon=True)
     server_thread.start()
     # The frozen bundle's first cold import (torch et al.) can exceed the old
     # hard-coded 15s default on a loaded Windows box, so the launcher gave up
@@ -548,7 +585,7 @@ def main() -> None:
         width=1480, height=920,
         min_size=(1100, 700),
         easy_drag=False,
-        js_api=_Api(host, port),
+        js_api=_Api(ui_host, port),
     )
     if _pu.IS_WINDOWS:
         # WebView2 honors browser accelerator keys by default, so F5 reloads

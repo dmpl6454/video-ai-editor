@@ -245,10 +245,27 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 DEFAULT_CANVAS = {"w": 1080, "h": 1920, "fps": 30}
 
-# Path-restriction allowlist. When VAI_RESTRICT_PATHS=1 (multi-user / hosted
-# deployment posture), tool args that point at filesystem paths must resolve
-# beneath one of these roots. Default off preserves the local-desktop
-# experience where Claude can `apply_lut("/Users/me/luts/teal.cube")`.
+# --- filesystem path restriction --------------------------------------------
+#
+# Two postures, one mechanism.
+#
+#   * Loopback desktop (the default, and every release through 0.5.0):
+#     restriction is OFF and a tool arg may name any file the user can read.
+#     That is the point of a local-first editor — Claude gets to
+#     `apply_lut("/Users/me/luts/teal.cube")` without ceremony, and the only
+#     principal on the socket is the person sitting at the machine.
+#
+#   * LAN mode (0.6.0's phone companion): the socket is reachable from other
+#     machines on the network, so the very same tool args become a remote file
+#     READ primitive (`add_clip.src`, `import_srt.path`, exfiltrated back out
+#     through /transcript) and a remote file WRITE primitive
+#     (`export_srt.path` → `~/.zshrc`, `~/Library/LaunchAgents/…`). Nothing in
+#     0.5.0 stopped either. `enable_path_restriction(True)` forces restriction
+#     on for the life of the process, independently of the env var, and
+#     api/pairing.py calls it whenever LAN mode is armed.
+#
+# VAI_RESTRICT_PATHS keeps its old meaning: force restriction on for a hosted /
+# multi-user deployment, LAN mode or not.
 RESTRICT_PATHS = os.environ.get("VAI_RESTRICT_PATHS", "").strip().lower() in {"1", "true", "yes", "on"}
 ALLOWED_PATH_ROOTS: list[Path] = []
 if RESTRICT_PATHS:
@@ -262,29 +279,144 @@ if RESTRICT_PATHS:
             except Exception:
                 pass
 
+#: Set by enable_path_restriction(), NOT by the environment. A double-clicked
+#: .app inherits launchd's environment, which has no VAI_RESTRICT_PATHS in it
+#: and no way for the user to add one — so the LAN switch cannot be an env var
+#: and this flag is how the running process learns about it.
+_FORCED_RESTRICT = False
 
-def assert_path_allowed(p: str | Path) -> Path:
-    """Resolve `p` and reject if RESTRICT_PATHS is on and the path escapes
-    every ALLOWED_PATH_ROOTS prefix. Symlinks are followed during resolution
-    so an attacker can't symlink-escape into /etc.
 
-    Returns the resolved Path so callers can use it directly.
-    Raises ValueError when the path is outside the allowlist.
+def enable_path_restriction(on: bool = True) -> None:
+    """Turn the allowlist on (or back off) at runtime.
+
+    Called from api/pairing.py when LAN mode is armed or disarmed. Deliberately
+    a function and not a module constant: the LAN toggle is a live setting the
+    user can flip from the desktop's Phone panel, and re-importing config from
+    a request handler would not re-run the import-time computation anyway.
     """
+    global _FORCED_RESTRICT
+    _FORCED_RESTRICT = bool(on)
+
+
+def restrict_paths_active() -> bool:
+    """Is the allowlist being enforced right now?
+
+    `RESTRICT_PATHS` (env, fixed at import) OR the runtime LAN flag. Every
+    guard reads THIS, never the bare constant.
+    """
+    return RESTRICT_PATHS or _FORCED_RESTRICT
+
+
+def _env_extra_roots() -> list[Path]:
+    """VAI_ALLOWED_ROOTS, re-read on every call.
+
+    Re-read rather than snapshotted because `ALLOWED_PATH_ROOTS` above is only
+    populated when the env var was set AT IMPORT with restriction already on —
+    which is never true for the LAN path, where restriction is armed later.
+    """
+    out: list[Path] = []
+    raw = os.environ.get("VAI_ALLOWED_ROOTS", "")
+    for r in raw.split(os.pathsep) if raw else []:
+        r = r.strip()
+        if not r:
+            continue
+        try:
+            out.append(Path(r).expanduser().resolve())
+        except OSError:
+            continue
+    return out
+
+
+def allowed_write_roots() -> list[Path]:
+    """Where a tool may CREATE or OVERWRITE a file under restriction.
+
+    Deliberately narrower than the read list: a stray read of ~/Pictures is a
+    privacy problem, but a stray write to a dotfile or a LaunchAgent is remote
+    code execution on the Mac. Only the app's own workdir plus the two folders
+    a person actually asks an editor to write into.
+
+    WORKDIR is read from the module global on EVERY call, never captured at
+    import: the pytest fixtures (and `desktop.py` under a custom WORKDIR env)
+    monkeypatch `config.WORKDIR` after this module is imported, and a snapshot
+    would silently reject every legitimate session path in the test suite.
+    """
+    roots = [WORKDIR.resolve()]
+    home = Path.home()
+    for name in ("Movies", "Videos", "Downloads"):
+        candidate = home / name
+        if candidate.is_dir():
+            roots.append(candidate.resolve())
+    roots.extend(_env_extra_roots())
+    roots.extend(ALLOWED_PATH_ROOTS)
+    return roots
+
+
+def allowed_read_roots() -> list[Path]:
+    """Where a tool may READ from under restriction.
+
+    Everything writable, plus ~/Pictures (stills for `apply_brand_kit.end_card`
+    and the sticker tools), plus the app's own read-only bundled assets
+    (LUT/template presets and fonts — `apply_lut` and the brand kit resolve
+    names into them).
+
+    Deliberately NOT ~/Documents or ~/Desktop. A LAN peer that can name a path
+    can read it back out through `/transcript`, and those two are where people
+    keep the things they would mind losing. A user who genuinely stores footage
+    there adds the folder with VAI_ALLOWED_ROOTS — the desktop's Phone panel
+    says so in as many words.
+    """
+    roots = allowed_write_roots()
+    pictures = Path.home() / "Pictures"
+    if pictures.is_dir():
+        roots.append(pictures.resolve())
+    for extra in (PRESETS_DIR, FONTS_DIR):
+        try:
+            roots.append(extra.resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _check_roots(p: str | Path, roots: list[Path], what: str) -> Path:
     resolved = Path(p).expanduser().resolve()
-    if not RESTRICT_PATHS:
+    if not restrict_paths_active():
         return resolved
-    for root in ALLOWED_PATH_ROOTS:
+    for root in roots:
         try:
             resolved.relative_to(root)
             return resolved
         except ValueError:
             continue
     raise ValueError(
-        f"path {resolved} is outside the allowed roots "
-        f"({[str(r) for r in ALLOWED_PATH_ROOTS]}); "
+        f"{what} path {resolved} is outside the allowed roots "
+        f"({[str(r) for r in roots]}); "
         f"set VAI_ALLOWED_ROOTS to permit it"
     )
+
+
+def assert_path_allowed(p: str | Path) -> Path:
+    """Resolve `p` for READING and reject it if restriction is active and the
+    path escapes every read root. Symlinks are followed during resolution so an
+    attacker can't symlink-escape into /etc.
+
+    Returns the resolved Path so callers can use it directly.
+    Raises ValueError when the path is outside the allowlist.
+    """
+    return _check_roots(p, allowed_read_roots(), "read")
+
+
+def assert_write_path_allowed(p: str | Path) -> Path:
+    """Resolve `p` for WRITING and reject it if restriction is active and the
+    path escapes every write root.
+
+    Separate from `assert_path_allowed` because the two threat models are not
+    the same size: reading the wrong file leaks data, writing the wrong file
+    (a shell rc, a LaunchAgent plist) executes code the next time the user logs
+    in. Callers must run this BEFORE any `mkdir(parents=True)` — creating the
+    parent directory of a rejected path is itself a filesystem side effect an
+    unauthenticated caller should not get.
+    """
+    return _check_roots(p, allowed_write_roots(), "write")
 
 
 WORKDIR.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# Expo build + dev output
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+
+# Generated native projects. `expo prebuild` is run only to READ the merged
+# Info.plist; committing ios/ would flip this from a managed project to a bare
+# one and break every future `expo install`.
+ios/
+android/
+
+# native signing material — never belongs in the tree
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# logs / local env
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# macOS
+.DS_Store

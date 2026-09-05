@@ -107,6 +107,41 @@ def save_project(session_id: str, dst: Path) -> Path:
     return dst
 
 
+def _inside(base: Path, relative: object) -> Path | None:
+    """Resolve `relative` against `base`, or None if it escapes.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT PARANOIA ABOUT `..`
+    -----------------------------------------------------
+    `manifest.json` comes out of an attacker-supplied zip, and every string in
+    it was, until 0.6.0, joined onto the unpack directory and handed straight
+    to `shutil.move`. `Path.__truediv__` DISCARDS the left-hand side entirely
+    when the right-hand side is absolute:
+
+        Path("/a/b") / "/Users/me/tax-return.pdf"  ->  Path("/Users/me/tax-return.pdf")
+
+    so a hostile `.vae` did not even need a `..` to turn `POST /api/load_project`
+    into "move any file on this Mac into a session directory, then download it
+    through /api/sessions/{sid}/files/uploads/imported/…". That is a MOVE, not a
+    copy, so it is destructive as well as an exfiltration primitive, and it sat
+    entirely outside the dispatch path guards — `assert_path_allowed` is never
+    consulted here, so arming LAN mode did nothing to close it.
+
+    `zipfile.extractall` already refuses to write outside its destination, so a
+    member that really came from the archive is by construction inside `unpack`.
+    Anything that resolves outside is therefore not a stale project written by
+    an older version of this app — it is hostile input, and the honest response
+    is to skip it rather than to try to repair it.
+    """
+    if not isinstance(relative, str) or not relative:
+        return None
+    try:
+        candidate = (base / relative).resolve()
+        root = base.resolve()
+    except (OSError, ValueError):
+        return None
+    return candidate if candidate.is_relative_to(root) else None
+
+
 def load_project(src: Path) -> str:
     """Load a .vae into a fresh session. Returns the new session_id."""
     if not src.exists():
@@ -120,22 +155,40 @@ def load_project(src: Path) -> str:
         zf.extractall(sd / "_unpack")
 
     unpack = sd / "_unpack"
-    manifest = json.loads((unpack / "manifest.json").read_text(encoding="utf-8"))
+    manifest_path = _inside(unpack, "manifest.json")
+    if manifest_path is None or not manifest_path.exists():
+        # `_unpack` is inside the session dir we just created, so this can only
+        # fail if the archive carried no manifest at all.
+        raise ValueError("that .vae has no manifest.json — it is not a project file")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     # Move media into imported/, build src remap
     src_remap: dict[str, str] = {}
     for entry in manifest.get("media", []):
-        bundled = unpack / entry["bundled"]
+        if not isinstance(entry, dict):
+            continue
+        bundled = _inside(unpack, entry.get("bundled"))
+        if bundled is None:
+            _log.warning("load_project: refusing manifest entry that escapes the "
+                         "archive: %r", entry.get("bundled"))
+            continue
         if not bundled.exists():
             continue
-        target = imported / Path(entry["bundled"]).name
+        orig = entry.get("orig")
+        if not isinstance(orig, str) or not orig:
+            continue
+        # `.name` on the RESOLVED path, not on the raw manifest string: the raw
+        # string is what we just refused to trust.
+        target = imported / bundled.name
         shutil.move(str(bundled), str(target))
-        src_remap[entry["orig"]] = str(target)
+        src_remap[orig] = str(target)
 
     # Move state files into the session dir, rewriting src paths in edl.json
     for name in ("edl.json", "ops.json", "meta.json", "chat.json"):
-        sp = unpack / name
-        if not sp.exists():
+        # Fixed names, so this cannot escape — routed through `_inside` anyway
+        # so there is exactly one rule in this function for "is this path mine?"
+        sp = _inside(unpack, name)
+        if sp is None or not sp.exists():
             continue
         text = sp.read_text(encoding="utf-8")
         for old, new in src_remap.items():

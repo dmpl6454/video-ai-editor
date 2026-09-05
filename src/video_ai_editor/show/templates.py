@@ -12,6 +12,7 @@ call.
 """
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 from ..config import PRESETS_DIR
 from ..edl import EDL
@@ -194,15 +195,53 @@ class ShowSnapshot:
         return applied
 
 
+_SAFE_SHOW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _show_path(name: str) -> Path:
+    """`shows_dir()/<name>.json`, or a ValueError if `name` is not a leaf.
+
+    WHY A WHITELIST AND NOT A TRAVERSAL CHECK
+    -----------------------------------------
+    `save_show_template` and `apply_show_template` are live DISPATCH handlers,
+    so `name` arrives straight from `POST /api/sessions/{sid}/dispatch` and from
+    `/mcp`. Until 0.6.0 it was interpolated into a path with no checking at all,
+    which made "save a show template" an arbitrary-location `.json` WRITE and
+    "apply" the matching arbitrary READ — neither of which ever reached
+    `assert_write_path_allowed`, because the guard lives in dispatch.py's
+    argument table and this argument is called `name`, not `path`.
+
+    The most damaging target was the app's own `settings.json`: a ShowSnapshot
+    written over it parses as a dict, merges over `_blank()`, and comes back
+    with `devices == []` — silently unpairing every phone with no error anywhere.
+
+    A whitelist rather than a `..` check because there is no legitimate show
+    name that a whitelist rejects: these are user-chosen labels for presets in
+    one flat directory, never paths. Rejecting loudly (rather than silently
+    sanitising to a different file than the user asked for) means a caller
+    always operates on the name it passed.
+    """
+    if not isinstance(name, str) or not _SAFE_SHOW_NAME.match(name.strip()):
+        raise ValueError(
+            f"show template name {name!r} is not usable — use letters, digits, "
+            "dots, dashes or underscores, with no slashes")
+    safe = name.strip()
+    # Belt and braces: the whitelist already forbids a separator, so this only
+    # fires if the pattern above is ever loosened.
+    if safe != Path(safe).name:
+        raise ValueError(f"show template name {name!r} is not a plain name")
+    return shows_dir() / f"{safe}.json"
+
+
 def save_show(name: str, edl: EDL) -> Path:
     snap = ShowSnapshot.from_edl(edl)
-    p = shows_dir() / f"{name}.json"
+    p = _show_path(name)
     p.write_text(json.dumps(snap, indent=2), encoding="utf-8")
     return p
 
 
 def load_show(name: str) -> dict:
-    p = shows_dir() / f"{name}.json"
+    p = _show_path(name)
     if not p.exists():
         raise ValueError(f"show template {name!r} not found in {shows_dir()}")
     return json.loads(p.read_text(encoding="utf-8"))

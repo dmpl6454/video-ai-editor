@@ -3,6 +3,142 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.6.0
+
+### Added
+- **iPhone companion app.** A real editing client for the phone: the timeline,
+  the AI tool catalog, chat, import and export all live on iOS, while the Mac
+  does every heavy thing — the 108 dispatch tools, the Claude agent loop, and
+  every ffmpeg render. The phone never pretends it can do AI work on its own;
+  each screen that needs the Mac says so, and the connection state is visible
+  at all times.
+- **LAN mode — opt-in, and off by default.** Reaching the Mac from a phone
+  means putting the editor's HTTP socket on your local network, which is a real
+  change in exposure, so it is a switch you turn on in the desktop app's Phone
+  panel rather than something a release quietly does for you. With the switch
+  off, the app binds `127.0.0.1` exactly as it always has and none of the code
+  below runs. The setting is stored in `settings.json` alongside the app's logs
+  (an environment variable would have been unreachable in a double-clicked
+  `.app`) and changing it asks you to restart, because the bind address is
+  chosen once at launch.
+- **Pairing.** The Phone panel shows a QR code carrying a single-use, ten-minute
+  claim code; scanning it gives that phone a bearer token. Devices are listed by
+  name and can be revoked one at a time. Native media loaders, which cannot
+  reliably carry an `Authorization` header, use a separate 60-second token that
+  is accepted on media URLs only.
+- **`GET /api/pair/*`** — `info`, `lan`, `new`, `claim`, `whoami`, `devices`,
+  `revoke`, `media_token`. The four that change the security posture are
+  loopback-only: a paired phone cannot pair a second phone.
+- **An upload limit that actually exists.** `VAI_MAX_UPLOAD_BYTES` (4 GiB by
+  default) is enforced from the declared `Content-Length` before a byte is read,
+  again as a running total mid-stream, and once more as a free-space
+  precondition — and is reported by `/api/health` so the phone can refuse an
+  over-sized pick before spending your battery on it. There was previously no
+  cap of any kind.
+
+### Security
+- **Closes an arbitrary file READ and an arbitrary file WRITE reachable through
+  the tool dispatcher.** Six tool arguments — `import_srt.path`,
+  `multicam.srcs`, `find_broll.bin` and the `path` of `export_srt`,
+  `export_vtt` and `export_ass` — took a caller-supplied filesystem path and
+  used it without ever consulting the path allowlist. Reachable from both
+  `POST /api/sessions/{id}/dispatch` and `/mcp`. The read half could pull any
+  file the user could read and hand it back through `/transcript`; the write
+  half ran `mkdir(parents=True)` and then wrote to any destination, which on a
+  path like `~/.zshrc` or `~/Library/LaunchAgents/` is code execution at the
+  next login. `set_property`'s `value` was a seventh route to the same read.
+  All seven now resolve through the allowlist, with a narrower list for writes
+  than for reads, and `tests/test_path_guards.py` derives the set of
+  path-typed arguments from `/api/tools` so a new tool cannot be added without
+  a guard decision recorded for it.
+- **Path restriction is forced on whenever the socket is not loopback-only.**
+  Tools may then read inside the editor's workdir, `~/Movies`, `~/Downloads`
+  and `~/Pictures`, and write only to the first three; `VAI_ALLOWED_ROOTS` adds
+  more. Turning LAN mode off releases the restriction again, so nothing that
+  worked on the desktop stops working.
+- **DNS-rebinding defence, on every route in every posture.** The server
+  answers only to a loopback name or a bare IP literal in `Host` — a page on
+  `evil.com` that re-resolves its own name to your Mac's LAN address gets a 421
+  instead of a session. It runs with LAN mode OFF too, which is the posture
+  every default install ships in; only `/livez` and `/readyz` are exempt, so a
+  monitor with its own `Host` header is unaffected. Requests labelled
+  `Sec-Fetch-Site: cross-site` are refused, and API routes require an
+  `X-VAE-Client` header, which a browser can only send after a preflight this
+  app's CORS policy denies.
+- **Closes an arbitrary file MOVE through `POST /api/load_project`.** A `.vae`
+  is a zip, and its `manifest.json` named each bundled media file as a string
+  that was joined onto the unpack directory — but `Path("/a/b") / "/etc/passwd"`
+  discards the base entirely, so an absolute path in a hand-made manifest was
+  enough to `shutil.move` any readable file on the Mac into a session's
+  `uploads/imported/`, from where it could be downloaded over the media route.
+  No traversal was needed and none of the tool-dispatcher path guards were in
+  the way, because `load_project` never consulted them. Manifest entries that
+  resolve outside the archive are now refused.
+- **Closes an arbitrary `.json` write and read through the show templates.**
+  `save_show_template.name` and `apply_show_template.name` were interpolated
+  straight into a path; the most damaging target was the app's own
+  `settings.json`, which parses as a template and comes back with an empty
+  device list — silently unpairing every phone. Names are now a strict
+  `[A-Za-z0-9._-]` leaf inside `presets/shows`. The guard table in
+  `tests/test_path_guards.py` now derives `name` arguments too, since the
+  reason this one was missed is that it was not called `path`.
+- **Auth lockout** after 60 rejected requests a minute from one peer, with
+  media paths excluded from the count — a single filmstrip paint is two dozen
+  requests, and a phone with a stale token must not be able to lock itself out.
+
+### Changed
+- `/api/health` now also reports `max_upload_bytes`.
+- `desktop.py` splits the bind address from the window URL: with LAN mode on it
+  binds `0.0.0.0` while the webview and the voice-over bridge keep talking to
+  `127.0.0.1`. A socket bound to a public interface requires authentication
+  even if the LAN switch is later turned off — a toggle cannot un-bind a
+  socket, so it must not be able to disarm the auth in front of one. That rung
+  is now enforced by observation as well as by intent: a request that arrives on
+  a non-loopback interface arms authentication and the path allowlist before it
+  is answered, so a hand-rolled `uvicorn --host 0.0.0.0` with `VAE_LAN` unset is
+  no longer wide open.
+- `settings.json` is written `0600` inside a `0700` directory, through an
+  unpredictable temp file rather than a predictable `.json.tmp`. It is the only
+  record of which phones are paired; on a shared Mac the process umask had been
+  making it world-readable.
+- Every read-modify-write of the pairing settings now holds one lock end to
+  end. Revoking a phone while it was still polling could be undone by the
+  `last_seen` write from a request that had already loaded the old device list:
+  the panel showed the phone gone and the phone kept working.
+- The upload cap's second and third layers now cover `sticker_upload`,
+  `subtitle_upload` and `load_project`, which still had raw read loops. The
+  `Content-Length` middleware cannot see a body sent with
+  `Transfer-Encoding: chunked`, so those three had no limit at all against one.
+
+### Fixed (iPhone companion)
+- A request that timed out was reported as a user cancellation, so a sleeping
+  Mac left the connection bar reading "Connected" while edits, uploads and
+  exports failed in silence. Timeouts are now their own failure and move the
+  connection state.
+- The automatic reconnect had no caller: `retrying`, `unreachable` and
+  `throttled` were terminal states whose copy promised a recovery. One owner
+  now drives them, and the app re-probes when it returns to the foreground.
+- The phone asked for new ops with the last op's sequence number, but the Mac
+  treats that value as a list index — so a fresh project reported its own
+  `init` op as "the project changed while you were looking at it" every six
+  seconds, permanently.
+- Queue depth never worked: the phone asked `GET /api/jobs`, which is not a
+  route. Every queued render said "waiting" instead of how many jobs were ahead.
+- Signed media URLs are no longer cached past the life of the 60-second token
+  inside them, and a thumbnail failure is confirmed as a real refusal before the
+  clip's filmstrip is written off. Preview playback re-signs and resumes when a
+  range request is refused mid-stream rather than stalling with no explanation.
+- Cold start no longer holds a blank screen for up to twelve seconds waiting on
+  a Mac that is not answering.
+- The project list is virtualized and fetches posters only for the rows on
+  screen.
+- A `.local` address is refused up front with an explanation, because the Mac
+  will always answer it with a 421; a Tailscale (100.64/10) address is now
+  accepted with a note about the VPN instead of being reported as an attack.
+- Both the desktop's Phone panel and the phone's Connect screen now say that
+  the connection is not encrypted, which is the one exposure arming LAN mode
+  adds that a user cannot see for themselves.
+
 ## 0.5.0
 
 ### Added

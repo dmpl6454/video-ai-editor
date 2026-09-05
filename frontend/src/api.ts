@@ -48,10 +48,54 @@ export interface ToolSchema {
   input_schema: { type: 'object'; properties: Record<string, JsonSchemaProp>; required: string[] }
 }
 
+// --- Phone pairing (api/pairing.py) ---------------------------------------
+// One paired iPhone, as the Mac has it recorded. `last_seen` is 0 until the
+// device makes its first authenticated request.
+export interface PairDevice {
+  id: string; name: string; created_at: number; last_seen: number
+}
+
+// GET /api/pair/info — everything the Phone panel renders. `hosts` is
+// private-address-only and best-first; empty means this Mac is not on a LAN
+// right now, which is a real state the panel has to explain rather than hide.
+export interface PairInfo {
+  version: string; lan_enabled: boolean; auth_required: boolean
+  job_workers: number; max_upload_bytes: number; media_token_ttl_s: number
+  bound_public: boolean; hosts: string[]; devices: PairDevice[]
+  pending_codes: number; settings_path: string; code_ttl_s: number
+}
+
+// POST /api/pair/lan. `allowed_roots_hint` is written by the backend to be
+// shown VERBATIM — the panel must not paraphrase which folders a connected
+// phone can reach, because that sentence is the security promise.
+export interface PairLanResult {
+  lan_enabled: boolean; bound_public: boolean; restart_required: boolean
+  auth_required: boolean; hosts: string[]; allowed_roots_hint: string
+}
+
+// POST /api/pair/new. `payload` is the exact string to put in the QR — built
+// by api/pairing.py::pair_payload, which is the single source of truth for the
+// grammar. Never reassemble it here; a phone that parses a paraphrase is a
+// phone pointed at the wrong Mac.
+export interface PairCode {
+  code: string; host: string; hosts: string[]; port: number
+  payload: string; expires_in_s: number
+}
+
+// `X-VAE-Client: 1` is a SECURITY CONTROL, not a label. api/auth.py requires it
+// on every non-media request once LAN mode is armed, for one reason: no <img>,
+// <form>, or plain <script> can set a custom header, so demanding one forces a
+// CORS preflight that the backend's origin allowlist then denies. That is what
+// stops a web page the user happens to be visiting from driving their editor
+// through the same LAN endpoint the phone uses. The desktop sends it too — it
+// is trusted by address rather than by this header, but a single code path is
+// worth more than an exemption nobody remembers.
+const CLIENT_HEADERS: Record<string, string> = { 'X-VAE-Client': '1' }
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : undefined,
+    headers: body ? { ...CLIENT_HEADERS, 'content-type': 'application/json' } : CLIENT_HEADERS,
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
@@ -265,4 +309,26 @@ export const api = {
     }
     return res.json() as Promise<{ id: string }>
   },
+
+  // --- Phone pairing (api/pair_routes.py) ---------------------------------
+  // Every one of these is loopback-only on the backend: a paired phone must not
+  // be able to pair a SECOND phone, arm LAN mode, or revoke another device. So
+  // they exist here, in the desktop's own client, and nowhere else.
+
+  pairInfo: () => http<PairInfo>('GET', '/pair/info'),
+
+  // Arming LAN mode puts this Mac's editor on the local network. `restart_required`
+  // comes back true whenever the answer changes what the socket should be bound
+  // to — the bind address is chosen once, before uvicorn starts (desktop.py), so
+  // the panel has to say "restart" rather than show a code for a socket that is
+  // still on 127.0.0.1.
+  setPairLan: (enabled: boolean) => http<PairLanResult>('POST', '/pair/lan', { enabled }),
+
+  // Mints a single-use claim code plus the exact QR payload for it. 409 when LAN
+  // mode is off, and 409 with `no_lan_address` when this Mac has no LAN address
+  // to put in the code.
+  newPairCode: () => http<PairCode>('POST', '/pair/new'),
+
+  revokeDevice: (deviceId: string) =>
+    http<{ revoked: string; devices: PairDevice[] }>('POST', '/pair/revoke', { device_id: deviceId }),
 }

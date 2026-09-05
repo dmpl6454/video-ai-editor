@@ -5,6 +5,7 @@ import { api } from '../api'
 import { toast } from '../toast'
 import { openHelp } from './Help'
 import { openShortcuts } from './ShortcutsSettings'
+import { PhonePanel } from './PhonePanel'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
 import { SafeZoneToggle } from './SafeZones'
@@ -40,6 +41,10 @@ export function TopBar() {
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [appVersion, setAppVersion] = useState('')
+  // The phone-pairing panel. Closed by default and mounted only while open:
+  // it shows a live credential, and a panel that is merely hidden is one
+  // stylesheet mistake away from being a code left on screen.
+  const [phoneOpen, setPhoneOpen] = useState(false)
   // Git short-sha (or a baked BUILD_ID in a packaged app). Shown next to the
   // version so a bug report identifies the exact bits, which "v0.3.7" did not.
   const [appBuild, setAppBuild] = useState('')
@@ -336,6 +341,17 @@ export function TopBar() {
         ))}
         <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
         <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
+        {/* Deliberately in .topbar-scroll rather than .topbar-pinned: the
+            pinned cluster's invariant is that Export is the right-most,
+            always-visible control, and pairing a phone is a once-a-month
+            action that has no business competing with it. PhonePanel portals
+            to document.body, so it adds no layout here. */}
+        <button
+          onClick={() => setPhoneOpen(true)}
+          title="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
+          style={{ fontSize: 11 }}
+        >📱 Phone</button>
+        {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
         {appVersion && (
           <span title={appBuild ? `App version ${appVersion} · build ${appBuild}` : 'App version'}
                 style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>

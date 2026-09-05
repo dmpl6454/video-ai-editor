@@ -17,8 +17,13 @@ What this adds:
     and its protocol is stable + tiny.
   - In-process rate limit: sliding-window per-IP, configurable. Default is
     permissive (60 req/s) so dev doesn't notice; production sets RATE_LIMIT.
-  - Request body size cap on file uploads via Starlette middleware. Avoids
-    OOM on a 10 GB upload.
+
+NOT here: the upload size cap. This module's docstring claimed one for three
+releases and no such middleware was ever installed — the frontend's 413 branch
+was dead code the whole time. It now lives in api/uploads.py, which does the
+Content-Length pre-check, the mid-stream abort and the free-space precondition
+together, because only the last two need to know where the file is being
+written.
 """
 from __future__ import annotations
 import json

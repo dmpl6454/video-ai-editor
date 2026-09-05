@@ -48,6 +48,8 @@ from .ingest import ingest_upload
 from .render import render_preview, render_export
 from .agent.dispatch import DISPATCH, dispatch, list_tools
 from .agent.loop import chat_turn
+from .api.uploads import (assert_room_for as _assert_room_for,
+                          stream_upload_to as _stream_upload_to)
 
 @asynccontextmanager
 async def _lifespan(_app: "FastAPI"):
@@ -61,6 +63,23 @@ app = FastAPI(title="video-ai-editor", lifespan=_lifespan)
 # /livez + /readyz + /metrics, sliding-window rate limit. Idempotent.
 from .api.hardening import install as _install_hardening, METRICS, get_logger
 _install_hardening(app)
+
+# Phone companion: bearer auth + Host validation + the upload cap, and the
+# /api/pair/* routes behind them. The position of this block is load-bearing.
+# Starlette runs the LAST-added middleware FIRST, so installing here — after
+# hardening, before CORS — produces:
+#     CORS -> PairAuth -> UploadLimit -> RequestContext(rate limit) -> route
+# Move it below the CORS block and an OPTIONS preflight hits auth, 401s, and
+# every browser request fails citing CORS instead of the real cause. Fold it
+# into hardening.install() and auth ends up INSIDE the rate limiter, so a flood
+# of unauthenticated requests is answered as "too many" rather than "not
+# paired". All of this is inert until LAN mode is on (api/auth.py explains the
+# gating): with VAE_LAN unset and no settings.json the desktop behaves exactly
+# as it did in 0.5.0.
+from .api.auth import install as _install_pair_auth
+from .api.pair_routes import router as _pair_router
+_install_pair_auth(app)
+app.include_router(_pair_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -202,8 +221,14 @@ class ExportRequest(BaseModel):
 
 @app.get("/api/health")
 def health():
+    # `max_upload_bytes` is advertised here, not just enforced at the ingress,
+    # so the phone's Import screen can refuse a too-large pick locally instead
+    # of spending five minutes of the user's battery pushing bytes at a server
+    # that will answer 413 at the end.
     from .config import APP_VERSION
-    return {"ok": True, "version": APP_VERSION}
+    from .api.uploads import max_upload_bytes
+    return {"ok": True, "version": APP_VERSION,
+            "max_upload_bytes": max_upload_bytes()}
 
 
 @app.get("/api/version")
@@ -359,7 +384,7 @@ def delete_session_route(sid: str):
 
 
 @app.post("/api/sessions/{sid}/vo_record")
-async def vo_record(sid: str, file: UploadFile = File(...),
+async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
                     start: float = Form(0.0), gain_db: float = Form(0.0)):
     """Receive a recorded mic blob (WebM/Opus or WAV) and add it to the vo track.
 
@@ -369,11 +394,10 @@ async def vo_record(sid: str, file: UploadFile = File(...),
     sd = session_dir(sid)
     vo_dir = sd / "uploads" / "vo"
     vo_dir.mkdir(parents=True, exist_ok=True)
+    _assert_room_for(request, vo_dir)
     safe_name = _safe_filename(file.filename, "vo.webm")
     raw = vo_dir / f"raw_{safe_name}"
-    with raw.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    await _stream_upload_to(file, raw)
 
     # Normalize to AAC mp4 so the audio mixer can splice it cleanly
     norm = vo_dir / f"vo_{int(time.time())}.m4a"
@@ -413,7 +437,7 @@ async def vo_record(sid: str, file: UploadFile = File(...),
 
 
 @app.post("/api/sessions/{sid}/sticker_upload")
-async def sticker_upload(sid: str, file: UploadFile = File(...),
+async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...),
                          add_at_playhead: bool = Form(False),
                          playhead: float = Form(0.0)):
     """Upload a PNG (or other image) and optionally drop it as a sticker."""
@@ -422,9 +446,13 @@ async def sticker_upload(sid: str, file: UploadFile = File(...),
     sticker_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _safe_filename(file.filename, "sticker.png")
     dst = sticker_dir / safe_name
-    with dst.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    # `UploadLimitMiddleware` short-circuits on `if raw and ...`, so a body sent
+    # with `Transfer-Encoding: chunked` and no Content-Length skips it entirely.
+    # Without the two calls below this route had no second layer at all and a
+    # chunked multipart body would fill the volume — the exact failure
+    # api/uploads.py's docstring claims is closed on all six ingresses.
+    _assert_room_for(request, sticker_dir)
+    await _stream_upload_to(file, dst)
     info = {"src": str(dst), "filename": safe_name}
     if add_at_playhead:
         store = _store(sid)
@@ -441,7 +469,7 @@ async def sticker_upload(sid: str, file: UploadFile = File(...),
 
 
 @app.post("/api/sessions/{sid}/audio_upload")
-async def audio_upload(sid: str, file: UploadFile = File(...),
+async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
                        add_to_music: bool = Form(True),
                        duck: bool = Form(True),
                        volume_db: float = Form(-12.0)):
@@ -450,11 +478,10 @@ async def audio_upload(sid: str, file: UploadFile = File(...),
     sd = session_dir(sid)
     audio_dir = sd / "uploads" / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    _assert_room_for(request, audio_dir)
     safe_name = _safe_filename(file.filename, "audio.mp3")
     dst = audio_dir / safe_name
-    with dst.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    await _stream_upload_to(file, dst)
     # Probe to get duration
     from .ingest.probe import probe as _probe
     try:
@@ -492,7 +519,7 @@ _SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt", ".ass"})
 
 
 @app.post("/api/sessions/{sid}/subtitle_upload")
-async def subtitle_upload(sid: str, file: UploadFile = File(...)):
+async def subtitle_upload(sid: str, request: Request, file: UploadFile = File(...)):
     """Store a .srt/.vtt/.ass in the session so `import_srt` can run from the
     browser without the user typing a path. `/upload` cannot take this job:
     it ffmpeg-normalises everything it receives and 422s on a non-video.
@@ -511,9 +538,11 @@ async def subtitle_upload(sid: str, file: UploadFile = File(...)):
     uploads = session_dir(sid) / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
     dst = uploads / safe_name
-    with dst.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    # See sticker_upload: the Content-Length middleware is not reached by a
+    # chunked body, so the free-space precondition and the mid-stream running
+    # total are the real limits on this route.
+    _assert_room_for(request, uploads)
+    await _stream_upload_to(file, dst)
     return {"path": str(dst), "name": dst.name}
 
 
@@ -544,7 +573,7 @@ def _match_canvas_to_source(store, probe) -> None:
 
 
 @app.post("/api/sessions/{sid}/upload")
-async def upload(sid: str, background_tasks: BackgroundTasks,
+async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
                  file: UploadFile = File(...),
                  add_to_timeline: bool = Form(True),
                  transcribe: bool = Form(True),
@@ -553,11 +582,14 @@ async def upload(sid: str, background_tasks: BackgroundTasks,
     sd = session_dir(sid)
     uploads = sd / "uploads"
     uploads.mkdir(exist_ok=True)
+    # Two guards the middleware cannot do: refuse an import the volume has no
+    # room for (better than failing at 97% of a five-minute upload), and abort
+    # mid-stream on a body that lied about its Content-Length, deleting the
+    # partial file on the way out. See api/uploads.py.
+    _assert_room_for(request, uploads)
     safe_name = _safe_filename(file.filename, "upload.mp4")
     dst = uploads / safe_name
-    with dst.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    await _stream_upload_to(file, dst)
 
     # Normalize is unavoidable for the timeline to work — it's relatively fast.
     # Whisper transcription is the slow part (10-60s on CPU); push it to a
@@ -1185,15 +1217,19 @@ def save_project_endpoint(sid: str):
 
 
 @app.post("/api/load_project")
-async def load_project_endpoint(file: UploadFile = File(...)):
+async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
     """Upload a .vae and open it as a new session."""
     name = Path(file.filename or "project.vae").name
     if not name.endswith(".vae") and not name.endswith(".zip"):
         raise HTTPException(415, "expected a .vae project file")
     tmp = WORKDIR / f"_import_{name}"
-    with tmp.open("wb") as f:
-        while chunk := await file.read(1 << 20):
-            f.write(chunk)
+    # The worst of the three unguarded ingresses: this one writes to WORKDIR,
+    # the app's own working volume, rather than into a session that a user can
+    # delete. A chunked body with no Content-Length used to walk straight past
+    # the middleware and fill it.
+    WORKDIR.mkdir(parents=True, exist_ok=True)
+    _assert_room_for(request, WORKDIR)
+    await _stream_upload_to(file, tmp)
     try:
         from .storage_project import load_project
         sid = load_project(tmp)

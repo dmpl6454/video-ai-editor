@@ -898,6 +898,26 @@ def _safe_src(p: str | Path) -> str:
     return str(assert_path_allowed(p))
 
 
+def _safe_dst(p: str | Path) -> Path:
+    """Same, for a path a tool is about to WRITE to.
+
+    A separate, deliberately narrower allowlist (config.allowed_write_roots),
+    because the two failures are not the same size. A tool that reads the wrong
+    file leaks data; a tool that writes the wrong file — `~/.zshrc`,
+    `~/Library/LaunchAgents/anything.plist` — executes code the next time the
+    user opens a terminal or logs in. `export_srt`/`export_vtt`/`export_ass`
+    took a caller-supplied `path` and ran `mkdir(parents=True)` on its parent
+    before writing, which made them an arbitrary-file-write primitive reachable
+    from POST /dispatch and from /mcp.
+
+    Returns a resolved Path. Callers must run this BEFORE creating any parent
+    directory: `mkdir(parents=True)` on a rejected path is still a filesystem
+    side effect an unauthenticated caller should not be able to cause.
+    """
+    from ..config import assert_write_path_allowed
+    return assert_write_path_allowed(p)
+
+
 def add_clip(store: EDLStore, args: dict) -> dict:
     track = _v_track_for_media(store.edl, args["track"])
     src = _safe_src(args["src"])
@@ -3305,9 +3325,13 @@ def multicam(store: EDLStore, args: dict) -> dict:
         total: optional total project length (default = min(durations)).
         replace_v1: if True (default), wipe and rewrite V1; else just return the plan.
     """
-    srcs = args.get("srcs") or []
-    if len(srcs) < 1:
+    raw_srcs = args.get("srcs") or []
+    if len(raw_srcs) < 1:
         raise ValueError("multicam: need at least one source path in `srcs`")
+    # Every angle is a caller-supplied path, and the plan's chosen `src` values
+    # land on V1 verbatim below — so an unguarded entry here is both a read of
+    # any file on the Mac and a way to park that path in the saved project.
+    srcs = [_safe_src(s) for s in raw_srcs]
     from ..ai import multicam as mc
     plan = mc.plan_multicam(
         [Path(s) for s in srcs],
@@ -3412,8 +3436,11 @@ def find_broll(store: EDLStore, args: dict) -> dict:
     """Search a local b-roll folder for clips matching `query`. Returns ranked
     candidates the agent can `add_clip` from. The folder is set per-call via
     `bin` (env var `VAI_BROLL_BIN` is the default)."""
-    bin_dir = Path(args.get("bin") or os.environ.get("VAI_BROLL_BIN") or
-                   _default_broll_dir())
+    # `bin` is a caller-supplied directory that gets walked and probed, and the
+    # matches come back in the response — an unguarded value turns this into a
+    # directory-listing primitive for the whole filesystem.
+    bin_dir = Path(_safe_src(args.get("bin") or os.environ.get("VAI_BROLL_BIN") or
+                             _default_broll_dir()))
     query = str(args.get("query", "")).strip()
     if not query:
         raise ValueError("find_broll requires a 'query' argument")
@@ -3430,7 +3457,10 @@ def import_srt_tool(store: EDLStore, args: dict) -> dict:
     """Replace the project transcript with one parsed from an external .srt /
     .vtt / .ass file. Useful when the user has a pre-edited subtitle file or
     a translation they want to caption with."""
-    src = Path(args["path"])
+    # Guarded: the parsed contents become the project transcript, which
+    # GET /transcript hands straight back — so an unguarded `path` reads any
+    # text file on the Mac and exfiltrates it over HTTP.
+    src = Path(_safe_src(args["path"]))
     if not src.exists():
         raise ValueError(f"subtitle file not found: {src}")
     from ..ingest.srt_io import import_srt
@@ -3450,7 +3480,10 @@ def export_srt_tool(store: EDLStore, args: dict) -> dict:
     transcript = _load_transcript(store)
     if transcript is None:
         raise RuntimeError("no transcript on this project")
-    dst = Path(args.get("path") or (store.dir / "captions.srt"))
+    # _safe_dst BEFORE mkdir, deliberately: creating the parent of a rejected
+    # path is itself a side effect, and this arg used to be a straight
+    # arbitrary-file-write (`~/.zshrc`, a LaunchAgent plist) via /dispatch.
+    dst = _safe_dst(args.get("path") or (store.dir / "captions.srt"))
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(export_srt(transcript), encoding="utf-8")
     summary = f"Exported {len(transcript.segments)} segments → {dst.name}"
@@ -3462,7 +3495,10 @@ def export_vtt_tool(store: EDLStore, args: dict) -> dict:
     transcript = _load_transcript(store)
     if transcript is None:
         raise RuntimeError("no transcript on this project")
-    dst = Path(args.get("path") or (store.dir / "captions.vtt"))
+    # _safe_dst BEFORE mkdir, deliberately: creating the parent of a rejected
+    # path is itself a side effect, and this arg used to be a straight
+    # arbitrary-file-write (`~/.zshrc`, a LaunchAgent plist) via /dispatch.
+    dst = _safe_dst(args.get("path") or (store.dir / "captions.vtt"))
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(export_vtt(transcript), encoding="utf-8")
     summary = f"Exported {len(transcript.segments)} segments → {dst.name}"
@@ -3474,7 +3510,10 @@ def export_ass_tool(store: EDLStore, args: dict) -> dict:
     transcript = _load_transcript(store)
     if transcript is None:
         raise RuntimeError("no transcript on this project")
-    dst = Path(args.get("path") or (store.dir / "captions.ass"))
+    # _safe_dst BEFORE mkdir, deliberately: creating the parent of a rejected
+    # path is itself a side effect, and this arg used to be a straight
+    # arbitrary-file-write (`~/.zshrc`, a LaunchAgent plist) via /dispatch.
+    dst = _safe_dst(args.get("path") or (store.dir / "captions.ass"))
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(export_ass(transcript), encoding="utf-8")
     summary = f"Exported {len(transcript.segments)} segments → {dst.name}"
@@ -4281,7 +4320,7 @@ def set_property(store: EDLStore, args: dict) -> dict:
         audio.mute, speed, reverse, src, in, out, start
     """
     cid = str(args["clip_id"])
-    path = str(args["path"])
+    path = str(args["path"])  # path-guard: exempt (dotted ATTRIBUTE path)
     value = args["value"]
     res = store.edl.get_clip(cid)
     if not res:
@@ -4300,6 +4339,13 @@ def set_property(store: EDLStore, args: dict) -> dict:
         leaf = "in_"
     if not hasattr(obj, leaf):
         raise ValueError(f"unknown attr {leaf!r} on {type(obj).__name__}")
+    if leaf == "src" and isinstance(value, str):
+        # `path` here is a DOTTED ATTRIBUTE path, not a filesystem one — but
+        # `set_property(clip, "src", "/etc/passwd")` re-points a clip at an
+        # arbitrary file, which is the same primitive `add_clip.src` is guarded
+        # against. Guarding add_clip and leaving this open would just have moved
+        # the hole one tool to the left.
+        value = _safe_src(value)
     setattr(obj, leaf, value)
     summary = f"Set {cid}.{path} = {value!r}"
     store.commit("set_property", args, summary)

@@ -62,6 +62,98 @@ def test_vae_round_trip_preserves_edl_and_media(tmp_path: Path, monkeypatch):
     assert Path(new_src).exists(), f"src {new_src} should exist after load"
 
 
+def _hostile_vae(dst: Path, bundled: str, orig: str = "/x.mp4") -> None:
+    """A .vae whose manifest points `bundled` wherever the caller likes."""
+    import zipfile
+    with zipfile.ZipFile(dst, "w") as zf:
+        zf.writestr("manifest.json", json.dumps(
+            {"media": [{"orig": orig, "bundled": bundled}]}))
+        zf.writestr("edl.json", json.dumps(
+            {"canvas": {"w": 320, "h": 180, "fps": 30}, "tracks": [], "duration": 0.0}))
+
+
+def test_load_project_will_not_move_a_file_from_outside_the_archive(tmp_path, monkeypatch):
+    """`POST /api/load_project` used to be an arbitrary-file MOVE primitive.
+
+    `bundled = unpack / entry["bundled"]` — and `Path.__truediv__` DISCARDS the
+    base when the right-hand side is absolute, so no traversal was even needed.
+    A hand-made manifest naming `/Users/me/tax-return.pdf` had the file MOVED
+    out of the user's home into `<session>/uploads/imported/`, from where the
+    caller downloaded it with
+    `GET /api/sessions/{sid}/files/uploads/imported/…` — a path
+    `pairing.is_media_path` classifies as media, so a 60-second `?k=` token was
+    enough. None of dispatch.py's six path guards were in the way: `load_project`
+    never consulted `assert_path_allowed` at all, so arming LAN mode did nothing.
+    """
+    from video_ai_editor import storage as _storage, storage_project as _sp
+    monkeypatch.setattr(_storage, "WORKDIR", tmp_path / "wd")
+    monkeypatch.setattr(_sp, "session_dir", lambda sid: tmp_path / "wd" / sid)
+
+    secret = tmp_path / "tax-return.pdf"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+
+    for bundled in (str(secret),                       # absolute — no ".." at all
+                    "../../../../../../../.." + str(secret),   # traversal
+                    "media/../../../outside.bin"):
+        vae = tmp_path / "hostile.vae"
+        vae.unlink(missing_ok=True)
+        _hostile_vae(vae, bundled)
+        new_sid = load_project(vae)
+        imported = tmp_path / "wd" / new_sid / "uploads" / "imported"
+        assert secret.exists(), f"{bundled!r} moved a file out of the user's home"
+        assert secret.read_text(encoding="utf-8") == "TOP SECRET"
+        assert list(imported.glob("*")) == [], f"{bundled!r} landed in the session"
+
+
+def test_inside_guard_refuses_a_path_that_escapes_through_a_symlink(tmp_path):
+    """The guard must RESOLVE, not just normalise lexically.
+
+    `zipfile.extractall` writes a symlink member as an ordinary file rather than
+    a link, so this is not reachable through the archive today — which is
+    exactly why it is worth pinning. `_inside` is one `is_relative_to` call away
+    from being rewritten as a cheaper-looking lexical `os.path.normpath` check,
+    and a lexical check says `unpack/link/secret` is inside `unpack` no matter
+    where `link` points. Anything that plants a link under the unpack directory
+    (a future extractor, a restored backup, an `--extract` flag someone adds)
+    would then walk straight back out. Assert the property, not the reachability.
+    """
+    from video_ai_editor.storage_project import _inside
+
+    unpack = tmp_path / "unpack"
+    unpack.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.bin").write_bytes(b"TOP SECRET")
+    (unpack / "link").symlink_to(outside, target_is_directory=True)
+
+    assert _inside(unpack, "link/secret.bin") is None
+    # …and the guard is not simply refusing everything: a real member still
+    # resolves, including one reached through a link that stays inside.
+    (unpack / "media").mkdir()
+    (unpack / "media" / "clip.mp4").write_bytes(b"\0")
+    assert _inside(unpack, "media/clip.mp4") is not None
+
+
+def test_load_project_still_imports_a_legitimate_relative_entry(tmp_path, monkeypatch):
+    """The refusal must not be "reject everything" — the ordinary path is the
+    one `save_project` writes, and it has to keep working."""
+    import zipfile
+    from video_ai_editor import storage as _storage, storage_project as _sp
+    monkeypatch.setattr(_storage, "WORKDIR", tmp_path / "wd")
+    monkeypatch.setattr(_sp, "session_dir", lambda sid: tmp_path / "wd" / sid)
+
+    vae = tmp_path / "ok.vae"
+    with zipfile.ZipFile(vae, "w") as zf:
+        zf.writestr("media/clip.mp4", b"\0" * 32)
+        zf.writestr("manifest.json", json.dumps(
+            {"media": [{"orig": "/original/clip.mp4", "bundled": "media/clip.mp4"}]}))
+        zf.writestr("edl.json", json.dumps(
+            {"canvas": {"w": 320, "h": 180, "fps": 30}, "tracks": [], "duration": 0.0}))
+    sid = load_project(vae)
+    landed = tmp_path / "wd" / sid / "uploads" / "imported" / "clip.mp4"
+    assert landed.exists() and landed.read_bytes() == b"\0" * 32
+
+
 def test_undo_redo_returns_to_same_state(tmp_path: Path):
     store = _seed(tmp_path)
     initial_hash = store.edl.hash()

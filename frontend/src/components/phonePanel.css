@@ -1,0 +1,208 @@
+/* The "Connect a phone" panel.
+   Every colour here is a token from styles.css:3-22 — the one exception is
+   --qr-plate, and it is functional rather than decorative: a QR code scans
+   fastest as dark modules on a light ground, and inverted codes are read less
+   reliably by older camera stacks. The plate is white for that reason and is
+   the only light surface in the whole editor. */
+
+.phone-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 260;                    /* above Help (200), below nothing else */
+  background: rgba(6, 6, 8, 0.72);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.phone-panel {
+  --qr-plate: #ffffff;
+  --qr-ink: #0e0e10;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  /* One lighter pixel along the top edge, lit-from-above. A drop shadow alone
+     on a near-black ground renders as mud. */
+  border-top-color: #3a3a45;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.62);
+  width: min(760px, 94vw);
+  max-height: 86vh;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.phone-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px 12px;
+}
+.phone-kicker {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin: 0 0 4px;
+}
+.phone-head h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+.phone-head p { margin: 6px 0 0; font-size: 12px; color: var(--text-dim); max-width: 46ch; }
+
+.phone-body {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 20px;
+  padding: 4px 24px 24px;
+}
+/* Below the editor's own 900px floor the two columns would each be too narrow
+   to read; stack instead of shrinking. */
+@media (max-width: 720px) {
+  .phone-body { grid-template-columns: 1fr; }
+}
+
+.phone-section { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.phone-section:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.phone-section h3 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.phone-note { font-size: 12px; color: var(--text-dim); line-height: 1.55; margin: 8px 0 0; }
+
+/* A tinted rule-on-the-left note rather than a filled alert box: guidance
+   beside the content instead of shouting over it. */
+.phone-callout {
+  border-left: 3px solid var(--warn);
+  background: #2c2410;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.phone-callout.is-danger { border-left-color: #ff6b57; background: #2e1a16; }
+.phone-callout.is-good { border-left-color: var(--good); background: #12291c; }
+.phone-callout strong { display: block; margin-bottom: 3px; font-size: 12px; }
+
+/* The LAN switch. A real toggle, because this is the one control in the app
+   that changes the machine's security posture and it must not read as a
+   button you press by accident. */
+.phone-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.phone-switch:hover:not(:disabled) { background: var(--bg-3); border-color: #3a3a45; }
+.phone-switch:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.phone-switch[aria-checked='true'] { border-color: var(--good); }
+.phone-switch .track {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  position: relative;
+}
+.phone-switch[aria-checked='true'] .track { background: var(--good); border-color: var(--good); }
+.phone-switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  /* transform only — the compositor runs this without a layout pass. */
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.phone-switch[aria-checked='true'] .knob { transform: translateX(16px); background: #0e0e10; }
+.phone-switch .label { display: block; font-size: 13px; font-weight: 600; }
+.phone-switch .sub { display: block; font-size: 11px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
+@media (prefers-reduced-motion: reduce) {
+  .phone-switch .knob { transition: none; }
+}
+
+/* The code plate. */
+.phone-qr {
+  background: var(--qr-plate);
+  border-radius: 10px;
+  padding: 12px;
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+.phone-qr-empty {
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 20px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+.phone-countdown {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.phone-countdown.is-expired { color: var(--warn); }
+
+/* Typed-in fallback values. Monospace and selectable: someone WILL read these
+   aloud across a room. */
+.phone-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin-top: 10px; }
+.phone-kv dt { font-size: 11px; color: var(--text-dim); }
+.phone-kv dd {
+  margin: 0;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
+
+.phone-devices { list-style: none; margin: 0; padding: 0; }
+.phone-devices li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.phone-devices li:last-child { border-bottom: none; }
+.phone-devices .who { flex: 1; min-width: 0; }
+.phone-devices .name { font-size: 13px; font-weight: 600; }
+.phone-devices .meta { font-size: 11px; color: var(--text-dim); }
+.phone-devices button { font-size: 11px; padding: 4px 10px; }
+.phone-devices button:hover:not(:disabled) { border-color: #ff6b57; color: #ff6b57; }
+
+.phone-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.phone-foot {
+  padding: 0 24px 20px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.phone-foot code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  background: var(--bg-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}

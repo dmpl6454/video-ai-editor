@@ -56,3 +56,15 @@ tool-results/
 # config.build_id() inside the frozen app. Must stay ignored, or the very next
 # build sees it as an untracked file and falsely stamps itself "-dirty".
 BUILD_ID
+
+# --- iOS companion app (mobile/) --------------------------------------------
+# mobile/.gitignore already covers these; they are repeated here so a `git add`
+# run from the repo root can never sweep in a generated native project. A
+# committed mobile/ios/ would silently convert the Expo app from managed to
+# bare and break every subsequent `expo install`.
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
+mobile/expo-env.d.ts

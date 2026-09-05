@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": ["jest", "node"] },
+  "include": ["__tests__/**/*.ts", "__tests__/**/*.tsx", "lib/**/*.ts", "components/**/*.tsx", "constants/**/*.ts", "expo-env.d.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,91 @@
+{
+  "expo": {
+    "name": "Video AI Editor",
+    "slug": "video-ai-editor-mobile",
+    "owner": "dashmani-media",
+    "version": "0.6.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0E0E10",
+    "primaryColor": "#FF4D6D",
+    "ios": {
+      "bundleIdentifier": "com.videoaieditor.mobile",
+      "buildNumber": "1",
+      "supportsTablet": true,
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIViewControllerBasedStatusBarAppearance": false,
+        "NSCameraUsageDescription": "Video AI Editor uses the camera once, to scan the pairing code shown on your Mac. It never records.",
+        "NSLocalNetworkUsageDescription": "Video AI Editor talks to the Video AI Editor app on your Mac over your local network. All of your media and every edit stay on that Mac.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": false,
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "privacyManifests": {
+        "NSPrivacyTracking": false,
+        "NSPrivacyCollectedDataTypes": [],
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
+            "NSPrivacyAccessedAPITypeReasons": ["E174.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+          }
+        ]
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-secure-store",
+      "expo-video",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#0E0E10"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Video AI Editor uses the camera once, to scan the pairing code shown on your Mac. It never records.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "savePhotosPermission": "Video AI Editor saves a finished export to your photo library when you ask it to. It never reads your library.",
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": ["photo", "video"]
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Video AI Editor reads only the clips you pick here, and uploads them to your Mac to edit."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {}
+    }
+  }
+}
