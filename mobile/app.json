@@ -32,15 +32,21 @@
         "NSPrivacyAccessedAPITypes": [
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
-            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "C617.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryDiskSpace",
-            "NSPrivacyAccessedAPITypeReasons": ["E174.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "E174.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
-            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "CA92.1"
+            ]
           }
         ]
       }
@@ -71,7 +77,10 @@
         {
           "savePhotosPermission": "Video AI Editor saves a finished export to your photo library when you ask it to. It never reads your library.",
           "isAccessMediaLocationEnabled": false,
-          "granularPermissions": ["photo", "video"]
+          "granularPermissions": [
+            "photo",
+            "video"
+          ]
         }
       ],
       [
@@ -85,7 +94,10 @@
       "typedRoutes": true
     },
     "extra": {
-      "router": {}
+      "router": {},
+      "eas": {
+        "projectId": "5a411c75-93ca-4687-a703-fab70b25a14f"
+      }
     }
   }
 }
