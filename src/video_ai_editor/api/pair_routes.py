@@ -126,7 +126,7 @@ def new_code(request: Request) -> dict:
             "message": ("This Mac has no local network address right now. "
                         "Connect it to the same Wi-Fi as your iPhone."),
         })
-    port = pairing.server_port()
+    port = pairing.server_port(pairing.observed_port(request))
     code = pairing.new_pair_code()
     return {
         "code": code,

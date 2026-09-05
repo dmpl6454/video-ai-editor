@@ -447,3 +447,24 @@ def test_the_chat_stream_still_streams_through_the_auth_middleware(lan_on,
         '{"type": "text_delta", "text": "hel"}',
         '{"type": "text_delta", "text": "lo"}',
         '{"type": "done"}']
+
+
+def test_pair_code_carries_the_port_the_request_arrived_on(monkeypatch):
+    """A bare `uvicorn --port 8000` run never calls set_server_port(), and the
+    payload used to fall through to the packaged default of 8765 — a QR
+    pointing at a port with nothing behind it. The request is ground truth."""
+    from video_ai_editor.api import pairing
+
+    monkeypatch.setattr(pairing, "_server_port", 0, raising=False)
+    monkeypatch.delenv("VAE_PORT", raising=False)
+
+    class _Req:
+        def __init__(self, port):
+            self.scope = {"server": ("192.168.0.23", port)}
+            self.url = type("U", (), {"port": port})()
+
+    assert pairing.observed_port(_Req(8000)) == 8000
+    assert pairing.server_port(pairing.observed_port(_Req(8000))) == 8000
+    # An explicit recorded port always wins over the observation.
+    monkeypatch.setattr(pairing, "_server_port", 8765, raising=False)
+    assert pairing.server_port(pairing.observed_port(_Req(8000))) == 8765

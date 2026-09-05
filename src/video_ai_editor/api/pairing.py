@@ -340,15 +340,41 @@ def set_server_port(port: int) -> None:
     _server_port = int(port)
 
 
-def server_port() -> int:
-    """Port for the pair payload. Falls back to the same default desktop.py
-    uses, so a `uvicorn` dev run still produces a usable code."""
+def server_port(observed: int = 0) -> int:
+    """Port for the pair payload.
+
+    Preference order, and the order matters because a wrong port here is a QR
+    the phone silently fails to reach:
+
+    1. What `desktop.py` recorded via `set_server_port` — the packaged app is
+       the only caller that truly knows what uvicorn bound.
+    2. `observed`: the port the CURRENT request arrived on. A bare
+       `uvicorn ... --port 8000` run (the documented dev path, and what run.sh
+       does) never calls `set_server_port`, and used to fall through to the
+       packaged default of 8765 — printing a code for a port with nothing
+       behind it. The request itself is ground truth, so use it.
+    3. `VAE_PORT`, then the packaged default, for callers with no request in
+       hand.
+    """
     if _server_port:
         return _server_port
+    if observed:
+        return int(observed)
     try:
         return int(os.environ.get("VAE_PORT", "8765"))
     except ValueError:
         return 8765
+
+
+def observed_port(request) -> int:
+    """The port this request actually arrived on, or 0 if the server did not
+    say. Starlette puts it in `scope["server"] = (host, port)`; `url.port` is
+    None when the client omitted a non-default port from the Host header."""
+    server = request.scope.get("server") or ()
+    if len(server) == 2 and server[1]:
+        return int(server[1])
+    port = getattr(request.url, "port", None)
+    return int(port) if port else 0
 
 
 def auth_required() -> bool:
