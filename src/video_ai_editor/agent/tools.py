@@ -133,6 +133,9 @@ EDIT_TOOLS = [
            "clip_id": {"type": "string"},
            "fit": {"type": "string", "enum": ["contain", "cover"],
                    "description": "cover = fill + crop; contain = letterbox"},
+           "mode": {"type": "string", "enum": ["contain", "cover"],
+                    "description": "Alias of fit; prefer fit. Read only when fit is "
+                                   "omitted (default 'cover' when both are absent)."},
        },
        ["clip_id", "fit"]),
     _t("set_clip_transform",
@@ -346,6 +349,10 @@ TEXT_TOOLS = [
        {
            "style": {"type": "string", "enum": ["default", "ig_chunky", "word_emphasis"], "default": "default"},
            "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
+           "chunk_size": {"type": "integer", "default": 2, "minimum": 1,
+                          "description": "style='word_emphasis' only: words per karaoke "
+                                         "chunk (1-3 reads well; default 2). Ignored by "
+                                         "the other styles."},
        }),
     _t("auto_caption",
        "BEST-QUALITY auto captions for Hindi + English + Spanish (and Hinglish). "
@@ -364,7 +371,15 @@ TEXT_TOOLS = [
        {
            "style": {"type": "string", "enum": ["default", "ig_chunky", "word_emphasis"], "default": "ig_chunky"},
            "position": {"type": "string", "enum": ["bottom", "center", "top"], "default": "bottom"},
+           # x-validated-by-handler on `target` AND its two aliases below: the
+           # handler normalises 'hindi'/'roman'/'english'/'spanish' itself and
+           # raises a clear ValueError against CAPTION_TARGETS, so the generic
+           # boundary enum check must stand down on all three spellings alike.
+           # Before this flag, target='hindi' was a 400 while target_lang='hindi'
+           # reached the normaliser — the alias was MORE permissive than the
+           # canonical name it claimed to alias.
            "target": {"type": "string", "enum": ["hi", "en", "hinglish", "es"],
+                      "x-validated-by-handler": True,
                       "description": "Language of the CAPTIONS: 'hi' Devanagari, 'en' English, "
                                      "'hinglish' romanised Hindi, 'es' Spanish. Omit to caption "
                                      "in whatever was spoken."},
@@ -378,6 +393,20 @@ TEXT_TOOLS = [
                                      "one actually ran."},
            "max_chars": {"type": "integer", "default": 42},
            "max_cps": {"type": "number", "default": 17.0},
+           # The two alias spellings the UI/MCP reach for. Enum-advertised and
+           # handler-validated exactly like `target` (see the note above it).
+           "target_lang": {"type": "string", "enum": ["hi", "en", "hinglish", "es"],
+                           "x-validated-by-handler": True,
+                           "description": "Alias of target; prefer target. Read only "
+                                          "when target is omitted."},
+           "caption_lang": {"type": "string", "enum": ["hi", "en", "hinglish", "es"],
+                            "x-validated-by-handler": True,
+                            "description": "Alias of target; prefer target. Read only "
+                                           "when target and target_lang are omitted."},
+           "chunk_size": {"type": "integer", "default": 2, "minimum": 1,
+                          "description": "style='word_emphasis' only: words per karaoke "
+                                         "chunk (1-3 reads well; default 2). Ignored by "
+                                         "the other styles."},
        }),
     _t("apply_brand_kit",
        "Set the project's brand kit and auto-apply persistent watermark + end-card.",
@@ -414,6 +443,20 @@ TEXT_TOOLS = [
                                     "as written."},
            "anim_in": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
            "anim_out": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down"]},
+           "scale": {"type": "number", "default": 1.0,
+                     "description": "Transform scale multiplier (1.0 = as styled)"},
+           "rotation": {"type": "number", "default": 0.0, "description": "Degrees, clockwise"},
+           "opacity": {"type": "number", "default": 1.0, "description": "0 transparent .. 1 opaque"},
+           "size": {"type": "number", "default": 96,
+                    "description": "Font size in canvas px (TextStyle.size)"},
+           "stroke": {"type": "string", "default": "#000000",
+                      "description": "#RRGGBB outline colour (TextStyle.stroke)"},
+           "stroke_w": {"type": "number", "default": 4,
+                        "description": "Outline width in canvas px; 0 = no outline"},
+           "allow_stack": {"type": "boolean", "default": False,
+                           "description": "By default a new clip REPLACES existing "
+                                          "text clips of the same role whose time "
+                                          "window overlaps. Pass true to keep both."},
        },
        ["text", "start", "end"]),
     _t("apply_text_template",
@@ -489,6 +532,9 @@ TEXT_TOOLS = [
                            "description": "ISO code, e.g. 'hi', 'es', 'fr', 'en'"},
            "source_lang": {"type": "string",
                            "description": "Omit to use the transcript's detected language"},
+           "to": {"type": "string",
+                  "description": "Alias of target_lang; prefer target_lang. Read only "
+                                 "when target_lang is omitted."},
        },
        ["target_lang"]),
 ]
@@ -569,10 +615,19 @@ AUDIO_TOOLS = [
        "auto",
        {"subdivision": {"type": "integer", "default": 4, "description": "Cut every Nth beat (4 = every bar in 4/4)"}}),
     _t("auto_reframe",
-       "Switch canvas aspect (9:16 / 16:9 / 1:1 / 4:5). M3 does a center-crop; "
-       "subject-tracked reframing lands in M5.",
+       "Switch canvas aspect (9:16 / 16:9 / 1:1 / 4:5) and re-crop every V1 clip to "
+       "it. With subject_track (default) each clip is re-rendered following the "
+       "detected subject (OpenCV face detection, local, no model download); "
+       "subject_track=false is a plain centre-crop with no detection at all.",
        "auto",
-       {"ratio": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]}},
+       {"ratio": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]},
+        "aspect": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"],
+                   "description": "Alias of ratio; prefer ratio. Read only when ratio "
+                                  "is omitted (default '9:16' when both are absent)."},
+        "subject_track": {"type": "boolean", "default": True,
+                          "description": "Follow the detected subject when cropping "
+                                         "(needs the tracking feature, i.e. OpenCV); "
+                                         "false = plain centre-crop, fastest."}},
        ["ratio"]),
     _t("noise_reduce",
        "Spectrally denoise a media clip's audio (hiss, fans, room tone) and replace "
@@ -602,6 +657,11 @@ SHOW_TOOLS = [
        {
            "name": {"type": "string", "enum": ["outfit_breakdown", "tech_tip", "explainer"]},
            "inputs": {"type": "object", "description": "Template-specific inputs e.g. {hook: 'BUY NOW'} or {guest: 'Mrunal Thakur'}"},
+           "with_hook_stack": {"type": "boolean", "default": True,
+                               "description": "Also apply the hook stack (visual + "
+                                              "text + audio hook) after the template, "
+                                              "seeded from inputs.hook/inputs.text. "
+                                              "Pass false to compose the hook yourself."},
        },
        ["name"]),
     _t("list_templates",
@@ -653,7 +713,11 @@ EFFECT_TOOLS = [
     _t("remove_effect",
        "Remove the Nth effect from a clip's effect chain.",
        "effects",
-       {"clip_id": {"type": "string"}, "index": {"type": "integer"}},
+       {"clip_id": {"type": "string"},
+        "index": {"type": "integer", "description": "0-based position in the clip's effect chain"},
+        "idx": {"type": "integer",
+                "description": "Alias of index; prefer index. Read only when index is "
+                               "omitted (default 0 when both are absent)."}},
        ["clip_id", "index"]),
     _t("color_grade",
        "Convenience: add a color effect with brightness/contrast/saturation/temp/tint. "
@@ -664,6 +728,11 @@ EFFECT_TOOLS = [
            "brightness": {"type": "number", "description": "-1..1, 0=neutral"},
            "contrast": {"type": "number", "description": "0..2, 1=neutral"},
            "saturation": {"type": "number", "description": "0..3, 1=neutral"},
+           "sat": {"type": "number",
+                   "description": "Legacy alias of saturation; prefer saturation and "
+                                  "never send both. Once both are stored on the clip "
+                                  "the export uses sat while the preview uses "
+                                  "saturation, so they drift apart."},
            "gamma": {"type": "number", "description": "0.1..10, 1=neutral"},
            "temp": {"type": "number", "description": "-1 cool .. +1 warm"},
            "tint": {"type": "number", "description": "-1 magenta .. +1 green"},
@@ -671,7 +740,13 @@ EFFECT_TOOLS = [
     _t("apply_lut",
        "Apply a 3D LUT (.cube) to a clip or all V1 clips.",
        "effects",
-       {"clip_id": {"type": "string"}, "src": {"type": "string"}, "intensity": {"type": "number"}},
+       {"clip_id": {"type": "string", "description": "Omit to apply to every V1 clip"},
+        "src": {"type": "string",
+                "description": "Bundled LUT name from list_luts (e.g. 'warm.cube') or a "
+                               "path to an existing .cube file"},
+        "lut_path": {"type": "string",
+                     "description": "Alias of src; prefer src. Read only when src is omitted."},
+        "intensity": {"type": "number", "default": 1.0, "description": "0..1 blend amount"}},
        ["src"]),
     _t("add_transition",
        "Add a transition at a timeline boundary (t in seconds, between two adjacent V1 clips). "
@@ -816,7 +891,11 @@ HEAVY_AI_TOOLS = [
        "it; pass bg_color=null for true alpha.",
        "ai",
        {"clip_id": {"type": "string"},
-        "bg_color": {"type": ["string", "null"], "default": "#00FF00"}},
+        "bg_color": {"type": ["string", "null"], "default": "#00FF00"},
+        "model": {"type": "string", "default": "u2net",
+                  "description": "rembg session model name (default 'u2net'; e.g. "
+                                 "'u2net_human_seg', 'isnet-general-use'). Each new "
+                                 "model downloads its weights on first use."}},
        ["clip_id"]),
     _t("object_erase",
        "LaMa inpaint: erase a bbox region across a time window on a clip "
@@ -847,6 +926,9 @@ HEAVY_AI_TOOLS = [
        {"srcs": {"type": "array", "items": {"type": "string"},
                  "description": "Paths to the angle files; first = sync reference"},
         "window_s": {"type": "number", "default": 2.0},
+        "total": {"type": "number",
+                  "description": "Total programme length in seconds; omit to use the "
+                                 "shortest angle's duration"},
         "replace_v1": {"type": "boolean", "default": True}},
        ["srcs"]),
     _t("diarize",
@@ -863,7 +945,12 @@ HEAVY_AI_TOOLS = [
        "ai",
        {"num_speakers": {"type": "integer", "default": 2},
         "turns": {"type": "array", "items": {"type": "object"},
-                  "description": "Optional pre-computed [{speaker,start,end}] turns"}},
+                  "description": "Optional pre-computed [{speaker,start,end}] turns"},
+        "fallback": {"type": "boolean", "default": True,
+                     "description": "Forwarded to diarize when turns is omitted: allow "
+                                    "the local MFCC/KMeans heuristic when pyannote "
+                                    "(HUGGINGFACE_TOKEN) is unavailable; false forces "
+                                    "pyannote."}},
        []),
     _t("smooth_slow_motion",
        "RIFE optical-flow frame interpolation for buttery slow-mo on a media clip "
@@ -938,3 +1025,27 @@ def list_tools(categories: list[str] | None = None) -> list[ToolSchema]:
     if categories is None:
         return ALL_TOOLS
     return [t for t in ALL_TOOLS if t["category"] in categories]
+
+
+def input_schema_for(tool: str) -> dict | None:
+    """The advertised `input_schema` of one tool, or None for an unknown name."""
+    return next((t["input_schema"] for t in ALL_TOOLS if t["name"] == tool), None)
+
+
+def unknown_args(tool: str, args: dict) -> list[str]:
+    """Argument names in `args` that `tool`'s input_schema does not list.
+
+    This is the check a key-free plan validator needs: a local model must never
+    smuggle a path or an unfamiliar knob past the schema, and that is only safe
+    to enforce because every argument a handler reads is now advertised
+    (tests/test_tool_schema_completeness.py keeps it that way). It is
+    deliberately NOT called from dispatch(): the dispatcher tolerates extra keys
+    today (see _validate_tool_args), and flipping that is a behaviour change for
+    every existing caller. Keeping the rule here means the validator and any
+    future dispatch hook share one definition instead of drifting.
+    """
+    schema = input_schema_for(tool)
+    if schema is None:
+        return sorted(args)
+    advertised = set(schema.get("properties") or {})
+    return sorted(k for k in args if k not in advertised)

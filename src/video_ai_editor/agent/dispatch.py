@@ -25,6 +25,11 @@ from ..show.templates import (
     ShowSnapshot,
 )
 from .tools import list_tools as _list_tools
+from .timemap import (
+    source_range_to_timeline,
+    map_segments_to_timeline,
+    clamp_to_extent,
+)
 from .. import platformutil as _pu
 
 DispatchFn = Callable[[EDLStore, dict], dict]
@@ -772,12 +777,20 @@ def _current_v1_ingest_json(store: EDLStore) -> Path | None:
     a stale transcript from an earlier/different upload in the same session
     (each upload gets its own uploads/<stem>/ subdirectory).
     """
+    src = _first_v1_media_src(store)
+    if src is None:
+        return None
+    candidate = Path(src).parent / "ingest.json"
+    return candidate if candidate.exists() else None
+
+
+def _first_v1_media_src(store: EDLStore) -> str | None:
+    """Source path of the first media clip on v1 (in stored order), or None
+    when v1 holds no media. This is THE file a project transcript describes —
+    see `_load_transcript_with_source`."""
     v1 = store.edl.get_track("v1")
     src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
-    if not src_clip:
-        return None
-    candidate = Path(src_clip.src).parent / "ingest.json"
-    return candidate if candidate.exists() else None
+    return src_clip.src if src_clip else None
 
 
 # ---------- inspection ----------
@@ -1571,6 +1584,34 @@ def apply_hook_stack(store: EDLStore, args: dict) -> dict:
     }
 
 
+def _timeline_segments(store: EDLStore, segments: list[dict],
+                       src: str | None) -> tuple[list[dict], float]:
+    """Transcript segments retimed onto v1, plus the extent caption cues may
+    not run past. The one place both caption tools get their timeline from.
+
+    With media on v1 this is `timemap.map_segments_to_timeline` (removed words
+    dropped, per-clip speed-aware retiming, identity when uncut) and the
+    extent is `edl.video_extent()`: `caption_format.build_cues` deliberately
+    holds a cue past its last word for reading speed, which is harmless mid-
+    footage but at the end of a shortened timeline is exactly what pushed
+    `recompute_duration()` past the video and rendered black frames under a
+    caption. See `timemap.clamp_to_extent`.
+
+    With NO media on v1 the segments come back untouched and the extent is
+    unbounded. Nothing has been cut or sped, so the transcript's own times are
+    the only timeline there is; the panel's "Import subtitles → Captions from
+    transcript" flow runs on a session before any footage is uploaded
+    (tests/test_features_route pins it), and mapping through zero clips laid
+    zero cues — the very defect that flow was fixed for once already, back
+    when add_caption_track read only whisper's ingest.json.
+    """
+    from .timemap import media_clips
+    if not media_clips(store.edl, "v1"):
+        return segments, float("inf")
+    return (map_segments_to_timeline(store.edl, "v1", segments, src=src),
+            store.edl.video_extent())
+
+
 def add_caption_track(store: EDLStore, args: dict) -> dict:
     # These two land on the EDL by ASSIGNMENT (`cap.config.style = …`) rather
     # than by constructing a CaptionsConfig, which is exactly why an unknown
@@ -1595,55 +1636,56 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
     # Captions from transcript" laid down zero (or the old whisper) cues — the
     # imported file never reached the timeline, and on a packaged Mac without
     # faster-whisper that import is the only caption path there is.
-    transcript = _load_transcript(store)
+    transcript, tx_src = _load_transcript_with_source(store)
     cap.clips = []
     seg_count = 0
     if transcript is not None:
-        tx = transcript.model_dump()
+        # Transcript times are SOURCE seconds; caption clips are TIMELINE
+        # seconds. Map through the current v1 clips first (same reasoning and
+        # same helper as auto_caption — see there): removed words leave the
+        # captions, the rest follow the cuts and any speed change, and an
+        # uncut timeline comes out byte-identical to laying the raw segments.
+        segments, extent = _timeline_segments(
+            store, transcript.model_dump().get("segments", []), tx_src)
         canvas = store.edl.canvas
         y_pos = canvas.h * (0.85 if position == "bottom" else 0.5 if position == "center" else 0.15)
+
+        def _lay(text: str, start: float, end: float, role: str, y: float) -> None:
+            nonlocal seg_count
+            span = clamp_to_extent(start, end, extent)
+            if span is None:
+                return
+            cap.clips.append(TextClip(
+                text=text, start=span[0], end=span[1], role=role,  # type: ignore[arg-type]
+                transform=Transform(x=canvas.w / 2, y=y),
+            ))
+            seg_count += 1
 
         if style == "word_emphasis":
             # Group words into chunks of 1-3 (default 2) and emit one TextClip
             # per chunk, timed to the words' start..end. The TextLayer renders
             # them at hook-size to deliver the punchy IG/TikTok karaoke look.
             chunk_size = int(args.get("chunk_size", 2))
-            for seg in tx.get("segments", []):
+            for seg in segments:
                 words = seg.get("words") or []
                 if not words:
                     # No word-level timing — fall back to single-segment caption
-                    cap.clips.append(TextClip(
-                        text=(seg.get("text") or "").strip(),
-                        start=float(seg["start"]), end=float(seg["end"]),
-                        role="caption",
-                        transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5),
-                    ))
-                    seg_count += 1
+                    _lay((seg.get("text") or "").strip(),
+                         float(seg["start"]), float(seg["end"]), "caption", canvas.h * 0.5)
                     continue
                 for i in range(0, len(words), chunk_size):
                     chunk = words[i:i + chunk_size]
                     text = " ".join((w.get("word") or "").strip() for w in chunk).strip()
                     if not text:
                         continue
-                    cap.clips.append(TextClip(
-                        text=text.upper(),
-                        start=float(chunk[0]["start"]),
-                        end=float(chunk[-1]["end"]),
-                        role="hook",  # hook style = bold/centered/big — perfect for word_emphasis
-                        transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5),
-                    ))
-                    seg_count += 1
+                    # hook style = bold/centered/big — perfect for word_emphasis
+                    _lay(text.upper(), float(chunk[0]["start"]), float(chunk[-1]["end"]),
+                         "hook", canvas.h * 0.5)
         else:
             # default / ig_chunky: one caption per segment
-            for seg in tx.get("segments", []):
-                cap.clips.append(TextClip(
-                    text=(seg.get("text") or "").strip(),
-                    start=float(seg["start"]),
-                    end=float(seg["end"]),
-                    role="caption",
-                    transform=Transform(x=canvas.w / 2, y=y_pos),
-                ))
-                seg_count += 1
+            for seg in segments:
+                _lay((seg.get("text") or "").strip(),
+                     float(seg["start"]), float(seg["end"]), "caption", y_pos)
     summary = f"Add caption track ({style}, {position}) — {seg_count} caption(s)"
     store.commit("add_caption_track", args, summary)
     return {"summary": summary, "lines": seg_count}
@@ -1965,9 +2007,20 @@ def auto_caption(store: EDLStore, args: dict, *,
         data["spoken_language"] = spoken
     ingest_json.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    # Build readable cues from the word stream.
+    # Build readable cues from the word stream — the TIMELINE word stream.
+    # What was persisted above is the SOURCE-time transcript (the record of
+    # the file, which get_transcript/export_srt/find_moments all index by);
+    # what goes on the caption track has to follow the clips. Whisper heard
+    # the whole file, so after any cut its words for the removed footage are
+    # still here: laid at source time they overhung the video (measured: last
+    # cue 33.9s on a 24.2s timeline — recompute_duration then grew the render
+    # to 34s, ~10s of it black) and kept the removed fillers in the caption
+    # text. Mapping drops the removed words, retimes the rest per clip (speed
+    # included) and is the identity on an uncut timeline. Scoped to THIS
+    # source: only v1 clips playing the file just transcribed carry its words.
+    segments_tl, extent = _timeline_segments(store, tx_dict.get("segments", []), str(src))
     cues = cues_from_segments(
-        tx_dict.get("segments", []),
+        segments_tl,
         max_chars=int(args.get("max_chars", 42)),
         max_cps=float(args.get("max_cps", 17.0)),
     )
@@ -1989,20 +2042,26 @@ def auto_caption(store: EDLStore, args: dict, *,
     cap.clips = []
     if style == "word_emphasis":
         chunk = int(args.get("chunk_size", 2))
-        words = [w for seg in tx_dict.get("segments", []) for w in (seg.get("words") or [])]
+        words = [w for seg in segments_tl for w in (seg.get("words") or [])]
         for i in range(0, len(words), chunk):
             grp = words[i:i + chunk]
             text = " ".join((w.get("word") or "").strip() for w in grp).strip()
             if not text:
                 continue
+            span = clamp_to_extent(float(grp[0]["start"]), float(grp[-1]["end"]), extent)
+            if span is None:
+                continue
             cap.clips.append(TextClip(
-                text=text.upper(), start=float(grp[0]["start"]), end=float(grp[-1]["end"]),
+                text=text.upper(), start=span[0], end=span[1],
                 role="hook", transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5),
             ))
     else:
         for cue in cues:
+            span = clamp_to_extent(cue.start, cue.end, extent)
+            if span is None:
+                continue
             cap.clips.append(TextClip(
-                text=cue.text, start=cue.start, end=cue.end, role="caption",
+                text=cue.text, start=span[0], end=span[1], role="caption",
                 transform=Transform(x=canvas.w / 2, y=y_pos),
             ))
 
@@ -2257,10 +2316,92 @@ def set_clip_muted(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "muted": c.audio.mute}
 
 
+def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Union of closed ranges, sorted ascending; overlapping/touching ones
+    become one. Pure — returns a new list."""
+    merged: list[tuple[float, float]] = []
+    for s, e in sorted(ranges):
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+# Source ranges shorter than this are nothing to cut: `timemap._overlap`
+# already discards a surviving sliver below its own 1e-6, and cut_range
+# rejects end <= start, so a zero-length word with pad=0 must not reach it.
+_MIN_CUT_S = 1e-9
+
+
+def _cut_source_ranges(store: EDLStore, track_id: str,
+                       source_ranges: list[tuple[str | None, float, float]]) -> int:
+    """Remove every SOURCE range in `source_ranges` — `(src, start, end)` in
+    source seconds of file `src` — from `track_id`, re-mapping through the
+    LIVE EDL before each cut. Returns the number of `cut_range` calls made.
+    The caller owns the `EDLStore.batch()`; this only emits cuts.
+
+    Why not map once, sort, and cut back-to-front (what remove_silences did
+    from day one and remove_fillers then copied): `cut_range` ends with
+    `_ripple_close_gap`, which re-packs the track from timeline 0. When v1
+    has a LEADING gap (add_clip with start>0 is reachable from Claude and
+    MCP) the first cut closes that gap and shifts every earlier clip left, so
+    each remaining precomputed timeline range is stale by the gap width, and
+    back-to-front order cannot help. Measured by the review on a clip placed
+    at 2.0s: fillers at source 0.6/5.5/10.5 → only the last was removed and
+    two ranges of real speech went instead; remove_silences on the same clip
+    cut source [5,7) for a silence detected at [3,5).
+
+    So the loop keeps SOURCE ranges, which no cut can invalidate — a source
+    instant is either still on the timeline or it is not — and on every
+    iteration re-maps all of them against `store.edl`
+    (`timemap.source_range_to_timeline`: cut-away parts vanish, straddling
+    parts come back clipped, reused regions come back once per occurrence),
+    merges the timeline hits, cuts only the LAST merged range, and repeats
+    until nothing maps. `n` is a handful, so the O(n²) mapping is free.
+
+    Merging matters on its own: two back-to-back fillers overlap once padded,
+    and cutting them as two ranges removed the second, rippled the following
+    speech left into the first range, and then cut a slice of it.
+
+    Termination: the last merged range wholly contains at least one hit, a
+    cut never creates a new occurrence of a source range, so every iteration
+    retires ≥1 hit and the initial hit count bounds the loop. Going past it
+    would mean the mapping and the cut disagree about what was removed — a
+    bug, so it raises instead of spinning.
+    """
+    def _hits() -> list[tuple[float, float]]:
+        hits: list[tuple[float, float]] = []
+        for src, s_start, s_end in source_ranges:
+            if s_end - s_start <= _MIN_CUT_S:
+                continue
+            hits.extend(source_range_to_timeline(store.edl, track_id, s_start, s_end, src=src))
+        return hits
+
+    hits = _hits()
+    budget = len(hits)
+    n = 0
+    while hits:
+        if n >= budget:
+            raise RuntimeError(
+                f"remove ranges on {track_id}: {len(hits)} range(s) still map after "
+                f"{n} cuts (expected at most {budget}) — cut did not remove what the "
+                f"mapper says is there")
+        s, e = _merge_ranges(hits)[-1]
+        cut_range(store, {"track": track_id, "start": s, "end": e})
+        n += 1
+        hits = _hits()
+    return n
+
+
 def remove_silences(store: EDLStore, args: dict) -> dict:
     """Detect silences in the V1 audio + emit cut ops to remove them.
 
-    Uses ffmpeg `silencedetect` then translates ranges to cut_range calls.
+    Uses ffmpeg `silencedetect` per v1 clip slice, converts each hit to an
+    absolute SOURCE range of that clip's file, and hands the lot to
+    `_cut_source_ranges`, which maps them onto the timeline against the live
+    EDL before each cut (see there for why precomputed timeline ranges were
+    wrong).
     """
     threshold_db = float(args.get("threshold_db", -30))
     min_dur = float(args.get("min_dur", 0.5))
@@ -2273,7 +2414,7 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
     # Run silencedetect on each contributing source-clip slice in timeline order.
     import re, subprocess
     from ..edl.schema import Clip
-    ranges_to_cut: list[tuple[float, float]] = []  # in TIMELINE coords
+    source_ranges: list[tuple[str | None, float, float]] = []  # (src, SOURCE s, SOURCE e)
     for c in track.clips:
         if not isinstance(c, Clip):
             continue
@@ -2294,75 +2435,95 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
             if local_end - local_start < min_dur:
                 continue
             # silencedetect offsets are SOURCE seconds into the [in_, out)
-            # slice; cut_range interprets its args as TIMELINE seconds. On a
-            # sped clip 1 timeline-second covers speed_factor source-seconds,
-            # so divide before anchoring at c.start — without this, a 2x
-            # clip's silence at source [2,4) (playing at timeline [1,2))
-            # emitted cut_range(2,4), which removed source [4,8): the wrong
-            # content, and twice as much of it.
-            sf = c.speed_factor
-            tl_start = c.start + local_start / sf
-            tl_end = c.start + local_end / sf
-            ranges_to_cut.append((tl_start, tl_end))
+            # slice, so `c.in_ + local` is the absolute source instant of
+            # THIS clip's file. cut_range wants TIMELINE seconds; the
+            # conversion is speed-aware (on a 2x clip a source [2,4) silence
+            # plays at timeline [1,2) — converting naively once emitted
+            # cut_range(2,4) and removed source [4,8), the wrong content and
+            # twice as much of it). That arithmetic used to live inline here
+            # and ONLY here; it is now `agent/timemap`, shared by every
+            # transcript consumer, and applied by _cut_source_ranges against
+            # the live EDL right before each cut rather than up front.
+            source_ranges.append((c.src, c.in_ + local_start, c.in_ + local_end))
 
-    if not ranges_to_cut:
+    if not source_ranges:
         store.commit("remove_silences", args, "Remove silences: none found")
         return {"summary": "No silences detected", "cuts": 0}
 
-    # Apply cuts back-to-front so timeline coords stay valid mid-cut
-    ranges_to_cut.sort(reverse=True)
-    n = 0
     # One user action = one undo step: batch() swallows each cut_range's own
     # commit so the single commit below is the only op/snapshot recorded.
     with store.batch():
-        for s, e in ranges_to_cut:
-            try:
-                cut_range(store, {"track": track_id, "start": s, "end": e})
-                n += 1
-            except ValueError:
-                continue
+        n = _cut_source_ranges(store, track_id, source_ranges)
     summary = f"Removed {n} silences (threshold {threshold_db}dB, min {min_dur}s)"
     store.commit("remove_silences", args, summary)
     return {"summary": summary, "cuts": n}
 
 
 def remove_fillers(store: EDLStore, args: dict) -> dict:
-    """Find filler-word ranges in the transcript and cut them out."""
+    """Find filler-word ranges in the transcript and cut them out.
+
+    Transcript word times are SOURCE seconds; `cut_range` takes TIMELINE
+    seconds. This used to hand one to the other unconverted, which is
+    invisible on a fresh timeline (the two clocks coincide) and destructive on
+    any other: measured on a real 36s clip, run after `remove_silences` it
+    removed 1 of 4 fillers and cut two ranges of real speech instead. Every
+    filler's source range now goes through `timemap.source_range_to_timeline`
+    (inside `_cut_source_ranges`, against the live EDL before each cut — see
+    there for the leading-gap ripple that made precomputed timeline ranges
+    wrong), which also answers "on the timeline twice" (two ranges → both
+    cut) and merges overlapping padded ranges into one cut. Same speed-aware
+    math `remove_silences` has always used, now shared.
+
+    "Already removed" is decided on the UNPADDED word. A filler whose spoken
+    range is gone but whose pad still touches surviving footage is not
+    present — deciding on the padded range counted it as present, cut 2×pad
+    of the NEIGHBOURING words, and reported a filler removed. Realistic path:
+    a pass with pad=0 followed by a pass with pad=0.15 ate 0.05s of each
+    neighbour and said "Removed 1 filler words".
+
+    `pad` is applied in SOURCE seconds before mapping — it is air around the
+    spoken word, so on a 2x clip it should occupy half the timeline time, and
+    it must not stretch across a cut edge into unrelated footage (the mapper
+    clips it there).
+    """
     fillers = [w.lower() for w in args.get("words", ["um", "uh", "like", "you know", "so basically"])]
     pad = float(args.get("pad", 0.05))
     track_id = str(args.get("track", "v1"))
 
-    transcript = get_transcript(store, {})
-    words = []
-    for seg in transcript.get("segments", []):
-        for w in seg.get("words", []):
-            words.append(w)
+    transcript, tx_src = _load_transcript_with_source(store)
+    words = [w.model_dump() for w in (transcript.words if transcript is not None else [])]
     if not words:
         store.commit("remove_fillers", args, "Remove fillers: no transcript")
         return {"summary": "No transcript available", "cuts": 0}
 
-    ranges: list[tuple[float, float]] = []
-    for w in words:
-        token = (w.get("word") or "").strip().lower().rstrip(",.!?")
-        if token in fillers:
-            ranges.append((max(0.0, w["start"] - pad), w["end"] + pad))
-
-    if not ranges:
+    filler_words = [w for w in words
+                    if (w.get("word") or "").strip().lower().rstrip(",.!?") in fillers]
+    if not filler_words:
         store.commit("remove_fillers", args, "Remove fillers: none found")
         return {"summary": "No filler words found", "cuts": 0}
 
-    ranges.sort(reverse=True)
-    n = 0
+    present: list[tuple[str | None, float, float]] = []   # (src, padded SOURCE s, e)
+    for w in filler_words:
+        s, e = float(w["start"]), float(w["end"])
+        if not source_range_to_timeline(store.edl, track_id, s, e, src=tx_src):
+            continue                                        # already cut away
+        present.append((tx_src, max(0.0, s - pad), e + pad))
+    on_timeline = len(present)
+    already_removed = len(filler_words) - on_timeline
+
+    if not present:
+        summary = f"No filler words left to remove ({already_removed} already cut)"
+        store.commit("remove_fillers", args, summary)
+        return {"summary": summary, "cuts": 0, "words": 0, "already_removed": already_removed}
+
     with store.batch():  # one undo step for the whole pass (see remove_silences)
-        for s, e in ranges:
-            try:
-                cut_range(store, {"track": track_id, "start": s, "end": e})
-                n += 1
-            except ValueError:
-                continue
-    summary = f"Removed {n} filler words"
+        n = _cut_source_ranges(store, track_id, present)
+    summary = f"Removed {on_timeline} filler words"
+    if already_removed:
+        summary += f" ({already_removed} already cut)"
     store.commit("remove_fillers", args, summary)
-    return {"summary": summary, "cuts": n}
+    return {"summary": summary, "cuts": n, "words": on_timeline,
+            "already_removed": already_removed}
 
 
 def auto_cut_to_beats(store: EDLStore, args: dict) -> dict:
@@ -3473,9 +3634,20 @@ def import_srt_tool(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "segments": len(transcript.segments)}
 
 
+# export_srt / export_vtt / export_ass write the transcript in SOURCE time —
+# the record of the FILE, the same thing get_transcript returns and
+# ingest.json stores — NOT the on-timeline caption track. After cuts they
+# therefore do not line up with a render; the caption track (auto_caption /
+# add_caption_track, which map through `agent/timemap`) is what the render
+# shows. Deliberate for now: making them follow the timeline is a behaviour
+# change for anyone exporting a transcript to re-import, needs an opt-in in
+# the tool schema, and was flagged (not required) by the same review that
+# fixed the caption tools. Pinned by
+# tests/test_transcript_timemap.py::test_export_srt_is_deliberately_source_timed
+# so changing the decision is a visible change.
 def export_srt_tool(store: EDLStore, args: dict) -> dict:
-    """Write the current transcript out as a .srt file. Default destination
-    is `<session>/captions.srt`."""
+    """Write the current transcript out as a .srt file, in SOURCE time (see
+    the note above). Default destination is `<session>/captions.srt`."""
     from ..ingest.srt_io import export_srt
     transcript = _load_transcript(store)
     if transcript is None:
@@ -3538,11 +3710,40 @@ def _load_transcript(store: EDLStore):
     upload directory, never a `glob("uploads/**/ingest.json")[0]`, which has no
     ordering guarantee in a session with more than one upload.
     """
+    return _load_transcript_with_source(store)[0]
+
+
+def _load_transcript_with_source(store: EDLStore):
+    """`_load_transcript`, plus WHICH media file the transcript's times index.
+
+    Returns `(transcript, src)`. `src` is the first v1 media clip's source
+    path for BOTH writers, or None only when v1 holds no media.
+
+    The distinction matters to every consumer that maps transcript times onto
+    the timeline (`agent/timemap`): transcript times are SOURCE seconds of ONE
+    file, so on a v1 holding clips from two files only the matching file's
+    clips may carry its words. For `ingest.json` that file is by construction
+    the first v1 clip's (`_current_v1_ingest_json` derives the path from it).
+
+    An imported `<session>/transcript.json` is treated as the SAME file's
+    transcript, not as origin-unknown. A first version returned None for it,
+    meaning "map through every v1 clip", on the reasoning that the import
+    path only ever met single-source timelines. The review disproved that on
+    an UNCUT two-file v1: `remove_fillers` cut the imported filler's offsets
+    out of the second file too, and `add_caption_track` laid every cue once
+    per clip (11 → 22 word_emphasis cues) — both regressions against laying
+    the raw times, which is what the tools did before the mapper. A subtitle
+    file is authored against one video, and the video a project is built on
+    is its first v1 clip; scoping to it keeps the import path byte-identical
+    to before on every single-source timeline and, on a multi-source one,
+    confines its cues and cuts to the footage the file actually describes.
+    """
     from ..ingest.transcribe import Transcript
+    src = _first_v1_media_src(store)
     p = store.dir / "transcript.json"
     if p.exists():
         try:
-            return Transcript.model_validate_json(p.read_text(encoding="utf-8"))
+            return Transcript.model_validate_json(p.read_text(encoding="utf-8")), src
         except Exception:
             pass  # fall through to the ingest side rather than hard-failing
     ing = _current_v1_ingest_json(store)
@@ -3551,10 +3752,10 @@ def _load_transcript(store: EDLStore):
             data = json.loads(ing.read_text(encoding="utf-8"))
             tr = data.get("transcript")
             if tr:
-                return Transcript.model_validate(tr)
+                return Transcript.model_validate(tr), src
         except Exception:
-            return None
-    return None
+            return None, None
+    return None, None
 
 
 def noise_reduce(store: EDLStore, args: dict) -> dict:

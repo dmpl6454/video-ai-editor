@@ -41,6 +41,7 @@ EXPECTED_GUARDS: dict[tuple[str, str], str] = {
     ("add_sticker", "src"): "read",
     ("apply_brand_kit", "end_card"): "read",
     ("apply_lut", "src"): "read",
+    ("apply_lut", "lut_path"): "read",   # alias of src; the handler resolves it into src BEFORE _safe_src
     ("find_broll", "bin"): "read",
     ("import_srt", "path"): "read",
     ("match_style", "reference"): "read",
@@ -147,8 +148,8 @@ def test_every_advertised_path_arg_has_a_table_entry():
 
 def test_the_guard_count_is_pinned():
     """A bare count, so a rename cannot quietly shrink the table."""
-    assert len(EXPECTED_GUARDS) == 21
-    assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 9
+    assert len(EXPECTED_GUARDS) == 22  # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised
+    assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 10
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "write") == 3
 
 
