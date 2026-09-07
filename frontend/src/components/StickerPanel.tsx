@@ -26,6 +26,15 @@ const TONE_KEY = 'vai_emoji_tone'
 /** Index into EmojiEntry.t, or -1 for the default yellow. */
 const TONE_SWATCHES = ['✋', '✋🏻', '✋🏼', '✋🏽', '✋🏾', '✋🏿']
 
+/** Most emoji warmed in one request. A grid row is 8 swatches and the panel
+ *  shows ~12 rows, so this is several screens' worth — enough that scrolling
+ *  stays instant, bounded enough that opening the picker is not a download. */
+const PREWARM_MAX = 128
+const PREWARM_DEBOUNCE_MS = 300
+/** Warmed this page-load, so re-opening the picker or re-expanding a group
+ *  costs nothing. Module-level: the panel unmounts with the Media/AI tab. */
+const PREWARMED = new Set<string>()
+
 /** Apply the panel's skin tone to `e`, when it has one. */
 function toned(e: EmojiEntry, tone: number): string {
   return tone >= 0 && e.t ? e.t[tone] : e.c
@@ -86,28 +95,55 @@ export function StickerPanel() {
     () => (debounced.trim() ? searchEmoji(debounced, 96) : null),
     [debounced])
 
-  // Ask the server to warm the artwork cache the first time the picker opens.
-  // On a cold cache the browser's ~6-connection cap made a large group trickle
-  // in over many seconds; this fetches the misses on a background pool so the
-  // second look — and every later one — is instant. Fire-and-forget: if it
-  // fails, every swatch still fetches on demand exactly as before.
-  const warmed = useRef(false)
-  useEffect(() => {
-    if (!open || warmed.current) return
-    warmed.current = true
-    const all: string[] = []
+  // The emoji the picker is ABOUT TO DRAW — search results, or the recents plus
+  // whichever groups are expanded. Not the catalogue.
+  const visible = useMemo(() => {
+    if (!open) return [] as string[]
+    if (results) return results.map((e) => toned(e, tone))
+    const out = [...recent]
     for (const g of EMOJI_CATALOG) {
-      for (const e of g.emojis) {
-        all.push(e.c)
-        if (e.t) all.push(...e.t)
-      }
+      if (!openGroups.has(g.name)) continue
+      for (const e of g.emojis) out.push(toned(e, tone))
     }
-    void fetch('/api/emoji/prewarm', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emojis: all }),
-    }).catch(() => {})
-  }, [open])
+    return out
+  }, [open, results, recent, openGroups, tone])
+
+  // Warm the artwork cache for what is on screen, and only that.
+  //
+  // Warming exists for a real reason: a browser opens ~6 connections per origin,
+  // so on a cold cache a group's swatches trickled in over many seconds, and
+  // `serve_emoji_png` is a SYNC endpoint on the shared anyio threadpool. But the
+  // first version asked for the WHOLE catalogue — every entry plus all five skin
+  // tones, 3436 strings — the moment the picker opened. On a fresh install that
+  // is ~3400 CDN requests fired by the act of clicking "Stickers", for artwork
+  // of which the user will look at maybe two dozen. Nobody asked for that, most
+  // of it is thrown away, and every one of those requests leaves this machine.
+  //
+  // Scoped to the visible set it is the same optimisation without the burst:
+  // opening the panel warms the recents and the one expanded group (169 emoji
+  // at most, capped at PREWARM_MAX), a search warms its own results, and
+  // expanding another group warms that group when it is expanded. Everything
+  // else is still fetched on demand by the `loading="lazy"` <img> below, exactly
+  // as before — this only ever changes WHEN a fetch happens, never whether the
+  // artwork is the fetched artwork, which is the invariant the whole emoji
+  // subsystem rests on (never the OS font; see lib/emojiArt.ts).
+  useEffect(() => {
+    const fresh = visible.filter((e) => !PREWARMED.has(e)).slice(0, PREWARM_MAX)
+    if (fresh.length === 0) return
+    // Debounced for the same reason the search box is: typing "rocket", or
+    // clicking through three groups, must not fire a request per keystroke.
+    const t = setTimeout(() => {
+      // Marked only once the request actually goes out — an effect torn down
+      // before the timer fires has warmed nothing.
+      for (const e of fresh) PREWARMED.add(e)
+      void fetch('/api/emoji/prewarm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emojis: fresh }),
+      }).catch(() => {})
+    }, PREWARM_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+  }, [visible])
 
   // Close the picker when clicking anywhere outside it. The ref wraps the
   // toggle button too, so clicking the toggle to close it doesn't fall through

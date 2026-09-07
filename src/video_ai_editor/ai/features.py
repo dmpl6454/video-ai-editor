@@ -46,8 +46,9 @@ class Feature:
     #
     # "a packaged bundle" means EITHER build, because the two exclude lists are
     # not the same: `build_app.sh` (macOS) additionally drops torch,
-    # torchvision, torchaudio, faster_whisper, open_clip, timm and scipy, which
-    # the Windows `.spec` keeps. Deriving the flag from the `.spec` alone left
+    # torchvision, torchaudio, open_clip, timm and scipy, which the Windows
+    # `.spec` keeps. (faster_whisper was on that list too until captions were
+    # made to work from the DMG.) Deriving the flag from the `.spec` alone left
     # every macOS user of the packaged app with exactly the impossible advice
     # this field exists to prevent (`visual_search` → "run uv sync", inside a
     # frozen .app). Marking a feature False costs nothing on the build where it
@@ -122,6 +123,49 @@ def _gpu_transcribe_ok() -> bool:
         return False
 
 
+def _tts_ok() -> bool:
+    """Piper's Python package AND the espeak-ng dictionaries it phonemizes with.
+
+    `_has("piper")` alone was not merely optimistic here, it was the most
+    dangerous answer this module can give. In the packaged app piper imports
+    fine, so TTS reported AVAILABLE — and then `tts_voiceover` KILLED THE WHOLE
+    PROCESS (audited against the shipped bundle: `/api/health` 200, run the
+    tool, no process). `piper/phonemize_espeak.py` hands
+    `<piper package dir>/espeak-ng-data` straight to espeak-ng, and espeak-ng
+    answers a missing phoneme table with `exit(1)` — inside our own
+    interpreter, so there is no exception to catch, no traceback, and every
+    other session in the process dies with it. `build_app.sh` did not collect
+    that data (it is package DATA, invisible to PyInstaller's import analysis),
+    so the app was inviting users into a crash. It now passes
+    `--collect-data piper`; this probe is the second half, so a build that ever
+    loses the data again reports the feature missing instead of fatal.
+
+    Cheap and non-raising, per this module's contract: `find_spec` locates the
+    package WITHOUT importing it (importing piper is itself a risk here), and
+    the rest is one `os.path.isfile`. `phontab` is the marker rather than the
+    directory, because an empty `espeak-ng-data/` fails exactly the same way.
+    """
+    try:
+        spec = importlib.util.find_spec("piper")
+    except (ImportError, ValueError, AttributeError):
+        return False
+    if spec is None:
+        return False
+    # Frozen builds go through PyInstaller's FrozenImporter, which sets
+    # submodule_search_locations to [<sys._MEIPASS>/piper] — the same directory
+    # piper's own `Path(__file__).parent` resolves to there.
+    roots = list(getattr(spec, "submodule_search_locations", None) or [])
+    if not roots and spec.origin:
+        roots = [os.path.dirname(spec.origin)]
+    for root in roots:
+        try:
+            if os.path.isfile(os.path.join(root, "espeak-ng-data", "phontab")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _binary(mod: str, attr: str) -> Callable[[], bool]:
     def probe() -> bool:
         try:
@@ -140,16 +184,34 @@ FEATURES: list[Feature] = [
             _whisper_ok,
             fix=f"`{PIP_EXTRA}` (installs faster-whisper), or drop a whisper.cpp "
                 "binary + ggml model in the models/ dir",
-            # faster-whisper IS bundled on Windows and is NOT on macOS
-            # (build_app.sh excludes it), so on a packaged Mac this reports
-            # unavailable and the pip half of `fix` above is impossible. The
-            # binary half is not — whisper.cpp is a drop-in — so this feature
-            # gets a route rather than the blanket "run from source".
-            packaged_fix="drop a whisper.cpp binary (`whisper-cli`) + a ggml model "
-                         "into the models/ dir, or run the app from source — the "
-                         "packaged macOS build excludes faster-whisper and nothing "
-                         "can be pip-installed into a frozen app",
-            note="First use of the caption model downloads it (~1.5GB for large-v3)."),
+            # faster-whisper is now bundled in BOTH packaged builds. It used to
+            # be `--exclude-module`d on macOS, so the notarized DMG answered the
+            # Captions button with transcribe.py's "run the app from source
+            # (`uv sync --all-extras`)" — on the one feature a video editor is
+            # most likely to reach for, and advice a DMG recipient cannot act
+            # on. The whisper.cpp escape hatch this text used to lead with is
+            # not a real one either: Homebrew's `whisper-cli` is a wrapper that
+            # links @rpath dylibs, so it is not a drop-in without dylib surgery.
+            # Reaching this line in a frozen app therefore means the BUNDLE is
+            # broken, not that the feature was deliberately left out — say so,
+            # since a packaging fault and a deliberate omission need different
+            # responses from whoever reads it. The drop-in route stays named
+            # because it does still work inside a bundle for anyone who has a
+            # portable whisper-cli.
+            packaged_fix="this build is supposed to ship faster-whisper and does "
+                         "not appear to — a packaging fault, not a missing extra, "
+                         "so please report it. Workaround: put a portable "
+                         "whisper.cpp binary (`whisper-cli`) + a ggml model in the "
+                         "models/ dir, or run the app from source. Nothing can be "
+                         "pip-installed into a frozen app.",
+            # Measured, not estimated: the large-v3 repo is 3.09GB on disk
+            # (model.bin alone is 3,087,284,237 bytes) and `small` is ~465MB.
+            # This note said "~1.5GB" and was the only warning a user got
+            # before a multi-gigabyte download started.
+            note="Captions transcribe with large-v3, downloaded on first use "
+                 "(~3GB, once, cached). The quick transcript made when you "
+                 "import a clip uses `small` instead (~465MB). Set "
+                 "WHISPER_CAPTION_MODEL to a smaller name to skip the big one."),
     Feature("noise_reduce", "Background-noise removal",
             ["noise_reduce"], lambda: _has("noisereduce", "soundfile"),
             fix=f"`{PIP_EXTRA}`",
@@ -210,8 +272,19 @@ FEATURES: list[Feature] = [
             fix=f"`{PIP_EXTRA}` (installs librosa)",
             in_packaged_app=False),
     Feature("tts", "Text-to-speech voiceover",
-            ["tts_voiceover"], lambda: _has("piper"),
-            fix=f"`{PIP_EXTRA}` (installs piper-tts)"),
+            ["tts_voiceover"], _tts_ok,
+            fix=f"`{PIP_EXTRA}` (installs piper-tts, which carries its own "
+                "espeak-ng-data)",
+            # piper IS bundled in both packaged builds, so the blanket "run from
+            # source" answer would be wrong; what a bundle can be missing is
+            # piper's espeak-ng DATA, and nothing can be pip-installed into a
+            # frozen app to add it.
+            packaged_fix="this build is missing piper's espeak-ng-data (voice "
+                         "synthesis would take the app down, so it is reported "
+                         "unavailable instead); rebuild with `--collect-data "
+                         "piper`, or run the app from source",
+            note="Voices download on first use (~60MB each) into the app's "
+                 "cache dir."),
     Feature("translate", "Caption translation",
             ["translate_captions"], lambda: _has("ctranslate2", "sentencepiece"),
             fix=f"`{PIP_EXTRA}` (installs ctranslate2 + sentencepiece)",
@@ -296,7 +369,12 @@ def feature_report() -> dict:
                 # A feature with a route that works inside a bundle (a drop-in
                 # binary) gets that route, not the blanket "run from source".
                 entry["fix"] = f.packaged_fix
-                entry["packaged_app_excluded"] = True
+                # …but only call it EXCLUDED if it actually is. captions now
+                # ships in both packaged builds and still carries a packaged_fix
+                # (for the "bundled but somehow missing" case), so stamping this
+                # unconditionally told the UI to grey out a feature the build
+                # contains and label it deliberately left out.
+                entry["packaged_app_excluded"] = not f.in_packaged_app
             elif frozen and not f.in_packaged_app:
                 entry["fix"] = PACKAGED_FIX
                 entry["packaged_app_excluded"] = True

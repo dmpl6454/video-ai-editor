@@ -120,6 +120,24 @@ def _live_context_block(store: EDLStore, ui_state: dict | None = None) -> str:
     )
 
 
+#: The ONE place this module tells a user how to supply a key, so the chat
+#: pane's two key failures (never had one / has a bad one) cannot drift apart.
+#: It names the toolbar affordance and not a dotfile: `apikey.py` makes
+#: `POST /api/settings/api-key` a complete substitute for hand-creating
+#: `~/Library/Application Support/Video AI Editor/.env` — a Finder-hidden file
+#: in a Finder-hidden folder — and it rebinds the running process, so neither
+#: "edit .env" nor "restart" was ever advice a packaged-app user could act on.
+#: True from source too, where the same button is present and does the same
+#: thing, which is why this needs no per-build branch.
+_KEY_HOWTO = ("Click the 🔑 key button in the toolbar and paste a key "
+              "from console.anthropic.com — it takes effect right away, no "
+              "restart needed.")
+
+#: Shown when the process has no key at all (the chat pane normally catches
+#: this first and offers the same button inline).
+_NO_KEY_MESSAGE = "Chat needs an Anthropic API key. " + _KEY_HOWTO
+
+
 def _friendly_anthropic_error(e: Exception) -> str:
     """Map a raw Anthropic SDK exception to a user-facing message.
 
@@ -129,6 +147,15 @@ def _friendly_anthropic_error(e: Exception) -> str:
     whose body says "credit balance is too low"); auth and rate-limit errors get
     their own copy. Anything unrecognised falls back to a generic-but-honest
     "temporarily unavailable" line.
+
+    Anything about the KEY points at the in-app route, never at a dotfile. The
+    auth line used to say "check ANTHROPIC_API_KEY in your .env and restart",
+    which is wrong twice for the audience that hits it most: a packaged-app user
+    has no `.env` they know of (it lives in a Finder-hidden folder under
+    Application Support, which is exactly the problem `apikey.py` exists to
+    solve), and no restart is needed either — `POST /api/settings/api-key`
+    rebinds the live process. One sentence has to stay true from source too, so
+    it names the toolbar affordance rather than a build-specific path.
     """
     status = getattr(e, "status_code", None)
     text = str(e).lower()
@@ -139,7 +166,7 @@ def _friendly_anthropic_error(e: Exception) -> str:
                 "console.anthropic.com (Plans & Billing) and try again.")
     if status == 401 or "authentication" in text or "invalid x-api-key" in text:
         return ("AI features are unavailable — the Anthropic API key is missing "
-                "or invalid. Check ANTHROPIC_API_KEY in your .env and restart.")
+                "or invalid. " + _KEY_HOWTO)
     if status == 429 or "rate limit" in text:
         return ("AI is busy right now (rate limited). Wait a few seconds and "
                 "try again.")
@@ -332,7 +359,10 @@ async def chat_turn(
     can persist it.
     """
     if not ANTHROPIC_API_KEY:
-        yield {"type": "error", "message": "ANTHROPIC_API_KEY is not set. Add it to ~/video-ai-editor/.env and restart."}
+        # Same route as the auth failure above, and for the same reason — the
+        # old copy named a path (`~/video-ai-editor/.env`) that is not where any
+        # build reads one from.
+        yield {"type": "error", "message": _NO_KEY_MESSAGE}
         yield {"type": "done"}
         return
 

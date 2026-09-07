@@ -209,8 +209,21 @@ def _get_model(model_size: str | None = None):
         # main.py's dispatch mapping let it through as an HTTP 500 "internal
         # server error" — the Captions button just failed with no explanation.
         # RuntimeError maps to a 422 carrying this text straight to the toast.
-        # (The macOS .app deliberately excludes faster-whisper to stay ~150MB;
-        # that build reaches exactly this line.)
+        #
+        # The packaged builds BUNDLE faster-whisper now, so a frozen app must
+        # not repeat the "run the app from source" line: the macOS .app used to
+        # exclude it and reach this branch by design, and every DMG recipient
+        # was handed an instruction they had no checkout to follow. Reaching it
+        # in a frozen app now means the bundle is broken, which is a different
+        # thing to tell someone. build_app.sh fails the build rather than
+        # shipping that, so this branch is the belt to its braces.
+        if getattr(sys, "frozen", False):
+            raise RuntimeError(
+                "Speech-to-text is unavailable — this app bundles the "
+                "'faster-whisper' package but it is not installed in this "
+                "build, which is a packaging fault rather than a missing "
+                "optional extra. Please report it."
+            ) from e
         raise RuntimeError(
             "Speech-to-text is unavailable in this build — the 'faster-whisper' "
             "package is not installed. Run the app from source (`uv sync "

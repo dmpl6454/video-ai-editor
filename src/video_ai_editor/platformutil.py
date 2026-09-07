@@ -42,10 +42,109 @@ def exe_name(name: str) -> str:
     return name
 
 
-# Resolved once at import. Bare names are fine when on PATH; exe_name makes the
-# Windows form explicit so callers can also feed these to find_binary.
-FFMPEG = exe_name("ffmpeg")
-FFPROBE = exe_name("ffprobe")
+def _bundle_payload_dirs() -> list[Path]:
+    """Directories a FROZEN PyInstaller build unpacks its collected payload to.
+
+    Empty when running from source — which is what keeps everything below a
+    strict widening: with no candidates, every resolver here degrades to the
+    bare-name/PATH behaviour it has always had, byte for byte.
+
+    macOS `--windowed` onedir (what `build_app.sh` produces): since PyInstaller
+    6, `BUNDLE` relocates every BINARY entry into `Contents/Frameworks` and
+    cross-links it into `Contents/Resources`, and the bootloader moves
+    `sys._MEIPASS` along with them (PyInstaller `building/osx.py`, "we have
+    effectively relocated the sys._MEIPASS directory from Contents/MacOS into
+    Contents/Frameworks"). So a `--add-binary "ffmpeg:."` payload is a real
+    file at `<_MEIPASS>/ffmpeg`, with a symlink at `../Resources/ffmpeg`.
+
+    The other candidates are cheap (`is_file` on a handful of paths, once at
+    import) and exist so a future packaging change cannot silently un-fix this:
+    the Windows onedir layout puts the payload in `_internal/` next to the exe,
+    and a onefile build unpacks it to a temp `_MEIPASS` that is not next to the
+    executable at all.
+    """
+    if not getattr(sys, "frozen", False):
+        return []
+    cands: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        m = Path(meipass)
+        cands += [m, m.parent / "Resources", m.parent / "Frameworks"]
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+    except OSError:                     # pragma: no cover - unreadable argv[0]
+        exe_dir = None
+    if exe_dir is not None:
+        cands += [exe_dir, exe_dir / "_internal",
+                  exe_dir.parent / "Frameworks", exe_dir.parent / "Resources"]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in cands:
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+# Resolved once at import: `sys.frozen`/`sys._MEIPASS` never change during a
+# run, and this is on the import path of every entry point.
+BUNDLE_PAYLOAD_DIRS: list[Path] = _bundle_payload_dirs()
+
+
+def bundled_binary(name: str) -> str | None:
+    """Absolute path to `name` shipped INSIDE this frozen bundle, else None.
+
+    Always None from source, so callers keep their existing behaviour there.
+    """
+    for d in BUNDLE_PAYLOAD_DIRS:
+        cand = d / exe_name(name)
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:                 # pragma: no cover - unreadable dir
+            continue
+    return None
+
+
+def bundled_bin_dir() -> Path | None:
+    """Directory the bundled ffmpeg actually lives in, or None.
+
+    `config.py` appends it to PATH so code that resolves a bare name itself
+    (a third-party library, a subprocess that only inherits PATH) finds the
+    shipped copy too.
+    """
+    ff = bundled_binary("ffmpeg")
+    return Path(ff).parent if ff else None
+
+
+def resolve_tool(name: str) -> str:
+    """How every ffmpeg/ffprobe invocation in this codebase names its binary.
+
+    Order: an explicit `VAI_FFMPEG` / `VAI_FFPROBE` override, then the copy
+    bundled inside a frozen app (ABSOLUTE path), then the bare name for PATH
+    to resolve — i.e. exactly what this module did before, once nothing is
+    bundled.
+
+    The bundled copy has to win, and it has to win *here*: `--add-binary`ing
+    ffmpeg into the .app changes nothing on its own, because `FFMPEG` was a
+    BARE NAME and `config._augment_path_for_gui_launch()` only ever added
+    Homebrew/MacPorts directories to PATH — never the bundle's own. That gap
+    is why a notarized DMG on a Mac with no Homebrew could not import,
+    preview, thumbnail or export a single frame: the app launched fine and
+    every ffmpeg call raised FileNotFoundError.
+    """
+    override = os.environ.get(f"VAI_{name.upper()}", "").strip()
+    if override:
+        return override
+    return bundled_binary(name) or exe_name(name)
+
+
+# Resolved once at import. From source these are still the bare names
+# ("ffmpeg"/"ffprobe", or the .exe forms on Windows) resolved via PATH; in a
+# frozen build they are absolute paths into the bundle.
+FFMPEG = resolve_tool("ffmpeg")
+FFPROBE = resolve_tool("ffprobe")
 
 
 def ffmpeg_filter_path(path: Path | str) -> str:
@@ -71,10 +170,15 @@ def ffmpeg_filter_path(path: Path | str) -> str:
 def find_binary(name: str, extra_dirs: list[Path]) -> str | None:
     """Locate a native binary cross-platform.
 
+    0. A copy shipped inside a frozen bundle (nothing there from source, so
+       this step is a no-op on the dev path).
     1. `shutil.which(exe_name(name))` — respects PATH, adds `.exe` on Windows.
     2. Each dir in `extra_dirs` (both `name` and `exe_name(name)`).
     Returns the resolved path string, or None if nowhere found.
     """
+    bundled = bundled_binary(name)
+    if bundled:
+        return bundled
     found = shutil.which(exe_name(name))
     if found:
         return found

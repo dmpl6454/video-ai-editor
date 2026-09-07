@@ -7,12 +7,13 @@ for that style.
 
 Show templates are user-saved snapshots of brand kit + canvas + caption style
 + music gain so a recurring weekly segment (Style Spotlight, Tech Tip on
-quicksolutions.in, etc.) can be re-applied to next week's raw footage in one
+your channel, etc.) can be re-applied to next week's raw footage in one
 call.
 """
 from __future__ import annotations
 import json
 from pathlib import Path
+from .. import platformutil as _pu
 from ..config import PRESETS_DIR
 from ..edl import EDL
 from ..edl.schema import BrandKit, Canvas, TextClip, Transform, Track
@@ -119,14 +120,30 @@ def list_template_names() -> list[str]:
 
 # ---------- Show templates (per-user recurring shows) ----------
 
+def _bundled_shows_dir() -> Path:
+    """Show templates shipped inside the app — READ-ONLY, and may not exist."""
+    return PRESETS_DIR / "shows"
+
+
 def shows_dir() -> Path:
-    p = PRESETS_DIR / "shows"
+    """Writable directory for user-saved show templates.
+
+    Deliberately NOT under PRESETS_DIR: when frozen that resolves inside the
+    read-only, code-signed .app, so writing there fails outright on a
+    DMG-mounted copy and would invalidate the signature on an installed one.
+    The per-OS user data dir is writable and survives an app update.
+    """
+    p = _pu.user_data_dir("Video AI Editor") / "shows"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def list_shows() -> list[str]:
-    return sorted(p.stem for p in shows_dir().glob("*.json"))
+    names = {q.stem for q in shows_dir().glob("*.json")}
+    bundled = _bundled_shows_dir()
+    if bundled.is_dir():
+        names |= {q.stem for q in bundled.glob("*.json")}
+    return sorted(names)
 
 
 class ShowSnapshot:
@@ -202,7 +219,8 @@ def save_show(name: str, edl: EDL) -> Path:
 
 
 def load_show(name: str) -> dict:
-    p = shows_dir() / f"{name}.json"
-    if not p.exists():
-        raise ValueError(f"show template {name!r} not found in {shows_dir()}")
-    return json.loads(p.read_text(encoding="utf-8"))
+    for d in (shows_dir(), _bundled_shows_dir()):
+        p = d / f"{name}.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    raise ValueError(f"show template {name!r} not found in {shows_dir()}")

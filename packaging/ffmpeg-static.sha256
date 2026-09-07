@@ -1,0 +1,16 @@
+# Pinned provenance for the static ffmpeg/ffprobe bundled into the macOS .app.
+#
+# These two binaries are downloaded at build time, then code-signed with our
+# Developer ID and notarized as part of the product — so an unpinned, unverified
+# fetch would mean putting our signature on bytes nobody checked. build_app.sh
+# verifies these digests and FAILS the build on a mismatch.
+#
+# Producer : static-ffmpeg==3.0  (PyPI)  -> darwin_arm64 archive
+# ffmpeg   : 7.0, static, arm64, 0 non-system dylib refs
+# Licence  : GPL-2.0-or-later (built --enable-gpl with libx264/libx265/libvidstab)
+#            See packaging/THIRD-PARTY-NOTICES.md before redistributing.
+#
+# To roll these forward: re-stage the pair, re-run shasum -a 256, paste here,
+# and re-check the licence config with `ffmpeg -version`.
+326895b16940f238d76e902fc71150f10c388c281985756f9850ff800a2f1499  ffmpeg
+307e09bc01bd72bde5f441a1a6df68769da3b2b6e431accfbfc9cf3893ad00c4  ffprobe

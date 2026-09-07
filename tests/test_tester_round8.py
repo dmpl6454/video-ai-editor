@@ -493,16 +493,20 @@ def test_mac_only_exclusions_are_flagged_too():
 
     win, mac = _bundle_excludes()
     mac_only = mac - win
-    assert {"torch", "open_clip", "faster_whisper"} <= mac_only, (
+    assert {"torch", "open_clip"} <= mac_only, (
         "build_app.sh no longer drops these — re-check the feature flags")
 
     by_key = {f.key: f for f in FEATURES}
     # open_clip + torch: no route inside a bundle at all.
     assert not by_key["visual_search"].in_packaged_app
-    # faster-whisper has one (a drop-in whisper.cpp binary), so it gets a real
-    # route rather than the blanket "run from source".
-    assert by_key["captions"].packaged_fix
-    assert "whisper.cpp" in by_key["captions"].packaged_fix
+    # faster_whisper is deliberately NOT in that set any more: the macOS build
+    # bundles it (captions were simply broken in the DMG before), so captions
+    # are now available in BOTH packaged builds. Keep asserting that, or the
+    # guard silently stops meaning what its name says.
+    assert "faster_whisper" not in mac_only, (
+        "build_app.sh excludes faster_whisper again — captions would be dead in "
+        "the DMG, which is the regression this asserts against")
+    assert by_key["captions"].in_packaged_app
 
 
 def test_object_erase_is_gated_on_lama_not_on_cv2():
@@ -549,13 +553,30 @@ def test_a_packaged_fix_is_preferred_over_the_blanket_answer(monkeypatch):
 
     monkeypatch.setattr(_sys, "frozen", True, raising=False)
     monkeypatch.setattr(F, "FEATURES", [
+        # in_packaged_app defaults True: the dependency IS in the bundle, and
+        # packaged_fix is the bundle-compatible route (a drop-in binary, or
+        # "report it" for something that should have shipped).
         F.Feature("k", "L", ["t"], lambda: False, fix="pip install x",
                   packaged_fix="drop the binary in models/"),
+        # ...and one that genuinely is not in the bundle.
+        F.Feature("gone", "G", ["t2"], lambda: False, fix="pip install y",
+                  in_packaged_app=False),
     ])
-    entry = F.feature_report()["unavailable"][0]
+    report = F.feature_report()["unavailable"]
+    entry = next(e for e in report if e["key"] == "k")
     assert entry["fix"] == "drop the binary in models/"
-    assert entry["packaged_app_excluded"] is True
     assert F.PACKAGED_FIX not in entry["fix"]
+    # `packaged_app_excluded` means "the .app deliberately leaves this out", and
+    # it must track in_packaged_app rather than merely "has a packaged_fix".
+    # Stamping it whenever a packaged_fix existed labelled bundled features as
+    # excluded — captions ships in both builds now and still carries a
+    # packaged_fix for the should-not-happen case, so the UI was greying out
+    # something the build contains.
+    assert entry["packaged_app_excluded"] is False
+
+    excluded = next(e for e in report if e["key"] == "gone")
+    assert excluded["packaged_app_excluded"] is True
+    assert excluded["fix"] == F.PACKAGED_FIX
 
 
 def test_list_transitions_is_honest_at_the_TOP_level(tmp_path):
