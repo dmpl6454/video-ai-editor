@@ -202,6 +202,26 @@ class _RateLimiter:
 
 RATE = _RateLimiter()
 
+#: Per-second allowance for the filmstrip routes, keyed like every other route
+#: on (client, path). The limiter's key drops the query string, so EVERY tile
+#: of a session's /thumb (and every /waveform slice) shares one bucket — the
+#: per-path design above never protected the filmstrip the way its docstring
+#: says: a 17-clip timeline at 80 px/s paints ~170 tiles in well under a
+#: second, the 61st and every later one came back 429 and the strip showed
+#: holes (measured 2026-09-11 on a real edit, 94 rejected tiles per paint).
+#: These routes are cheap cached file reads after the first render, so the
+#: allowance is ten times the default; everything else keeps DEFAULT via
+#: RATE.default_rps (tests monkeypatch that, so it is not duplicated here).
+FILMSTRIP_RPS = 600.0
+_FILMSTRIP_SUFFIXES = ("/thumb", "/waveform")
+
+
+def rps_for_path(path: str) -> float | None:
+    """The allowance a route gets, or None for the limiter's default."""
+    if path.endswith(_FILMSTRIP_SUFFIXES):
+        return FILMSTRIP_RPS
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Middleware
@@ -217,7 +237,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if not path.startswith(("/metrics", "/healthz", "/livez", "/readyz")):
             ip = (request.client.host if request.client else "unknown") + ":" + path
-            if not RATE.allow(ip):
+            if not RATE.allow(ip, rps_for_path(path)):
                 METRICS.counter("vai_http_rate_limited_total", {"path": path})
                 _logger.warning("rate-limited", extra={
                     "request_id": rid, "method": request.method, "path": path,

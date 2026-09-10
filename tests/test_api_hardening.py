@@ -183,3 +183,38 @@ def test_audio_upload_endpoint(client, tmp_path: Path):
                         data={"add_to_music": "true", "duck": "true"})
     assert r.status_code == 200
     assert r.json().get("duration", 0) > 1.5
+
+
+# ---------------------------------------------------------------------------
+# Filmstrip allowance
+
+def test_filmstrip_routes_are_not_throttled_like_api_calls(client, monkeypatch):
+    """The limiter keys on (client, path) WITHOUT the query string, so every
+    tile of a session's /thumb shared one 60 rps bucket and a 17-clip
+    timeline paint (~170 tiles) lost the tail of it to 429 — visible holes in
+    the filmstrip. /thumb and /waveform now carry their own allowance; the
+    rest of the API keeps the default (tightened here to make the trip
+    observable)."""
+    monkeypatch.setattr(RATE, "default_rps", 5.0)
+    RATE.windows.clear()
+
+    thumbs = [client.get("/api/sessions/nosuch/thumb", params={"src": "/nope.mp4", "t": i / 2, "h": 72}).status_code
+              for i in range(200)]
+    assert 429 not in thumbs, f"filmstrip tiles were throttled: {sorted(set(thumbs))}"
+    assert 500 not in thumbs
+
+    waves = [client.get("/api/sessions/nosuch/waveform", params={"src": "/nope.mp4", "peaks_per_sec": 50}).status_code
+             for _ in range(50)]
+    assert 429 not in waves
+
+    versions = [client.get("/api/version").status_code for _ in range(10)]
+    assert 429 in versions, "the default allowance must still trip for ordinary routes"
+
+
+def test_rps_for_path_table():
+    from video_ai_editor.api.hardening import FILMSTRIP_RPS, rps_for_path
+    assert rps_for_path("/api/sessions/s_1/thumb") == FILMSTRIP_RPS
+    assert rps_for_path("/api/sessions/s_1/waveform") == FILMSTRIP_RPS
+    assert rps_for_path("/api/sessions/s_1/edl") is None
+    assert rps_for_path("/api/version") is None
+    assert rps_for_path("/api/sessions/s_1/thumbnails") is None, "suffix match must be exact"
