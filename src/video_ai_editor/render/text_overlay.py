@@ -23,6 +23,7 @@ from ..edl import EDL
 from ..edl.schema import TextClip, Sticker
 from ..edl.keyframes import is_keyframed, sample, to_ffmpeg_expr
 from .. import platformutil as _pu
+from . import clock
 
 
 def _png_is_valid(p: Path) -> bool:
@@ -999,6 +1000,31 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
     return out
 
 
+def _layout_window(item: dict) -> tuple[float, float]:
+    """The `[start, end)` an overlay item was AUTHORED at, in layout time."""
+    kind = item["kind"]
+    if kind == "anim_text":
+        tc = item["text_clip"]
+        return float(tc.start), float(tc.end)
+    if kind == "anim":
+        s = item["sticker"]
+        return float(s.start), float(s.end)
+    return float(item["start"]), float(item["end"])
+
+
+def _on_render_clock(items: list[dict], seams: clock.SeamTable) -> list[dict]:
+    """New item dicts carrying `rs`/`re` — the item's window on the render
+    clock — with the items the seams consumed entirely left out. Pure: the
+    input list and its dicts are not touched (a caller may still hold them)."""
+    placed: list[dict] = []
+    for it in items:
+        win = clock.render_window(seams, *_layout_window(it))
+        if win is None:
+            continue
+        placed.append({**it, "rs": win[0], "re": win[1]})
+    return placed
+
+
 def build_overlay_chain(
     edl: EDL,
     cache_dir: Path,
@@ -1079,6 +1105,14 @@ def build_overlay_chain(
                       "z": zmap.get(s.id, 0), "clip_z": getattr(s, "z", 0),
                       "sort_start": s.start, "is_sticker": 1})
 
+    # Place every item on the RENDER clock (render/clock.py). The v1 lane these
+    # composite onto is pulled left by each cross-fade at or before the item,
+    # so `enable=between(t,start,end)` in raw LAYOUT time drew captions, hooks
+    # and stickers late by the accumulated overlap (2.4 s after twelve
+    # Zoom-Ins, measured). Done BEFORE indices are assigned: an item whose
+    # window the seams consumed entirely is dropped here, so the `-i` list
+    # and the filter labels can never disagree about how many items exist.
+    items = _on_render_clock(items, clock.seam_table(edl))
     if not items:
         return "", [], source_label
 
@@ -1115,15 +1149,18 @@ def build_overlay_chain(
         # starting at t≈0 — an animated overlay later on the timeline had
         # finished its whole animation before its enable-window even opened,
         # rendering frozen at the final value. Static items use plain `-i`.
+        # `rs`/`re` are the item's RENDER window (set by _on_render_clock); the
+        # offset, the enable gate and every clip-local `(t - start)` below use
+        # them, never the layout `start`, or the pts and the gate would sit
+        # `overlap` seconds apart and the item would open on its final frame.
+        rs, re = float(item["rs"]), float(item["re"])
         if item["kind"] == "anim" and is_keyframed(item["sticker"].transform.opacity):
-            s: Sticker = item["sticker"]
-            dur = max(0.5, s.end - s.start) + 0.5
-            extra_inputs += ["-itsoffset", f"{s.start:.3f}",
+            dur = max(0.5, re - rs) + 0.5
+            extra_inputs += ["-itsoffset", f"{rs:.3f}",
                              "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
         elif item["kind"] == "anim_text":
-            tc = item["text_clip"]
-            dur = max(0.5, tc.end - tc.start) + 0.5
-            extra_inputs += ["-itsoffset", f"{tc.start:.3f}",
+            dur = max(0.5, re - rs) + 0.5
+            extra_inputs += ["-itsoffset", f"{rs:.3f}",
                              "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
         else:
             extra_inputs += ["-i", str(item["png"])]
@@ -1142,14 +1179,16 @@ def build_overlay_chain(
                 pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
             parts.append(pre + scaled)
             parts.append(
-                f"{cur}{scaled}overlay=enable='between(t\\,{item['start']:.3f}\\,{item['end']:.3f})'{next_label}"
+                f"{cur}{scaled}overlay=enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
             )
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
             role = item["role"]
             a_in, a_out = item["anim_in"], item["anim_out"]
             # Anim duration, clamped so in+out never overlap on short clips.
-            d = min(ANIM_DUR, max(0.1, (tc.end - tc.start) * 0.4))
+            # Clamped against the RENDER length: that is how long the clip is
+            # on screen, and in+out must not overlap inside it.
+            d = min(ANIM_DUR, max(0.1, (re - rs) * 0.4))
             preprocessed = f"[ov{i}]"
 
             chain = f"[{idx}:v]scale={out_w}:{out_h},format=rgba"
@@ -1159,10 +1198,10 @@ def build_overlay_chain(
             if a_in == "pop" or a_out == "pop":
                 s_terms = []
                 if a_in == "pop":
-                    q = f"clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1)"
+                    q = f"clip((t-{rs:.4f})/{d:.4f}\\,0\\,1)"
                     s_terms.append(f"if(lt({q}\\,0.7)\\,0.6+0.657*{q}\\,1.06-0.2*({q}-0.7))")
                 if a_out == "pop":
-                    q = f"clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)"
+                    q = f"clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)"
                     s_terms.append(f"(1-0.4*{q})")
                 s_expr = "*".join(s_terms)
                 chain += (f",scale=w='ceil(iw*({s_expr})/2)*2'"
@@ -1172,14 +1211,14 @@ def build_overlay_chain(
             # clip-local now that the input pts sit at absolute time).
             if is_keyframed(getattr(tc.transform, "opacity", None)):
                 aexpr = to_ffmpeg_expr(tc.transform.opacity,
-                                       time_var=f"(T-{tc.start:.4f})")
+                                       time_var=f"(T-{rs:.4f})")
                 chain += f",geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
 
             # Fades ride the fade filter's alpha mode (cheap, no geq).
             if a_in == "fade":
-                chain += f",fade=t=in:st={tc.start:.3f}:d={d:.3f}:alpha=1"
+                chain += f",fade=t=in:st={rs:.3f}:d={d:.3f}:alpha=1"
             if a_out == "fade":
-                chain += f",fade=t=out:st={tc.end - d:.3f}:d={d:.3f}:alpha=1"
+                chain += f",fade=t=out:st={re - d:.3f}:d={d:.3f}:alpha=1"
             parts.append(chain + preprocessed)
 
             # Overlay position. x/y center the (possibly pop-scaled) frame on
@@ -1198,13 +1237,13 @@ def build_overlay_chain(
             off = out_h * 0.04
             y_terms = [f"{cy:.2f}*(1-overlay_h/main_h)"]
             if a_in == "slide_up":
-                y_terms.append(f"+{off:.1f}*(1-clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1))")
+                y_terms.append(f"+{off:.1f}*(1-clip((t-{rs:.4f})/{d:.4f}\\,0\\,1))")
             elif a_in == "slide_down":
-                y_terms.append(f"-{off:.1f}*(1-clip((t-{tc.start:.4f})/{d:.4f}\\,0\\,1))")
+                y_terms.append(f"-{off:.1f}*(1-clip((t-{rs:.4f})/{d:.4f}\\,0\\,1))")
             if a_out == "slide_up":
-                y_terms.append(f"-{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
+                y_terms.append(f"-{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
             elif a_out == "slide_down":
-                y_terms.append(f"+{off:.1f}*clip((t-{tc.end - d:.4f})/{d:.4f}\\,0\\,1)")
+                y_terms.append(f"+{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
             # x compensation mirrors y: center the (possibly pop-scaled)
             # frame on the anchor x. For a centered anchor cx == out_w/2 and
             # `cx*(1-overlay_w/main_w)` is algebraically `(main_w-overlay_w)/2`
@@ -1217,13 +1256,13 @@ def build_overlay_chain(
                 x_expr = f"{cx:.2f}*(1-overlay_w/main_w)"
             parts.append(
                 f"{cur}{preprocessed}overlay=x='{x_expr}':y='{''.join(y_terms)}'"
-                f":enable='between(t\\,{tc.start:.3f}\\,{tc.end:.3f})'{next_label}"
+                f":enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
             )
         else:
             s: Sticker = item["sticker"]
             sw, sh = item["size"]  # PNG natural pixel size (canvas-aligned)
             tx = s.transform
-            tvar = f"(t-{s.start:.4f})"  # clip-local time inside expressions
+            tvar = f"(t-{rs:.4f})"  # clip-local time, on the render clock
             sx = out_w / max(1, canvas.w)
             sy = out_h / max(1, canvas.h)
             # The PNG is at canvas-pixel size; rescale to match output pixels.
@@ -1258,7 +1297,7 @@ def build_overlay_chain(
                 # Keyframes are clip-local; the looped input's pts sit at
                 # absolute time via -itsoffset (see the input-building comment
                 # above), so shift: local = T - start.
-                aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{s.start:.4f})")
+                aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{rs:.4f})")
                 parts.append(
                     f"{sticker_stream}format=yuva420p,"
                     f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
@@ -1272,7 +1311,7 @@ def build_overlay_chain(
                     parts.append(f"{sticker_stream}null{preprocessed}")
 
             parts.append(
-                f"{cur}{preprocessed}overlay=x='{xexpr}':y='{yexpr}':enable='between(t\\,{s.start:.3f}\\,{s.end:.3f})'{next_label}"
+                f"{cur}{preprocessed}overlay=x='{xexpr}':y='{yexpr}':enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
             )
         cur = next_label
     return ";".join(parts), extra_inputs, cur

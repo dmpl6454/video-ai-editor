@@ -15,6 +15,7 @@
 // producing an empty text clip.
 
 import { useEffect, useRef, useState } from 'react'
+import { layoutPlayhead } from '../lib/timelineLayout'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
@@ -68,8 +69,14 @@ export function TextTool() {
   const defaultEnd = (start: number) =>
     defaultOverlayEnd(start, 3, videoContentEnd(useStore.getState().edl))
 
+  // The playhead is RENDER time; `start` is LAYOUT time (lib/timelineLayout
+  // `layoutPlayhead` — the same inverse the Timeline uses for a sticker drop).
+  // Handing the playhead straight through put the new clip Σoverlap seconds
+  // BEFORE the frame under the playhead once overlays played on the render
+  // clock: 1.5 s early after three 0.5 s dissolves.
   const addDefaultText = async () => {
-    const start = useStore.getState().playhead
+    const { edl, playhead } = useStore.getState()
+    const start = layoutPlayhead(edl, playhead)
     const res = await dispatch('add_text', {
       text: 'Your text',
       start,
@@ -83,7 +90,8 @@ export function TextTool() {
 
   const applyPreset = async (name: string) => {
     setPresetsOpen(false)
-    const start = useStore.getState().playhead
+    const { edl, playhead } = useStore.getState()
+    const start = layoutPlayhead(edl, playhead)
     const v = presetText.trim()
     const res = await dispatch('apply_text_template', {
       name,

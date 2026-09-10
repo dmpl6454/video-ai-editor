@@ -15,6 +15,7 @@ import { liveCssTransform, liveCssFilter, colorGradeOf, sampleKF,
          liveVideoCssApplies } from '../lib/overlay'
 import { planSourceDraw, sourcePreviewApplies } from '../lib/sourcePreview'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
+import { renderSpanOf } from '../lib/timelineLayout'
 
 /**
  * Preview pane.
@@ -113,7 +114,12 @@ export function Preview() {
         start?: number
         transform?: { scale?: never; rotation?: never; opacity?: never }
       }
-      const localT = playhead - (c.start ?? 0)
+      // Clip-local time from where the clip PLAYS (render time), not from
+      // its layout `start` — the same origin the source-draw path below uses.
+      // A keyframed v1 clip after 1.0 s of overlap sampled its pose 1.0 s
+      // early here, so the first frame of a rotation drag snapped the picture
+      // to a different scale before the live value took over.
+      const localT = playhead - renderSpanOf(edl, tk.id, found).start
       sc = sampleKF(c.transform?.scale, localT, 1)
       rot = sampleKF(c.transform?.rotation, localT, 0)
       opa = sampleKF(c.transform?.opacity, localT, 1)
@@ -222,7 +228,19 @@ export function Preview() {
       keyframed: kf(tx.rotation) || kf(tx.scale) || kf(tx.x) || kf(tx.y),
       hasDims: typeof dims === 'object',
     })) return null
-    const localT = playhead - (c.start ?? 0)
+    // `playhead` is the composited <video>'s clock — RENDER time — while
+    // `c.start` is LAYOUT time. On v1 the two differ by the overlap the
+    // transitions BEFORE this clip consumed (`lib/timelineLayout`, the same
+    // per-clip pull the Timeline draws v1 with): the renderer starts this
+    // clip at `start − shift`, so the source frame it is showing under the
+    // playhead is `in + (playhead − (start − shift))`. Subtracting the raw
+    // `start` handed the source canvas a frame `shift` seconds EARLY, and a
+    // rotation drag on any clip after a dissolve swapped in a picture that
+    // did not match the one it replaced — visibly so with keyframes, whose
+    // clip-local clock (`localT`) was off by the same amount. v1-only by
+    // construction: `sourcePreviewApplies` already refused every other lane.
+    const renderStart = renderSpanOf(edl, 'v1', c as unknown as Clip).start
+    const localT = playhead - renderStart
     // The gesture publishes only the field being dragged; every other field
     // keeps its stored value, so the preview shows the whole transform rather
     // than resetting the ones the user is not touching.
@@ -244,7 +262,9 @@ export function Preview() {
     // did nothing at all while a rotated clip was selected. The live value wins
     // over the stored one so the slider stays live even here.
     const opacity = liveTransform.opacity ?? sampleKF(tx.opacity as never, localT, 1)
-    return { plan, url, src: c.src, start: c.start ?? 0, in: c.in ?? 0, opacity }
+    // `start` is what `syncPipVideo` subtracts from the render-time playhead
+    // to find the source frame, so it is the RENDER start (see above).
+    return { plan, url, src: c.src, start: renderStart, in: c.in ?? 0, opacity }
   }, [liveTransform, edl, sid, boxSize, playhead])
 
   const srcCanvasRef = useRef<HTMLCanvasElement>(null)

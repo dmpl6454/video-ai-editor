@@ -406,6 +406,13 @@ _NAME_DEFAULT_DURATION_S: dict[str, float] = {
 #: duration in a legacy EDL is "use the default", not "a 0 s cross-fade"
 #: (which ffmpeg rejects and which the timeline would count as free).
 MIN_DURATION_S = 0.1
+#: The longest transition `add_transition` will store. The desktop popover
+#: and the prompt expander already capped at 2.0 s (frontend
+#: lib/transitionCatalog.MAX_DURATION_S); dispatch/MCP had no cap, so a
+#: `duration: 5.0` between 2 s clips was stored as 5.0, charged as 2.0 by the
+#: seam table and handed raw to xfade, which then ended the video stream 2 s
+#: before the audio. The stored number must be the rendered number.
+MAX_DURATION_S = 2.0
 FALLBACK_DURATION_S = 0.5
 
 _FAMILY_OF: dict[str, str] = {name: fam for fam, names in FAMILIES.items() for name in names}

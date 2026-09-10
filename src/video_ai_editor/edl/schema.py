@@ -5,7 +5,7 @@ import json
 import math
 from typing import Any, Literal, Union
 from uuid import uuid4
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 EDL_VERSION = 2
 
@@ -51,7 +51,16 @@ EDL_VERSION = 2
 #     this salt moves because the FILE differs, and without the bump every
 #     existing session would keep being served its long-GOP preview from cache
 #     and the fix would read as having done nothing.
-RENDER_BEHAVIOR_VERSION = 9
+# 10: every non-v1 lane (text, captions, stickers, PiP picture+audio, music,
+#     vo) moved from layout time to the render clock (render/clock.py); a
+#     cached video-only mp4 or preview from before has its overlays baked
+#     late by the transition overlap and must not be served or remuxed.
+# 11: the compositor now xfades with the SEAM TABLE's clamped cost (never more
+#     than the shorter neighbour, first record at a stacked cut) and pads the
+#     trailing filler out to the LAYOUT end, so a timeline whose overlay lane
+#     outlives v1 renders to edl.duration instead of edl.duration − overlap. A
+#     cache written under 10 can hold a short file for such an EDL.
+RENDER_BEHAVIOR_VERSION = 11
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -371,6 +380,39 @@ class Transition(_EDLModel):
     type: str = "fade"
     duration: float = 0.5
 
+    @field_validator("duration")
+    @classmethod
+    def _duration_is_what_renders(cls, v: float, info: ValidationInfo) -> float:
+        """A stored duration below the renderer's floor is the transition's
+        own default — the SAME number the compositor has always used
+        (`render.transitions.effective_duration`), written into the data so
+        every reader sees it.
+
+        WHY IN THE DATA, not at render time: the compositor resolved a stored
+        0.0 / 0.05 to the default while `v1_seam_table()` (hence
+        `edl.duration`, `render/clock.py`, the desktop's `seamTable`, the
+        mobile strip and the benchmark's own copy of the rule) charged the
+        raw number. Measured: `Transition(at=2.0, duration=0.05)` between two
+        2 s clips rendered a 3.5 s file (xfade 0.5) while the transport read
+        3.95 and every overlay after the seam sat 0.45 s late — the drift the
+        render clock exists to remove, re-created by one record. Reachable
+        through dispatch/MCP before `add_transition` floored it; still
+        reachable by a direct edit of `v1.transitions` or a legacy edl.json,
+        which is why the schema owns it. A FIELD validator (not a model
+        `before` hook) because `_EDLModel` validates assignment and only
+        field validators have their return value applied on `tr.duration =
+        0.02` — measured: a before-model validator ran on assignment but its
+        normalised dict was discarded. `info.data` carries `type` (declared
+        above this field) on construction, JSON load and assignment alike.
+
+        Lazy import: render/ imports this module, so the dependency cannot be
+        module-level; by the time a Transition is validated `edl.schema` is
+        fully loaded and the cycle is closed. `render/transitions.py` itself
+        imports only `logging`.
+        """
+        from ..render.transitions import effective_duration
+        return effective_duration(str(info.data.get("type", "fade")), v)
+
 
 class CaptionsConfig(_EDLModel):
     enabled: bool = False
@@ -503,18 +545,18 @@ class EDL(_EDLModel):
                     for c in (t.clips if t else []) if isinstance(c, Clip)),
                    default=0.0)
 
-    def transition_overlap(self) -> float:
-        """Seconds the v1 transitions remove from the rendered timeline.
+    def v1_seam_table(self) -> list[tuple[float, float]]:
+        """The v1 seams the renderer will cross-fade, as `(seam, seconds)` in
+        LAYOUT time, ascending: `seam` is the boundary (left clip's start +
+        effective duration) and `seconds` is what that xfade removes from the
+        output. Empty when there are no applicable transitions.
 
-        An `xfade` PLAYS THE TWO CLIPS AT ONCE for its duration, so every
-        transition the renderer applies makes the output that much shorter than
-        the clips' geometric extent (compositor.py says so in one line:
-        `cur_dur = cur_dur + seg_dur[i] - tdur`). Nothing told the EDL, so the
-        timeline, the transport denominator and every "how long is this" caller
-        kept reporting the un-shortened length: an 8s timeline split at 2/4/6
-        with three 0.5s transitions renders **6.5s**, and playback simply
-        stopped with the transport reading 6.50 / 8.00 and a dead tail nobody
-        could explain. Reported as "the 8 sec video got stopped at 7 sec".
+        This is THE seam-matching rule — `transition_overlap()` sums it and
+        `render/clock.py` (the layout→render time map every non-v1 lane is
+        positioned through) walks it. It lives here rather than in render/
+        because render/ imports this module and the dependency cannot point
+        back; a second copy of the rule in the renderer is exactly how the
+        overlay lanes drifted for as long as they did.
 
         Mirrors the renderer's applicability rule exactly, because counting a
         transition it will NOT apply is the same bug pointing the other way:
@@ -528,32 +570,26 @@ class EDL(_EDLModel):
         """
         v1 = self.get_track("v1")
         if not v1 or not v1.transitions:
-            return 0.0
-        clips = sorted((c for c in v1.clips if isinstance(c, Clip)),
-                       key=lambda c: c.start)
-        total = 0.0
-        for cur, nxt in zip(clips, clips[1:]):
-            boundary = cur.start + cur.effective_duration
-            # A GAP (a positive one) is what makes `_v1_segments` insert black
-            # filler and therefore what makes the renderer keep the seam a cut.
-            # An OVERLAP is not: `_v1_segments` packs it with `max(cursor,
-            # start)` and emits no filler, so the two clips stay adjacent
-            # segments and the transition IS applied. Testing `abs(...)` here
-            # would let a legacy overlapping pair report a longer timeline than
-            # it renders. Same 1ms tolerance as compositor._GAP_EPS, duplicated
-            # rather than imported because render/ imports this module and the
-            # dependency cannot point back.
-            if nxt.start - boundary > 0.001:
-                continue          # a gap → filler → the renderer keeps the cut
-            match = next((tr for tr in v1.transitions
-                          if abs(tr.at - boundary) < 0.05), None)
-            if match:
-                # Never claim more than the shorter side can give: xfade cannot
-                # overlap further than a clip is long.
-                total += max(0.0, min(float(match.duration),
-                                      cur.effective_duration,
-                                      nxt.effective_duration))
-        return total
+            return []
+        return seam_table_for([c for c in v1.clips if isinstance(c, Clip)],
+                              v1.transitions)
+
+    def transition_overlap(self) -> float:
+        """Seconds the v1 transitions remove from the rendered timeline.
+
+        An `xfade` PLAYS THE TWO CLIPS AT ONCE for its duration, so every
+        transition the renderer applies makes the output that much shorter than
+        the clips' geometric extent (compositor.py says so in one line:
+        `cur_dur = cur_dur + seg_dur[i] - tdur`). Nothing told the EDL, so the
+        timeline, the transport denominator and every "how long is this" caller
+        kept reporting the un-shortened length: an 8s timeline split at 2/4/6
+        with three 0.5s transitions renders **6.5s**, and playback simply
+        stopped with the transport reading 6.50 / 8.00 and a dead tail nobody
+        could explain. Reported as "the 8 sec video got stopped at 7 sec".
+
+        The applicability rule itself is `v1_seam_table()` — this is its sum.
+        """
+        return sum(cost for _seam, cost in self.v1_seam_table())
 
     def recompute_duration(self) -> None:
         end = 0.0
@@ -588,6 +624,68 @@ class EDL(_EDLModel):
         # Subtracted from the whole timeline, not just v1's own extent: the
         # output IS the v1 assembly, and every other lane is mixed onto it.
         self.duration = max(0.0, end - self.transition_overlap())
+
+
+#: Two Transition records within this many seconds of one boundary are "the
+#: same cut" — `add_transition` replaces within it, `remove_transition`
+#: sweeps within it, and the seam table matches within it. A click on the
+#: timeline is not exact arithmetic.
+SEAM_MATCH_TOL_S = 0.05
+#: A positive gap wider than this between two v1 clips becomes black filler
+#: (compositor._GAP_EPS — duplicated because render/ imports this module).
+V1_GAP_EPS_S = 0.001
+
+
+def seam_matching(transitions: list[Transition], boundary: float) -> Transition | None:
+    """The FIRST record within `SEAM_MATCH_TOL_S` of `boundary`, or None.
+
+    First, not last: a legacy EDL or an MCP edit can still stack two records
+    at one cut, and the compositor's own matcher used to keep iterating
+    (last wins) while this table kept the first. Measured: fade 0.2 @ 2.0 +
+    fade 0.8 @ 2.03 → the table said 0.2 (edl.duration 3.8, clock pulls B by
+    0.2) while the render xfaded 0.8 (a 3.2 s file, overlays 0.6 s late).
+    The compositor now asks THIS function for the record, so there is one
+    answer.
+    """
+    return next((tr for tr in transitions
+                 if abs(tr.at - boundary) < SEAM_MATCH_TOL_S), None)
+
+
+def seam_table_for(clips: list[Clip], transitions: list[Transition]
+                   ) -> list[tuple[float, float]]:
+    """`EDL.v1_seam_table()` for an explicit clip list and transition list —
+    the compositor calls this with the very lists it assembles, so the seams
+    it xfades and the seams the EDL charges are one computation."""
+    if not transitions:
+        return []
+    ordered = sorted(clips, key=lambda c: c.start)
+    seams: list[tuple[float, float]] = []
+    for cur, nxt in zip(ordered, ordered[1:]):
+        boundary = cur.start + cur.effective_duration
+        # A GAP (a positive one) is what makes `_v1_segments` insert black
+        # filler and therefore what makes the renderer keep the seam a cut.
+        # An OVERLAP is not: `_v1_segments` packs it with `max(cursor,
+        # start)` and emits no filler, so the two clips stay adjacent
+        # segments and the transition IS applied. Testing `abs(...)` here
+        # would let a legacy overlapping pair report a longer timeline than
+        # it renders.
+        if nxt.start - boundary > V1_GAP_EPS_S:
+            continue          # a gap → filler → the renderer keeps the cut
+        match = seam_matching(transitions, boundary)
+        if match:
+            # Never claim more than the shorter side can give: xfade cannot
+            # overlap further than a clip is long. The compositor xfades with
+            # THIS clamped number too — it used to pass the raw record
+            # duration to xfade, and ffmpeg then ran the picture ahead of
+            # every other lane by (d − clamped) and ended the video stream
+            # before the audio (A=2 s, B=0.3 s, fade 0.5: video 1.8 s, audio
+            # 2.0 s, edl.duration 2.0).
+            cost = max(0.0, min(float(match.duration),
+                                cur.effective_duration,
+                                nxt.effective_duration))
+            if cost > 0.0:
+                seams.append((boundary, cost))
+    return seams
 
 
 def empty_edl(canvas: Canvas | None = None) -> EDL:

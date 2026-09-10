@@ -2,8 +2,11 @@
 
 V1 is the base layer (concatenated full-screen). Each clip on V2 (or any
 non-V1 video track) is overlaid on top with its transform (scale, x, y,
-rotation, opacity) applied, and only visible during its timeline range
-(`enable=between(t,start,end)`).
+rotation, opacity) applied, and only visible during its RENDER window —
+`render/clock.py` maps the clip's layout `[start, start+duration)` past the
+v1 cross-fades before it, so the picture and the v1 frame it sits on agree
+(a PIP authored at layout 30 s on a timeline with 2 s of transitions before
+it plays at 28 s, together with the v1 frame authored at 30 s).
 
 Audio from V2 clips also gets mixed into the final audio output so PiP
 clips with sound (talking-head over screen recording, etc.) play correctly.
@@ -15,6 +18,7 @@ from ..edl import EDL
 from ..edl.schema import Clip
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 from .effects import build_chromakey_filter
+from . import clock
 
 
 def collect_pip_clips(edl: EDL) -> list[tuple[str, Clip]]:
@@ -90,6 +94,39 @@ def _scalar_or_last(v, default: float = 0.0) -> float:
     return float(sorted(kfs, key=lambda p: p[0])[-1][1])
 
 
+#: ffmpeg inputs pip.py adds PER PIP: the picture input (`-itsoffset` to its
+#: render start) followed by a separate AUDIO input of the same trimmed span
+#: with no offset. One input cannot serve both: `-t` is compared against the
+#: `-itsoffset`-shifted timestamps for audio but the unshifted ones for video
+#: (measured on ffmpeg 8.1: `-ss 0 -t 0.5 -itsoffset 1.0` decodes 15 video
+#: frames and ZERO audio samples; `-t 1.5` yields 0.5 s of audio), so every
+#: PIP at start > 0 had been silent since the picture gained its offset. The
+#: audio input is positioned by `adelay` alone, like music and voiceover.
+INPUTS_PER_PIP = 2
+
+
+def pip_audio_input_index(first_input_index: int, j: int) -> int:
+    """ffmpeg input index of the j-th kept PIP's AUDIO input, given the index
+    of the first PIP input — the one statement of the layout above, shared
+    with compositor.py's audio fold."""
+    return first_input_index + INPUTS_PER_PIP * j + 1
+
+
+def _on_render_clock(pips: list[tuple[str, Clip]], seams: clock.SeamTable
+                     ) -> list[tuple[str, Clip, float, float]]:
+    """`(track_id, clip, render_start, render_end)` for every PIP the seams
+    leave visible, in the order `collect_pip_clips` gave. `c.duration` (source
+    seconds) is the layout length on purpose: the PIP chain applies no speed,
+    which is the same reason the audio fold applies no atempo."""
+    placed: list[tuple[str, Clip, float, float]] = []
+    for tid, c in pips:
+        win = clock.render_window(seams, c.start, c.start + c.duration)
+        if win is None:
+            continue
+        placed.append((tid, c, win[0], win[1]))
+    return placed
+
+
 def build_pip_overlay_chain(
     edl: EDL,
     *,
@@ -105,10 +142,14 @@ def build_pip_overlay_chain(
     Each PiP clip is added as a new ffmpeg input (decoded from its src). The
     chain scales it relative to the canvas (default 35% of canvas long side),
     optionally rotates, then overlays at its timeline position with
-    `enable=between(t,start,end)`. Audio for each clip is returned separately
+    `enable=between(t,rs,re)` — its RENDER window. Audio for each clip is returned separately
     so the audio mixer can fold it in with the same timing.
     """
-    pips = collect_pip_clips(edl)
+    # Place each PIP on the RENDER clock first: a PIP whose window the v1
+    # cross-fades consumed entirely gets no input, no filter and no audio, and
+    # the indices/`audio_clips` list below count only what is kept — the
+    # compositor pairs `audio_clips[j]` with `pip_audio_input_index(first, j)`.
+    pips = _on_render_clock(collect_pip_clips(edl), clock.seam_table(edl))
     if not pips:
         return "", [], source_label, []
 
@@ -136,12 +177,12 @@ def build_pip_overlay_chain(
     # before a plain one), and ordering is by `start` — collect_pip_clips sorts —
     # not by list position.
     _last_baked = None
-    for _j, (_t, _c) in enumerate(pips):
+    for _j, (_t, _c, _rs, _re) in enumerate(pips):
         if not (preview and getattr(_c, "chromakey", None) is None):
             _last_baked = _j
 
-    for i, (_tid, c) in enumerate(pips):
-        idx = first_input_index + i
+    for i, (_tid, c, rs, re) in enumerate(pips):
+        idx = first_input_index + INPUTS_PER_PIP * i   # the picture input
         # Trim source on input side so we only decode what's needed, and place
         # the decoded stream at the clip's ABSOLUTE timeline position.
         #
@@ -165,10 +206,22 @@ def build_pip_overlay_chain(
         # `-t` rather than `-to`: `-to` is an absolute input timestamp, and
         # `-itsoffset` shifts the timestamps it is compared against, so the two
         # together can truncate the input to nothing. A duration is immune.
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", f"{max(0.001, c.out - c.in_):.3f}"]
-        if c.start > 0.0005:
-            extra_inputs += ["-itsoffset", f"{c.start:.3f}"]
+        #
+        # Both in RENDER time (`rs`): the offset AND the enable gate below, or
+        # the two drift apart by the overlap and the old still-image bug is
+        # back. `-t` is capped to the render window as well: a PIP straddling a
+        # seam is on screen for less than its source length, and the same span
+        # feeds the AUDIO input below — trimming both keeps the sound from
+        # outlasting the picture by the seconds the seam consumed.
+        span = f"{max(0.001, min(c.out - c.in_, re - rs)):.3f}"
+        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", span]
+        if rs > 0.0005:
+            extra_inputs += ["-itsoffset", f"{rs:.3f}"]
         extra_inputs += ["-i", c.src]
+        # The AUDIO input — same span, no offset (see INPUTS_PER_PIP). Added on
+        # both the baked and the client-drawn branch, since the audio fold in
+        # compositor.py indexes off it either way.
+        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", span, "-i", c.src]
 
         if preview and getattr(c, "chromakey", None) is None:
             # PREVIEW: do not bake the PIP's PICTURE — the browser draws it live
@@ -353,13 +406,13 @@ def build_pip_overlay_chain(
         x_kf = tx.x
         y_kf = tx.y
         if is_keyframed(x_kf):
-            xe = to_ffmpeg_expr(x_kf, time_var=f"(t-{c.start:.4f})")
+            xe = to_ffmpeg_expr(x_kf, time_var=f"(t-{rs:.4f})")
             x_expr = f"({xe})*{sx:.6f}-overlay_w/2"
         else:
             xc = float(getattr(tx, "x", 0)) if isinstance(tx.x, (int, float)) else canvas.w / 2
             x_expr = f"({xc * sx:.2f})-overlay_w/2"
         if is_keyframed(y_kf):
-            ye = to_ffmpeg_expr(y_kf, time_var=f"(t-{c.start:.4f})")
+            ye = to_ffmpeg_expr(y_kf, time_var=f"(t-{rs:.4f})")
             y_expr = f"({ye})*{sy:.6f}-overlay_h/2"
         else:
             yc = float(getattr(tx, "y", 0)) if isinstance(tx.y, (int, float)) else canvas.h / 2
@@ -370,7 +423,7 @@ def build_pip_overlay_chain(
         next_label = out_label if is_last else f"[pip_post{i}]"
         parts.append(
             f"{cur}{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
-            f":enable='between(t\\,{c.start:.3f}\\,{c.start + c.duration:.3f})'{next_label}"
+            f":enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
         )
         cur = next_label
         audio_clips.append(c)

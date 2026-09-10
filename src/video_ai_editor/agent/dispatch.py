@@ -2981,8 +2981,9 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     `at` is the timeline second the transition centers on (typically the boundary
     between two clips). Adjacent clips around `at` will be xfaded.
     """
-    from ..edl.schema import Transition
-    from ..render.transitions import default_duration, is_valid, all_names, resolve_transition
+    from ..edl.schema import SEAM_MATCH_TOL_S, Clip, Transition
+    from ..render.transitions import (MAX_DURATION_S, MIN_DURATION_S, effective_duration,
+                                      is_valid, all_names, resolve_transition)
     v1 = store.edl.get_track("v1")
     if not v1:
         raise ValueError("v1 track not found")
@@ -2993,16 +2994,37 @@ def add_transition(store: EDLStore, args: dict) -> dict:
             f"call list_transitions to see them. Common: fade, dissolve, "
             f"slideleft, zoomin, circleopen, radial, pixelize, glitch, whip, spin"
         )
-    # No `duration` → the transition's OWN default (render.transitions
-    # FAMILY_DEFAULT_DURATION_S): a whip is over in 0.25 s, a dip to black
-    # takes 0.6. Resolved HERE, at add time, so the EDL carries the real
-    # number and `EDL.transition_overlap` (the transport length) and the
-    # compositor's xfade read the same value without either consulting the
-    # catalog. An explicit 0 or negative is treated as "not given" for the
-    # same reason a legacy 0 is in the renderer: ffmpeg rejects a 0 s xfade.
-    raw_dur = args.get("duration")
-    duration = float(raw_dur) if raw_dur is not None and float(raw_dur) > 0 else default_duration(ttype)
-    tr = Transition(at=float(args["at"]), type=ttype, duration=duration)
+    # No `duration`, or one below the renderer's floor (MIN_DURATION_S) → the
+    # transition's OWN default (render.transitions FAMILY_DEFAULT_DURATION_S):
+    # a whip is over in 0.25 s, a dip to black takes 0.6. Resolved HERE, at
+    # add time, so the EDL carries the real number and `EDL.transition_overlap`
+    # (the transport length), the render clock and the compositor's xfade read
+    # the same value. `> 0` used to be the only test, so a 0.05 was STORED
+    # while the renderer quietly used 0.5 — the transport read 3.95 for a 3.5 s
+    # file and every overlay after that seam sat 0.45 s late. (The schema's
+    # Transition validator now applies the same floor to anything that reaches
+    # it another way; this keeps the summary honest about what was stored.)
+    #
+    # Capped at MAX_DURATION_S (2.0 s — the popover's and the prompt
+    # expander's cap, which dispatch/MCP callers never had) and at the SHORTER
+    # NEIGHBOUR of the cut: xfade cannot overlap further than a clip is long,
+    # the seam table charges only that much, and storing more meant the
+    # number in the EDL was not the number on screen. A duration=5.0 between
+    # 2 s clips used to end the video stream 2 s before the audio.
+    at = float(args["at"])
+    duration = min(MAX_DURATION_S, effective_duration(ttype, args.get("duration")))
+    ordered = sorted((c for c in v1.clips if isinstance(c, Clip)), key=lambda c: c.start)
+    for cur, nxt in zip(ordered, ordered[1:]):
+        boundary = cur.start + cur.effective_duration
+        if abs(at - boundary) < SEAM_MATCH_TOL_S:
+            shorter = min(cur.effective_duration, nxt.effective_duration)
+            # Only when the clamp still yields a renderable number — a clip
+            # shorter than the floor is left to the seam table's own clamp,
+            # which never charges more than that clip anyway.
+            if shorter >= MIN_DURATION_S:
+                duration = min(duration, shorter)
+            break
+    tr = Transition(at=at, type=ttype, duration=duration)
     # Replace any transition already sitting on this cut instead of appending.
     # The renderer keys transitions by the seam they belong to, so a second one
     # at the same boundary never rendered — it just accumulated in the EDL,

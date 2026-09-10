@@ -24,7 +24,7 @@ import pytest
 from video_ai_editor.agent.dispatch import dispatch
 from video_ai_editor.edl.schema import Clip, Keyframe
 from video_ai_editor.edl.snapshot import EDLStore
-from video_ai_editor.render.pip import build_pip_overlay_chain
+from video_ai_editor.render.pip import build_pip_overlay_chain, INPUTS_PER_PIP
 
 
 def _store(tmp_path: Path) -> EDLStore:
@@ -347,9 +347,13 @@ def test_a_chromakeyed_pip_is_still_baked_in_preview(tmp_path):
     assert "colorkey" in chain or "chromakey" in chain, chain
     # ...and the plain one is NOT: exactly one overlay, for the keyed clip.
     assert chain.count("overlay=") == 1, chain
-    # Both still contribute audio and an input, whichever way the picture went.
+    # Both still contribute audio and their inputs, whichever way the picture
+    # went. INPUTS_PER_PIP, not 1: the picture input carries `-itsoffset`, and
+    # ffmpeg applies `-t` to the SHIFTED timestamps for audio (dropping it
+    # entirely once start >= duration), so the sound rides its own offset-free
+    # input — see pip.py's INPUTS_PER_PIP.
     assert [c.id for c in audio] == ["plain", "keyed"]
-    assert inputs.count("-i") == 2
+    assert inputs.count("-i") == 2 * INPUTS_PER_PIP
     # The chain must END on the declared out label, or ffmpeg fails with
     # "matches no streams" — a mixed timeline is exactly where an off-by-one in
     # the is_last bookkeeping would hide.
@@ -435,8 +439,9 @@ def test_an_all_client_drawn_preview_hands_the_source_label_straight_back(tmp_pa
 
     assert chain == ""
     assert label == "[v]"
-    # Inputs and audio are still both there — a silent PIP is its own bug.
-    assert inputs.count("-i") == 2
+    # Inputs and audio are still both there — a silent PIP is its own bug
+    # (INPUTS_PER_PIP per clip: the audio has its own offset-free input).
+    assert inputs.count("-i") == 2 * INPUTS_PER_PIP
     assert [c.id for c in audio] == ["a", "b"]
 
 

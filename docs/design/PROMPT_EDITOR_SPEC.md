@@ -420,33 +420,35 @@ def run_plan(store, plan, facts, *, emit, cancel_event, prompt) -> ExecResult
 ### 4.4 Verifier (`verify.py`) — `CheckResult(check, human, passed: bool|None, measured, expected, unit, detail, headline)`
 `VerifyCtx(store, facts_before, facts_after, render_path|None, exec_result)`; `facts_after = build_facts(store, ui_state, feature_report=facts_before_report)` after commit. All `CHECK_SPECS` names implemented (test).
 
-| check | measured how |
-|---|---|
-| `transcript_present` | `dispatch._load_transcript(store)` and `words>0` |
-| `captions_nonempty` | captions track (or text-track `role=="caption"`) has ≥ 1 clip |
-| `captions_cover(min_ratio)` | union of caption `[start,end]` ∩ `facts_after.speech_spans` (both **timeline** seconds — spans come from `timemap.map_segments_to_timeline`) / `speech_seconds` |
-| `captions_within_extent` | last cue end ≤ `edl.video_extent() + 0.05` |
-| `captions_sync(tol=0.1)` | for the first cue after each v1 seam: the cue moved ≤ `tol` relative to its OWN first word's `timemap`-mapped timeline time between `edl_before` and `edl` (a cue with no pre-run counterpart: within `tol` of that word). Measures drift the run introduced, not Whisper's cue padding — the absolute form flagged 1.6 s on every unchanged cue whose segment starts before its first word |
-| `captions_language(target)` | script ratios as drafted; `hinglish` needs `facts_before.language=="hi"` else `pass=None` |
-| `captions_style(style)` | `captions.config.style` **and** `captions_nonempty` |
-| `speech_preserved` | every word that was on the timeline before and is not a filler token is still on the timeline after (`timemap.map_words_to_timeline` before vs after, keyed by source time). **Energy is ground truth, timestamps are estimates:** a vanished word whose SOURCE span lies ≥ 70% inside a `silencedetect` run of the source (the plan's `remove_silences` noise/min-duration, else −30 dB / 0.5 s; measured once per verify, cached on the ctx) is reported as "N transcript words sat inside measured silence (misaligned timestamps) — not counted" and does not fail the check. Measured: the TikTok run's transcript held "than, it, looks, in, photos." at 14.29–16.28 s as five back-to-back 0.40 s spans (whisper's uniform-spacing fallback) over a stretch silencedetect read as silent; the cut was right, the timestamps were not |
-| `fillers_remaining_leq(words,max)` | `timemap.map_words_to_timeline(edl,"v1",words)` → count surviving tokens ∈ words |
-| `duration_shrank`, `duration_between`, `duration_leq` | `edl.duration` |
-| `silence_total_leq(max_total_s=1.0)` — "no long pauses remain" | speech-only verify render (music muted) + `silencedetect` runs; only runs ≥ `min_run_s = min_dur + 2×keep_pad + 0.15 s` (the plan's `remove_silences` args, defaults → 0.85 s) count; `measured` = total of those long runs, `detail` names the longest remaining run. **Not** "≤ 1.0 s of any silence": after `remove_silences` every cut pause keeps 2×`keep_pad` of air by design and sub-`min_dur` breaths were never its job — the TikTok run read 7 × 0.2 s of kept air plus natural pauses as 3.79 s of failure with every dead-air stretch gone |
-| `canvas_aspect(ratio)` | canvas dims |
-| `reframe_effective` | `auto_reframe` result `reframed` has no `(skipped` entry **and** ≥1 clip `src` changed, **or** every v1 clip `fit=="cover"` |
-| `no_letterbox` | for each v1 clip: probe dims aspect == canvas aspect (±2%) **or** `fit=="cover"` |
-| `overlays_inside_safe_zone(ratio)` | every non-exempt TextClip/Sticker position resolved via `render.text_overlay._y_for_role` + `resolve_anchor_overrides`, inside `presets.SAFE_ZONES[ratio]`; **vacuous when no overlays → `pass=None`** |
-| `music_present`, `music_ducked`, `music_within_video_extent` | as drafted |
-| `music_covers(min_ratio)` | Σ music clip durations / `video_extent` ≥ ratio |
-| `beat_splits_geq(n)`, `min_shot_geq(s)` | v1 boundary count delta; min fragment duration |
-| `beat_pulse_present(n)` | ≥ n v1 clips carry scale keyframes whose start lies within 60 ms of a bed beat |
-| `hook_text_starts_leq(t)`, `hook_axes_geq(n)` (`headline=false`: satisfiable by `apply_hook_stack` regardless of content **[verified]**) | as drafted |
-| `effect_present`, `clip_src_changed`, `speed_equals` (`clip.speed_factor` **[verified property]**), `text_present`, `brand_*`, `transitions_count_geq`, `export_preset_applied`, `vo_present`, `tool_ok` | as drafted |
-| `loudness_target_set`, `loudness_within(tol)` | canvas field; verify render + `ebur128` |
-| `shorts_created(count,max_dur,min_dur)` | `exec_result.new_sessions`; each child duration ∈ `[min_dur−0.5, max_dur+0.5]` |
-| `shorts_finished` | each child has captions + a hook TextClip + 9:16 canvas |
-| `audit_ok` | `show.audit.audit(edl)`: `ok`, zero error-level issues, `hook_axes.hook_score==3`; the numeric score is reported, not gated |
+**Two clocks.** Every number in this table is in one of two coordinate spaces, tagged per row. **Layout** = the EDL's own coordinates: every clip `start`/`end`, caption cue, `Transition.at`, marker and every tool argument. **Render** = the file's clock: `edl.duration`, ffprobe, the frames and samples of the verify render. They differ by the overlap the v1 cross-fades consume — `render_time(t) = t − Σ{d_i : seam s_i ≤ t}` over `EDL.v1_seam_table()` (`render/clock.py`; the desktop's `lib/timelineLayout.renderTime` is the same function). A check may compare layout with layout (`captions_within_extent`) or render with render (`duration_leq` against ffprobe), never one with the other: the EDL-level checks were blind to a 2.4 s overlay drift precisely because both sides of every comparison were layout while the renderer had moved v1 to the render clock.
+
+| check | clock | measured how |
+|---|---|---|
+| `transcript_present` | — | `dispatch._load_transcript(store)` and `words>0` |
+| `captions_nonempty` | — | captions track (or text-track `role=="caption"`) has ≥ 1 clip |
+| `captions_cover(min_ratio)` | layout | union of caption `[start,end]` ∩ `facts_after.speech_spans` (both **timeline** seconds — spans come from `timemap.map_segments_to_timeline`) / `speech_seconds` |
+| `captions_within_extent` | layout | last cue end ≤ `edl.video_extent() + 0.05` |
+| `captions_sync(tol=0.1)` | layout | for the first cue after each v1 seam: the cue moved ≤ `tol` relative to its OWN first word's `timemap`-mapped timeline time between `edl_before` and `edl` (a cue with no pre-run counterpart: within `tol` of that word). Measures drift the run introduced, not Whisper's cue padding — the absolute form flagged 1.6 s on every unchanged cue whose segment starts before its first word |
+| `captions_language(target)` | — | script ratios as drafted; `hinglish` needs `facts_before.language=="hi"` else `pass=None` |
+| `captions_style(style)` | — | `captions.config.style` **and** `captions_nonempty` |
+| `speech_preserved` | layout (source→layout via timemap) | every word that was on the timeline before and is not a filler token is still on the timeline after (`timemap.map_words_to_timeline` before vs after, keyed by source time). **Energy is ground truth, timestamps are estimates:** a vanished word whose SOURCE span lies ≥ 70% inside a `silencedetect` run of the source (the plan's `remove_silences` noise/min-duration, else −30 dB / 0.5 s; measured once per verify, cached on the ctx) is reported as "N transcript words sat inside measured silence (misaligned timestamps) — not counted" and does not fail the check. Measured: the TikTok run's transcript held "than, it, looks, in, photos." at 14.29–16.28 s as five back-to-back 0.40 s spans (whisper's uniform-spacing fallback) over a stretch silencedetect read as silent; the cut was right, the timestamps were not |
+| `fillers_remaining_leq(words,max)` | layout | `timemap.map_words_to_timeline(edl,"v1",words)` → count surviving tokens ∈ words |
+| `duration_shrank`, `duration_between`, `duration_leq` | **render** | `edl.duration` (= layout end − `transition_overlap()`; what ffprobe reports) |
+| `silence_total_leq(max_total_s=1.0)` — "no long pauses remain" | **render** | speech-only verify render (music muted) + `silencedetect` runs; only runs ≥ `min_run_s = min_dur + 2×keep_pad + 0.15 s` (the plan's `remove_silences` args, defaults → 0.85 s) count; `measured` = total of those long runs, `detail` names the longest remaining run. **Not** "≤ 1.0 s of any silence": after `remove_silences` every cut pause keeps 2×`keep_pad` of air by design and sub-`min_dur` breaths were never its job — the TikTok run read 7 × 0.2 s of kept air plus natural pauses as 3.79 s of failure with every dead-air stretch gone |
+| `canvas_aspect(ratio)` | — | canvas dims |
+| `reframe_effective` | — | `auto_reframe` result `reframed` has no `(skipped` entry **and** ≥1 clip `src` changed, **or** every v1 clip `fit=="cover"` |
+| `no_letterbox` | — | for each v1 clip: probe dims aspect == canvas aspect (±2%) **or** `fit=="cover"` |
+| `overlays_inside_safe_zone(ratio)` | — | every non-exempt TextClip/Sticker position resolved via `render.text_overlay._y_for_role` + `resolve_anchor_overrides`, inside `presets.SAFE_ZONES[ratio]`; **vacuous when no overlays → `pass=None`** |
+| `music_present`, `music_ducked`, `music_within_video_extent` | layout | as drafted |
+| `music_covers(min_ratio)` | layout | Σ music clip durations / `video_extent` ≥ ratio |
+| `beat_splits_geq(n)`, `min_shot_geq(s)` | layout | v1 boundary count delta; min fragment duration |
+| `beat_pulse_present(n)` | layout | ≥ n v1 clips carry scale keyframes whose start lies within 60 ms of a bed beat |
+| `hook_text_starts_leq(t)`, `hook_axes_geq(n)` (`headline=false`: satisfiable by `apply_hook_stack` regardless of content **[verified]**) | layout | as drafted |
+| `effect_present`, `clip_src_changed`, `speed_equals` (`clip.speed_factor` **[verified property]**), `text_present`, `brand_*`, `transitions_count_geq`, `export_preset_applied`, `vo_present`, `tool_ok` | — | as drafted |
+| `loudness_target_set`, `loudness_within(tol)` | render | canvas field; verify render + `ebur128` |
+| `shorts_created(count,max_dur,min_dur)` | render (child `edl.duration`) | `exec_result.new_sessions`; each child duration ∈ `[min_dur−0.5, max_dur+0.5]` |
+| `shorts_finished` | — | each child has captions + a hook TextClip + 9:16 canvas |
+| `audit_ok` | — | `show.audit.audit(edl)`: `ok`, zero error-level issues, `hook_axes.hook_score==3`; the numeric score is reported, not gated |
 
 **Verify render** (`render/verify_render.py::render_for_verify`): `compositor._render(edl, dst, height=360, fps=…, preview=False, cache_dir=…, crf=30, on_progress=…, cancel_event=…)` **[verified kwarg name `on_progress`]**; once per plan; skipped (checks `pass=None`) when `edl.duration > 600`; emitted as `step{tool:"verify_render"}`.
 

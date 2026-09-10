@@ -1,5 +1,6 @@
 import { useStore } from '../store'
 import { usePromptStore } from '../lib/promptStore'
+import { layoutPlayhead } from '../lib/timelineLayout'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -88,8 +89,13 @@ export const COMMANDS: Command[] = [
   { id: 'markOut', label: 'Mark out', category: 'Marks', run: (s) => s.setOutMark(s.playhead) },
   { id: 'clearMarks', label: 'Clear in/out marks', category: 'Marks',
     run: (s) => { s.setInMark(null); s.setOutMark(null) } },
+  // A marker's `time` is LAYOUT time like every other EDL field (the
+  // Timeline draws it at `renderTime`). It used to store the raw playhead —
+  // render time — which was consistent with the canvas only by accident and
+  // would have put an `at`-taking recipe ("cut at the marker") Σoverlap
+  // seconds before the frame the marker was set on.
   { id: 'addMarker', label: 'Add marker', category: 'Marks',
-    run: (s) => s.dispatch('add_marker', { time: s.playhead }) },
+    run: (s) => s.dispatch('add_marker', { time: layoutPlayhead(s.edl, s.playhead) }) },
 
   // ---------- View ----------
   { id: 'zoomIn', label: 'Zoom in timeline', category: 'View', run: (s) => s.zoomTimeline(1.25) },

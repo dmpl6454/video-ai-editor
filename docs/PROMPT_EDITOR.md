@@ -110,6 +110,19 @@ Glitch/Stylised, Light) with a default duration per look. From the prompt:
 for its duration, so the timeline (and the render) gets exactly that much
 shorter; the run summary says so.
 
+**Two clocks.** Every clip `start`/`end`, caption cue, marker, transition `at`
+and tool argument is in *layout* time — the EDL's own coordinates, which
+never move. `edl.duration`, ffprobe and the frames of the rendered file are
+in *render* time: `render_time(t) = t − Σ{d : v1 seam ≤ t}` over the
+transitions the renderer actually cross-fades (`EDL.v1_seam_table()`, one
+per seam, never more than the shorter clip). The renderer places every
+other lane — captions, text, stickers, PiP, music, voiceover — at
+`render_time(start)` and the desktop draws and plays them there, so an
+overlay authored on a word stays on that word after any number of
+transitions. `add_transition` stores the duration that will render (floored
+at 0.1 s to the look's default, capped at 2.0 s and at the shorter
+neighbour), so the stored number, the transport and the file agree.
+
 ## Environment
 
 ```

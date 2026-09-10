@@ -1,8 +1,9 @@
 import React from 'react'
 import { useStore } from '../store'
-import { isMediaClip, clipEnd, type AnyClip } from '../types'
+import { isMediaClip, type AnyClip } from '../types'
 import { baseName } from '../lib/paths'
 import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
+import { clipLocalTime } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
 import { setLivePipFraming } from '../lib/pipDraw'
 
@@ -215,7 +216,7 @@ export function Properties() {
         trackLabel={clip.t.label ?? clip.t.id}
         canRaise={canRaise}
         canLower={canLower}
-        playhead={playhead}
+        localT={clipLocalTime(edl, clip.t.id, c, playhead)}
         dispatch={dispatch}
       />
     )
@@ -227,7 +228,7 @@ export function Properties() {
         c={c as unknown as TextClipLike}
         trackLabel={clip.t.label ?? clip.t.id}
         canvas={edl.canvas}
-        playhead={playhead}
+        localT={clipLocalTime(edl, clip.t.id, c, playhead)}
         dispatch={dispatch}
       />
     )
@@ -278,8 +279,15 @@ export function Properties() {
   // and the playhead is in the right. The banner above says "Not visible at
   // the playhead … Edits here still apply", which is true of every other field
   // and was quietly false of this one.
-  const clipSpan = Math.max(0, (clipEnd(c as AnyClip) ?? clipStart) - clipStart)
-  const localT = Math.min(Math.max(0, playhead - clipStart), clipSpan)
+  //
+  // And measured from where the clip PLAYS, not from its layout `start`
+  // (`lib/timelineLayout.clipLocalTime`): the playhead is render time, and a
+  // v1 clip after a dissolve starts `shift` seconds before its `start` (the
+  // sibling of Preview.tsx's source-draw fix), while an overlay lane's
+  // keyframes run from `render_time(start)` on the renderer and in
+  // StickerLayer. `playhead − clipStart` showed the pose of a different
+  // instant than the one on screen and keyed it 0.5 s early per dissolve.
+  const localT = clipLocalTime(edl, clip.t.id, c as AnyClip, playhead)
 
   // Transform values are read AT THE PLAYHEAD, which is why they are derived
   // here rather than beside the other fields above — they depend on localT.
@@ -808,12 +816,13 @@ interface StickerLike {
   transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
 }
 
-function StickerProps({ c, trackLabel, canRaise, canLower, playhead, dispatch }: {
+function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
   c: StickerLike
   trackLabel: string
   canRaise: boolean
   canLower: boolean
-  playhead: number
+  /** Clip-local RENDER time at the playhead — `clipLocalTime`, computed by the parent. */
+  localT: number
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   const tx = c.transform ?? {}
@@ -824,8 +833,8 @@ function StickerProps({ c, trackLabel, canRaise, canLower, playhead, dispatch }:
   // rather than the one on screen, and every edit here replaced the animation
   // with a scalar. Stickers are keyframable (add_keyframe takes Clip, TextClip
   // and Sticker alike), so leaving this panel alone would have fixed the bug
-  // only for media clips.
-  const localT = Math.min(Math.max(0, playhead - start), duration)
+  // only for media clips. `localT` arrives on the render clock (see the media
+  // inspector) — StickerLayer animates this sticker on the same clock.
   const x = sampleKF(tx.x as KFNum | undefined, localT, 0)
   const y = sampleKF(tx.y as KFNum | undefined, localT, 0)
   const scale = sampleKF(tx.scale as KFNum | undefined, localT, 1)
@@ -946,11 +955,12 @@ interface TextClipLike {
   transform?: { x?: unknown; y?: unknown; opacity?: unknown }
 }
 
-function TextProps({ c, trackLabel, canvas, playhead, dispatch }: {
+function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   c: TextClipLike
   trackLabel: string
   canvas: { w: number; h: number }
-  playhead: number
+  /** Clip-local RENDER time at the playhead — `clipLocalTime`, computed by the parent. */
+  localT: number
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   // Sampled at the playhead, and transform writes go through set_clip_transform
@@ -958,8 +968,8 @@ function TextProps({ c, trackLabel, canvas, playhead, dispatch }: {
   // Transform (schema.py defaults it to x=540,y=1700), so it is keyframable and
   // was subject to the same clobbering; the stale comment on set_clip_transform
   // claiming "text clips don't" have one is what makes that easy to miss.
-  const txLocalT = Math.min(Math.max(0, playhead - (c.start ?? 0)),
-                            Math.max(0, (c.end ?? 0) - (c.start ?? 0)))
+  // Render-clock local, as TextLayer samples it (`t − renderWindow.start`).
+  const txLocalT = localT
   const x = sampleKF(c.transform?.x as KFNum | undefined, txLocalT, canvas.w / 2)
   const y = sampleKF(c.transform?.y as KFNum | undefined, txLocalT, canvas.h * 0.85)
   const opacity = sampleKF(c.transform?.opacity as KFNum | undefined, txLocalT, 1)

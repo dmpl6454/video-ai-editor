@@ -8,11 +8,19 @@ expected ≥ 90%" instead of "failed". `passed=None` means "could not measure"
 (no speech to cover, no overlays to place, timeline too long to render) —
 reported, never counted as a pass.
 
-Two clocks, one rule (facts.py): transcript words are SOURCE seconds; every
-caption cue, clip start and `edl.duration` is TIMELINE seconds. All speech
-here is mapped through `timemap.map_words_to_timeline` against the edl being
-judged — the edl BEFORE the run for "what was there", the edl AFTER for "what
-survived" — so a check never compares the two clocks directly.
+Three clocks, one rule (facts.py, render/clock.py): transcript words are
+SOURCE seconds; every caption cue, clip start, transition `at` and tool
+argument is LAYOUT (timeline) seconds — the EDL's coordinate space; and
+`edl.duration`, ffprobe and the frames of a verify render are RENDER
+seconds, `render_time(t) = t − Σ{d : v1 seam ≤ t}` (layout end minus the
+overlap the cross-fades consumed; `EDL.v1_seam_table()`). All speech here is
+mapped through `timemap.map_words_to_timeline` against the edl being judged
+— the edl BEFORE the run for "what was there", the edl AFTER for "what
+survived" — so a check never compares source against layout directly; and
+the checks that read `edl.duration` (`duration_*`) are the render clock,
+while `captions_within_extent`/`captions_sync`/`hook_text_starts_leq` are
+layout against layout. Mixing those two is how the overlay-lane drift stayed
+invisible to the EDL-level checks for as long as it did.
 
 WHY the verifier reads the transcript itself instead of trusting
 `facts_after.speech_spans`: facts are the planner's input; the verifier is

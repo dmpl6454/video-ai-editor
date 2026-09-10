@@ -5,7 +5,8 @@
 import { create } from 'zustand'
 import { api } from './api'
 import { toast } from './toast'
-import { clipEnd, type AnyClip, type EDL, type Op } from './types'
+import { type EDL, type Op } from './types'
+import { splitTargets } from './lib/splitTargets'
 import { deletedLabel } from './lib/deletedLabel'
 import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
 import { firePromptRunning, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
@@ -756,26 +757,21 @@ export const useStore = create<State>((set, get) => ({
 
   splitAtPlayhead: async () => {
     const s = get()
-    const t = s.playhead
     // Split the SELECTED clip's track when the playhead is inside its range —
     // this used to hardcode v1, cutting the wrong track for a v2/overlay
     // selection even though the backend (and the timeline's right-click
     // "Split here") supports any track. Multi-selection: one split per
     // distinct track that has a selected clip containing the playhead.
     // No containing selected clip → v1, the historical default.
+    //
+    // The playhead is RENDER time and `split_at` takes LAYOUT time; the
+    // containment test and the dispatched time are both decoded per track
+    // in lib/splitTargets (v1 through v1's inverse, overlay lanes through
+    // `layoutTime`). Testing layout starts against the raw playhead cut v1
+    // instead of the caption on screen, 1.5 s before the frame shown.
     const selected = new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[])
-    const trackIds: string[] = []
-    if (s.edl && selected.size) {
-      for (const tk of s.edl.tracks) {
-        for (const c of tk.clips) {
-          if (!selected.has(c.id)) continue
-          if (c.start <= t && t < clipEnd(c) && !trackIds.includes(tk.id)) trackIds.push(tk.id)
-        }
-      }
-    }
-    if (!trackIds.length) trackIds.push('v1')
-    for (const track of trackIds) {
-      await get().splitTrackAt(track, t)
+    for (const { track, time } of splitTargets(s.edl, selected, s.playhead)) {
+      await get().splitTrackAt(track, time)
     }
   },
 
@@ -886,15 +882,8 @@ async function triggerDownload(url: string, filename: string, sessionId: string 
   toast.success('Export complete — downloading…')
 }
 
-// Helper used by the timeline to find the clip under a given timeline time.
-export function clipAt(edl: EDL | null, trackId: string, t: number): AnyClip | null {
-  if (!edl) return null
-  const tk = edl.tracks.find((x) => x.id === trackId)
-  if (!tk) return null
-  for (const c of tk.clips) {
-    if ('src' in c) {
-      if (c.start <= t && t < clipEnd(c)) return c
-    }
-  }
-  return null
-}
+// `clipAt(edl, trackId, t)` used to live here: a LAYOUT-time containment test
+// with no callers. Deleted rather than left as bait — "which clip is under the
+// playhead" is a render-time question now (`lib/timelineLayout.v1ClipAt`,
+// which StickerLayer's framing gate uses), and a stray layout-time helper is
+// exactly what a future caller would reach for first.

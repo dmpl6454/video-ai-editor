@@ -21,6 +21,7 @@ measures, and that is the product's own claim.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -43,6 +44,23 @@ GLITCH_FAMILY = frozenset(CATEGORIES["stylized"]) | frozenset(CATEGORIES["textur
 
 #: ±1 frame at 30 fps (spec: beat splits land within a frame of a beat).
 FRAME_S = 1 / 30
+
+#: The render-clock probes of the transition cases (18/25/26): a full-frame
+#: sticker plus a 1 kHz tone on the VO lane, one pair `PROBE_LEAD_S` before
+#: the first seam and one pair `PROBE_LEAD_S` after it, each `PROBE_S` long.
+#: 3 s clears any catalog transition's window on either side of a seam (the
+#: longest is well under 2 s) while staying inside the neighbouring shot;
+#: 0.5 s is 15 frames — long enough to find, short enough not to hide a
+#: seam. Layout time is what the EDL stores; the render is asked where the
+#: probe actually appears.
+PROBE_LEAD_S = 3.0
+PROBE_S = 0.5
+PROBE_TONE_HZ = 1000.0
+#: The tone must land within this of its expected onset (the tone's own
+#: bandpass rise is ~20 ms; a transition's overlap is ≥ 100 ms).
+PROBE_AUDIO_TOL_S = 0.05
+#: Probe times snap OUTWARD to this grid (see `_probe_grid`).
+PROBE_GRID_S = 0.1
 #: Loudness tolerance, and the wider one docs/BENCHMARK.md explains.
 LUFS_TOL = 1.0
 LUFS_TOL_SHORT_CONTENT = 1.5
@@ -263,6 +281,106 @@ def _render_reflects_overlaps(ctx: CaseCtx, edl) -> list[Assertion]:
     return out
 
 
+def _window_ok(got: tuple[float, float] | None, expected: tuple[float, float], tol: float) -> bool:
+    return got is not None and abs(got[0] - expected[0]) <= tol and abs(got[1] - expected[1]) <= tol
+
+
+def _seam_table_agrees(edl) -> Assertion:
+    """The benchmark's restated seam rule (`M.seam_overlaps`) and the
+    product's `EDL.v1_seam_table()` — which `render/clock.py` walks — name
+    the same seams with the same cost. Every render-clock expectation below
+    is computed from the benchmark's copy, so a disagreement here means the
+    expectations are suspect, not the renderer; it is reported by name
+    rather than left to surface as a mysterious probe lag."""
+    ours = [(round(a, 3), round(b, 3)) for a, b in M.seam_overlaps(edl)]
+    theirs = [(round(a, 3), round(b, 3)) for a, b in edl.v1_seam_table()]
+    return check("seam_table_agrees", ours == theirs, theirs, ours,
+                 "EDL.v1_seam_table() vs the benchmark's own seam rule (seam, seconds consumed)")
+
+
+def _fmt_window(w: tuple[float, float] | None) -> str:
+    return "not found" if w is None else f"[{w[0]:.3f}, {w[1]:.3f})"
+
+
+def _probe_windows(path: Path, edl, *, t: float, dur: float, fps: float,
+                   levels: list[tuple[float, float]]) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """(sticker window, tone window) found in the render for the probe pair
+    laid at layout `t`. The search spans from the render-clock position to
+    the layout position (plus half a second each side), so a probe that
+    plays at LAYOUT time is still found and reported with its real lag
+    rather than as 'not found'."""
+    lo = min(M.render_time(edl, t), t) - 0.5
+    hi = max(M.render_time(edl, t), t) + dur + 0.5
+    return (M.overlay_window(path, lo=lo, hi=hi, fps=fps),
+            M.tone_window(levels, lo=lo, hi=hi))
+
+
+def _render_clock(ctx: CaseCtx, edl) -> list[Assertion]:
+    """The transition cases' RENDER-level sync check. `captions_relaid_
+    without_drift` and `render_duration_reflects_overlaps` compare layout
+    coordinates with layout coordinates and were blind to the renderer
+    playing every overlay lane late: the v1 lane is pulled left by each
+    cross-fade's overlap (clip B starts `d` early), while text, stickers,
+    PiP and the VO/music beds were positioned at raw layout time. Two probe
+    pairs planted in setup (`_plant_render_clock_probes`) answer it from the
+    pixels and the samples: the pair AFTER the first seam must appear at
+    `render_time(t) = t − overlap` (within a frame / 0.05 s), the pair BEFORE
+    it must not move at all, and — so a probe that never renders cannot
+    pass vacuously — both must have been visible at layout time in the
+    untransitioned render setup kept."""
+    probes = ctx.extra.get("render_clock_probes")
+    names = ("overlay_follows_render_clock", "audio_follows_render_clock",
+             "probes_before_first_seam_unmoved", "probes_visible_before_transitions")
+    table = _seam_table_agrees(edl)
+    if not probes:
+        return [table] + [check(n, None, detail="no render-clock probes planted in setup") for n in names]
+    path = ctx.render()
+    if path is None:
+        return [table] + [check(n, None, detail="timeline too long to render") for n in names]
+    fps = float(edl.canvas.fps or 30)
+    # One frame (+5 ms of float slack). It also absorbs what the renderer
+    # itself does at a window's edges: `enable=between(t,a,b)` is inclusive
+    # at `b`, so a sticker's last frame is the one AT `end` (measured
+    # [2.0, 2.533) for a box laid on [2.0, 2.5)), and a render time that
+    # falls between frames starts on the next one.
+    frame_tol = 1.0 / fps + 0.005
+    pre, post, dur, seam = probes["pre"], probes["post"], probes["dur"], probes["seam"]
+    exp_post = (M.render_time(edl, post), M.render_time(edl, post + dur))
+    exp_pre = (M.render_time(edl, pre), M.render_time(edl, pre + dur))
+    consumed = post - exp_post[0]
+    levels = M.band_levels(path, freq_hz=PROBE_TONE_HZ)
+    post_v, post_a = _probe_windows(path, edl, t=post, dur=dur, fps=fps, levels=levels)
+    pre_v, pre_a = _probe_windows(path, edl, t=pre, dur=dur, fps=fps, levels=levels)
+
+    def _lag(got: tuple[float, float] | None, exp: tuple[float, float]) -> str:
+        return "" if got is None else f"lag {got[0] - exp[0]:+.3f} s vs the picture"
+
+    where = f"layout {post:.2f} s; {consumed:.3f} s consumed by the seam at {seam:.2f} s"
+    out = [table,
+           check("overlay_follows_render_clock", _window_ok(post_v, exp_post, frame_tol), _fmt_window(post_v),
+                 f"{_fmt_window(exp_post)} ± {frame_tol:.3f}", f"sticker {where}; {_lag(post_v, exp_post)}"),
+           check("audio_follows_render_clock", _window_ok(post_a, exp_post, PROBE_AUDIO_TOL_S), _fmt_window(post_a),
+                 f"{_fmt_window(exp_post)} ± {PROBE_AUDIO_TOL_S:.2f}", f"1 kHz tone on the VO lane {where}; {_lag(post_a, exp_post)}"),
+           check("probes_before_first_seam_unmoved",
+                 _window_ok(pre_v, exp_pre, frame_tol) and _window_ok(pre_a, exp_pre, PROBE_AUDIO_TOL_S),
+                 f"sticker {_fmt_window(pre_v)}, tone {_fmt_window(pre_a)}", f"both {_fmt_window(exp_pre)}",
+                 f"layout {pre:.2f} s lies before every seam, so its render time is its layout time")]
+    before = ctx.extra.get("render_before")
+    if before is None:
+        out.append(check(names[3], None, detail="no pre-transition render in setup"))
+        return out
+    # No transitions yet when `before` was rendered: layout time IS render
+    # time, so both windows must sit at the layout position exactly.
+    lv_before = M.band_levels(before, freq_hz=PROBE_TONE_HZ)
+    v0 = M.overlay_window(before, lo=post - 0.5, hi=post + dur + 0.5, fps=fps)
+    a0 = M.tone_window(lv_before, lo=post - 0.5, hi=post + dur + 0.5)
+    layout = (post, post + dur)
+    out.append(check(names[3], _window_ok(v0, layout, frame_tol) and _window_ok(a0, layout, PROBE_AUDIO_TOL_S),
+                     f"sticker {_fmt_window(v0)}, tone {_fmt_window(a0)}", f"both {_fmt_window(layout)}",
+                     "the same probes at layout time in the untransitioned render (guards the checks above against a probe that never renders)"))
+    return out
+
+
 # --------------------------------------------------------------------------
 # setups
 # --------------------------------------------------------------------------
@@ -303,6 +421,58 @@ def _remember_render(ctx: CaseCtx) -> None:
     path = ctx.render()
     ctx.extra["render_before"] = path
     ctx.extra["boundaries_before"] = M.v1_boundaries(ctx.edl())
+
+
+def _plant_render_clock_probes(ctx: CaseCtx) -> None:
+    """Cases 18/25/26: two probe pairs through the real dispatch route — a
+    canvas-covering magenta sticker (the `stickers` lane bakes through the
+    same `overlay=enable=between(t,…)` window as text and captions; a
+    TextClip has no opaque background box, so a full frame of one colour is
+    what a 1×1 area-scaled frame can recognise) and a 1 kHz tone as a clip on
+    the VO lane (the same `adelay=start` path as a voiceover or a bed) —
+    `PROBE_LEAD_S` before and after the FIRST seam. Must run before
+    `_remember_render` so the untransitioned render carries them too.
+
+    The two stickers sit 1 px apart on purpose: `add_sticker` cascades an
+    EXACT position collision 3 % of the canvas down-right (so stacked
+    stickers stay selectable), which would leave a scene-coloured strip along
+    two edges of the second probe; 1 px of offset is below its 1 px collision
+    threshold and invisible in a frame mean."""
+    edl = ctx.edl()
+    seams = M.v1_boundaries(edl)
+    if len(seams) < 2:
+        raise RuntimeError(f"render-clock probes need at least two v1 seams, found {seams}")
+    seam, nxt = seams[0], seams[1]
+    pre, post = _probe_grid(seam - PROBE_LEAD_S, up=False), _probe_grid(seam + PROBE_LEAD_S, up=True)
+    if pre < 0.5 or post + PROBE_S + PROBE_LEAD_S > nxt:
+        raise RuntimeError(f"seams {seam:.2f}/{nxt:.2f} s leave no room for {PROBE_LEAD_S} s probes either side")
+    canvas = edl.canvas
+    png = M.write_probe_sticker(ctx.session_dir / "uploads" / "stickers" / "render_clock_probe.png", canvas.w, canvas.h)
+    wav = M.write_probe_tone(ctx.session_dir / "uploads" / "render_clock_probe_1khz.wav",
+                             freq_hz=PROBE_TONE_HZ, seconds=PROBE_S)
+    for i, t in enumerate((pre, post)):
+        ctx.env.dispatch(ctx.sid, "add_sticker", {"src": str(png), "start": t, "end": t + PROBE_S,
+                                                  "position": [canvas.w / 2 + i, canvas.h / 2],
+                                                  "scale": M.PROBE_STICKER_SCALE})
+        ctx.env.dispatch(ctx.sid, "add_clip", {"track": "vo", "src": str(wav), "in": 0.0, "out": PROBE_S, "start": t})
+    ctx.extra["render_clock_probes"] = {"pre": pre, "post": post, "dur": PROBE_S, "seam": seam}
+
+
+def _probe_grid(t: float, *, up: bool) -> float:
+    """`t` snapped away from the seam to the `PROBE_GRID_S` grid (down for
+    the pre-seam probe, up for the post-seam one). The renderer writes
+    overlay windows as `enable='between(t,{start:.3f},…)'` and audio
+    offsets as whole milliseconds; the fixture's first seam is 11.0667 s, so
+    a probe at seam − 3 = 8.0667 s would be written as 8.067 — PAST the
+    8.0667 frame — and its first visible frame would be the next one: a
+    one-frame lag the renderer did not cause (measured: sticker at 8.100 for
+    a layout start of 8.067). A multiple of 0.1 s is exact in three decimals
+    and lands on a frame at the fixture's 30 fps (3 frames), so a probe's
+    layout window IS a frame window and the ±1-frame tolerance is spent on
+    the renderer, not on formatting."""
+    steps = t / PROBE_GRID_S
+    snapped = math.ceil(steps - 1e-6) if up else math.floor(steps + 1e-6)   # float noise never crosses a step
+    return round(snapped * PROBE_GRID_S, 3)
 
 
 def _remember_hash(ctx: CaseCtx) -> None:
@@ -538,7 +708,7 @@ def c18(ctx: CaseCtx) -> list[Assertion]:
             [check("captions_within_extent", ok_ext, round(last, 2), f"≤ {extent:.2f}", "captions re-laid after the seams moved"),
              check("captions_relaid_without_drift", bool(pairs) and drift <= 0.1, round(drift, 3), "≤ 0.1 s drift per seam",
                    "; ".join(rows) or f"{len(pairs)} seams compared: cue-vs-word offset unchanged by the re-lay")] +
-            _render_reflects_overlaps(ctx, edl))
+            _render_reflects_overlaps(ctx, edl) + _render_clock(ctx, edl))
 
 
 def c19(ctx: CaseCtx) -> list[Assertion]:
@@ -628,7 +798,8 @@ def c24(ctx: CaseCtx) -> list[Assertion]:
 
 def c25(ctx: CaseCtx) -> list[Assertion]:
     edl = ctx.edl()
-    return _transition_family(edl, ZOOM_FAMILY, min_count=5, label="zoom") + _render_reflects_overlaps(ctx, edl) + [_one_op(ctx)]
+    return (_transition_family(edl, ZOOM_FAMILY, min_count=5, label="zoom") + _render_reflects_overlaps(ctx, edl) +
+            _render_clock(ctx, edl) + [_one_op(ctx)])
 
 
 def c26(ctx: CaseCtx) -> list[Assertion]:
@@ -638,7 +809,8 @@ def c26(ctx: CaseCtx) -> list[Assertion]:
     at_hook = first_seam is not None and any(abs(t.at - first_seam) < 0.05 for t in trs)
     return (_transition_family(edl, GLITCH_FAMILY, min_count=1, label="glitch") +
             [check("transition_at_first_seam", at_hook, [round(t.at, 2) for t in trs], first_seam,
-                   "'at the hook' = the opening seam")] + _render_reflects_overlaps(ctx, edl) + [_one_op(ctx)])
+                   "'at the hook' = the opening seam")] + _render_reflects_overlaps(ctx, edl) +
+            _render_clock(ctx, edl) + [_one_op(ctx)])
 
 
 # --------------------------------------------------------------------------
@@ -676,7 +848,7 @@ CASES: tuple[Case, ...] = (
          "fast", "Brand", ("brand", "end_card"), c17),
     Case(18, "transitions_smooth", "add smooth transitions between the clips", "presplit_16x9", "fast", "Transitions (Basic)",
          ("transitions",), c18, setup=_chain(_prior_dispatch("add_caption_track", style="ig_chunky", position="bottom"),
-                                             _remember_caption_deltas, _remember_render)),
+                                             _remember_caption_deltas, _plant_render_clock_probes, _remember_render)),
     Case(19, "youtube_auto_edit", "make it good for youtube", "en_16x9", "slow", "Auto edit", ("auto_edit",), c19,
          marks=("slow",)),
     Case(20, "reels_full_pipeline", "complete the video for instagram reels with hindi captions and upbeat music",
@@ -695,9 +867,9 @@ CASES: tuple[Case, ...] = (
     Case(24, "pending_transcript", "remove the ums", "en_16x9", "slow", "Prerequisite honesty", ("remove_fillers",), c24,
          setup=_pending_transcript, marks=("slow",)),
     Case(25, "transitions_zoom", "smooth zoom between every clip", "presplit_16x9", "fast", "Transitions (Zoom)",
-         ("transitions",), c25, setup=_remember_render),
+         ("transitions",), c25, setup=_chain(_plant_render_clock_probes, _remember_render)),
     Case(26, "transitions_glitch", "add a glitch transition at the hook", "presplit_16x9", "fast",
-         "Transitions (Glitch/Stylised)", ("transitions",), c26, setup=_remember_render),
+         "Transitions (Glitch/Stylised)", ("transitions",), c26, setup=_chain(_plant_render_clock_probes, _remember_render)),
 )
 
 CASE_BY_ID: dict[int, Case] = {c.id: c for c in CASES}
@@ -713,4 +885,4 @@ def prompts() -> list[str]:
 
 __all__ = ["Case", "CaseCtx", "CASES", "CASE_BY_ID", "FAST_TIER", "SLOW_TIER", "TRANSITION_CASES",
            "BASIC_FAMILY", "ZOOM_FAMILY", "GLITCH_FAMILY", "FRAME_S", "LUFS_TOL", "LUFS_TOL_SHORT_CONTENT",
-           "prompts"]
+           "PROBE_LEAD_S", "PROBE_S", "PROBE_TONE_HZ", "PROBE_AUDIO_TOL_S", "PROBE_GRID_S", "prompts"]

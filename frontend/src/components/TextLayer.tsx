@@ -12,6 +12,8 @@ import {
   type KFNum, type OverlayBox,
 } from '../lib/overlay'
 import { emojiImage, emojiGeneration } from '../lib/emojiArt'
+import { renderWindow, v1SeamsOf } from '../lib/timelineLayout'
+import { animEnvelope } from '../lib/textAnim'
 
 interface Props {
   edl: EDL
@@ -224,26 +226,8 @@ function cssFont(ttf: string): { family: string; weight: string } | null {
   return { family, weight }
 }
 
-// Animation envelope for anim_in/anim_out presets — the same curves the
-// server bakes (render/text_overlay.py): d = min(0.35, 40% of clip), pop-in
-// overshoots 0.6→1.06→1.0, pop-out shrinks to 0.6, slides travel 4% of the
-// preview height, fades ramp alpha linearly.
-function animEnvelope(c: TextClip, t: number, height: number): { alpha: number; scale: number; dy: number } {
-  const d = Math.min(0.35, Math.max(0.1, (c.end - c.start) * 0.4))
-  const off = height * 0.04
-  const qIn = Math.min(1, Math.max(0, (t - c.start) / d))
-  const qOut = Math.min(1, Math.max(0, (t - (c.end - d)) / d))
-  let alpha = 1, scale = 1, dy = 0
-  if (c.anim_in === 'fade') alpha *= qIn
-  if (c.anim_out === 'fade') alpha *= 1 - qOut
-  if (c.anim_in === 'pop') scale *= qIn < 0.7 ? 0.6 + 0.657 * qIn : 1.06 - 0.2 * (qIn - 0.7)
-  if (c.anim_out === 'pop') scale *= 1 - 0.4 * qOut
-  if (c.anim_in === 'slide_up') dy += off * (1 - qIn)
-  if (c.anim_in === 'slide_down') dy -= off * (1 - qIn)
-  if (c.anim_out === 'slide_up') dy -= off * qOut
-  if (c.anim_out === 'slide_down') dy += off * qOut
-  return { alpha, scale, dy }
-}
+// Animation envelope for anim_in/anim_out: lib/textAnim.ts — runs on the
+// clip's RENDER window (the same clock `renderWindow` gates activity with).
 
 function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number,
               box = 0): string[] {
@@ -404,6 +388,15 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       return
     }
 
+    // `t` below is the <video>'s clock — RENDER time — while every text clip's
+    // `start`/`end` is LAYOUT time. The two differ by the overlap the v1
+    // transitions before it consumed (`lib/timelineLayout`), and the export
+    // now places each overlay at `render_time(start)`; testing raw layout
+    // values against the render clock is exactly the drift the export used
+    // to have (captions up to 2.4 s late after a dozen dissolves). Computed
+    // once per effect run, not per frame: the seam table only changes with
+    // the EDL, which is already in this effect's deps.
+    const seams = v1SeamsOf(edl)
     let raf = 0
     let lastTime = -1
     let lastDragId: string | null = null
@@ -442,12 +435,18 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       const boxes: OverlayBox[] = []
 
       // Collect active text clips
-      const active: { c: TextClip; role: string }[] = []
+      const active: { c: TextClip; role: string; win: { start: number; end: number } }[] = []
       for (const tk of edl.tracks) {
         if (tk.type !== 'text' && tk.type !== 'captions') continue
         for (const c of tk.clips) {
           if (!isText(c)) continue
-          if (c.start <= t && t <= c.end) active.push({ c, role: (c as TextClip & { role?: string }).role ?? 'default' })
+          // A window the renderer drops (wholly inside a consumed span) is
+          // not drawn here either — the preview must not show a caption the
+          // export will never contain.
+          const w = renderWindow(seams, c.start, c.end)
+          if (!w.dropped && w.start <= t && t <= w.end) {
+            active.push({ c, role: (c as TextClip & { role?: string }).role ?? 'default', win: w })
+          }
         }
       }
 
@@ -455,7 +454,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       const order = ['watermark', 'lower_third', 'caption', 'label', 'super', 'hook']
       active.sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role))
 
-      for (const { c, role } of active) {
+      for (const { c, role, win } of active) {
         const s = ROLE_STYLES[role] ?? ROLE_STYLES.default
         // Per-clip style overrides (non-sentinel values only — see cssFont/
         // roleFontMatches above; mirrors the server's resolve_style_overrides).
@@ -492,7 +491,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           ? Math.max(1, Math.round((styleStrokeW / edl.canvas.h) * height))
           : Math.max(2, Math.round(s.stroke * height))
 
-        const env = animEnvelope(c, t, height)
+        const env = animEnvelope(c, t, height, win)
         const styleStroke = c.style?.stroke
           && c.style.stroke.toUpperCase() !== SENTINEL_STROKE
           && /^#[0-9a-fA-F]{6}/.test(c.style.stroke)
@@ -504,12 +503,12 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // degenerate 1-keyframe list are baked into the PNG's alpha by
         // resolve_opacity_override/_scalar_or_last, and a real (>=2)
         // keyframe list is animated per-frame by the geq path in CLIP-LOCAL
-        // time (`T - clip.start`) — hence `t - c.start` here, matching
-        // animEnvelope's own time base. types.ts deliberately omits
-        // transform on the mirrored Clip interfaces, hence the cast (same
-        // pattern as resolveAnchor above).
+        // RENDER time (`T - rs`, the clip's render-window start) — hence
+        // `t - win.start` here, matching animEnvelope's time base. types.ts
+        // deliberately omits transform on the mirrored Clip interfaces,
+        // hence the cast (same pattern as resolveAnchor above).
         const rawOpacity = (c as TextClip & { transform?: { opacity?: KFNum } }).transform?.opacity
-        const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, t - c.start, 1)))
+        const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, t - win.start, 1)))
         ctx.globalAlpha = (s.opacity ?? 1) * env.alpha * txOpacity
 
         // Emoji are KEPT and drawn as artwork below (see drawLine) — they

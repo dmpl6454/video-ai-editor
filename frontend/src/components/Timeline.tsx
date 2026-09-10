@@ -7,8 +7,12 @@ import * as dragResolve from '../lib/dragResolve'
 import * as dv from '../lib/dragVisuals'
 import { baseName, isAudioPath } from '../lib/paths'
 import { keyframeTimes } from '../lib/overlay'
-import { edlTimeFromOutput, v1Layout, type LayoutClip } from '../lib/timelineLayout'
+import {
+  drawnSpan, edlTimeFromOutput, layoutTime, renderTime, v1Layout,
+  type LayoutClip, type V1Layout,
+} from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
+import { splitTimeFor } from '../lib/splitTargets'
 import { v1CutPoints } from '../lib/cutPoints'
 import { chordLabel } from '../keymap/engine'
 
@@ -290,21 +294,27 @@ export function Timeline() {
 
   // How far each v1 clip is pulled left of its `start` by the transitions
   // before it, plus where each seam lands — both in OUTPUT time. Mirrors
-  // EDL.transition_overlap(); see lib/timelineLayout.ts.
-  const { shift: v1Shift, seams: v1Seams, clips: v1LayoutClips } = useMemo(() => {
+  // EDL.transition_overlap(); see lib/timelineLayout.ts. `v1Seams` is also
+  // the seam table EVERY OTHER lane is drawn against: the renderer plays
+  // captions, text, stickers, PiP, music and VO at `render_time(t) = t −
+  // Σ{d_i : seam ≤ t}`, so an overlay after a transition is pulled left by
+  // the same overlap its picture is. Before this, overlay lanes were drawn
+  // at raw layout time — consistent with a renderer that was itself wrong,
+  // and up to 2.4 s off the picture after a dozen transitions.
+  const { shift: v1Shift, seams: v1Seams, clips: v1LayoutClips, layout: v1LayoutAll } = useMemo(() => {
     const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
+    const emptyLayout: V1Layout = { shift: new Map<string, number>(), seams: [] }
     const empty = {
-      shift: new Map<string, number>(), seams: [], clips: [] as LayoutClip[],
+      shift: emptyLayout.shift, seams: emptyLayout.seams, clips: [] as LayoutClip[],
+      layout: emptyLayout,
     }
     if (!v1) return empty
     const trs = (v1 as unknown as { transitions?: TransitionInfo[] }).transitions ?? []
     const lc: LayoutClip[] = v1.clips.filter(isMediaClip).map((c) => ({
       id: c.id, start: c.start, duration: clipDuration(c),
     }))
-    return {
-      ...v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration }))),
-      clips: lc,
-    }
+    const layout = v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration })))
+    return { ...layout, clips: lc, layout }
   }, [edl])
 
   const v1Cuts = useMemo(() => {
@@ -350,18 +360,19 @@ export function Timeline() {
     const t = tracks[i]
     const y = trackY(i)
     for (const c of t.clips) {
-      const start = c.start - (t.id === 'v1' ? (v1Shift.get(c.id) ?? 0) : 0)
-      // EFFECTIVE timeline width — (out-in)/speed for media, matching the draw
-      // loop's clipDuration. Raw `out-in` made a 2x clip's hit box extend past
-      // its drawn rect (shadowing the neighbor: clicks selected the wrong clip,
-      // trim handles hit-tested at invisible positions) and a 0.5x clip's
-      // right half fell through the hit-test entirely (clicks seeked instead).
-      const dur = clipDuration(c)
+      // `drawnSpan` is the ONE function this list and the draw loop share:
+      // v1's per-clip pull, every other lane's render window. Width is the
+      // EFFECTIVE timeline width — (out-in)/speed for media. Raw `out-in`
+      // made a 2x clip's hit box extend past its drawn rect (shadowing the
+      // neighbor: clicks selected the wrong clip, trim handles hit-tested at
+      // invisible positions) and a 0.5x clip's right half fell through the
+      // hit-test entirely (clicks seeked instead).
+      const span = drawnSpan(t.id, c, v1LayoutAll)
       hits.push({
         trackId: t.id, clip: c,
-        x: labelWidth + start * zoom,
+        x: labelWidth + span.start * zoom,
         y,
-        w: Math.max(2, dur * zoom),
+        w: Math.max(2, span.duration * zoom),
         h: trackHeight,
       })
     }
@@ -453,16 +464,21 @@ export function Timeline() {
         // renderer overlap this clip with its predecessor, so everything after
         // the first transition plays EARLIER than `start` says — drawing the
         // raw value put the strip up to a second right of the picture and left
-        // an unreachable tail past the (correctly shortened) duration.
-        const start = c.start - (t.id === 'v1' ? (v1Shift.get(c.id) ?? 0) : 0)
-        const dur = clipDuration(c)
+        // an unreachable tail past the (correctly shortened) duration. Every
+        // OTHER lane is pulled by the same rule (`render_time`), and a span
+        // that crosses a seam shrinks by that seam's overlap; one the renderer
+        // will drop outright (`span.dropped`) is drawn as a flagged sliver so
+        // it can still be selected and dragged out, never as a negative width.
+        const span = drawnSpan(t.id, c, v1LayoutAll)
+        const start = span.start
+        const dur = span.duration
         // The overlap WARNING is about the EDL invariant "two clips must not
         // occupy the same time on a track", so it is tested against the EDL
         // positions — never the drawn ones. Under a transition the drawn rects
         // overlap ON PURPOSE (that is what a cross-dissolve looks like), and
         // testing the drawn values flagged every transition as broken data.
         const rawStartT = c.start
-        const rawEndT = c.start + dur
+        const rawEndT = c.start + clipDuration(c)
         const overlapsPrior = seenRanges.some(
           ([s, e]) => rawStartT < e - 1e-9 && rawEndT > s + 1e-9)
         seenRanges.push([rawStartT, rawEndT])
@@ -621,7 +637,10 @@ export function Timeline() {
         // Overlap warning: the later clip (in start order) of an overlapping
         // pair on this track gets a dashed amber border so it's never
         // invisibly merged with its neighbor, even for legacy/pre-guard data.
-        if (overlapsPrior) {
+        // The same outline flags an overlay whose whole window sits inside a
+        // crossfade's consumed span — the renderer drops it, so an unflagged
+        // sliver would read as "on the timeline but never on screen".
+        if (overlapsPrior || span.dropped) {
           ctx.save()
           ctx.strokeStyle = '#f59e0b'
           ctx.lineWidth = 2
@@ -704,9 +723,11 @@ export function Timeline() {
 
     // Markers (drawn on the heavy canvas so they live behind the playhead;
     // they don't change every frame).
+    // `m.time` is LAYOUT time (commands.ts stores `layoutPlayhead`), so a
+    // marker is drawn where that instant PLAYS, like every other lane.
     const markers = (edl?.markers ?? []) as { id: string; time: number; label: string; color?: string }[]
     for (const m of markers) {
-      const mx = labelWidth + m.time * zoom
+      const mx = labelWidth + renderTime(v1Seams, m.time) * zoom
       if (mx < labelWidth || mx > contentW) continue
       // DASHED, and always labelled. A solid full-height line is exactly what
       // the playhead looks like, so a marker created by an accidental `M`
@@ -752,7 +773,7 @@ export function Timeline() {
     // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps.
     //  `thumbTick` repaints as filmstrip tiles load — waveTick's mechanism;
     //  `sid` feeds thumbImage's URLs; `v1Cuts` derives from `edl` via useMemo.)
-  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, v1Shift, inMark, outMark, flashClipId])
+  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, v1LayoutAll, inMark, outMark, flashClipId])
 
   // Sticky track-label column. The main canvas draws labels at its own x=0,
   // but that canvas is the thing that SCROLLS (contentW-sized) — so once the
@@ -960,7 +981,14 @@ export function Timeline() {
       const durSec = dragged
         ? clipDuration(dragged)
         : drag.origOut - drag.origIn
-      let landStart = rawStart
+      // For an overlay the landing is the RENDER position of the layout time
+      // the commit will write: inside a crossfade window that is the seam,
+      // so the line visibly snaps to the dissolve's start rather than
+      // promising a spot the clip cannot occupy (see lib/timelineLayout
+      // `layoutTime`). Everywhere else this is `rawStart` itself.
+      let landStart = drag.clipKind === 'media'
+        ? rawStart
+        : renderTime(v1Seams, layoutTime(v1Seams, rawStart))
       let overlapping = false
       if (compatible && destTrack && drag.clipKind === 'media') {
         // A same-lane drag on v1 REORDERS (onMouseUp sends close_gap), so the
@@ -1047,10 +1075,24 @@ export function Timeline() {
         // `origEnd` (Task 7, onMouseUp).
         const origEnd = (hits.find((h) => h.clip.id === drag.clipId)?.clip as unknown as { end?: number })?.end
           ?? drag.origStart
-        const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: origEnd }, side, dt)
+        // Same decode as the release path: the pointer moved the edge in
+        // RENDER time, the commit needs the LAYOUT delta.
+        const edgeDelta = overlayEdgeDelta(side === 'l' ? drag.origStart : origEnd, dt, drag.clipId)
+        const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: origEnd }, side, edgeDelta)
+        // Drawn and labelled in RENDER time — the ruler and the playhead chip
+        // this label sits under are render time, and a number that disagreed
+        // with the tick marks 12px above it would read as a bug. Properties
+        // shows the EDL's own (layout) values; that is its coordinate space.
+        const rs = renderTime(v1Seams, r.start)
+        const re = renderTime(v1Seams, r.end)
         edgeSec = side === 'l' ? r.start : r.end
-        label = `${(side === 'l' ? r.start : r.start).toFixed(2)}s → ${(side === 'l' ? origEnd : r.end).toFixed(2)}s`
+        label = `${rs.toFixed(2)}s → ${re.toFixed(2)}s`
       }
+      // Overlay edges are layout values here and the guide must sit on the
+      // pulled lane. Media edges stay in the clip's own space as before: a v1
+      // clip's pull is a per-clip slot (`v1Shift`), not a coordinate, and its
+      // guide is deliberately untouched by the overlay-lane change.
+      if (drag.clipKind !== 'media') edgeSec = renderTime(v1Seams, edgeSec)
       const ex = labelWidth + Math.max(0, edgeSec) * zoom
       ctx.strokeStyle = dv.ACCENT
       ctx.lineWidth = dv.DRAG_BORDER_W
@@ -1060,7 +1102,7 @@ export function Timeline() {
       ctx.fillText(label, ex + 4, ty + 12)
     }
     ctx.restore()
-  }, [dragTick, tracks, zoom, contentW, dpr])
+  }, [dragTick, tracks, zoom, contentW, dpr, v1Seams])
 
   // Escape cancels an in-progress clip drag with NO commit (mousedown captured
   // state, but we simply drop it and repaint to clear the ghost). Only active
@@ -1253,10 +1295,19 @@ export function Timeline() {
 
   // Collect all snap targets: clip start, clip end, the playhead. Snap edges
   // to within `snapPx` pixels; converts to seconds via the current zoom.
+  // Every caller passes `t` in LAYOUT time (a v1 drag is a layout delta; an
+  // overlay gesture is decoded through `layoutTime` first), and every clip
+  // edge here is an EDL value — so the candidate list is layout space. The
+  // playhead is the one RENDER-time value in it: it is the <video>'s clock,
+  // which after three 0.5 s dissolves sits 1.5 s LEFT of the layout instant
+  // it shows. Left raw, "snap this caption to the playhead" landed the
+  // caption 1.5 s after the frame under the playhead. Decoded with the same
+  // overlay inverse (inside a crossfade window that is the seam's layout
+  // time), which agrees with v1's `edlTimeFromOutput` everywhere else.
   const SNAP_PX = 8
   function snapTime(t: number, ignoreClipId?: string): number {
     if (!snapEnabled) return t   // snapping toggled off (keyboard shortcut)
-    const candidates: number[] = [0, playhead]
+    const candidates: number[] = [0, layoutTime(v1Seams, playhead)]
     for (const tk of edl?.tracks ?? []) {
       for (const c of tk.clips) {
         if (ignoreClipId && c.id === ignoreClipId) continue
@@ -1276,6 +1327,17 @@ export function Timeline() {
       }
     }
     return best
+  }
+
+  // The signed LAYOUT delta for an overlay edge the pointer moved by `dt`
+  // seconds of RENDER time: the edge's render position plus the drag,
+  // decoded through `layoutTime` (inside a crossfade window that is the
+  // seam's layout time — the documented snap rule), then snapped against the
+  // EDL's own edges. Shared by the live guide and the release path so the
+  // preview is the landing.
+  function overlayEdgeDelta(origEdge: number, dt: number, ignoreClipId?: string): number {
+    const target = layoutTime(v1Seams, renderTime(v1Seams, origEdge) + dt)
+    return snapTime(Math.max(0, target), ignoreClipId) - origEdge
   }
 
   async function onMouseUp(e: React.MouseEvent) {
@@ -1300,7 +1362,16 @@ export function Timeline() {
     }
 
     if (drag.kind === 'move') {
-      const rawNewStart = Math.max(0, drag.origStart + dt)
+      // A v1 drag commits a DELTA, which is immune to the pull (both ends of
+      // the gesture are in the same coordinate space). An overlay is not: it
+      // was grabbed at its RENDER position, so the pointer's new render
+      // position must be decoded back to a layout `start` before `move_clip`
+      // sees it — otherwise a caption dragged 1 s right after three 0.5 s
+      // dissolves would land 1.5 s late. Snapping happens in layout space
+      // because every candidate edge is an EDL value.
+      const rawNewStart = drag.clipKind === 'media'
+        ? Math.max(0, drag.origStart + dt)
+        : Math.max(0, layoutTime(v1Seams, renderTime(v1Seams, drag.origStart) + dt))
       let newStart = snapTime(rawNewStart, drag.clipId)
       const args: Record<string, unknown> = { clip_id: drag.clipId, new_start: newStart }
       let destTrack = tracks.find((t) => t.id === drag.trackId)
@@ -1410,9 +1481,15 @@ export function Timeline() {
       // both cases `edgeDelta` is (snapped new edge position − old edge
       // position), exactly the `deltaSec` contract every resolve* function
       // expects (positive = edge moved right).
-      const edgeDelta = side === 'l'
-        ? snapTime(drag.origStart + dt, drag.clipId) - drag.origStart
-        : snapTime(origEnd + dt, drag.clipId) - origEnd
+      // Overlay edges live on a pulled lane: decode the pointer's render
+      // position back to layout before snapping (`overlayEdgeDelta`), the
+      // same inverse the move path uses. Media edges are drag deltas in the
+      // clip's own space and need no conversion.
+      const edgeDelta = isOverlay
+        ? overlayEdgeDelta(side === 'l' ? drag.origStart : origEnd, dt, drag.clipId)
+        : (side === 'l'
+          ? snapTime(drag.origStart + dt, drag.clipId) - drag.origStart
+          : snapTime(origEnd + dt, drag.clipId) - origEnd)
       if (isOverlay) {
         // Overlay clips have no source to trim — edge-drag retimes the window
         // (start/end) via set_clip_timing. resolveOverlayTiming clamps end>start.
@@ -1493,10 +1570,14 @@ export function Timeline() {
     if (emoji) {
       const w = edl?.canvas.w ?? 1080
       const h = edl?.canvas.h ?? 1920
+      // The pointer is in RENDER time; the stickers lane is pulled like every
+      // overlay lane, so decode to layout first (a drop inside a dissolve
+      // lands on the seam) and snap against the EDL's edges there.
+      const stickerStart = snapTime(layoutTime(v1Seams, tDrop))
       await dispatch('add_sticker', {
         emoji,
-        start: snapTime(tDrop),
-        end: snapTime(tDrop) + 3.0,
+        start: stickerStart,
+        end: stickerStart + 3.0,
         position: [w / 2, h * 0.55],
       })
       return
@@ -1561,11 +1642,12 @@ export function Timeline() {
     // EDL `start`. On v1 those differ by the accumulated transition overlap,
     // so drop the conversion in — otherwise dropping onto a lane that already
     // has transitions places the clip earlier than the pointer indicated.
-    // (Overlay lanes carry no transitions, so their two coordinate spaces are
-    // the same and the mapping is the identity.)
+    // Every other lane (PiP, music, VO) is pulled by the same overlap now
+    // that the renderer plays it at `render_time`, so it gets the overlay
+    // inverse (`layoutTime`: a drop inside a dissolve lands on the seam).
     const startT = trackId === 'v1'
       ? edlTimeFromOutput(snapTime(tDrop), v1LayoutClips, v1Shift)
-      : snapTime(tDrop)
+      : snapTime(layoutTime(v1Seams, tDrop))
     await dispatch('add_clip', {
       track: trackId, src, in: 0.0, out: dur, start: startT,
     })
@@ -1581,7 +1663,7 @@ export function Timeline() {
     // "extra red playhead". It goes through dispatch, so Undo restores it.
     const markers = (edl?.markers ?? []) as { id: string; time: number }[]
     if (y <= headerHeight + 8) {
-      const near = markers.find((m) => Math.abs((labelWidth + m.time * zoom) - x) <= 6)
+      const near = markers.find((m) => Math.abs((labelWidth + renderTime(v1Seams, m.time) * zoom) - x) <= 6)
       if (near) {
         e.preventDefault()
         void dispatch('remove_marker', { marker_id: near.id })
@@ -1907,7 +1989,10 @@ export function Timeline() {
             // — name it what it does and say so in the tooltip.
             { label: 'Split at playhead',
               title: `Cut the clip under the playhead in two (${chordLabel('Mod+KeyB')}). Move the playhead to where you want the cut first.`,
-              action: () => useStore.getState().splitTrackAt(contextMenu.trackId, playhead) },
+              // Decoded per lane (lib/splitTargets): `split_at` takes layout
+              // time and the playhead is render time — same path as ⌘B.
+              action: () => useStore.getState().splitTrackAt(
+                contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead)) },
             { label: 'Duplicate',
               title: `Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`,
               action: () => dispatch('duplicate_clip', { clip_id: contextMenu.clipId }) },

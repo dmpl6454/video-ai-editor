@@ -43,7 +43,7 @@
 //   • Preview.tsx's videoFingerprint must NOT include sticker tracks — no
 //     sticker edit needs an ffmpeg round-trip any more.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useStore } from '../store'
 import { isMediaClip, clipEnd, type EDL, type Clip } from '../types'
 import {
@@ -59,6 +59,9 @@ import {
   setLivePipFraming, livePipFraming,
 } from '../lib/pipDraw'
 import * as dv from '../lib/dragVisuals'
+import {
+  activeInRender, layoutClock, renderLocal, renderTime, v1ClipAt, v1LayoutOf, v1SeamsOf,
+} from '../lib/timelineLayout'
 
 interface Props {
   edl: EDL
@@ -98,6 +101,31 @@ function imageFor(sk: StickerClip, sid: string | null): HTMLImageElement | 'load
   img.src = url
   return 'loading'
 }
+
+// RENDER CLOCK vs LAYOUT TIME — the three pure helpers every time comparison
+// in this layer goes through.
+//
+// `t` in the draw loop is the <video>'s currentTime: RENDER time. Every
+// overlay clip's `start`/`end` is LAYOUT time, the EDL's own coordinate
+// space. After a v1 transition the two differ by the overlap the crossfade
+// consumed (`lib/timelineLayout`: render_time(t) = t − Σ{d_i : seam s_i ≤ t}),
+// and the export now places every non-v1 lane at `render_time(start)`. This
+// layer tested `c.start <= t <= c.end` and computed keyframe/PiP-media local
+// time as `t - start` — raw layout values against the render clock — which is
+// the same drift TextLayer.tsx just fixed: on the reported session (12 Zoom
+// In transitions, 71.86 s layout → 69.46 s render) a sticker or PiP appeared
+// up to 2.4 s LATE relative to the picture, and a PiP's own footage started
+// that far into itself. The adapters this layer goes through —
+// `activeInRender`, `renderLocal`, `layoutClock` — live in lib/timelineLayout
+// (not exported from here: a component file that exports plain functions
+// breaks Fast Refresh, and the lint says so) so the sign and the drop rule
+// are pinned by a node test — the canvas itself cannot run under vitest, and
+// a screenshot would not catch a 0.5 s offset.
+//
+// They are thin adapters over the seam table, never a second rule: which
+// transitions count, the tolerance and the clamp all live in the table, and
+// if this file ever disagreed with the Timeline the preview would promise a
+// sync the export does not produce.
 
 type Drag =
   // 'pip-frame' is an ALT-drag that pans the picture inside a cropped PIP's
@@ -143,13 +171,23 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
   // the <video> is the WRONG element (the browser draws the PIP, so the render
   // does not contain it), and this layer is the right one. See livePipTx.
   const liveTransform = useStore((s) => s.liveTransform)
+  // The v1 seam table (see the render-clock helpers above). Computed once per
+  // EDL, never per frame: this component's draw effect is registered once
+  // (its deps are the element and the callbacks, not the EDL — it reads the
+  // EDL through `stateRef`), so unlike TextLayer it cannot compute the table
+  // at the top of the effect; a memo threaded through the same ref is the
+  // equivalent "once per EDL change" here.
+  const seams = useMemo(() => v1SeamsOf(edl), [edl])
+  // v1's per-clip pull (the lane the transitions live ON is positioned per
+  // clip, not through `renderWindow`) — for `activeV1Clip`, same lifetime.
+  const v1Shift = useMemo(() => v1LayoutOf(edl).shift, [edl])
 
   // Keep the latest reactive values in a ref so the rAF loop + event handlers
   // (registered once) always read fresh state without re-binding.
   const stateRef = useRef({ edl, width, height, selection, sessionId, framing,
-                            isPlaying, playbackRate, liveTransform })
+                            isPlaying, playbackRate, liveTransform, seams, v1Shift })
   stateRef.current = { edl, width, height, selection, sessionId, framing,
-                       isPlaying, playbackRate, liveTransform }
+                       isPlaying, playbackRate, liveTransform, seams, v1Shift }
   const dragRef = useRef<Drag | null>(null)
   // Committed-but-unconfirmed rotation from the grip (see liveRot).
   const heldRotRef = useRef<{ id: string; deg: number; at: number } | null>(null)
@@ -238,11 +276,13 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
     // Raw clip-array order used to be a THIRD, unsynchronized ordering.
     const activeStickers = (t: number): StickerClip[] => {
       const out: { sk: StickerClip; tz: number; cz: number }[] = []
+      const { seams } = stateRef.current
       for (const tk of stateRef.current.edl.tracks) {
         if (tk.type !== 'sticker') continue
         const tz = (tk as unknown as { z?: number }).z ?? 0
         for (const c of tk.clips) {
-          if (isSticker(c) && c.start <= t && t <= c.end) {
+          // `t` is the render clock; `[start, end]` is layout — see activeInRender.
+          if (isSticker(c) && activeInRender(seams, c.start, c.end, t, true)) {
             out.push({ sk: c, tz, cz: (c as unknown as { z?: number }).z ?? 0 })
           }
         }
@@ -276,9 +316,11 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
     }
 
     const stickerBox = (sk: StickerClip, t: number): OverlayBox => {
-      const { edl, width, height } = stateRef.current
+      const { edl, width, height, seams } = stateRef.current
       const ov = liveOverride(sk.id)
-      return boxFromStickerGeom(sk.id, stickerGeom(sk, t, edl.canvas.w, edl.canvas.h, width, height, ov))
+      // Keyframes run in clip-local RENDER time — see layoutClock.
+      return boxFromStickerGeom(sk.id, stickerGeom(
+        sk, layoutClock(seams, sk.start, t), edl.canvas.w, edl.canvas.h, width, height, ov))
     }
 
     // NOTE: a text box arrives from TextLayer ALREADY LIVE — it reads the same
@@ -318,17 +360,20 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
     // table of box dimensions (overlay.test.ts + test_pip_overlay.py).
     const activePips = (t: number): Clip[] => {
       const out: Clip[] = []
+      const { seams } = stateRef.current
       for (const tk of stateRef.current.edl.tracks) {
         if (tk.type !== 'video' || tk.id === 'v1') continue
         for (const c of tk.clips) {
-          if (isMediaClip(c) && c.start <= t && t < clipEnd(c)) out.push(c)
+          // A PiP is positioned against v1's picture in layout time and played
+          // by the renderer at render_time(start) — same rule as a sticker.
+          if (isMediaClip(c) && activeInRender(seams, c.start, clipEnd(c), t, false)) out.push(c)
         }
       }
       return out
     }
 
     const pipBox = (c: Clip, t: number): OverlayBox => {
-      const { edl, width, height, sessionId } = stateRef.current
+      const { edl, width, height, sessionId, seams } = stateRef.current
       // The EDL records no frame size, so the PIP's aspect is probed from the
       // source file and cached (lib/media). While it loads, pipGeom falls back
       // to the canvas aspect so the box stays grabbable instead of vanishing.
@@ -342,7 +387,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       const g = pipGeom(
         c as unknown as { start: number; transform?: StickerClip['transform']
                           mask?: { type?: string } | null; fit?: string },
-        t, edl.canvas, aspect, width, height, mergeLivePipScale(ov, lt?.scale))
+        layoutClock(seams, c.start, t), edl.canvas, aspect, width, height,
+        mergeLivePipScale(ov, lt?.scale))
       const lr = liveRot(c.id)
       const rotDeg = lr ?? lt?.rotation ?? null
       return { id: c.id, kind: 'pip', cx: g.cx, cy: g.cy, hw: g.hw, hh: g.hh,
@@ -371,14 +417,22 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       return !!c && stateRef.current.framing?.clipId === c.id
     }
 
-    // The v1 clip on screen at time t, if any — the direct-drag target when
-    // nothing else (sticker/text) is under the cursor.
+    // The v1 clip on screen at render time t, if any — the direct-drag
+    // target when nothing else (sticker/text) is under the cursor.
+    //
+    // v1 is the lane the transitions live ON, so its clips are positioned by
+    // a per-clip pull (`timelineLayout.v1Layout`), not by `renderWindow`;
+    // `v1ClipAt` tests each clip at `start − shift` and keeps the LAST match,
+    // so a crossfade window answers clip B (what the <video> is fading in).
+    // The old layout-time test deferred to `store.clipAt`, which had no
+    // callers (now deleted): for the first Σoverlap seconds of C's picture it
+    // answered B, so a framing drag on C was refused — or reframed B.
+    // Preview.tsx and Properties measure the same clip's local clock from
+    // the same pull (`renderSpanOf`), so the gate and the panel agree.
     const activeV1Clip = (t: number): Clip | undefined => {
       const v1 = stateRef.current.edl.tracks.find((tk) => tk.id === 'v1')
       if (!v1) return undefined
-      return v1.clips.find(
-        (c): c is Clip => isMediaClip(c) && c.start <= t && t < clipEnd(c),
-      )
+      return v1ClipAt(v1.clips.filter((c): c is Clip => isMediaClip(c)), stateRef.current.v1Shift, t)
     }
 
     // Rotation being dragged right now, so the box turns under the pointer
@@ -474,7 +528,14 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
           // PLAY the element while the timeline plays; only SEEK while paused.
           // Seeking per frame is what made the PIP flicker and vanish during
           // playback — see syncPipVideo.
-          syncPipVideo(v, t, pc.start, (pc as unknown as { in?: number }).in ?? 0,
+          //
+          // The element's offset is `in + (t − start)` with `start` in RENDER
+          // time: the renderer starts the PiP's footage where its enable
+          // window opens, `render_time(start)`, so handing it the layout start
+          // would play the footage that much too early into itself (up to
+          // 2.4 s on the reported session) while the box appeared late.
+          syncPipVideo(v, t, renderTime(stateRef.current.seams, pc.start),
+                       (pc as unknown as { in?: number }).in ?? 0,
                        stateRef.current.edl.canvas.fps ?? 30,
                        { playing: stateRef.current.isPlaying,
                          rate: stateRef.current.playbackRate })
@@ -500,7 +561,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         // opacity for the whole gesture and only the main video appeared to
         // react, which is the bug this pair of changes fixes.
         ctx.globalAlpha = livePipTx(pc.id)?.opacity
-          ?? sampleKF(pcx.transform?.opacity as never, t - pc.start, 1)
+          ?? sampleKF(pcx.transform?.opacity as never,
+                      renderLocal(stateRef.current.seams, pc.start, t), 1)
         clipToShape(ctx, pcx.mask, box.hw, box.hh)
         // NEVER `continue` past a PIP whose frame is unavailable — before this
         // layer owned the pixels the renderer baked it, so skipping is a
@@ -574,7 +636,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       // prevent, just moved a few frames later.
       for (const sk of paintOrder(stickers, dragRef.current?.id ?? pendingRef.current?.id)) {
         const ov = liveOverride(sk.id)
-        const g = stickerGeom(sk, t, stateRef.current.edl.canvas.w, stateRef.current.edl.canvas.h,
+        const g = stickerGeom(sk, layoutClock(stateRef.current.seams, sk.start, t),
+                              stateRef.current.edl.canvas.w, stateRef.current.edl.canvas.h,
                               width, height, ov)
         ctx.save()
         ctx.translate(g.cx, g.cy)
@@ -713,7 +776,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
           const sk = activeStickers(t).find((s) => s.id === selBox.id)
           let scale0 = 1
           if (sk) {
-            scale0 = stickerGeom(sk, t, stateRef.current.edl.canvas.w,
+            scale0 = stickerGeom(sk, layoutClock(stateRef.current.seams, sk.start, t),
+                                 stateRef.current.edl.canvas.w,
                                  stateRef.current.edl.canvas.h,
                                  stateRef.current.width, stateRef.current.height).scale
           } else if (selBox.kind === 'pip') {
@@ -722,7 +786,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
               scale0 = pipGeom(
                 pc as unknown as { start: number; transform?: StickerClip['transform']
                                    mask?: { type?: string } | null; fit?: string },
-                t, stateRef.current.edl.canvas, null,
+                layoutClock(stateRef.current.seams, pc.start, t),
+                stateRef.current.edl.canvas, null,
                 stateRef.current.width, stateRef.current.height).scale
             }
           }

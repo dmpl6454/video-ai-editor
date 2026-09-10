@@ -72,6 +72,14 @@ every planted event is an exact concat offset, not a whisper guess:
 * Exported `.srt/.vtt/.ass` stay source-timed by design (baseline finding
   15); no case asserts an exported subtitle file against a cut render — the
   captions **track** is what is measured.
+* **Two clocks.** The EDL stores every lane in **layout** time; a v1 cross-fade
+  plays clip A's last *d* seconds and clip B's first *d* seconds in the same
+  output window, so the picture and speech after a seam reach the screen
+  *d* early. `render_time(t) = t − Σ{d : seam ≤ t}` is the render's clock, and
+  the transition cases measure the overlay and audio lanes against **it**, on
+  the render — a check that compares layout coordinates with layout
+  coordinates (`captions_relaid_without_drift`, `edl_duration_agrees`) cannot
+  see a lane that plays late.
 * No network: a socket-level guard fails any non-loopback connection for the
   whole session; `huggingface_hub.snapshot_download` can only resolve from the
   local cache. `downloads` questions are answered **skip**, so a case that
@@ -106,10 +114,44 @@ clips" (Basic: `crossdissolve` at all five seams, captions re-laid and in
 sync within 0.1 s at every seam), 25 "smooth zoom between every clip" (Zoom
 family), 26 "add a glitch transition at the hook" (Glitch/Stylised family at
 the opening seam). Each asserts exactly one op, an overlap total of at least
-0.1 s per applied transition (the catalog's shortest duration),
-and that ffprobe's duration of the render equals the clips' extent minus the
-overlaps within 0.2 s — computed from the clips and transitions alone, not
-from `EDL.transition_overlap()`.
+0.1 s per applied transition (the catalog's shortest duration), and that the
+render's **audio-stream** duration (sample-exact; the container duration is
+frame-quantised) equals the clips' extent minus the overlaps within a frame
++ 20 ms — computed from the clips and transitions alone, not from
+`EDL.transition_overlap()`; `seam_table_agrees` reports, by name, whether
+that restated rule and the product's `EDL.v1_seam_table()` name the same
+seams.
+
+### The render-clock probes
+
+Before the prompt runs, each transition case plants two **probe pairs**
+through the real dispatch route: a canvas-covering pure-magenta sticker
+(`add_sticker`, `scale = 1/0.22` so the 22 %-of-long-edge default covers the
+frame) and a 0.5 s, 1 kHz tone as a clip on the `vo` lane (`add_clip`) — one
+pair 3 s **before** the first seam and one pair 3 s **after** it, snapped
+outward to the 0.1 s grid (exact in the renderer's three-decimal `enable=`
+windows and on a frame at 30 fps). The pre-transition render is kept. After
+the prompt, the transitioned render is sampled: every frame of the search
+window is box-averaged to one pixel (`scale=1:1:flags=area`, stamped with its
+own container pts via `-copyts` + `showinfo`, `fps_mode passthrough`) and
+classified magenta or not; the audio is band-passed 40 Hz around 1 kHz and
+`astats` gives an RMS level every 10 ms, the tone being the longest run within
+8 dB of the window's peak provided that peak stands 12 dB above the median.
+
+| assertion | measured how | passes when |
+|---|---|---|
+| `overlay_follows_render_clock` | first/last magenta frame of the post-seam sticker | window = `[render_time(t), render_time(t + 0.5))` ± 1 frame (+5 ms) |
+| `audio_follows_render_clock` | onset/offset of the post-seam 1 kHz tone | same window ± 0.05 s |
+| `probes_before_first_seam_unmoved` | both pre-seam probes | at their **layout** window (no seam precedes them, so render time = layout time) |
+| `probes_visible_before_transitions` | the post-seam pair in the render kept from before the prompt | at their layout window — the guard against a probe that never renders passing the two checks above vacuously |
+| `seam_table_agrees` | `M.seam_overlaps(edl)` vs `EDL.v1_seam_table()` | identical `(seam, seconds)` lists |
+
+The probes never straddle a consumed span (3 s clear of any catalog
+transition on either side), so the rule for an overlay that lies entirely
+inside a cross-fade's consumed tail — its mapped window is empty and it is
+**dropped**, never inverted — is the render-clock unit tests' to pin, not the
+benchmark's. The detail of a failing probe assertion carries the measured
+**lag** against the picture, so the report reads as a number, not a verdict.
 
 ## First-use downloads
 
@@ -174,6 +216,21 @@ product change and a test:
   segment start ("Um," inside the preceding pause), present with zero
   transitions; it now measures DRIFT — the per-seam cue-vs-word offset must
   not change through the re-lay (`captions_relaid_without_drift`).
+* **Cases 18, 25, 26 — the overlay lanes play late by the accumulated
+  overlap (2026-09-11).** The render-clock probes, run against the renderer
+  before `render/clock.py` existed: with 0.4 s consumed at the first seam
+  (case 18) the post-seam sticker appeared at 14.133 s for a picture-relative
+  expectation of 13.667 s (**lag +0.467 s**) and the VO-lane tone at 14.080 s
+  (**+0.413 s**); with 0.3 s consumed (25, 26) the lags were +0.367 / +0.313 s.
+  The pre-seam pair did not move (measured 8.10 / 8.08 s for a layout start
+  of 8.067 s — the renderer's three-decimal `enable=` window, which is why the
+  probe times now snap to the 0.1 s grid). Every lane positioned by
+  `enable=between(t,start,end)` or `adelay=start` — text, captions, stickers,
+  PiP, music, voiceover — was placed in layout time while the v1 picture had
+  been pulled left; the desktop timeline drew the same thing. The fix is the
+  render clock (`render_time(t) = t − Σ overlap at or before t`) applied in
+  the renderer and in the desktop's drawing; these assertions are what
+  proves it landed.
 * **Case 20 — Hindi captions dropped when MADLAD is skipped** instead of
   falling back to as-spoken captions; the reply said so. Still open.
 * **Case 22 — "undo that" recognised, nothing dispatched.** Still open.

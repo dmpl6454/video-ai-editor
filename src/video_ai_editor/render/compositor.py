@@ -22,7 +22,8 @@ from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
-from .pip import build_pip_overlay_chain, collect_pip_clips
+from .pip import build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index
+from . import clock
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 
 
@@ -635,8 +636,20 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                           cache_dir: Path | None = None,
                           chunk_paths: list[Path] | None = None,
                           fps: int = 30, total_duration: float = 0.0,
+                          seams: clock.SeamTable | None = None,
                           ) -> tuple[str, list[str], list[str], list[str]]:
     """Build the video+audio filter chain for the V1 timeline.
+
+    `total_duration` is the LAYOUT end of the timeline (`edl.duration +
+    edl.transition_overlap()`), NOT `edl.duration`: `_v1_segments` walks a
+    layout cursor, and the trailing filler is `total_duration − cursor`. It
+    was handed `edl.duration` — already render time — so whenever a music
+    bed or sticker outlived v1 on a timeline with transitions the tail came
+    out short by the total overlap: A=2 s, B=2 s, fade 0.5, music to layout
+    5.0 → edl.duration 4.5, file 4.0 s, the bed's last 0.45 s and a sticker at
+    layout 4.5–5.0 (clock 4.0–4.5) simply absent while the transport promised
+    them. `seams` is the seam table the xfades follow (see below); when not
+    given it is derived from `clips`/`transitions` by the same function.
 
     Returns (filter_str, input_args, [v_label, a_label], extra_inputs_for_masks).
     Each clip is decoded with input-side seeking, scaled+padded to canvas,
@@ -740,23 +753,38 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
 
     # Transitions bridge two clips that are ADJACENT segments — a cross-fade
     # across intervening black is meaningless, so a gapped boundary stays a cut.
-    # `tr.at` is matched against the clip's TIMELINE end (start + effective
-    # duration); the old code accumulated effective durations from 0, which
-    # drifted the moment the timeline had any leading offset or gap.
-    from .transitions import effective_duration
+    #
+    # WHICH seam gets WHICH duration is not decided here. `seam_table_for`
+    # (edl/schema.py — the body of `EDL.v1_seam_table()`) is the one rule:
+    # adjacency, the 0.05 s boundary match, the FIRST record at a stacked
+    # cut, the cost clamped to the shorter neighbour. `edl.duration`, the
+    # render clock every other lane is placed through, the desktop's
+    # `seamTable` and the benchmark all read that table; this loop used to be
+    # a second copy that disagreed with it three ways (last record won,
+    # `effective_duration` resolved sub-0.1 s records here but not there,
+    # nothing clamped to the clip lengths), and every disagreement was the
+    # picture running ahead of the overlays by the difference, with the video
+    # stream ending before the audio. Measured: A=2 s, B=0.3 s, fade 0.5 →
+    # video 1.8 s / audio 2.0 s; fade 5.0 between 2 s clips → video 2.0 s /
+    # audio 4.0 s with clip C never shown. So: the COST comes from the table
+    # (matched on the boundary it was built from, same 1 ms as
+    # `_assemble_v1_audio`), only the LOOK comes from the record — the first
+    # match, the same record the table charged — and a boundary the table
+    # does not list is a hard cut, whatever records sit near it.
+    from ..edl.schema import seam_matching, seam_table_for
+    records = list(transitions)
+    if seams is None:
+        seams = seam_table_for(clips, records)
     seg_trans: dict[int, tuple[str, float]] = {}
     for idx, c in enumerate(clips[:-1]):
         si = seg_of_clip.get(idx)
         if si is None or seg_of_clip.get(idx + 1) != si + 1:
             continue
         boundary = c.start + c.effective_duration
-        for tr in transitions:
-            if abs(tr.at - boundary) < 0.05:
-                # A stored duration ≤ 0 (a legacy record, or a caller that
-                # wrote 0 to mean "default") is the transition's own default,
-                # never a 0 s xfade — ffmpeg refuses that and the EDL would
-                # count the seam as free. Same rule add_transition applies.
-                seg_trans[si] = (tr.type, effective_duration(tr.type, tr.duration))
+        cost = next((d for seam, d in seams if abs(seam - boundary) < _GAP_EPS), 0.0)
+        record = seam_matching(records, boundary)
+        if cost > 0.0 and record is not None:
+            seg_trans[si] = (record.type, cost)
 
     # ---- Timeline assembly ----
     if not seg_trans:
@@ -910,7 +938,14 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # filler — and NOT a special path. It used to short-circuit to a bare
     # black+anullsrc render that never called `build_audio_mix`, which silently
     # dropped every note of a music-only timeline.
-    total_duration = max(0.0, edl.duration)
+    #
+    # The v1 assembly walks LAYOUT time (`_v1_segments`' cursor is clip
+    # start + effective duration), so the extent it pads to must be the
+    # layout end, which is `edl.duration` (render length) plus the overlap the
+    # transitions consumed — see `_build_filter_complex`'s docstring for the
+    # measured 0.5 s short file this used to produce.
+    seams = clock.seam_table(edl)
+    total_duration = max(0.0, edl.duration + sum(d for _s, d in seams))
     if not clips:
         total_duration = max(1.0, total_duration)  # never emit a 0-length file
 
@@ -950,6 +985,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     fc, inputs, labels, mask_inputs = _build_filter_complex(
         clips, w_out, h_out, transitions=transitions, cache_dir=cache_dir,
         chunk_paths=chunk_paths, fps=fps, total_duration=total_duration,
+        seams=seams,
     )
     v_label = labels[0]
     a_label = labels[1]
@@ -1057,10 +1093,17 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             pass  # any concat/copy hiccup → fall through to the re-encode path
 
     # Fold V2 PiP audio into the V1 main audio before the music+vo mixer runs.
-    # Each PIP clip's audio is positioned at its timeline start via adelay and
-    # amix'd with the main concat audio.
+    # Each PIP clip's audio is positioned at its RENDER start via adelay and
+    # amix'd with the main concat audio. Render start, not layout start: the
+    # main audio it is mixed with is the xfade/acrossfade output, already
+    # pulled left by every cross-fade before the PIP, and pip.py placed the
+    # picture (`-itsoffset`) at that same instant. The audio comes from its
+    # OWN input (pip.pip_audio_input_index — see INPUTS_PER_PIP there for why
+    # one input cannot carry both), already `-t`-capped to the render window,
+    # so no trim is needed here. `seams` is the table the v1 assembly above
+    # was xfaded with — one table for the whole graph.
     if pip_audio_clips:
-        # PIP video inputs were added at indices [pre_pip..pre_pip+N-1] —
+        # PIP inputs start at pre_pip (INPUTS_PER_PIP of them per clip) —
         # pre_pip is captured ABOVE, right after pip_inputs_count is known and
         # before next_idx advances any further (the text-overlay block below
         # also advances next_idx; re-deriving pre_pip via subtraction here
@@ -1069,8 +1112,8 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         pa_parts: list[str] = []
         pa_labels: list[str] = []
         for j, c in enumerate(pip_audio_clips):
-            input_idx = pre_pip + j
-            delay_ms = max(0, int(round(c.start * 1000)))
+            input_idx = pip_audio_input_index(pre_pip, j)
+            delay_ms = max(0, int(round(clock.render_time(seams, c.start) * 1000)))
             chain = (f"[{input_idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
             # PIP clips' own gain/fade/mute (was ignored — the v2 volume
@@ -1368,6 +1411,78 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
     return RenderResult(path=dst, cached=False, edl_hash=h)
 
 
+def _assemble_v1_audio(fc_parts: list[str], clips: list[Clip], a_labels: list[str],
+                       *, total_duration: float, seams: clock.SeamTable,
+                       out_label: str) -> None:
+    """Audio-only twin of the timeline assembly in `_build_filter_complex`:
+    the per-clip audio streams in `a_labels`, walked over `_v1_segments` (so
+    gaps become silent filler exactly as the video got black filler) and
+    joined with `acrossfade` at every seam in `seams`, plain concat elsewhere.
+    Appends to `fc_parts` and ends on `out_label`.
+
+    The seams come from the render clock's table rather than from re-matching
+    `Transition` records here: the audio this produces is remuxed against a
+    VIDEO the main path already cross-faded, and the table is the one
+    statement of which seams that was and by how much. The main path reads
+    the same table (`_build_filter_complex`), so the cached video and this
+    audio cannot disagree — they did while the main path kept its own
+    matcher (a legacy zero-duration record xfaded there and was uncounted
+    here, so a music-only edit remuxed plain-concat audio onto a cross-faded
+    picture). `Transition.duration` is now normalised in the schema, so no
+    record carries a number the renderer will not use.
+
+    `total_duration` is the LAYOUT end, as in `_build_filter_complex`.
+    """
+    segments = _v1_segments(clips, total_duration)
+    seg_a: list[str] = []
+    seg_dur: list[float] = []
+    seg_of_clip: dict[int, int] = {}
+    for kind, val in segments:
+        if kind == "clip":
+            ci = int(val)  # type: ignore[arg-type]
+            seg_of_clip[ci] = len(seg_a)
+            seg_a.append(a_labels[ci])
+            seg_dur.append(clips[ci].effective_duration)
+        else:
+            g = float(val)  # type: ignore[arg-type]
+            ag = f"[ragap{len(seg_a)}]"
+            fc_parts.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000:d={g:.3f},"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo{ag}")
+            seg_a.append(ag)
+            seg_dur.append(g)
+    if not seg_a:
+        return
+    # Seam → the segment index of its LEFT clip; only adjacent clip segments
+    # can carry one (the table already excludes gapped boundaries, matched
+    # here on the same boundary it was built from).
+    seg_fade: dict[int, float] = {}
+    for idx, c in enumerate(clips[:-1]):
+        si = seg_of_clip.get(idx)
+        if si is None or seg_of_clip.get(idx + 1) != si + 1:
+            continue
+        boundary = c.start + c.effective_duration
+        cost = next((d for seam, d in seams if abs(seam - boundary) < 0.001), 0.0)
+        if cost > 0.0:
+            seg_fade[si] = cost
+    if not seg_fade:
+        if len(seg_a) == 1:
+            fc_parts.append(f"{seg_a[0]}anull{out_label}")
+        else:
+            fc_parts.append("".join(seg_a) + f"concat=n={len(seg_a)}:v=0:a=1{out_label}")
+        return
+    cur = seg_a[0]
+    for i in range(1, len(seg_a)):
+        new = f"[rxa{i}]"
+        d = seg_fade.get(i - 1)
+        if d:
+            fc_parts.append(f"{cur}{seg_a[i]}acrossfade=d={d:.3f}{new}")
+        else:
+            fc_parts.append(f"{cur}{seg_a[i]}concat=n=2:v=0:a=1{new}")
+        cur = new
+    fc_parts.append(f"{cur}anull{out_label}")
+
+
 def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
                           *, fps: int, cache_dir: Path) -> None:
     """Take a cached video-only mp4 and mux a fresh audio mix onto it.
@@ -1375,6 +1490,13 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     The audio mix is built the same way the main renderer does it (V1 source
     audio + music ducking + voiceover) but only the audio is encoded.
     Video is `-c:v copy` so this is essentially I/O bound.
+
+    "The same way" includes the v1 ASSEMBLY: gap filler and an `acrossfade`
+    at every seam the cached video was `xfade`d at (`_assemble_v1_audio`).
+    This path used to plain-`concat` the per-clip audio, so on a timeline
+    with transitions a music-only edit served a preview whose speech ran
+    late by the accumulated overlap against a picture that did not — the
+    render-clock drift, re-created on the fast path alone.
     """
     clips = _video_clips(edl)
     tmp = _part_path(dst)
@@ -1404,14 +1526,13 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             c, input_label=f"[{idx}:a]", label_out=f"[a{i}]"
         ))
         a_labels.append(f"[a{i}]")
-    # Concat per-clip audio
-    if len(a_labels) == 1:
-        fc_parts.append(f"{a_labels[0]}anull[aout]")
-    else:
-        # Pair-wise concat with identical sample format
-        fc_parts.append(
-            "".join(a_labels) + f"concat=n={len(a_labels)}:v=0:a=1[aout]"
-        )
+    seams = clock.seam_table(edl)
+    # Layout end, not `edl.duration` — the cached video was padded to the
+    # layout end (see `_render_locked`), and audio a total overlap shorter
+    # than its picture would truncate the file on `-shortest`.
+    _assemble_v1_audio(fc_parts, clips, a_labels,
+                       total_duration=max(0.0, edl.duration + sum(d for _s, d in seams)),
+                       seams=seams, out_label="[aout]")
 
     # Track-level v1 mute — mirror of the main render path (audio-only).
     a_main = "[aout]"
@@ -1424,15 +1545,22 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     # per-clip gain/fade/mute + adelay + amix). Skipping this dropped every
     # PIP clip's audio from the remuxed preview.
     next_idx = 1 + len(clips)
-    pip_clips = [c for _tid, c in collect_pip_clips(edl)]
+    # Same placement rule as pip.py: render window, and a PIP the seams
+    # consumed entirely is not an input at all.
+    pip_clips = [(c, win) for _tid, c in collect_pip_clips(edl)
+                 if (win := clock.render_window(seams, c.start, c.start + c.duration)) is not None]
     if pip_clips:
         pa_labels: list[str] = []
-        for j, c in enumerate(pip_clips):
+        for j, (c, (rs, re)) in enumerate(pip_clips):
             idx = next_idx + j
             inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
-            delay_ms = max(0, int(round(c.start * 1000)))
+            delay_ms = max(0, int(round(rs * 1000)))
             chain = (f"[{idx}:a]aresample=async=1:first_pts=0,"
                      f"aformat=channel_layouts=stereo:sample_rates=48000")
+            if re - rs < c.duration - 0.0005:
+                # Straddles a seam: shorter on screen than its source length
+                # (pip.py caps the main path's input with `-t` for the same).
+                chain += f",atrim=duration={max(0.0, re - rs):.3f}"
             chain += _audio_props_filters(c)
             if delay_ms > 0:
                 chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"

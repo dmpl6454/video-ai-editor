@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { layoutPlayhead } from '../lib/timelineLayout'
 import { useStore } from '../store'
 import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
 import { api } from '../api'
@@ -130,13 +131,19 @@ export function StickerPanel() {
     // every track, so it already includes overlays — clamping to it is circular:
     // one overlay that overshoots the video licenses the next one to overshoot
     // just as far, and the timeline keeps growing a black tail.
-    const duration = videoContentEnd(edl) || (playhead + 3.0)
+    // The playhead is RENDER time; `start` and `videoContentEnd` are LAYOUT
+    // time. Decode first (lib/timelineLayout `layoutPlayhead`, the Timeline's
+    // own sticker-drop inverse) and keep the 3 s window arithmetic in layout
+    // space: after twelve Zoom-Ins the raw playhead authored the sticker
+    // 2.4 s early, drawn 2.4 s left of the playhead and baked there.
+    const at = layoutPlayhead(edl, playhead)
+    const duration = videoContentEnd(edl) || (at + 3.0)
     // Guarantee a real 3s window: if the playhead is close enough to the end
     // that a plain [playhead, playhead+3] clamped to duration would collapse
     // to near-zero, pull start back so the full 3s fits before the end
     // instead (never before 0). Inserting an emoji right at the tail of the
     // timeline used to silently produce a near-invisible sticker — issue 31b.
-    const start = Math.max(0, Math.min(playhead, duration - 3.0))
+    const start = Math.max(0, Math.min(at, duration - 3.0))
     await dispatch('add_sticker', {
       emoji,
       start,

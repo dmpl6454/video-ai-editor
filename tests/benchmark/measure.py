@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from video_ai_editor import platformutil as _pu
 from video_ai_editor.agent import timemap
@@ -420,23 +421,219 @@ def frame_hash(path: Path, t: float, *, size: str = "64x36") -> str:
     return hashlib.md5(proc.stdout).hexdigest()
 
 
-def expected_render_duration(edl: EDL) -> tuple[float, float]:
-    """(expected rendered seconds, seconds the transitions overlap) computed
-    from the clips and transitions alone — the renderer's rule, restated
-    here rather than imported from `EDL.transition_overlap()` so a change to
-    that method shows up as a benchmark disagreement."""
+def seam_overlaps(edl: EDL) -> list[tuple[float, float]]:
+    """(seam, seconds the cross-fade consumes) for every v1 seam the renderer
+    will actually xfade, in timeline order — the renderer's applicability
+    rule restated from the clips and transitions alone (adjacent clips only,
+    one transition per seam matched within 0.05 s, never more than the
+    shorter neighbour can give) rather than imported from
+    `EDL.transition_overlap()`, so a change to that method shows up as a
+    benchmark disagreement. The rule lives HERE once on the benchmark side:
+    `expected_render_duration` and `render_time` both read it, so the
+    duration check and the clock check cannot quietly disagree about which
+    seams count."""
     clips = v1_clips(edl)
-    extent = max((c.start + c.effective_duration for c in clips), default=0.0)
-    overlap = 0.0
     trs = transitions(edl)
+    out: list[tuple[float, float]] = []
     for cur, nxt in zip(clips, clips[1:]):
         seam = cur.start + cur.effective_duration
         if nxt.start - seam > 0.001:
             continue
         match = next((t for t in trs if abs(t.at - seam) < 0.05), None)
         if match is not None:
-            overlap += max(0.0, min(float(match.duration), cur.effective_duration, nxt.effective_duration))
+            out.append((seam, max(0.0, min(float(match.duration), cur.effective_duration, nxt.effective_duration))))
+    return out
+
+
+def expected_render_duration(edl: EDL) -> tuple[float, float]:
+    """(expected rendered seconds, seconds the transitions overlap) computed
+    from the clips and transitions alone — see `seam_overlaps` for why the
+    rule is restated rather than imported."""
+    clips = v1_clips(edl)
+    extent = max((c.start + c.effective_duration for c in clips), default=0.0)
+    overlap = sum(d for _, d in seam_overlaps(edl))
     return extent - overlap, overlap
+
+
+def render_time(edl: EDL, t: float) -> float:
+    """Layout second `t` on the RENDER's clock: `t` minus every overlap whose
+    seam lies at or before it. An xfade plays clip A's last d seconds and
+    clip B's first d seconds in the same output window, so everything on
+    clip B — and every later clip — reaches the screen earlier than its
+    layout start by the overlap accumulated so far. A caption, sticker,
+    PiP or bed written at layout time `t` is in sync with the picture only
+    if the renderer places it at `render_time(t)`; nothing in the EDL moves
+    (layout stays the EDL's coordinate space), only the renderer converts.
+
+    WHY `seam <= t`, not `<`: the seam itself is clip B's first frame, and
+    B's first frame is already inside the cross-fade window — it has
+    already been pulled left by that seam's overlap."""
+    return float(t) - sum(d for seam, d in seam_overlaps(edl) if seam <= t + 1e-6)
+
+
+# --------------------------------------------------------------------------
+# render-clock probes: a full-frame colour and a tone, found in the render
+# --------------------------------------------------------------------------
+
+#: The probe sticker's colour (pure magenta) and the classifier for a frame
+#: MEAN. Not an exact match: captions or a hook drawn over the probe lighten
+#: the mean a little (white text over magenta), while no scene of the fixture
+#: — a coloured band over `testsrc2` — averages anywhere near it.
+PROBE_RGB = (255, 0, 255)
+#: `cache_sticker_pngs` sizes a sticker to 22 % of the canvas's long edge ×
+#: scale, so this scale makes a canvas-sized PNG cover the canvas (1919 of
+#: 1920 px: `int()` truncation leaves one column, invisible in the mean).
+#: Not larger: a wider sticker pastes at a negative offset, which Pillow only
+#: sometimes accepts.
+PROBE_STICKER_SCALE = 1.0 / 0.22
+#: Amplitude of the probe tone (−10.5 dBFS): loud enough to stand ≥ 12 dB
+#: over the voice's energy in a 40 Hz band, quiet enough to leave the
+#: render's integrated loudness alone (0.5 s in 70 s).
+PROBE_TONE_AMPLITUDE = 0.3
+
+
+def is_probe_frame(rgb: tuple[int, int, int]) -> bool:
+    r, g, b = rgb
+    return r >= 170 and b >= 170 and g <= 110
+
+
+def write_probe_sticker(path: Path, w: int, h: int) -> Path:
+    """A canvas-sized, fully opaque `PROBE_RGB` PNG at `path`."""
+    from PIL import Image
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (int(w), int(h)), (*PROBE_RGB, 255)).save(path)
+    return path
+
+
+def write_probe_tone(path: Path, *, freq_hz: float, seconds: float) -> Path:
+    """A mono 48 kHz PCM WAV of a pure sine at `freq_hz` for `seconds`
+    (`aevalsrc`, exact amplitude — lavfi's `sine` source is fixed at 1/8)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    expr = f"{PROBE_TONE_AMPLITUDE}*sin(2*PI*{freq_hz:g}*t)"
+    proc = subprocess.run([_pu.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                           "-i", f"aevalsrc={expr}:s=48000:d={seconds:.3f}", "-c:a", "pcm_s16le", str(path)],
+                          capture_output=True, **_pu.SUBPROCESS_FLAGS)
+    if proc.returncode != 0 or not path.exists():
+        raise RuntimeError(f"probe tone synthesis failed: {proc.stderr[-300:]!r}")
+    return path
+
+
+_SHOWINFO_PTS = re.compile(r"pts_time:\s*(-?[\d.]+)")
+
+
+def frame_means(path: Path, *, first_frame: int, count: int, fps: float) -> list[tuple[int, tuple[int, int, int]]]:
+    """`(frame index, mean RGB)` for `count` consecutive frames from frame
+    index `first_frame`, in ONE ffmpeg call. Fewer pairs come back past the
+    end of the file.
+
+    The index is READ from each frame's own container pts (`-copyts` keeps
+    the original timestamps through the input seek; `showinfo` prints them
+    to stderr, one line per frame in output order), never inferred from the
+    seek. Measured before that: an accurate `-ss` to half a frame before the
+    target does decode the right first frame, but the rawvideo muxer's
+    default constant-frame-rate vsync then rounds the half-frame offset and
+    DUPLICATES a frame somewhere in the run — the onset of a box drawn on
+    [2.0, 2.5) read as 2.033 from one seek point and 2.0 from another. So:
+    `-fps_mode passthrough` (no dup/drop) and pts-derived indices, which
+    makes the ±1-frame assertions built on this exact by construction.
+    `scale=1:1:flags=area` is a box average over the whole frame — the
+    default bicubic would sample a handful of pixels."""
+    seek = max(0.0, (int(first_frame) - 0.5) / fps)
+    proc = subprocess.run([_pu.FFMPEG, "-hide_banner", "-loglevel", "info", "-nostats", "-ss", f"{seek:.4f}",
+                           "-i", str(path), "-copyts", "-fps_mode", "passthrough", "-frames:v", str(int(count)),
+                           "-vf", "showinfo,scale=1:1:flags=area,format=rgb24", "-f", "rawvideo", "-"],
+                          capture_output=True, **_pu.SUBPROCESS_FLAGS)
+    if proc.returncode != 0:
+        raise RuntimeError(f"frame sampling from frame {first_frame} failed: {proc.stderr[-300:]!r}")
+    data = proc.stdout
+    rgb = [(data[i], data[i + 1], data[i + 2]) for i in range(0, len(data) - 2, 3)]
+    times = [float(m.group(1)) for m in _SHOWINFO_PTS.finditer(proc.stderr.decode("utf-8", "replace"))]
+    # `showinfo` sits before the `-frames:v` cap, so the graph can stamp one
+    # frame more than the muxer writes; frames flow in order, so the first
+    # len(rgb) rows are the written ones. Fewer rows than frames is a bug.
+    if len(times) < len(rgb):
+        raise RuntimeError(f"frame sampling from frame {first_frame}: {len(times)} showinfo rows for {len(rgb)} frames")
+    return [(int(round(t * fps)), m) for t, m in zip(times[:len(rgb)], rgb)]
+
+
+def overlay_window(path: Path, *, lo: float, hi: float, fps: float,
+                   is_on: Callable[[tuple[int, int, int]], bool] = is_probe_frame) -> tuple[float, float] | None:
+    """`[first on-frame, one past the last on-frame)` in render seconds among
+    the frames of `[lo, hi)`, or None when no frame satisfies `is_on`.
+    Frame-exact by construction: one sample per decoded frame, each stamped
+    with its own container pts (`frame_means`)."""
+    k0 = max(0, int(round(lo * fps)))
+    k1 = max(k0, int(round(hi * fps)))
+    on = [k for k, rgb in frame_means(path, first_frame=k0, count=k1 - k0, fps=fps) if k0 <= k < k1 and is_on(rgb)]
+    if not on:
+        return None
+    return on[0] / fps, (on[-1] + 1) / fps
+
+
+_META_PTS = re.compile(r"pts_time:([\d.]+)")
+_META_RMS = re.compile(r"RMS_level=(-?[\d.]+|-inf)")
+
+
+def band_levels(path: Path, *, freq_hz: float, width_hz: float = 40.0,
+                hop_s: float = 0.01) -> list[tuple[float, float]]:
+    """(time, RMS dBFS) every `hop_s` of the audio inside a `width_hz` band
+    around `freq_hz`, over the WHOLE file — no `-ss`, so the printed
+    `pts_time` stays absolute. Bandpass first, then `asetnsamples` blocks,
+    `astats` per block, `ametadata` printing the one key to stdout."""
+    n = max(1, int(round(48000 * hop_s)))
+    af = (f"aresample=48000,bandpass=f={freq_hz:g}:width_type=h:w={width_hz:g},"
+          f"asetnsamples=n={n}:p=0,astats=metadata=1:reset=1,"
+          "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-")
+    proc = subprocess.run([_pu.FFMPEG, "-hide_banner", "-loglevel", "error", "-i", str(path), "-vn",
+                           "-af", af, "-f", "null", "-"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+    if proc.returncode != 0:
+        raise RuntimeError(f"band levels of {Path(path).name} failed: {proc.stderr[-300:]!r}")
+    out: list[tuple[float, float]] = []
+    t: float | None = None
+    for line in proc.stdout.splitlines():
+        m = _META_PTS.search(line)
+        if m:
+            t = float(m.group(1))
+            continue
+        m = _META_RMS.search(line)
+        if m and t is not None:
+            out.append((t, float(m.group(1))))
+            t = None
+    return out
+
+
+def tone_window(levels: list[tuple[float, float]], *, lo: float, hi: float,
+                drop_db: float = 8.0, floor_db: float = 12.0) -> tuple[float, float] | None:
+    """`[onset, offset)` of a tone inside `[lo, hi)`: the LONGEST run of
+    blocks within `drop_db` of the window's peak — a run, so a stray voice
+    harmonic in the band cannot pass for the onset — provided that peak
+    stands `floor_db` above the window's median level (else there is no
+    tone in the window: None). 8 dB rather than 3 because the bandpass rings
+    up over ~20 ms; measured on a bare tone, −8 dB finds the first block."""
+    rows = [(t, lvl) for t, lvl in levels if lo <= t < hi]
+    if not rows:
+        return None
+    peak = max(lvl for _, lvl in rows)
+    ordered = sorted(lvl for _, lvl in rows)
+    median = ordered[len(ordered) // 2]
+    if peak == float("-inf") or peak - median < floor_db:
+        return None
+    hop = (rows[-1][0] - rows[0][0]) / max(1, len(rows) - 1) if len(rows) > 1 else 0.01
+    best: tuple[int, int] | None = None
+    run_start: int | None = None
+    for i, (_, lvl) in enumerate([*rows, (0.0, float("-inf"))]):
+        if lvl >= peak - drop_db:
+            run_start = i if run_start is None else run_start
+            continue
+        if run_start is not None and (best is None or i - run_start > best[1] - best[0]):
+            best = (run_start, i)
+        run_start = None
+    if best is None:
+        return None
+    return rows[best[0]][0], rows[best[1] - 1][0] + hop
 
 
 # --------------------------------------------------------------------------
@@ -519,6 +716,9 @@ __all__ = ["Assertion", "check", "load_edl", "load_ops", "edl_hash", "Snapshot",
            "timeline_speech_spans", "merge_spans", "span_total", "intersection", "caption_cover",
            "captions_within_extent", "transcript_words_source", "captions_sync", "split_inside_word",
            "first_kept_source_time", "overlay_zone_violations", "hook_clip", "render", "probe_duration",
-           "render_silence", "render_loudness", "frame_hash", "expected_render_duration",
+           "render_silence", "render_loudness", "frame_hash", "seam_overlaps", "expected_render_duration",
+           "render_time", "PROBE_RGB", "PROBE_STICKER_SCALE", "PROBE_TONE_AMPLITUDE", "is_probe_frame",
+           "write_probe_sticker", "write_probe_tone", "frame_means", "overlay_window", "band_levels",
+           "tone_window",
            "detected_beats", "bed_beats_on_timeline", "beat_alignment", "pulses_on_beats",
            "script_ratio", "DEVANAGARI", "LATIN", "captions_text"]

@@ -12,20 +12,37 @@ from __future__ import annotations
 from pathlib import Path
 from ..edl import EDL
 from ..edl.schema import Clip
+from . import clock
 
 
 def _esc_path(p: str) -> str:
     return p.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def _audio_clip_filter(in_label: str, clip: Clip, out_label: str) -> str:
-    """Single-clip transform: resample → delay → gain → fade in/out."""
+def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
+                       *, window: tuple[float, float] | None = None) -> str:
+    """Single-clip transform: resample → trim → delay → gain → fade in/out.
+
+    `window` is the clip's `[start, end)` on the RENDER clock (render/clock.py);
+    None means "no transitions", where render time is layout time. Every
+    absolute instant here — the delay, both fade edges — is a render instant:
+    a bed authored under a word must dip and swell where the word is HEARD,
+    and the v1 speech it mixes with has already been pulled left by the
+    cross-fades before it.
+    """
+    rs, re = window if window is not None else (float(clip.start), float(clip.start) + clip.duration)
     parts = [
         "aresample=async=1:first_pts=0",
         "aformat=channel_layouts=stereo:sample_rates=48000",
     ]
-    # Position on timeline via adelay (ms, per channel)
-    delay_ms = max(0, int(round(clip.start * 1000)))
+    # A clip straddling a seam is SHORTER on the render clock by what the
+    # seam consumed — its end must land where the v1 frame at its layout end
+    # lands, not run on past it. Trimmed before the delay so the cut is
+    # measured from the clip's own first sample.
+    if re - rs < clip.duration - 0.0005:
+        parts.append(f"atrim=duration={max(0.0, re - rs):.3f}")
+    # Position on the render clock via adelay (ms, per channel)
+    delay_ms = max(0, int(round(rs * 1000)))
     if delay_ms > 0:
         parts.append(f"adelay=delays={delay_ms}|{delay_ms}:all=1")
     # Gain from clip.audio.gain_db
@@ -34,14 +51,29 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str) -> str:
         parts.append(f"volume={gain:.2f}dB")
     # Fades
     if clip.audio and clip.audio.fade_in > 0.001:
-        parts.append(f"afade=t=in:st={clip.start:.3f}:d={clip.audio.fade_in:.3f}")
+        parts.append(f"afade=t=in:st={rs:.3f}:d={clip.audio.fade_in:.3f}")
     if clip.audio and clip.audio.fade_out > 0.001:
-        end = clip.start + clip.duration
-        st = max(0.0, end - clip.audio.fade_out)
+        # From the RENDER end: a bed that ran to the layout end of a timeline
+        # with transitions used to start its fade-out past the file's end and
+        # was simply cut off — its fade never played.
+        st = max(0.0, re - clip.audio.fade_out)
         parts.append(f"afade=t=out:st={st:.3f}:d={clip.audio.fade_out:.3f}")
     if clip.audio and clip.audio.mute:
         parts.append("volume=0")
     return f"{in_label}{','.join(parts)}{out_label}"
+
+
+def _on_render_clock(clips: list[Clip], seams: clock.SeamTable
+                     ) -> list[tuple[Clip, tuple[float, float]]]:
+    """`(clip, render_window)` for the clips the seams leave audible, in the
+    order given. The layout window is `[start, start + duration)`: audio lanes
+    apply no speed, so source seconds are timeline seconds here."""
+    placed: list[tuple[Clip, tuple[float, float]]] = []
+    for c in clips:
+        win = clock.render_window(seams, c.start, c.start + c.duration)
+        if win is not None:
+            placed.append((c, win))
+    return placed
 
 
 def build_audio_mix(
@@ -77,7 +109,14 @@ def build_audio_mix(
         if t.type == "audio" and not t.muted:
             vo_clips += [c for c in t.clips if isinstance(c, Clip)]
 
-    if not music_clips and not vo_clips:
+    # Every lane below is positioned on the RENDER clock. A clip the v1
+    # cross-fades consumed entirely is left out here — no input, no filter —
+    # so an all-consumed lane is the same as an empty one.
+    seams = clock.seam_table(edl)
+    music_placed = _on_render_clock(music_clips, seams)
+    vo_placed = _on_render_clock(vo_clips, seams)
+
+    if not music_placed and not vo_placed:
         # Still apply loudnorm on the speech-only path if a target is set
         # AND we're in export mode. Preview skips it (see docstring).
         lufs = getattr(edl.canvas, "loudness_lufs", None)
@@ -94,21 +133,21 @@ def build_audio_mix(
     next_idx = first_input_index
 
     music_labels: list[str] = []
-    for c in music_clips:
+    for c, win in music_placed:
         # Read source from `c.in` to `c.out`
         extra_inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[m{next_idx}]"
-        parts.append(_audio_clip_filter(in_label, c, out))
+        parts.append(_audio_clip_filter(in_label, c, out, window=win))
         music_labels.append(out)
         next_idx += 1
 
     vo_labels: list[str] = []
-    for c in vo_clips:
+    for c, win in vo_placed:
         extra_inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[vo{next_idx}]"
-        parts.append(_audio_clip_filter(in_label, c, out))
+        parts.append(_audio_clip_filter(in_label, c, out, window=win))
         vo_labels.append(out)
         next_idx += 1
 
