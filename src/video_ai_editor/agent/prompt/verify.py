@@ -22,6 +22,7 @@ code path fewer to disagree with the tools it is checking.
 from __future__ import annotations
 
 import importlib
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,31 @@ _WORD_KEEP_RATIO = 0.8
 #: the middle or the tail of a word still fails: the end must play.
 _WORD_TAIL_RATIO = 0.4
 _WORD_END_SLACK_S = 0.02
+#: `speech_preserved`: energy is ground truth, timestamps are estimates. A
+#: "lost" word whose SOURCE span lies at least this much inside a silent run
+#: of the source is a misaligned timestamp, not a cut word. Measured on the
+#: TikTok run: the transcript held "than, it, looks, in, photos." at
+#: 14.29–16.28 s as five back-to-back 0.40 s spans (whisper's uniform-spacing
+#: fallback) while silencedetect on the same source read 14.118–16.248 s as
+#: silent; remove_silences cut that air correctly and the check reported 20
+#: words lost. 70% (not 100%) because silencedetect's own edges are ±1 hop.
+_WORD_IN_SILENCE_RATIO = 0.7
+#: `remove_silences` recipe defaults (recipes.py / dispatch.remove_silences)
+#: — what the verifier assumes when no plan step names them.
+_SILENCE_NOISE_DB = -30.0
+_SILENCE_MIN_DUR_S = 0.5
+_SILENCE_KEEP_PAD_S = 0.1
+#: `silence_total_leq`: a remaining silent run counts as a "long pause" only
+#: when it is at least `min_dur + 2×keep_pad + this`. After remove_silences,
+#: every cut pause leaves exactly 2×keep_pad of deliberately kept air, and
+#: sub-`min_dur` pauses were never its job; the old "≤ 1.0 s of ANY silence"
+#: read 7 × 0.2 s of kept air plus natural breaths as 3.79 s of failure on a
+#: run whose dead air was entirely gone. 0.15 s absorbs silencedetect's edge
+#: jitter and the encoder's pre-echo on the verify render.
+_LONG_PAUSE_TOL_S = 0.15
+
+_SIL_START_RE = re.compile(r"silence_start:\s*(-?[\d.]+)")
+_SIL_END_RE = re.compile(r"silence_end:\s*(-?[\d.]+)")
 
 
 @dataclass
@@ -97,6 +123,7 @@ class VerifyCtx:
     _tx_loaded: bool = False
     _speech_render: Path | None = None
     _speech_render_tried: bool = False
+    _source_silence_cache: dict[str, list[tuple[float, float]] | None] = field(default_factory=dict)
 
     @property
     def edl(self) -> EDL:
@@ -122,6 +149,24 @@ class VerifyCtx:
 
     def speech_spans(self, edl: EDL) -> list[tuple[float, float]]:
         return _merge_spans([(float(w["start"]), float(w["end"])) for w in self.words_on(edl)])
+
+    def source_silences(self) -> list[tuple[float, float]] | None:
+        """Silent runs of the file the transcript's times index, in SOURCE
+        seconds, measured once per verify with the plan's remove_silences
+        threshold/min-duration (or the recipe defaults) and cached on the
+        ctx. None when there is no source or ffmpeg could not read it —
+        the caller then judges by timestamps alone, as before."""
+        _, src = self.transcript()
+        if not src:
+            return None
+        key = str(src)
+        if key not in self._source_silence_cache:
+            noise_db, min_dur, _ = _silence_params(self)
+            try:
+                self._source_silence_cache[key] = silence_runs(Path(key), noise_db=noise_db, min_dur=min_dur)
+            except Exception:  # noqa: BLE001 — an unreadable source is "unknown", not a crash
+                self._source_silence_cache[key] = None
+        return self._source_silence_cache[key]
 
     def speech_render(self) -> Path | None:
         """The verify render with the music track muted (cached by the
@@ -187,6 +232,53 @@ def _intersection(a: list[tuple[float, float]], b: list[tuple[float, float]]) ->
         for s2, e2 in b:
             total += max(0.0, min(e1, e2) - max(s1, s2))
     return total
+
+
+def silence_runs(path: Path, *, noise_db: float = _SILENCE_NOISE_DB, min_dur: float = _SILENCE_MIN_DUR_S,
+                 end: float | None = None) -> list[tuple[float, float]]:
+    """`(start, end)` of every stretch below `noise_db` for at least `min_dur`
+    that ffmpeg `silencedetect` finds in `path`'s audio, in file seconds.
+    A run still open when the stream ends (no `silence_end` line) is closed
+    at `end` when given, else left open-ended (`inf`) so intersection math
+    still counts it. WHY a runs reader beside `verify_render.total_silence`:
+    both checks here need the individual runs — the longest one, and which
+    words fall inside one — and a sum cannot answer either."""
+    from ...render.verify_render import _ffmpeg_stderr
+    err = _ffmpeg_stderr(["-i", str(path), "-vn", "-af", f"silencedetect=noise={noise_db}dB:d={min_dur}"])
+    starts = [float(m) for m in _SIL_START_RE.findall(err)]
+    ends = [float(m) for m in _SIL_END_RE.findall(err)]
+    runs = [(max(0.0, s), e) for s, e in zip(starts, ends)]
+    if len(starts) > len(ends):
+        runs.append((max(0.0, starts[-1]), float(end) if end is not None else float("inf")))
+    return runs
+
+
+def _silence_params(ctx: Any) -> tuple[float, float, float]:
+    """`(noise_db, min_dur, keep_pad)` the plan's `remove_silences` step ran
+    with, else the recipe defaults — so the verifier measures silence the
+    way the tool did, not against a threshold of its own."""
+    for step in ctx.plan.steps:
+        if step.tool == "remove_silences":
+            a = step.args
+            return (float(a.get("threshold_db", _SILENCE_NOISE_DB)), float(a.get("min_dur", _SILENCE_MIN_DUR_S)),
+                    float(a.get("keep_pad", _SILENCE_KEEP_PAD_S)))
+    return _SILENCE_NOISE_DB, _SILENCE_MIN_DUR_S, _SILENCE_KEEP_PAD_S
+
+
+def _long_pause_floor(ctx: Any) -> float:
+    """Shortest remaining silent run `silence_total_leq` counts as a pause the
+    tool should have removed (see `_LONG_PAUSE_TOL_S`)."""
+    _, min_dur, keep_pad = _silence_params(ctx)
+    return round(min_dur + 2.0 * keep_pad + _LONG_PAUSE_TOL_S, 3)
+
+
+def _inside_silence(w: dict, runs: list[tuple[float, float]]) -> bool:
+    """True when ≥ `_WORD_IN_SILENCE_RATIO` of the word's SOURCE span lies in
+    a measured silent run (a zero-length word: its instant does)."""
+    s, e = float(w["start"]), float(w["end"])
+    if e - s <= 0.0:
+        return any(a <= s <= b for a, b in runs)
+    return _intersection([(s, e)], runs) >= _WORD_IN_SILENCE_RATIO * (e - s)
 
 
 def v1_clips(edl: EDL) -> list[Clip]:
@@ -467,9 +559,23 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
               if _norm_token(w.get("word")) not in fillers and _present(ctx.edl_before, w)]
     if not before:
         return _ok(pc, None, None, "every kept word survives", detail="no words were on the timeline")
-    lost = [w for w in before if not _present(ctx.edl, w)]
-    detail = ("lost: " + ", ".join(str(w.get("word")) for w in lost[:6])) if lost else None
-    return _ok(pc, not lost, len(lost), 0, unit="words lost", detail=detail)
+    gone = [w for w in before if not _present(ctx.edl, w)]
+    # Energy is ground truth, timestamps are estimates: a vanished word whose
+    # source span sits inside a silent run of the SOURCE (measured with the
+    # plan's own silencedetect settings) was never voiced there — the
+    # transcript put it in the pause remove_silences rightly cut. Reported
+    # separately, never counted (see `_WORD_IN_SILENCE_RATIO`). Only read
+    # when something vanished, so a clean run costs no ffmpeg call.
+    runs = ctx.source_silences() if gone else None
+    misaligned = [w for w in gone if runs and _inside_silence(w, runs)]
+    lost = [w for w in gone if not (runs and _inside_silence(w, runs))]
+    parts: list[str] = []
+    if lost:
+        parts.append("lost: " + ", ".join(str(w.get("word")) for w in lost[:6]))
+    if misaligned:
+        parts.append(f"{len(misaligned)} transcript words sat inside measured silence (misaligned timestamps)"
+                     " — not counted: " + ", ".join(str(w.get("word")) for w in misaligned[:6]))
+    return _ok(pc, not lost, len(lost), 0, unit="words lost", detail="; ".join(parts) or None)
 
 
 def c_fillers_remaining_leq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -523,14 +629,20 @@ def _need_render(ctx: VerifyCtx, pc: Postcondition) -> CheckResult | None:
 
 
 def c_silence_total_leq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
-    """Silence left in the SPEECH: measured on a render with the music track
-    muted. On the full mix a −14 dB bed covers every pause and silencedetect
-    finds nothing — the check was vacuously true whenever music was on the
-    timeline (the TikTok run measured 0 s under a bed covering 100%)."""
+    """No LONG pause remains in the SPEECH: the silent runs of a render with
+    the music track muted, counting only those at least `_long_pause_floor`
+    long (the plan's min_dur + 2×keep_pad + tolerance); passes when the long
+    runs total ≤ `max_total_s`. Reports the longest remaining run so a
+    failure names the pause. WHY runs, not the sum of all silence: after
+    remove_silences the kept air alone is 2×keep_pad per cut pause and
+    natural sub-min_dur breaths were never its job (`_LONG_PAUSE_TOL_S`).
+    WHY the music is muted: on the full mix a −14 dB bed covers every pause
+    and silencedetect finds nothing — the check was vacuously true whenever
+    music was on the timeline (the TikTok run measured 0 s under a bed
+    covering 100%)."""
     missing = _need_render(ctx, pc)
     if missing:
         return missing
-    from ...render.verify_render import total_silence
     cap = float(_arg(pc, "max_total_s") or 1.0)
     path = ctx.render_path
     if music_clips(ctx.edl):
@@ -538,9 +650,17 @@ def c_silence_total_leq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         if path is None:
             return _ok(pc, None, None, f"≤ {cap}",
                        detail=ctx.speech_render_skip_reason or "music is on the timeline and no speech-only render exists")
-    total = total_silence(path)
-    return _ok(pc, total <= cap, total, f"≤ {cap}", unit="s",
-               detail="measured with the music track muted" if music_clips(ctx.edl) else None)
+    noise_db, min_dur, keep_pad = _silence_params(ctx)
+    floor = _long_pause_floor(ctx)
+    lengths = [e - s for s, e in silence_runs(path, noise_db=noise_db, min_dur=min_dur, end=ctx.edl.duration)]
+    long_runs = [d for d in lengths if d >= floor]
+    total = round(sum(long_runs), 3)
+    longest = max(lengths, default=0.0)
+    detail = (f"longest remaining pause {longest:.2f} s; {len(long_runs)} pause(s) ≥ {floor:.2f} s "
+              f"(min_dur {min_dur:g} + 2×keep_pad {keep_pad:g} + {_LONG_PAUSE_TOL_S:g} tolerance)")
+    if music_clips(ctx.edl):
+        detail += "; measured with the music track muted"
+    return _ok(pc, total <= cap, total, f"≤ {cap}", unit="s", detail=detail)
 
 
 def c_canvas_aspect(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -972,4 +1092,4 @@ def verify_plan(store: EDLStore, plan: Plan, exec_result: Any, facts_before: Tim
 
 
 __all__ = ["CheckResult", "VerifyCtx", "CHECKS", "run_check", "verify_plan", "overlay_positions",
-           "caption_clips", "text_clips", "music_clips", "v1_clips"]
+           "caption_clips", "text_clips", "music_clips", "v1_clips", "silence_runs"]

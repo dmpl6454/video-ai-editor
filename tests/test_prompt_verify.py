@@ -433,7 +433,8 @@ def test_render_checks_are_unmeasured_without_a_render_and_skipped_when_too_long
 
 def test_verify_plan_renders_once_and_measures_silence_and_loudness(store):
     """One real 360p verify render of the 12 s fixture (tone in three windows,
-    so silencedetect finds the two 2 s gaps) drives both render checks."""
+    so silencedetect finds the two 2 s gaps — both long pauses under the
+    0.85 s floor) drives both render checks."""
     D.dispatch(store, "set_loudness_target", {"lufs": -16})
     plan = F.plan_of(F.step("set_loudness_target", lufs=-16),
                      postconditions=[_pc("silence_total_leq", max_total_s=1.0),
@@ -524,7 +525,7 @@ def test_silence_is_measured_with_the_music_muted(store, tmp_path, monkeypatch):
         return out
 
     monkeypatch.setattr(VR, "render_for_verify", fake_render)
-    monkeypatch.setattr(VR, "total_silence", lambda p, **k: 0.0 if p.name == "mix.mp4" else 4.5)
+    monkeypatch.setattr(V, "silence_runs", lambda p, **k: [] if p.name == "mix.mp4" else [(1.0, 5.5)])
     ctx = _ctx(store, render_path=Path(store.dir) / "cache" / "verify" / "mix.mp4")
     r = _check(ctx, "silence_total_leq", max_total_s=1.0)
     assert r.passed is False and r.measured == 4.5 and "muted" in (r.detail or "")
@@ -545,3 +546,105 @@ def test_silence_without_a_speech_render_is_unmeasured_not_passed(store, tmp_pat
     ctx = _ctx(store, render_path=tmp_path / "mix.mp4")
     r = _check(ctx, "silence_total_leq", max_total_s=1.0)
     assert r.passed is None and "ffmpeg died" in (r.detail or "")
+
+
+# ---------------------------------------------------------------- findings: energy is ground truth, timestamps are estimates
+
+#: A transcript for the 12 s fixture clip (tone 0–3, 5–8, 10–12 s) that
+#: puts two words INSIDE the 3–5 s silence — whisper's uniform-spacing
+#: fallback did exactly this on the TikTok run (14.29–16.28 s: five
+#: back-to-back 0.40 s "words" over a stretch silencedetect measured silent).
+_MISALIGNED_WORDS = [("hello", 0.30, 0.50), ("than", 3.40, 3.80), ("it", 3.90, 4.30),
+                     ("camera", 5.40, 5.90), ("wins", 6.00, 6.40), ("bye", 10.50, 11.00)]
+
+
+def test_speech_preserved_does_not_count_transcript_words_inside_measured_silence(tmp_path):
+    """remove_silences cut 3.1–4.9 s and with it "than" and "it" — words the
+    transcript placed where the audio holds no energy. Nothing voiced was
+    lost, so the check passes and says so; a word whose tone really is cut
+    ("camera") still fails exactly as before."""
+    from prompt_fixtures import speech_clip, transcript, write_ingest
+    src = speech_clip(tmp_path / "mis", name="mis")
+    write_ingest(src, transcript(_MISALIGNED_WORDS))
+    st = F.make_store(tmp_path / "mis", src=src, name="s_mis")
+    before = st.edl.model_copy(deep=True)
+    plan = F.plan_of(F.step("remove_silences", track="v1", threshold_db=-30.0, min_dur=0.5, keep_pad=0.1))
+    D.dispatch(st, "remove_silences", {"track": "v1", "threshold_db": -30.0, "min_dur": 0.5, "keep_pad": 0.1})
+    assert st.edl.duration < 9.0                                              # both 2 s gaps went
+    ctx = _ctx(st, before=before, plan=plan)
+    r = _check(ctx, "speech_preserved")
+    assert r.passed is True and r.measured == 0, r
+    assert "2 transcript words sat inside measured silence" in (r.detail or ""), r.detail
+    assert "than" in r.detail and "it" in r.detail and "not counted" in r.detail
+    assert ctx.source_silences() and any(s <= 3.4 and e >= 4.3 for s, e in ctx.source_silences())
+    # "camera" (source 5.4–5.9) now plays at timeline 3.6–4.1: cut it and the
+    # check fails on that one word while still reporting the two it excused.
+    t0, t1 = source_to_timeline(st.edl, "v1", 5.4), source_to_timeline(st.edl, "v1", 5.9)
+    D.dispatch(st, "cut_range", {"track": "v1", "start": t0 - 0.02, "end": t1 + 0.02})
+    r = _check(ctx, "speech_preserved")
+    assert r.passed is False and r.measured == 1 and "camera" in (r.detail or ""), r
+    assert "not counted" in r.detail and "than" in r.detail
+
+
+def test_speech_preserved_uses_the_recipe_defaults_when_no_plan_step_names_the_silence_params(tmp_path):
+    from prompt_fixtures import speech_clip, transcript, write_ingest
+    src = speech_clip(tmp_path / "dflt", name="dflt")
+    write_ingest(src, transcript(_MISALIGNED_WORDS))
+    st = F.make_store(tmp_path / "dflt", src=src, name="s_dflt")
+    before = st.edl.model_copy(deep=True)
+    D.dispatch(st, "remove_silences", {"track": "v1"})
+    ctx = _ctx(st, before=before)                                             # plan: no steps at all
+    assert V._silence_params(ctx) == (-30.0, 0.5, 0.1)
+    r = _check(ctx, "speech_preserved")
+    assert r.passed is True and r.measured == 0 and "not counted" in (r.detail or ""), r
+
+
+def test_word_inside_silence_needs_seventy_percent_of_its_span_in_a_silent_run():
+    runs = [(3.0, 5.0)]
+    assert V._inside_silence({"start": 3.4, "end": 3.8}, runs) is True
+    assert V._inside_silence({"start": 4.7, "end": 5.1}, runs) is True         # 75% inside
+    assert V._inside_silence({"start": 4.6, "end": 5.3}, runs) is False        # 57%: a real onset pad, not a misalignment
+    assert V._inside_silence({"start": 4.0, "end": 4.0}, runs) is True         # zero-length: the instant is silent
+    assert V._inside_silence({"start": 6.0, "end": 6.0}, runs) is False
+
+
+def test_silence_runs_reads_start_end_pairs_on_lavfi_audio(tmp_path):
+    gap = tmp_path / "gap.wav"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "aevalsrc='0.5*sin(440*2*PI*t)*(between(t\\,0\\,1)+between(t\\,3\\,4))':s=48000:d=4",
+                    str(gap)], check=True, capture_output=True)
+    runs = V.silence_runs(gap, noise_db=-30.0, min_dur=0.5)
+    assert len(runs) == 1 and runs[0][0] == pytest.approx(1.0, abs=0.05) and runs[0][1] == pytest.approx(3.0, abs=0.05)
+    assert V.silence_runs(gap, noise_db=-30.0, min_dur=2.5) == []
+
+
+def test_silence_check_counts_only_long_pauses_and_names_the_longest(store):
+    """Two real 360p renders of the fixture: uncut, the two 2 s gaps are long
+    pauses (≥ 0.85 s = min_dur 0.5 + 2×keep_pad 0.1 + 0.15 tolerance) and
+    the check fails naming 2.0 s; after remove_silences only the 2×0.1 s of
+    deliberately kept air remains per pause and the check passes. The old
+    "≤ 1.0 s of any silence" read the TikTok run's seven kept-air pairs plus
+    natural sub-0.5 s pauses as 3.79 s of failure after every dead-air
+    stretch was gone."""
+    import re
+    plan = F.plan_of(F.step("remove_silences", track="v1", threshold_db=-30.0, min_dur=0.5, keep_pad=0.1))
+    before = store.edl.model_copy(deep=True)
+    ctx = _ctx(store, before=before, plan=plan,
+               render_path=R.render_for_verify(store.edl, Path(store.dir), max_duration_s=60.0))
+    r = _check(ctx, "silence_total_leq", max_total_s=1.0)
+    assert r.passed is False and 3.6 <= r.measured <= 4.4 and r.unit == "s", r
+    m = re.search(r"longest remaining pause ([\d.]+) s", r.detail or "")
+    assert m and abs(float(m.group(1)) - 2.0) < 0.15, r.detail
+    assert "≥ 0.85 s" in r.detail and "2 pause(s)" in r.detail
+    D.dispatch(store, "remove_silences", {"track": "v1", "threshold_db": -30.0, "min_dur": 0.5, "keep_pad": 0.1})
+    ctx = _ctx(store, before=before, plan=plan,
+               render_path=R.render_for_verify(store.edl, Path(store.dir), max_duration_s=60.0))
+    r = _check(ctx, "silence_total_leq", max_total_s=1.0)
+    assert r.passed is True and r.measured == 0.0 and "0 pause(s) ≥ 0.85 s" in (r.detail or ""), r
+
+
+def test_long_pause_floor_follows_the_plans_remove_silences_args():
+    plan = F.plan_of(F.step("remove_silences", track="v1", threshold_db=-40.0, min_dur=1.0, keep_pad=0.2))
+    ctx = SimpleNamespace(plan=plan)
+    assert V._silence_params(ctx) == (-40.0, 1.0, 0.2)
+    assert V._long_pause_floor(ctx) == pytest.approx(1.0 + 0.4 + 0.15)

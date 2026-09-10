@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  answersPayload, coerceAnswer, defaultAnswers, isGate, missingRequired, optionsFor, parseDuration,
+  abortOption, answersPayload, coerceAnswer, defaultAnswers, escapeTarget, isGate, missingRequired, optionsFor, parseDuration,
   totalDownloadBytes, visibleQuestions,
 } from './clarifyDefaults'
 import { parseSseText, type ClarifyEvent, type NeedsInput } from './promptEvents'
@@ -111,5 +111,39 @@ describe('gates come one at a time', () => {
     expect(visibleQuestions([lang, dl])).toEqual([lang, dl])   // a real question first: the whole grid
     expect(visibleQuestions([dl])).toEqual([dl])
     expect(visibleQuestions([])).toEqual([])
+  })
+})
+
+describe('Esc is the run-ending option when a question offers one', () => {
+  // The real long-run gate (planner.py: `go` → ("yes","Start"), ("no","Cancel")).
+  const go: NeedsInput = { key: 'go', question: 'This will take about 2 minutes (reframe the canvas to 9:16). Start?',
+                           kind: 'confirm', required: true,
+                           options: [{ value: 'yes', label: 'Start' }, { value: 'no', label: 'Cancel' }] }
+  const bareGo: NeedsInput = { key: 'go', question: 'Start?', kind: 'confirm', required: true }
+  const gate: NeedsInput = { key: 'gate_auto_caption', question: 'auto captions is not available here. Continue without it, or stop?',
+                             kind: 'choice', required: true,
+                             options: [{ value: 'skip', label: 'Continue without auto captions', hint: 'The rest of the edit still runs' },
+                                       { value: 'abort', label: 'Stop', hint: 'Nothing changes' }] }
+  const lang: NeedsInput = { key: 'target_lang', question: 'Which language?', kind: 'choice', required: true,
+                             options: [{ value: 'hi', label: 'Hindi' }, { value: 'en', label: 'English' }] }
+  it('`go` answered no cancels the run, so its No is the abort (labelled Cancel on the wire, No when bare)', () => {
+    expect(abortOption(go)).toEqual({ value: 'no', label: 'Cancel' })
+    expect(abortOption(bareGo)?.value).toBe('no')
+  })
+  it('a feature gate answered `abort` cancels the run; `skip` continues, so only Stop is the abort', () => {
+    expect(abortOption(gate)?.label).toBe('Stop')
+  })
+  it('the download gate has no abort: Skip drops the download and the run continues', () => {
+    expect(abortOption(clarify.questions[0])).toBeNull()
+    const bareDl: NeedsInput = { key: 'downloads', question: 'Download?', kind: 'confirm', required: true }
+    expect(abortOption(bareDl)).toBeNull()
+    expect(abortOption(lang)).toBeNull()
+  })
+  it('a card takes its Esc target from the first abort among the visible questions', () => {
+    expect(escapeTarget([go])).toEqual({ question: go, option: { value: 'no', label: 'Cancel' } })
+    expect(escapeTarget([lang, gate])).toEqual({ question: gate, option: gate.options![1] })
+    expect(escapeTarget([lang])).toBeNull()
+    expect(escapeTarget([clarify.questions[0]])).toBeNull()
+    expect(escapeTarget([])).toBeNull()
   })
 })

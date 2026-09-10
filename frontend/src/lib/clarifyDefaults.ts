@@ -29,6 +29,47 @@ export function optionsFor(q: NeedsInput): NeedsInputOption[] {
 /** A gate: a `confirm` (`downloads`, `go`) or a feature gate (`gate_<tool>`). */
 export const isGate = (q: NeedsInput) => kindOf(q) === 'confirm' || q.key.startsWith('gate_')
 
+// What the backend reads as "end the run" for the `go` gate: planner._NO on
+// `go` returns the empty "Cancelled — the timeline is unchanged" plan. Kept
+// as values, not labels, because the label is the planner's ("Cancel" on
+// the wire, "No" when the options are absent) and may be localised.
+const GO_NO_VALUES = new Set<unknown>(['no', 'n', 'false', 'skip', 'cancel', 'abort', 'nahi', false, 0])
+
+/**
+ * The option that ENDS THE RUN, when the question offers one — the card's
+ * Esc target. Only two questions carry one (planner.apply_answers /
+ * pending.apply_answers): `go` answered no, and any choice answered `abort`
+ * (the feature gates' "Stop"). The look-alikes are deliberately NOT aborts:
+ * the `downloads` gate's "Skip" drops the download and the run continues,
+ * and a feature gate's "skip" continues without that tool — so those cards
+ * keep the card's own Cancel (drop the question) as a separate outcome.
+ *
+ * WHY: the long-run gate used to render its "Cancel" option next to the
+ * card's "Cancel Esc" — two Cancels side by side with the same effect.
+ */
+export function abortOption(q: NeedsInput): NeedsInputOption | null {
+  const opts = optionsFor(q)
+  const norm = (v: unknown) => (typeof v === 'string' ? v.trim().toLowerCase() : v)
+  if (q.key === 'go') return opts.find((o) => GO_NO_VALUES.has(norm(o.value))) ?? null
+  return opts.find((o) => norm(o.value) === 'abort') ?? null
+}
+
+export interface EscapeTarget { question: NeedsInput; option: NeedsInputOption }
+
+/**
+ * What Esc does on a card showing `questions`: the first run-ending option
+ * among them (Esc picks it and submits, the option carries the Esc hint) or
+ * `null`, in which case the card renders its own Cancel that drops the
+ * question. Never both.
+ */
+export function escapeTarget(questions: NeedsInput[]): EscapeTarget | null {
+  for (const question of questions) {
+    const option = abortOption(question)
+    if (option) return { question, option }
+  }
+  return null
+}
+
 /**
  * The questions a card shows at once: when the FIRST is a gate it stands
  * alone (the backend re-pauses with what is left after it is answered), so a

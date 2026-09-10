@@ -409,7 +409,9 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("duration_between", "the duration matches", target=None, start=None, end=None,
           factor=None, tol=0.1, tol_ratio=None),
     _spec("duration_leq", "the video is short enough", max=None),
-    _spec("silence_total_leq", "little silence remains", max_total_s=1.0, needs_render=True),
+    # Long pauses only (≥ the plan's min_dur + 2×keep_pad + 0.15 s): the kept
+    # air remove_silences leaves on purpose and natural breaths do not count.
+    _spec("silence_total_leq", "no long pauses remain", max_total_s=1.0, needs_render=True),
     # framing
     _spec("canvas_aspect", "the canvas has the requested aspect", ratio=None),
     _spec("reframe_effective", "the reframe changed the picture"),

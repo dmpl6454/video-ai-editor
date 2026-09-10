@@ -136,7 +136,7 @@ def _x_translate(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 def _x_remove_silences(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     pcs = [pc("speech_preserved", "no kept word was cut"),
-           pc("silence_total_leq", "little silence remains", max_total_s=1.0)]
+           pc("silence_total_leq", "no long pauses remain", max_total_s=1.0)]
     if f.silence_seconds >= 1.0:
         pcs.insert(0, pc("duration_shrank", "the video got shorter", min_ratio=0.02))
     return Expansion(
