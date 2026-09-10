@@ -538,7 +538,11 @@ def _resolve_bind_host(requested: str) -> tuple[str, bool]:
     toggle cannot un-bind a socket, so it must not be able to disarm the
     authentication in front of one either.
     """
-    from .api import pairing
+    # ABSOLUTE import (see the module header): this function runs inside the
+    # frozen entry script, and `from .api` here crashed every 0.6.0 .app at
+    # launch with "attempted relative import with no known parent package" -
+    # invisible under pytest and `-m`, where the package IS the parent.
+    from video_ai_editor.api import pairing
     if requested not in {"127.0.0.1", "localhost", "::1"}:
         # An operator who set VAE_HOST explicitly gets what they asked for —
         # and if that is not loopback, auth is armed regardless of the toggle.
@@ -557,7 +561,7 @@ def main() -> None:
     # Tell the app process what it is actually listening on BEFORE the server
     # thread starts: uvicorn.run() imports video_ai_editor.main in THIS process,
     # so api.auth reads this state when it installs its middleware.
-    from .api import pairing
+    from video_ai_editor.api import pairing
     pairing.mark_bound_public(public)
     pairing.set_server_port(port)
 
