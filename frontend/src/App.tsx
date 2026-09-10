@@ -3,6 +3,7 @@ import { useStore } from './store'
 import { TopBar } from './components/TopBar'
 import { LeftPane } from './components/LeftPane'
 import { Preview } from './components/Preview'
+import { PromptBar } from './components/PromptBar'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Timeline } from './components/Timeline'
 import { Properties } from './components/Properties'
@@ -88,6 +89,11 @@ export default function App() {
         onDelta={(d) => setPanelSize('leftW', useStore.getState().leftW + d)}
       />
       <main className="center">
+        {/* One sentence → a verified, single-undo edit. Above the picture,
+            never over it; the .center grid's first (auto) row is its home
+            (styles.css). Tools, chat and the phone all share the session
+            lock with it — see lib/promptStore.ts. */}
+        <PromptBar />
         <div className="preview-pane">
           <ErrorBoundary
             fallback={(err) => (

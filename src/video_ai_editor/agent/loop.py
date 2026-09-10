@@ -1,4 +1,5 @@
-"""Anthropic tool-use loop.
+"""The chat turn: Anthropic tool-use loop with a key, the local Prompt
+Editor brains without one.
 
 Yields events to be SSE-streamed to the client:
   - {"type":"text_delta","text":"…"}              streamed assistant text
@@ -7,6 +8,18 @@ Yields events to be SSE-streamed to the client:
   - {"type":"op","op":{...}}                       ops_log entry that resulted
   - {"type":"done"}                                end of turn
   - {"type":"error","message":"…"}
+
+The no-key path (`agent/prompt/service.prompt_turn`, spec §4.1) adds five
+event types the desktop renders and the phone deliberately drops
+(`mobile/lib/sse.ts` returns `{kind:"empty"}` for unknown types):
+  - {"type":"brain","status":"trying|answered|failed","brain","label",…}  one per brain attempt
+  - {"type":"plan","plan":{…}}                                            the validated Plan
+  - {"type":"step","index","total","tool","status","progress?","summary?","effect?","error?"}
+  - {"type":"verify","plan_id","checks":[…],"passed","total","rendered"}
+  - {"type":"clarify","token","plan_id","questions":[…],"expires_in_s"}   then done
+Both paths keep the six shapes above unchanged, emit single-line frames, end
+with `done`, and — on the no-key path — start the first `text_delta` with
+"via <Brain> — " so the phone can show which brain answered.
 """
 from __future__ import annotations
 import asyncio
@@ -332,8 +345,14 @@ async def chat_turn(
     can persist it.
     """
     if not ANTHROPIC_API_KEY:
-        yield {"type": "error", "message": "ANTHROPIC_API_KEY is not set. Add it to ~/video-ai-editor/.env and restart."}
-        yield {"type": "done"}
+        # No cloud key: the Prompt Editor plans and edits on the local brains
+        # (recipes → Apple Intelligence → local model), validates every plan
+        # before dispatch and verifies the result. Same event stream, same
+        # `history` list (it appends the user message and the reply), and the
+        # run itself outlives this generator if the client goes away.
+        from .prompt.service import prompt_turn
+        async for evt in prompt_turn(store, user_message, history, ui_state=ui_state):
+            yield evt
         return
 
     client = Anthropic(api_key=ANTHROPIC_API_KEY)

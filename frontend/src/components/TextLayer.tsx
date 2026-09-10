@@ -166,10 +166,13 @@ const SENTINEL_Y = 1700
 // value the sentinel comparison must run against. NOT the browser's own
 // draw anchors below (those stay authoritative for how a role-positioned
 // clip actually draws on screen).
-function serverAnchorY(role: string, canvasH: number): number {
+function serverAnchorY(role: string, canvasH: number, canvasW?: number): number {
   if (role === 'watermark') return canvasH - canvasH * 0.04
   if (role === 'hook') return canvasH * 0.5
-  if (role === 'caption') return canvasH - canvasH * 0.16
+  // Portrait canvases anchor captions at 0.76·h (inside the TikTok/Reels safe
+  // zone); everything else keeps the historic 0.84·h. Mirrors
+  // render/text_overlay.py::caption_anchor_y.
+  if (role === 'caption') return canvasW != null && canvasH > canvasW ? canvasH * 0.76 : canvasH - canvasH * 0.16
   if (role === 'lower_third') return canvasH - canvasH * 0.2
   return canvasH * 0.75
 }
@@ -542,6 +545,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         else if (s.align === 'top') cy = height * 0.06 + totalH / 2
         else if (s.align === 'center') cy = height / 2
         else if (s.align === 'lower') cy = height * 0.78
+        // Captions on a portrait canvas draw where the export puts them
+        // (caption_anchor_y: 0.76·h, clear of the platform UI).
+        else if (s.align === 'bottom' && role === 'caption' && edl.canvas.h > edl.canvas.w) cy = height * 0.76
         else if (s.align === 'bottom') cy = height - totalH / 2 - height * 0.10
         else cy = height * 0.78
         cy += env.dy

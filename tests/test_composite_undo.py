@@ -244,9 +244,14 @@ def test_auto_cut_to_beats_is_one_undo_step(tmp_path: Path, monkeypatch):
                                  "in": 0, "out": 6, "start": 0})
     before, ops0 = _clips(store), _ops(store)
 
-    result = dispatch(store, "auto_cut_to_beats", {"subdivision": 1})
-    assert result["splits"] == 3
+    # Beats 1.0 / 2.5 / 4.0 on a 6 s clip leave shots of 1.0, 1.5, 1.5 and
+    # 2.0 s, so `min_shot=0.8` (the beat_sync recipe's promise) keeps all
+    # three — and reports that it merged none.
+    result = dispatch(store, "auto_cut_to_beats", {"subdivision": 1, "min_shot": 0.8})
+    assert (result["splits"], result["merged"]) == (3, 0)
     assert len(_clips(store)) == len(before) + 3
+    assert min(c.effective_duration for t in store.edl.tracks if t.id == "v1"
+               for c in t.clips if isinstance(c, Clip)) >= 0.8
     assert _ops(store) == ops0 + 1 and store.ops.last().tool == "auto_cut_to_beats"
 
     dispatch(store, "undo", {})

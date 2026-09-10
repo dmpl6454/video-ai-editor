@@ -82,6 +82,72 @@ export interface PairCode {
   payload: string; expires_in_s: number
 }
 
+// --- Prompt Editor (api/prompt_routes.py; spec §4.7) ------------------------
+// The SSE routes return the raw `Response` so lib/promptEvents.readSseStream
+// can consume the body; the JSON routes go through http() like everything
+// else. Event shapes live in lib/promptEvents.ts.
+
+export interface PromptBody {
+  message: string
+  selection?: string | null
+  multi_selection?: string[]
+  playhead?: number | null
+  brain?: string | null
+  // Re-attach to a run that is already executing (reload, second tab): the
+  // route replays its event bus from the start, so the client sees the plan
+  // again and every step that has landed since. Execution never depended on
+  // this connection — a run outlives its stream (spec §4.2).
+  resume_run?: string | null
+}
+
+// `<session>/prompt_run.json` (agent/prompt/runlog.py) — the current or last
+// run, for reconnect after a reload. Every field is optional on the client
+// side: an older or partial record must render as "a run happened" rather
+// than crash the bar. Statuses: planning | running | verifying | done |
+// failed | cancelled | clarify.
+export interface PromptRunRecord {
+  run_id?: string
+  plan_id?: string
+  status?: string
+  started?: number
+  ended?: number | null
+  prompt?: string
+  brain?: string
+  steps?: unknown[]
+  verify?: unknown
+  reply?: string | null
+  op?: unknown
+  error?: string | null
+  events?: number
+}
+
+// `GET …/prompt/run` wraps the record: `live` says the process still holds
+// the run (its event bus can be replayed with `resume_run`); a record whose
+// status is still "running" with `live:false` is a run the backend lost —
+// a restart mid-run — and the bar must say so rather than spin forever.
+export interface PromptRunEnvelope {
+  run: PromptRunRecord | null
+  live?: boolean
+  replayable?: boolean
+}
+
+// `GET …/prompt/pending` — the clarification waiting for an answer, if any
+// (agent/prompt/pending.py). Restored on reload so the card reappears.
+export interface PromptPending {
+  token: string
+  plan_id?: string
+  prompt?: string | null
+  brain?: string | null
+  questions: unknown[]
+  expires_in_s?: number
+}
+
+export interface PromptModelRow {
+  id: string; installed: boolean; snapshot_path?: string | null
+  bytes_on_disk?: number; expected_bytes?: number; free_bytes?: number
+}
+export interface PromptModels { tier?: string | null; models: PromptModelRow[] }
+
 // `X-VAE-Client: 1` is a SECURITY CONTROL, not a label. api/auth.py requires it
 // on every non-media request once LAN mode is armed, for one reason: no <img>,
 // <form>, or plain <script> can set a custom header, so demanding one forces a
@@ -331,4 +397,54 @@ export const api = {
 
   revokeDevice: (deviceId: string) =>
     http<{ revoked: string; devices: PairDevice[] }>('POST', '/pair/revoke', { device_id: deviceId }),
+
+  // --- Prompt Editor (api/prompt_routes.py) -------------------------------
+
+  // POST …/prompt → SSE. Throws on a non-2xx with the body appended, the same
+  // contract as http(), so store.errorMessage() and
+  // lib/promptEvents.promptRunningFromError() can read it.
+  promptStream: (sid: string, body: PromptBody) => sse(`/sessions/${sid}/prompt`, body),
+
+  // POST …/prompt/answer {token, answers} → SSE (the resumed run).
+  promptAnswer: (sid: string, token: string, answers: Record<string, unknown>) =>
+    sse(`/sessions/${sid}/prompt/answer`, { token, answers }),
+
+  promptPending: (sid: string) => http<{ pending: PromptPending | null }>('GET', `/sessions/${sid}/prompt/pending`),
+
+  promptRun: (sid: string) => http<PromptRunEnvelope>('GET', `/sessions/${sid}/prompt/run`),
+
+  // Cancelling is the ONLY way a run stops — closing the stream is not
+  // (spec §4.2). Without a token it cancels the running plan; with one it
+  // drops a pending clarification.
+  promptCancel: (sid: string, token?: string) =>
+    http<{ cancelled: boolean }>('POST', `/sessions/${sid}/prompt/cancel`, token ? { token } : {}),
+
+  // `refresh` re-probes Apple Intelligence / mlx-lm; otherwise a 60 s memo.
+  promptBrains: (refresh = false) =>
+    http<unknown>('GET', `/prompt/brains${refresh ? '?refresh=1' : ''}`),
+
+  promptModels: () => http<PromptModels>('GET', '/prompt/models'),
+
+  // Loopback-only on the backend (403 otherwise): a paired phone must not be
+  // able to start a 4 GB download on the Mac. 202 + job id; poll getJob.
+  downloadModel: (id: string) =>
+    http<{ job_id: string }>('POST', '/prompt/models/download', { id }),
+}
+
+// One POST that returns the Response for an SSE body. Kept separate from
+// http() because the body is a stream, not JSON, but it sends the same
+// X-VAE-Client header (api/auth.py demands it on every non-media request once
+// LAN mode is armed) and raises the same `${status} ${statusText}: ${body}`
+// error shape on failure.
+async function sse(path: string, body: unknown): Promise<Response> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { ...CLIENT_HEADERS, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok || !res.body) {
+    const text = await res.text()
+    throw new Error(`${res.status} ${res.statusText}: ${text}`)
+  }
+  return res
 }

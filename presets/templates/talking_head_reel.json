@@ -1,0 +1,14 @@
+{
+  "description": "Talking-head footage finished for Instagram Reels: tightened, vertical, chunky captions, a hook, a chill bed and a clean mix.",
+  "platform": "reels",
+  "keywords": ["talking head", "talking-head", "reel", "reels edit", "vlog reel"],
+  "recipes": [
+    {"recipe": "tighten"},
+    {"recipe": "reframe", "slots": {"ratio": "9:16", "platform": "reels"}},
+    {"recipe": "captions", "slots": {"style": "ig_chunky", "position": "bottom"}},
+    {"recipe": "hook"},
+    {"recipe": "music", "slots": {"mood": "chill"}},
+    {"recipe": "clean_audio"},
+    {"recipe": "export_preset", "slots": {"platform": "reels"}}
+  ]
+}

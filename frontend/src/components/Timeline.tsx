@@ -9,6 +9,7 @@ import { baseName, isAudioPath } from '../lib/paths'
 import { keyframeTimes } from '../lib/overlay'
 import { edlTimeFromOutput, v1Layout, type LayoutClip } from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
+import { v1CutPoints } from '../lib/cutPoints'
 import { chordLabel } from '../keymap/engine'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
@@ -287,15 +288,6 @@ export function Timeline() {
     return headerHeight + i * (trackHeight + 4)
   }
 
-  // Cut points on v1: each pair of temporally-adjacent media clips (next.start
-  // ≈ current end within 0.05s). `tr` is the transition already at that cut,
-  // matched by |tr.at − cutTime| < 0.05 — the same tolerance the render
-  // compositor uses. The match loop deliberately takes the LAST hit, because
-  // add_transition APPENDS (it never replaces) and the compositor's own
-  // boundary matcher iterates the full list letting later entries overwrite
-  // earlier ones — so "last wins" is what actually renders. types.ts's Track
-  // doesn't declare `transitions` (hand-mirrored schema, incomplete on
-  // purpose), so it's read via the repo's established cast pattern.
   // How far each v1 clip is pulled left of its `start` by the transitions
   // before it, plus where each seam lands — both in OUTPUT time. Mirrors
   // EDL.transition_overlap(); see lib/timelineLayout.ts.
@@ -316,27 +308,14 @@ export function Timeline() {
   }, [edl])
 
   const v1Cuts = useMemo(() => {
-    const v1 = (edl?.tracks ?? []).find((t) => t.id === 'v1')
-    if (!v1) return [] as { at: number; outAt: number; tr: TransitionInfo | null }[]
-    const trs = (v1 as unknown as { transitions?: TransitionInfo[] }).transitions ?? []
-    const media = v1.clips.filter(isMediaClip).slice().sort((a, b) => a.start - b.start)
-    const cuts: { at: number; outAt: number; tr: TransitionInfo | null }[] = []
-    for (let i = 0; i < media.length - 1; i++) {
-      // EFFECTIVE timeline end ((out-in)/speed) — the backend ripples
-      // neighbors to the effective end, so raw `out-in` both misplaced the
-      // affordance and failed the 0.05s adjacency check for any retimed clip.
-      const end = clipEnd(media[i])
-      if (Math.abs(media[i + 1].start - end) <= 0.05) {
-        let match: TransitionInfo | null = null
-        for (const tr of trs) if (Math.abs(tr.at - end) < 0.05) match = tr
-        // `at` stays EDL time (it is what add/remove_transition is called
-        // with); `outAt` is where the affordance is DRAWN, which differs by
-        // the accumulated overlap once any transition exists upstream.
-        const seam = v1Seams.find((s) => Math.abs(s.boundary - end) < 1e-6)
-        cuts.push({ at: end, outAt: seam ? seam.outAt : end, tr: match })
-      }
-    }
-    return cuts
+    // The cut list itself is shared with the Transitions panel
+    // (lib/cutPoints.ts) so the seam the panel targets is the seam this
+    // canvas draws; only `outAt` — where the affordance is DRAWN, which
+    // differs from `at` by the accumulated overlap upstream — is local.
+    return v1CutPoints(edl).map((cut) => {
+      const seam = v1Seams.find((s) => Math.abs(s.boundary - cut.at) < 1e-6)
+      return { at: cut.at, outAt: seam ? seam.outAt : cut.at, tr: cut.tr as TransitionInfo | null }
+    })
   }, [edl, v1Seams])
 
   // Filmstrip tile loader. Returns the image when cached; otherwise kicks off

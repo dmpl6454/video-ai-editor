@@ -32,60 +32,12 @@ from lan_fixtures import lan_home  # noqa: F401
 DISPATCH_PY = (Path(__file__).resolve().parents[1]
                / "src/video_ai_editor/agent/dispatch.py")
 
-#: (tool, arg) -> guard. "read" and "write" name the allowlist the handler must
-#: consult; "exempt" carries the reason the argument is not a filesystem path
-#: at all, and is the only way to keep something off the guarded list.
-EXPECTED_GUARDS: dict[tuple[str, str], str] = {
-    ("add_clip", "src"): "read",
-    ("add_music", "src"): "read",
-    ("add_sticker", "src"): "read",
-    ("apply_brand_kit", "end_card"): "read",
-    ("apply_lut", "src"): "read",
-    ("apply_lut", "lut_path"): "read",   # alias of src; the handler resolves it into src BEFORE _safe_src
-    ("find_broll", "bin"): "read",
-    ("import_srt", "path"): "read",
-    ("match_style", "reference"): "read",
-    ("multicam", "srcs"): "read",
-    ("export_ass", "path"): "write",
-    ("export_srt", "path"): "write",
-    ("export_vtt", "path"): "write",
-    # `font` is a BUNDLED font NAME resolved by name inside config.FONTS_DIR
-    # (apply_brand_kit validates it against a glob of that directory and
-    # rejects anything else). It never reaches the filesystem as a caller path.
-    ("add_text", "font"): "exempt",
-    # A dotted ATTRIBUTE path — "transform.x", "audio.gain_db" — not a
-    # filesystem path. The genuinely dangerous half of this tool is its
-    # `value` when the leaf is `src`, which the handler guards; see
-    # test_set_property_src_value_is_guarded below.
-    ("set_property", "path"): "exempt",
-    # Same as add_text.font: a bundled font NAME, validated against a glob of
-    # config.FONTS_DIR and rejected if it is not one of them.
-    ("apply_brand_kit", "font"): "exempt",
-    # --- `name` args -----------------------------------------------------
-    # Added in 0.6.0. `_NAME_HINT` did not match `name`, and these tools
-    # advertise no description for `_DESC_HINT` to hit, so `save_show_template`
-    # spent 0.5.0 as an unnoticed arbitrary-location `.json` write and
-    # `apply_show_template` as the matching read — routed around every guard in
-    # dispatch.py because the argument simply was not called `path`. That is
-    # precisely the miss this table exists to make impossible, so `name` is now
-    # part of the derivation and every tool that has one is accounted for.
-    #
-    # These two DO reach the filesystem, but as a leaf name inside
-    # PRESETS_DIR/shows — never as a caller-controlled path — so the allowlist
-    # is the wrong tool. `show/templates.py::_show_path` enforces a
-    # `[A-Za-z0-9._-]` whitelist and refuses anything that is not a plain name;
-    # test_show_template_names_cannot_escape_presets below is the behaviour
-    # half of this exemption.
-    ("save_show_template", "name"): "exempt",
-    ("apply_show_template", "name"): "exempt",
-    # Pure in-memory dict lookups against a literal table; the value never
-    # reaches the filesystem in any form.
-    ("apply_export_preset", "name"): "exempt",   # _EXPORT_PRESETS
-    ("apply_text_template", "name"): "exempt",   # built-in bundle table
-    ("apply_template", "name"): "exempt",        # show/templates.py::TEMPLATES
-    # Human display text for a lower-third graphic. Not an identifier at all.
-    ("add_lower_third", "name"): "exempt",
-}
+# The table itself moved to `agent/path_args.py` (spec §1.3 rule 6) because
+# the Prompt Editor's plan validator needs the SAME rows at runtime. This test
+# keeps deriving the candidate set independently from /api/tools and asserting
+# the two agree, and keeps the count pin, so the move changes nothing about
+# what a new path-shaped argument has to pass.
+from video_ai_editor.agent.path_args import PATH_ARGS as EXPECTED_GUARDS
 
 #: An argument NAME that looks like a path. Kept separate from the description
 #: heuristic so a tool with an empty description still gets caught.

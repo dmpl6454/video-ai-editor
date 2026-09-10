@@ -1,0 +1,93 @@
+: turn tighten_and_captions
+data: {"type": "brain", "status": "trying", "brain": "recipes", "label": "Recipes"}
+
+data: {"type": "brain", "status": "failed", "brain": "recipes", "label": "Recipes", "detail": "confidence 0.62 \u2014 asking an on-device model to normalise"}
+
+data: {"type": "brain", "status": "trying", "brain": "apple_intelligence", "label": "Apple Intelligence"}
+
+data: {"type": "brain", "status": "failed", "brain": "apple_intelligence", "label": "Apple Intelligence", "detail": "appleIntelligenceNotEnabled"}
+
+data: {"type": "brain", "status": "trying", "brain": "local_model", "label": "Local model", "model": "mlx-community/Qwen2.5-7B-Instruct-4bit"}
+
+data: {"type": "typing", "actor": "planner"}
+
+data: {"type": "brain", "status": "answered", "brain": "local_model", "label": "Local model", "model": "mlx-community/Qwen2.5-7B-Instruct-4bit", "latency_ms": 6100}
+
+data: {"type": "text_delta", "text": "via Local model \u2014 working on: Tighten and add captions (run p_3f9a1c2e)\u2026"}
+
+data: {"type": "plan", "plan": {"version": 1, "id": "p_3f9a1c2e", "intent": "tighten+captions", "title": "Tighten and add captions", "steps": [{"tool": "remove_silences", "args": {"track": "v1", "threshold_db": -30, "min_dur": 0.5, "keep_pad": 0.1}, "why": "cut the dead air", "optional": false, "stage": 2}, {"tool": "remove_fillers", "args": {"words": ["um", "uh", "hmm", "erm", "uhh", "umm"], "pad": 0.05, "track": "v1"}, "why": "cut the ums", "optional": false, "stage": 2}, {"tool": "add_caption_track", "args": {"style": "ig_chunky", "position": "bottom", "max_chars": 42}, "why": "captions from the persisted transcript", "optional": false, "stage": 7}], "needs_input": [], "postconditions": [{"check": "speech_preserved", "args": {}, "human": "no kept word was cut", "needs_render": false, "headline": true}, {"check": "fillers_remaining_leq", "args": {"words": ["um", "uh", "hmm", "erm", "uhh", "umm"], "max": 0}, "human": "filler words are gone", "needs_render": false, "headline": true}, {"check": "captions_cover", "args": {"min_ratio": 0.9}, "human": "captions cover the speech", "needs_render": false, "headline": true}, {"check": "captions_within_extent", "args": {}, "human": "no caption runs past the video", "needs_render": false, "headline": true}, {"check": "silence_total_leq", "args": {"max_total_s": 1.0}, "human": "little silence remains", "needs_render": true, "headline": true}], "downloads_needed": [], "estimated_seconds": 14.0, "confidence": 0.9, "brain": "local_model", "content_brain": null, "reply": ""}}
+
+data: {"type": "step", "index": 0, "total": 3, "tool": "remove_silences", "status": "running"}
+
+data: {"type": "tool_use", "name": "remove_silences", "args": {"track": "v1", "threshold_db": -30, "min_dur": 0.5, "keep_pad": 0.1}, "id": "p_3f9a1c2e_s0"}
+
+data: {"type": "tool_result", "name": "remove_silences", "result": {"summary": "Removed 0 silences", "cuts": 0}, "id": "p_3f9a1c2e_s0"}
+
+data: {"type": "step", "index": 0, "total": 3, "tool": "remove_silences", "status": "ok", "summary": "Removed 0 silences", "effect": "none"}
+
+data: {"type": "step", "index": 1, "total": 3, "tool": "remove_fillers", "status": "running", "progress": 0.0}
+
+data: {"type": "tool_use", "name": "remove_fillers", "args": {"words": ["um", "uh", "hmm", "erm", "uhh", "umm"], "pad": 0.05, "track": "v1"}, "id": "p_3f9a1c2e_s1"}
+
+data: {"type": "step", "index": 1, "total": 3, "tool": "remove_fillers", "status": "running", "progress": 0.5}
+
+data: {"type": "tool_result", "name": "remove_fillers", "result": {"summary": "Removed 4 fillers (-1.9s)", "cuts": 4, "words": ["um", "uh", "um", "hmm"], "already_removed": []}, "id": "p_3f9a1c2e_s1"}
+
+data: {"type": "step", "index": 1, "total": 3, "tool": "remove_fillers", "status": "ok", "summary": "Removed 4 fillers (\u22121.9 s)"}
+
+data: {"type": "heartbeat", "t": 12.4}
+
+data: {"type": "step", "index": 2, "total": 3, "tool": "add_caption_track", "status": "running"}
+
+data: {"type": "tool_use", "name": "add_caption_track", "args": {"style": "ig_chunky", "position": "bottom", "max_chars": 42}, "id": "p_3f9a1c2e_s2"}
+
+data: {"type": "tool_result", "name": "add_caption_track", "result": {"summary": "Laid 9 caption cues (ig_chunky)", "cues": 9}, "id": "p_3f9a1c2e_s2"}
+
+data: {"type": "step", "index": 2, "total": 3, "tool": "add_caption_track", "status": "ok", "summary": "Laid 9 caption cues (ig_chunky)"}
+
+data: {"type": "step", "index": 3, "total": 3, "tool": "verify_render", "status": "running", "progress": 0.3, "summary": "rendering 360p for the checks"}
+
+data: {"type": "step", "index": 3, "total": 3, "tool": "verify_render", "status": "ok", "summary": "rendered in 6.2 s"}
+
+data: {"type": "verify", "plan_id": "p_3f9a1c2e", "checks": [{"check": "speech_preserved", "human": "no kept word was cut", "pass": true, "measured": 118, "expected": 118, "unit": "words", "headline": true}, {"check": "fillers_remaining_leq", "human": "filler words are gone", "pass": true, "measured": 0, "expected": 0, "unit": "fillers", "headline": true}, {"check": "captions_cover", "human": "captions cover the speech", "pass": true, "measured": 0.97, "expected": 0.9, "unit": "ratio", "headline": true}, {"check": "captions_within_extent", "human": "no caption runs past the video", "pass": true, "measured": 22.3, "expected": 22.31, "unit": "s", "headline": true}, {"check": "silence_total_leq", "human": "little silence remains", "pass": false, "measured": 1.4, "expected": 1.0, "unit": "s", "detail": "two pauses under the -30 dB threshold survived; say 'remove the silences' with a higher threshold", "headline": true}], "passed": 4, "total": 5, "rendered": true}
+
+data: {"type": "op", "op": {"seq": 12, "ts": 1757300000.0, "tool": "prompt", "args": {"plan_id": "p_3f9a1c2e"}, "summary": "Prompt: Tighten and add captions (3 steps)", "edl_hash_before": "a1b2", "edl_hash_after": "c3d4", "by": "prompt"}}
+
+data: {"type": "text_delta", "text": "\n\nvia Local model \u2014 4 of 5 checks passed. remove_silences: nothing to cut. Removed 4 fillers (\u22121.9 s) and laid 9 caption cues. Not passed: little silence remains \u2014 measured 1.4 s, expected \u2264 1.0 s. Undo with \u2318Z."}
+
+data: {"type": "done"}
+
+: turn clarify_downloads
+data: {"type": "brain", "status": "trying", "brain": "recipes", "label": "Recipes"}
+
+data: {"type": "brain", "status": "answered", "brain": "recipes", "label": "Recipes", "latency_ms": 3}
+
+data: {"type": "text_delta", "text": "via Recipes \u2014 First use downloads MADLAD translation model (3 GB). Reply **download** or **skip**."}
+
+data: {"type": "plan", "plan": {"version": 1, "id": "p_7b2d9e01", "intent": "captions", "title": "Hindi captions", "steps": [{"tool": "auto_caption", "args": {"style": "ig_chunky", "position": "bottom", "target": "hi", "max_chars": 42}, "why": "captions in Hindi need the translation model", "optional": false, "stage": 7}], "needs_input": [{"key": "downloads", "question": "First use downloads MADLAD translation model (3 GB). Start the download?", "kind": "confirm", "options": [{"value": "yes", "label": "Download"}, {"value": "no", "label": "Skip"}], "default": null, "required": true}], "postconditions": [{"check": "captions_language", "args": {"target": "hi"}, "human": "captions are in the requested language", "needs_render": false, "headline": true}], "downloads_needed": [{"what": "MADLAD translation model", "bytes": 3000000000, "tool": "auto_caption"}], "estimated_seconds": 40.0, "confidence": 0.95, "brain": "recipes", "content_brain": null, "reply": ""}}
+
+data: {"type": "clarify", "token": "clr_5e6f7a8b", "plan_id": "p_7b2d9e01", "questions": [{"key": "downloads", "question": "First use downloads MADLAD translation model (3 GB). Start the download?", "kind": "confirm", "options": [{"value": "yes", "label": "Download"}, {"value": "no", "label": "Skip"}], "default": null, "required": true}], "expires_in_s": 600}
+
+data: {"type": "done"}
+
+: turn step_failure
+data: {"type": "brain", "status": "trying", "brain": "recipes", "label": "Recipes"}
+
+data: {"type": "brain", "status": "answered", "brain": "recipes", "label": "Recipes", "latency_ms": 2}
+
+data: {"type": "text_delta", "text": "via Recipes \u2014 working on: Make it vertical (run p_9c0d1e2f)\u2026"}
+
+data: {"type": "plan", "plan": {"version": 1, "id": "p_9c0d1e2f", "intent": "reframe", "title": "Make it vertical", "steps": [{"tool": "auto_reframe", "args": {"ratio": "9:16", "subject_track": true}, "why": "reels are 9:16", "optional": false, "stage": 6}, {"tool": "set_clip_fit", "args": {"clip_id": "$v1_all", "fit": "cover"}, "why": "no letterbox fallback", "optional": false, "stage": 6}], "needs_input": [], "postconditions": [{"check": "canvas_aspect", "args": {"ratio": "9:16"}, "human": "the canvas has the requested aspect", "needs_render": false, "headline": true}], "downloads_needed": [], "estimated_seconds": 20.0, "confidence": 1.0, "brain": "recipes", "content_brain": null, "reply": ""}}
+
+data: {"type": "step", "index": 0, "total": 2, "tool": "auto_reframe", "status": "running", "progress": 0.2}
+
+data: {"type": "tool_use", "name": "auto_reframe", "args": {"ratio": "9:16", "subject_track": true}, "id": "p_9c0d1e2f_s0"}
+
+data: {"type": "tool_result", "name": "auto_reframe", "result": {"error": "cv2 not importable"}, "id": "p_9c0d1e2f_s0", "is_error": true}
+
+data: {"type": "step", "index": 0, "total": 2, "tool": "auto_reframe", "status": "failed", "error": "cv2 not importable"}
+
+data: {"type": "error", "message": "Step 1/2 auto_reframe failed: cv2 not importable. Timeline unchanged; transcript restored."}
+
+data: {"type": "done"}
+

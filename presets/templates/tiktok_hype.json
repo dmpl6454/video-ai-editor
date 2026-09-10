@@ -1,0 +1,14 @@
+{
+  "description": "High-energy TikTok: tightened, vertical, karaoke captions, punchy hook, an upbeat bed cut to the beat.",
+  "platform": "tiktok",
+  "keywords": ["hype", "tiktok edit", "high energy", "energetic edit", "make it hype"],
+  "recipes": [
+    {"recipe": "tighten"},
+    {"recipe": "reframe", "slots": {"ratio": "9:16", "platform": "tiktok"}},
+    {"recipe": "captions", "slots": {"style": "word_emphasis", "position": "center"}},
+    {"recipe": "hook"},
+    {"recipe": "music", "slots": {"mood": "upbeat"}},
+    {"recipe": "beat_sync"},
+    {"recipe": "export_preset", "slots": {"platform": "tiktok"}}
+  ]
+}

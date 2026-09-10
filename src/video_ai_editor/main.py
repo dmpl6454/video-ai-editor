@@ -16,10 +16,19 @@ M1 routes:
   GET  /api/sessions/{sid}/files/{kind}/{name}→ stream session-scoped media
 
 M2 routes:
-  POST /api/sessions/{sid}/chat               → SSE-stream a Claude chat turn
+  POST /api/sessions/{sid}/chat               → SSE-stream a chat turn (Claude with a key, local brains without)
   GET  /api/sessions/{sid}/history            → chat history
+
+Prompt Editor routes (api/prompt_routes.py, spec §4.7):
+  POST /api/sessions/{sid}/prompt             → SSE-stream a prompt run
+  POST /api/sessions/{sid}/prompt/answer      → resume a paused plan
+  GET  /api/sessions/{sid}/prompt/pending     → the open clarification
+  GET  /api/sessions/{sid}/prompt/run         → prompt_run.json (reconnect)
+  POST /api/sessions/{sid}/prompt/cancel      → cancel the run / drop the question
+  GET  /api/prompt/brains, /api/prompt/models, POST /api/prompt/models/{download,delete}
 """
 from __future__ import annotations
+import asyncio
 import inspect
 import json
 import re
@@ -92,18 +101,20 @@ app.add_middleware(
 
 
 def _validate_ai_config() -> None:
-    """Warn loudly (but don't crash) if the AI chat backend isn't usable.
+    """Say at boot which brains chat will run on, and warn if a key looks wrong.
 
-    The editor works fine without Claude — only the chat pane needs it — so a
-    missing key is a warning, not a fatal. Surfacing it at boot saves users a
-    confusing first chat that fails with a billing/auth error mid-conversation.
+    A missing key is NOT a degraded state any more: chat and the Prompt bar
+    plan and edit on the local brains (agent/prompt/), so it logs at `info`.
+    A malformed key stays a warning — that one produces a confusing first
+    chat that fails with an auth error mid-conversation.
     """
     from .config import ANTHROPIC_API_KEY
     log = get_logger()
     if not ANTHROPIC_API_KEY:
-        log.warning(
-            "ANTHROPIC_API_KEY is not set — the 'Tell Claude what to do' chat "
-            "pane will be disabled. Add it to .env to enable AI features."
+        log.info(
+            "ANTHROPIC_API_KEY is not set — chat and the Prompt bar run on local "
+            "brains (recipes / Apple Intelligence / local model). Add a key to "
+            "enable Claude."
         )
     elif not ANTHROPIC_API_KEY.startswith("sk-"):
         log.warning(
@@ -166,21 +177,12 @@ def _safe_filename(name: str | None, fallback: str) -> str:
     return f"{stem_clean}{suffix_clean}" or fallback
 
 
-# One mutation at a time per session. FastAPI runs sync endpoints in a
-# threadpool, and `dispatch()` read-modify-writes a shared EDLStore, so two
-# concurrent edits to the same session could interleave: both mutate the same
-# in-memory tree, both call commit(), and the second snapshot/ops entry
-# describes a state neither caller asked for. Uncontended acquisition is
-# ~100ns, so this costs nothing on the normal single-user path — it exists so
-# the background-job path below (which can hold a session for minutes) cannot
-# race a UI gesture.
-_SESSION_LOCKS: dict[str, threading.Lock] = {}
-_SESSION_LOCKS_GUARD = threading.Lock()
-
-
-def _session_lock(sid: str) -> threading.Lock:
-    with _SESSION_LOCKS_GUARD:
-        return _SESSION_LOCKS.setdefault(sid, threading.Lock())
+# One mutation at a time per session. The registry lives in api/locks.py so
+# the Prompt Editor's run thread (agent/prompt/executor.py) takes the SAME
+# lock as `/dispatch` and the job workers without importing this module; the
+# rationale (FastAPI's threadpool + a shared EDLStore) is written there.
+from .api import locks as _locks
+_session_lock = _locks.session_lock
 
 
 def _store(sid: str) -> EDLStore:
@@ -261,22 +263,18 @@ def tools():
     return {"tools": [{**t, **_handler_hook_flags(t["name"])} for t in list_tools()]}
 
 
-_FEATURE_REPORT_CACHE: dict | None = None
-
-
 @app.get("/api/features")
 def features(refresh: int = 0):
     """The `check_features` payload (ai/features.py::feature_report) over HTTP,
     so the AI panel can grey a tool out BEFORE the click and show the exact
-    `fix` string instead of a 422 afterwards. Memoised: the probes import six
-    ai.* modules and resolve a torch device — measured 2.2 s cold — and the
-    answer only changes when someone installs something, which is what
-    `?refresh=1` (the panel's Refresh button) is for."""
-    global _FEATURE_REPORT_CACHE
-    if refresh or _FEATURE_REPORT_CACHE is None:
-        from .ai.features import feature_report
-        _FEATURE_REPORT_CACHE = feature_report()
-    return _FEATURE_REPORT_CACHE
+    `fix` string instead of a 422 afterwards. Memoised in
+    `ai.features.cached_feature_report` (shared with the Prompt Editor's
+    planner, which reads `tools_available` from it on every turn): the probes
+    import six ai.* modules and resolve a torch device — measured 2.2 s cold —
+    and the answer only changes when someone installs something, which is
+    what `?refresh=1` (the panel's Refresh button) is for."""
+    from .ai.features import cached_feature_report
+    return cached_feature_report(refresh=bool(refresh))
 
 
 # ---- MCP server: let external agents (Claude Code / Cursor / Codex) drive the
@@ -383,6 +381,25 @@ def delete_session_route(sid: str):
     return {"deleted": sid}
 
 
+# The five upload ingresses below mutate the shared EDLStore like /dispatch
+# does, so they follow the same two rules (spec §4.2): answer `409
+# prompt_running` while a prompt run holds the session, and take the session
+# lock around the edit. Without them an upload landing DURING a run's
+# `store.batch()` had its commit swallowed (`EDLStore.commit` returns None
+# inside a batch) — the user's own edit was either folded into the run's one
+# op (so ⌘Z removed it) or wiped by the run's rollback, after the route had
+# already answered 200. Verified by executing `commit` inside `batch()`.
+#
+# The lock is taken on a worker thread (`asyncio.to_thread`): these routes are
+# `async def`, and a `threading.Lock` held by a job worker would otherwise
+# stall the whole event loop.
+async def _locked_edit(sid: str, edit):
+    def _run():
+        with _session_lock(sid):
+            return edit()
+    return await asyncio.to_thread(_run)
+
+
 @app.post("/api/sessions/{sid}/vo_record")
 async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
                     start: float = Form(0.0), gain_db: float = Form(0.0)):
@@ -391,6 +408,9 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     Browser MediaRecorder typically produces audio/webm;codecs=opus. We trans-
     code to a session-local AAC mp4 for clean playback in the timeline pipeline.
     """
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
     sd = session_dir(sid)
     vo_dir = sd / "uploads" / "vo"
     vo_dir.mkdir(parents=True, exist_ok=True)
@@ -421,19 +441,23 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
 
     store = _store(sid)
     from .edl.schema import Track, Clip, AudioProps
-    track = store.edl.get_track("vo")
-    if not track:
-        track = Track(id="vo", type="vo", z=0, label="Voiceover")
-        store.edl.tracks.append(track)
-    clip = Clip(
-        src=str(norm), in_=0.0, out=p.duration, start=float(start),
-        audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
-    )
-    track.clips.append(clip)
-    summary = f"Voiceover {p.duration:.1f}s @ {start:.1f}s ({float(gain_db):+.1f} dB)"
-    store.commit("vo_record", {"start": start, "gain_db": gain_db}, summary)
-    return {"clip_id": clip.id, "src": str(norm), "duration": p.duration,
-            "summary": summary, "edl_hash": store.edl.hash()}
+
+    def _edit():
+        track = store.edl.get_track("vo")
+        if not track:
+            track = Track(id="vo", type="vo", z=0, label="Voiceover")
+            store.edl.tracks.append(track)
+        clip = Clip(
+            src=str(norm), in_=0.0, out=p.duration, start=float(start),
+            audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
+        )
+        track.clips.append(clip)
+        summary = f"Voiceover {p.duration:.1f}s @ {start:.1f}s ({float(gain_db):+.1f} dB)"
+        store.commit("vo_record", {"start": start, "gain_db": gain_db}, summary)
+        return {"clip_id": clip.id, "src": str(norm), "duration": p.duration,
+                "summary": summary, "edl_hash": store.edl.hash()}
+
+    return await _locked_edit(sid, _edit)
 
 
 @app.post("/api/sessions/{sid}/sticker_upload")
@@ -441,6 +465,9 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
                          add_at_playhead: bool = Form(False),
                          playhead: float = Form(0.0)):
     """Upload a PNG (or other image) and optionally drop it as a sticker."""
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
     sd = session_dir(sid)
     sticker_dir = sd / "uploads" / "stickers"
     sticker_dir.mkdir(parents=True, exist_ok=True)
@@ -456,15 +483,19 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
     info = {"src": str(dst), "filename": safe_name}
     if add_at_playhead:
         store = _store(sid)
-        canvas = store.edl.canvas
-        dispatch(store, "add_sticker", {
-            "src": str(dst),
-            "start": float(playhead),
-            "end": float(playhead) + 3.0,
-            "position": [canvas.w / 2, canvas.h * 0.55],
-            "scale": 1.0,
-        })
-        info["edl_hash"] = store.edl.hash()
+
+        def _edit():
+            canvas = store.edl.canvas
+            dispatch(store, "add_sticker", {
+                "src": str(dst),
+                "start": float(playhead),
+                "end": float(playhead) + 3.0,
+                "position": [canvas.w / 2, canvas.h * 0.55],
+                "scale": 1.0,
+            })
+            return store.edl.hash()
+
+        info["edl_hash"] = await _locked_edit(sid, _edit)
     return info
 
 
@@ -474,6 +505,9 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
                        duck: bool = Form(True),
                        volume_db: float = Form(-12.0)):
     """Upload an audio file (mp3/wav/m4a) and optionally append to the music track."""
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
     store = _store(sid)
     sd = session_dir(sid)
     audio_dir = sd / "uploads" / "audio"
@@ -490,29 +524,34 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
         raise HTTPException(422, {"file": safe_name, "error": str(e)})
 
     if add_to_music:
-        store.edl.recompute_duration()
-        start = 0.0
-        # Trim the music bed to the VIDEO length. The old expression here was
-        #     min(p.duration, max(edl.duration, p.duration))
-        # which is the algebraic identity `min(d, max(x, d)) == d` for all x — it
-        # ALWAYS returned the full song, so its "trim to project duration"
-        # comment described behaviour that never existed. A 29s video plus a
-        # 6:13 song therefore made edl.duration 373.71s, and the transport and
-        # the render then legitimately ran minutes past the last frame of video
-        # (reported on both the browser and the desktop app as "the timer keeps
-        # running after the clip finishes").
-        #
-        # Music-first-then-video is still valid, and so is a deliberately long
-        # bed on a short video, so when there is no video yet we keep the whole
-        # song rather than trimming it to nothing.
-        video_extent = store.edl.video_extent()
-        out = min(p.duration, video_extent) if video_extent > 0.05 else p.duration
-        dispatch(store, "add_music", {
-            "src": str(dst), "start": start, "in": 0.0, "out": out,
-            "duck": duck, "volume_db": volume_db,
-        })
+        await _locked_edit(sid, lambda: _add_uploaded_music(store, dst, p.duration, duck, volume_db))
 
     return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash()}
+
+
+def _add_uploaded_music(store, dst: Path, duration: float, duck: bool, volume_db: float) -> None:
+    """The music-track edit of `audio_upload`, run under the session lock."""
+    store.edl.recompute_duration()
+    start = 0.0
+    # Trim the music bed to the VIDEO length. The old expression here was
+    #     min(p.duration, max(edl.duration, p.duration))
+    # which is the algebraic identity `min(d, max(x, d)) == d` for all x — it
+    # ALWAYS returned the full song, so its "trim to project duration"
+    # comment described behaviour that never existed. A 29s video plus a
+    # 6:13 song therefore made edl.duration 373.71s, and the transport and
+    # the render then legitimately ran minutes past the last frame of video
+    # (reported on both the browser and the desktop app as "the timer keeps
+    # running after the clip finishes").
+    #
+    # Music-first-then-video is still valid, and so is a deliberately long
+    # bed on a short video, so when there is no video yet we keep the whole
+    # song rather than trimming it to nothing.
+    video_extent = store.edl.video_extent()
+    out = min(duration, video_extent) if video_extent > 0.05 else duration
+    dispatch(store, "add_music", {
+        "src": str(dst), "start": start, "in": 0.0, "out": out,
+        "duck": duck, "volume_db": volume_db,
+    })
 
 
 _SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt", ".ass"})
@@ -528,6 +567,9 @@ async def subtitle_upload(sid: str, request: Request, file: UploadFile = File(..
     dispatch("import_srt", {path}) itself, so the import goes through the one
     mutation path and lands in the op log / undo like every other edit.
     """
+    busy = _prompt_running_response(sid)         # the follow-up dispatch would 409 anyway; say so first
+    if busy is not None:
+        return busy
     _store(sid)                                  # 404 on an unknown session
     safe_name = _safe_filename(file.filename, "captions.srt")
     if Path(safe_name).suffix.lower() not in _SUBTITLE_SUFFIXES:
@@ -578,6 +620,9 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
                  add_to_timeline: bool = Form(True),
                  transcribe: bool = Form(True),
                  whisper_model: str = Form("")):
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
     store = _store(sid)
     sd = session_dir(sid)
     uploads = sd / "uploads"
@@ -633,23 +678,27 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
         })
 
     if add_to_timeline:
-        v1 = store.edl.get_track("v1")
-        was_empty = not any(True for _ in (v1.clips if v1 else []))
-        if was_empty:
-            _match_canvas_to_source(store, res.probe)
-        store.edl.recompute_duration()
-        # Append after the last V1 clip — NOT after `edl.duration`, which spans
-        # every track. Importing a 6-minute song first would otherwise park the
-        # next video at start=373s, stranding it behind minutes of black (now
-        # that gaps actually render, that black is real footage in the export).
-        start = store.edl.video_extent()
-        dispatch(store, "add_clip", {
-            "track": "v1",
-            "src": str(res.normalized),
-            "in": 0.0,
-            "out": res.probe.duration,
-            "start": start,
-        })
+        def _edit() -> bool:
+            v1 = store.edl.get_track("v1")
+            was_empty = not any(True for _ in (v1.clips if v1 else []))
+            if was_empty:
+                _match_canvas_to_source(store, res.probe)
+            store.edl.recompute_duration()
+            # Append after the last V1 clip — NOT after `edl.duration`, which spans
+            # every track. Importing a 6-minute song first would otherwise park the
+            # next video at start=373s, stranding it behind minutes of black (now
+            # that gaps actually render, that black is real footage in the export).
+            start = store.edl.video_extent()
+            dispatch(store, "add_clip", {
+                "track": "v1",
+                "src": str(res.normalized),
+                "in": 0.0,
+                "out": res.probe.duration,
+                "start": start,
+            })
+            return was_empty
+
+        was_empty = await _locked_edit(sid, _edit)
         if was_empty:
             # This upload starts a brand-new project on an empty timeline —
             # any chat history is necessarily about DIFFERENT, no-longer-
@@ -700,6 +749,11 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
 # small and /livez, the timeline poll and the next edit all queue behind them.
 # The frontend calls these with `wait=0` and polls /api/jobs/{id}, exactly as it
 # already does for export.
+# `transcribe` (0.7.0, agent/prompt) is deliberately NOT here although it can
+# run for a minute: this set is mirrored verbatim in mobile/lib/jobs.ts and
+# pinned by tests/test_mobile_catalog_drift.py, and the phone is frozen this
+# release. The prompt executor runs it on its own thread; a direct caller
+# passes `?wait=0`, which the route accepts for any tool.
 ASYNC_DISPATCH_TOOLS = frozenset({
     "remove_background", "object_erase", "upscale", "stabilize",
     "smooth_slow_motion", "vocal_isolate", "instrumental_isolate",
@@ -719,6 +773,14 @@ def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
     UI never needs a second allowlist.
     """
     store = _store(sid)
+    # A prompt run holds the session lock for as long as its longest step
+    # (a caption pass can be minutes). Blocking a UI gesture behind it would
+    # read as a hung app, so answer 409 up front; the desktop shows "Prompt
+    # running — wait or cancel". Job workers (below) keep blocking: a queued
+    # job is meant to wait its turn.
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
     if not wait:
         return _dispatch_async(sid, store, body)
     with _session_lock(sid):
@@ -1114,7 +1176,11 @@ def _load_history(sid: str) -> list[dict]:
 
 
 def _save_history(sid: str, history: list[dict]) -> None:
-    _history_path(sid).write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+    # Under the history lock: a prompt run's thread finalizes the same file
+    # from `agent/prompt/service.FileHistoryWriter` and the two writes may
+    # land in either order (spec §4.6).
+    with _locks.history_lock(sid):
+        _history_path(sid).write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
 
 @app.get("/api/sessions/{sid}/history")
@@ -1146,6 +1212,16 @@ async def chat(sid: str, body: ChatRequest):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# Prompt Editor routes (spec §4.7): `/api/sessions/{sid}/prompt*` and
+# `/api/prompt/*`. Mounted after the chat route, behind the same middleware;
+# `configure` hands them the LRU store resolver so the run thread re-resolves
+# the store inside the session lock.
+from .api import prompt_routes as _prompt_routes
+_prompt_routes.configure(resolve_store=_store)
+app.include_router(_prompt_routes.router)
+_prompt_running_response = _prompt_routes.prompt_running_response
 
 
 @app.get("/api/sessions/{sid}/waveform")

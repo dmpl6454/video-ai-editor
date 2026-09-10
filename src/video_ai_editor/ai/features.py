@@ -61,6 +61,13 @@ class Feature:
     # blanket "run from source" answer would be under-selling it. Used in
     # preference to PACKAGED_FIX when frozen.
     packaged_fix: str = ""
+    # A SPEED tier for a capability that already works (gpu_transcribe): the
+    # tools it names keep working without it, only slower. Reported as
+    # `optional: true` so a consumer that turns "unavailable" into "these tools
+    # are gone" — the Prompt Editor's `facts.tools_available` — skips it.
+    # Without this flag every Mac lost `auto_caption` from its plans and was
+    # told to run an NVIDIA `uv sync --group cuda` (verified on the M4 Max).
+    speed_tier: bool = False
 
 
 def _whisper_ok() -> bool:
@@ -256,7 +263,7 @@ FEATURES: list[Feature] = [
                  "backend in ctranslate2, so a Mac always transcribes on CPU.",
             # The CUDA wheels are in neither bundle, and pip cannot add them to
             # a frozen app.
-            in_packaged_app=False),
+            in_packaged_app=False, speed_tier=True),
 ]
 
 
@@ -282,6 +289,8 @@ def feature_report() -> dict:
         entry = {"key": f.key, "feature": f.label, "tools": f.tools}
         if f.note:
             entry["note"] = f.note
+        if f.speed_tier:
+            entry["optional"] = True          # the tools work without it (slower)
         if ok:
             avail.append(entry)
         else:
@@ -313,3 +322,28 @@ def feature_report() -> dict:
                     + (f"; missing: {', '.join(m['key'] for m in missing)}"
                        if missing else "")),
     }
+
+
+# The memo used to live in `main._FEATURE_REPORT_CACHE`, which only the
+# `/api/features` route could reach. The Prompt Editor's `build_facts` needs
+# the same answer on every turn (`facts.tools_available`, spec §2.1) and must
+# never pay the 2.2 s cold path twice, so the memo moved next to the probes:
+# one cache, read by the route, the planner and the brains report alike.
+_REPORT_CACHE: dict | None = None
+_REPORT_CACHE_LOCK = __import__("threading").Lock()
+
+
+def cached_feature_report(*, refresh: bool = False) -> dict:
+    """`feature_report()`, computed once per process (or again on `refresh`).
+
+    The answer only changes when someone installs something, which is what
+    the AI panel's Refresh button (`?refresh=1`) is for. The lock keeps two
+    first callers — a chat turn and the panel loading at once — from both
+    paying the cold path.
+    """
+    global _REPORT_CACHE
+    with _REPORT_CACHE_LOCK:
+        if refresh or _REPORT_CACHE is None:
+            _REPORT_CACHE = feature_report()
+        return _REPORT_CACHE
+

@@ -311,6 +311,17 @@ verify_signature() {
       die "nested library carries the app entitlements (a --deep leak): ${sample#$path/}"
     fi
   fi
+  # The Apple Intelligence helper (build_app.sh --add-binary, spec §3.2) is
+  # one more nested Mach-O for sign_nested_machos; when this build carries it,
+  # prove the hardened-runtime signature survived PyInstaller's ad-hoc re-sign
+  # order — a helper that macOS refuses to launch would silently drop a brain.
+  local fm_helper="$path/Contents/Frameworks/fm-planner"
+  if [ -f "$fm_helper" ]; then
+    info="$(codesign -dvv "$fm_helper" 2>&1)"
+    [[ "$info" == *"flags="*"runtime"* ]] \
+      || die "fm-planner helper lacks hardened runtime: ${fm_helper#$path/}"
+    log "  fm-planner helper: hardened runtime confirmed"
+  fi
 }
 
 # Sign in a /tmp staging copy and move the finished bundle back, exactly as

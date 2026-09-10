@@ -39,7 +39,8 @@ def client(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_main, "WORKDIR", tmp_path)
     # The report is memoised per process; start each test cold so a fake
     # installed by one test can never leak into another's assertions.
-    monkeypatch.setattr(_main, "_FEATURE_REPORT_CACHE", None)
+    from video_ai_editor.ai import features as _features
+    monkeypatch.setattr(_features, "_REPORT_CACHE", None)
     _main._STORES.clear()
     return TestClient(app)
 
@@ -65,6 +66,12 @@ def test_features_route_reports_every_feature_with_a_fix_for_each_gap(client):
         assert entry["fix"], f"{entry['key']} reports no way to fix it"
     for entry in body["available"]:
         assert "fix" not in entry, f"{entry['key']} is available yet carries a fix"
+    # A speed tier is not a capability: it is flagged so consumers that turn
+    # "unavailable" into "these tools are gone" skip it (the Prompt Editor's
+    # facts lost `auto_caption` on every Mac without this).
+    gpu = next(e for e in body["available"] + body["unavailable"] if e["key"] == "gpu_transcribe")
+    assert gpu["optional"] is True and "auto_caption" in gpu["tools"]
+    assert all(e.get("optional") is not True for e in body["available"] + body["unavailable"] if e["key"] != "gpu_transcribe")
 
 
 def test_features_route_is_memoised_until_refresh(client, monkeypatch):

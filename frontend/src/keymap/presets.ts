@@ -54,6 +54,11 @@ export const PRESETS = {
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
+      // `/` (the universal "go to the command line") and ⌘K (the universal
+      // "command palette") both land in the Prompt bar. Neither key is bound
+      // elsewhere in this preset; `?` (Shift+Slash) is a different chord and
+      // still opens Help.
+      focusPrompt: ['Slash', 'Mod+KeyK'],
     } as KeyMap,
   },
 
@@ -89,6 +94,10 @@ export const PRESETS = {
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
+      // Only `/` here: ⌘K is Premiere's own Add Edit (split) above, and the
+      // engine's chord map is last-write-wins, so binding it twice would
+      // silently steal split. Rebind in Settings if you want ⌘K anyway.
+      focusPrompt: ['Slash'],
     } as KeyMap,
   },
 
@@ -124,6 +133,7 @@ export const PRESETS = {
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
+      focusPrompt: ['Slash', 'Mod+KeyK'],
     } as KeyMap,
   },
 } as const

@@ -1,6 +1,6 @@
 [project]
 name = "video-ai-editor"
-version = "0.6.0"
+version = "0.7.0"
 description = "Local AI video editor — chat-driven, CapCut-class"
 requires-python = ">=3.11"
 dependencies = [
@@ -39,6 +39,19 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
 ]
+# The on-device planning brain for the Prompt bar (docs/PROMPT_EDITOR.md).
+# An EXTRA, not a group, because it is per-machine capability rather than a
+# dev-only tool: `uv sync --extra local-llm` on an Apple-silicon Mac installs
+# mlx-lm, and `agent/prompt/brains/mlx_brain.py` imports it lazily so a
+# checkout without the extra still runs and `brains_report()` says exactly
+# what is missing ("not installed (pip)") instead of raising at import.
+# Pinned exactly: mlx-lm 0.31.x requires transformers>=5, which nothing else in
+# this lock pulls, and a floating pin would let a routine `uv lock` move the
+# model loader under the benchmark. The environment markers keep the lock
+# resolvable on ubuntu/windows CI, where the extra is simply empty.
+local-llm = [
+    "mlx-lm==0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 # heavier AI deps loaded on demand in later milestones
 ai = [
     "movis>=0.7",
@@ -63,6 +76,18 @@ packages = ["src/video_ai_editor"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+# The CapCut-parity benchmark (tests/benchmark/, docs/BENCHMARK.md) transcribes
+# real synthesized media and runs 24 prompts end to end — minutes, not seconds,
+# and it needs the whisper model on disk. It is excluded from the default run
+# by marker; `pytest -m benchmark` opts in (a command-line -m replaces this
+# one). `tests/benchmark/test_media_synthesis.py` is deliberately UNMARKED so
+# the media pipeline itself stays covered by every default run.
+addopts = "-m 'not benchmark'"
+markers = [
+    "benchmark: end-to-end CapCut-parity benchmark on real media (opt in with -m benchmark)",
+    "slow: slow-tier benchmark case (shorts, reframe, full pipeline, 12-minute clip)",
+    "tts: needs a Hindi TTS voice (Piper hi_IN or macOS `say -v Lekha`) to synthesize its fixture",
+]
 
 [dependency-groups]
 dev = [

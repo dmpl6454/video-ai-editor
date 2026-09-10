@@ -551,6 +551,10 @@ AUDIO_TOOLS = [
            "out": {"type": "number", "default": 0.0, "description": "0 = use full source duration"},
            "volume_db": {"type": "number", "default": -12.0},
            "duck": {"type": "boolean", "default": True},
+           "loop": {"type": "boolean", "default": False,
+                    "description": "Repeat a bed shorter than the video back to back until "
+                                   "the video extent is covered (laid as consecutive clips; "
+                                   "only the last one fades out)."},
        },
        ["src"]),
     _t("set_duck",
@@ -613,7 +617,12 @@ AUDIO_TOOLS = [
        "Detect beats in the music track and split V1 every Nth beat (so cuts land "
        "on the music). Requires add_music first.",
        "auto",
-       {"subdivision": {"type": "integer", "default": 4, "description": "Cut every Nth beat (4 = every bar in 4/4)"}}),
+       {"subdivision": {"type": "integer", "default": 4, "description": "Cut every Nth beat (4 = every bar in 4/4)"},
+        "min_shot": {"type": "number", "default": 0.0, "minimum": 0,
+                     "description": "Shortest shot to leave, seconds. A beat that would cut a "
+                                    "shorter fragment (off a clip edge or the previous cut) is "
+                                    "SKIPPED, not shifted, so kept cuts stay on the beat. "
+                                    "0 = cut on every Nth beat regardless."}}),
     _t("auto_reframe",
        "Switch canvas aspect (9:16 / 16:9 / 1:1 / 4:5) and re-crop every V1 clip to "
        "it. With subject_track (default) each clip is re-rendered following the "
@@ -761,7 +770,13 @@ EFFECT_TOOLS = [
            # first and replace that with a wall of ~88 names.
            "type": {"type": "string", "enum": _transition_names(),
                     "x-validated-by-handler": True},
-           "duration": {"type": "number", "default": 0.5},
+           # No `default` here on purpose: each transition has its own
+           # (render.transitions.default_duration — a whip 0.25 s, a dip to
+           # black 0.6 s) and the handler applies it when this is omitted.
+           # `list_transitions.defaults` advertises the number per name.
+           "duration": {"type": "number",
+                        "description": "Seconds; omit for the transition's own default "
+                                       "(see list_transitions → defaults)."},
        },
        ["at"]),
     _t("remove_transition",
@@ -774,7 +789,9 @@ EFFECT_TOOLS = [
        },
        []),
     _t("list_transitions",
-       "The full transition catalog: categories, aliases, and descriptions.",
+       "The full transition catalog: every accepted name, CapCut-style families "
+       "with display names and descriptions (`entries`), and the per-transition "
+       "default duration add_transition applies when none is given (`defaults`).",
        "effects", {}),
     _t("check_features",
        "What THIS install can actually do: which optional features (captions, "
@@ -963,6 +980,17 @@ HEAVY_AI_TOOLS = [
            "factor": {"type": "integer", "default": 2, "description": "Slow-down multiple, e.g. 2 or 4"},
        },
        ["clip_id"]),
+    _t("transcribe",
+       "Transcribe the first v1 clip's source with Whisper and persist the "
+       "transcript (ingest.json or the session's transcript.json) WITHOUT laying "
+       "captions or touching the timeline. Reuses an existing transcript unless "
+       "force=true. Refuses a model that is not already downloaded.",
+       "ai",
+       {"model": {"type": "string", "enum": ["small", "large-v3-turbo", "large-v3"],
+                  "description": "Whisper model; default WHISPER_MODEL (small). Must already be on disk."},
+        "force": {"type": "boolean", "default": False,
+                  "description": "Re-transcribe even when a transcript is already persisted."}},
+       []),
     _t("make_shorts",
        "Heuristically pick N highlight ranges from the V1 source (transcript + audio "
        "energy) for cutting a long video into shorts. Default returns the ranges only; "

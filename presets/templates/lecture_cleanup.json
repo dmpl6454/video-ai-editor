@@ -1,0 +1,12 @@
+{
+  "description": "Clean up a recorded lecture or meeting: silences and fillers out, plain captions, denoised, -14 LUFS — no hook, no music.",
+  "platform": "youtube_16x9",
+  "keywords": ["lecture", "lecture cleanup", "clean up the lecture", "meeting recording", "webinar", "class recording"],
+  "exclusions": ["hook", "music"],
+  "recipes": [
+    {"recipe": "tighten"},
+    {"recipe": "captions", "slots": {"style": "default", "position": "bottom"}},
+    {"recipe": "clean_audio", "slots": {"lufs": -14}},
+    {"recipe": "export_preset", "slots": {"platform": "youtube_16x9"}}
+  ]
+}

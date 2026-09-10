@@ -3,6 +3,130 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.7.0
+
+### Added
+- **Edit with a prompt, no API key.** A Prompt bar above the preview (`/`
+  focuses it) turns one sentence into a verified edit through a ladder of
+  brains: a grammar-and-recipe planner (`agent/prompt/{grammar,slots,recipes,
+  planner}.py`) answers instantly at confidence ≥ 0.75; an on-device language
+  model normalises the 0.4–0.75 band — Apple Intelligence through a
+  network-free Swift helper (`tools/fm-planner`, macOS 26+, only when the
+  feature is on in System Settings) then `mlx-community/Qwen2.5-7B-Instruct-4bit`
+  via MLX (`uv sync --extra local-llm`; tiered by RAM, loaded only from the
+  local Hugging Face cache); Claude is a rung only when `ANTHROPIC_API_KEY` is
+  set. Every reply says which brain answered and, when a better rung was
+  unavailable, exactly why and how to fix it (`GET /api/prompt/brains`). The
+  on-device brains receive recipe cards and emit an intent draft; the same
+  recipe table expands it into a staged plan, so an LLM plan gets stages,
+  postconditions, prerequisites and idempotence for free.
+- **Plans are verified, not assumed.** Every run ends with measured
+  postconditions read from the EDL, the transcript mapped through
+  `agent/timemap`, ffprobe or one 360p verify render made through the export
+  audio path: captions cover of speech in timeline seconds, no cue past the
+  picture, loudness on the render, no overlay outside the platform safe zone,
+  splits on beats, fillers remaining. Failed checks lead the reply with
+  measured vs expected. A whole prompt run is **one op, one undo step**;
+  execution outlives the SSE connection (a phone that locks does not roll
+  back a caption pass) and `GET …/prompt/run` reconnects to a running or
+  finished run. Five new SSE events — `brain`, `plan`, `step`, `verify`,
+  `clarify` — beside the six the phone knows; the first `text_delta` of every
+  turn starts with `via <Brain> —` so the iPhone app shows the brain with zero
+  changes.
+- **Clarifications instead of guesses.** The planner asks only when it cannot
+  know (caption language, brand handle, voiceover text, a ratio on an
+  already-vertical source), plus two gates: a first-use download (MADLAD 3 GB,
+  large-v3 3.1 GB, a Piper voice 60 MB) and a run over 90 s. From the phone
+  you answer with a whole word (`hi`, `first`, `haan`, `skip`); a partial
+  match never counts.
+- **All the transitions from CapCut.** `presets/transitions` names every look
+  in `render/transitions.py` — all 58 native ffmpeg xfade transitions plus the
+  custom ones — with a CapCut-style display name, category (Basic, Wipe,
+  Slide, Zoom, Blur, Shape, Glitch/Stylised, Light), default duration and a
+  one-line description; `add_transition`/`list_transitions` accept and
+  advertise every catalog name; the compositor honours per-transition default
+  durations; the desktop gains a Transitions panel (category tabs, grid,
+  local hover preview, apply-to-selected-cut, keyboard); and the prompt takes
+  transition intents — "smooth zoom between every clip", "add a glitch
+  transition at the hook".
+- **`transcribe`** — a non-mutating tool that persists the first v1 clip's
+  transcript without laying captions; the prompt path's prerequisite, so
+  "remove the ums" on a fresh upload never means a second transcription pass
+  or an unwanted caption track. Refuses a model that is not on disk.
+- **Presets**: six text styles, four transition looks, five edit templates,
+  and four procedural music beds (`scripts/gen_music_beds.py` — 48 kHz,
+  180 s, −18 LUFS, an exact kick grid with a `.json` sidecar; generated at
+  build time, never committed).
+- **The CapCut-parity benchmark** (`tests/benchmark/`, `docs/BENCHMARK.md`):
+  26 prompts through the real route on synthesized media with ground truth to
+  the millisecond, measured independently of the app's verifier, with a
+  socket-level guard that fails any network egress. `pytest -m benchmark`
+  opts in; the media pipeline and the guard are in the default run.
+- iOS build number 2.
+
+### Changed
+- **One source↔timeline mapping for every transcript consumer** (the
+  `d06d1c7` baseline of this release): `remove_fillers`, `add_caption_track`
+  and `auto_caption` go through `agent/timemap.py`, and footage is removed by
+  transcript/source time only via `_cut_source_ranges`, which re-maps through
+  the live EDL after every cut. Before: after `remove_silences`, `remove_fillers`
+  removed 1 of 4 fillers and cut two stretches of real speech, and captions
+  generated after cuts were laid at source time — 9.7 s past the end of the
+  video, rendering over black. `export_srt/vtt/ass` deliberately stay
+  source-timed.
+- **Every argument a handler reads is advertised in its schema**
+  (`tests/test_tool_schema_completeness.py` pins the census at zero). The
+  day the rule was introduced, 13 tools read 22 arguments their schema never
+  mentioned (`auto_reframe.subject_track`, `add_text.size`, `apply_lut.lut_path`,
+  …); `add_music(gain_db)` was silently ignored. Unknown arguments are now a
+  rejected plan, not a no-op.
+- `add_music` gains `loop`: a bed shorter than the video is laid back-to-back
+  until the extent is covered, only the last piece fading out.
+- Caption and lower-third defaults sit higher on vertical canvases (the
+  TikTok/Reels UI covers the bottom ~20 % and the right rail): `y` 0.76 /
+  0.74 on 9:16, unchanged on 16:9. `SAFE_ZONES` is one table shared by the
+  handlers and the verifier.
+- Chat without a key no longer answers "ANTHROPIC_API_KEY is not set": it
+  delegates to the same prompt service, and the startup message says the bar
+  runs on local brains. `/dispatch` answers `409 prompt_running` while a prompt
+  run holds the session lock (the desktop shows "Prompt running — wait or
+  cancel"); chat history is written under a per-session history lock so the
+  route's save and the run thread's finalize can land in either order.
+- The feature report memo moved from `main.py` into `ai/features.py`
+  (`cached_feature_report`), so the planner's facts never trigger the 2.2 s
+  cold probe twice.
+
+### Security
+- Every plan — from any brain — is validated against an explicit allowlist
+  before any dispatch: allow-listed tools only (`undo/redo`, `set_property`,
+  `add_clip`, `add_sticker`, `add_effect`, `repair_*`, the export writers and
+  a dozen more are denied), no unknown argument, enum whitelists for every
+  free string that reaches the filesystem or the network (whisper models,
+  Piper voices, fonts, LUT names, caption targets, preset names, transition
+  names), numeric bounds, and **no model-authored file path** — a plan may
+  read only files the session already offers.
+- The prompt path never downloads a model or a voice without a **yes**;
+  "no cloud key" is not "no network", the rule is no network without an
+  answer. Model downloads are loopback-only routes (a paired phone cannot
+  start a 4 GB download on the Mac). The Apple Intelligence helper is a
+  network-free child process with a scrubbed environment and an empty working
+  directory; its source is tripwired against `URLSession`, `Network`,
+  sockets and `Data(contentsOf:)`, and `Package.swift` declares zero
+  dependencies. The MLX loader sets `HF_HUB_OFFLINE=1` in-process and loads
+  from a directory, never a repo id; its download path excludes `*.py`.
+- The on-device brains receive no secrets, no absolute paths and no tool
+  schemas; only the cloud brain may emit raw tool steps, and those are
+  validated the same way.
+
+### Docs
+- `docs/PROMPT_EDITOR.md` (the ladder, the prompts, the questions, answering
+  from the phone, transitions, environment), `docs/BENCHMARK.md` (ground
+  truth, measurement rules, tiers, the claim procedure), `tests/benchmark/README.md`;
+  README "Edit with a prompt, no API key"; CLAUDE.md sections for
+  `agent/prompt/`, `brains/` + `tools/fm-planner/`, `agent/timemap.py` (two
+  clocks) and `tests/benchmark/`; `.env.example` marks the key optional and
+  documents `VAI_BRAIN`, `VAI_MLX_MODEL`, `VAI_PROMPT_CLOUD`.
+
 ## 0.6.0
 
 ### Added

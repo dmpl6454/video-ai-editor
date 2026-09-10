@@ -4,7 +4,7 @@
     "slug": "video-ai-editor-mobile",
     "scheme": "videoaieditor",
     "owner": "dashmani-media",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -12,7 +12,7 @@
     "primaryColor": "#FF4D6D",
     "ios": {
       "bundleIdentifier": "com.videoaieditor.mobile",
-      "buildNumber": "1",
+      "buildNumber": "2",
       "supportsTablet": true,
       "config": {
         "usesNonExemptEncryption": false

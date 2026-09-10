@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/dmpl6454/video-ai-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/dmpl6454/video-ai-editor/actions/workflows/ci.yml)
 
-Local, chat-driven, CapCut-class video editor. Upload a video, tell Claude how
-to edit it. Everything runs on your machine — only Claude API calls leave it.
+Local, prompt-driven, CapCut-class video editor. Upload a video, type what you
+want in one sentence. Everything runs on your machine — a Claude API key is
+optional, and the only bytes that leave are the calls you turn on.
 
 - **100 dispatch tools** (94 advertised to the chat agent) covering every CapCut feature pillar (multi-track
   timeline, keyframes, effects, masks, chroma key, transitions, color grading,
@@ -76,6 +77,40 @@ The agent gets all 94 schema'd tools (cut, transitions, captions, color,
 default; pass `session_id` in any tool's arguments to target a specific
 project.
 
+## Edit with a prompt, no API key
+
+Type one sentence into the Prompt bar (`/`) — `add captions`, `cut out the
+ums`, `make it vertical for reels`, `add chill background music and duck it
+under my voice`, `smooth zoom between every clip`, `make 3 shorts under 30
+seconds for tiktok` — and it becomes a verified edit. No cloud key needed.
+
+- **The brain ladder.** A grammar-and-recipe planner answers most prompts
+  instantly. Prompts it reads with less confidence go to an on-device language
+  model — Apple Intelligence (macOS 26+, when it is on in System Settings),
+  then a local MLX model (`uv sync --extra local-llm`; Qwen2.5-7B at ≥ 24 GB
+  RAM). Claude is a rung only when `ANTHROPIC_API_KEY` is set. Every reply
+  names the brain that answered and, when a better one was unavailable, why
+  and how to fix it.
+- **Offline by rule.** The prompt path never downloads a model or a voice
+  without your **yes** — a first-use download (whisper large-v3 3.1 GB, MADLAD
+  3 GB, a Piper voice 60 MB) is a question in the plan, and "skip" drops the
+  steps that needed it. Model downloads start only from the Mac itself, never
+  from a paired phone. Every plan — from any brain — passes an explicit
+  allowlist (tools, arguments, enums, bounds, no model-written file path)
+  before a single tool runs.
+- **Download once, then it is local.** Whisper `small` ships cached; the
+  larger models, the translation model and extra voices are fetched once on
+  your say-so and live in your cache after that.
+- **Verified, one undo step.** Each run ends with measured checks (captions
+  cover of speech in timeline seconds, loudness on the render, no overlay
+  outside the platform safe zone, splits on beats) and is one op — ⌘Z takes
+  all of it back.
+- **Benchmark.** `tests/benchmark/` runs 26 prompts on synthesized media with
+  millisecond ground truth and a socket guard against any egress:
+  `VAI_BRAIN=recipes uv run pytest -m benchmark tests/benchmark`. Method and
+  claims: [docs/BENCHMARK.md](docs/BENCHMARK.md). The bar itself:
+  [docs/PROMPT_EDITOR.md](docs/PROMPT_EDITOR.md).
+
 ## Setup
 
 ```bash
@@ -83,7 +118,7 @@ brew install ffmpeg ffmpeg-full        # ffmpeg-full has libvidstab + libass + z
 cd ~/video-ai-editor
 uv sync --python 3.13 --all-extras --group dev   # plain `uv sync` omits pytest
 cd frontend && npm install && cd ..
-cp .env.example .env                   # fill in ANTHROPIC_API_KEY
+cp .env.example .env                   # ANTHROPIC_API_KEY is optional (it adds the Claude rung)
 ```
 
 Optional binaries (downloaded on first use of each feature; ~270 MB total):
@@ -155,8 +190,10 @@ Open http://localhost:5173.
 ## Test
 
 ```bash
-uv run pytest                          # ~11 min, 970 tests
+uv run pytest                          # the default suite (the benchmark is excluded by marker)
+VAI_BRAIN=recipes uv run pytest -m benchmark tests/benchmark   # the CapCut-parity benchmark (minutes; needs whisper small cached)
 cd frontend && npx tsc -b --force && npx vitest run && npx vite build
+cd mobile && npx tsc --noEmit && npm test
 ```
 
 > Use `tsc -b`, **never** `tsc --noEmit`. `frontend/tsconfig.json` is a solution

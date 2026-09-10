@@ -27,6 +27,7 @@ const SHORTCUTS: { keys?: string; label: string; cmds?: string[] }[] = [
   { cmds: ['zoomIn', 'zoomOut'],  label: 'Zoom timeline in / out' },
   { cmds: ['deselect'],           label: 'Clear selection + marks' },
   { cmds: ['undo', 'redo'],       label: 'Undo / redo' },
+  { cmds: ['focusPrompt'],        label: 'Focus the Prompt bar (one sentence → a verified edit)' },
   { keys: `${IS_MAC ? '⌘' : 'Ctrl'}+scroll`, label: 'Zoom timeline (wheel)' },
   { keys: 'Right-click clip',     label: 'Context menu (split / mute / lock / delete)' },
   { keys: '?',                    label: 'Toggle this help' },

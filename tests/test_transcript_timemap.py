@@ -276,6 +276,27 @@ def test_words_only_map_through_clips_of_their_own_source():
     assert len(map_words_to_timeline(edl, "v1", words)) == 2
 
 
+def test_a_derived_file_maps_through_its_origin(tmp_path: Path):
+    """A reframe/denoise render in the cache plays the upload's source
+    seconds; with its `.origin` sidecar the transcript follows it (before:
+    the first src-rewriting step of a plan lost the transcript)."""
+    from video_ai_editor.agent.media_origin import is_derived, origin_of, record_origin
+    upload = tmp_path / "uploads" / "talk" / "talk.normalized.mp4"
+    derived = tmp_path / "cache" / "reframe_abc.mp4"
+    denoised = tmp_path / "cache" / "denoise" / "denoise_def.mp4"
+    for f in (upload, derived, denoised):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    assert record_origin(derived, upload) is not None and is_derived(derived)
+    record_origin(denoised, derived)                                   # a chain collapses to the upload
+    assert origin_of(denoised) == str(upload) == origin_of(derived) and origin_of(upload) == str(upload)
+    assert record_origin(upload, upload) is None                       # a tool returning its input records nothing
+    edl = _edl(Clip(src=str(denoised), in_=0, out=4, start=0), Clip(src="/x/b.mp4", in_=0, out=4, start=4))
+    words = [{"word": "x", "start": 1.0, "end": 1.5}]
+    assert [(w["start"], w["end"]) for w in map_words_to_timeline(edl, "v1", words, src=str(upload))] == [(1.0, 1.5)]
+    assert map_words_to_timeline(edl, "v1", words, src="/x/other.mp4") == []
+
+
 def test_segments_split_by_a_cut_lose_the_removed_words_from_their_text():
     edl = _edl(Clip(src="/x/a.mp4", in_=0, out=3, start=0),
                Clip(src="/x/a.mp4", in_=5, out=8, start=3))

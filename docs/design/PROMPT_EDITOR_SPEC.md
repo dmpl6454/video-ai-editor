@@ -426,7 +426,7 @@ def run_plan(store, plan, facts, *, emit, cancel_event, prompt) -> ExecResult
 | `captions_nonempty` | captions track (or text-track `role=="caption"`) has ≥ 1 clip |
 | `captions_cover(min_ratio)` | union of caption `[start,end]` ∩ `facts_after.speech_spans` (both **timeline** seconds — spans come from `timemap.map_segments_to_timeline`) / `speech_seconds` |
 | `captions_within_extent` | last cue end ≤ `edl.video_extent() + 0.05` |
-| `captions_sync(tol=0.1)` | for the first cue after each v1 seam: cue start within `tol` of its first word's `timemap`-mapped timeline time |
+| `captions_sync(tol=0.1)` | for the first cue after each v1 seam: the cue moved ≤ `tol` relative to its OWN first word's `timemap`-mapped timeline time between `edl_before` and `edl` (a cue with no pre-run counterpart: within `tol` of that word). Measures drift the run introduced, not Whisper's cue padding — the absolute form flagged 1.6 s on every unchanged cue whose segment starts before its first word |
 | `captions_language(target)` | script ratios as drafted; `hinglish` needs `facts_before.language=="hi"` else `pass=None` |
 | `captions_style(style)` | `captions.config.style` **and** `captions_nonempty` |
 | `speech_preserved` | every word that was on the timeline before and is not a filler token is still on the timeline after (`timemap.map_words_to_timeline` before vs after, keyed by source time) |

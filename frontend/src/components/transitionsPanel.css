@@ -1,0 +1,316 @@
+/* The Transitions panel — the left pane's third tab.
+   Imported by TransitionsPanel.tsx — not from styles.css (owned elsewhere).
+
+   Direction: the same console the Prompt bar and the AI panel use — --bg-1
+   chrome, --bg-2 tiles, hairlines, uppercase 10px kickers, colour only where
+   it means something. The tiles are the point: each is a 16:9 swatch of two
+   colours (A = the outgoing clip in --accent-2, B = the incoming clip in
+   --accent) frozen at the MIDPOINT of its animation, so a glance at the grid
+   already tells the looks apart; hover or focus plays it. The keyframes read
+   per-tile custom properties set inline by lib/transitionPreview.ts
+   (clip-path endpoints, translate directions, mask angle); the CSS knows the
+   motion, the TS knows the geometry.
+
+   Motion is transform / opacity / clip-path / filter / mask only. Under
+   prefers-reduced-motion the tiles stay frozen at the midpoint even on hover.
+   Every colour is a token from styles.css; no new tokens. */
+
+/* ---- panel chrome --------------------------------------------------------- */
+
+.transitions-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.trp-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.trp-target-none { font-size: 11px; color: var(--text-dim); padding: 2px 4px; line-height: 1.4; }
+.trp-target-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.trp-target-at { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trp-target-at b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.trp-target-at small { font-size: 10px; color: var(--text-dim); }
+.trp-target-why { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trp-nav {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+}
+.trp-nav:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.trp-nav:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+
+.trp-applied {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 8px;
+  border-left: 3px solid var(--accent-2);
+  background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.trp-applied-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--accent-2); flex-shrink: 0; }
+.trp-applied-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.trp-remove { font-size: 10px; padding: 2px 8px; background: transparent; color: var(--text-dim); }
+.trp-remove:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); background: transparent; }
+
+.trp-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text);
+  padding: 6px 8px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-radius: 4px;
+}
+.trp-error button { font-size: 10px; padding: 2px 8px; flex-shrink: 0; }
+
+/* Family tabs — a wrapping strip of small pills (eight of them in a 160px+
+   column), one tab stop with roving focus (WAI-ARIA automatic activation). */
+.trp-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.trp-tab {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.trp-tab:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.trp-tab[aria-selected="true"] { color: var(--text); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+.trp-tab:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.trp-tab:active { transform: translateY(1px); }
+.trp-tab-n { font-size: 9px; font-weight: 500; opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+/* ---- the grid --------------------------------------------------------------- */
+
+.trp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.trp-empty { grid-column: 1 / -1; font-size: 11px; color: var(--text-dim); padding: 8px 4px; }
+
+.trp-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 4px 5px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  text-align: left;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.trp-tile:hover:not(:disabled) { background: var(--bg-2); border-color: #3a3a45; }
+.trp-tile:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.trp-tile:active:not(:disabled) { transform: translateY(1px); }
+.trp-tile.is-on-cut { border-color: var(--accent-2); }
+.trp-tile.is-on-cut .trp-tile-name::after { content: ' ·'; color: var(--accent-2); }
+/* Browse-only (no cut to apply to): the NAME and DURATION dim, the swatch
+   keeps playing on hover/focus so the 72 looks can be previewed before a
+   clip is ever split. */
+.trp-tile.is-browse-only .trp-tile-name, .trp-tile.is-browse-only .trp-tile-dur { opacity: 0.5; }
+.trp-tile.is-browse-only { cursor: help; }
+.trp-hint-line { font-size: 11px; color: var(--text-dim); padding: 4px 6px; border-left: 2px solid var(--accent-2); }
+.trp-tile-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 2px;
+}
+.trp-tile-dur { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 0 2px; }
+
+/* ---- the preview swatch ------------------------------------------------- */
+
+@property --tp-band { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@property --tp-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+
+.tp-prev {
+  --ca: color-mix(in srgb, var(--accent-2) 58%, var(--bg-3));
+  --cb: color-mix(in srgb, var(--accent) 58%, var(--bg-3));
+  --tp-dur: 1.3s;
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-0);
+  isolation: isolate;
+}
+.tp-a, .tp-b, .tp-veil {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* Frozen at the midpoint until hovered/focused: `paused` with a negative
+     delay is a still frame from the middle of the animation. */
+  animation-duration: var(--tp-dur);
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-delay: calc(var(--tp-dur) * -0.5);
+  animation-play-state: paused;
+  will-change: transform, opacity, clip-path;
+}
+.tp-a { background: var(--ca); z-index: 1; }
+.tp-b { background: var(--cb); z-index: 2; }
+.tp-veil { z-index: 3; opacity: 0; pointer-events: none; }
+/* A subtle diagonal so a plain-colour swatch still reads as a picture. */
+.tp-a::after, .tp-b::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 55%);
+}
+.tp-prev.a-top .tp-a { z-index: 2; }
+.tp-prev.a-top .tp-b { z-index: 1; }
+
+.trp-tile:hover .tp-a, .trp-tile:hover .tp-b, .trp-tile:hover .tp-veil,
+.trp-tile:focus-visible .tp-a, .trp-tile:focus-visible .tp-b, .trp-tile:focus-visible .tp-veil {
+  animation-delay: 0s;
+  animation-play-state: running;
+}
+@media (prefers-reduced-motion: reduce) {
+  .trp-tile:hover .tp-a, .trp-tile:hover .tp-b, .trp-tile:hover .tp-veil,
+  .trp-tile:focus-visible .tp-a, .trp-tile:focus-visible .tp-b, .trp-tile:focus-visible .tp-veil {
+    animation-delay: calc(var(--tp-dur) * -0.5);
+    animation-play-state: paused;
+  }
+}
+
+/* Basic */
+.kind-fade .tp-b { animation-name: tp-fade; }
+.kind-distance .tp-b { animation-name: tp-distance; }
+/* Light */
+.kind-dip-black .tp-veil { background: #000; animation-name: tp-dip; }
+.kind-dip-white .tp-veil { background: #fff; animation-name: tp-dip; }
+.kind-gray .tp-veil { background: #8a8a92; animation-name: tp-dip; }
+.kind-dip-black .tp-b, .kind-dip-white .tp-b, .kind-gray .tp-b { animation-name: tp-swap; animation-timing-function: steps(1, end); }
+.kind-burn .tp-b { animation-name: tp-fade; }
+.kind-burn .tp-veil { background: radial-gradient(ellipse at 35% 45%, #fff2c8, #ff9a3c 45%, transparent 75%); animation-name: tp-burn; }
+/* Wipe (clip-path from --cp-from to --cp-to) */
+.kind-wipe .tp-b, .kind-diag .tp-b, .kind-wave .tp-b,
+.kind-iris .tp-b, .kind-box .tp-b, .kind-diamond .tp-b, .kind-doors .tp-b, .kind-curtain .tp-b, .kind-crop .tp-b {
+  animation-name: tp-clip;
+}
+.kind-crop .tp-b { animation-name: tp-clip-zoom; }
+.kind-iris-close .tp-a, .kind-doors-close .tp-a, .kind-curtain-close .tp-a { animation-name: tp-clip; }
+.kind-clock .tp-b { mask-image: conic-gradient(#000 var(--tp-angle), transparent 0); animation-name: tp-angle; }
+.kind-slice .tp-b {
+  mask-image: repeating-linear-gradient(var(--mask-angle, 90deg), #000 0 var(--tp-band), transparent var(--tp-band) 20%);
+  animation-name: tp-band-in;
+}
+/* Slide */
+.kind-slide .tp-a, .kind-reveal .tp-a { animation-name: tp-move-out; }
+.kind-slide .tp-b, .kind-cover .tp-b { animation-name: tp-move-in; }
+/* Zoom */
+.kind-zoom .tp-b { animation-name: tp-zoom; }
+.kind-squeeze .tp-a { animation-name: tp-squeeze; }
+/* Blur */
+.kind-blur .tp-a { animation-name: tp-blur-out; }
+.kind-wind .tp-a { animation-name: tp-wind-out; }
+.kind-wind .tp-b { animation-name: tp-fade; }
+/* Shape */
+.kind-blinds .tp-b, .kind-bars .tp-b {
+  mask-image: repeating-linear-gradient(var(--mask-angle, 90deg), #000 0 var(--tp-band), transparent var(--tp-band) 20%);
+  animation-name: tp-band;
+}
+.kind-checker .tp-b, .kind-pixel .tp-b {
+  mask-image: linear-gradient(#000, #000);
+  mask-repeat: space;
+  animation-name: tp-cells;
+}
+.kind-pixel .tp-b { animation-name: tp-cells-coarse; }
+.kind-ripple .tp-b {
+  mask-image: repeating-radial-gradient(circle at 50% 50%, #000 0 var(--tp-band), transparent var(--tp-band) 14%);
+  animation-name: tp-band-ripple;
+}
+/* Glitch / Stylised */
+.kind-glitch .tp-b { animation-name: tp-glitch; animation-timing-function: steps(1, end); }
+.kind-spin .tp-b { mask-image: conic-gradient(#000 var(--tp-angle), transparent 0); animation-name: tp-spin; }
+.kind-whip .tp-a { animation-name: tp-whip-out; animation-timing-function: cubic-bezier(0.7, 0, 0.3, 1); }
+.kind-whip .tp-b { animation-name: tp-whip-in; animation-timing-function: cubic-bezier(0.7, 0, 0.3, 1); }
+
+@keyframes tp-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes tp-distance { from { opacity: 0; transform: scale(1.3); } to { opacity: 1; transform: scale(1); } }
+@keyframes tp-dip { 0% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes tp-swap { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
+@keyframes tp-burn { 0% { opacity: 0; transform: scale(0.6); } 45% { opacity: 0.95; transform: scale(1.3); } 100% { opacity: 0; transform: scale(1.6); } }
+@keyframes tp-clip { from { clip-path: var(--cp-from); } to { clip-path: var(--cp-to); } }
+@keyframes tp-clip-zoom { from { clip-path: var(--cp-from); transform: scale(0.6); } to { clip-path: var(--cp-to); transform: scale(1); } }
+@keyframes tp-angle { from { --tp-angle: 0deg; } to { --tp-angle: 360deg; } }
+@keyframes tp-spin { from { --tp-angle: 0deg; transform: rotate(-90deg) scale(1.5); } to { --tp-angle: 360deg; transform: rotate(0) scale(1); } }
+@keyframes tp-band { from { --tp-band: 0%; } to { --tp-band: 20%; } }
+@keyframes tp-band-in { from { --tp-band: 0%; transform: var(--tx-from); } to { --tp-band: 20%; transform: translate(0, 0); } }
+@keyframes tp-band-ripple { from { --tp-band: 0%; } to { --tp-band: 14%; } }
+@keyframes tp-move-out { from { transform: translate(0, 0); } to { transform: var(--tx-out); } }
+@keyframes tp-move-in { from { transform: var(--tx-from); } to { transform: translate(0, 0); } }
+@keyframes tp-zoom { from { opacity: 0; transform: scale(0.25); } 30% { opacity: 1; } to { opacity: 1; transform: scale(1); } }
+@keyframes tp-squeeze { from { transform: none; } to { transform: var(--sq); } }
+@keyframes tp-blur-out { from { opacity: 1; filter: blur(0); } 60% { filter: blur(6px); } to { opacity: 0; filter: blur(8px); } }
+@keyframes tp-wind-out { from { transform: translate(0, 0); filter: blur(0); } 50% { filter: blur(5px); } to { transform: var(--tx-out); filter: blur(0); opacity: 0.4; } }
+@keyframes tp-cells { from { mask-size: 1% 1%; } to { mask-size: 25% 25%; } }
+@keyframes tp-cells-coarse { from { mask-size: 2% 2%; } to { mask-size: 20% 20%; } }
+@keyframes tp-whip-out { from { transform: translate(0, 0); filter: blur(0); } 50% { filter: blur(7px); } to { transform: var(--tx-out); filter: blur(0); } }
+@keyframes tp-whip-in { from { transform: var(--tx-from); filter: blur(0); } 50% { filter: blur(7px); } to { transform: translate(0, 0); filter: blur(0); } }
+@keyframes tp-glitch {
+  0% { clip-path: inset(100% 0 0 0); transform: none; }
+  15% { clip-path: inset(0 0 70% 0); transform: translateX(6%); }
+  30% { clip-path: inset(40% 0 20% 0); transform: translateX(-5%); }
+  45% { clip-path: inset(10% 0 55% 0); transform: translateX(4%); }
+  60% { clip-path: inset(0 0 25% 0); transform: translateX(-3%); }
+  75% { clip-path: inset(30% 0 0 0); transform: translateX(2%); }
+  90%, 100% { clip-path: inset(0 0 0 0); transform: none; }
+}
+
+/* ---- footer ----------------------------------------------------------------- */
+
+.trp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.trp-dur { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); }
+.trp-dur input { width: 58px; font-size: 11px; padding: 4px 6px; background: var(--bg-2); font-variant-numeric: tabular-nums; }
+.trp-unit { font-size: 11px; color: var(--text-dim); }
+.trp-link { font-size: 10px; padding: 0; background: none; border: none; color: var(--accent-2); }
+.trp-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.trp-every { margin-left: auto; font-size: 11px; padding: 4px 10px; }
+.trp-every small { font-size: 9.5px; color: var(--text-dim); margin-left: 4px; }
+.trp-hint { font-size: 10px; color: var(--text-dim); }

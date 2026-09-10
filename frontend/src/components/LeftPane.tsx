@@ -1,15 +1,18 @@
 import { useRef, useState, type KeyboardEvent } from 'react'
 import { MediaBin } from './MediaBin'
 import { AiPanel } from './AiPanel'
+import { TransitionsPanel } from './TransitionsPanel'
 import './aiPanel.css'
 
-// The left sidebar's two tabs. The strip IS the panel heading — aiPanel.css
+// The left sidebar's three tabs. The strip IS the panel heading — aiPanel.css
 // hides MediaBin's own <h2>Media</h2> so the word isn't shown twice — and
 // "Media" stays the default so the first paint still carries the label
-// tests/test_frontend_smoke.py looks for.
-type Tab = 'media' | 'ai'
+// tests/test_frontend_smoke.py looks for. "Transitions" is CapCut's own word
+// for the panel (0.7.0) and sits between the footage and the AI tools.
+type Tab = 'media' | 'transitions' | 'ai'
 const TABS: { id: Tab; label: string; title: string }[] = [
   { id: 'media', label: 'Media', title: 'Footage, music, voiceover, stickers and effects' },
+  { id: 'transitions', label: 'Transitions', title: 'Every transition the renderer has, by family — hover to preview, click to apply to a cut' },
   { id: 'ai', label: 'AI', title: 'Auto-edit, captions, clean-up, cutout and search tools' },
 ]
 const STORE_KEY = 'vai.leftTab'
@@ -17,14 +20,14 @@ const STORE_KEY = 'vai.leftTab'
 function readTab(): Tab {
   try {
     const v = localStorage.getItem(STORE_KEY)
-    if (v === 'ai' || v === 'media') return v
+    if (v === 'ai' || v === 'media' || v === 'transitions') return v
   } catch { /* private mode / storage disabled — Media is the right default */ }
   return 'media'
 }
 
 export function LeftPane() {
   const [tab, setTab] = useState<Tab>(readTab)
-  const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ media: null, ai: null })
+  const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ media: null, transitions: null, ai: null })
 
   const pick = (t: Tab, focus = false) => {
     setTab(t)
@@ -76,6 +79,11 @@ export function LeftPane() {
           AI cards' expanded forms and typed values across a tab switch. */}
       <div role="tabpanel" id="left-panel-media" aria-labelledby="left-tab-media" hidden={tab !== 'media'}>
         <MediaBin />
+      </div>
+      <div role="tabpanel" id="left-panel-transitions" aria-labelledby="left-tab-transitions" hidden={tab !== 'transitions'}>
+        {/* Same `active` contract as AiPanel: the catalog fetch waits for the
+            first show, and the chosen family survives a tab switch. */}
+        <TransitionsPanel active={tab === 'transitions'} />
       </div>
       <div role="tabpanel" id="left-panel-ai" aria-labelledby="left-tab-ai" hidden={tab !== 'ai'}>
         {/* `active` is how the hidden-not-unmounted panel learns it left the

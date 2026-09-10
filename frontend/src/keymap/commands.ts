@@ -1,4 +1,5 @@
 import { useStore } from '../store'
+import { usePromptStore } from '../lib/promptStore'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -104,6 +105,13 @@ export const COMMANDS: Command[] = [
   { id: 'selectAll', label: 'Select all clips', category: 'Selection', run: (s) => s.selectAll() },
   { id: 'deselect', label: 'Deselect / clear', category: 'Selection',
     run: (s) => { s.clearSelection(); s.setInMark(null); s.setOutMark(null) } },
+
+  // ---------- Navigation ----------
+  // Focus the Prompt bar from anywhere. The engine never sees keys typed in a
+  // text field, so `/` inside chat or a rename box still types a slash; from
+  // the timeline or a button it jumps to the bar with the text selected.
+  { id: 'focusPrompt', label: 'Focus the Prompt bar', category: 'Navigation',
+    run: () => usePromptStore.getState().focus() },
 
   // ---------- History ----------
   { id: 'undo', label: 'Undo', category: 'History', run: (s) => s.dispatch('undo') },

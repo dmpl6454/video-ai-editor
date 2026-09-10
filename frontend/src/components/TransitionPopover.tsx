@@ -2,59 +2,26 @@
 // transition at a v1 cut point. Opened by Timeline.tsx when the user clicks
 // a cut-point affordance drawn on the timeline canvas.
 //
-// Catalog: fetched once per app run via the read-only `list_transitions`
-// dispatch tool. store.dispatch() deliberately returns Promise<void> (it's a
-// fire-and-refresh wrapper), so this component calls api.dispatch directly —
-// the route envelope is { result, edl_hash, op } (main.py's dispatch_tool)
-// and list_transitions' result is { transitions: string[], catalog: {...},
-// count }. list_transitions is a read-only tool (it never commits), so
-// calling it here creates no op / no undo entry / no EDL refresh churn.
+// Catalog: the same normalised catalog the Transitions panel uses
+// (lib/transitionCatalog — fetched once per app run through the read-only
+// `list_transitions` dispatch tool, never an op / undo entry / EDL refresh).
+// The <select> is grouped by family with CapCut-style names, and picking a
+// look sets the duration to that look's own default unless the user has
+// typed one — the same duration the panel applies, so the two surfaces never
+// disagree about what "Whip Pan" lasts.
 
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import {
+  FALLBACK_CATALOG, FAMILY_ORDER, MAX_DURATION_S, MIN_DURATION_S, cachedTransitionCatalog, clampDuration,
+  loadTransitionCatalog, lookupTransition, type TransitionCatalog,
+} from '../lib/transitionCatalog'
+import { formatCutTime } from '../lib/cutPoints'
 import './TransitionPopover.css'
 
 export interface TransitionInfo {
   at: number
   type: string
   duration: number
-}
-
-// Curated first screen (every name verified present in the backend catalog —
-// render/transitions.py's NATIVE ∪ ALIASES ∪ CUSTOM_EXPRS). "More…" swaps in
-// the full ~90-name list fetched from list_transitions.
-const CURATED = [
-  'fade', 'dissolve', 'fadeblack', 'fadewhite',
-  'slideleft', 'slideright', 'wipeleft', 'wiperight',
-  'circleopen', 'zoomin', 'pixelize', 'glitch', 'whip', 'spin',
-]
-
-// Fallback when the listing call fails: names that are always valid.
-const FALLBACK = ['fade', 'dissolve', 'wipeleft', 'wiperight', 'slideleft', 'slideright']
-
-// Module-level cache: the transition catalog is static for the lifetime of
-// the backend process, so one successful fetch serves every popover open.
-// A failed fetch is NOT cached — the next open retries.
-let catalogCache: string[] | null = null
-let catalogInflight: Promise<string[]> | null = null
-
-function fetchCatalog(sid: string): Promise<string[]> {
-  if (catalogCache) return Promise.resolve(catalogCache)
-  if (!catalogInflight) {
-    catalogInflight = api
-      .dispatch<{ transitions?: string[] }>(sid, 'list_transitions', {})
-      .then((res) => {
-        const names = res.result?.transitions
-        if (Array.isArray(names) && names.length) {
-          catalogCache = names
-          return names
-        }
-        return FALLBACK
-      })
-      .catch(() => FALLBACK)
-      .finally(() => { catalogInflight = null })
-  }
-  return catalogInflight
 }
 
 interface Props {
@@ -73,15 +40,25 @@ interface Props {
 export function TransitionPopover(
   { x, y, at, existing, sessionId, onApply, onRemove, onClose }: Props,
 ) {
-  const [names, setNames] = useState<string[]>(catalogCache ?? FALLBACK)
-  const [showAll, setShowAll] = useState(false)
-  const [type, setType] = useState(existing?.type ?? 'fade')
+  const [catalog, setCatalog] = useState<TransitionCatalog>(() => cachedTransitionCatalog() ?? FALLBACK_CATALOG)
+  // An existing transition may carry an alias ("spin") set via chat/MCP;
+  // the select shows its canonical look so the value is never blank.
+  const [type, setType] = useState(() => lookupTransition(cachedTransitionCatalog() ?? FALLBACK_CATALOG, existing?.type ?? 'fade')?.name ?? existing?.type ?? 'fade')
   // Kept as a string so mid-edit states ("0.", "") don't snap the input.
-  const [duration, setDuration] = useState(String(existing?.duration ?? 0.5))
+  // `touched` remembers that the user typed a duration, so a later type
+  // change keeps it instead of resetting to the look's default.
+  const [duration, setDuration] = useState(() => String(existing?.duration ?? lookupTransition(FALLBACK_CATALOG, existing?.type ?? 'fade')?.duration ?? 0.5))
+  const [touched, setTouched] = useState(!!existing)
 
   useEffect(() => {
     let alive = true
-    fetchCatalog(sessionId).then((n) => { if (alive) setNames(n) })
+    loadTransitionCatalog(sessionId)
+      .then((c) => {
+        if (!alive) return
+        setCatalog(c)
+        setType((t) => lookupTransition(c, t)?.name ?? t)
+      })
+      .catch(() => { /* the fallback list is already showing; the next open retries */ })
     return () => { alive = false }
   }, [sessionId])
 
@@ -102,19 +79,24 @@ export function TransitionPopover(
     }
   }, [onClose])
 
-  const curated = CURATED.filter((n) => names.includes(n))
-  const base = curated.length ? curated : names.slice(0, 12)
-  // Always include the currently-selected type (an existing transition set
-  // via chat/MCP can be any of the ~90 names) so the <select> never renders
-  // a blank value.
-  const options = showAll ? names : (base.includes(type) ? base : [type, ...base])
+  const pickType = (name: string) => {
+    setType(name)
+    if (!touched) {
+      const d = lookupTransition(catalog, name)?.duration
+      if (typeof d === 'number') setDuration(String(d))
+    }
+  }
 
   // Keep the popover on-screen when the cut is near the viewport edge.
   const left = Math.max(8, Math.min(x, window.innerWidth - 248))
   const top = Math.max(8, Math.min(y, window.innerHeight - 200))
 
+  const known = lookupTransition(catalog, type)
+  const entry = known ?? null
+
   function apply() {
-    const d = Math.max(0.1, Math.min(2.0, parseFloat(duration) || 0.5))
+    const fallback = entry?.duration ?? 0.5
+    const d = clampDuration(parseFloat(duration) || fallback)
     onApply(type, d)
   }
 
@@ -126,28 +108,35 @@ export function TransitionPopover(
     >
       <div className="tp-title">
         {existing ? 'Edit transition' : 'Add transition'}
-        <span className="tp-at">at {at.toFixed(2)}s</span>
+        <span className="tp-at">at {formatCutTime(at)}</span>
       </div>
       <label className="tp-row">
         <span>Type</span>
-        <select value={type} onChange={(e) => setType(e.target.value)}>
-          {options.map((n) => <option key={n} value={n}>{n}</option>)}
+        <select value={type} onChange={(e) => pickType(e.target.value)}>
+          {/* A value the catalog does not know (a stale project, a renamed
+              look) stays selectable so the select never renders blank. */}
+          {!known && <option value={type}>{type}</option>}
+          {FAMILY_ORDER.map((f) => {
+            const rows = catalog.families.get(f) ?? []
+            if (!rows.length) return null
+            return (
+              <optgroup key={f} label={f}>
+                {rows.map((e) => <option key={e.name} value={e.name}>{e.display}</option>)}
+              </optgroup>
+            )
+          })}
         </select>
       </label>
-      {!showAll && names.length > options.length && (
-        <button type="button" className="tp-more" onClick={() => setShowAll(true)}>
-          More… ({names.length} available)
-        </button>
-      )}
+      {entry?.description && <div className="tp-desc">{entry.description}</div>}
       <label className="tp-row">
         <span>Duration</span>
         <input
           type="number"
-          min={0.1}
-          max={2.0}
-          step={0.1}
+          min={MIN_DURATION_S}
+          max={MAX_DURATION_S}
+          step={0.05}
           value={duration}
-          onChange={(e) => setDuration(e.target.value)}
+          onChange={(e) => { setTouched(true); setDuration(e.target.value) }}
         />
         <span className="tp-unit">s</span>
       </label>

@@ -1,0 +1,12 @@
+{
+  "description": "Full-width Bebas hook line, all caps, dead centre — the first-three-seconds look.",
+  "role": "hook",
+  "font": "BebasNeue-Regular.ttf",
+  "anchor": "hook",
+  "size": 170,
+  "color": "#FFFFFF",
+  "stroke": "#000000",
+  "stroke_w": 7,
+  "upper": true,
+  "anim_in": "pop"
+}

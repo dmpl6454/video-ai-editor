@@ -1,13 +1,30 @@
+// The chat pane. With an ANTHROPIC_API_KEY it is a Claude tool-use turn; without
+// one, `/chat` delegates to the Prompt Editor (agent/loop.py, spec §4.6) and
+// the same stream carries `brain`, `plan`, `step`, `verify` and `clarify`
+// frames alongside the six it always had. This pane therefore:
+//
+//   * reads the stream with lib/promptEvents.readSseStream — the one loop it
+//     shares with the Prompt bar, so a frame-handling fix lands in both;
+//   * shows which brain answered as a header pill (the `brain` event, or the
+//     `via <label> — ` prefix of the first text when only that arrived);
+//   * renders a `clarify` as the same ClarifyCard the bar uses and answers it
+//     through `POST …/prompt/answer`, consuming the resumed stream here;
+//   * ignores `plan`/`step`/`verify` — the per-step tool_use/tool_result
+//     lines already render them as a Claude turn (that pairing is why the
+//     backend emits them, §4.1).
+//
+// The session lock is shared (§4.2): while the Prompt bar is running, this
+// pane waits, and while a chat turn streams, the bar waits (`chatBusy`).
+
 import { useEffect, useRef, useState } from 'react'
 import { useStore, errorMessage } from '../store'
+import { api } from '../api'
+import { usePromptStore, isBusy } from '../lib/promptStore'
+import { brainLabel, readSseStream, type ClarifyEvent, type Plan, type PromptEvent } from '../lib/promptEvents'
+import type { Answers } from '../lib/clarifyDefaults'
+import { ClarifyCard } from './ClarifyCard'
 
-type ChatEvent =
-  | { type: 'text_delta'; text: string }
-  | { type: 'tool_use'; name: string; args: Record<string, unknown>; id: string }
-  | { type: 'tool_result'; name: string; result: unknown; id: string; is_error?: boolean }
-  | { type: 'op'; op: { tool: string; summary: string } }
-  | { type: 'done' }
-  | { type: 'error'; message: string }
+type ChatEvent = PromptEvent
 
 interface Msg {
   role: 'user' | 'assistant' | 'tool'
@@ -18,25 +35,85 @@ interface Msg {
   ok?: boolean
 }
 
+interface PendingClarify { token: string; questions: ClarifyEvent['questions']; plan: Plan | null }
+
+const VIA_RE = /^via ([^—]+?) — /
+
 export function ChatOverlay() {
   const sid = useStore((s) => s.sessionId)
   const refresh = useStore((s) => s.refresh)
   const renderPreview = useStore((s) => s.renderPreview)
+  const promptStatus = usePromptStore((s) => s.status)
+  const setChatBusy = usePromptStore((s) => s.setChatBusy)
 
   const [open, setOpen] = useState(true)
   const [msgs, setMsgs] = useState<Msg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [brain, setBrain] = useState<string | null>(null)
+  const [pending, setPending] = useState<PendingClarify | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
-  }, [msgs])
+  }, [msgs, pending])
+
+  // Tell the bar when this pane holds the lock; release on unmount too.
+  useEffect(() => { setChatBusy(busy); return () => setChatBusy(false) }, [busy, setChatBusy])
+
+  const promptBusy = isBusy(promptStatus)
+
+  /** One event from either the chat turn or a resumed clarification. */
+  function handle(evt: ChatEvent, acc: { text: string; plan: Plan | null }) {
+    if (evt.type === 'text_delta') {
+      acc.text += evt.text
+      const via = VIA_RE.exec(acc.text)
+      if (via) setBrain(via[1].trim())
+      const text = acc.text
+      setMsgs((m) => {
+        const last = m[m.length - 1]
+        if (last && last.role === 'assistant' && last.text !== undefined) {
+          return [...m.slice(0, -1), { ...last, text }]
+        }
+        return [...m, { role: 'assistant', text }]
+      })
+    } else if (evt.type === 'tool_use') {
+      setMsgs((m) => [...m, { role: 'tool', tool: evt.name, args: evt.args }])
+      // start a fresh assistant accumulator after tool use
+      acc.text = ''
+    } else if (evt.type === 'tool_result') {
+      setMsgs((m) => {
+        const idx = [...m].reverse().findIndex((x) => x.role === 'tool' && x.tool === evt.name && x.result === undefined)
+        if (idx === -1) return m
+        const realIdx = m.length - 1 - idx
+        const updated = { ...m[realIdx], result: evt.result, ok: !evt.is_error }
+        return [...m.slice(0, realIdx), updated, ...m.slice(realIdx + 1)]
+      })
+    } else if (evt.type === 'op') {
+      // EDL changed → refresh store + preview
+      refresh().then(() => renderPreview())
+    } else if (evt.type === 'error') {
+      setMsgs((m) => [...m, { role: 'assistant', text: `Error: ${evt.message}` }])
+    } else if (evt.type === 'brain') {
+      if (evt.status === 'answered') setBrain(evt.label || brainLabel(evt.brain))
+    } else if (evt.type === 'plan') {
+      acc.plan = evt.plan
+    } else if (evt.type === 'clarify') {
+      setPending({ token: evt.token, questions: evt.questions, plan: acc.plan })
+    }
+    // `step` / `verify` / `done`: the tool lines and the final text cover them.
+  }
+
+  async function consume(res: Response) {
+    const acc = { text: '', plan: null as Plan | null }
+    await readSseStream(res.body!, (evt) => handle(evt as ChatEvent, acc))
+  }
 
   async function send() {
     const text = input.trim()
-    if (!text || !sid || busy) return
+    if (!text || !sid || busy || promptBusy) return
     setInput('')
+    setPending(null)
     setMsgs((m) => [...m, { role: 'user', text }])
     setBusy(true)
     try {
@@ -58,57 +135,7 @@ export function ChatOverlay() {
         setMsgs((m) => [...m, { role: 'assistant', text: `Error ${res.status}: ${errText}` }])
         return
       }
-      const reader = res.body.getReader()
-      const dec = new TextDecoder()
-      let buf = ''
-      let assistantText = ''
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        const lines = buf.split('\n\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          // Per-LINE guard: one malformed frame must not abort the whole stream.
-          // An uncaught throw here escaped the read loop, so chat stopped
-          // mid-sentence with no message and no way to tell it had stopped.
-          let evt: ChatEvent
-          try {
-            evt = JSON.parse(line.slice(6)) as ChatEvent
-          } catch {
-            console.warn('[chat] skipping malformed SSE frame:', line.slice(0, 120))
-            continue
-          }
-          if (evt.type === 'text_delta') {
-            assistantText += evt.text
-            setMsgs((m) => {
-              const last = m[m.length - 1]
-              if (last && last.role === 'assistant' && last.text !== undefined) {
-                return [...m.slice(0, -1), { ...last, text: assistantText }]
-              }
-              return [...m, { role: 'assistant', text: assistantText }]
-            })
-          } else if (evt.type === 'tool_use') {
-            setMsgs((m) => [...m, { role: 'tool', tool: evt.name, args: evt.args }])
-            // start a fresh assistant accumulator after tool use
-            assistantText = ''
-          } else if (evt.type === 'tool_result') {
-            setMsgs((m) => {
-              const idx = [...m].reverse().findIndex((x) => x.role === 'tool' && x.tool === evt.name && x.result === undefined)
-              if (idx === -1) return m
-              const realIdx = m.length - 1 - idx
-              const updated = { ...m[realIdx], result: evt.result, ok: !evt.is_error }
-              return [...m.slice(0, realIdx), updated, ...m.slice(realIdx + 1)]
-            })
-          } else if (evt.type === 'op') {
-            // EDL changed → refresh store + preview
-            refresh().then(() => renderPreview())
-          } else if (evt.type === 'error') {
-            setMsgs((m) => [...m, { role: 'assistant', text: `Error: ${evt.message}` }])
-          }
-        }
-      }
+      await consume(res)
     } catch (e) {
       // Stream-LEVEL guard: a network drop mid-answer rejects reader.read().
       // Without this the rejection escaped `send()` entirely and the user was
@@ -124,6 +151,29 @@ export function ChatOverlay() {
     }
   }
 
+  async function answerClarify(answers: Answers) {
+    if (!sid || !pending || busy) return
+    const { token } = pending
+    setPending(null)
+    setBusy(true)
+    try {
+      const res = await api.promptAnswer(sid, token, answers)
+      await consume(res)
+    } catch (e) {
+      setMsgs((m) => [...m, { role: 'assistant', text: `Error: ${errorMessage(e)}` }])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function dropClarify() {
+    if (!sid || !pending) return
+    const { token } = pending
+    setPending(null)
+    try { await api.promptCancel(sid, token) } catch (e) { console.warn('[chat] dropping the question failed:', errorMessage(e)) }
+    setMsgs((m) => [...m, { role: 'assistant', text: 'Dropped the question — nothing was changed.' }])
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -131,17 +181,29 @@ export function ChatOverlay() {
     }
   }
 
+  const placeholder = busy ? 'Working…'
+    : promptBusy ? 'The Prompt bar is running — chat waits for the same session'
+    : 'Tell the editor what to do — Enter to send'
+
   return (
     <>
       {!open && (
-        <button className="chat-fab" onClick={() => setOpen(true)} title="Chat with Claude">
+        <button className="chat-fab" onClick={() => setOpen(true)} title="Chat">
           💬 Chat
         </button>
       )}
       {open && (
         <div className="chat-pane">
           <header>
-            <strong>Chat with Claude</strong>
+            <strong>Chat</strong>
+            {brain && (
+              // The same pill the Prompt bar wears (promptBar.css .brain-pill),
+              // so "which brain answered" looks the same in both places.
+              <span className="brain-pill" title="The brain that answered the last turn">
+                <span className="brain-dot is-answered" aria-hidden="true" />
+                <span className="name">via {brain}</span>
+              </span>
+            )}
             <div style={{ flex: 1 }} />
             <button onClick={() => setOpen(false)}>×</button>
           </header>
@@ -181,6 +243,15 @@ export function ChatOverlay() {
                 )}
               </div>
             ))}
+            {pending && !busy && (
+              <ClarifyCard
+                key={pending.token}
+                questions={pending.questions}
+                plan={pending.plan}
+                onSubmit={(a) => void answerClarify(a)}
+                onCancel={() => void dropClarify()}
+              />
+            )}
             {busy && <div style={{ color: 'var(--text-dim)' }}>…</div>}
           </div>
           <footer>
@@ -188,8 +259,8 @@ export function ChatOverlay() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder={busy ? 'Working…' : 'Tell Claude what to do — Enter to send'}
-              disabled={busy}
+              placeholder={placeholder}
+              disabled={busy || promptBusy}
             />
           </footer>
         </div>

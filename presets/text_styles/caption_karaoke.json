@@ -1,0 +1,11 @@
+{
+  "description": "Word-by-word emphasis captions (the karaoke look); pairs with captions style word_emphasis.",
+  "role": "caption",
+  "font": "Inter-Black.ttf",
+  "anchor": "caption",
+  "size": 72,
+  "color": "#FFE600",
+  "stroke": "#000000",
+  "stroke_w": 6,
+  "upper": true
+}

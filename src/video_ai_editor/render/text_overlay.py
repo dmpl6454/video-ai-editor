@@ -390,14 +390,43 @@ def _pick_script_font(text: str) -> Path | None:
     return p if p.exists() else None
 
 
-def _y_for_role(role: str, transform_y: float | None, canvas_h: int) -> float:
+#: Caption anchor on a PORTRAIT canvas, as a fraction of canvas height. The
+#: historic `canvas_h - 0.16·h` = 0.84·h sits under the TikTok/Reels UI (their
+#: chrome covers the bottom ~20% of a 9:16 frame — baseline finding 7 /
+#: spec §2.8 SAFE_ZONES); 0.76 keeps captions inside the 9:16 safe zone
+#: `y ∈ [0.10, 0.78]`. Landscape and square canvases keep 0.84 so every
+#: existing 16:9 / 1:1 project renders byte-identically.
+CAPTION_PORTRAIT_Y_FRAC = 0.76
+
+
+def caption_anchor_y(canvas_w: int | None, canvas_h: int) -> float:
+    """The captions block's own center-y for the `caption` role.
+
+    Captions ignore per-clip transforms by design (resolve_anchor_overrides
+    returns (None, None) for them — "the captions block owns caption
+    positioning"), so a platform-aware default has to live HERE, not in the
+    tool that lays the track: `add_caption_track` writes the same value into
+    the EDL for honesty, but this function is what the pixels follow.
+    `canvas_w=None` (a caller that only knows the height) means the historic
+    landscape anchor. Mirrored by `serverAnchorY` / the caption branch in
+    frontend TextLayer.tsx.
+    """
+    if canvas_w is not None and canvas_h > canvas_w:
+        return canvas_h * CAPTION_PORTRAIT_Y_FRAC
+    return canvas_h - canvas_h * 0.16
+
+
+def _y_for_role(role: str, transform_y: float | None, canvas_h: int,
+                canvas_w: int | None = None) -> float:
     """Center-y in canvas coords.
 
     `transform_y` is a RESOLVED override (resolve_anchor_overrides): a float
     means the user explicitly positioned this clip and it beats the role
     anchor; None means role positioning. Captions never get here with a
     float — resolve_anchor_overrides pins caption to (None, None) because
-    the captions block owns caption positioning.
+    the captions block owns caption positioning; their anchor comes from
+    `caption_anchor_y`, which needs `canvas_w` to tell portrait from
+    landscape (callers that omit it get the historic landscape anchor).
     """
     if transform_y is not None and role != "caption":
         return float(transform_y)
@@ -406,7 +435,7 @@ def _y_for_role(role: str, transform_y: float | None, canvas_h: int) -> float:
     if role == "hook":
         return canvas_h * 0.50
     if role == "caption":
-        return canvas_h - canvas_h * 0.16
+        return caption_anchor_y(canvas_w, canvas_h)
     if role == "lower_third":
         return canvas_h - canvas_h * 0.20
     return canvas_h * 0.75
@@ -522,7 +551,7 @@ def resolve_anchor_overrides(c: TextClip, role: str,
                 return None
         return f
 
-    anchor_y_role = _y_for_role(role, None, canvas_h)
+    anchor_y_role = _y_for_role(role, None, canvas_h, canvas_w)
     ax = _explicit(getattr(tx, "x", None),
                    (_TRANSFORM_SENTINEL_X, canvas_w / 2))
     ay = _explicit(getattr(tx, "y", None),
@@ -690,7 +719,7 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     lines = _wrap(draw, text.upper() if caps else text, font, max_w, box)
     line_h = font.size + 8
     total_h = line_h * len(lines)
-    y_center = _y_for_role(role, anchor_y, canvas_h)
+    y_center = _y_for_role(role, anchor_y, canvas_h, canvas_w)
     y_top = int(y_center - total_h / 2)
     x_center = float(anchor_x) if anchor_x is not None else canvas_w / 2
     for i, line in enumerate(lines):
@@ -806,7 +835,10 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
             # already has text PNGs would export the OLD artwork indefinitely
             # while the preview drew the new — the precise mismatch this whole
             # subsystem exists to prevent.
-            f"v9|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
+            # v10: the caption role's anchor became portrait-aware
+            # (caption_anchor_y) — a 9:16 caption PNG keyed under v9 holds the
+            # old 0.84·h placement and nothing else in the key tracks it.
+            f"v10|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
@@ -1160,7 +1192,7 @@ def build_overlay_chain(
             # clips overlay_w==main_w / overlay_h==main_h, so both exprs
             # collapse to 0 — identical to the static path.
             anchor_x, anchor_y = resolve_anchor_overrides(tc, role, canvas.w, canvas.h)
-            cy = _y_for_role(role, anchor_y, canvas.h) * (out_h / max(1, canvas.h))
+            cy = _y_for_role(role, anchor_y, canvas.h, canvas.w) * (out_h / max(1, canvas.h))
             cx = ((float(anchor_x) if anchor_x is not None else canvas.w / 2)
                   * (out_w / max(1, canvas.w)))
             off = out_h * 0.04

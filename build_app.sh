@@ -87,6 +87,36 @@ echo "[build] BUILD_ID=$BUILD_SHA"
 # building/build_main.py, format_binaries_and_datas(workingdir=spec_dir)), so
 # every source below is made absolute with $ROOT; destinations are unaffected.
 # --workpath/--distpath still default to ./build and ./dist.
+# presets/music/*.wav are generated, not committed (.gitignore): 180 s
+# procedural beds from scripts/gen_music_beds.py (spec §2.8). Regenerate them
+# before `--add-data presets:presets` so the bundle ships them; the script is
+# P's — skip loudly rather than fail when it has not landed yet.
+if [ -f scripts/gen_music_beds.py ]; then
+  echo "[build] generating presets/music beds"
+  uv run python scripts/gen_music_beds.py || { echo "gen_music_beds failed"; exit 1; }
+else
+  echo "note: scripts/gen_music_beds.py not present — bundling presets/music as-is"
+fi
+
+# Apple Intelligence helper (tools/fm-planner, spec §3.2). Built ONLY when the
+# macOS 26 SDK and a real Xcode are selected: a loud failure when they are
+# present (a broken helper must not ship silently), an explicit skip when they
+# are not (CI, an older Xcode) — brains_report() then says the helper is
+# missing from this build. arm64-only: PyInstaller validates collected binary
+# arch against the host build. `.binpath` lets fm.py find the dev build.
+FM_BIN=""
+SDK_MAJOR=$(xcrun --sdk macosx --show-sdk-version 2>/dev/null | cut -d. -f1 || echo 0)
+if [ "${SDK_MAJOR:-0}" -ge 26 ] && xcode-select -p 2>/dev/null | grep -q Xcode.app; then
+  echo "[build] building tools/fm-planner (Apple Intelligence helper)"
+  (cd tools/fm-planner && swift build -c release --arch arm64) || { echo "fm-planner build failed"; exit 1; }
+  FM_BIN_DIR="$(cd tools/fm-planner && swift build -c release --arch arm64 --show-bin-path)"
+  echo "$FM_BIN_DIR" > tools/fm-planner/.binpath
+  FM_BIN="$FM_BIN_DIR/fm-planner"
+  [ -x "$FM_BIN" ] || { echo "fm-planner binary missing at $FM_BIN"; exit 1; }
+else
+  echo "note: macOS 26 SDK/Xcode not present — building without the Apple Intelligence helper"
+fi
+
 ROOT="$(pwd)"
 SPEC_DIR="$ROOT/build/pyinstaller-spec"
 mkdir -p "$SPEC_DIR"
@@ -130,6 +160,9 @@ uv run pyinstaller \
   --exclude-module rembg \
   --exclude-module simple_lama_inpainting \
   --exclude-module noisereduce \
+  --exclude-module mlx \
+  --exclude-module mlx_lm \
+  ${FM_BIN:+--add-binary "$FM_BIN:."} \
   src/video_ai_editor/desktop.py
 
 # PyInstaller's CLI mode (used here, not the committed .spec — the generated

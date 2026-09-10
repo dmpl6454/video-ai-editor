@@ -1,0 +1,12 @@
+{
+  "description": "A vertical story teaser: the opening trimmed to a short punch, a hook, a cinematic bed, no captions.",
+  "platform": "story",
+  "keywords": ["story teaser", "teaser", "instagram story", "ig story", "trailer"],
+  "exclusions": ["captions"],
+  "recipes": [
+    {"recipe": "reframe", "slots": {"ratio": "9:16", "platform": "story"}},
+    {"recipe": "hook"},
+    {"recipe": "music", "slots": {"mood": "cinematic"}},
+    {"recipe": "export_preset", "slots": {"platform": "story"}}
+  ]
+}

@@ -743,6 +743,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     # `tr.at` is matched against the clip's TIMELINE end (start + effective
     # duration); the old code accumulated effective durations from 0, which
     # drifted the moment the timeline had any leading offset or gap.
+    from .transitions import effective_duration
     seg_trans: dict[int, tuple[str, float]] = {}
     for idx, c in enumerate(clips[:-1]):
         si = seg_of_clip.get(idx)
@@ -751,7 +752,11 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         boundary = c.start + c.effective_duration
         for tr in transitions:
             if abs(tr.at - boundary) < 0.05:
-                seg_trans[si] = (tr.type, tr.duration)
+                # A stored duration ≤ 0 (a legacy record, or a caller that
+                # wrote 0 to mean "default") is the transition's own default,
+                # never a 0 s xfade — ffmpeg refuses that and the EDL would
+                # count the seam as free. Same rule add_transition applies.
+                seg_trans[si] = (tr.type, effective_duration(tr.type, tr.duration))
 
     # ---- Timeline assembly ----
     if not seg_trans:

@@ -158,7 +158,10 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
      lets each row shrink all the way to 0 instead of overflowing, and the
      floor on the preview row (120px) keeps it from vanishing entirely under
      normal use while still yielding space before the layout breaks. */
-  grid-template-rows: minmax(120px, 1fr) 6px minmax(0, var(--timeline-h, 280px));
+  grid-template-rows: auto minmax(120px, 1fr) 6px minmax(0, var(--timeline-h, 280px));
+  /* The leading `auto` row is the Prompt bar (components/PromptBar.tsx). It
+     caps itself at 38vh and scrolls its own run log inside that, so the
+     preview row below keeps its 120px floor and nothing overflows. */
   background: var(--bg-0);
   overflow: hidden;
 }

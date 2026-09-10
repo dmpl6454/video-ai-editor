@@ -1,0 +1,13 @@
+{
+  "description": "Small Inter label pinned near the top for chapter tags and callouts.",
+  "role": "label",
+  "font": "Inter-Bold.ttf",
+  "anchor": "top",
+  "size": 48,
+  "color": "#FFFFFF",
+  "stroke": "#000000",
+  "stroke_w": 3,
+  "upper": false,
+  "anim_in": "fade",
+  "anim_out": "fade"
+}

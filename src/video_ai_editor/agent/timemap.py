@@ -101,8 +101,18 @@ def _same_source(a: str | os.PathLike | None, b: str | os.PathLike | None) -> bo
     """
     if a is None or b is None:
         return False
-    return (os.path.normcase(os.path.abspath(os.fspath(a)))
-            == os.path.normcase(os.path.abspath(os.fspath(b))))
+    if (os.path.normcase(os.path.abspath(os.fspath(a)))
+            == os.path.normcase(os.path.abspath(os.fspath(b)))):
+        return True
+    # A derived file (reframe/denoise/stabilize/upscale output in the session
+    # cache) plays the SAME source seconds as the upload it was made from, so
+    # it carries the upload's transcript — resolve both sides to their origin
+    # (`agent/media_origin`: `.origin` sidecars, pure reads) before giving up.
+    # Without this the first src-rewriting step of a plan lost the transcript
+    # for the rest of the session (zero captions after a reframe).
+    from .media_origin import origin_of
+    oa, ob = origin_of(a), origin_of(b)
+    return (os.path.normcase(os.path.abspath(oa)) == os.path.normcase(os.path.abspath(ob)))
 
 
 def media_clips(edl: EDL, track_id: str, *, src: str | None = None) -> list[Clip]:

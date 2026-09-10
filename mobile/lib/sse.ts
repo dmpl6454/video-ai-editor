@@ -55,6 +55,7 @@ export type ChatEvent =
 
 export type ChatEventType = ChatEvent["type"];
 
+// The Mac's Prompt Editor (0.7.0) also streams brain, plan, step, verify and clarify; this build drops them and reads the brain from the `via …` text prefix.
 const KNOWN_TYPES: ReadonlySet<string> = new Set<ChatEventType>([
   "text_delta",
   "tool_use",

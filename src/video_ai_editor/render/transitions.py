@@ -32,6 +32,10 @@ list and find `mosaic`, `pixelate` and `pixel` were all the same transition.
   - native:  ("slideleft", None)         → xfade=transition=slideleft
   - custom:  ("custom", "<expr string>") → xfade=transition=custom:expr='...'
 `post_filter(name, start, end, w, h)` → the extra filter, or None.
+`default_duration(name)` → the seconds a transition takes when the caller
+names none (per FAMILY, below); `family_of(name)` → its CapCut-style family;
+`entries()` → one product-facing record per distinct look for the UI grid,
+the prompt planner and `list_transitions`.
 """
 from __future__ import annotations
 import logging
@@ -263,40 +267,232 @@ CATEGORIES: dict[str, list[str]] = {
     "stylized": ["glitch", "spiral", "whip", "whipright", "whipup", "whipdown"],
 }
 
-# Short human descriptions for the most-used ones (UI tooltips / chat).
+# One human description per DISTINCT look (UI tooltips / chat / the prompt
+# planner's cards). Complete on purpose: `entries()` reads this table, and
+# 47 of the 72 tiles had no tooltip while a second, hand-written copy of the
+# same list lived in presets/transitions/catalog.json — which also disagreed
+# with this module on 4 families, 20 default durations and 30+ labels. This
+# module is now the ONLY catalog; `agent/prompt/presets.transition_catalog()`
+# wraps `entries()` and a test pins that every look has a description.
 DESCRIPTIONS: dict[str, str] = {
-    "fade": "Classic crossfade A→B.",
-    "dissolve": "Grainy pixel dissolve.",
-    "fadeblack": "Dip to black between clips.",
-    "fadewhite": "Flash to white between clips.",
-    "slideleft": "Incoming clip pushes in from the right.",
-    "smoothright": "Soft directional slide rightward.",
-    "zoomin": "Punch-zoom into the next clip.",
-    "circleopen": "Iris opens to reveal the next clip.",
-    "radial": "Clock-wipe sweep.",
-    "pixelize": "Mosaic-out, mosaic-in (digital feel).",
-    "glitch": "Per-row digital tear/slice glitch.",
-    "whip": "Whip-pan left: a hard slide with a directional motion blur.",
-    "whipright": "Whip-pan right.",
-    "whipup": "Whip-pan up.",
-    "whipdown": "Whip-pan down.",
-    "spin": "Spiral sweep — reads as rotation (alias of `spiral`).",
-    "spiral": "Angular sweep offset by radius, so the wipe rotates outward.",
+    "bars": "Horizontal bars wipe together.",
+    "blinds": "Venetian blinds — vertical bands wipe together.",
+    "boxopen": "A rectangular iris opens from the centre.",
+    "burn": "The bright parts of the outgoing shot burn away first.",
+    "checker": "Checkerboard cells resolve in a scattered order.",
+    "circleclose": "An iris closes on the old clip.",
+    "circlecrop": "The frame pulls in to a circle and opens back out.",
+    "circleopen": "An iris opens from the centre to reveal the next clip.",
+    "coverdown": "The new clip slides in over the old one, downward.",
+    "coverleft": "The new clip slides in over the old one, leftward.",
+    "coverright": "The new clip slides in over the old one, rightward.",
+    "coverup": "The new clip slides in over the old one, upward.",
+    "diagbl": "A soft diagonal reveal from the bottom-left.",
+    "diagbr": "A soft diagonal reveal from the bottom-right.",
+    "diagtl": "A soft diagonal reveal from the top-left.",
+    "diagtr": "A soft diagonal reveal from the top-right.",
+    "diamond": "A diamond iris opens from the centre.",
+    "dissolve": "Grainy pixel dissolve with a film-lab feel.",
+    "distance": "The two frames blend by pixel distance — a soft morph.",
+    "fade": "Classic crossfade from one clip into the next.",
+    "fadeblack": "Dip through black — the cinematic scene change.",
+    "fadefast": "A crossfade that resolves early — snappy, almost a cut.",
+    "fadegrays": "Drains the colour, passes through grey, refills.",
+    "fadeslow": "A crossfade that lingers in the blend.",
+    "fadewhite": "Flash through white — bright and upbeat.",
+    "glitch": "Per-row digital tear — the TikTok glitch cut.",
     "hblur": "Blur out, blur in.",
-    "wave": "Vertical wipe with a rippling edge.",
-    "ripple": "Ring spreading out from the centre.",
-    "diamond": "Diamond iris opening from the centre.",
-    "boxopen": "Rectangular iris opening from the centre.",
-    "checker": "Checkerboard cells resolving in a scattered order.",
-    "blinds": "Venetian blinds — vertical bands wiping together.",
-    "bars": "Horizontal bars wiping together.",
-    "burn": "Luma burn: the bright parts of the outgoing clip dissolve first.",
+    "hlslice": "Horizontal slices peel away to the left.",
+    "hlwind": "Streaks smear the picture away to the left.",
+    "horzclose": "Two halves close in from the top and bottom.",
+    "horzopen": "The frame splits across the middle and opens outward.",
+    "hrslice": "Horizontal slices peel away to the right.",
+    "hrwind": "Streaks smear the picture away to the right.",
+    "pixelize": "Mosaic out, mosaic in — a digital feel.",
+    "radial": "A clock-hand sweep around the centre.",
+    "rectcrop": "The frame pulls in to a rectangle and opens back out.",
+    "revealdown": "The old clip slides away downward, revealing the new one.",
+    "revealleft": "The old clip slides away leftward, revealing the new one.",
+    "revealright": "The old clip slides away rightward, revealing the new one.",
+    "revealup": "The old clip slides away upward, revealing the new one.",
+    "ripple": "A ring ripples out from the centre.",
+    "slidedown": "The new clip pushes the old one down and out.",
+    "slideleft": "The new clip pushes the old one out to the left.",
+    "slideright": "The new clip pushes the old one out to the right.",
+    "slideup": "The new clip pushes the old one up and out.",
+    "smoothdown": "A soft-edged slide downward.",
+    "smoothleft": "A soft-edged slide to the left.",
+    "smoothright": "A soft-edged slide to the right.",
+    "smoothup": "A soft-edged slide upward.",
+    "spiral": "An angular sweep that rotates outward.",
+    "squeezeh": "The old clip squeezes flat sideways.",
+    "squeezev": "The old clip squeezes flat vertically.",
+    "vdslice": "Vertical slices peel away downward.",
+    "vdwind": "Streaks smear the picture away downward.",
+    "vertclose": "Two halves close in from the sides.",
+    "vertopen": "The frame splits down the middle and opens outward.",
+    "vuslice": "Vertical slices peel away upward.",
+    "vuwind": "Streaks smear the picture away upward.",
+    "wave": "A vertical wipe whose edge ripples as it crosses.",
+    "whip": "A whip pan to the left — a hard push with a motion-blur burst.",
+    "whipdown": "A whip pan downward with a motion-blur burst.",
+    "whipright": "A whip pan to the right with a motion-blur burst.",
+    "whipup": "A whip pan upward with a motion-blur burst.",
+    "wipebl": "A diagonal wipe towards the bottom-left corner.",
+    "wipebr": "A diagonal wipe towards the bottom-right corner.",
+    "wipedown": "A hard edge wipes downward.",
+    "wipeleft": "A hard edge wipes the new clip in from the right.",
+    "wiperight": "A hard edge wipes the new clip in from the left.",
+    "wipetl": "A diagonal wipe towards the top-left corner.",
+    "wipetr": "A diagonal wipe towards the top-right corner.",
+    "wipeup": "A hard edge wipes upward.",
+    "zoomin": "A punch-zoom into the next clip.",
+    # aliases a reader may look up directly
+    "spin": "Spiral sweep — reads as rotation (alias of `spiral`).",
     "zoomout": "Iris-close. NOT a true zoom-out — the render engine cannot "
                "scale during a transition; this is the closest look it has.",
 }
 
 # Backwards-compat: the five names the old schema shipped that were broken.
 LEGACY_ALIASES = {"slide", "zoom", "glitch", "whip", "spin"}
+
+
+# --- product families + per-transition default durations ---------------------
+#
+# CapCut groups its transitions by what they DO to the eye, not by which
+# ffmpeg mechanism draws them; the owner asked for "all the transitions from
+# CapCut", so the product surface (the Transitions panel's tabs, the prompt
+# planner's "smooth zoom between every clip") speaks these eight families.
+# `CATEGORIES` above stays the renderer's own grouping (fades/wipes/slices…)
+# because tests and the chat tool already read it; `FAMILIES` is the second,
+# product-facing view of the SAME canonical names. Every distinct look is in
+# exactly one family (a test pins that), aliases inherit their target's.
+FAMILY_NAMES: tuple[str, ...] = ("Basic", "Wipe", "Slide", "Zoom", "Blur", "Shape",
+                                 "Glitch/Stylised", "Light")
+
+FAMILIES: dict[str, list[str]] = {
+    "Basic": ["fade", "fadefast", "fadeslow", "dissolve", "distance"],
+    "Light": ["fadeblack", "fadewhite", "fadegrays", "burn"],
+    "Wipe": ["wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr",
+             "diagtl", "diagtr", "diagbl", "diagbr", "radial", "wave",
+             "hlslice", "hrslice", "vuslice", "vdslice"],
+    "Slide": ["slideleft", "slideright", "slideup", "slidedown",
+              "smoothleft", "smoothright", "smoothup", "smoothdown",
+              "coverleft", "coverright", "coverup", "coverdown",
+              "revealleft", "revealright", "revealup", "revealdown"],
+    "Zoom": ["zoomin", "squeezeh", "squeezev", "circlecrop", "rectcrop"],
+    "Blur": ["hblur", "hlwind", "hrwind", "vuwind", "vdwind"],
+    "Shape": ["circleopen", "circleclose", "vertopen", "vertclose", "horzopen", "horzclose",
+              "ripple", "diamond", "boxopen", "checker", "blinds", "bars"],
+    "Glitch/Stylised": ["glitch", "pixelize", "spiral", "whip", "whipright", "whipup", "whipdown"],
+}
+
+# Seconds a transition runs when the caller names no duration. Per family,
+# because that is how the eye reads them: a whip must be over before it is
+# noticed, a dip to black needs time to land, a plain crossfade sits between.
+# The tool used to hard-code 0.5 for everything, which made a whip pan look
+# like a slow smear and a fade-to-black look like a flicker; CapCut's own
+# defaults sit in the same 0.25–0.7 s band. Per-name overrides sit on top
+# for the few looks whose family default is wrong for them.
+FAMILY_DEFAULT_DURATION_S: dict[str, float] = {
+    "Basic": 0.5, "Light": 0.6, "Wipe": 0.4, "Slide": 0.35, "Zoom": 0.3,
+    "Blur": 0.5, "Shape": 0.5, "Glitch/Stylised": 0.3,
+}
+_NAME_DEFAULT_DURATION_S: dict[str, float] = {
+    "fadefast": 0.3, "fadeslow": 0.8, "whip": 0.25, "whipright": 0.25, "whipup": 0.25,
+    "whipdown": 0.25, "spiral": 0.6, "pixelize": 0.5, "burn": 0.7,
+}
+#: The renderer never runs an xfade shorter than this; a zero or negative
+#: duration in a legacy EDL is "use the default", not "a 0 s cross-fade"
+#: (which ffmpeg rejects and which the timeline would count as free).
+MIN_DURATION_S = 0.1
+FALLBACK_DURATION_S = 0.5
+
+_FAMILY_OF: dict[str, str] = {name: fam for fam, names in FAMILIES.items() for name in names}
+
+
+def family_of(name: str) -> str | None:
+    """CapCut-style family of a transition (aliases resolve to their target);
+    None for a name the catalog does not know."""
+    canon = canonical(name)
+    return _FAMILY_OF.get(canon)
+
+
+def default_duration(name: str) -> float:
+    """Seconds this transition runs when no duration is given — the value
+    `add_transition` writes into the EDL, so the timeline arithmetic
+    (`EDL.transition_overlap`) and the xfade the compositor emits agree
+    without either knowing about the other."""
+    canon = canonical(name)
+    if canon in _NAME_DEFAULT_DURATION_S:
+        return _NAME_DEFAULT_DURATION_S[canon]
+    fam = _FAMILY_OF.get(canon)
+    return FAMILY_DEFAULT_DURATION_S.get(fam, FALLBACK_DURATION_S) if fam else FALLBACK_DURATION_S
+
+
+def effective_duration(name: str, duration: float | None) -> float:
+    """The duration the renderer actually uses for a transition record: the
+    stored one when it is a real positive number, else the per-transition
+    default. Shared by the compositor and anything that predicts its output
+    length, so the two can never disagree on what a stored `0.0` means."""
+    try:
+        d = float(duration) if duration is not None else 0.0
+    except (TypeError, ValueError):
+        d = 0.0
+    return d if d >= MIN_DURATION_S else default_duration(name)
+
+
+def display_name(name: str) -> str:
+    """A CapCut-style label for a canonical look: "Slide Left", "Fade to
+    Black", "Whip Pan Up". Derived, so every look has one; a presets file
+    may carry a nicer one and the UI may prefer it."""
+    canon = canonical(name)
+    special = {
+        "fadeblack": "Fade to Black", "fadewhite": "Fade to White", "fadegrays": "Fade Through Gray",
+        "fadefast": "Fast Fade", "fadeslow": "Slow Fade", "hblur": "Blur Dissolve",
+        "hlslice": "Slice Left", "hrslice": "Slice Right", "vuslice": "Slice Up", "vdslice": "Slice Down",
+        "hlwind": "Wind Left", "hrwind": "Wind Right", "vuwind": "Wind Up", "vdwind": "Wind Down",
+        "squeezeh": "Squeeze Horizontal", "squeezev": "Squeeze Vertical", "circlecrop": "Circle Zoom",
+        "rectcrop": "Box Zoom", "vertopen": "Barn Doors Open", "vertclose": "Barn Doors Close",
+        "horzopen": "Curtain Open", "horzclose": "Curtain Close", "radial": "Clock Wipe",
+        "wipetl": "Wipe Top-Left", "wipetr": "Wipe Top-Right", "wipebl": "Wipe Bottom-Left",
+        "wipebr": "Wipe Bottom-Right", "diagtl": "Diagonal Top-Left", "diagtr": "Diagonal Top-Right",
+        "diagbl": "Diagonal Bottom-Left", "diagbr": "Diagonal Bottom-Right",
+        "whip": "Whip Pan Left", "whipright": "Whip Pan Right", "whipup": "Whip Pan Up",
+        "whipdown": "Whip Pan Down", "zoomin": "Zoom In", "boxopen": "Box Open",
+        "circleopen": "Iris Open", "circleclose": "Iris Close", "burn": "Film Burn",
+        "pixelize": "Pixelate", "checker": "Checkerboard", "blinds": "Blinds", "bars": "Bars",
+    }
+    if canon in special:
+        return special[canon]
+    for prefix in ("slide", "smooth", "cover", "reveal", "wipe"):
+        for direction in ("left", "right", "up", "down"):
+            if canon == f"{prefix}{direction}":
+                return f"{prefix.capitalize()} {direction.capitalize()}"
+    return canon.capitalize()
+
+
+def entries() -> list[dict]:
+    """One product-facing record per DISTINCT look (aliases folded in), in
+    family order then name order: `{name, display, family, category,
+    default_duration, description, aliases, kind}`. `kind` says which
+    mechanism draws it (native xfade / custom expr / post-filter) — the UI
+    hover preview picks its animation by family, the renderer by kind."""
+    alias_of: dict[str, list[str]] = {}
+    for alias, target in ALIASES.items():
+        alias_of.setdefault(target, []).append(alias)
+    category_of = {name: cat for cat, names in CATEGORIES.items() for name in names}
+    out: list[dict] = []
+    for fam in FAMILY_NAMES:
+        for name in sorted(FAMILIES[fam]):
+            kind = "post" if name in POST_FILTERS else "custom" if name in CUSTOM_EXPRS else "native"
+            out.append({
+                "name": name, "display": display_name(name), "family": fam,
+                "category": category_of.get(name), "default_duration": default_duration(name),
+                "description": DESCRIPTIONS.get(name, ""), "aliases": sorted(alias_of.get(name, [])),
+                "kind": kind,
+            })
+    return out
 
 
 def all_names() -> list[str]:
@@ -380,4 +576,11 @@ def catalog() -> dict:
                  f"{len(ALIASES)} of the {len(all_names())} accepted names are "
                  "synonyms for one of them (see `aliases`)."),
         "all": all_names(),
+        # Product view (CapCut-style): family tabs, per-look defaults and
+        # display metadata. `defaults` is keyed by EVERY accepted name so a
+        # caller holding an alias needs no second lookup.
+        "families": {fam: sorted(names) for fam, names in FAMILIES.items()},
+        "family_order": list(FAMILY_NAMES),
+        "defaults": {n: default_duration(n) for n in all_names()},
+        "entries": entries(),
     }

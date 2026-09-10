@@ -64,19 +64,11 @@
   color: var(--text-dim, #9b9ba5);
 }
 
-.tp-more {
-  align-self: flex-start;
+.tp-desc {
   margin-left: 64px;
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--accent-2, #5b8dff);
-  cursor: pointer;
-  font-size: 11px;
-}
-.tp-more:hover:not(:disabled) {
-  background: none;
-  text-decoration: underline;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim, #9b9ba5);
 }
 
 .tp-actions {

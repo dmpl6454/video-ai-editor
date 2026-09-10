@@ -1,0 +1,13 @@
+{
+  "description": "A landscape YouTube explainer: tightened, plain bottom captions, an opening hook, -14 LUFS.",
+  "platform": "youtube_16x9",
+  "keywords": ["explainer", "youtube explainer", "tutorial", "walkthrough", "lecture video"],
+  "recipes": [
+    {"recipe": "tighten"},
+    {"recipe": "reframe", "slots": {"ratio": "16:9", "platform": "youtube_16x9"}},
+    {"recipe": "captions", "slots": {"style": "default", "position": "bottom"}},
+    {"recipe": "hook"},
+    {"recipe": "clean_audio"},
+    {"recipe": "export_preset", "slots": {"platform": "youtube_16x9"}}
+  ]
+}

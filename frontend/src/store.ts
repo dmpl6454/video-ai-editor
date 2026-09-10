@@ -8,6 +8,7 @@ import { toast } from './toast'
 import { clipEnd, type AnyClip, type EDL, type Op } from './types'
 import { deletedLabel } from './lib/deletedLabel'
 import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
+import { firePromptRunning, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -33,6 +34,12 @@ export const ASYNC_DISPATCH_TOOLS = new Set([
   'smooth_slow_motion', 'vocal_isolate', 'instrumental_isolate',
   'motion_track', 'auto_caption', 'multicam',
 ])
+// `transcribe` (0.7.0) can run for a minute but is deliberately NOT here: the
+// backend keeps it out of main.ASYNC_DISPATCH_TOOLS because that set is
+// mirrored verbatim in mobile/lib/jobs.ts and the phone is frozen this
+// release, and tests/test_qa_round5.py pins this list to the backend's. The
+// desktop never dispatches it directly — the prompt executor runs it on its
+// own thread (spec §4.2) — so nothing here would pin a request worker.
 
 const JOB_POLL_MS = 700
 
@@ -642,6 +649,17 @@ export const useStore = create<State>((set, get) => ({
       // a network hiccup) left the user staring at a UI that looked like
       // nothing happened, with no error anywhere (issue 15-adjacent: "no
       // persistent error surface for a failed edit").
+      // 409 `prompt_running`: a Prompt-bar run holds this session's lock
+      // (spec §4.2) and the backend refused the edit rather than queueing it
+      // behind minutes of captioning. Not an error in the user's terms — the
+      // prompt store (which depends on this module, so it listens rather than
+      // being imported) shows a toast with Cancel and attaches the bar to the
+      // run. If nothing is listening yet, a plain toast still says why.
+      if (promptRunningFromError(e)) {
+        opts?.onError?.(PROMPT_RUNNING_MESSAGE)
+        if (!firePromptRunning(sid)) toast.info(PROMPT_RUNNING_MESSAGE)
+        return null
+      }
       const msg = errorMessage(e)
       opts?.onError?.(msg)
       if (isCancelMessage(msg)) toast.info(msg)   // the user asked for this — not red

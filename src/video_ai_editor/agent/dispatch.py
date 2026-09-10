@@ -787,10 +787,107 @@ def _current_v1_ingest_json(store: EDLStore) -> Path | None:
 def _first_v1_media_src(store: EDLStore) -> str | None:
     """Source path of the first media clip on v1 (in stored order), or None
     when v1 holds no media. This is THE file a project transcript describes —
-    see `_load_transcript_with_source`."""
+    see `_load_transcript_with_source`.
+
+    Resolved to the UPLOAD when the clip plays a derived file (a reframe,
+    denoise, stabilize, upscale or slow-motion render in the session cache —
+    `agent/media_origin`). Those keep the source's duration and timing, so
+    the upload's transcript still describes them; keyed to the live `src`
+    the transcript vanished after the first such step and the flagship
+    prompt shipped with zero captions (measured 2026-09-10)."""
+    from .media_origin import origin_of
     v1 = store.edl.get_track("v1")
     src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
-    return src_clip.src if src_clip else None
+    return origin_of(src_clip.src) if src_clip else None
+
+
+def _record_derived(derived: "Path | str", source: "Path | str") -> None:
+    """Every handler that replaces `clip.src` with a cache render calls this
+    so the transcript keeps following the footage (see `_first_v1_media_src`)."""
+    from .media_origin import record_origin
+    record_origin(derived, source)
+
+
+# ---------- platform-aware overlay defaults (spec §2.8 / §4.9) ----------
+
+def canvas_aspect_name(w: int, h: int) -> str:
+    """`"9:16" | "16:9" | "1:1" | "4:5" | "other"` for a canvas or a probed
+    frame, with a 2% tolerance so 1080×1920 and 1088×1920 both read 9:16."""
+    if w <= 0 or h <= 0:
+        return "other"
+    ratio = w / h
+    for name, target in (("9:16", 9 / 16), ("16:9", 16 / 9), ("1:1", 1.0), ("4:5", 0.8)):
+        if abs(ratio - target) <= target * 0.02:
+            return name
+    return "other"
+
+
+# The table the verifier's `overlays_inside_safe_zone` and the handler defaults
+# below share. `agent/prompt/presets.py::SAFE_ZONES` (P's contract, §2.8) is the
+# single source once it exists; these are the same numbers from the spec, kept
+# here so dispatch.py never imports a module that may not be installed yet and
+# so the handler defaults cannot silently drift from the verifier: both read
+# `_safe_zone()`. 9:16 is the only zone that moves anything — TikTok/Reels UI
+# covers the bottom ~20% and the right rail (baseline finding 7).
+_SAFE_ZONE_DEFAULTS: dict[str, dict[str, float]] = {
+    "9:16": {"y_min": 0.10, "y_max": 0.78, "x_max": 0.85, "caption_y": 0.76, "lower_third_y": 0.74},
+    "1:1":  {"y_min": 0.08, "y_max": 0.90, "x_max": 1.00, "caption_y": 0.85, "lower_third_y": 0.80},
+    "4:5":  {"y_min": 0.08, "y_max": 0.90, "x_max": 1.00, "caption_y": 0.85, "lower_third_y": 0.80},
+    "16:9": {"y_min": 0.05, "y_max": 0.92, "x_max": 1.00, "caption_y": 0.85, "lower_third_y": 0.80},
+    "other": {"y_min": 0.05, "y_max": 0.92, "x_max": 1.00, "caption_y": 0.85, "lower_third_y": 0.80},
+}
+
+
+def _safe_zone(aspect: str) -> dict[str, float]:
+    """The safe zone for `aspect` as a plain dict. Prefers the presets module's
+    `SAFE_ZONES` entry (dict- or attribute-shaped) and fills any field it does
+    not carry from the defaults above, so a partial table still answers."""
+    base = dict(_SAFE_ZONE_DEFAULTS.get(aspect) or _SAFE_ZONE_DEFAULTS["other"])
+    try:
+        from .prompt.presets import SAFE_ZONES  # type: ignore[import-not-found]
+    except ImportError:
+        return base
+    entry = SAFE_ZONES.get(aspect) if isinstance(SAFE_ZONES, dict) else None
+    if entry is None:
+        return base
+    for key in base:
+        val = entry.get(key) if isinstance(entry, dict) else getattr(entry, key, None)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            base[key] = float(val)
+    return base
+
+
+def overlay_default_y(canvas: Canvas, role: str, position: str = "bottom") -> float:
+    """Canvas-pixel y for a caption or lower-third laid by a tool default.
+
+    `position` "top"/"center" keep their long-standing fractions; "bottom"
+    comes from the safe zone of the canvas aspect — 0.76·h on a 9:16 canvas,
+    the unchanged 0.85·h elsewhere. The renderer's caption block uses the same
+    portrait rule (`render.text_overlay.caption_anchor_y`), so what the EDL
+    says and what the export shows agree.
+    """
+    if role == "caption" and position == "top":
+        return canvas.h * 0.15
+    if role == "caption" and position == "center":
+        return canvas.h * 0.5
+    zone = _safe_zone(canvas_aspect_name(canvas.w, canvas.h))
+    frac = zone["lower_third_y"] if role == "lower_third" else zone["caption_y"]
+    return canvas.h * frac
+
+
+def whisper_model_on_disk(model: str) -> bool:
+    """Is `model` already cached for at least one transcription backend?
+
+    Cheap `Path.exists` probes only — never a model load. The prompt path
+    uses this as its no-download rule (spec §1.4): a model that is not here
+    becomes a `downloads_needed` question, never a silent 3 GB fetch.
+    """
+    from ..ingest import transcribe as _T
+    if _T._whisper_cpp_available() and _T._whisper_cpp_model_path(model).exists():
+        return True
+    hub = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub"
+    repo = hub / f"models--Systran--faster-whisper-{model}"
+    return any((repo / "snapshots").glob("*/model.bin")) if repo.exists() else False
 
 
 # ---------- inspection ----------
@@ -1648,7 +1745,7 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
         segments, extent = _timeline_segments(
             store, transcript.model_dump().get("segments", []), tx_src)
         canvas = store.edl.canvas
-        y_pos = canvas.h * (0.85 if position == "bottom" else 0.5 if position == "center" else 0.15)
+        y_pos = overlay_default_y(canvas, "caption", position)
 
         def _lay(text: str, start: float, end: float, role: str, y: float) -> None:
             nonlocal seg_count
@@ -2037,8 +2134,7 @@ def auto_caption(store: EDLStore, args: dict, *,
     cap.config.lang = caption_lang
 
     canvas = store.edl.canvas
-    y_pos = canvas.h * (0.85 if position == "bottom"
-                        else 0.5 if position == "center" else 0.15)
+    y_pos = overlay_default_y(canvas, "caption", position)
     cap.clips = []
     if style == "word_emphasis":
         chunk = int(args.get("chunk_size", 2))
@@ -2171,19 +2267,51 @@ def add_music(store: EDLStore, args: dict) -> dict:
         track.duck = None
 
     from ..edl.schema import Clip, AudioProps
-    clip = Clip(
-        src=src, in_=in_, out=out, start=start,
-        audio=AudioProps(gain_db=volume_db, fade_in=0.5, fade_out=1.0),
-    )
-    track.clips.append(clip)
+    # `loop`: a bed shorter than the video is laid as consecutive clips of the
+    # same source back to back until the video extent is covered, the last one
+    # trimmed. Expressed in the EDL rather than with ffmpeg's `aloop` because
+    # render/audio_mix.py mixes music per clip and has no loop support — and a
+    # loop that is visible on the timeline can be trimmed or muted like any
+    # other clip. Only the last piece fades out (and only the first fades in),
+    # so the seams between loops are gapless. Baseline finding 1 (a 12 s
+    # music-only tail) was the opposite failure; this is the fix for the
+    # other direction, a 20 s bed under a 75 s video.
+    loop = bool(args.get("loop", False))
+    bed_len = max(0.0, out - in_)
+    video_extent = store.edl.video_extent()
+    needed = video_extent - start
+    pieces: list[tuple[float, float]] = []           # (start, out) per clip
+    if loop and bed_len > 0.05 and needed > bed_len + 0.01:
+        t, remaining = start, needed
+        while remaining > 0.01:
+            seg = min(bed_len, remaining)
+            pieces.append((t, in_ + seg))
+            t += seg
+            remaining -= seg
+    else:
+        pieces.append((start, out))
+    clips: list[Clip] = []
+    for i, (c_start, c_out) in enumerate(pieces):
+        first, last = i == 0, i == len(pieces) - 1
+        clips.append(Clip(
+            src=src, in_=in_, out=c_out, start=c_start,
+            audio=AudioProps(gain_db=volume_db,
+                             fade_in=0.5 if first else 0.0,
+                             fade_out=1.0 if last else 0.0),
+        ))
+    track.clips.extend(clips)
+    clip = clips[0]
     # Both separators: split('/') alone left the whole D:\... path in the
     # summary on Windows (same fix as get_timeline's src_name). Hoisted out
     # of the f-string: a backslash inside an f-string expression is a
     # SyntaxError before Python 3.12 (ubuntu CI runs 3.11).
     src_name = str(src).replace("\\", "/").split("/")[-1]
     summary = f"Add music {src_name} @ {start:.1f}s, {volume_db:.0f}dB{', ducked' if duck else ''}"
+    if len(clips) > 1:
+        summary += f", looped ×{len(clips)} to {video_extent:.1f}s"
     store.commit("add_music", args, summary)
-    return {"clip_id": clip.id, "summary": summary, "duck": duck}
+    return {"clip_id": clip.id, "clip_ids": [c.id for c in clips], "loops": len(clips),
+            "summary": summary, "duck": duck}
 
 
 def set_duck(store: EDLStore, args: dict) -> dict:
@@ -2526,9 +2654,50 @@ def remove_fillers(store: EDLStore, args: dict) -> dict:
             "already_removed": already_removed}
 
 
+def _beat_cuts_keeping_min_shot(candidates: list[float], shots: list[tuple[float, float]],
+                                min_shot: float) -> tuple[list[float], int]:
+    """Which beat instants to split at so no V1 shot ends up shorter than
+    `min_shot` — and how many beats that dropped. Pure; unit-tested in
+    tests/test_auto_cut_min_shot.py.
+
+    A beat too close to the previous KEPT split (or to the edge of the shot
+    it falls in — the first beat after a clip head, the last before a clip
+    tail) is SKIPPED, never nudged: shifting it would put a cut off the beat,
+    which is the one thing this tool exists to avoid. Skipping keeps the
+    downbeat cadence and lets the next beat at ≥ min_shot land as normal. A
+    beat outside every shot (a gap, a bare edge) is neither split nor counted
+    as merged — there is nothing there to cut.
+    """
+    kept: list[float] = []
+    merged = 0
+    last_split: dict[tuple[float, float], float] = {}
+    for t in sorted(candidates):
+        shot = next(((s, e) for s, e in shots if s < t < e), None)
+        if shot is None:
+            continue
+        if t - last_split.get(shot, shot[0]) < min_shot or shot[1] - t < min_shot:
+            merged += 1
+            continue
+        kept.append(t)
+        last_split = {**last_split, shot: t}
+    return kept, merged
+
+
 def auto_cut_to_beats(store: EDLStore, args: dict) -> dict:
-    """Detect beats in the music track and split V1 at each beat boundary."""
+    """Detect beats in the music track and split V1 at each beat boundary.
+
+    `min_shot` (seconds, default 0 = the historical "every Nth beat, no
+    matter what") merges beats that would leave a shot shorter than that:
+    the beat_sync recipe promises `min_shot_geq(0.8)` and, when the music is
+    already on the timeline, this tool is the only thing placing the cuts —
+    at 120 BPM every 4th beat is 2 s apart, but the fragment left before the
+    first beat or after the last one is whatever the footage happens to
+    give (benchmark case 10 measured 0.697 s). The precomputed path
+    (`heuristics.beat_split_times`) already applied the same rule; this
+    makes the run-time path honour the same postcondition.
+    """
     subdivision = int(args.get("subdivision", 4))  # cut every Nth beat
+    min_shot = max(0.0, float(args.get("min_shot", 0.0)))
     music = store.edl.get_track("music")
     from ..edl.schema import Clip
     music_clip = next((c for c in (music.clips if music else []) if isinstance(c, Clip)), None)
@@ -2547,7 +2716,11 @@ def auto_cut_to_beats(store: EDLStore, args: dict) -> dict:
     beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
     # Project onto timeline (music_clip.start anchors them)
     beat_tl_times = [music_clip.start + t for t in beat_times if t >= 0]
-    cuts = beat_tl_times[::max(1, subdivision)]
+    candidates = beat_tl_times[::max(1, subdivision)]
+    v1 = store.edl.get_track("v1")
+    shots = [(c.start, c.start + c.effective_duration)
+             for c in (v1.clips if v1 else []) if isinstance(c, Clip)]
+    cuts, merged = _beat_cuts_keeping_min_shot(candidates, shots, min_shot)
     n = 0
     with store.batch():  # one undo step for all the splits (see remove_silences)
         for t in cuts:
@@ -2557,8 +2730,10 @@ def auto_cut_to_beats(store: EDLStore, args: dict) -> dict:
             except (ValueError, KeyError):
                 continue
     summary = f"Cut V1 at {n} beats (every {subdivision})"
+    if merged:
+        summary += f", {merged} skipped to keep shots ≥ {min_shot:g}s"
     store.commit("auto_cut_to_beats", args, summary)
-    return {"summary": summary, "splits": n, "beats_total": len(beat_times)}
+    return {"summary": summary, "splits": n, "beats_total": len(beat_times), "merged": merged}
 
 
 def tts_voiceover(store: EDLStore, args: dict) -> dict:
@@ -2807,7 +2982,7 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     between two clips). Adjacent clips around `at` will be xfaded.
     """
     from ..edl.schema import Transition
-    from ..render.transitions import is_valid, all_names, resolve_transition
+    from ..render.transitions import default_duration, is_valid, all_names, resolve_transition
     v1 = store.edl.get_track("v1")
     if not v1:
         raise ValueError("v1 track not found")
@@ -2818,8 +2993,16 @@ def add_transition(store: EDLStore, args: dict) -> dict:
             f"call list_transitions to see them. Common: fade, dissolve, "
             f"slideleft, zoomin, circleopen, radial, pixelize, glitch, whip, spin"
         )
-    tr = Transition(at=float(args["at"]), type=ttype,
-                    duration=float(args.get("duration", 0.5)))
+    # No `duration` → the transition's OWN default (render.transitions
+    # FAMILY_DEFAULT_DURATION_S): a whip is over in 0.25 s, a dip to black
+    # takes 0.6. Resolved HERE, at add time, so the EDL carries the real
+    # number and `EDL.transition_overlap` (the transport length) and the
+    # compositor's xfade read the same value without either consulting the
+    # catalog. An explicit 0 or negative is treated as "not given" for the
+    # same reason a legacy 0 is in the renderer: ffmpeg rejects a 0 s xfade.
+    raw_dur = args.get("duration")
+    duration = float(raw_dur) if raw_dur is not None and float(raw_dur) > 0 else default_duration(ttype)
+    tr = Transition(at=float(args["at"]), type=ttype, duration=duration)
     # Replace any transition already sitting on this cut instead of appending.
     # The renderer keys transitions by the seam they belong to, so a second one
     # at the same boundary never rendered — it just accumulated in the EDL,
@@ -2847,6 +3030,7 @@ def add_transition(store: EDLStore, args: dict) -> dict:
         summary += (f" — timeline {before:.2f}s → {store.edl.duration:.2f}s "
                     f"(the two clips overlap for {shortened:.2f}s)")
     return {"summary": summary, "duration": store.edl.duration,
+            "transition_duration": tr.duration, "type": tr.type,
             "shortened_by": round(shortened, 3) if shortened > 0.001 else 0.0}
 
 
@@ -3774,6 +3958,7 @@ def noise_reduce(store: EDLStore, args: dict) -> dict:
     cache_dir = store.dir / "cache" / "denoise"
     out = denoise.denoise_clip(Path(c.src), cache_dir,
                                strength=float(args.get("strength", 0.85)))
+    _record_derived(out, c.src)
     c.src = str(out)
     summary = f"Denoised {cid} (strength={args.get('strength', 0.85)})"
     store.commit("noise_reduce", args, summary)
@@ -3913,6 +4098,7 @@ def stabilize(store: EDLStore, args: dict) -> dict:
         raise ValueError("stabilize only supports media clips")
     from ..ai.stabilize import stabilize as _stabilize
     new_src = _stabilize(Path(c.src), store.dir / "cache" / "stabilize")
+    _record_derived(new_src, c.src)
     c.src = str(new_src)
     summary = f"Stabilize {cid} → {new_src.name}"
     store.commit("stabilize", args, summary)
@@ -4017,6 +4203,101 @@ def translate_captions(store: EDLStore, args: dict) -> dict:
     store.commit("translate_captions", args, summary)
     return {"summary": summary, "translated": n,
             "from": source, "to": target}
+
+
+def transcribe_tool(store: EDLStore, args: dict, *,
+                    set_progress=None, cancel_event=None) -> dict:
+    """Transcribe the first v1 clip's source and persist the transcript —
+    WITHOUT touching the timeline (spec §4.9). The Prompt Editor's
+    prerequisite step: `tighten` and `captions` from a persisted transcript
+    need words, not a caption track, and `auto_caption` (the only other tool
+    that transcribes) always lays one — so "remove the ums" on a fresh upload
+    used to mean either a second transcription pass or an unwanted caption
+    track (spec §2.5 "never two transcription passes").
+
+    Args:
+      model — whisper model name; default `WHISPER_MODEL` (small). Refused
+              unless already on disk (`whisper_model_on_disk`): the prompt
+              path never downloads without a yes (§1.4), so a missing model is
+              a `ValueError`, not a 480 MB side effect.
+      force — re-transcribe even when a transcript is already persisted.
+
+    Where the transcript lands: `ingest.json["transcript"]` next to the
+    source when the upload wrote one (what `_current_v1_ingest_json` reads),
+    else `<session>/transcript.json` — never a file created next to a source
+    that lives outside the session (a desktop `add_clip` of ~/Movies/x.mp4).
+
+    Commits nothing: no EDL change means no op, no snapshot, no undo step.
+    `set_progress` / `cancel_event` are the same opt-in hooks `auto_caption`
+    takes. NOT in main.ASYNC_DISPATCH_TOOLS for 0.7.0: that set is mirrored
+    verbatim by the phone (`mobile/lib/jobs.ts`, pinned by
+    tests/test_mobile_catalog_drift.py) and the mobile app is frozen this
+    release; the prompt executor runs this on its own thread anyway, and a
+    direct `/dispatch` caller passes `?wait=0` to get the job path.
+    """
+    from ..config import WHISPER_MODEL
+    from ..ingest import transcribe as _T
+
+    model = str(args.get("model") or WHISPER_MODEL)
+    force = bool(args.get("force", False))
+    src = _first_v1_media_src(store)
+    if src is None:
+        raise ValueError("transcribe: no clip on v1 to transcribe")
+    if not Path(src).exists():
+        raise ValueError(f"transcribe: source not found: {src}")
+
+    if not force:
+        existing, _ = _load_transcript_with_source(store)
+        if existing is not None and existing.words:
+            n = len(existing.words)
+            return {"summary": f"Transcript already present ({n} words, {existing.language})",
+                    "words": n, "language": existing.language, "backend": "cached",
+                    "reused": True}
+
+    if not whisper_model_on_disk(model):
+        raise ValueError(
+            f"transcribe: model {model!r} not downloaded — the prompt path never "
+            "fetches a model without asking; download it from the Captions panel "
+            "or pick a cached model")
+
+    backend_env = os.environ.get("WHISPER_BACKEND") or "auto"
+    uses_cli = _T._whisper_cpp_available() and (
+        backend_env == "whisper_cpp"
+        or (backend_env == "auto" and _T._whisper_cpp_model_path(model).exists()))
+    backend = "whisper_cli" if uses_cli else "faster_whisper"
+
+    def _on_progress(frac: float, done: float, total: float) -> None:
+        if set_progress is not None:
+            set_progress(frac)
+
+    def _should_cancel() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    tx = _T.transcribe(Path(src), model_size=model, on_progress=_on_progress,
+                       should_cancel=_should_cancel)
+    tx_dict = tx.model_dump()
+
+    ingest_json = _current_v1_ingest_json(store)
+    if ingest_json is not None:
+        try:
+            data = json.loads(ingest_json.read_text(encoding="utf-8"))
+        except ValueError:
+            data = {}
+        data["transcript"] = tx_dict
+        data["spoken_language"] = tx.language
+        ingest_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        wrote = str(ingest_json)
+    else:
+        target = store.dir / "transcript.json"
+        target.write_text(json.dumps(tx_dict, ensure_ascii=False), encoding="utf-8")
+        wrote = str(target)
+
+    n = len(tx.words)
+    if set_progress is not None:
+        set_progress(1.0)
+    return {"summary": f"Transcribed {n} words ({tx.language}, {model} via {backend})",
+            "words": n, "language": tx.language, "backend": backend, "model": model,
+            "path": wrote, "reused": False}
 
 
 def make_shorts(store: EDLStore, args: dict) -> dict:
@@ -4473,10 +4754,12 @@ def add_lower_third(store: EDLStore, args: dict) -> dict:
     if handle:
         text = f"{name}\n{handle}"
     canvas = store.edl.canvas
+    # 0.74·h on a 9:16 canvas (clear of the TikTok/Reels bottom UI), the
+    # long-standing 0.80·h elsewhere — see overlay_default_y.
     clip = TextClip(
         text=text, start=start, end=end, role="lower_third",
         speaker=speaker,
-        transform=Transform(x=canvas.w / 2, y=canvas.h * 0.80),
+        transform=Transform(x=canvas.w / 2, y=overlay_default_y(canvas, "lower_third")),
     )
     track.clips.append(clip)
     summary = f"Lower-third {name}{f' ({handle})' if handle else ''} {start:.1f}–{end:.1f}s"
@@ -4768,9 +5051,17 @@ def list_transitions(store: EDLStore, args: dict) -> dict:
     # "the platform promises N transitions" became a padded claim a tester
     # could disprove by finding repeats. `count` keeps its meaning for existing
     # callers; this just makes the flat read honest on its own.
+    #
+    # `entries` / `families` / `defaults` are the product surface (0.7.0):
+    # one record per distinct look with its CapCut-style family, display
+    # name, default duration and description — what the Transitions panel
+    # draws its tabs and grid from and what the prompt planner offers. The
+    # per-name `defaults` are what `add_transition` applies when a caller
+    # names no duration, so a UI can show the number before the click.
     return {"transitions": all_names(), "catalog": cat, "count": cat["count"],
             "looks": cat["looks"], "alias_count": cat["alias_count"],
-            "note": cat["note"]}
+            "note": cat["note"], "entries": cat["entries"], "families": cat["families"],
+            "family_order": cat["family_order"], "defaults": cat["defaults"]}
 
 
 def list_text_styles(store: EDLStore, args: dict) -> dict:
@@ -4914,7 +5205,9 @@ def auto_reframe(store: EDLStore, args: dict) -> dict:
             try:
                 new_src = reframe_clip(Path(c.src), store.dir / "cache", target_w=w, target_h=h)
                 # Preserve in/out as fractions of duration: the reframed file has
-                # the same duration as the source so in/out remain valid.
+                # the same duration as the source so in/out remain valid — and
+                # so does the transcript, once the origin is recorded.
+                _record_derived(new_src, c.src)
                 c.src = str(new_src)
                 reframed.append(c.id)
             except Exception as e:
@@ -5001,6 +5294,7 @@ def upscale(store: EDLStore, args: dict) -> dict:
     if not available():
         raise RuntimeError("Real-ESRGAN binary missing; expected at models/realesrgan/")
     new_src = upscale_clip(Path(c.src), store.dir / "cache" / "upscale", factor=factor)
+    _record_derived(new_src, c.src)
     c.src = str(new_src)
     summary = f"Upscale {cid} ×{factor} via Real-ESRGAN"
     store.commit("upscale", args, summary)
@@ -5036,6 +5330,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "apply_hook_stack": apply_hook_stack,
     "add_caption_track": add_caption_track,
     "auto_caption": auto_caption,
+    "transcribe": transcribe_tool,
     "apply_brand_kit": apply_brand_kit,
     "audit_aesthetic": audit_aesthetic,
     # M3: audio + auto-trim + reframe

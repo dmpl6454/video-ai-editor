@@ -1,0 +1,552 @@
+/* The Prompt bar, its run log, the clarify card and the brain badge.
+   Imported by PromptBar.tsx — not from styles.css (owned elsewhere).
+
+   Direction: an editorial console, not a chat box. The bar is a full-width
+   slab of --bg-1 under a hairline, opened by a "›" in --accent-2 the way a
+   terminal prompt opens a line; the log beneath it is the darker --bg-0 with
+   a faint grain so it reads as a different material (a record, not a form).
+   Hierarchy is carried by scale, not colour: the reply at 13px, step rows at
+   12px in the monospace stack OpsLog already uses, measured values at 11px in
+   --text-dim. Colour is semantic only — --good landed, --warn in flight,
+   --accent failed, --accent-2 the thing you can act on — and every value is a
+   token from styles.css:4-21; no new tokens were needed.
+
+   Motion is transform/opacity only. The indeterminate shimmer is the one
+   continuous animation, and prefers-reduced-motion turns it into a still bar. */
+
+/* ---- the bar ---------------------------------------------------------- */
+
+.prompt-bar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* A grid item's automatic minimum is its min-content width; without this
+     the action row (badge + Run) pushed the whole bar past the centre column
+     at the 900px floor and .center's overflow:hidden clipped the Cancel
+     button off the screen (measured at 900x640). */
+  min-width: 0;
+  max-height: 38vh;          /* the log scrolls inside; the preview never overflows */
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  /* Container queries below key off the bar's own width — the sidebars are
+     resizable, so the window width says nothing about how much room we have. */
+  container-type: inline-size;
+}
+
+.prompt-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 12px 8px 14px;
+  flex-shrink: 0;
+}
+
+.prompt-glyph {
+  flex-shrink: 0;
+  width: 14px;
+  margin-top: 4px;
+  font-size: 20px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--accent-2);
+  opacity: 0.7;
+  transition: opacity 160ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+.prompt-bar:focus-within .prompt-glyph { opacity: 1; transform: translateX(2px); }
+.prompt-bar.is-busy .prompt-glyph { color: var(--warn); opacity: 1; }
+.prompt-bar.is-error .prompt-glyph { color: var(--accent); opacity: 1; }
+.prompt-bar.is-done .prompt-glyph { color: var(--good); opacity: 1; }
+
+.prompt-input {
+  flex: 1 1 160px;
+  min-width: 96px;
+  resize: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 4px 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text);
+  max-height: calc(3 * 20px + 8px);   /* auto-grows to three lines, then scrolls */
+  overflow-y: auto;
+  caret-color: var(--accent-2);
+}
+.prompt-input::placeholder { color: var(--text-dim); opacity: 0.85; }
+.prompt-input:disabled { opacity: 0.55; }
+
+.prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 1;
+  min-width: 0;
+  margin-top: 1px;
+}
+.prompt-run {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  min-width: 64px;
+}
+.prompt-run kbd {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.7;
+  margin-left: 6px;
+}
+.prompt-run.is-cancel {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--text-dim);
+}
+.prompt-run.is-cancel:hover:not(:disabled) { color: var(--text); border-color: var(--accent); background: rgba(255, 77, 109, 0.08); }
+
+/* The 2 px state line under the input: --accent-2 while planning
+   (indeterminate sweep) and running (scaleX = progress), --good when done,
+   --accent on error. Width is a transform so the compositor owns it. */
+.prompt-line {
+  position: absolute;
+  left: 14px;
+  right: 12px;
+  bottom: 0;
+  height: 2px;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+.prompt-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--accent-2);
+  transform-origin: left center;
+  transform: scaleX(var(--prompt-progress, 0));
+  transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms ease;
+  opacity: 0;
+}
+.prompt-bar.is-busy .prompt-line::after { opacity: 1; }
+.prompt-bar.is-planning .prompt-line::after {
+  transform: none;
+  width: 34%;
+  animation: prompt-sweep 1.2s ease-in-out infinite;
+}
+.prompt-bar.is-done .prompt-line::after {
+  background: var(--good);
+  transform: scaleX(1);
+  animation: prompt-settle 1.6s ease-out forwards;
+}
+.prompt-bar.is-error .prompt-line::after { background: var(--accent); transform: scaleX(1); opacity: 1; }
+@keyframes prompt-sweep {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(320%); }
+}
+@keyframes prompt-settle {
+  0%   { opacity: 1; }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prompt-bar.is-planning .prompt-line::after { animation: none; width: 100%; opacity: 0.5; }
+  .prompt-bar.is-done .prompt-line::after { animation: none; opacity: 0; }
+  .prompt-glyph { transition: none; }
+}
+
+/* Inline cancel confirmation — Esc during a run asks; it never aborts silently. */
+.prompt-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 6px 14px 8px 38px;
+  font-size: 12px;
+  color: var(--text);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
+}
+.prompt-confirm .grow { flex: 1; min-width: 0; }
+.prompt-confirm button { font-size: 11px; padding: 3px 10px; }
+.prompt-confirm button.danger:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+.prompt-hint {
+  padding: 0 14px 6px 38px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---- brain badge -------------------------------------------------------- */
+
+.brain-badge { position: relative; min-width: 0; }
+.brain-pill {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brain-pill:hover:not(:disabled), .brain-pill[aria-expanded="true"] { color: var(--text); border-color: #3a3a45; }
+.brain-pill:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.brain-pill .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.brain-pill .model { opacity: 0.7; }
+/* Things drop out in order of how little they are needed as the column
+   narrows: the key hints first, then the model tag; the brain name and the
+   Run/Cancel button never do. */
+@container (max-width: 560px) {
+  .prompt-run kbd { display: none; }
+  .prompt-run { min-width: 0; }
+}
+@container (max-width: 460px) {
+  .brain-pill .model { display: none; }
+  .prompt-hint { display: none; }
+}
+/* The dot carries the state: filled = answered this run, hollow = available,
+   struck = unavailable. */
+.brain-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  border: 1.5px solid var(--good);
+  background: transparent;
+  position: relative;
+}
+.brain-dot.is-answered { background: var(--good); }
+.brain-dot.is-struck { border-color: var(--text-dim); }
+.brain-dot.is-struck::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  top: 50%;
+  height: 1.5px;
+  background: var(--text-dim);
+  transform: rotate(-45deg);
+}
+.brain-dot.is-trying { border-color: var(--warn); animation: brain-pulse 1s ease-in-out infinite; }
+@keyframes brain-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .brain-dot.is-trying { animation: none; } }
+
+/* left/top/width are set inline by BrainBadge.tsx (fixed, from the pill's
+   rect, clamped to the viewport) — portaled to document.body to escape
+   .center's overflow clip. */
+.brain-pop {
+  position: fixed;
+  z-index: 1000;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-top-color: #3a3a45;
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  padding: 10px 12px 12px;
+  font-size: 12px;
+  text-align: left;
+  white-space: normal;
+}
+.brain-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.brain-pop-head h3 {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.brain-pop-head button { font-size: 10.5px; padding: 2px 8px; }
+.brain-rows { list-style: none; margin: 0; padding: 0; }
+.brain-row {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  column-gap: 8px;
+  row-gap: 3px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.brain-row:first-child { border-top: none; padding-top: 2px; }
+.brain-row .brain-dot { margin-top: 5px; }
+.brain-row-name { font-weight: 600; color: var(--text); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.brain-row-name .tag { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
+.brain-row-name .tag.answered { color: var(--good); }
+.brain-row-detail { grid-column: 2; font-size: 11px; line-height: 1.45; color: var(--text-dim); overflow-wrap: anywhere; }
+.brain-row-fix {
+  grid-column: 2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 5px 8px;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.brain-row-actions { grid-column: 2; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.brain-row-actions button { font-size: 11px; padding: 3px 10px; }
+.brain-row-actions .note { font-size: 10.5px; color: var(--text-dim); }
+.brain-row-actions .note.bad { color: var(--accent); }
+.brain-row-actions .note.good { color: var(--good); }
+.brain-dl-bar { grid-column: 2; height: 4px; border-radius: 999px; background: var(--bg-3); overflow: hidden; }
+.brain-dl-bar > span { display: block; height: 100%; background: var(--accent-2); transform-origin: left; transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1); }
+.brain-ladder { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); font-size: 11px; color: var(--text-dim); }
+.brain-ladder h4 { margin: 0 0 4px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600; }
+.brain-ladder ol { margin: 0; padding-left: 16px; }
+.brain-ladder li { padding: 1px 0; overflow-wrap: anywhere; }
+.brain-ladder li b { color: var(--text); font-weight: 500; }
+.brain-ladder .ms { font-variant-numeric: tabular-nums; }
+
+/* ---- the run log ---------------------------------------------------------- */
+
+.prompt-log {
+  position: relative;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: var(--bg-0);
+  padding: 10px 14px 12px 38px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+/* Paper grain: a 2 % repeating rule, so the record reads as a different
+   surface from the input slab above it. Purely decorative, no pointer. */
+.prompt-log::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.02;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, var(--text) 2px 3px);
+}
+.prompt-log > * { position: relative; }
+
+.prompt-log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.prompt-log-title { font-size: 13px; font-weight: 600; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.prompt-log-via { font-size: 11px; color: var(--text-dim); }
+.prompt-log-via b { color: var(--text); font-weight: 500; }
+.prompt-log-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+.prompt-log-meta b { color: var(--text); font-weight: 500; }
+.prompt-log-meta .dl { color: var(--warn); }
+
+/* Step rail — monospace, numbered, one line each. */
+.prompt-steps { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.prompt-step {
+  display: grid;
+  grid-template-columns: 22px 14px minmax(120px, max-content) 1fr;
+  column-gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+.prompt-step .n { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.prompt-step .g { text-align: center; }
+.prompt-step .tool { color: var(--text); overflow-wrap: anywhere; }
+.prompt-step .sum { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; min-width: 0; }
+.prompt-step.is-ok .g { color: var(--good); }
+.prompt-step.is-running .g { color: var(--warn); }
+.prompt-step.is-failed .g, .prompt-step.is-failed .sum { color: var(--accent); }
+.prompt-step.is-skipped { opacity: 0.6; }
+.prompt-step.is-skipped .g { color: var(--text-dim); }
+.prompt-step.is-none .sum::after { content: ' · no effect'; color: var(--warn); }
+.prompt-step.is-verify .tool { color: var(--text-dim); font-style: italic; }
+.prompt-step-bar { grid-column: 3 / -1; height: 3px; border-radius: 999px; background: var(--bg-3); overflow: hidden; margin: 2px 0 1px; }
+.prompt-step-bar > span { display: block; height: 100%; background: var(--accent-2); transform-origin: left; transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1); }
+.prompt-step-bar.indeterminate > span { width: 38%; animation: prompt-sweep 1.15s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .prompt-step-bar.indeterminate > span { animation: none; width: 100%; opacity: 0.5; } }
+
+.prompt-step.is-placeholder { display: flex; gap: 8px; }
+
+/* Verify table */
+.prompt-verify { margin-top: 10px; }
+.prompt-verify-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.prompt-verify-head b { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12px; }
+.prompt-verify-head .rendered { color: var(--text-dim); text-transform: none; letter-spacing: 0; font-size: 10.5px; }
+.prompt-checks { display: grid; grid-template-columns: 14px 1fr auto auto; column-gap: 10px; row-gap: 2px; font-size: 11.5px; }
+.prompt-check { display: contents; }
+.prompt-check > span { padding: 2px 0; }
+.prompt-check .g { text-align: center; }
+.prompt-check .human { color: var(--text); overflow-wrap: anywhere; }
+.prompt-check .human small { color: var(--text-dim); margin-left: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.prompt-check .val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.prompt-check.is-pass .g { color: var(--good); }
+.prompt-check.is-fail .g { color: var(--accent); }
+.prompt-check.is-fail .human { color: var(--accent); }
+.prompt-check.is-skip .g { color: var(--text-dim); }
+.prompt-check-detail { grid-column: 2 / -1; font-size: 11px; color: var(--text-dim); padding: 0 0 4px; overflow-wrap: anywhere; }
+
+.prompt-reply {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prompt-error {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.prompt-notice {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.prompt-log-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.prompt-log-actions button { font-size: 11px; padding: 3px 10px; }
+.prompt-log-actions .spacer { flex: 1; }
+.prompt-log-actions .ghost { background: transparent; color: var(--text-dim); }
+.prompt-log-actions .ghost:hover:not(:disabled) { color: var(--text); }
+
+/* ---- clarify card ---------------------------------------------------------- */
+
+.clarify {
+  border-top: 1px solid var(--line);
+  background: var(--bg-0);
+  padding: 10px 14px 12px 38px;
+  font-size: 12px;
+}
+.clarify-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.clarify-kicker {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  font-weight: 600;
+}
+.clarify-sub { font-size: 11px; color: var(--text-dim); }
+.clarify-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px 18px;
+}
+.clarify-q { min-width: 0; }
+.clarify-q > legend, .clarify-q > label.q {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 6px;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+.clarify-q fieldset, fieldset.clarify-q { border: none; margin: 0; padding: 0; min-width: 0; }
+.clarify-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.clarify-chip {
+  font-size: 12px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.clarify-chip:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.clarify-chip[aria-checked="true"] { color: var(--text); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+.clarify-chip:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.clarify-chip:active { transform: translateY(1px); }
+.clarify-chip small { display: block; font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
+.clarify-chip.is-default::after { content: ' · default'; font-size: 10px; color: var(--text-dim); }
+
+.clarify-field { display: flex; align-items: center; gap: 6px; }
+.clarify-field input {
+  width: 140px;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--bg-2);
+}
+.clarify-field input[aria-invalid="true"] { border-color: var(--accent); }
+.clarify-field .unit { font-size: 11px; color: var(--text-dim); }
+.clarify-field .range { font-size: 10.5px; color: var(--text-dim); }
+.clarify-text { width: 100%; font-size: 12px; padding: 5px 8px; background: var(--bg-2); }
+
+.clarify-question { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.clarify-dl { margin: 0 0 6px; padding-left: 16px; font-size: 11px; color: var(--text-dim); }
+.clarify-dl span { opacity: 0.7; }
+.clarify-sub-gap { margin-bottom: 4px; }
+.clarify-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.clarify-actions .ghost { background: transparent; color: var(--text-dim); }
+.clarify-actions .ghost:hover:not(:disabled) { color: var(--text); }
+.clarify-actions button { font-size: 12px; padding: 5px 12px; }
+.clarify-actions .err { font-size: 11px; color: var(--accent); }
+.clarify-actions kbd { font: inherit; font-size: 10px; opacity: 0.7; margin-left: 6px; }
+
+/* Screen-reader-only live region (the aiPanel.css pattern). */
+.prompt-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Run-log step rows: the plan's `why` is the label, the tool id a quiet tag. */
+.prompt-step-id { margin-left: 6px; font-size: 10px; color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Gate cards: the technical remedy behind a disclosure, never in the chip. */
+.clarify-why { font-size: 11px; color: var(--text-dim); }
+.clarify-why > button { padding: 0 4px; font-size: 11px; }
+.clarify-why ul { margin: 4px 0 0 14px; padding: 0; }

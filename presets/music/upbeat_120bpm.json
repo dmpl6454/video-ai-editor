@@ -1,0 +1,9 @@
+{
+  "bpm": 120,
+  "mood": "upbeat",
+  "source": "procedural",
+  "beat_grid_offset": 0.0,
+  "duration_s": 180.0,
+  "lufs": -18.0,
+  "sample_rate": 48000
+}
