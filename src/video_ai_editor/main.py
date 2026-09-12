@@ -85,10 +85,101 @@ _install_hardening(app)
 # paired". All of this is inert until LAN mode is on (api/auth.py explains the
 # gating): with VAE_LAN unset and no settings.json the desktop behaves exactly
 # as it did in 0.5.0.
+#
+# The router stays MOUNTED even though the phone feature is temporarily gated
+# off for this ship (api/pairing.py::PHONE_PAIRING_ENABLED). Unmounting it would
+# make /api/pair/* an unrouted path — Starlette's bare 404, outside this app's
+# error envelope and outside its request log. Mounted + one router-level
+# dependency (pair_routes._require_phone_feature) gives a real, logged,
+# enveloped 404 instead, and re-enabling the feature touches no wiring here.
+from .api import pairing
 from .api.auth import install as _install_pair_auth
 from .api.pair_routes import router as _pair_router
 _install_pair_auth(app)
 app.include_router(_pair_router)
+
+# --- the published schema has to agree with the gate -------------------------
+# The mounted router makes /api/pair/* a routed 404 (above) — but it also puts
+# all eight paths, and the request models behind them, into /openapi.json, /docs
+# and /redoc. That contradicts the very signal the 404 exists to send: a client
+# generated from the schema, or a reader opening /docs to see what this build
+# offers, would get eight endpoints that every real verb answers 404 on, i.e.
+# "pairing is present and merely broken". While the gate is closed the schema
+# must say what is true: there is no phone companion in this build.
+#
+# `include_in_schema=False` on the router is the cheaper edit and was rejected:
+# it also hides the routes with the flag ON, losing real documentation of a real
+# feature. Filtering at publish time is posture-aware, so flipping the flag back
+# on restores the docs with no further change.
+_SCHEMA_REF_PREFIX = "#/components/schemas/"
+
+
+def _collect_schema_refs(node: object, found: set[str]) -> None:
+    """Every `#/components/schemas/X` name reachable from `node`, into `found`."""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(_SCHEMA_REF_PREFIX):
+            found.add(ref[len(_SCHEMA_REF_PREFIX):])
+        for value in node.values():
+            _collect_schema_refs(value, found)
+        return
+    if isinstance(node, list):
+        for value in node:
+            _collect_schema_refs(value, found)
+
+
+def _without_pair_paths(schema: dict) -> dict:
+    """A copy of `schema` with the pair paths, and the models only they use, gone.
+
+    The component sweep is the load-bearing half: dropping the paths alone would
+    still publish `LanRequest.enabled`, `ClaimRequest.code` and
+    `RevokeRequest.device_id` under components/schemas — the shape of the feature
+    this build says it does not have. Reachability rather than a hardcoded name
+    list, so a model shared with a route that stays (HTTPValidationError) is
+    kept, and a pair model added later is dropped without anyone remembering to.
+
+    Pure and immutable: FastAPI memoises the unfiltered schema in
+    `app.openapi_schema`, and mutating that cached dict would make the first
+    posture served permanent.
+    """
+    paths = {path: item for path, item in schema.get("paths", {}).items()
+             if not path.startswith("/api/pair/")}
+    components = schema.get("components") or {}
+    schemas = components.get("schemas") or {}
+    if not schemas:
+        return {**schema, "paths": paths}
+
+    reachable: set[str] = set()
+    _collect_schema_refs(paths, reachable)
+    while True:                                   # a kept model may cite another
+        grown = set(reachable)
+        _collect_schema_refs({n: schemas[n] for n in reachable if n in schemas}, grown)
+        if grown == reachable:
+            break
+        reachable = grown
+
+    kept = {name: body for name, body in schemas.items() if name in reachable}
+    return {**schema, "paths": paths, "components": {**components, "schemas": kept}}
+
+
+_fastapi_openapi = app.openapi
+
+
+def app_openapi() -> dict:
+    """/openapi.json for the posture this process is actually in.
+
+    Deliberately NOT memoised into `app.openapi_schema`: the gate is read at call
+    time (`phone_pairing_enabled()` consults the environment on every call, which
+    is what lets the test suite flip it per test), so caching the filtered result
+    would freeze whichever posture answered first.
+    """
+    schema = _fastapi_openapi()
+    if pairing.phone_pairing_enabled():
+        return schema
+    return _without_pair_paths(schema)
+
+
+app.openapi = app_openapi  # type: ignore[method-assign]
 
 app.add_middleware(
     CORSMiddleware,
@@ -238,8 +329,18 @@ def version():
     # `build` is what makes a bug report actionable — VERSION alone stayed at
     # 0.3.7 across 99 commits, so "I'm on v0.3.7" identified nothing. See
     # config.build_id().
+    #
+    # `phone_pairing` is the ONE channel the frontend uses to decide whether the
+    # iPhone affordance exists at all. It ships False — the companion is
+    # temporarily gated off (api/pairing.py::PHONE_PAIRING_ENABLED) — and the UI
+    # must read it here rather than infer the feature from a 404, so turning the
+    # flag back on lights the panel up with no frontend change. Kept cheap
+    # because the top bar polls this: both modules are already imported by the
+    # time a request can arrive, and the call is an env lookup plus a bool.
+    from .api.pairing import phone_pairing_enabled
     from .config import APP_VERSION, build_id
-    return {"version": APP_VERSION, "build": build_id()}
+    return {"version": APP_VERSION, "build": build_id(),
+            "phone_pairing": phone_pairing_enabled()}
 
 
 def _handler_hook_flags(name: str) -> dict:

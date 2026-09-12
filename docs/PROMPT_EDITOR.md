@@ -87,9 +87,20 @@ not "no network", the rule is no network without your answer. Model
 downloads themselves can only be started from the Mac (loopback-only routes),
 never from a paired phone.
 
-## Answering from the phone
+## Answering from the phone — temporarily unavailable in this build
 
-The phone shows the question as text ("Which language for the captions?
+The iPhone companion and local-network pairing are **turned off in 0.7.1**, so
+in this build every clarification is answered on the Mac, in the Prompt bar or
+the chat pane. Nothing was removed: the feature is gated behind one flag —
+`PHONE_PAIRING_ENABLED` in `src/video_ai_editor/api/pairing.py`, read through
+`phone_pairing_enabled()` and set by the environment variable
+`VAE_PHONE_PAIRING` (`1`/`true`/`yes`). A developer who wants the phone back
+runs the app with `VAE_PHONE_PAIRING=1` and gets exactly the 0.7.0 behaviour
+described in the rest of this section; `GET /api/version` reports the live state
+as `phone_pairing`. Existing pairing settings and remembered devices are left
+untouched while it is off.
+
+With the flag on, the phone shows the question as text ("Which language for the captions?
 Reply **hi**, **en**, **hinglish** or **es**."). Reply with the **whole
 word** — the value, its label, an ordinal (`first`, `the second one`),
 `yes`/`no`/`haan`/`nahi`, or a number. A partial match never counts: `hi`
@@ -97,7 +108,9 @@ resumes the plan, `make it hi-res` drops the pending question and plans your
 new request instead. A question expires after ten minutes, and any edit made
 elsewhere in the meantime invalidates it.
 
-On the phone the first line of every reply names the brain: `via Recipes — …`.
+On the phone the first line of every reply names the brain: `via Recipes — …`
+(the Mac shows the same prefix, so nothing about the reply shape depends on the
+flag).
 
 ## Transitions
 
@@ -131,6 +144,8 @@ VAI_BRAIN=auto                # recipes | fm | mlx | cloud | auto
 VAI_MLX_MODEL=                # override the RAM-tier model id
 VAI_PROMPT_CLOUD=1            # 0 disables the Claude rung even with a key
 VAI_FM_HELPER=                # path to a built fm-planner (dev; the .app bundles it)
+VAE_PHONE_PAIRING=            # unset/0 = the iPhone companion and LAN pairing are OFF (0.7.1 default);
+                              # 1 | true | yes restores them (api/pairing.py::PHONE_PAIRING_ENABLED)
 ```
 
 ## Where things live

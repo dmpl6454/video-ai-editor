@@ -95,7 +95,8 @@ seconds for tiktok` — and it becomes a verified edit. No cloud key needed.
   without your **yes** — a first-use download (whisper large-v3 3.1 GB, MADLAD
   3 GB, a Piper voice 60 MB) is a question in the plan, and "skip" drops the
   steps that needed it. Model downloads start only from the Mac itself, never
-  from a paired phone. Every plan — from any brain — passes an explicit
+  from a paired phone — and in this build no phone can pair at all (see
+  "iPhone companion" below). Every plan — from any brain — passes an explicit
   allowlist (tools, arguments, enums, bounds, no model-written file path)
   before a single tool runs.
 - **Download once, then it is local.** Whisper `small` ships cached; the
@@ -110,6 +111,34 @@ seconds for tiktok` — and it becomes a verified edit. No cloud key needed.
   `VAI_BRAIN=recipes uv run pytest -m benchmark tests/benchmark`. Method and
   claims: [docs/BENCHMARK.md](docs/BENCHMARK.md). The bar itself:
   [docs/PROMPT_EDITOR.md](docs/PROMPT_EDITOR.md).
+
+## iPhone companion — temporarily off in this build
+
+The editor ships **standalone**: there is no phone to pair, and nothing on your
+local network to turn on. The iPhone companion app (`mobile/`) and the
+local-network pairing flow (QR code, claim codes, device list) are **disabled,
+not removed** — this is a deliberate, reversible shipping decision for 0.7.1,
+taken because pairing is the one feature that needs a second device and a
+cooperative Wi-Fi network before the editor can cut a single clip. A future
+release turns it back on.
+
+While it is off, `GET /api/version` reports `phone_pairing: false`, the Phone
+panel is not offered in the UI, every `/api/pair/*` route answers `404`, and the
+app binds `127.0.0.1` exactly as it does with LAN mode off. **Any pairing
+settings and remembered devices you already have are left untouched** — the flag
+does not unpair anything, it just stops consulting the file.
+
+A developer can re-enable the whole feature with one environment variable:
+
+```bash
+VAE_PHONE_PAIRING=1 bash run.sh    # 1 | true | yes, case-insensitive
+```
+
+That variable is the one switch. It feeds `PHONE_PAIRING_ENABLED` in
+`src/video_ai_editor/api/pairing.py` — the single source of truth, read through
+`phone_pairing_enabled()` so the environment is honoured at call time. With it
+set, the behaviour is exactly 0.7.0's, including the LAN switch in the Phone
+panel and everything documented in the 0.6.0 changelog entry.
 
 ## Setup
 
@@ -193,7 +222,7 @@ Open http://localhost:5173.
 uv run pytest                          # the default suite (the benchmark is excluded by marker)
 VAI_BRAIN=recipes uv run pytest -m benchmark tests/benchmark   # the CapCut-parity benchmark (minutes; needs whisper small cached)
 cd frontend && npx tsc -b --force && npx vitest run && npx vite build
-cd mobile && npx tsc --noEmit && npm test
+cd mobile && npx tsc --noEmit && npm test   # the shelved iOS app — kept green, see above
 ```
 
 > Use `tsc -b`, **never** `tsc --noEmit`. `frontend/tsconfig.json` is a solution

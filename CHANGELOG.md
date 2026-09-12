@@ -3,6 +3,51 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.7.1
+
+### Changed
+- **The iPhone companion and local-network pairing are TEMPORARILY DISABLED, so
+  the desktop editor ships standalone.** Nothing was deleted: `api/pairing.py`,
+  `api/pair_routes.py`, `api/auth.py`, the frontend Phone panel, the `mobile/`
+  iOS app and every one of their tests are all still here, unchanged in
+  behaviour. They are gated off behind ONE flag —
+  `PHONE_PAIRING_ENABLED` in `src/video_ai_editor/api/pairing.py`, read through
+  `pairing.phone_pairing_enabled()`, `False` by default and `True` when the
+  environment variable `VAE_PHONE_PAIRING` is set to `1`/`true`/`yes`
+  (case-insensitive). Turning it back on is that one variable and nothing else;
+  with it on, the behaviour is exactly 0.7.0's. The reason to ship this way is
+  that pairing is the one feature whose value depends on a second device and a
+  cooperative local network, and a desktop editor should not ask a first-time
+  user to debug Wi-Fi isolation before it cuts a clip. A future release turns it
+  back on rather than re-implementing it.
+- **`GET /api/version` now reports `phone_pairing: bool`** (the live value of
+  `phone_pairing_enabled()`, honoured per call, not cached at import). That key
+  is the only channel the frontend consults to decide whether the phone
+  affordance exists at all, so one flag moves the backend posture and the UI
+  together. `version` and `build` keep their exact meaning and types.
+- **While the flag is off:** every `/api/pair/*` route answers **404** with the
+  app's standard error envelope (`{"error":{"code":"NOT_FOUND","message":…}}`),
+  saying the phone feature is not available in this build; `lan_enabled()` is
+  `False` whatever `settings.json` says; `set_lan_enabled(True)` refuses instead
+  of writing; `auth_required()` is `False` unless the socket is genuinely bound
+  to a public interface; and `desktop.py` binds loopback regardless of the
+  persisted setting. The LAN posture ladder (a request arriving on a
+  non-loopback interface still arms authentication and the path allowlist) is
+  untouched — a flag that could disarm auth in front of an already-public socket
+  would be a security regression, not a shipping decision.
+- **Your existing pairing settings are left alone.** `settings.json` — its
+  `lan_enabled` value and every remembered device — is never rewritten, cleared
+  or migrated by this change; it is simply not consulted while the feature is
+  off, and it is read as-is again the moment `VAE_PHONE_PAIRING=1` comes back.
+  Turning the flag off is not an unpair.
+
+### Docs
+- README, CLAUDE.md and `docs/PROMPT_EDITOR.md` now say the phone is
+  temporarily unavailable in this build wherever they described pairing or
+  answering a clarification from the phone, and name `VAE_PHONE_PAIRING` /
+  `PHONE_PAIRING_ENABLED` as the one-line way a developer re-enables it;
+  `.env.example` documents the variable and ships it off.
+
 ## 0.7.0
 
 ### Added

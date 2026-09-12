@@ -48,7 +48,33 @@ export interface ToolSchema {
   input_schema: { type: 'object'; properties: Record<string, JsonSchemaProp>; required: string[] }
 }
 
+// GET /api/version — the only endpoint the TopBar hits on boot, and therefore
+// the only channel that tells the frontend which optional affordances this
+// build actually has. `version` and `build` feed the version badge.
+//
+// `phone_pairing` mirrors the backend's `phone_pairing_enabled()`
+// (api/pairing.py, env `VAE_PHONE_PAIRING`). It is FALSE in the shipped
+// desktop build: the iPhone / local-network pairing feature is TEMPORARILY
+// gated off behind that one reversible flag so the editor ships as a normal
+// standalone editor, and a future release turns it back on. Optional in the
+// type because an older backend omits it, and a missing key must read as off
+// — lib/versionInfo.ts owns that normalization.
+export interface AppVersion {
+  version: string
+  build: string
+  phone_pairing?: boolean
+}
+
 // --- Phone pairing (api/pairing.py) ---------------------------------------
+// KEPT ON PURPOSE, unreachable in the shipped build but NOT dead. These types
+// and the pair* client functions below describe /api/pair/*, which the backend
+// answers with 404 while `phone_pairing` is false. Their only consumer is
+// PhonePanel.tsx, and TopBar mounts PhonePanel exactly when /api/version reports
+// `phone_pairing: true` — so with the shipped flag off nothing here is called,
+// and the release that flips `VAE_PHONE_PAIRING` back on brings the panel and
+// these calls back with no frontend change at all. That conditional, not a
+// deletion, is the whole design: do not remove them as "dead code".
+//
 // One paired iPhone, as the Mac has it recorded. `last_seen` is 0 until the
 // device makes its first authenticated request.
 export interface PairDevice {

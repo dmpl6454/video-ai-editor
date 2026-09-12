@@ -537,12 +537,26 @@ def _resolve_bind_host(requested: str) -> tuple[str, bool]:
     for the life of the process even if the user turns the toggle back off. A
     toggle cannot un-bind a socket, so it must not be able to disarm the
     authentication in front of one either.
+
+    While the phone feature is gated off this always answers
+    `("127.0.0.1", False)` — see the WHY at the top of the body.
     """
     # ABSOLUTE import (see the module header): this function runs inside the
     # frozen entry script, and `from .api` here crashed every 0.6.0 .app at
     # launch with "attempted relative import with no known parent package" -
     # invisible under pytest and `-m`, where the package IS the parent.
     from video_ai_editor.api import pairing
+    # TEMPORARY SHIP GATE, and it is a hard floor rather than one input among
+    # several: this release ships the editor as a standalone desktop app with the
+    # iPhone companion switched off (api/pairing.py::PHONE_PAIRING_ENABLED), and
+    # a build with no phone feature must not be ABLE to put itself on the
+    # network — not via a stale `lan_enabled: true` in the user's settings.json,
+    # and not via `VAE_HOST=0.0.0.0` either. There is nothing on the far end of
+    # such a socket to pair with, so every address it exposed would be pure
+    # attack surface. Returns a loopback literal, not `requested`, so a bogus
+    # VAE_HOST cannot come back out of here.
+    if not pairing.phone_pairing_enabled():
+        return "127.0.0.1", False
     if requested not in {"127.0.0.1", "localhost", "::1"}:
         # An operator who set VAE_HOST explicitly gets what they asked for —
         # and if that is not loopback, auth is armed regardless of the toggle.

@@ -17,6 +17,24 @@ from lan_fixtures import CLIENT_HEADERS, lan_home, lan_on, lan_peer, pair_a_devi
 from video_ai_editor.main import app
 
 
+@pytest.fixture(autouse=True)
+def phone_feature_on(monkeypatch):
+    """Arm the phone feature for every test in this module.
+
+    This release ships with the iPhone companion temporarily gated off
+    (`api/pairing.py::PHONE_PAIRING_ENABLED`, reversible by one line). Nothing
+    below was weakened or deleted, because these tests are the feature's
+    specification: they must keep proving that pairing, the four auth layers and
+    the lockout all still work, so that flipping the flag back on is a decision
+    and not a gamble.
+
+    Declared here rather than inherited, so this file states the posture it
+    tests. `tests/test_phone_feature_off.py` owns the other half — what the
+    shipped build does with the flag closed.
+    """
+    monkeypatch.setenv("VAE_PHONE_PAIRING", "1")
+
+
 # --- 1. the guard: nothing changes until LAN mode is on ----------------------
 
 def test_default_posture_requires_no_auth(lan_home):

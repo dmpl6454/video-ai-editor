@@ -5,6 +5,22 @@ and knows nothing about requests; `api/auth.py` enforces what it decides and
 `api/pair_routes.py` exposes it. Keeping the split means the security posture
 is testable without a client.
 
+THE TEMPORARY SHIP GATE (READ THIS FIRST)
+-----------------------------------------
+This release ships the desktop editor as a normal standalone CapCut-style app,
+with the iPhone / local-network pairing feature switched OFF. That is a
+SHIPPING decision, not a deletion: the code, the tests and the `mobile/` app all
+stay in the tree, and a future release turns the feature back on by flipping one
+flag. `PHONE_PAIRING_ENABLED` below is that flag, and `phone_pairing_enabled()`
+is the only thing anything should ever ask.
+
+Everything downstream hangs off it, so the whole feature has exactly one
+switch: `lan_enabled()` answers False while it is off, `set_lan_enabled()`
+refuses (and writes nothing), every `/api/pair/*` route answers 404, and
+`desktop.py` binds loopback whatever `VAE_HOST` and settings.json say.
+`GET /api/version` publishes the flag as `phone_pairing` so the frontend hides
+the affordance from one authoritative source instead of guessing.
+
 WHY A FILE AND NOT AN ENV VAR
 -----------------------------
 The first design read `VAE_LAN` from the environment. A double-clicked `.app`
@@ -255,6 +271,73 @@ def _mutate(fn) -> None:
         save_settings(fn(load_settings()))
 
 
+# --- the temporary ship gate -------------------------------------------------
+
+#: Values that count as "yes" for `VAE_PHONE_PAIRING`. Deliberately the same
+#: vocabulary `_env_lan` accepts minus "on", because the contract the rest of
+#: the codebase (and the tests) was written against names exactly these three.
+_PHONE_PAIRING_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def _phone_pairing_env() -> bool | None:
+    """`VAE_PHONE_PAIRING` as a tri-state: True, False, or "unset".
+
+    "unset" has to be distinguishable from "set to 0", because the module
+    default below is what SHIPS and an explicit `VAE_PHONE_PAIRING=0` must be
+    able to turn the feature off again in a build that shipped with it on —
+    i.e. in the next release, where `PHONE_PAIRING_ENABLED` is the literal
+    `True`. Collapse this to a plain bool and that build loses its off switch.
+    """
+    raw = os.environ.get("VAE_PHONE_PAIRING")
+    if raw is None:
+        return None
+    return raw.strip().lower() in _PHONE_PAIRING_TRUTHY
+
+
+#: THE flag, and the whole decision written down: see "THE TEMPORARY SHIP GATE"
+#: above. To put the iPhone companion back in the product, this is the one-line
+#: change — `PHONE_PAIRING_ENABLED = True`. Nothing else in the tree needs
+#: editing, and nothing about the feature has been removed.
+#:
+#: A LITERAL, not `bool(_phone_pairing_env())`. The env expression was the same
+#: value `phone_pairing_enabled()` already reads live, so the constant recorded
+#: no decision at all: with the variable set the function returned the env value
+#: and ignored it, and with the variable unset it could only ever be False. A
+#: reader opening this file to learn the shipped posture found an environment
+#: lookup where the CHANGELOG, README and CLAUDE.md all promise a `False` — and
+#: the tri-state below justified itself by "a build that shipped with it on",
+#: which that expression made unreachable. Behaviour is identical in every
+#: posture (the env override lives in the function, one line down); what changes
+#: is that the flag now says what it means.
+PHONE_PAIRING_ENABLED: bool = False
+
+
+def phone_pairing_enabled() -> bool:
+    """Does the iPhone companion exist in this build?
+
+    A FUNCTION, and read on every call, because the environment is the live
+    override: the test suite flips `VAE_PHONE_PAIRING` per test, and a caller
+    that cached the module bool at import time would keep answering with
+    whatever the first test happened to set. An explicit env value always wins
+    over the shipped default, in both directions.
+    """
+    env = _phone_pairing_env()
+    if env is not None:
+        return env
+    return PHONE_PAIRING_ENABLED
+
+
+class PhonePairingDisabled(ValueError):
+    """Raised when a caller asks for phone pairing in a build that ships without it.
+
+    A `ValueError` subclass on purpose: `api/hardening.py` already turns a
+    ValueError that escapes a handler into this app's error envelope, so a
+    programmatic caller gets a real, enveloped refusal rather than a 500 — and
+    no new exception type has to be threaded through the route layer for a state
+    the route layer already 404s before it can be reached.
+    """
+
+
 # --- posture -----------------------------------------------------------------
 
 def _env_lan() -> bool:
@@ -270,6 +353,13 @@ def _env_lan() -> bool:
 def lan_enabled() -> bool:
     """Is the phone companion allowed to exist? Read live, never cached in a
     module constant — the desktop's Phone panel flips this at runtime."""
+    # The ship gate outranks every other input, including a settings.json that
+    # a previous build wrote with `lan_enabled: true`. An upgrading user's file
+    # is left exactly as it is (see `set_lan_enabled`) and simply stops meaning
+    # anything until the feature is turned back on, so downgrading and
+    # re-enabling restores their setting untouched.
+    if not phone_pairing_enabled():
+        return False
     if _env_lan():
         return True
     return bool(load_settings().get("lan_enabled", False))
@@ -382,6 +472,13 @@ def auth_required() -> bool:
 
     False in the default desktop posture and false under `TestClient`, which is
     why the 1338 existing tests keep passing untouched.
+
+    The ship gate reaches this through `lan_enabled()`, and only through it —
+    deliberately. With the phone feature off the toggle contributes nothing, so
+    this reduces to `_bound_public`: an operator who ran
+    `uvicorn --host 0.0.0.0` still gets authentication on that socket, because a
+    feature flag must never be able to strip auth off a socket that a stranger
+    can reach. Off means "no phone companion", not "no defences".
     """
     return lan_enabled() or _bound_public
 
@@ -404,7 +501,19 @@ def set_lan_enabled(enabled: bool) -> dict:
     `desktop.py::main`, before uvicorn starts. Turning LAN on cannot move a
     listening socket from 127.0.0.1 to 0.0.0.0, so the panel has to say
     "restart the app" rather than pretend the phone can connect now.
+
+    Refuses outright while the ship gate is closed, in BOTH directions, and the
+    refusal comes before any write. Two reasons, and the second is the one that
+    matters: a "true" this build will never honour would be a lie on disk, and
+    the user's existing settings.json is the only record of which phones they
+    have paired — a build that cannot use it has no business rewriting it. It is
+    left byte-identical, so re-enabling the feature restores their real state.
     """
+    if not phone_pairing_enabled():
+        raise PhonePairingDisabled(
+            "The iPhone companion is not available in this build, so the local "
+            "network setting cannot be changed."
+        )
     _mutate(lambda data: {**data, "lan_enabled": bool(enabled)})
     sync_path_restriction()
     return {

@@ -9,6 +9,7 @@ import { PhonePanel } from './PhonePanel'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
 import { SafeZoneToggle } from './SafeZones'
+import { parseVersionInfo, VERSION_UNKNOWN, type VersionInfo } from '../lib/versionInfo'
 
 interface SessionRow { id: string; name: string }
 
@@ -40,14 +41,17 @@ export function TopBar() {
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [appVersion, setAppVersion] = useState('')
+  // One object from the single GET /api/version below, replaced wholesale (never
+  // mutated): the semantic version, the git short-sha / baked BUILD_ID shown next
+  // to it so a bug report identifies the exact bits (which "v0.3.7" did not), and
+  // `phonePairing` — whether this build has the iPhone affordance at all.
+  // Starts at VERSION_UNKNOWN, whose phonePairing is false, so the phone button
+  // cannot flash in and out while the request is in flight.
+  const [appInfo, setAppInfo] = useState<VersionInfo>(VERSION_UNKNOWN)
   // The phone-pairing panel. Closed by default and mounted only while open:
   // it shows a live credential, and a panel that is merely hidden is one
   // stylesheet mistake away from being a code left on screen.
   const [phoneOpen, setPhoneOpen] = useState(false)
-  // Git short-sha (or a baked BUILD_ID in a packaged app). Shown next to the
-  // version so a bug report identifies the exact bits, which "v0.3.7" did not.
-  const [appBuild, setAppBuild] = useState('')
   // The session-picker dropdown is rendered via a portal to document.body
   // (positioned from this ref's rect) instead of as a normal absolutely-
   // positioned child of .topbar. .topbar clips overflow on both axes to keep
@@ -84,10 +88,11 @@ export function TopBar() {
         if (!r.ok) throw new Error(`/api/version -> HTTP ${r.status}`)
         return r.json()
       })
-      .then((d) => {
-        setAppVersion(d.version || '')
-        setAppBuild(d.build || '')
-      })
+      // This ONE request answers two questions — the version badge and whether
+      // the phone affordance exists (`phone_pairing`). Deliberately not a second
+      // probe against /api/pair/*: that route is a 404 in the shipped build, and
+      // deciding UI from a 404 makes the button appear and then disappear.
+      .then((d) => setAppInfo(parseVersionInfo(d)))
       .catch((e) => console.warn('[TopBar] version fetch failed:', e))
   }, [])
 
@@ -341,21 +346,39 @@ export function TopBar() {
         ))}
         <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
         <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
-        {/* Deliberately in .topbar-scroll rather than .topbar-pinned: the
-            pinned cluster's invariant is that Export is the right-most,
-            always-visible control, and pairing a phone is a once-a-month
-            action that has no business competing with it. PhonePanel portals
-            to document.body, so it adds no layout here. */}
-        <button
-          onClick={() => setPhoneOpen(true)}
-          title="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
-          style={{ fontSize: 11 }}
-        >📱 Phone</button>
-        {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
-        {appVersion && (
-          <span title={appBuild ? `App version ${appVersion} · build ${appBuild}` : 'App version'}
+        {/* The iPhone-pairing affordance, rendered ONLY when this build reports
+            `phone_pairing: true` on /api/version.
+
+            WHY it is gated rather than deleted: the desktop editor ships as a
+            normal standalone editor, so the local-network pairing feature is
+            TEMPORARILY off behind one reversible flag — `VAE_PHONE_PAIRING` /
+            `PHONE_PAIRING_ENABLED` in api/pairing.py. With it off there must be
+            no button, no panel and no phone wording anywhere in the UI; with it
+            on, this is exactly the old behaviour. PhonePanel.tsx and
+            phonePanel.css stay in the tree for the release that flips it back.
+
+            Both the button and the panel live in .topbar-scroll rather than
+            .topbar-pinned: the pinned cluster's invariant is that Export is the
+            right-most, always-visible control, and pairing a phone is a
+            once-a-month action that has no business competing with it. The
+            button is the only element in this fragment that occupies layout —
+            PhonePanel portals to document.body — so when the flag is off the
+            toolbar simply closes up, with no gap and no stray separator (the
+            nearest separators sit further left, before TextTool). */}
+        {appInfo.phonePairing && (
+          <>
+            <button
+              onClick={() => setPhoneOpen(true)}
+              title="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
+              style={{ fontSize: 11 }}
+            >📱 Phone</button>
+            {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
+          </>
+        )}
+        {appInfo.version && (
+          <span title={appInfo.build ? `App version ${appInfo.version} · build ${appInfo.build}` : 'App version'}
                 style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
-            v{appVersion}{appBuild ? ` · ${appBuild}` : ''}
+            v{appInfo.version}{appInfo.build ? ` · ${appInfo.build}` : ''}
           </span>
         )}
       </div>

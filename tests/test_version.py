@@ -28,6 +28,19 @@ def test_version_endpoint_matches_file():
     assert r.json()["version"] == expected
 
 
+def test_version_endpoint_publishes_the_full_payload():
+    """`/api/version` is a contract, not a debug dump — the top bar polls it and
+    the frontend reads `phone_pairing` from it to decide whether the iPhone
+    affordance exists at all (the feature is temporarily gated off in this
+    release: api/pairing.py::PHONE_PAIRING_ENABLED). Pin the keys and their
+    types so a rename cannot silently make the UI guess."""
+    body = TestClient(app).get("/api/version").json()
+    assert set(body) == {"version", "build", "phone_pairing"}
+    assert isinstance(body["version"], str) and body["version"]
+    assert isinstance(body["build"], str)
+    assert isinstance(body["phone_pairing"], bool)
+
+
 def test_health_reports_version():
     expected = VERSION_FILE.read_text().strip()
     c = TestClient(app)

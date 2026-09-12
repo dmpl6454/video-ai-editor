@@ -42,5 +42,17 @@ def test_resolve_bind_host_works_when_run_as_a_top_level_script(monkeypatch):
     bind_host, public = ns["_resolve_bind_host"]("127.0.0.1")
     assert bind_host in {"127.0.0.1", "0.0.0.0"}
     assert isinstance(public, bool)
-    # An explicit non-loopback host is honoured and always counts as public.
+
+    # The shipped posture: the phone companion is temporarily gated off
+    # (api/pairing.py::PHONE_PAIRING_ENABLED), and a build with no phone feature
+    # must not be able to put itself on the network — not even when an operator
+    # names a public address. Asserted through the frozen entry path because this
+    # is the only code path the .app actually runs.
+    monkeypatch.delenv("VAE_PHONE_PAIRING", raising=False)
+    assert ns["_resolve_bind_host"]("10.0.0.5") == ("127.0.0.1", False)
+    assert ns["_resolve_bind_host"]("0.0.0.0") == ("127.0.0.1", False)
+
+    # With the feature back on, an explicit non-loopback host is honoured again
+    # and always counts as public. Same function, same frozen import path.
+    monkeypatch.setenv("VAE_PHONE_PAIRING", "1")
     assert ns["_resolve_bind_host"]("10.0.0.5") == ("10.0.0.5", True)

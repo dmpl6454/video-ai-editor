@@ -42,6 +42,17 @@ cause. Auth must stay outside the rate limiter so that a flood of
 unauthenticated requests is rejected as unauthenticated rather than absorbed
 into a per-path rate bucket.
 
+WHAT THE TEMPORARY PHONE SHIP GATE CHANGES HERE: NOTHING, ON PURPOSE
+--------------------------------------------------------------------
+This release ships with the iPhone companion switched off
+(`api/pairing.py::PHONE_PAIRING_ENABLED` — temporary and reversible). That
+reaches this file through `pairing.auth_required()` alone, which now reduces to
+"is the socket bound off-machine?". So layers 2 and 3 keep running on every
+request in every posture, and an operator who starts `uvicorn --host 0.0.0.0`
+by hand still gets layers 1 and 4 on that socket. A product flag must not be
+able to remove a defence from a socket a stranger can reach — "no phone
+companion" is not "no authentication".
+
 WHY THE EXISTING 1338 TESTS STILL PASS
 --------------------------------------
 Enforcement is gated on `pairing.auth_required()`, which is False unless LAN
@@ -109,6 +120,31 @@ def _reject(*, status: int, code: str, message: str, request_id: str):
     METRICS.counter("vai_auth_rejected_total", {"reason": code})
     return _envelope(status=status, code=code, message=message,
                      request_id=request_id)
+
+
+def _misdirected_message(port: int) -> str:
+    """The body of the 421, worded for the posture the build is actually in.
+
+    Layer 2 (the Host allowlist) is UNCONDITIONAL — it runs in every posture,
+    including the only one that ships — so this sentence is reachable in the
+    plain standalone desktop build. Until now it said "use the IP shown in the
+    desktop app's Phone panel", which in that build points at a panel the UI
+    does not render: the iPhone / local-network companion is TEMPORARILY gated
+    off behind `pairing.PHONE_PAIRING_ENABLED` (see "THE TEMPORARY SHIP GATE" in
+    api/pairing.py), and TopBar only mounts the panel when /api/version reports
+    `phone_pairing: true`. An instruction to consult a UI element that is not
+    there is worse than no instruction, so the advice follows the same flag and
+    is correct in both postures — one line back to today's behaviour.
+
+    The caller keeps this inside `_reject`, so the status, the error code and
+    the /metrics reason (MISDIRECTED_REQUEST) are unchanged either way.
+    """
+    lead = "This server only answers to its own address."
+    if pairing.phone_pairing_enabled():
+        return (f"{lead} If you reached it through a hostname, use the IP shown "
+                "in the desktop app's Phone panel.")
+    return (f"{lead} Open the editor at http://127.0.0.1:{port} — this build "
+            "answers on that address only, not on a hostname.")
 
 
 def _is_loopback(request: Request) -> bool:
@@ -246,9 +282,7 @@ class PairAuthMiddleware(BaseHTTPMiddleware):
         if not host_header_allowed(request.headers.get("host", "")):
             return _reject(
                 status=421, code="MISDIRECTED_REQUEST", request_id=rid,
-                message=("This server only answers to its own address. If "
-                         "you reached it through a hostname, use the IP "
-                         "shown in the desktop app's Phone panel."))
+                message=_misdirected_message(pairing.server_port(server[1] or 0)))
         if request.headers.get("sec-fetch-site", "") == "cross-site":
             return _reject(
                 status=403, code="FORBIDDEN", request_id=rid,

@@ -14,6 +14,11 @@ Split by who is allowed to call them:
       GET  /api/pair/whoami    who am I, and what can this Mac do
       POST /api/pair/media_token  a 60s `?k=` token for native media loaders
 
+TEMPORARILY OFF IN THIS RELEASE: every route below answers 404 unless the phone
+feature is switched back on — one router-level dependency, `_require_phone_feature`,
+reading `pairing.phone_pairing_enabled()`. Nothing here was removed; see "THE
+TEMPORARY SHIP GATE" in api/pairing.py for the flag and why it exists.
+
 `api/auth.py` has already applied the Host allowlist and the `Sec-Fetch-Site`
 check to every path here (unconditionally, LAN mode or not) by the time a
 handler runs, and has already rejected an unauthenticated caller on everything
@@ -21,13 +26,48 @@ except `/claim`. What is left for these handlers is the desktop/phone split.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import pairing
 from .auth import _is_loopback
 
-router = APIRouter(prefix="/api/pair", tags=["pair"])
+
+def _require_phone_feature() -> None:
+    """Refuse every route in this router while the phone feature is off.
+
+    ONE router-level dependency rather than a check inside each of the eight
+    handlers: a guard you have to remember to add is a guard that gets forgotten
+    the next time someone appends a route, and this one is the whole feature's
+    front door. `pairing.phone_pairing_enabled()` is the single source of truth —
+    see "THE TEMPORARY SHIP GATE" in api/pairing.py.
+
+    404, NOT 403. The honest answer is not "you may not" but "there is nothing
+    here": this build has no iPhone companion, so the resource genuinely does not
+    exist, and 403 would tell a caller that pairing is present and merely
+    withheld. The router stays mounted precisely so this is a routed, logged,
+    enveloped 404 from the app's own handler rather than Starlette's bare
+    unrouted-path response.
+
+    One honest caveat, since staying mounted is the deliberate trade: Starlette
+    matches the path and rejects the METHOD before any router dependency runs, so
+    a wrong verb (`DELETE /api/pair/info`) still gets its bare 405 rather than
+    this 404 — the one place the mount is visible. Every verb these routes
+    actually declare answers 404, and main.py keeps the paths out of the
+    published OpenAPI schema while the gate is closed, so nothing a client is
+    told to call contradicts "there is nothing here". A catch-all route to
+    swallow the 405 would mean a second guard to keep in sync with this one, for
+    a signal that leaks no shape — not worth the drift.
+    """
+    if pairing.phone_pairing_enabled():
+        return
+    # A string detail, so hardening's envelope carries the reason in `message`
+    # (a dict detail lands in `details` under a generic "request failed").
+    raise HTTPException(404, "The iPhone companion is not available in this build.")
+
+
+router = APIRouter(prefix="/api/pair", tags=["pair"],
+                   dependencies=[Depends(_require_phone_feature)])
 
 
 class LanRequest(BaseModel):

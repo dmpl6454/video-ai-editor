@@ -36,9 +36,21 @@ def lan_home(monkeypatch, tmp_path):
     Without this, every pairing test would write to the developer's real
     `~/Library/Application Support/Video AI Editor/settings.json` and could
     pair a phantom device with their actual Mac.
+
+    It also ARMS the phone feature, because that is what "a machine where the
+    iPhone companion exists" means. This release ships the editor standalone
+    with the companion temporarily gated off behind one reversible flag
+    (`api/pairing.py::PHONE_PAIRING_ENABLED`); the feature was not removed, and
+    every test built on this fixture exists to keep proving it still works the
+    day the flag flips back. Arming it here rather than in each of the four
+    dependent files keeps the posture one decision in one place — the same
+    reason `reset_pairing_state` lives here. `tests/test_phone_feature_off.py`
+    deliberately does NOT use these fixtures: it tests the shipped, gated-off
+    state and clears both env vars itself.
     """
     from video_ai_editor.api import pairing
 
+    monkeypatch.setenv("VAE_PHONE_PAIRING", "1")
     home = tmp_path / "appdata"
     home.mkdir()
     monkeypatch.setattr(pairing, "settings_path",
