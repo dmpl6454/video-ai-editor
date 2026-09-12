@@ -184,16 +184,32 @@ export interface PromptModels { tier?: string | null; models: PromptModelRow[] }
 // worth more than an exemption nobody remembers.
 const CLIENT_HEADERS: Record<string, string> = { 'X-VAE-Client': '1' }
 
+// Every non-2xx thrown from this module carries ONE shape:
+//   Error("<status> <statusText>: <raw response body>")
+// store.errorMessage() parses the JSON tail out of that string and prefers
+// the hardening envelope's sentence ({error:{message}} / {error:{details:
+// {message}}}) before a legacy FastAPI {detail}. The multipart helpers below
+// each used to carry a private copy of an older parse that read `body.detail`
+// only — but api/hardening.py rewrites EVERY HTTPException into {error:{...}},
+// so there is no `detail` on the wire and every one of them fell back to the
+// bare status line. That is how Open on a rejected .vae toasted
+// "415 Unsupported Media Type" instead of the backend's reason. One helper,
+// one contract; the body rides along RAW (not pre-parsed) so errorMessage()
+// stays the single place that knows the envelope. An empty body yields the
+// bare status line rather than a dangling colon.
+async function apiError(res: Response): Promise<Error> {
+  const head = `${res.status} ${res.statusText}`
+  const text = await res.text().catch(() => '')
+  return new Error(text ? `${head}: ${text}` : head)
+}
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: body ? { ...CLIENT_HEADERS, 'content-type': 'application/json' } : CLIENT_HEADERS,
     body: body ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${text}`)
-  }
+  if (!res.ok) throw await apiError(res)
   return res.json()
 }
 
@@ -221,15 +237,7 @@ export const api = {
     fd.append('duck', String(opts.duck ?? true))
     fd.append('volume_db', String(opts.volumeDb ?? -12))
     const res = await fetch(`${BASE}/sessions/${sid}/audio_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ src: string; duration: number; edl_hash: string }>
   },
 
@@ -241,15 +249,7 @@ export const api = {
     fd.append('transcribe', String(opts.transcribe ?? true))
     if (opts.whisperModel) fd.append('whisper_model', opts.whisperModel)
     const res = await fetch(`${BASE}/sessions/${sid}/upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{
       src: string
       normalized: string
@@ -326,15 +326,8 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     const res = await fetch(`${BASE}/sessions/${sid}/subtitle_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      // Same contract as http(): the raw body rides along in the message and
-      // store.errorMessage() unwraps it. api/hardening.py rewrites every
-      // HTTPException into {error:{message, details}} — there is no `detail`
-      // key on the wire — so the older detail.error/detail parse here found
-      // nothing and the user saw "422 Unprocessable Entity" instead of
-      // "expected a .srt, .vtt or .ass file".
-      throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`)
-    }
+    // Same contract as http() — see apiError for why the raw body rides along.
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ path: string; name: string }>
   },
 
@@ -358,15 +351,7 @@ export const api = {
     fd.append('start', String(start))
     fd.append('gain_db', String(gainDb))
     const res = await fetch(`${BASE}/sessions/${sid}/vo_record`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail?.error) msg = body.detail.error
-        else if (typeof body?.detail === 'string') msg = body.detail
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ clip_id: string; src: string; duration: number; summary: string }>
   },
 
@@ -376,14 +361,7 @@ export const api = {
     fd.append('add_at_playhead', String(addAtPlayhead))
     fd.append('playhead', String(playhead))
     const res = await fetch(`${BASE}/sessions/${sid}/sticker_upload`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ src: string; filename: string; edl_hash?: string }>
   },
 
@@ -391,14 +369,7 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     const res = await fetch(`${BASE}/load_project`, { method: 'POST', body: fd })
-    if (!res.ok) {
-      let msg = `${res.status} ${res.statusText}`
-      try {
-        const body = await res.json()
-        if (body?.detail) msg = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-      } catch {}
-      throw new Error(msg)
-    }
+    if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ id: string }>
   },
 
@@ -468,9 +439,6 @@ async function sse(path: string, body: unknown): Promise<Response> {
     headers: { ...CLIENT_HEADERS, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok || !res.body) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${res.statusText}: ${text}`)
-  }
+  if (!res.ok || !res.body) throw await apiError(res)
   return res
 }

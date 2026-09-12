@@ -10,6 +10,7 @@ import { splitTargets } from './lib/splitTargets'
 import { deletedLabel } from './lib/deletedLabel'
 import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
 import { firePromptRunning, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
+import { nativeSave } from './lib/nativeSave'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -561,8 +562,13 @@ export const useStore = create<State>((set, get) => ({
     try {
       await api.upload(sid, file, true)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      set({ uploadError: `${file.name}: ${msg}` })
+      // errorMessage(), not `e.message`: api.upload throws the api.ts contract
+      // shape, "<status> <statusText>: <raw envelope>". MediaBin renders this
+      // string verbatim, so reading .message pasted the whole
+      // {"error":{"code":…,"request_id":…}} JSON into the panel instead of the
+      // backend's sentence — the same regression Preview.tsx's comment records
+      // fixing once before.
+      set({ uploadError: `${file.name}: ${errorMessage(e)}` })
       set({ uploading: false, uploadProgress: null })
       return
     }
@@ -574,8 +580,7 @@ export const useStore = create<State>((set, get) => ({
     try {
       await get().renderPreview()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      toast.error(`Preview render failed: ${msg}`)
+      toast.error(`Preview render failed: ${errorMessage(e)}`)
     }
   },
 
@@ -586,8 +591,8 @@ export const useStore = create<State>((set, get) => ({
     try {
       await api.audioUpload(sid, file, { addToMusic: true, duck: true })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      set({ uploadError: `${file.name}: ${msg}` })
+      // Same contract as upload() above — errorMessage() unwraps the envelope.
+      set({ uploadError: `${file.name}: ${errorMessage(e)}` })
       set({ uploading: false, uploadProgress: null })
       return
     }
@@ -596,8 +601,7 @@ export const useStore = create<State>((set, get) => ({
     try {
       await get().renderPreview()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      toast.error(`Preview render failed: ${msg}`)
+      toast.error(`Preview render failed: ${errorMessage(e)}`)
     }
   },
 
@@ -729,7 +733,11 @@ export const useStore = create<State>((set, get) => ({
         }
       }
     } catch (e) {
-      set({ exportError: e instanceof Error ? e.message : String(e) })
+      // Rendered verbatim by TopBar's ⚠ chip (and its title), so it goes
+      // through errorMessage() like every other displayed string — api.ts
+      // throws with the raw envelope appended, and a JSON wall in a 1-line
+      // toolbar chip is unreadable.
+      set({ exportError: errorMessage(e) })
     } finally {
       set({ exporting: false, exportStatus: null, exportJobId: null })
     }
@@ -837,12 +845,6 @@ useStore.subscribe((state, prevState) => {
   }
 })
 
-// Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
-// js_api — only the one method this file calls, not the whole class.
-interface PywebviewBridge {
-  pywebview?: { api?: { save_export?: (sid: string, filename: string) => Promise<string | null> } }
-}
-
 // A finished export needs to reach the user's disk. In a real browser an
 // `<a download>` click does that natively. But the packaged app runs inside
 // pywebview's WKWebView/WebView2 (no Chrome/Safari chrome around it), which
@@ -852,25 +854,25 @@ interface PywebviewBridge {
 // native `save_export` bridge (desktop.py's `_Api`), which drives a real save
 // dialog and copies the file server-side. Browser-dev mode has no
 // `window.pywebview`, so it falls through to the anchor path unchanged.
+// Bridge detection and the call itself live in lib/nativeSave so the saved
+// .vae project link (TopBar) uses the exact same path instead of a second
+// copy of the `window.pywebview` probe.
 // Kept module-scoped (not in a component) so it can fire from the store's
 // polling loop.
 async function triggerDownload(url: string, filename: string, sessionId: string | null): Promise<void> {
-  const py = (window as unknown as PywebviewBridge).pywebview
-  if (py?.api?.save_export && sessionId) {
-    try {
-      const saved = await py.api.save_export(sessionId, filename)
-      if (saved) {
-        toast.success(`Saved to ${saved}`)
-        return
-      }
-      // User cancelled the native dialog — nothing was saved, and falling
-      // through to the anchor click below wouldn't help (same WKWebView/
-      // WebView2 limitation), so just stop here without a false success toast.
+  const pending = nativeSave(sessionId, filename)
+  if (pending) {
+    const outcome = await pending
+    if (outcome.kind === 'saved') {
+      toast.success(`Saved to ${outcome.path}`)
       return
-    } catch {
-      // Bridge call itself failed (e.g. older packaged build without the
-      // bridge) — fall through to the anchor path as a best effort.
     }
+    // User cancelled the native dialog — nothing was saved, and falling
+    // through to the anchor click below wouldn't help (same WKWebView/
+    // WebView2 limitation), so just stop here without a false success toast.
+    if (outcome.kind === 'cancelled') return
+    // Bridge call itself failed (e.g. older packaged build without the
+    // bridge) — fall through to the anchor path as a best effort.
   }
   const a = document.createElement('a')
   a.href = url

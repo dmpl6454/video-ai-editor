@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { layoutPlayhead } from '../lib/timelineLayout'
-import { useStore } from '../store'
+import { useStore, errorMessage } from '../store'
 import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
 import { api } from '../api'
 import { codepointSeq } from '../lib/emojiArt'
@@ -261,7 +261,10 @@ export function StickerPanel() {
                 await api.stickerUpload(sid, f, true, playhead)
                 await refresh()
               } catch (err) {
-                setUploadErr(err instanceof Error ? err.message : String(err))
+                // Rendered verbatim in the panel, so unwrap the envelope:
+                // api.stickerUpload throws "<status> <statusText>: <raw body>"
+                // and a 413/415 otherwise showed its JSON in a 10px <div>.
+                setUploadErr(errorMessage(err))
               } finally {
                 if (fileRef.current) fileRef.current.value = ''
               }

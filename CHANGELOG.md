@@ -3,6 +3,26 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.7.2
+
+### Fixed
+- **Opening a saved project could fail with "415 Unsupported Media Type".**
+  `POST /api/load_project` judged the upload by its file NAME — a case-sensitive
+  `.vae` / `.zip` suffix check — and never looked at the bytes. So the same valid
+  project was refused the moment its name did not match: renamed in uppercase
+  (`P.VAE`), saved without an extension, or — the case the packaged app hit on
+  its own — saved by WebKit as `<id>.vae.txt`, because the `.vae` download was
+  served as `text/plain` (Python's `mimetypes` has no entry for `.vae`) and
+  macOS appends `.txt` to an unknown-extension text attachment. Projects are
+  now recognised by CONTENT: a zip carrying `manifest.json` is a project
+  whatever it is called. `.vae` downloads are served as `application/zip`, the
+  packaged app saves projects through the native Save-As dialog exactly as
+  exports already do (the WKWebView ignores the anchor's `download` attribute
+  and navigates instead), and the error toast shows the server's reason from
+  the standard error envelope (`error.message`) instead of the bare status
+  line — the frontend had been reading `detail`, which the envelope never
+  carries.
+
 ## 0.7.1
 
 ### Changed

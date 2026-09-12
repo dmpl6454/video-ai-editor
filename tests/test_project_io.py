@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from video_ai_editor.edl import EDLStore
 from video_ai_editor.edl.schema import EDL, Track, Clip, Canvas
 from video_ai_editor.agent.dispatch import dispatch
@@ -224,3 +226,116 @@ def test_redo_stack_cleared_after_new_op(tmp_path: Path):
     # redo should NOT bring back the 1.5 — we did a new op after undo.
     assert store.edl.hash() == h_after_new
     assert h_after_new != h_after_first
+
+
+# --- is_project_archive: the content probe behind POST /api/load_project -----
+
+def _zip_bytes_to(dst: Path, members: dict[str, bytes]) -> Path:
+    import zipfile
+    with zipfile.ZipFile(dst, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return dst
+
+
+def test_probe_accepts_a_saved_project_and_ignores_its_name(tmp_path, monkeypatch):
+    """The probe is what replaced the filename gate on /api/load_project, so
+    it must say yes to a real save_project archive under ANY name — including
+    the `<sid>.vae.txt` macOS produced for the shipped 0.7.1 app."""
+    from video_ai_editor import storage as _storage, storage_project as _sp
+    from video_ai_editor.storage_project import is_project_archive
+    monkeypatch.setattr(_storage, "WORKDIR", tmp_path / "wd")
+    monkeypatch.setattr(_sp, "session_dir", lambda sid: tmp_path / "wd" / sid)
+    _seed(tmp_path / "wd" / "session1")
+    saved = save_project("session1", tmp_path / "p.vae")
+    for name in ("P.VAE", "p", "blob", "session1.vae.txt", "p.mp4"):
+        renamed = tmp_path / name
+        renamed.write_bytes(saved.read_bytes())
+        assert is_project_archive(renamed), name
+
+
+def test_probe_refuses_what_is_not_a_zip(tmp_path):
+    from video_ai_editor.storage_project import is_project_archive
+    assert not is_project_archive(tmp_path / "missing.vae")
+    (tmp_path / "text.vae").write_text("manifest.json\n")
+    assert not is_project_archive(tmp_path / "text.vae")
+    # Zip magic on the front of garbage: the signature alone is not enough.
+    (tmp_path / "fake.vae").write_bytes(b"PK\x03\x04" + b"\xff" * 64)
+    assert not is_project_archive(tmp_path / "fake.vae")
+
+
+def test_probe_accepts_the_empty_archive_marker_only_as_far_as_zipfile_does(tmp_path):
+    """`PK\\x05\\x06` alone is a real (empty) zip: zipfile opens it, it has no
+    manifest, so it is a zip but not a project. A truncated marker that
+    zipfile cannot open is refused without raising."""
+    import zipfile
+    from video_ai_editor.storage_project import is_project_archive
+    empty = tmp_path / "empty.vae"
+    zipfile.ZipFile(empty, "w").close()
+    assert empty.read_bytes().startswith(b"PK\x05\x06")
+    assert not is_project_archive(empty)
+    (tmp_path / "torn.vae").write_bytes(b"PK\x05\x06\x00\x00")
+    assert not is_project_archive(tmp_path / "torn.vae")
+
+
+def test_probe_only_counts_a_file_member_at_the_archive_root(tmp_path):
+    """Proof is a FILE that `extractall` places at `<unpack>/manifest.json`.
+
+    Judged on the literal member name. The first version resolved the name
+    against a fake base so it could reuse `_inside`, and that made the probe
+    MORE LENIENT than the loader in three ways — `Path.resolve()` normalises
+    `..` where `extractall` drops it, and a directory entry resolves to the
+    same path a file does. Each of the last three below then passed the probe
+    and failed the loader, which is the one thing the probe must never do.
+    """
+    from video_ai_editor.storage_project import is_project_archive
+    assert is_project_archive(_zip_bytes_to(tmp_path / "root.vae", {"manifest.json": b"{}"}))
+    # `./manifest.json`: some zip writers emit it, extractall drops the `.`.
+    assert is_project_archive(_zip_bytes_to(tmp_path / "dot.vae", {"./manifest.json": b"{}"}))
+    for i, member in enumerate(("backup/manifest.json",       # nested
+                                "../manifest.json",           # escapes
+                                "/manifest.json",             # absolute
+                                "manifest.json/",             # a directory
+                                "../vae-probe/manifest.json",   # out and back
+                                "vae-probe/../manifest.json")):  # in and out
+        p = _zip_bytes_to(tmp_path / f"m{i}.vae", {member: b"{}", "keep.txt": b"x"})
+        assert not is_project_archive(p), member
+    assert not is_project_archive(_zip_bytes_to(tmp_path / "none.vae", {"edl.json": b"{}"}))
+
+
+def test_a_refused_import_leaves_no_session_behind(tmp_path, monkeypatch):
+    """`load_project` validates in a private directory, THEN creates the session.
+
+    It used to create the session first and unpack into it, so every archive
+    that failed validation left an `s_*` directory in WORKDIR — and `GET
+    /api/sessions` globs `s_*`, so each refusal added a ghost "empty project"
+    to the picker. Four broken files, four ghosts, no way to tell them from
+    real work that lost its media.
+    """
+    import zipfile
+    from video_ai_editor import storage as _storage, storage_project as _sp
+    wd = tmp_path / "wd"
+    monkeypatch.setattr(_storage, "WORKDIR", wd)
+    monkeypatch.setattr(_sp, "session_dir", lambda sid: wd / sid)
+    wd.mkdir()
+
+    broken = {
+        "no_manifest.vae": {"edl.json": b"{}"},
+        "bad_manifest.vae": {"manifest.json": b"{ not json"},
+        "manifest_is_a_list.vae": {"manifest.json": b"[]", "edl.json": b"{}"},
+        "dir_manifest.vae": {"manifest.json/": b"{}", "edl.json": b"{}"},
+        "bad_edl.vae": {"manifest.json": b'{"media": []}', "edl.json": b"nope{"},
+        "no_edl.vae": {"manifest.json": b'{"media": []}'},
+    }
+    for name, members in broken.items():
+        p = tmp_path / name
+        with zipfile.ZipFile(p, "w") as zf:
+            for member, data in members.items():
+                zf.writestr(member, data)
+        with pytest.raises(ValueError) as exc:
+            load_project(p)
+        # The message is user-facing (the endpoint wraps it in a 422 body), so
+        # it must not carry the app's own absolute paths.
+        assert str(wd) not in str(exc.value), name
+        assert sorted(q.name for q in wd.glob("s_*")) == [], name
+        assert list(wd.glob("_import_unpack_*")) == [], name

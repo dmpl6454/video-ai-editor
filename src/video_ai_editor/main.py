@@ -1393,26 +1393,60 @@ def save_project_endpoint(sid: str):
             "size": out.stat().st_size}
 
 
+_NOT_A_PROJECT = ("That file is not a Video AI Editor project. Choose the .vae "
+                  "file you saved with Save (a project file is a zip that "
+                  "contains manifest.json).")
+
+
+def _not_a_project_message(sent_name: str) -> str:
+    """The 415 text. Names the file the user actually sent when its name is
+    not one we would have expected, so a pick like `<sid>.vae.txt` (macOS
+    appended `.txt` to a text/plain download — see serve_session_file) or a
+    stray `.mp4` explains itself instead of reading as a random refusal."""
+    if sent_name.lower().endswith((".vae", ".zip")):
+        return _NOT_A_PROJECT
+    return f"{_NOT_A_PROJECT} The file you chose was named “{sent_name}”."
+
+
+def _open_project_archive(tmp: Path, sent_name: str) -> str:
+    """Content probe, then load. The caller owns `tmp` and unlinks it."""
+    from .storage_project import is_project_archive, load_project
+    if not is_project_archive(tmp):
+        raise HTTPException(415, _not_a_project_message(sent_name))
+    try:
+        return load_project(tmp)
+    except Exception as e:
+        # A genuine project archive that still failed to import — a different
+        # failure from "not a project at all", and it keeps its own status.
+        raise HTTPException(422, f"failed to load project: {e}")
+
+
 @app.post("/api/load_project")
 async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
-    """Upload a .vae and open it as a new session."""
-    name = Path(file.filename or "project.vae").name
-    if not name.endswith(".vae") and not name.endswith(".zip"):
-        raise HTTPException(415, "expected a .vae project file")
+    """Upload a .vae and open it as a new session.
+
+    The upload is judged by its CONTENT (zip magic + a root manifest.json —
+    storage_project.is_project_archive), never by its filename. The name gate
+    this replaced (`endswith(".vae") or endswith(".zip")`) refused the app's
+    own saved projects once macOS had renamed the download `<sid>.vae.txt`,
+    and refused `P.VAE` and an extensionless pick for no reason the user could
+    see. The filename is now only a hint for the temp file's name — sanitised
+    to its last component, and an empty/missing one still works.
+    """
+    name = Path(file.filename or "").name or "project.vae"
     tmp = WORKDIR / f"_import_{name}"
     # The worst of the three unguarded ingresses: this one writes to WORKDIR,
     # the app's own working volume, rather than into a session that a user can
     # delete. A chunked body with no Content-Length used to walk straight past
-    # the middleware and fill it.
+    # the middleware and fill it. Both guards run BEFORE any content check —
+    # the probe needs the bytes on disk, and the bytes must be budgeted first.
     WORKDIR.mkdir(parents=True, exist_ok=True)
     _assert_room_for(request, WORKDIR)
     await _stream_upload_to(file, tmp)
     try:
-        from .storage_project import load_project
-        sid = load_project(tmp)
-    except Exception as e:
-        raise HTTPException(422, f"failed to load project: {e}")
+        sid = _open_project_archive(tmp, name)
     finally:
+        # Every exit — 200, 415, 422 — leaves no `_import_*` behind in WORKDIR.
         tmp.unlink(missing_ok=True)
     return {"id": sid}
 
@@ -1606,8 +1640,23 @@ def serve_session_file(sid: str, kind: str, name: str):
     # had no Escape/back affordance and trapped the user). uploads/previews stay
     # inline so the frontend <video> can still stream them.
     if kind == "exports":
-        return FileResponse(candidate, filename=candidate.name)
+        return FileResponse(candidate, filename=candidate.name,
+                            media_type=_export_media_type(candidate))
     return FileResponse(candidate)
+
+
+def _export_media_type(path: Path) -> str | None:
+    """`.vae` is a zip, and must be SERVED as one.
+
+    `mimetypes` does not know the extension, so FileResponse fell back to
+    `text/plain; charset=utf-8` for a saved project. A text/plain attachment
+    with an unknown extension is exactly the case in which WebKit/macOS saves
+    the download with `.txt` appended — the user got `<sid>.vae.txt`, and the
+    old filename gate on /api/load_project then refused their own project.
+    The Content-Disposition filename stays the real `.vae` name. None means
+    "let FileResponse guess as before" — every other export type is unchanged.
+    """
+    return "application/zip" if path.suffix.lower() == ".vae" else None
 
 
 # Mount the built frontend at the root, so the desktop wrap can open

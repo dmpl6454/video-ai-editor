@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../store'
+import { useStore, errorMessage } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
 
@@ -186,7 +186,12 @@ export function VoRecorder() {
           }
           toast.success('Voiceover recorded ✓')
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e))
+          // api.voRecord throws api.ts's contract shape, "<status>
+          // <statusText>: <raw envelope>", and this string is rendered
+          // verbatim in the panel below. errorMessage() is the only thing
+          // that knows how to unwrap {error:{message}} — without it a 422
+          // showed the whole JSON envelope, request_id and all.
+          setError(errorMessage(e))
         } finally {
           setSubmitting(false)
         }
@@ -299,7 +304,8 @@ export function VoRecorder() {
       // toast is the "yes, that worked" signal either way.
       toast.success('Voiceover imported ✓')
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      // Same reason as the record path above — this text is displayed as-is.
+      setError(errorMessage(e))
     } finally {
       setSubmitting(false)
     }

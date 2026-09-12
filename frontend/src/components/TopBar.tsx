@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore, errorMessage } from '../store'
 import { api } from '../api'
@@ -10,6 +10,8 @@ import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
 import { SafeZoneToggle } from './SafeZones'
 import { parseVersionInfo, VERSION_UNKNOWN, type VersionInfo } from '../lib/versionInfo'
+import { claimClickForNativeSave, projectFilename } from '../lib/nativeSave'
+import { isSavedProjectStale, savedProject, visibleSavedProject, type SavedProject } from '../lib/savedProject'
 
 interface SessionRow { id: string; name: string }
 
@@ -31,13 +33,17 @@ export function TopBar() {
   const sid = useStore((s) => s.sessionId)
   const refresh = useStore((s) => s.refresh)
   const [saving, setSaving] = useState(false)
-  const [savedUrl, setSavedUrl] = useState<string | null>(null)
-  const [savedGen, setSavedGen] = useState(0)
+  // url + sid + generation as ONE record — see lib/savedProject for why the
+  // session id belongs in it. `saved` is only shown while it belongs to the
+  // session on screen, so the link can never point at one project while the
+  // native bridge is handed another's id.
+  const [saved, setSaved] = useState<SavedProject | null>(null)
+  const savedHere = visibleSavedProject(saved, sid)
   // A download link is "outdated" once history advances past the generation it
   // was made at. We keep the link (you can still grab the last render) but mark
   // it so nobody ships a stale file by mistake.
   const exportStale = !!exportUrl && opsLen > exportGen
-  const savedStale = !!savedUrl && opsLen > savedGen
+  const savedStale = !!savedHere && isSavedProjectStale(savedHere, opsLen)
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -110,11 +116,10 @@ export function TopBar() {
   const onSaveProject = async () => {
     if (!sid) return
     setSaving(true)
-    setSavedUrl(null)
+    setSaved(null)
     try {
       const r = await api.saveProject(sid)
-      setSavedUrl(r.url)
-      setSavedGen(useStore.getState().ops.length)
+      setSaved(savedProject(sid, r.url, useStore.getState().ops.length))
     } catch (e) {
       // Save used to fail in TOTAL silence: no toast, no console line, and the
       // "Saved" link simply never appeared — indistinguishable from a slow save.
@@ -123,6 +128,31 @@ export function TopBar() {
     } finally {
       setSaving(false)
     }
+  }
+
+  // The "Saved" link is an `<a download>` for the browser, but the packaged
+  // WKWebView ignores the `download` attribute and navigates instead (see the
+  // export button's comment below — the same trap that moved exports onto the
+  // native bridge). Navigating to a .vae, which the backend serves as
+  // text/plain;attachment, either did nothing or saved "<sid>.vae.txt" — the
+  // file Open then refused with 415. The bridge copies the very file the link
+  // points at: save_project writes exports/<sid>.vae, and save_export reads
+  // exports/<filename>. In a browser the click is left alone.
+  //
+  // `link.sid`, never the live `sid`: the bridge must be asked for the session
+  // the file was actually written from. Handing it the current session id was
+  // how a link left over from another project turned into a silent no-op (the
+  // file does not exist there, and a missing source reads back as "cancelled",
+  // which this handler deliberately does not toast).
+  const onSavedLinkClick = (link: SavedProject) => (e: ReactMouseEvent<HTMLAnchorElement>) => {
+    const pending = claimClickForNativeSave(e, link.sid, projectFilename(link.sid))
+    if (!pending) return
+    void pending.then((outcome) => {
+      if (outcome.kind === 'saved') toast.success(`Saved to ${outcome.path}`)
+      // Cancelled: nothing was written, so no toast — a success would lie and
+      // an error would nag about a choice the user just made.
+      else if (outcome.kind === 'failed') toast.error(`Couldn't save the project file: ${errorMessage(outcome.error)}`)
+    })
   }
 
   const onLoadProject = async (file: File) => {
@@ -402,8 +432,8 @@ export function TopBar() {
         </button>
         <input ref={importRef} type="file" accept=".vae,.zip" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
-        {savedUrl && (
-          <a href={savedUrl} download
+        {savedHere && (
+          <a href={savedHere.url} download onClick={onSavedLinkClick(savedHere)}
             className={savedStale ? 'stale-dl' : ''}
             title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
             style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
