@@ -411,6 +411,17 @@ def _mcp_resolve_store(session_id: str | None):
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
+    # MCP-ANY-CONTENT-TYPE (0.7.3): a cross-origin page can POST text/plain or
+    # a form WITHOUT a CORS preflight; application/json forces one, and the
+    # CORS policy refuses it. So a non-JSON body is refused before any tool runs.
+    ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if ctype != "application/json":
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None,
+             "error": {"code": -32600,
+                       "message": "Content-Type must be application/json"}},
+            status_code=415,
+        )
     try:
         body = await request.json()
     except Exception:
@@ -1597,7 +1608,42 @@ def serve_sticker_image(sid: str, clip_id: str):
         # The artwork is genuinely gone (emoji cache cleared, end-card moved).
         # 404 so the client falls back to its glyph/outline rather than hanging.
         raise HTTPException(404, "sticker image missing")
-    return FileResponse(path)
+    # SEC-REBIND-127-PREFIX defence in depth (0.7.3): the EDL src may be ANY
+    # absolute path (add_sticker's allowlist is a no-op in the default
+    # posture), so a caller that can dispatch could otherwise read any file on
+    # the Mac through this route. Outside the session's own directory, serve
+    # only bytes that are actually a raster image (inside it, sticker_upload's
+    # own copies of any format stay servable, as /files/uploads already allows).
+    if path.resolve().is_relative_to(store.dir.resolve()):
+        return FileResponse(path)
+    media_type = _sticker_image_type(path)
+    if media_type is None:
+        raise HTTPException(404, "sticker image missing")
+    return FileResponse(path, media_type=media_type)
+
+
+_STICKER_MAGIC: tuple[tuple[bytes, int, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", 0, "image/png"),
+    (b"\xff\xd8\xff", 0, "image/jpeg"),
+    (b"GIF87a", 0, "image/gif"),
+    (b"GIF89a", 0, "image/gif"),
+    (b"WEBP", 8, "image/webp"),
+)
+
+
+def _sticker_image_type(path: Path) -> str | None:
+    """The image media type of `path` from its magic bytes, or None."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    for magic, offset, media_type in _STICKER_MAGIC:
+        if head[offset:offset + len(magic)] == magic:
+            if media_type == "image/webp" and not head.startswith(b"RIFF"):
+                continue
+            return media_type
+    return None
 
 
 @app.get("/api/sessions/{sid}/files/{kind}/{name:path}")

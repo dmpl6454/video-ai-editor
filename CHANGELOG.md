@@ -3,6 +3,30 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.7.3
+
+### Security
+- **A web page could read local files through the running editor (DNS rebinding).**
+  The local server's Host allowlist accepted any name that merely *started*
+  with `127.` — `127.attacker.example`, `127.0.0.1.nip.io` — which are DNS
+  names an attacker controls. After rebinding such a name to 127.0.0.1, a
+  malicious page became same-origin with the editor and could create a
+  session, point a sticker at any file on the Mac, and download its bytes
+  through `/api/sessions/{sid}/sticker/{id}`. Chrome's local-network prompt
+  blocks this by default; Safari and Firefox did not. The Host check now
+  accepts only real IP literals plus `localhost`, so a rebinding request gets
+  **421**. As defence in depth, the sticker route now serves a file outside
+  the project folder only if its bytes are actually an image (PNG, JPEG, GIF,
+  WebP).
+- **`/mcp` executed tool calls sent as `text/plain` or a form.** Those content
+  types need no CORS preflight, so any cross-origin page could trigger tools
+  (it could not read the answer). `/mcp` now requires
+  `Content-Type: application/json`, which forces the preflight the CORS policy
+  refuses, and answers anything else with **415** before a tool runs.
+
+Upgrade recommended for everyone running 0.7.2 or earlier. No settings,
+projects or media change.
+
 ## 0.7.2
 
 ### Fixed
