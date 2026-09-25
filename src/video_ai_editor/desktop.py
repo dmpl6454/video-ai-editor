@@ -24,6 +24,7 @@ from pathlib import Path
 # the absolute name resolves in the EXE, under `-m`, and under pytest alike.
 from video_ai_editor import platformutil as _pu
 from video_ai_editor.storage import is_valid_session_id, session_dir, session_path
+from video_ai_editor.api.download_names import download_leaf
 
 
 def _npm_cmd() -> str:
@@ -457,10 +458,16 @@ class _Api:
 
         return {"ok": True, **result}
 
-    def save_export(self, session_id: str, filename: str) -> str | None:
+    def save_export(self, session_id: str, filename: str,
+                    suggested_name: str | None = None) -> str | None:
         """Copy an exported file to a user-chosen location via the native
         save dialog. Returns the chosen destination path, or None if the
-        session/file is invalid or the user cancelled the dialog."""
+        session/file is invalid or the user cancelled the dialog.
+
+        `suggested_name` is the name the Export dialog's File name field asked
+        for (QA-100): it pre-fills the Save-As box instead of the render's
+        internal `export_<hash>.mp4`. Only its leaf is used, and only when it
+        keeps the source's extension; the SOURCE is always `filename`."""
         if not is_valid_session_id(session_id):
             return None
         # Reject any filename that isn't a bare leaf (e.g. "../../etc/passwd")
@@ -475,7 +482,7 @@ class _Api:
                          # importable (e.g. under pytest) without a GUI toolkit
         win = webview.windows[0]
         dest = win.create_file_dialog(
-            webview.FileDialog.SAVE, save_filename=filename,
+            webview.FileDialog.SAVE, save_filename=download_leaf(suggested_name, filename),
         )
         if not dest:
             return None

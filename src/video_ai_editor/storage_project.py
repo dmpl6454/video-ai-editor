@@ -101,7 +101,11 @@ def _ingest_json_for(src: str) -> Path | None:
     return None
 
 
-def save_project(session_id: str, dst: Path) -> Path:
+def save_project(session_id: str, dst: Path, report: dict | None = None) -> Path:
+    """Write the session to `dst` (.vae). `report`, when given, receives
+    `missing`: the media the timeline uses that is not on disk and therefore
+    could NOT be bundled (QA-096) — the caller must tell the user, because the
+    saved project is not self-contained without it."""
     sd = session_dir(session_id)
     store = EDLStore(sd)
     edl = store.edl
@@ -133,8 +137,13 @@ def save_project(session_id: str, dst: Path) -> Path:
     library = [it["src"] for it in list_media(sd, edl)]
     media_paths = sorted(set().union(_media_srcs(edl), library,
                                      *(_media_srcs(h) for h in _history_edls(sd))))
+    from .media_offline import missing_media
+    missing = missing_media(sd, edl)
+    if report is not None:
+        report["missing"] = missing
     manifest = {"media": [], "session_id": session_id,
-                "load_state": store.load_state}
+                "load_state": store.load_state,
+                "missing": [{"src": m["src"], "name": m["name"]} for m in missing]}
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
         # edl.json comes from the LIVE store, not the file on disk: after a
         # snapshot recovery the on-disk copy is still the unreadable one, and

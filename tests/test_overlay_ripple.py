@@ -173,16 +173,17 @@ def test_trim_clip_from_the_back_shifts_only_overlays_after_the_trimmed_tail():
     assert abs(s.end - 13.0) < 1e-6
 
 
-def test_trim_clip_from_the_back_collapses_overlay_inside_the_removed_tail():
-    # Sticker at [13,14) sits INSIDE the removed [11,15) tail — it has no
-    # surviving footage under it, so it collapses to the cut point (11),
-    # matching cut_range's "inside the cut" behavior.
+def test_trim_clip_from_the_back_drops_overlay_inside_the_removed_tail():
+    # Sticker at [13,14) sits INSIDE the removed tail, and that tail is the
+    # END of the main lane (the magnetic lane packs the clip to [0,6)). It
+    # used to collapse onto a 0.1 s stub at the cut point, holding the
+    # timeline 0.1 s past the picture over black (QA-021-TAIL): with no
+    # footage after the cut there is nothing for the stub to belong to.
     store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=13.0, sticker_end=14.0,
                                           clip_start=5.0)
     dispatch(store, "trim_clip", {"clip_id": "c1", "out": 6.0})
-    s = _sticker(store)
-    assert abs(s.start - 11.0) < 1e-6
-    assert s.end > s.start
+    assert store.edl.get_track("stickers").clips == []
+    assert abs(store.edl.duration - 6.0) < 1e-6
 
 
 def test_trim_clip_from_the_back_leaves_overlays_before_the_trim_unchanged():
@@ -296,18 +297,18 @@ def test_ripple_delete_collapses_MULTIPLE_orphaned_captions_to_ONE_not_a_stack()
     assert "post" in texts
     assert abs(texts["post"].start - 5.0) < 1e-6   # 25 - 20
 
-    # Exactly ONE of the four orphaned cues (cap1..cap4) survives — the bug was
-    # that all four did, each an identical [0, 0.1) stub.
+    # NONE of the four orphaned cues (cap1..cap4) survives — the bug was that
+    # all four did, each an identical [0, 0.1) stub. (Wave-B review: the one
+    # stub the dedup used to keep overlapped the next cue, which shifts onto
+    # the same instant — and it captioned words that were just removed. On a
+    # captions track a wholly-cut cue goes; the one-stub rule is for a lone
+    # user-placed title/sticker, see test_ripple_delete_keeps_the_first_…)
     orphaned_ids = {"cap1", "cap2", "cap3", "cap4"}
     survivors = orphaned_ids & texts.keys()
-    assert len(survivors) == 1, (
-        f"expected exactly 1 surviving orphaned caption, got {len(survivors)}: {survivors}")
-    survivor = texts[next(iter(survivors))]
-    assert abs(survivor.start - 0.0) < 1e-6
-    assert survivor.end > survivor.start
+    assert not survivors, f"a cue of removed words survived: {survivors}"
 
-    # Total count: pre + ONE survivor + post = 3, not the original 6.
-    assert len(caps) == 3, f"expected 3 captions after ripple, got {len(caps)}: {sorted(texts)}"
+    # Total count: pre + post = 2, not the original 6.
+    assert len(caps) == 2, f"expected 2 captions after ripple, got {len(caps)}: {sorted(texts)}"
 
 
 def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
@@ -329,11 +330,13 @@ def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
                 Clip(src=src, in_=0, out=10, start=0, id="c1"),
                 Clip(src=src, in_=0, out=5, start=10, id="c2"),
             ]),
-            Track(id="captions", type="captions", z=13, clips=[
+            # A TEXT track (user titles): the one-stub rule is theirs. A
+            # captions track drops wholly-cut cues instead (wave-B review).
+            Track(id="text", type="text", z=12, clips=[
                 TextClip(id="first", text="first", start=1.0, end=2.0,
-                          transform=Transform(x=100, y=100), role="caption"),
+                          transform=Transform(x=100, y=100)),
                 TextClip(id="second", text="second", start=5.0, end=6.0,
-                          transform=Transform(x=100, y=100), role="caption"),
+                          transform=Transform(x=100, y=100)),
             ]),
         ],
     )
@@ -341,7 +344,7 @@ def test_ripple_delete_keeps_the_first_orphaned_clip_specifically():
     (Path(tmp) / "edl.json").write_text(edl.model_dump_json())
     store = EDLStore(Path(tmp))
     dispatch(store, "ripple_delete", {"clip_id": "c1"})
-    caps = store.edl.get_track("captions").clips
+    caps = store.edl.get_track("text").clips
     assert [c.id for c in caps] == ["first"]
 
 
@@ -392,6 +395,10 @@ def test_dedup_is_per_track_not_global():
                 Sticker(id="s1", src=src, start=2.0, end=3.0, transform=Transform(x=100, y=100)),
                 Sticker(id="s2", src=src, start=6.0, end=7.0, transform=Transform(x=100, y=100)),
             ]),
+            Track(id="text", type="text", z=12, clips=[
+                TextClip(id="t1", text="a", start=1.0, end=2.0, transform=Transform(x=100, y=100)),
+                TextClip(id="t2", text="b", start=5.0, end=6.0, transform=Transform(x=100, y=100)),
+            ]),
             Track(id="captions", type="captions", z=13, clips=[
                 TextClip(id="cap1", text="a", start=1.0, end=2.0,
                           transform=Transform(x=100, y=100), role="caption"),
@@ -405,7 +412,9 @@ def test_dedup_is_per_track_not_global():
     store = EDLStore(Path(tmp))
     dispatch(store, "ripple_delete", {"clip_id": "c1"})
     assert len(store.edl.get_track("stickers").clips) == 1
-    assert len(store.edl.get_track("captions").clips) == 1
+    assert len(store.edl.get_track("text").clips) == 1
+    # Captions drop wholly-cut cues rather than keep a stub (wave-B review).
+    assert len(store.edl.get_track("captions").clips) == 0
 
 
 # ---------- v1 fully empty: overlays are CLEARED, not collapsed to a stub ---

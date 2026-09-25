@@ -53,6 +53,7 @@ from .. import path_args as _path_args
 from ..tools import input_schema_for
 from .facts import TimelineFacts
 from .langs import needs_translation
+from . import live as _live
 from .runlog import RunBus, RunLog, RunRecord, new_run_id
 from .schema import CLIP_SENTINELS, PLAN_DENY, SEAM_SENTINEL, Plan, Step
 from .service import SNAPSHOT_DIR, TRANSCRIPT_WAIT_S
@@ -384,9 +385,9 @@ def resolve_clip_ref(edl: EDL, ref: Any, facts: TimelineFacts) -> list[str]:
     return ids
 
 
-#: `add_transition(at=$v1_seams)` fans out over at most this many seams — the
-#: same cap the `transitions` recipe applies to per-seam steps.
-MAX_SEAM_FANOUT = 12
+#: `add_transition(at=$v1_seams)` fans out over at most this many seams
+#: (live.py owns the rule; QA-070 raised it from a silent 12).
+MAX_SEAM_FANOUT = _live.MAX_SEAM_FANOUT
 _SEAM_TOL_S = 0.05
 
 
@@ -404,12 +405,15 @@ def resolve_step_args(edl: EDL, args: dict[str, Any], facts: TimelineFacts) -> l
     else exactly one. `clip_ids` sentinels become the resolved list in place."""
     out = dict(args)
     if out.get("at") == SEAM_SENTINEL:
-        seams = live_v1_seams(edl)
-        if not seams:
+        fan = _live.seam_fanout(edl)
+        if not fan.seams:
+            if fan.total:
+                raise StepRefused(f"{SEAM_SENTINEL}: every seam sits next to a clip shorter than "
+                                  f"{_live.MIN_TRANSITION_NEIGHBOUR_S:g} s — no transition fits")
             raise StepRefused(f"{SEAM_SENTINEL} names no seam — v1 has no two touching clips")
         # `add_transition` never moves a clip (the overlap is accounted for by
         # `EDL.transition_overlap`), so the seam list stays valid across the fan-out.
-        return [{**out, "at": at} for at in seams[:MAX_SEAM_FANOUT]]
+        return [{**out, "at": at} for at in fan.seams]
     if "clip_ids" in out and isinstance(out["clip_ids"], (list, tuple, str)):
         refs = [out["clip_ids"]] if isinstance(out["clip_ids"], str) else list(out["clip_ids"])
         ids: list[str] = []
@@ -488,6 +492,10 @@ class StepOutcome:
     error: str | None = None
     effect: str | None = None
     latency_ms: int = 0
+    #: What the step did differently from the literal plan, resolved at run
+    #: time (a capped fan-out, a sentence-boundary cut, a replaced title) —
+    #: the honest reply lists them (summary.py).
+    notices: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -624,9 +632,21 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     started = time.monotonic()
     call_id = f"{plan_id}_s{index}"
     live_args = live_source_language(store, step)
+    resolved, notices = _live.resolve_live_args(store, tool, live_args)
+    if resolved is None:
+        # A run-time sentinel found nothing to do (the timeline already fits
+        # the target length): an honest no-effect step, not a failure.
+        outcome = StepOutcome(index=index, tool=tool, args=[], status="ok", effect="none",
+                              results=[{"summary": "; ".join(notices) or "nothing to do"}], notices=notices)
+        emit({"type": "step", "index": index, "total": total, "tool": tool, "status": "ok",
+              "progress": 1.0, "effect": "none", "summary": outcome.results[0]["summary"]})
+        return outcome
+    live_args = resolved
     guard_step(tool, live_args, facts, consented=consented)
     arg_sets = resolve_step_args(store.edl, live_args, facts)
-    outcome = StepOutcome(index=index, tool=tool, args=arg_sets)
+    if live_args.get("at") == SEAM_SENTINEL:
+        notices.extend(_live.seam_fanout(store.edl).notices(store.edl.canvas.fps))
+    outcome = StepOutcome(index=index, tool=tool, args=arg_sets, notices=notices)
     emit({"type": "step", "index": index, "total": total, "tool": tool, "status": "running",
           "progress": 0.0})
     if len(arg_sets) == 1:
@@ -675,6 +695,12 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     emit({"type": "tool_result", "name": tool, "result": result_payload, "id": call_id})
     summary = _result_summary(outcome.results[0]) if n == 1 else (
         f"{n} seams" if step.args.get("at") == SEAM_SENTINEL else f"{n} clips")
+    for r in outcome.results:
+        note = r.get("notice") if isinstance(r, dict) else None
+        if isinstance(note, str) and note and note not in outcome.notices:
+            outcome.notices.append(note)
+    if outcome.notices:
+        summary = " · ".join([summary, *outcome.notices]) if summary else " · ".join(outcome.notices)
     if outcome.effect == "none":
         summary = f"{summary} · no effect" if summary else "no effect"
     evt: dict[str, Any] = {"type": "step", "index": index, "total": total, "tool": tool,
@@ -771,6 +797,12 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
                 except JobCancelled:
                     raise
                 except Exception as e:  # noqa: BLE001 — every handler error is a step failure
+                    if cancel_event is not None and cancel_event.is_set():
+                        # The handler noticed the cancel in its own terms
+                        # (transcribe raises TranscriptionCancelled, which is
+                        # not a JobCancelled): that is the user's Esc, not a
+                        # failed step — "Cancelled — timeline unchanged".
+                        raise JobCancelled() from e
                     if step.optional:
                         result.steps.append(StepOutcome(index=i, tool=step.tool, args=[dict(step.args)],
                                                         status="skipped", error=str(e)))
@@ -906,9 +938,16 @@ def _finish_children(store_resolver: Callable[[str], EDLStore], parent: ExecResu
             child_store = store_resolver(child_sid)
             with locks.session_lock(child_sid):
                 child_facts = build_facts(child_store, None, feature_report=cached_feature_report())
-                draft = IntentDraft(intents=[IntentItem(recipe="reframe", slots={"ratio": "9:16"}),
+                # QA-068: tighten first (the short's ums and dead air go), and
+                # hook it with the opening line make_shorts chose FROM the
+                # short — a whole sentence — rather than a transcript slice.
+                from ...storage import read_meta
+                hook_text = str(read_meta(child_sid).get("hook") or "").strip()
+                draft = IntentDraft(intents=[IntentItem(recipe="tighten", slots={}),
+                                             IntentItem(recipe="reframe", slots={"ratio": "9:16"}),
                                              IntentItem(recipe="captions", slots={}),
-                                             IntentItem(recipe="hook", slots={})],
+                                             IntentItem(recipe="hook",
+                                                        slots={"text": hook_text} if hook_text else {})],
                                     confidence=1.0, reply="finish short")
                 child_plan = from_intents(draft, child_facts).with_(brain=parent.plan.brain)
                 child = run_plan(child_store, child_plan, child_facts, emit=lambda e: None,

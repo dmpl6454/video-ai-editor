@@ -29,6 +29,28 @@ export function stepFrames(t: number, frames: number, fps: unknown): number {
   return Math.max(0, n) / f
 }
 
+/** `t` moved onto the nearest frame boundary of the `fps` grid (never < 0) —
+ *  what every client gesture (ruler click, scrub, drag delta) commits (QA-049). */
+export function toFrameGrid(t: number, fps: unknown): number {
+  return stepFrames(t, 0, fps)
+}
+
+/** Where a PAUSED <video> of a render at `fps` must seek to SHOW the frame at
+ *  `t` (frame `round(t·fps)`, the frame the timecode names): the MIDDLE of
+ *  that frame, never its exact pts. Chromium truncates `currentTime` to µs —
+ *  2/30 s becomes 0.066666, just before frame 2 — so an exact-pts seek showed
+ *  the PREVIOUS frame on every frame n ≡ 2 (mod 3) at 30 fps (QA-077). */
+export function displaySeekTime(t: number, fps: unknown): number {
+  const f = projectFps(fps)
+  const n = Math.max(0, Math.round((Number.isFinite(t) ? t : 0) * f))
+  return (n + 0.5) / f
+}
+
+/** The same guard for a SOURCE element (a PIP) whose own frame rate is not
+ *  known: a bias far below any frame length that still clears the µs
+ *  truncation. */
+export const PAUSED_SEEK_BIAS_S = 0.001
+
 /** `fps` for display: at most 3 decimals, no trailing zeros — 29.97, 23.976,
  *  59.94, 30. canvas.fps is stored exactly (30000/1001 = 29.97002997…), which
  *  is right for arithmetic and wrong for a label. */

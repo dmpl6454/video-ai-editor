@@ -11,6 +11,7 @@ import { useStore } from '../store'
 import { ASPECTS, PLATFORM_PRESETS, activeAspect, presetActive, ratioLabel, type Aspect, type PlatformPreset } from '../lib/ratioMenu'
 import { platformMenuCommand } from '../lib/exportOptions'
 import { canvasFacts } from '../lib/frameStep'
+import { Icon } from './Icon'
 
 export function RatioMenu() {
   const canvas = useStore((s) => s.edl?.canvas ?? null)
@@ -96,7 +97,7 @@ export function RatioMenu() {
             <button key={r} role="menuitemradio" aria-checked={aspect === r} className="ratio-item"
                     title={`Set canvas aspect ratio to ${r} — overlays reposition to fit`}
                     onClick={() => pickAspect(r)}>
-              <span className="ratio-check" aria-hidden="true">{aspect === r ? '✓' : ''}</span>
+              <span className="ratio-check menu-check" aria-hidden="true">{aspect === r && <Icon name="check" size={12} />}</span>
               <span className="ratio-label">{r}</span>
             </button>
           ))}
@@ -107,7 +108,7 @@ export function RatioMenu() {
             return (
               <button key={p.label} role="menuitemradio" aria-checked={on} className="ratio-item"
                       title={p.title} onClick={() => applyPreset(p)}>
-                <span className="ratio-check" aria-hidden="true">{on ? '✓' : ''}</span>
+                <span className="ratio-check menu-check" aria-hidden="true">{on && <Icon name="check" size={12} />}</span>
                 <span className="ratio-label">{p.label}</span>
                 <span className="ratio-hint">{p.w}×{p.h} · {p.bitrateKbps / 1000} Mbps</span>
               </button>

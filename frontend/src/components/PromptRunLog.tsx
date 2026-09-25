@@ -7,17 +7,19 @@
 // found nothing reads as such before the verifier says so, and the verify
 // table prints measured vs expected exactly as the backend reported them.
 //
-// A step row's primary label is the plan's own `why` ("cut the silent pauses
-// on v1") — the sentence the planner wrote for a reader deciding whether to
-// keep or undo. The dispatch tool id (`remove_silences`) is the secondary
-// tag: a CapCut user should not need the tool vocabulary to read the log.
+// A step row's label is the tool's EDITOR name ("Remove silences") and its
+// summary goes through the same cleanSummary rule as History (QA-101). The
+// planner's `why` read as developer text in practice ("auto_reframe may skip
+// a clip and Clip.fit defaults to contain") and the tool id is internal: both
+// are only the row's hover title.
 
 import { useState } from 'react'
 import { useStore } from '../store'
 import { toast } from '../toast'
 import { usePromptStore, isBusy } from '../lib/promptStore'
-import { brainLabel, humanBytes, humanDuration, type Plan, type StepRow, type VerifyCheck } from '../lib/promptEvents'
+import { brainLabel, humanBytes, humanDuration, type StepRow, type VerifyCheck } from '../lib/promptEvents'
 import { checksHeadline, checkValues } from '../lib/checkProse'
+import { editorProse, toolTitle } from '../lib/opLabels'
 
 const pad2 = (n: number) => String(n + 1).padStart(2, '0')
 
@@ -26,27 +28,50 @@ function glyph(s: StepRow): string {
     case 'ok': return '✓'
     case 'failed': return '✗'
     case 'skipped': return '–'
+    case 'cancelled': return '–'
     default: return '…'
   }
 }
 
-// Human names for the few tool ids that can appear without a plan step
-// (the verify render, a consented download, a shorts child).
-const TOOL_TITLES: Record<string, string> = {
-  verify_render: 'Verify render', download: 'Download (you said yes)', finish_short: 'Finish short',
-  transcribe: 'Transcribe', auto_caption: 'Auto captions', add_caption_track: 'Captions',
-  remove_silences: 'Remove silences', remove_fillers: 'Remove fillers', apply_hook_stack: 'Hook',
-  apply_export_preset: 'Export preset', auto_reframe: 'Reframe', set_clip_fit: 'Fill the frame',
-  add_music: 'Music', set_duck: 'Duck music', noise_reduce: 'Noise removal',
-  set_loudness_target: 'Loudness', add_transition: 'Transitions', apply_lut: 'Colour look',
-  audit_aesthetic: 'Aesthetic audit', cut_range: 'Trim', make_shorts: 'Shorts', apply_brand_kit: 'Brand kit',
-  tts_voiceover: 'Voiceover', add_lower_third: 'Lower third', add_text: 'Text', apply_text_template: 'End card',
+/** A step row's label: the tool's EDITOR name (QA-101). The planner's `why`
+ *  is its internal rationale ("auto_reframe may skip a clip and Clip.fit
+ *  defaults to contain") — developer text, kept only as the hover title. */
+export function stepLabel(s: StepRow): string {
+  return toolTitle(s.tool)
 }
 
-function stepLabel(s: StepRow, plan: Plan | null): string {
-  const why = plan?.steps?.[s.index]?.why
-  if (why && plan?.steps?.[s.index]?.tool === s.tool) return why
-  return TOOL_TITLES[s.tool] ?? s.tool.replace(/_/g, ' ')
+/** A step row's second column, in editor language (opLabels.editorProse —
+ *  History's cleanSummary rule, plus tool ids named): no clip ids, "clip(s)",
+ *  Python reprs or tool ids. */
+export function stepSummary(s: StepRow): string {
+  if (s.status === 'failed') return editorProse(s.error || 'failed')
+  if (s.status === 'skipped') return `skipped${s.error ? ` — ${editorProse(s.error)}` : ''}`
+  if (s.status === 'cancelled') return 'cancelled'
+  return editorProse(s.summary || '') || (s.status === 'running' ? 'running' : '')
+}
+
+/** The folded run's glyph and line (QA-073 / QA-018): a run that applied
+ *  nothing is NOT a green tick, and a replacement is said out loud. */
+export function collapsedSummary(p: {
+  steps: readonly StepRow[]; verify: { checks: VerifyCheck[] } | null; reply: string; headline: string | null
+}): { tone: 'pass' | 'fail' | 'info'; text: string } {
+  const failed = !!p.verify && p.verify.checks.some((c) => c.pass === false && c.headline !== false)
+  if (failed) return { tone: 'fail', text: p.headline ?? 'A check failed' }
+  const real = p.steps.filter((s) => s.tool !== 'verify_render')
+  const applied = real.filter((s) => s.status === 'ok' && s.effect !== 'none')
+  const notice = real.map((s) => s.summary ?? '').find((t) => /^replaced\b/i.test(t.trim()))
+  if (notice) return { tone: 'info', text: editorProse(notice) }
+  if (applied.length === 0) {
+    const why = editorProse(firstSentence(p.reply)) || 'Nothing to change'
+    return { tone: 'info', text: why }
+  }
+  return { tone: 'pass', text: p.headline ?? `${applied.length} step${applied.length === 1 ? '' : 's'} done` }
+}
+
+function firstSentence(text: string): string {
+  const t = (text ?? '').replace(/^\s*\[[^\]]*\]\s*/, '').trim()   // drop a "[brain]" prefix
+  const m = /^(.+?[.!?])(\s|$)/.exec(t)
+  return (m ? m[1] : t).slice(0, 140)
 }
 
 export function PromptRunLog() {
@@ -61,6 +86,7 @@ export function PromptRunLog() {
   const opSeen = usePromptStore((s) => s.opSeen)
   const connectionDropped = usePromptStore((s) => s.connectionDropped)
   const reconnecting = usePromptStore((s) => s.reconnecting)
+  const cancelling = usePromptStore((s) => s.cancelling)
   const dismiss = usePromptStore((s) => s.dismiss)
   const runId = usePromptStore((s) => s.runId)
   const dispatch = useStore((s) => s.dispatch)
@@ -93,15 +119,14 @@ export function PromptRunLog() {
 
   const collapsed = status === 'done' && openFor !== runKey
   if (collapsed) {
-    const failed = !!verify && verify.checks.some((c) => c.pass === false && c.headline !== false)
+    const chip = collapsedSummary({ steps, verify, reply, headline: checksHeadline(verify) })
+    const g = chip.tone === 'fail' ? '✗' : chip.tone === 'info' ? 'i' : '✓'
     return (
       <section className="prompt-log is-collapsed" aria-label="Prompt run">
         <div className="prompt-log-summary">
-          <span className={`g ${failed ? 'is-fail' : 'is-pass'}`} aria-hidden="true">{failed ? '✗' : '✓'}</span>
+          <span className={`g is-${chip.tone}`} aria-hidden="true">{g}</span>
           <span className="prompt-log-title">{title}</span>
-          <span className="sum">
-            {checksHeadline(verify) ?? `${steps.filter((s) => s.status === 'ok').length} step${steps.length === 1 ? '' : 's'} done`}
-          </span>
+          <span className="sum">{chip.text}</span>
           <span className="spacer" />
           <button type="button" className="prompt-log-expand" aria-expanded={false}
                   onClick={() => setOpenFor(runKey)} title="Show the steps and what the verifier measured">Details</button>
@@ -143,11 +168,11 @@ export function PromptRunLog() {
               <li key={`${s.index}-${s.tool}`} className={cls}>
                 <span className="n">{verifyRow ? '··' : pad2(s.index)}</span>
                 <span className="g" aria-hidden="true">{glyph(s)}</span>
-                <span className="tool" title={s.tool}>
-                  {stepLabel(s, plan)}<code className="prompt-step-id">{s.tool}</code>
-                </span>
+                {/* The tool id and the planner's rationale are internal
+                    (QA-101): hover only, never the visible label. */}
+                <span className="tool" title={[plan?.steps?.[s.index]?.why, s.tool].filter(Boolean).join(' · ')}>{stepLabel(s)}</span>
                 <span className="sum">
-                  {s.status === 'failed' ? (s.error || 'failed') : s.status === 'skipped' ? `skipped${s.error ? ` — ${s.error}` : ''}` : (s.summary || (s.status === 'running' ? 'running' : ''))}
+                  {stepSummary(s)}
                   <span className="prompt-sr-only"> {s.status}</span>
                 </span>
                 {s.status === 'running' && (
@@ -183,8 +208,14 @@ export function PromptRunLog() {
         </div>
       )}
 
-      {reply && <p className="prompt-reply">{reply}</p>}
-      {lastError && <div className="prompt-error" role="alert">{lastError}</div>}
+      {reply && <p className="prompt-reply">{editorProse(reply)}</p>}
+      {/* QA-064: a cancel is the user's own choice — a neutral line, never a
+          red "failed". While the current step finishes, say it is stopping. */}
+      {cancelling && busy && (
+        <div className="prompt-notice" role="status">Stopping after the current step — nothing it did will be kept.</div>
+      )}
+      {lastError && status === 'cancelled' && <div className="prompt-notice" role="status">{lastError}</div>}
+      {lastError && status !== 'cancelled' && <div className="prompt-error" role="alert">{lastError}</div>}
       {connectionDropped && (
         <div className="prompt-notice">
           The connection dropped — the run continues on the Mac. {reconnecting ? 'Reconnecting…' : 'Reload to see how it ended.'}

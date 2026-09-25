@@ -293,6 +293,47 @@ def _envelope(*, status: int, code: str, message: str, request_id: str,
                         headers={"X-Request-ID": request_id})
 
 
+def _safe_input(value: Any) -> Any:
+    """The offending input, as something `json.dumps` always accepts (QA-107).
+
+    FastAPI puts the raw request body into a validation error's `input`: a
+    JSON body sent as `text/plain` arrives as `bytes`, and `ctx` can hold the
+    exception object itself. Handing those to JSONResponse raised inside the
+    error handler, so a malformed request came back as a 500. Scalars pass
+    through, bytes are decoded, anything else is summarised, and every string
+    is capped so a 50 MB junk body is not echoed back."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value[:200]).decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value[:200]
+    if isinstance(value, (list, tuple)):
+        return [_safe_input(v) for v in list(value)[:20]]
+    if isinstance(value, dict):
+        return {str(k)[:60]: _safe_input(v) for k, v in list(value.items())[:20]}
+    return repr(value)[:200]
+
+
+def _safe_validation_errors(errors: Any) -> list[dict]:
+    out: list[dict] = []
+    for err in list(errors or [])[:20]:
+        if not isinstance(err, dict):
+            out.append({"msg": str(err)[:200]})
+            continue
+        item: dict[str, Any] = {
+            "type": str(err.get("type", "")),
+            "loc": [p if isinstance(p, (int, str)) else str(p) for p in err.get("loc", ())],
+            "msg": str(err.get("msg", ""))[:300],
+        }
+        if "input" in err:
+            item["input"] = _safe_input(err["input"])
+        if isinstance(err.get("ctx"), dict):
+            item["ctx"] = {str(k): _safe_input(v) for k, v in err["ctx"].items()}
+        out.append(item)
+    return out
+
+
 def install(app: FastAPI) -> None:
     """Wire all hardening middleware + exception handlers + ops endpoints
     into an existing FastAPI app. Idempotent — safe to call multiple times."""
@@ -317,9 +358,13 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _validation_exc(request: Request, exc: RequestValidationError) -> Response:
         rid = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
+        errors = _safe_validation_errors(exc.errors())
+        first = errors[0] if errors else {}
+        where = ".".join(str(p) for p in first.get("loc", []) if p != "body")
+        msg = f"invalid request: {where + ' — ' if where else ''}{first.get('msg', '')}".rstrip(" —:")
         return _envelope(status=422, code="VALIDATION_ERROR",
-                         message="invalid request", request_id=rid,
-                         details=exc.errors())
+                         message=msg or "invalid request", request_id=rid,
+                         details=errors)
 
     @app.exception_handler(ValueError)
     async def _value_exc(request: Request, exc: ValueError) -> Response:

@@ -107,6 +107,12 @@ def compose_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | 
 
     parts.extend(_failed_lines(verify_result))
     parts.extend(_unmeasured_lines(verify_result))
+    # What a step did differently from the literal plan, known only at run
+    # time (a replaced title, skipped sliver seams, a sentence-boundary cut).
+    for s in ran:
+        notices = getattr(s, "notices", None) or []
+        if notices:
+            parts.append(f"· {s.tool}: {'; '.join(notices)}")
     for s in none:
         summary = ""
         if s.results and isinstance(s.results[0], dict):

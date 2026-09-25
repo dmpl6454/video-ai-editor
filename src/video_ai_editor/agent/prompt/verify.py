@@ -30,6 +30,7 @@ code path fewer to disagree with the tools it is checking.
 from __future__ import annotations
 
 import importlib
+import math
 import re
 import threading
 from dataclasses import dataclass, field
@@ -132,6 +133,12 @@ class VerifyCtx:
     _tx_loaded: bool = False
     _speech_render: Path | None = None
     _speech_render_tried: bool = False
+    #: Whether this verify may render at all (`verify_plan(render=...)`). A
+    #: ctx built by hand (tests, tools) does not render unless it says so.
+    render_allowed: bool = False
+    duck_probe_skip_reason: str | None = None
+    _duck_probe: Path | None = None
+    _duck_probe_tried: bool = False
     _source_silence_cache: dict[str, list[tuple[float, float]] | None] = field(default_factory=dict)
 
     @property
@@ -196,6 +203,31 @@ class VerifyCtx:
             self.speech_render_skip_reason = f"speech-only render failed: {type(e).__name__}: {e}"
             self._speech_render = None
         return self._speech_render
+
+    def duck_probe_render(self) -> Path | None:
+        """The duck-gain stem of the current timeline (`audio_mix.
+        STEM_DUCK_PROBE`: a 1 kHz carrier times the gain the renderer applied
+        to the music), rendered once per verify; None — with a reason — when
+        rendering is off or impossible."""
+        if self._duck_probe_tried:
+            return self._duck_probe
+        self._duck_probe_tried = True
+        if not self.render_allowed:
+            self.duck_probe_skip_reason = "verify render disabled"
+            return None
+        from ...render.audio_mix import STEM_DUCK_PROBE
+        from ...render.verify_render import render_for_verify
+        try:
+            self._duck_probe = render_for_verify(
+                self.edl, Path(self.store.dir), max_duration_s=VERIFY_RENDER_MAX_DURATION_S,
+                cancel_event=self.cancel_event, stem=STEM_DUCK_PROBE)
+            if self._duck_probe is None:
+                self.duck_probe_skip_reason = (f"timeline is {self.edl.duration:.0f}s "
+                                               f"(> {VERIFY_RENDER_MAX_DURATION_S:.0f}s)")
+        except Exception as e:  # noqa: BLE001 — an unmeasured check, never a crash
+            self.duck_probe_skip_reason = f"duck probe render failed: {type(e).__name__}: {e}"
+            self._duck_probe = None
+        return self._duck_probe
 
     def probe_dims(self, src: str) -> tuple[int, int] | None:
         if src not in self._probe_cache:
@@ -555,6 +587,27 @@ def c_captions_style(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, current == style, current, style)
 
 
+def _fit_trim_source_end(ctx: VerifyCtx, src: str | None) -> float | None:
+    """The source second the kept timeline ends on, when this run applied a
+    target-length trim (`cut_range(start="$fit_to:…")`, agent/prompt/live.py);
+    None otherwise, or when the last v1 clip is not the transcript's file."""
+    from .live import parse_fit_sentinel
+    steps = list(getattr(ctx.plan, "steps", []) or [])
+    ran = {o.index for o in getattr(ctx.exec_result, "steps", []) or []
+           if getattr(o, "status", "") == "ok" and getattr(o, "args", None)}
+    if not any(i in ran and s.tool == "cut_range" and parse_fit_sentinel(s.args.get("start")) is not None
+               for i, s in enumerate(steps)):
+        return None
+    from ..timemap import media_clips
+    t = ctx.edl.get_track("v1")
+    clips = sorted((c for c in (t.clips if t else []) if isinstance(c, Clip)), key=lambda c: c.start)
+    # media_clips knows a derived file (denoise, reframe) is still that source.
+    same = {id(c) for c in media_clips(ctx.edl, "v1", src=src)} if src is not None else {id(c) for c in clips}
+    if not clips or id(clips[-1]) not in same:
+        return None
+    return float(clips[-1].out)
+
+
 def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     """Every non-filler word that was on the timeline BEFORE the run is still
     on it AFTER. Decided on SOURCE ranges through both edls (keyed by source
@@ -585,6 +638,12 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     if not before:
         return _ok(pc, None, None, "every kept word survives", detail="no words were on the timeline")
     gone = [w for w in before if not _present(ctx.edl, w)]
+    # QA-069: a target-length trim ("make this a 30s reel") removes the tail
+    # ON PURPOSE — those words are what was asked for, not lost speech. They
+    # were reported as "✗ 87 words lost" on a run that did exactly its job.
+    tail_src = _fit_trim_source_end(ctx, src)
+    trimmed = [w for w in gone if tail_src is not None and float(w["start"]) >= tail_src - 0.05]
+    gone = [w for w in gone if not any(w is t for t in trimmed)]
     # Energy is ground truth, timestamps are estimates: a vanished word whose
     # source span sits inside a silent run of the SOURCE (measured with the
     # plan's own silencedetect settings) was never voiced there — the
@@ -597,6 +656,8 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     parts: list[str] = []
     if lost:
         parts.append("lost: " + ", ".join(str(w.get("word")) for w in lost[:6]))
+    if trimmed:
+        parts.append(f"{len(trimmed)} words after the target length were trimmed as asked — not counted")
     if misaligned:
         parts.append(f"{len(misaligned)} transcript words sat inside measured silence (misaligned timestamps)"
                      " — not counted: " + ", ".join(str(w.get("word")) for w in misaligned[:6]))
@@ -681,8 +742,11 @@ def c_silence_total_leq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     long_runs = [d for d in lengths if d >= floor]
     total = round(sum(long_runs), 3)
     longest = max(lengths, default=0.0)
-    detail = (f"longest remaining pause {longest:.2f} s; {len(long_runs)} pause(s) ≥ {floor:.2f} s "
-              f"(min_dur {min_dur:g} + 2×keep_pad {keep_pad:g} + {_LONG_PAUSE_TOL_S:g} tolerance)")
+    # Editor language (QA-101): the floor explained, never the argument names.
+    n_long = len(long_runs)
+    detail = (f"longest remaining pause {longest:.2f} s; {n_long} pause{'' if n_long == 1 else 's'} "
+              f"of {floor:.2f} s or longer (shorter pauses are kept on purpose: the {min_dur:g} s "
+              f"silence length plus {keep_pad:g} s of breathing room each side)")
     if music_clips(ctx.edl):
         detail += "; measured with the music track muted"
     return _ok(pc, total <= cap, total, f"≤ {cap}", unit="s", detail=detail)
@@ -699,7 +763,7 @@ def c_canvas_aspect(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 def c_reframe_effective(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     clips = v1_clips(ctx.edl)
     if not clips:
-        return _ok(pc, None, None, "reframed or fit=cover", detail="no v1 clips")
+        return _ok(pc, None, None, "reframed to fill the frame", detail="no clips on the main video track")
     before_src = {c.id: c.src for c in v1_clips(ctx.edl_before)}
     src_changed = any(before_src.get(c.id) not in (None, c.src) for c in clips)
     results = ctx.exec_result.results_for("auto_reframe")
@@ -707,13 +771,13 @@ def c_reframe_effective(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     all_cover = all(c.fit == "cover" for c in clips)
     passed = (bool(results) and not skipped and src_changed) or all_cover
     measured = {"src_changed": src_changed, "skipped": skipped, "all_cover": all_cover}
-    return _ok(pc, passed, measured, "reframed or fit=cover")
+    return _ok(pc, passed, measured, "reframed to fill the frame")
 
 
 def c_no_letterbox(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     clips = v1_clips(ctx.edl)
     if not clips:
-        return _ok(pc, None, None, "every clip fills the canvas", detail="no v1 clips")
+        return _ok(pc, None, None, "every clip fills the canvas", detail="no clips on the main video track")
     canvas = ctx.edl.canvas.w / ctx.edl.canvas.h
     bad: list[str] = []
     unknown = 0
@@ -729,7 +793,8 @@ def c_no_letterbox(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     if bad:
         return _ok(pc, False, len(bad), 0, unit="letterboxed clips", detail=", ".join(bad[:6]))
     if unknown:
-        return _ok(pc, None, None, 0, detail=f"{unknown} clip(s) could not be probed")
+        return _ok(pc, None, None, 0, detail=(f"{unknown} clip{'' if unknown == 1 else 's'} "
+                                              "could not be measured"))
     return _ok(pc, True, 0, 0, unit="letterboxed clips")
 
 
@@ -798,7 +863,54 @@ def c_music_ducked(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         return _ok(pc, False, None, f"≤ {to_db} dB", detail="no music")
     if not track.duck:
         return _ok(pc, False, None, f"≤ {to_db} dB", detail="ducking off")
-    return _ok(pc, track.duck.to_db <= to_db, track.duck.to_db, f"≤ {to_db}", unit="dB")
+    # QA-079: measure the dip the renderer APPLIED, under the speech the
+    # timeline actually has. Reading `to_db` back from the EDL "verified" a
+    # −18 dB duck that the old fixed-threshold compressor never rendered.
+    probe = ctx.duck_probe_render()
+    if probe is None:
+        return _ok(pc, track.duck.to_db <= to_db, track.duck.to_db, f"≤ {to_db}", unit="dB",
+                   detail=f"setting only, dip not measured ({ctx.duck_probe_skip_reason})")
+    measured, how = _measured_duck_db(ctx, probe)
+    if measured is None:
+        return _ok(pc, None, None, f"≤ {to_db}", unit="dB", detail=how)
+    return _ok(pc, measured <= to_db + _DUCK_TOL_DB, round(measured, 1), f"≤ {to_db}", unit="dB",
+               detail=f"rendered dip {how}")
+
+
+#: Slack between the requested and the rendered dip (attack ramps, window edges).
+_DUCK_TOL_DB = 1.5
+
+
+def _measured_duck_db(ctx: VerifyCtx, probe: Path) -> tuple[float | None, str]:
+    """(dip in dB, how it was measured) from the duck probe stem: the median
+    50 ms window gain inside the speech the transcript places on the render
+    clock, or — with no transcript — the deepest sustained tenth of the
+    timeline."""
+    import statistics
+    from ...render import clock
+    from ...render.audio_mix import DUCK_PROBE_AMPLITUDE
+    from ...render.verify_render import window_levels_db
+    win = 0.05
+    gains = window_levels_db(probe, win_s=win, ref=DUCK_PROBE_AMPLITUDE / math.sqrt(2))
+    if not gains:
+        return None, "the duck probe render has no audio"
+    spans: list[tuple[float, float]] = []
+    tx, _ = ctx.transcript()
+    if tx is not None:
+        seams = clock.seam_table(ctx.edl)
+        for s, e in ctx.speech_spans(ctx.edl):
+            w = clock.render_window(seams, s, e)
+            if w is not None:
+                spans.append(w)
+    if spans:
+        # Skip each span's first 100 ms: the attack ramp is the ducker working.
+        inside = [g for i, g in enumerate(gains)
+                  if any(s + 0.1 <= i * win and (i + 1) * win <= e for s, e in spans)]
+        if not inside:
+            return None, "the transcript's speech is too short to measure a dip"
+        return statistics.median(inside), "median over the transcript's speech"
+    ordered = sorted(gains)
+    return ordered[max(0, len(ordered) // 10 - 1)], "deepest tenth of the timeline (no transcript)"
 
 
 def c_music_within_video_extent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -1185,7 +1297,7 @@ def verify_plan(store: EDLStore, plan: Plan, exec_result: Any, facts_before: Tim
     measured and `passed` those that held."""
     pcs = _postconditions(plan)
     ctx = VerifyCtx(store=store, plan=plan, exec_result=exec_result, facts_before=facts_before,
-                    store_resolver=store_resolver, cancel_event=cancel_event)
+                    store_resolver=store_resolver, cancel_event=cancel_event, render_allowed=render)
     total_steps = len(plan.steps)
     if render and any(pc.needs_render for pc in pcs):
         from ...render.verify_render import render_for_verify

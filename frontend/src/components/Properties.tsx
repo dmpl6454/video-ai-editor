@@ -1,12 +1,21 @@
 import React from 'react'
 import { useStore } from '../store'
 import { isMediaClip, type AnyClip } from '../types'
-import { baseName } from '../lib/paths'
 import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
 import { clipLocalTime } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
 import { setLivePipFraming } from '../lib/pipDraw'
 import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
+import { TimecodeField } from './TimecodeField'
+import { MediaName } from './MediaName'
+import { SliderScope, useSliderCommit } from '../lib/useSliderCommit'
+import { formatDb } from '../lib/dbFormat'
+import { levelAt, VOLUME_RANGE, volumeCommit, volumeKeyAt, volumeKeyTimes, volumeKeyToggle, type ClipAudioProps } from '../lib/audioLevel'
+import { textRoleLabel } from '../lib/opLabels'
+import { laneName } from '../lib/timelineLanes'
+import { TEXT_AXIS_SENTINEL, offAxisSentinel, roleAnchorY } from '../lib/textLayout'
+import { ColorField } from './ColorField'
+import { openCaptionStyle } from '../lib/captionStyleOpen'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -24,7 +33,7 @@ import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
  *  use) re-seeds on undo / chat edits / timeline drags WITHOUT remounting, so
  *  the caret is never dropped mid-edit.
  */
-function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, title }: {
+function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, title, ariaLabel }: {
   value: number
   dp?: number
   min?: number
@@ -33,6 +42,8 @@ function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, tit
   width?: number
   onCommit: (n: number) => void
   title?: string
+  /** Its visible <label> is a sibling, not associated — this is its name (QA-102). */
+  ariaLabel?: string
 }) {
   const seeded = value.toFixed(dp)
   const ref = React.useRef<HTMLInputElement>(null)
@@ -66,7 +77,7 @@ function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, tit
   }
 
   return (
-    <input ref={ref} type="number" step={step} min={min} max={max} title={title}
+    <input ref={ref} type="number" step={step} min={min} max={max} title={title} aria-label={ariaLabel}
       style={width != null ? { width } : undefined}
       value={local}
       onChange={(e) => setLocal(e.target.value)}
@@ -89,13 +100,18 @@ const SHORT_OVERLAY_S = 0.5
 // change a pixel.
 const ROLE_FORCES_CAPS = new Set(['super', 'hook'])
 
-// The font each role actually renders in when `style.font` is unset. Needed
-// because 'Inter-Black' is the schema default AND the "never touched" sentinel,
-// so a hook clip whose style.font is unset renders in Bebas Neue, not Inter.
-// Mirrors ROLE_STYLES in render/text_overlay.py; label-only, like the set above.
+// The font each role renders in when `style.font` is null (EDL v3, QA-076 —
+// "Inter-Black" used to double as the "unset" sentinel, so the inspector read
+// "Inter Black (default)" while an Anton super rendered, and Inter Black
+// itself could not be picked). Mirrors ROLE_STYLES in render/text_overlay.py.
 const ROLE_FONTS: Record<string, string> = {
   super: 'Anton-Regular', hook: 'BebasNeue-Regular', lower_third: 'Montserrat-Bold',
-  caption: 'Inter-Black', label: 'Inter-Bold', watermark: 'Inter-Bold',
+  caption: 'Inter-Black', label: 'Inter-Bold', watermark: 'Inter-Bold', default: 'Inter-Bold',
+}
+// Every bundled face both renderers can draw (fonts.css ↔ TextLayer.cssFont).
+const FONT_LABELS: Record<string, string> = {
+  'Inter-Black': 'Inter Black', 'Inter-Bold': 'Inter Bold', 'Anton-Regular': 'Anton',
+  'BebasNeue-Regular': 'Bebas Neue (capitals only)', 'Montserrat-Bold': 'Montserrat Bold',
 }
 
 // Bundled faces with NO lowercase letterforms: their lowercase slots contain
@@ -172,7 +188,9 @@ export function Properties() {
   const edl = useStore((s) => s.edl)
   const sel = useStore((s) => s.selection)
   const locked = lockedTrackOf(edl, sel)
-  if (!locked) return <PropertiesPanel />
+  // SliderScope: a slider commit still waiting on its idle delay lands on the
+  // clip it was made on, not on the next selection (lib/useSliderCommit).
+  if (!locked) return <SliderScope.Provider value={sel ?? ''}><PropertiesPanel /></SliderScope.Provider>
   return (
     <div className="props-locked">
       <div className="props-locked-note" role="status">🔒 {lockedNotice(locked)}</div>
@@ -233,7 +251,7 @@ function PropertiesPanel() {
     return (
       <StickerProps
         c={c as unknown as StickerLike}
-        trackLabel={clip.t.label ?? clip.t.id}
+        trackLabel={laneName(clip.t)}
         canRaise={canRaise}
         canLower={canLower}
         localT={clipLocalTime(edl, clip.t.id, c, playhead)}
@@ -246,7 +264,7 @@ function PropertiesPanel() {
     return (
       <TextProps
         c={c as unknown as TextClipLike}
-        trackLabel={clip.t.label ?? clip.t.id}
+        trackLabel={laneName(clip.t)}
         canvas={edl.canvas}
         localT={clipLocalTime(edl, clip.t.id, c, playhead)}
         dispatch={dispatch}
@@ -264,9 +282,10 @@ function PropertiesPanel() {
   const isAudioLane = ['audio', 'music', 'vo'].includes(clip.t.type)
   const speedRaw = (c as unknown as { speed?: number | null }).speed
   const speed = typeof speedRaw === 'number' ? speedRaw : 1.0
-  const audio = (c as unknown as { audio?: { gain_db?: number; fade_in?: number; fade_out?: number; mute?: boolean } }).audio
+  // QA-037: `reverse` is a top-level Clip field types.ts doesn't declare.
+  const reversed = (c as unknown as { reverse?: boolean }).reverse === true
+  const audio = (c as unknown as { audio?: ClipAudioProps }).audio
   const tx = (c as unknown as { transform?: { x?: unknown; y?: unknown; rotation?: unknown; scale?: unknown; opacity?: unknown } }).transform
-  const gain = audio?.gain_db ?? 0
   const fadeIn = audio?.fade_in ?? 0
   const fadeOut = audio?.fade_out ?? 0
   const muted = !!audio?.mute
@@ -379,10 +398,10 @@ function PropertiesPanel() {
         clip_id: c.id, props: [...KF_PROPS], time: localT,
       })}
       style={{
-        background: kfHere ? 'var(--accent)' : 'var(--bg-3)',
+        background: kfHere ? 'var(--accent-fill)' : 'var(--bg-3)',
         border: `1px solid ${kfAnimated ? 'var(--accent)' : 'var(--line)'}`,
         padding: '1px 8px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
-        color: kfAnimated ? 'inherit' : 'var(--text-dim)',
+        color: kfHere ? 'var(--on-accent)' : kfAnimated ? 'inherit' : 'var(--text-dim)',
       }}
     >{kfHere ? '◆' : '◇'} Keyframe</button>
   )
@@ -393,8 +412,8 @@ function PropertiesPanel() {
     // one clip's value across to another clip.
     <div className="props" key={c.id}>
       <h2>Properties</h2>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.src}>
-        {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · {baseName(c.src)}
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
+        {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · <MediaName src={c.src} />
       </div>
       {/* Timeline footprint = source duration / speed (effective_duration
           server-side); a 2x clip ends halfway through its source length. */}
@@ -407,28 +426,48 @@ function PropertiesPanel() {
       <Section label="Timing">
         <div className="row two">
           <div className="field">
-            <label>In (s)</label>
-            <NumberField value={c.in} min={0}
+            <label>In</label>
+            <TimecodeField ariaLabel="In" value={c.in} min={0}
               onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, in: n })} />
           </div>
           <div className="field">
-            <label>Out (s)</label>
-            <NumberField value={c.out} min={0}
+            <label>Out</label>
+            <TimecodeField ariaLabel="Out" value={c.out} min={0}
               onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, out: n })} />
           </div>
         </div>
         <div className="field">
-          <label>Start on timeline (s)</label>
-          <NumberField value={c.start} min={0}
+          <label>Start on timeline</label>
+          <TimecodeField ariaLabel="Start on timeline" value={c.start} min={0}
             onCommit={(n) => dispatch('move_clip', { clip_id: c.id, new_start: n })} />
         </div>
       </Section>
 
       {!isAudioLane && (
         <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
-          <Slider min={0.25} max={4} step={0.05} value={speed}
+          <Slider label="Speed" min={0.25} max={4} step={0.05} value={speed}
             format={(v) => `${v.toFixed(2)}×`}
             onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
+          {Math.abs(speed - 1) > 1e-6 && (
+            // QA-039 residual: time-stretching (keep pitch) moves transients by
+            // up to ±12 ms; varispeed is sample-exact and lets the pitch follow.
+            <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
+              title="On: the sound keeps its pitch (time-stretched; claps and consonants can land a few ms off). Off: tape-style speed change — every sound stays exactly on its frame, and the pitch rises or falls with the speed.">
+              <input type="checkbox" checked={audio?.keep_pitch !== false}
+                onChange={(e) => dispatch('set_speed', { clip_id: c.id, factor: speed, keep_pitch: e.target.checked })}
+                style={{ marginRight: 4 }} />
+              Keep pitch
+            </label>
+          )}
+          {/* QA-037: the field existed and rendered nothing; now the renderer
+              plays the clip backwards (render/reverse.py), picture and sound. */}
+          <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
+            title="Play this clip backwards — picture and sound.">
+            <input type="checkbox" checked={reversed} aria-label="Play backwards"
+              onChange={(e) => dispatch('set_property', { clip_id: c.id, path: 'reverse', value: e.target.checked })}
+              style={{ marginRight: 4 }} />
+            Play backwards
+          </label>
         </Section>
       )}
 
@@ -457,7 +496,7 @@ function PropertiesPanel() {
           <div className="row two">
             <div className="field">
               <label>Video fade in (s)</label>
-              <input type="number" step="0.05" min={0} max={5}
+              <input type="number" aria-label="Video fade in (s)" step="0.05" min={0} max={5}
                 key={`vfi${videoFadeIn.toFixed(2)}`} defaultValue={videoFadeIn.toFixed(2)}
                 onBlur={(e) => {
                   const n = Number(e.target.value)
@@ -467,7 +506,7 @@ function PropertiesPanel() {
             </div>
             <div className="field">
               <label>Video fade out (s)</label>
-              <input type="number" step="0.05" min={0} max={5}
+              <input type="number" aria-label="Video fade out (s)" step="0.05" min={0} max={5}
                 key={`vfo${videoFadeOut.toFixed(2)}`} defaultValue={videoFadeOut.toFixed(2)}
                 onBlur={(e) => {
                   const n = Number(e.target.value)
@@ -511,9 +550,49 @@ function PropertiesPanel() {
         dispatch('set_volume', { target: c.id, db: 0 })
         dispatch('add_fade', { clip_id: c.id, in_s: 0, out_s: 0 })
       }}>
-        <Slider min={-30} max={6} step={0.5} value={gain}
-          format={(v) => `${v.toFixed(1)} dB`}
-          onChange={(v) => dispatch('set_volume', { target: c.id, db: v })} />
+        {/* −60…+20 dB (QA-086: it stopped at +6, below what quiet dialogue
+            needs). The level AT THE PLAYHEAD: once the clip has volume keys a
+            commit keys the playhead instead of flattening the curve. */}
+        <Slider label="Volume" min={VOLUME_RANGE.min} max={VOLUME_RANGE.max} step={VOLUME_RANGE.step}
+          value={levelAt(audio, localT)}
+          format={formatDb}
+          onChange={(v) => {
+            const { tool, args } = volumeCommit(c.id, audio, localT, v)
+            void dispatch(tool, args)
+          }} />
+        <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+          {(() => {
+            const here = volumeKeyAt(audio, localT, edl.canvas.fps)
+            const keys = volumeKeyTimes(audio).length
+            return (
+              <>
+                <button
+                  aria-label={`${here ? 'Remove' : 'Add'} volume keyframe`}
+                  aria-pressed={here}
+                  title={here
+                    ? `Remove the volume keyframe at the playhead (${localT.toFixed(2)}s into the clip)`
+                    : `Add a volume keyframe at the playhead (${localT.toFixed(2)}s into the clip) — `
+                      + 'then move the playhead and change Volume to shape the level'}
+                  onClick={() => {
+                    const { tool, args } = volumeKeyToggle(c.id, audio, localT, edl.canvas.fps)
+                    void dispatch(tool, args)
+                  }}
+                  style={{
+                    background: here ? 'var(--accent-fill)' : 'var(--bg-3)',
+                    border: `1px solid ${keys ? 'var(--accent)' : 'var(--line)'}`,
+                    padding: '1px 8px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+                    color: here ? 'var(--on-accent)' : keys ? 'inherit' : 'var(--text-dim)',
+                  }}
+                >{here ? '◆' : '◇'} Volume key</button>
+                {keys > 0 && (
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                    {keys} volume {keys === 1 ? 'key' : 'keys'}
+                  </span>
+                )}
+              </>
+            )
+          })()}
+        </div>
         {/* "Audio" prefix is load-bearing: the section header scrolls out of
             small panels and a bare "Fade in" reads as a VIDEO fade (tester
             issue: "fade in and out is not working video" — the audio fade
@@ -521,12 +600,12 @@ function PropertiesPanel() {
         <div className="row two">
           <div className="field">
             <label>Audio fade in (s)</label>
-            <NumberField value={fadeIn} step={0.05} min={0} max={5}
+            <NumberField ariaLabel="Audio fade in (s)" value={fadeIn} step={0.05} min={0} max={5}
               onCommit={(n) => dispatch('add_fade', { clip_id: c.id, in_s: n })} />
           </div>
           <div className="field">
             <label>Audio fade out (s)</label>
-            <NumberField value={fadeOut} step={0.05} min={0} max={5}
+            <NumberField ariaLabel="Audio fade out (s)" value={fadeOut} step={0.05} min={0} max={5}
               onCommit={(n) => dispatch('add_fade', { clip_id: c.id, out_s: n })} />
           </div>
         </div>
@@ -571,7 +650,8 @@ function PropertiesPanel() {
               <button
                 onClick={() => setFraming(null)}
                 title="Finish framing and close the crop view — your changes are already applied"
-                style={{ background: 'var(--accent)', fontWeight: 600 }}
+                className="primary"
+                style={{ fontWeight: 600 }}
               >Apply</button>
               <button
                 onClick={() => {
@@ -669,9 +749,9 @@ function PropertiesPanel() {
                 )}
                 style={{
                   flex: 1, fontSize: 11, padding: '3px 6px', borderRadius: 3,
-                  cursor: 'pointer', color: 'inherit',
-                  background: active ? 'var(--accent)' : 'var(--bg-3)',
-                  border: `1px solid ${active ? 'var(--accent)' : 'var(--line)'}`,
+                  cursor: 'pointer', color: active ? 'var(--on-accent)' : 'inherit',
+                  background: active ? 'var(--accent-fill)' : 'var(--bg-3)',
+                  border: `1px solid ${active ? 'var(--accent-fill)' : 'var(--line)'}`,
                 }}
               >{label}</button>
             )
@@ -704,22 +784,22 @@ function PropertiesPanel() {
               <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 4 }}>
                 Framing inside the shape
               </div>
-              <Slider min={1} max={4} step={0.05} value={fr.zoom ?? 1}
-                format={(v) => `zoom ${v.toFixed(2)}`}
+              <Slider label="Zoom" min={1} max={4} step={0.05} value={fr.zoom ?? 1}
+                format={(v) => `${v.toFixed(2)}`}
                 onChange={(v) => set({ zoom: v })} />
-              <Slider min={-1} max={1} step={0.02} value={fr.x ?? 0}
-                format={(v) => `pan X ${v.toFixed(2)}`}
+              <Slider label="Pan X" min={-1} max={1} step={0.02} value={fr.x ?? 0}
+                format={(v) => `${v.toFixed(2)}`}
                 onChange={(v) => set({ x: v })} />
-              <Slider min={-1} max={1} step={0.02} value={fr.y ?? 0}
-                format={(v) => `pan Y ${v.toFixed(2)}`}
+              <Slider label="Pan Y" min={-1} max={1} step={0.02} value={fr.y ?? 0}
+                format={(v) => `${v.toFixed(2)}`}
                 onChange={(v) => set({ y: v })} />
               {/* Turns the PICTURE inside the shape; the shape stays put. The
                   element's own rotation (Transform below, or the handle above
                   the box in the preview) turns shape and picture together, and
                   the two compose — a PIP can sit at 20° with its footage
                   levelled at -20° inside. */}
-              <Slider min={-180} max={180} step={1} value={fr.rotation ?? 0}
-                format={(v) => `rotate inside ${v.toFixed(0)}°`}
+              <Slider label="Rotate inside" min={-180} max={180} step={1} value={fr.rotation ?? 0}
+                format={(v) => `${v.toFixed(0)}°`}
                 onLive={(v) => setLivePipFraming({ id: c.id,
                                                    x: fr.x ?? 0, y: fr.y ?? 0,
                                                    rotation: v })}
@@ -780,20 +860,20 @@ function PropertiesPanel() {
             playhead, change a value — deleted the key on the last step and left
             the clip static. */}
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <Slider min={0.1} max={4} step={0.05} value={scale}
-            format={(v) => `scale ${v.toFixed(2)}`}
+          <Slider label="Scale" min={0.1} max={4} step={0.05} value={scale}
+            format={(v) => `${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, scale: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, scale: v, time: localT })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <Slider min={-180} max={180} step={1} value={rotation}
-            format={(v) => `rotation ${v.toFixed(0)}°`}
+          <Slider label="Rotation" min={-180} max={180} step={1} value={rotation}
+            format={(v) => `${v.toFixed(0)}°`}
             onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v, time: localT })} />
         </div>
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
-          <Slider min={0} max={1} step={0.05} value={opacity}
-            format={(v) => `opacity ${v.toFixed(2)}`}
+          <Slider label="Opacity" min={0} max={1} step={0.05} value={opacity}
+            format={(v) => `${v.toFixed(2)}`}
             onLive={(v) => setLiveTransform({ clipId: c.id, opacity: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, opacity: v, time: localT })} />
         </div>
@@ -869,8 +949,9 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
     // See the media panel: key={c.id} guarantees a fresh field subtree per clip.
     <div className="props" key={c.id}>
       <h2>Properties</h2>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
-        {trackLabel} · {c.label ? `${c.label} ` : ''}Sticker · {c.id}
+      {/* The clip id is for bug reports: hover only (QA-101). */}
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.id}>
+        {trackLabel} · {c.label ? `${c.label} ` : ''}Sticker
       </div>
       <ClipWindowNotice start={start} end={start + duration} />
 
@@ -881,36 +962,36 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>X</label>
-            <NumberField value={x} dp={0} step={1}
+            <NumberField ariaLabel="X" value={x} dp={0} step={1}
               onCommit={(n) => setTx({ x: n })} />
           </div>
           <div className="field">
             <label>Y</label>
-            <NumberField value={y} dp={0} step={1}
+            <NumberField ariaLabel="Y" value={y} dp={0} step={1}
               onCommit={(n) => setTx({ y: n })} />
           </div>
         </div>
       </Section>
 
       <Section label="Transform">
-        <Slider min={0.1} max={4} step={0.05} value={scale}
-          format={(v) => `scale ${v.toFixed(2)}`} onChange={(v) => setTx({ scale: v })} />
-        <Slider min={-180} max={180} step={1} value={rotation}
-          format={(v) => `rotation ${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
-        <Slider min={0} max={1} step={0.05} value={opacity}
-          format={(v) => `opacity ${v.toFixed(2)}`} onChange={(v) => setTx({ opacity: v })} />
+        <Slider label="Scale" min={0.1} max={4} step={0.05} value={scale}
+          format={(v) => `${v.toFixed(2)}`} onChange={(v) => setTx({ scale: v })} />
+        <Slider label="Rotation" min={-180} max={180} step={1} value={rotation}
+          format={(v) => `${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
+        <Slider label="Opacity" min={0} max={1} step={0.05} value={opacity}
+          format={(v) => `${v.toFixed(2)}`} onChange={(v) => setTx({ opacity: v })} />
       </Section>
 
       <Section label="Timing">
         <div className="row two">
           <div className="field">
-            <label>Start (s)</label>
-            <NumberField value={start} min={0}
+            <label>Start</label>
+            <TimecodeField ariaLabel="Start" value={start} min={0}
               onCommit={(ns) => setTiming({ start: ns, end: ns + duration })} />
           </div>
           <div className="field">
-            <label>Duration (s)</label>
-            <NumberField value={duration} min={0.1}
+            <label>Duration</label>
+            <TimecodeField ariaLabel="Duration" value={duration} min={0.1}
               onCommit={(nd) => setTiming({ end: start + nd })} />
           </div>
         </div>
@@ -967,11 +1048,14 @@ interface TextClipLike {
   // to land in three places (schema.py, types.ts, and this), and tsc only catches
   // the third once something reads it.
   style?: {
-    font?: string; size?: number; color?: string
+    font?: string | null; size?: number; color?: string
     stroke?: string; stroke_w?: number; upper?: boolean | null
+    background?: string | null; align?: 'left' | 'center' | 'right'; line_spacing?: number
+    shadow_on?: boolean | null
   }
   anim_in?: string | null
   anim_out?: string | null
+  anim_dur?: number | null
   transform?: { x?: unknown; y?: unknown; opacity?: unknown; scale?: unknown; rotation?: unknown }
 }
 
@@ -990,8 +1074,15 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   // claiming "text clips don't" have one is what makes that easy to miss.
   // Render-clock local, as TextLayer samples it (`t − renderWindow.start`).
   const txLocalT = localT
-  const x = sampleKF(c.transform?.x as KFNum | undefined, txLocalT, canvas.w / 2)
-  const y = sampleKF(c.transform?.y as KFNum | undefined, txLocalT, canvas.h * 0.85)
+  // EDL v3 (QA-076): x/y render where they say. Only an untouched clip (the
+  // schema's 540/1700 pair) sits at its role anchor, which is what we show.
+  // Each axis's schema default (x 540, y 1700) means "never positioned": show
+  // the role layout it renders at, and nudge a TYPED 540/1700 by a pixel so
+  // it is not read back as "unset" (TEXT_AXIS_SENTINEL).
+  const x = c.transform?.x === TEXT_AXIS_SENTINEL.x ? canvas.w / 2
+    : sampleKF(c.transform?.x as KFNum | undefined, txLocalT, canvas.w / 2)
+  const y = c.transform?.y === TEXT_AXIS_SENTINEL.y ? roleAnchorY(c.role ?? 'default', canvas.h, canvas.w)
+    : sampleKF(c.transform?.y as KFNum | undefined, txLocalT, roleAnchorY(c.role ?? 'default', canvas.h, canvas.w))
   const opacity = sampleKF(c.transform?.opacity as KFNum | undefined, txLocalT, 1)
   // QA-036: rotation and scale are drawn by BOTH renderers now (baked into
   // the export PNG, or animated per frame when keyed; TextLayer mirrors it),
@@ -1005,9 +1096,8 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   const rawColor = c.style?.color ?? '#FFFFFF'
   // <input type=color> only speaks #rrggbb — drop an alpha suffix if present.
   const color = /^#[0-9a-fA-F]{6}/.test(rawColor) ? rawColor.slice(0, 7) : '#ffffff'
-  // Defaults mirror TextStyle in edl/schema.py so the control shows what the
-  // renderer will actually use when the field is unset.
-  const font = c.style?.font ?? 'Inter-Black'
+  // '' = the role's own font (style.font null) — a real, distinct choice.
+  const font = c.style?.font ?? ''
   const rawStroke = c.style?.stroke ?? '#000000'
   const stroke = /^#[0-9a-fA-F]{6}/.test(rawStroke) ? rawStroke.slice(0, 7) : '#000000'
   const strokeW = c.style?.stroke_w ?? 4
@@ -1016,11 +1106,15 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   // false would silently un-capitalise every existing hook and super.
   const upperSel = typeof c.style?.upper === 'boolean' ? (c.style.upper ? 'on' : 'off') : ''
   // The font this clip RENDERS in: an explicit style.font, else the role's.
-  // 'Inter-Black' doubles as the schema default and the "unset" sentinel, so it
-  // cannot be taken at face value for a role clip.
-  const effectiveFont = c.style?.font && c.style.font !== 'Inter-Black'
-    ? c.style.font
-    : (ROLE_FONTS[c.role ?? ''] ?? 'Inter-Black')
+  const effectiveFont = (c.style?.font ?? '').replace(/\.ttf$/i, '') || (ROLE_FONTS[c.role ?? 'default'] ?? 'Inter-Bold')
+  // QA-078: the block style — box, alignment, line spacing, shadow, anim length.
+  const bgRaw = c.style?.background ?? null
+  const bgWell = bgRaw && /^#[0-9a-fA-F]{6}/.test(bgRaw) ? bgRaw.slice(0, 7) : '#000000'
+  const bgAlpha = bgRaw && bgRaw.length === 9 ? bgRaw.slice(7) : 'B3'
+  const align = c.style?.align ?? 'center'
+  const lineSpacing = c.style?.line_spacing ?? 1
+  const shadowSel = typeof c.style?.shadow_on === 'boolean' ? (c.style.shadow_on ? 'on' : 'off') : ''
+  const animDur = c.anim_dur ?? 0.35
   // "As typed" is being asked for, in a face that has no lowercase to show.
   const capsOnlyFont = upperSel === 'off' && CAPS_ONLY_FONTS.has(effectiveFont)
   const animIn = c.anim_in ?? ''
@@ -1071,8 +1165,9 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
     // See the media panel: key={c.id} guarantees a fresh field subtree per clip.
     <div className="props" key={c.id}>
       <h2>Properties</h2>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
-        {trackLabel} · {c.role ?? 'default'} · {c.id}
+      {/* "Text · Title", not "Text · super · t_1488d680" (QA-101). */}
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }} title={c.id}>
+        {trackLabel} · {textRoleLabel(c.role)}
       </div>
       <ClipWindowNotice start={start} end={end} />
 
@@ -1082,6 +1177,7 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             through blur so there's a single commit path); an external change
             (chat edit, undo) re-seeds via the key. */}
         <textarea
+          aria-label="Text"
           key={`t${c.id}:${c.text}`}
           defaultValue={c.text}
           rows={3}
@@ -1101,15 +1197,15 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>Size (px)</label>
-            <NumberField value={size} dp={0} step={1} min={8}
+            <NumberField ariaLabel="Size (px)" value={size} dp={0} step={1} min={8}
               onCommit={(n) => void setProp('style.size', n)} />
           </div>
           <div className="field">
             <label>Color</label>
-            <input type="color" key={`c${color}`} defaultValue={color}
+            {/* Previews while picking, one op when the picker settles (QA-078). */}
+            <ColorField value={color} ariaLabel="Color"
               title="Text fill color (#ffffff means: use the role's preset style)"
-              onBlur={(e) => { const v = e.target.value; if (v !== color) void setProp('style.color', v) }}
-              style={{ width: '100%', padding: 0, height: 24 }} />
+              onCommit={(v) => void setProp('style.color', v)} />
           </div>
         </div>
         {/* Everything below was already honoured END TO END by both renderers
@@ -1125,20 +1221,18 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>Font</label>
-            <select key={`f${font}`} defaultValue={font}
+            <select key={`f${font}`} defaultValue={font} aria-label="Font"
               title="Bundled font. Preview and export use the same file."
-              onChange={(e) => { const v = e.target.value; if (v !== font) void setProp('style.font', v) }}
+              onChange={(e) => { const v = e.target.value; if (v !== font) void setProp('style.font', v || null) }}
               style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
-              <option value="Inter-Black">Inter Black (default)</option>
-              <option value="Inter-Bold">Inter Bold</option>
-              <option value="Anton-Regular">Anton</option>
-              <option value="BebasNeue-Regular">Bebas Neue (capitals only)</option>
-              <option value="Montserrat-Bold">Montserrat Bold</option>
+              {/* The first option names the face the ROLE renders in (QA-076). */}
+              <option value="">{FONT_LABELS[ROLE_FONTS[c.role ?? 'default'] ?? 'Inter-Bold']} (default)</option>
+              {Object.entries(FONT_LABELS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
             </select>
           </div>
           <div className="field">
             <label>Outline width</label>
-            <NumberField value={strokeW} dp={0} step={1} min={0} max={40}
+            <NumberField ariaLabel="Outline width" value={strokeW} dp={0} step={1} min={0} max={40}
               onCommit={(n) => void setProp('style.stroke_w', n)} />
           </div>
         </div>
@@ -1177,14 +1271,13 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
         <div className="row two">
           <div className="field">
             <label>Outline color</label>
-            <input type="color" key={`sk${stroke}`} defaultValue={stroke}
-              onBlur={(e) => { const v = e.target.value; if (v !== stroke) void setProp('style.stroke', v) }}
-              style={{ width: '100%', padding: 0, height: 24 }} />
+            <ColorField value={stroke} ariaLabel="Outline color"
+              onCommit={(v) => void setProp('style.stroke', v)} />
           </div>
           <div className="field">
             <label>Animate in / out</label>
             <div className="row" style={{ gap: 4 }}>
-              <select key={`ai${animIn}`} defaultValue={animIn}
+              <select key={`ai${animIn}`} defaultValue={animIn} aria-label="Animate in"
                 onChange={(e) => void setProp('anim_in', e.target.value || null)}
                 style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
                 <option value="">none</option>
@@ -1193,7 +1286,7 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
                 <option value="slide_up">slide up</option>
                 <option value="slide_down">slide down</option>
               </select>
-              <select key={`ao${animOut}`} defaultValue={animOut}
+              <select key={`ao${animOut}`} defaultValue={animOut} aria-label="Animate out"
                 onChange={(e) => void setProp('anim_out', e.target.value || null)}
                 style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
                 <option value="">none</option>
@@ -1205,16 +1298,70 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             </div>
           </div>
         </div>
+        {(animIn || animOut) && (
+          <div className="row two">
+            <div className="field">
+              <label>Animation length (s)</label>
+              <NumberField ariaLabel="Animation length (s)" value={animDur} dp={2} step={0.05} min={0.1} max={3}
+                onCommit={(n) => void setProp('anim_dur', n)} />
+            </div>
+            <div className="field" />
+          </div>
+        )}
+        {/* QA-078 — box, alignment, spacing, shadow: drawn by BOTH renderers
+            through rule 7 of the shared text layout model. */}
+        <div className="row two">
+          <div className="field">
+            <label>Alignment</label>
+            <div className="seg" role="radiogroup" aria-label="Alignment">
+              {(['left', 'center', 'right'] as const).map((a) => (
+                <button key={a} type="button" role="radio" aria-checked={align === a}
+                        aria-label={`Align ${a}`} title={`Align ${a}`}
+                        onClick={() => { if (a !== align) void setProp('style.align', a) }}>
+                  <AlignGlyph align={a} />
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label>Shadow</label>
+            <select key={`sh${shadowSel}`} defaultValue={shadowSel} aria-label="Shadow"
+              onChange={(e) => void setProp('style.shadow_on', e.target.value === '' ? null : e.target.value === 'on')}
+              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+              <option value="">Role default</option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+        </div>
+        <div className="row two">
+          <div className="field">
+            <label>
+              <input type="checkbox" checked={!!bgRaw} aria-label="Background box"
+                onChange={(e) => void setProp('style.background', e.target.checked ? `${bgWell}${bgAlpha}` : null)}
+                style={{ marginRight: 4 }} />
+              Background box
+            </label>
+            {bgRaw && (
+              <ColorField value={bgWell} ariaLabel="Background color"
+                onCommit={(v) => void setProp('style.background', `${v}${bgAlpha}`)} />
+            )}
+          </div>
+          <div className="field" />
+        </div>
+        <Slider label="Line spacing" min={0.8} max={2} step={0.05} value={lineSpacing}
+          format={(v) => `${v.toFixed(2)}×`}
+          onChange={(v) => void setProp('style.line_spacing', v)} />
         {/* transform.opacity — rendered by BOTH paths (server render_text_png
             alpha-multiplies the baked PNG; TextLayer multiplies globalAlpha),
             so this is a live control, not another dead field (tester issue 4:
             "more controls for the text like opacity"). */}
-        <Slider min={0} max={1} step={0.05} value={opacity}
-          format={(v) => `opacity ${v.toFixed(2)}`}
+        <Slider label="Opacity" min={0} max={1} step={0.05} value={opacity}
+          format={(v) => `${v.toFixed(2)}`}
           onChange={(v) => setTx({ opacity: v })} />
       </Section>
 
-      <Section label={`Position (canvas px, ${canvas.w}×${canvas.h})`}>
+      <Section label="Position">
         {/* TextClip transform x/y are ABSOLUTE CANVAS PIXELS (clip centre),
             not relative units — 540/1700 is bottom-centre on a 1080×1920.
             Caption cues are the exception: both renderers deliberately ignore
@@ -1222,21 +1369,23 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             for role='caption'; TextLayer's resolveAnchor mirrors it), so live
             inputs here would be dead controls — show why instead. */}
         {isCaption ? (
-          <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-            Caption position is controlled by the captions style, not per-cue
-            coordinates.
+          // QA-075: the captions' look and position are the TRACK's — one
+          // click to the panel that changes them for every cue.
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span>Every caption shares one position and look.</span>
+            <button type="button" onClick={openCaptionStyle}>Caption style…</button>
           </div>
         ) : (
           <div className="row two">
             <div className="field">
               <label>X</label>
-              <NumberField value={x} dp={0} step={1}
-                onCommit={(n) => void setTx({ x: n })} />
+              <NumberField ariaLabel="X" value={x} dp={0} step={1}
+                onCommit={(n) => void setTx({ x: offAxisSentinel(n, TEXT_AXIS_SENTINEL.x) })} />
             </div>
             <div className="field">
               <label>Y</label>
-              <NumberField value={y} dp={0} step={1}
-                onCommit={(n) => void setTx({ y: n })} />
+              <NumberField ariaLabel="Y" value={y} dp={0} step={1}
+                onCommit={(n) => void setTx({ y: offAxisSentinel(n, TEXT_AXIS_SENTINEL.y) })} />
             </div>
           </div>
         )}
@@ -1244,12 +1393,12 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
           <div className="row two">
             <div className="field">
               <label>Rotation (°)</label>
-              <NumberField value={txRotation} dp={1} step={1}
+              <NumberField ariaLabel="Rotation (°)" value={txRotation} dp={1} step={1}
                 onCommit={(n) => void setTx({ rotation: n })} />
             </div>
             <div className="field">
               <label>Scale</label>
-              <NumberField value={txScale} dp={2} step={0.05} min={0.01}
+              <NumberField ariaLabel="Scale" value={txScale} dp={2} step={0.05} min={0.01}
                 onCommit={(n) => void setTx({ scale: n })} />
             </div>
           </div>
@@ -1264,13 +1413,13 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
                 an unchanged field whose true value was e.g. 1.004 dispatched a
                 no-op op, cleared the redo stack and forced a re-encode.
                 NumberField compares against the SEEDED display value instead. */}
-            <label>Start (s)</label>
-            <NumberField value={start} min={0}
+            <label>Start</label>
+            <TimecodeField ariaLabel="Start" value={start} min={0}
               onCommit={(n) => void setTiming({ start: n })} />
           </div>
           <div className="field">
-            <label>End (s)</label>
-            <NumberField value={end} min={0}
+            <label>End</label>
+            <TimecodeField ariaLabel="End" value={end} min={0}
               onCommit={(n) => void setTiming({ end: n })} />
           </div>
         </div>
@@ -1293,7 +1442,9 @@ function Section({ label, children, onReset }: {
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     margin: '8px 0 4px' }}>
-        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.08 * 10 + 'em',
+        {/* 0.08em, like every other section header — this was
+            `0.08 * 10 + 'em'` = 0.8em ("T I M I N G"). */}
+        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
                       color: 'var(--text-dim)' }}>{label}</div>
         {onReset && (
           <button
@@ -1319,32 +1470,41 @@ function Slider({ label, min, max, step, value, onChange, onLive, format }: {
   format?: (v: number) => string;       // optional live label formatter
 }) {
   // Commit-on-release: the thumb + label track every drag tick locally (0ms),
-  // but the server `onChange` fires ONCE on pointer-up / blur / key-release.
-  // Dragging used to fire a dispatch + full preview render per tick — dozens of
-  // HTTP round-trips and render jobs for one gesture. Now it's exactly one.
+  // but the server `onChange` fires ONCE per gesture — on pointer-up, on blur,
+  // or once a burst of arrow keys goes idle (lib/sliderCommit, QA-087: twelve
+  // Right presses used to be twelve ops and twelve undo steps).
   const [local, setLocal] = React.useState(value)
   const dragging = React.useRef(false)
   // Keep local in sync when the prop changes from outside (undo, chat, etc.)
   // but never stomp the value mid-drag.
   React.useEffect(() => { if (!dragging.current) setLocal(value) }, [value])
 
-  const commit = (v: number) => { if (v !== value) onChange(v) }
+  const h = useSliderCommit(value, (v) => { dragging.current = false; onChange(v) })
+  // ONE layout for every slider (wave-B review): the name on the left, the
+  // value on the right — some had the label above, some none, some
+  // "opacity 1.00" as the readout.
   return (
-    <div className="row" style={{ alignItems: 'center', gap: 6 }}>
+    <div className="row slider-row" style={{ alignItems: 'center', gap: 6 }}>
+      {label && <span className="slider-name" aria-hidden="true">{label}</span>}
+      {/* Named for assistive tech (QA-102): the visible readout is the value
+          ("1.00×"), so without aria-label the slider had no name at all. */}
       <input type="range" min={min} max={max} step={step} value={local}
+        aria-label={label}
+        aria-valuetext={format ? format(local) : undefined}
         onChange={(e) => {
           const v = Number(e.target.value)
           dragging.current = true
           setLocal(v)
+          h.change(v)
           onLive?.(v)
         }}
-        onPointerUp={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
+        onPointerUp={(e) => { dragging.current = false; h.onPointerUp(e) }}
         onPointerCancel={() => { dragging.current = false }}
-        onKeyUp={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
-        onBlur={(e) => { dragging.current = false; commit(Number((e.target as HTMLInputElement).value)) }}
+        onKeyUp={h.onKeyUp}
+        onBlur={() => { dragging.current = false; h.onBlur() }}
         style={{ flex: 1 }} />
-      <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 70, textAlign: 'right' }}>
-        {format ? format(local) : label}
+      <span className="slider-value">
+        {format ? format(local) : String(local)}
       </span>
     </div>
   )
@@ -1434,32 +1594,40 @@ function ColorSlider({ label, min, max, step, commit, onLive, value, init = 0, f
   // clips, undo/redo, chat edits) — but never mid-drag.
   React.useEffect(() => { if (!dragging.current) setLocal(seeded) }, [seeded])
 
-  const release = (e: { target: EventTarget | null }) => {
-    dragging.current = false
-    // Same-value guard (mirrors Slider's `commit`): release fires from
-    // pointerup AND the later blur — without the guard the blur re-commits
-    // the identical value, appending a junk op to undo history.
-    const v = Number((e.target as HTMLInputElement).value)
-    if (v !== seeded) commit(v)
-  }
+  // One op per gesture (lib/sliderCommit, QA-087): pointer-up and the blur
+  // that trails it are one commit, and an arrow-key burst commits once idle.
+  const h = useSliderCommit(seeded, (v) => { dragging.current = false; commit(v) })
   return (
     <div className="row" style={{ alignItems: 'center', gap: 6 }}>
       <span style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 64 }}>{label}</span>
       <input type="range" min={min} max={max} step={step} value={local}
+        aria-label={label}
         onChange={(e) => {
           const v = Number(e.target.value)
           dragging.current = true
           setLocal(v)
+          h.change(v)
           onLive?.(v)
         }}
-        onPointerUp={release}
-        onKeyUp={release}
-        onBlur={release}
+        onPointerUp={(e) => { dragging.current = false; h.onPointerUp(e) }}
+        onKeyUp={h.onKeyUp}
+        onBlur={() => { dragging.current = false; h.onBlur() }}
         style={{ flex: 1 }} />
       <span style={{ fontSize: 10, color: 'var(--text)', minWidth: 46, textAlign: 'right',
                      fontVariantNumeric: 'tabular-nums' }}>
         {format ? format(local) : local.toFixed(2)}
       </span>
     </div>
+  )
+}
+
+/** Three bars, aligned — the monochrome alignment glyph (no emoji). */
+function AlignGlyph({ align }: { align: 'left' | 'center' | 'right' }) {
+  const xs = align === 'left' ? [1, 1, 1] : align === 'right' ? [3, 7, 5] : [2, 4, 3]
+  const ws = align === 'left' ? [12, 8, 10] : align === 'right' ? [12, 8, 10] : [12, 8, 10]
+  return (
+    <svg width="14" height="12" viewBox="0 0 16 12" aria-hidden="true">
+      {[1, 5, 9].map((y, i) => <rect key={y} x={align === 'center' ? (16 - ws[i]) / 2 : xs[i]} y={y} width={ws[i]} height="2" rx="1" fill="currentColor" />)}
+    </svg>
   )
 }

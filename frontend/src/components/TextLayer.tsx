@@ -17,8 +17,9 @@ import { animEnvelope } from '../lib/textAnim'
 import { inEnableWindow } from '../lib/overlayGate'
 import {
   EMOJI_BOX_RATIO, EMOJI_INK_RATIO, SCRIPT_FAMILY, SHADOW_ALPHA, SHADOW_OFFSET,
-  WRAP_WIDTH_RATIO, baselineFor, isAnimated, lineCenters, outlineLineWidth, pickScript,
+  WRAP_WIDTH_RATIO, baselineFor, fontFamilyList, isAnimated, lineCenters, outlineLineWidth, pickScript,
   rgbaCss, roleAnchorY, roleStyle, scaleRotationAt, staticValue, LINE_HEIGHT_RATIO, type RGBA,
+  BG_PAD_X_RATIO, backgroundRect, captionAnchorY, lineX, type TextAlign,
 } from '../lib/textLayout'
 
 interface Props {
@@ -126,7 +127,8 @@ function isText(c: unknown): c is TextClip {
 // so a default-role clip's default-populated style would misread as an
 // explicit override without check (a).
 const SENTINEL_COLOR = '#FFFFFF'
-const SENTINEL_FONT = 'Inter-Black'
+// No font sentinel any more (EDL v3, QA-076): `style.font` is null when unset,
+// so every string is a choice — "Inter-Black" included.
 // TextStyle.size schema default — any other value is an explicit size in
 // EDL-canvas px (the same coordinate system ROLE_STYLES sizes live in).
 const SENTINEL_SIZE = 96
@@ -151,31 +153,40 @@ const SENTINEL_Y = 1700
 // The exact values resolveAnchor treats as "unset". Exported through the
 // published OverlayBox so the interaction layer can avoid committing a drag
 // that would land on one (and silently snap back to the role layout).
-function xSentinelsFor(canvasW: number): number[] {
-  return [SENTINEL_X, canvasW / 2]
+// EDL v3 (QA-076): only the schema default of each axis (x 540, y 1700)
+// means "role layout" — canvas.w/2, canvas.h·0.85 and the role anchor were
+// sentinels in v2, so a typed Y of 918 on 1080p snapped to the anchor.
+function xSentinelsFor(): number[] {
+  return [SENTINEL_X]
 }
-function ySentinelsFor(role: string, canvasH: number, canvasW?: number): number[] {
-  return [SENTINEL_Y, canvasH * 0.85, roleAnchorY(role, canvasH, canvasW)]
+function ySentinelsFor(): number[] {
+  return [SENTINEL_Y]
 }
 
 function resolveAnchor(
-  c: TextClip, role: string, canvasW: number, canvasH: number,
+  c: TextClip, role: string,
 ): { ax: number | null; ay: number | null } {
   if (role === 'caption') return { ax: null, ay: null }
   const tx = (c as TextClip & { transform?: { x?: unknown; y?: unknown } }).transform
   if (!tx) return { ax: null, ay: null }
-  const pick = (v: unknown, sentinels: number[]): number | null => {
-    // A one-key list is a constant someone set on purpose — honoured, never a
-    // sentinel (mirror of resolve_anchor_overrides' `_explicit`).
+  const pick = (v: unknown, sentinel: number): number | null => {
+    // A one-key list is a constant someone set on purpose — honoured (mirror
+    // of resolve_anchor_overrides' `_explicit`).
     if (v && typeof v === 'object') return staticValue(v)
     if (typeof v !== 'number' || !Number.isFinite(v)) return null // animated / missing
-    for (const s of sentinels) if (Math.abs(v - s) < 0.5) return null
-    return v
+    return Math.abs(v - sentinel) < 0.5 ? null : v   // this axis never positioned
   }
-  return {
-    ax: pick(tx.x, xSentinelsFor(canvasW)),
-    ay: pick(tx.y, ySentinelsFor(role, canvasH, canvasW)),
-  }
+  return { ax: pick(tx.x, SENTINEL_X), ay: pick(tx.y, SENTINEL_Y) }
+}
+
+/** Rule 7 inputs from TextClip.style (QA-078) — text_overlay.resolve_block_overrides. */
+function blockStyle(c: TextClip): { background: RGBA | null; align: TextAlign; spacing: number; shadow: boolean | null } {
+  const st = (c.style ?? {}) as { background?: string | null; align?: string; line_spacing?: number; shadow_on?: boolean | null }
+  const align: TextAlign = st.align === 'left' || st.align === 'right' ? st.align : 'center'
+  const spacing = typeof st.line_spacing === 'number' && Number.isFinite(st.line_spacing)
+    ? Math.min(3, Math.max(0.5, st.line_spacing)) : 1
+  return { background: parseHex(st.background ?? null), align, spacing,
+           shadow: typeof st.shadow_on === 'boolean' ? st.shadow_on : null }
 }
 
 function roleFontMatches(role: string, ttf: string): boolean {
@@ -402,6 +413,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     // once per effect run, not per frame: the seam table only changes with
     // the EDL, which is already in this effect's deps.
     const seams = v1SeamsOf(edl)
+    // The captions track's position (QA-075) — where every caption cue sits.
+    const capPos = (edl.tracks.find((tk) => tk.id === 'captions') as { config?: { position?: string } | null } | undefined)
+      ?.config?.position ?? 'bottom'
     let raf = 0
     let lastTime = -1
     let lastDragId: string | null = null
@@ -467,8 +481,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // roleFontMatches above; mirrors the server's resolve_style_overrides).
         const styleColor = c.style?.color && c.style.color.toUpperCase() !== SENTINEL_COLOR
           ? c.style.color : null
-        const styleFont = c.style?.font && c.style.font !== SENTINEL_FONT
-          && !roleFontMatches(role, c.style.font)
+        const styleFont = c.style?.font && !roleFontMatches(role, c.style.font)
           ? cssFont(c.style.font) : null
         // style.size (non-sentinel) is an explicit size in EDL-canvas px —
         // exactly the coordinate system the role size lives in. Mirrors the
@@ -511,7 +524,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         const scriptFamily = script ? SCRIPT_FAMILY[script] : undefined
         const family = scriptFamily ?? styleFont?.family ?? s.font
         const weight = scriptFamily ? String(s.scriptWeight) : (styleFont?.weight ?? s.weight)
-        const fontSpec = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
+        const fontSpec = `${weight} ${fontPx}px ${fontFamilyList(family)}`
         // Custom stroke_w is in canvas px like the server's (rounded there).
         const styleStrokeW = typeof c.style?.stroke_w === 'number'
           && Number.isFinite(c.style.stroke_w) && c.style.stroke_w >= 0
@@ -541,8 +554,12 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         const emojiBox = fontPx * EMOJI_BOX_RATIO
         const maxW = edl.canvas.w * WRAP_WIDTH_RATIO * k * fx
         const lines = wrap(offB, text, maxW, emojiBox)
-        const lineH = fontPx * LINE_HEIGHT_RATIO
+        // Rule 7 (QA-078): alignment inside the block, line spacing, a box.
+        const blk = blockStyle(c)
+        const lineH = fontPx * LINE_HEIGHT_RATIO * blk.spacing
         const totalH = lineH * lines.length
+        const widths = lines.map((l) => lineWidth(offB, l, emojiBox))
+        const blockW = widths.reduce((m, w) => Math.max(m, w), 0)
         // The cap band of THIS font, measured here — the server measures 'H'
         // in Pillow; only the measured band is common ground (rule 3).
         const mH = offB.measureText('H')
@@ -551,11 +568,12 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
 
         // Anchor: an animated axis follows its curve; otherwise the explicit
         // override (non-sentinel) or the ROLE anchor the export uses.
-        const { ax, ay } = resolveAnchor(c, role, edl.canvas.w, edl.canvas.h)
+        const { ax, ay } = resolveAnchor(c, role)
         const noTx = role === 'caption'
         const axC = !noTx && isAnimated(tx?.x) ? sampleKF(tx?.x, localT, edl.canvas.w / 2)
           : (ax ?? edl.canvas.w / 2)
         const ayC = !noTx && isAnimated(tx?.y) ? sampleKF(tx?.y, localT, edl.canvas.h / 2)
+          : role === 'caption' ? captionAnchorY(capPos, edl.canvas.w, edl.canvas.h)
           : (ay ?? roleAnchorY(role, edl.canvas.h, edl.canvas.w))
         let anchorX = axC * fx
         let cy = ayC * fy + env.dy
@@ -570,27 +588,30 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // x/y the renderer ignores. Same for an animated x/y, whose position is
         // a curve a single drag can't express.
         const kfPositioned = isAnimated(tx?.x) || isAnimated(tx?.y)
-        if (role !== 'caption' && !kfPositioned) {
+        // A caption is published too, SELECT-ONLY (QA-075): a click on it
+        // selects the cue (and so its style section) instead of falling
+        // through to the video underneath; it still never drags.
+        if (role === 'caption' || !kfPositioned) {
           boxes.push({
-            id: c.id, kind: 'text',
+            id: c.id, kind: 'text', ...(role === 'caption' ? { selectOnly: true } : {}),
             cx: anchorX, cy,
             // Measured from the wrapped lines, so the box hugs the real glyphs
             // rather than a guessed rectangle.
-            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, lineWidth(offB, l, emojiBox)), 0) / 2 + fontPx * 0.15),
+            hw: Math.max(12, blockW / 2 + fontPx * (blk.background ? BG_PAD_X_RATIO : 0.15)),
             hh: Math.max(10, totalH / 2 + fontPx * 0.12),
             rot: (rotation * Math.PI) / 180,
             x: (anchorX / width) * edl.canvas.w,
             y: (cy / height) * edl.canvas.h,
             sizeCanvasPx,
-            xSentinels: xSentinelsFor(edl.canvas.w),
-            ySentinels: ySentinelsFor(role, edl.canvas.h, edl.canvas.w),
+            xSentinels: xSentinelsFor(),
+            ySentinels: ySentinelsFor(),
           })
         }
 
         // Paint the whole clip into offB at full opacity, then composite it
         // once with the clip's opacity — the export multiplies the FINISHED
         // image's alpha, so stroke, shadow and fill must dim as one layer.
-        const centers = lineCenters(0, lines.length, fontPx)
+        const centers = lineCenters(0, lines.length, fontPx, blk.spacing)
         const place = (g: CanvasRenderingContext2D, ox: number, oy: number) => {
           g.setTransform(dpr, 0, 0, dpr, 0, 0)
           g.translate(anchorX, cy)
@@ -602,14 +623,15 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         }
         const paintText = (g: CanvasRenderingContext2D, paint: 'stroke' | 'fill') => {
           lines.forEach((ln, i) => {
-            drawLine(g, ln, 0, centers[i], baselineFor(centers[i], capAsc, capDesc),
-                     emojiBox, paint)
+            // drawLine centres a line on its x: the aligned left edge + w/2.
+            drawLine(g, ln, lineX(blk.align, 0, blockW, widths[i]) + widths[i] / 2, centers[i],
+                     baselineFor(centers[i], capAsc, capDesc), emojiBox, paint)
           })
         }
         clearDevice(offB)
         offB.lineJoin = 'round'
         offB.lineCap = 'round'
-        if (s.shadow) {
+        if (blk.shadow ?? s.shadow) {
           // Rule 5: a HARD copy of outline + fill, offset SHADOW_OFFSET canvas
           // px (scaled with the block), black at SHADOW_ALPHA — no blur.
           clearDevice(offA)
@@ -640,6 +662,17 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         offB.globalCompositeOperation = 'source-over'
         offB.fillStyle = rgbaCss(fillRgba)
         paintText(offB, 'fill')
+        if (blk.background) {
+          // The box goes BEHIND the finished text (destination-over) — the
+          // export composites its box layer under the text the same way.
+          const [l, tp, r, b, rad] = backgroundRect(0, centers, blockW, fontPx, blk.spacing)
+          offB.globalCompositeOperation = 'destination-over'
+          offB.fillStyle = rgbaCss(blk.background)
+          offB.beginPath()
+          offB.roundRect(l, tp, r - l, b - tp, rad)
+          offB.fill()
+          offB.globalCompositeOperation = 'source-over'
+        }
         offB.setTransform(1, 0, 0, 1, 0, 0)
 
         ctx.save()

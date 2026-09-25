@@ -22,15 +22,20 @@ export interface TextClip {
   start: number
   end: number
   role?: string
-  // Per-clip style overrides; backend defaults ('#FFFFFF' / 'Inter-Black')
-  // mean "use the role style" — TextLayer mirrors that sentinel rule.
+  // Per-clip style overrides. `font` null = the role's own font (EDL v3,
+  // QA-076 — "Inter-Black" is no longer an "unset" sentinel); color '#FFFFFF'
+  // still means "use the role style" — TextLayer mirrors the rule.
   // `upper` is TRI-STATE, not a plain boolean: null/absent means "use the role's
   // own default" (super and hook are capitalised as a house style), so existing
   // projects keep their capitals and only an explicit false lowercases one.
-  style?: { font?: string; size?: number; color?: string; stroke?: string
-            stroke_w?: number; upper?: boolean | null }
+  // background / align / line_spacing / shadow_on: QA-078 (rule 7 of lib/textLayout).
+  style?: { font?: string | null; size?: number; color?: string; stroke?: string
+            stroke_w?: number; upper?: boolean | null
+            background?: string | null; align?: 'left' | 'center' | 'right'
+            line_spacing?: number; shadow_on?: boolean | null }
   anim_in?: string | null
   anim_out?: string | null
+  anim_dur?: number | null
   speaker?: string | null
 }
 
@@ -43,6 +48,8 @@ export interface Track {
   label?: string
   clips: AnyClip[]
   muted?: boolean
+  /** While any track is soloed only soloed tracks are heard (QA-086). */
+  solo?: boolean
 }
 
 export interface Marker {
@@ -85,6 +92,9 @@ export interface SessionInfo {
   // Mirrors the on-disk redo_stack.json (main.py:286). Optional so a response
   // from an older backend still typechecks; store.ts coerces it to a boolean.
   redo_available?: boolean
+  // QA-046: ⌘Z steps the server can still take (snapshot horizon, never the
+  // project's own init op). Optional for an older backend.
+  undo_depth?: number
 }
 
 /** One entry of the project's media library (GET /sessions/:id/media,
@@ -104,6 +114,10 @@ export interface MediaItem {
   /** Timeline clips referencing it, and their ids. */
   uses: number
   clip_ids: string[]
+  /** QA-095: a timeline clip plays it but the file is not on disk (offline). */
+  missing?: boolean
+  /** QA-090: a photo — placed at a default length, extendable like any clip. */
+  still?: boolean
 }
 
 export function isMediaClip(c: AnyClip): c is Clip {

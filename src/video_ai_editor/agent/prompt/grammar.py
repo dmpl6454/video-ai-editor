@@ -194,7 +194,14 @@ _DUCK_OFF_RE = re.compile(
     r"|\bdisabl\w*|\bdeactivat\w*|\bdon'?t\b|\bdo not\b|\bno\b|\bwithout\b|\bnever\b|\bnot\b"
     r"|\bun-?duck\w*|\bremove (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\b(?:duck(?:ing)?|sidechain) off\b"
     r"|\b(?:kill|cancel|drop) (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\bnahi\b|\bband karo\b|\bmat\b"
-    r"|\b(?:undo|revert|get rid of|lose|remove) (?:the |all (?:the )?|that )?(?:auto[- ]?)?(?:duck|sidechain)\w*")
+    r"|\b(?:undo|revert|get rid of|lose|remove) (?:the |all (?:the )?|that )?(?:auto[- ]?)?(?:duck|sidechain)\w*"
+    # QA-018 paraphrases: "stop the music from lowering when I talk", "keep
+    # the soundtrack steady under my voice" — ducking OFF, said in effects.
+    r"|\bstop(?:ped)?\s+(?:the\s+)?(?:background\s+)?(?:music|song|track|soundtrack|tune|bed)\s+from\s+"
+    r"(?:lowering|dipping|ducking|dropping|going down|getting quieter)"
+    r"|\bkeep\s+(?:the\s+)?(?:background\s+)?(?:music|song|track|soundtrack|tune|bed)\s+"
+    r"(?:steady|level|constant|at (?:the same|one|a constant) level)"
+    r"|\b(?:music|song|track|soundtrack|tune|bed)\s+stop\s+(?:dipping|lowering|ducking|dropping)\b")
 
 
 def duck_off(clause: str) -> bool:
@@ -232,7 +239,7 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
 )
 
 #: The music bed, as the object of a level / fade / mute / fit request.
-_MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|background music)"
+_MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|background music|backing track)"
 #: The programme's own sound (v1 clip audio), as the object of a level / mute.
 _VOICE_NOUN = r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound)"
 #: What "fade the ___ in/out" may name besides the music.
@@ -260,9 +267,18 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 (r"\bsnappier\b|\bpacier\b|\bfaster paced\b|\bless rambling\b|\bconcise\b", SYNONYM)),
     "shorts": ((r"\b(?:make|create|generate|give me|produce|extract|pull|find|get)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some|a couple of)?\s*(?:short|vertical|quick|viral|best)?\s*(?:shorts?|clips?|highlights?|reels?|snippets?|teasers?|moments)\b(?! (?:transitions?|captions?))|\bhighlights? reel\b|\bbest (?:bits|moments|parts)\b|\bsplit (?:it|this) into (?:\d+|shorts|clips)\b|\bchop (?:it|this) (?:up )?into\b|\bmake shorts\b|\bshorts out of (?:this|it)\b", EXACT),
                (r"\bhighlights?\b|\bclip (?:it|this) up\b|\bviral moments?\b", SYNONYM)),
-    "reframe": ((r"\b(?:make|turn|flip|convert|reframe|crop|resize|change)\s+(?:it|this|the video|the canvas|the aspect(?: ratio)?)?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b", EXACT),
+    "reframe": ((r"\b(?:make|turn|flip|convert|reframe|crop|resize|change)\s+(?:it|this|the video|the canvas|the aspect(?: ratio)?)?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b"
+                 # QA-018 live pass: "make it fit a phone screen", "turn this into a phone video"
+                 r"|\b(?:fit|for|into|onto)\s+(?:a\s+|the\s+)?(?:phone|mobile)(?:\s+(?:screen|video|format))?\b", EXACT),
                 (r"\bvertical\b|\bportrait\b|\blandscape\b|\bsquare\b|\b9:16\b|\b16:9\b|\b1:1\b|\b4:5\b", SYNONYM)),
-    "duck": ((r"\bduck(?:ing)?\b|\blower the music (?:under|behind|when|during)\b|\bmusic (?:under|behind|below) (?:my|the) (?:voice|speech|talking|dialogue)\b|\bquiet(?:er)? (?:the )?music (?:when|while|under)\b|\bmusic (?:quieter|softer|lower|down) (?:when|while|under|during)\b|\bturn (?:the )?music down (?:when|while|under)\b|\bsidechain\b|\bauto[- ]?duck\b", EXACT),
+    "duck": ((r"\bduck(?:ing)?\b|\blower the music (?:under|behind|when|during)\b|\bmusic (?:under|behind|below) (?:my|the) (?:voice|speech|talking|dialogue)\b|\bquiet(?:er)? (?:the )?music (?:when|while|under)\b|\bmusic (?:quieter|softer|lower|down) (?:when|while|under|during)\b|\bturn (?:the )?music down (?:when|while|under)\b|\bsidechain\b|\bauto[- ]?duck\b"
+             # QA-018 paraphrases ("have the song dip under speech", "stop the
+             # music from lowering when I talk", "keep the soundtrack steady")
+             r"|\b(?:music|song|track|soundtrack|tune|bed)\s+(?:dip|dips|duck|ducks|drop|drops|lower|lowers|go(?:es)? down)\s+(?:under|when|while|during|whenever|for)\b"
+             r"|\bstop(?:ped)?\s+(?:the\s+)?(?:background\s+)?(?:music|song|track|soundtrack|tune|bed)\s+from\s+(?:lowering|dipping|ducking|dropping|going down|getting quieter)\b"
+             r"|\bkeep\s+(?:the\s+)?(?:background\s+)?(?:music|song|track|soundtrack|tune|bed)\s+(?:steady|level|constant)\b"
+             r"|\b(?:music|song|track|soundtrack|tune|bed)\s+stop\s+(?:dipping|lowering|ducking|dropping)\b"
+             r"|\b(?:music|song|track|soundtrack|tune|bed)\s+(?:should(?:n'?t| not)|must(?:n'?t| not)|shall not|can'?t|cannot|may not)\s+(?:dip|duck|drop|lower|get quieter)\b", EXACT),
              (r"\bmusic (?:too )?loud\b|\bmusic (?:is )?drowning\b|\bbalance (?:the )?music\b|\bmusic under\b", SYNONYM)),
     # --- QA-018 -------------------------------------------------------
     # Music nouns a level/fade/mute/fit row names (the object, never the verb).
@@ -270,19 +286,30 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                    rf"|\bmake (?:the\s+)?{_MUSIC_NOUN} (?:end|stop|finish) (?:with|when|at) the (?:video|end|footage)\b"
                    rf"|\b{_MUSIC_NOUN} (?:is |runs? )?(?:too long|longer than the video|past the (?:video|end)|over the end|after the video ends)\b"
                    rf"|\b{_MUSIC_NOUN} (?:to|matches|should match) (?:the )?video(?:'s)? length\b"
-                   rf"|\b{_MUSIC_NOUN} (?:keeps? (?:on )?playing|continues|carries on|goes on|plays on|runs on|still plays)\b"
+                   rf"|\b{_MUSIC_NOUN} (?:keeps? (?:on )?(?:playing|going)|continues|carries on|goes on|plays on|runs on|still plays)\b"
+                   rf"|\b(?:clip|cut|stop|end|kill)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:when|where|as)\s+(?:the\s+)?(?:picture|video|footage|image)\s+(?:stops|ends|finishes)\b"
                    r"(?:\s+(?:after|past|beyond|over|when|once))?"
                    rf"|\b(?:end|stop|finish) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN} (?:when|where|as|with|at) (?:the\s+)?video\b"
                    rf"|\b{_MUSIC_NOUN} (?:should |must |needs to |has to )?(?:end|stop|finish) (?:with|when|at|where) the (?:video|footage)\b"
-                   r"|\bblack (?:tail|screen|frames?) at the end\b", EXACT),),
+                   r"|\bblack (?:tail|screen|frames?) at the end\b"
+                   # "trim the song so it matches the clip" (QA-018 paraphrase)
+                   rf"|\b(?:trim|cut|fit|shorten)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+so\s+(?:that\s+)?(?:it\s+)?"
+                   r"(?:matches|fits|ends with|lines up with|stops with)\s+(?:the\s+)?(?:clip|video|footage)\b", EXACT),),
     # "remove the music" / "delete the song" / "music hatao" — the bed goes.
     "remove_music": ((rf"\b(?:remove|delete|get rid of|take out|take off|clear|lose|ditch|scrap)\s+(?:the\s+|all\s+(?:the\s+)?|my\s+)?(?:background\s+)?{_MUSIC_NOUN}\b(?!\s+(?:from|in|at|for|between|during|under)\b)"
-                      rf"|\b{_MUSIC_NOUN}\s+(?:hatao|hata do|nikalo|nikal do|remove|delete)\b", EXACT),),
+                      rf"|\b{_MUSIC_NOUN}\s+(?:hatao|hata do|nikalo|nikal do|remove|delete)\b"
+                      rf"|\b(?:can|could|should|let)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:go away|disappear|be gone)\b"
+                      rf"|\bno (?:more\s+)?(?:background\s+)?{_MUSIC_NOUN}(?:\s+at all)?$", EXACT),),
     "fade": ((rf"\bfade(?:s|d)?\s+(?:it\s+|this\s+|everything\s+|the\s+(?:{_FADE_OBJECT})\s+|{_MUSIC_NOUN}\s+)?(?:in|out|up|down|away)\b"
+              # "have the soundtrack bow out at the end", "let the tune drift away"
+              rf"|\b{_MUSIC_NOUN}\s+(?:bow|drift|trail|taper|die|ease|fade|slip)\s+(?:out|away|off)\b"
               r"|\bfade[- ]?(?:ins?|outs?)\b|\bfade (?:up |in )?from black\b"
               rf"|\bfade (?:the\s+)?(?:{_FADE_OBJECT}|{_MUSIC_NOUN})\b", EXACT),
              (r"\bfades?\b|\bfading\b", SYNONYM)),
     "mute": ((rf"\b(?:un)?mute(?:d)?\s+(?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}|audio|sound|clip|video|it|everything)\b"
+              rf"|\b(?:kill|cut)\s+(?:the\s+)?(?:audio|sound)\s+(?:on|of|from)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
+              rf"|\bmake\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:silent|mute|muted|inaudible)\b"
+              rf"|\bhush\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
               rf"|\b(?:silence|turn off|switch off|kill)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
               rf"|\b(?:turn|switch)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+off\b"
               rf"|\b(?:turn|switch|put)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:back\s+)?on\b"
@@ -296,6 +323,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"|\b(?:{_MUSIC_NOUN})\s+(?:ka\s+volume\s+|ki\s+awaa?z\s+)?(?:thoda\s+|thodi\s+|aur\s+)?(?:kam|dheere|dheema|dheemi|halka|halki|zyada|jyada|tez|badha\w*)\b"
                 rf"|\b(?:volume|level|gain) (?:of|on|for) (?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
                 rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:quieter|softer|louder|lower)\b"
+                # QA-018 paraphrases: "a touch softer", "less loud", "quiet the music a little"
+                rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:a\s+(?:touch|bit|little|tad|notch)\s+|a\s+lot\s+|much\s+|way\s+)?(?:quieter|softer|louder|lower|less loud|more quiet)\b"
+                rf"|\bquiet(?:en)?\s+(?:down\s+)?(?:the\s+|my\s+)?(?:background\s+)?{_MUSIC_NOUN}\b(?!\s+(?:down\s+)?(?:when|while|under|during))"
                 rf"|\b(?:{_MUSIC_NOUN}) (?:quieter|softer|louder|lower|down|up)\b(?!\s+(?:when|while|under|during))"
                 rf"|\b(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:is |'s )?(?:way |far |much |a bit |a little |kind of |so |really )?(?:too loud|too quiet|too soft|too low|too high)\b(?!\s+(?:when|while|under|during))"
                 rf"|\bvolume (?:down|up) (?:on|for) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
@@ -307,7 +337,13 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     "beat_sync": ((r"\b(?:cut|edit|sync|snap|match|time|align)\w*\s+(?:it\s+|this\s+|the\s+(?:video|cuts|clips|footage)\s+)?(?:to|on|with|along)\s+(?:the\s+)?(?:beat|music|rhythm|drums?|bpm|tempo)\b|\bbeat[- ]?sync\b|\bon[- ]beat\b|\bbeat[- ]match(?:ed|ing)?\b|\bpulse (?:to|with|on) the (?:beat|music)\b|\bcuts? on (?:the )?beats?\b|\bbeat drops?\b", EXACT),
                   (r"\bto the (?:beat|music|rhythm)\b|\brhythm\b", SYNONYM)),
     "music": ((r"\b(?:add|put|drop|lay|throw in|give (?:it|me)|i want|need|play|with|use|set)\s+(?:some\s+|a\s+|the\s+|an?\s+\w+\s+|\w+\s+)?(?:background\s+)?(?:music|track|song|bed|beat|soundtrack|bgm|tune|score)\b|\bbackground music\b|\b(?:chill|upbeat|lo-?fi|cinematic|calm|energetic|epic|happy|dramatic|relaxing)\s+(?:background\s+)?(?:music|track|song|bed|beat|vibes?|tune)\b|\bmusic bed\b|\bbgm\b|\bsome music\b|\bmusic (?:please|pls)\b|\banother (?:track|song|music)\b|\breplace the (?:music|track|song)\b", EXACT),
-              (r"\bmusic\b|\bsoundtrack\b|\bsong\b|\btune\b", SYNONYM)),
+              # A bare music noun is WEAK, not a synonym (QA-018 live pass):
+              # at 0.85 it cleared the run bar, so "the song is overpowering
+              # me" / "have the soundtrack bow out at the end" were answered by
+              # the add-music recipe ("music is already on the timeline")
+              # instead of reaching the Apple Intelligence band, which reads
+              # them. Asking for music always hits an EXACT row above.
+              (r"\bmusic\b|\bsoundtrack\b|\bsong\b|\btune\b", WEAK)),
     "hook": ((r"\b(?:add|put|write|create|give (?:it|me)|make|need|i want|generate|open with)\s+(?:a\s+|an\s+|the\s+|some\s+|a\s+\w+\s+)?(?:hook|opener|opening (?:line|text|title|hook)|cold open|scroll[- ]stopper|attention grabber|punchy (?:intro|opening|start))\b|\bhook (?:it|this|them|the viewer)\b|\b(?:a |the )?hook\b|\bstop the scroll\b|\bgrab attention\b|\bpunchy (?:intro|opening|start)\b|\bfirst (?:3|three) seconds\b", EXACT),
              (r"\bintro text\b|\bopening text\b|\bopener\b|\battention\b", SYNONYM)),
     "color_look": ((r"\b(?:give|make|apply|add|put|use|grade|colou?r[- ]grade|slap on|throw on|set)\s+(?:it|this|the video|the footage|the clips?)?\s*(?:a\s+|an\s+|the\s+|some\s+)?(?:\w+[- ])?(?:look|grade|lut|filter|tone|vibe|feel|colou?r(?:s| grade| grading| correction| look)?|preset|teal[- ]orange|black and white|b ?and ?w)\b|\b(?:cinematic|warm(?:er)?|cool(?:er)?|cold|punchy|vivid|faded|vintage|retro|film|moody|teal(?: and orange| orange)?|black and white|monochrome|b ?and ?w|greyscale|grayscale)\s+(?:look|grade|lut|filter|tone|vibe|feel|colou?rs?|preset|footage)\b|\bmake (?:it|this|the (?:video|footage|colou?rs?)) (?:more )?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w|pop)\b|\bapply (?:a |the )?lut\b|\bcolou?r[- ]?grad(?:e|ing)\b|\blut\b", EXACT),

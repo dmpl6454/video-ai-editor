@@ -279,7 +279,11 @@ def _luma(path: Path, t: float) -> float:
 
 def _render(store) -> Path:
     from video_ai_editor.render.compositor import render_preview
-    res = render_preview(store.edl, Path(store.dir), height=180)
+    # Raw mix levels are measured here; with a target the preview is matched
+    # to the export's loudness (QA-082), which moves every absolute level.
+    edl = store.edl.model_copy(deep=True)
+    edl.canvas.loudness_lufs = None
+    res = render_preview(edl, Path(store.dir), height=180)
     return Path(res.path)
 
 

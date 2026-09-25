@@ -157,7 +157,9 @@ def test_plan_loads_offline_from_a_directory_and_expands_the_draft(tmp_path, exp
     assert len(h.loads) == 1 and Path(h.loads[0]).is_dir() and "/" in h.loads[0]
     assert h.loads[0] != SEVEN_B                      # never a repo id
     assert [s.tool for s in res.plan.steps] == ["recipe:remove_silences", "recipe:captions"]
-    assert res.plan.brain == "local_model" and res.plan.reply == "ok"
+    # The model's free-text reply is dropped (QA-018 live pass: it described
+    # edits before any ran); the reply is built from the run.
+    assert res.plan.brain == "local_model" and res.plan.reply is None
     # The prompt carries recipe cards and the facts block, no tool schemas, no paths.
     assert "remove_silences" in h.prompts[0] and "auto_caption" not in h.prompts[0]
     assert "intents" in h.prompts[0] and "/Users" not in h.prompts[0]
@@ -227,7 +229,9 @@ def test_flat_slot_keys_and_list_values_are_normalised(tmp_path, expander):
                                    {"recipe": "remove_fillers", "slots": {"words": ["um", "uh"]}},
                                    {"recipe": "reframe", "ratio": "9:16"}],
                        "confidence": "0.8", "reply": "done"})
-    res = Harness(tmp_path, output=flat).brain().plan(request(), timeout_s=5)
+    # The prompt names both edits: an on-device draft is grounded to what the
+    # prompt talks about (content.ground_to_prompt, QA-018 live pass).
+    res = Harness(tmp_path, output=flat).brain().plan(request("make it vertical and cut the ums"), timeout_s=5)
     assert res.ok
     assert [s.args for s in res.plan.steps] == [{"ratio": "9:16"}, {"words": "um, uh"}]   # deduped
     assert res.plan.confidence == 0.8
@@ -243,9 +247,11 @@ def test_unstated_confidence_gets_the_documented_default(tmp_path, expander):
     assert Harness(tmp_path, output=absent).brain().plan(request(), timeout_s=5).plan.confidence == UNSTATED_CONFIDENCE
     stated = json.dumps({"intents": [{"recipe": "captions", "slots": {}}], "confidence": 0.35})
     assert Harness(tmp_path, output=stated).brain().plan(request(), timeout_s=5).plan.confidence == 0.35
+    # A draft with no edit is not an answer (QA-018 live pass): the ladder
+    # falls through to the recipes' reading instead of "nothing to change".
     empty = json.dumps({"intents": [], "confidence": 0})
     res = Harness(tmp_path, output=empty).brain().plan(request(), timeout_s=5)
-    assert res.ok and res.plan.confidence == 0.0 and res.plan.steps == []
+    assert not res.ok and res.reason == "rejected:no edit in the draft"
 
 
 def test_generator_exception_falls_through_as_decode(tmp_path, expander):

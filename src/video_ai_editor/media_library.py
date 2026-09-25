@@ -72,12 +72,42 @@ def _load_state(session_dir: Path) -> dict[str, Any]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"removed": {}, "probe": {}}
+        return {"removed": {}, "probe": {}, "names": {}}
     if not isinstance(data, dict):
-        return {"removed": {}, "probe": {}}
+        return {"removed": {}, "probe": {}, "names": {}}
     removed = data.get("removed") if isinstance(data.get("removed"), dict) else {}
     probe = data.get("probe") if isinstance(data.get("probe"), dict) else {}
-    return {"removed": removed, "probe": probe}
+    names = data.get("names") if isinstance(data.get("names"), dict) else {}
+    return {"removed": removed, "probe": probe, "names": names}
+
+
+def record_display_name(session_dir: Path, src: str | Path, name: str) -> None:
+    """Remember what the user called a LOOSE upload (audio, voice-over, an
+    audio-only file handed off from the video ingress) — QA-045. A video
+    import keeps its name in its own ingest.json; a loose file has only its
+    sanitised disk name (`upload_6f3d3a.mp3` for a Hindi title), so the name
+    is kept here, keyed like every other row, by resolved path."""
+    name = (name or "").strip()
+    if not name:
+        return
+    session_dir = Path(session_dir)
+    with _STATE_LOCK:
+        state = _load_state(session_dir)
+        state["names"] = {**state["names"], str(Path(src).resolve()): name[:255]}
+        _save_state(session_dir, state)
+
+
+def forget_display_name(session_dir: Path, src: str | Path) -> None:
+    """Drop the name `record_display_name` kept for a file that is gone (a
+    refused relink's replacement), so no stale row outlives it."""
+    session_dir = Path(session_dir)
+    key = str(Path(src).resolve())
+    with _STATE_LOCK:
+        state = _load_state(session_dir)
+        if key not in state["names"]:
+            return
+        state["names"] = {k: v for k, v in state["names"].items() if k != key}
+        _save_state(session_dir, state)
 
 
 def _save_state(session_dir: Path, state: dict[str, Any]) -> None:
@@ -184,12 +214,28 @@ def _scan_ingests(uploads: Path, represented: set[str]) -> list[dict[str, Any]]:
         probe = data.get("probe") or {}
         vs = _first_video_stream(probe)
         name = data.get("display_name") or (_display_from_disk(Path(raw).name) if raw else norm.name)
-        out.append(_entry(norm.resolve(), name=name, kind="video", origin="upload",
-                          duration=probe.get("duration"), width=vs.get("width"), height=vs.get("height")))
+        still = bool(data.get("still"))
+        if still:
+            # QA-090: the source runs for minutes so the clip can be extended;
+            # what the bin shows (and a drag onto the timeline uses) is the
+            # length a photo is placed at.
+            from .ingest.still import STILL_DEFAULT_SECONDS
+            duration = STILL_DEFAULT_SECONDS
+        else:
+            duration = probe.get("duration")
+        # QA-089: a clamped source is listed at its REAL size — the 1080p
+        # file is only the editing proxy; exports render from the original.
+        dims = data.get("clamped_from") or [vs.get("width"), vs.get("height")]
+        entry = _entry(norm.resolve(), name=name, kind="video", origin="upload",
+                       duration=duration, width=dims[0], height=dims[1])
+        if still:
+            entry["still"] = True
+        out.append(entry)
     return out
 
 
-def _scan_loose(uploads: Path, represented: set[str], cache: dict[str, Any]) -> list[dict[str, Any]]:
+def _scan_loose(uploads: Path, represented: set[str], cache: dict[str, Any],
+                names: dict[str, str] | None = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for sub in sorted(_LOOSE_DIRS):
         base = uploads / sub
@@ -210,21 +256,11 @@ def _scan_loose(uploads: Path, represented: set[str], cache: dict[str, Any]) -> 
             kind = "video" if facts.get("has_video") and ext not in _AUDIO_EXTS else "audio"
             origin = {"audio": "audio", "vo": "voiceover", "imported": "imported"}[sub]
             represented.add(key)
-            out.append(_entry(f.resolve(), name=_display_from_disk(f.name), kind=kind, origin=origin,
+            name = (names or {}).get(key) or _display_from_disk(f.name)
+            out.append(_entry(f.resolve(), name=name, kind=kind, origin=origin,
                               duration=facts.get("duration"), width=facts.get("width"),
                               height=facts.get("height")))
     return out
-
-
-def _derived_name(src: Path, by_src: dict[str, dict[str, Any]]) -> str:
-    """`reframe_ab12.mp4` whose `.origin` names an upload → `clip.mp4 (reframe)`."""
-    origin = src.with_name(src.name + ".origin")
-    try:
-        parent = by_src.get(str(Path(origin.read_text(encoding="utf-8").strip()).resolve()))
-    except OSError:
-        parent = None
-    tag = src.stem.split("_", 1)[0]
-    return f"{parent['name']} ({tag})" if parent else src.name
 
 
 def list_media(session_dir: Path, edl) -> list[dict[str, Any]]:
@@ -238,7 +274,7 @@ def list_media(session_dir: Path, edl) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if uploads.is_dir():
         items += _scan_ingests(uploads, represented)
-        items += _scan_loose(uploads, represented, cache)
+        items += _scan_loose(uploads, represented, cache, state["names"])
     uses = _uses(edl)
     by_src = {it["src"]: it for it in items}
     # On the timeline but not found by the scan: derived renders, legacy paths.
@@ -250,11 +286,21 @@ def list_media(session_dir: Path, edl) -> list[dict[str, Any]]:
             if not src:
                 continue
             p = Path(src).resolve()
-            if str(p) in by_src or not p.exists():
+            if str(p) in by_src:
                 continue
             kind = "audio" if track.type in ("music", "vo", "audio") or p.suffix.lower() in _AUDIO_EXTS else "video"
+            from .media_offline import display_name_for
+            if not p.exists():
+                # QA-095: missing media is LISTED (offline, with its real
+                # name and a Relink action), never silently dropped.
+                it = _entry(p, name=display_name_for(session_dir, src), kind=kind,
+                            origin="timeline", duration=None, width=None, height=None)
+                it["missing"] = True
+                items.append(it)
+                by_src[it["src"]] = it
+                continue
             facts = _probe_facts(p, cache) or {}
-            it = _entry(p, name=_derived_name(p, by_src), kind=kind, origin="timeline",
+            it = _entry(p, name=display_name_for(session_dir, str(p)), kind=kind, origin="timeline",
                         duration=facts.get("duration"), width=facts.get("width"), height=facts.get("height"))
             items.append(it)
             by_src[it["src"]] = it
@@ -268,7 +314,7 @@ def list_media(session_dir: Path, edl) -> list[dict[str, Any]]:
         # (an Undo can bring its clips back after the item was removed).
         if gone and not ids:
             continue
-        visible.append({**it, "uses": len(ids), "clip_ids": ids})
+        visible.append({"missing": False, **it, "uses": len(ids), "clip_ids": ids})
     if cache != state["probe"]:
         # Drop cache rows for files that no longer exist, then persist — merged
         # into the file as it is NOW, so a concurrent removal survives.

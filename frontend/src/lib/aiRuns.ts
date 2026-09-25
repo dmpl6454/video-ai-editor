@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { api, type FeatureReport, type ToolSchema } from '../api'
 import { errorMessage } from '../store'
+import type { DownloadReport } from './modelDownloads'
 
 export type RunState =
   | { status: 'idle' }
@@ -34,6 +35,10 @@ interface AiRunsState {
   // this flag instead.
   panelVisible: boolean
   setPanelVisible(visible: boolean): void
+  // QA-065: which tools download model weights on their next run (GET
+  // /api/downloads). Re-read before a run and after one finishes.
+  downloads: DownloadReport | null
+  refreshDownloads(): Promise<DownloadReport | null>
 }
 
 export const useAiRuns = create<AiRunsState>((set, get) => ({
@@ -50,6 +55,17 @@ export const useAiRuns = create<AiRunsState>((set, get) => ({
   featuresError: null,
   loading: false,
   panelVisible: false,
+  downloads: null,
+  refreshDownloads: async () => {
+    try {
+      const r = (await api.getDownloads()).downloads
+      set({ downloads: r })
+      return r
+    } catch (e) {
+      console.warn('[ai] download report unavailable:', errorMessage(e))
+      return get().downloads
+    }
+  },
   setPanelVisible: (visible) => set((st) => (st.panelVisible === visible ? {} : { panelVisible: visible })),
 
   // Tools and features are fetched INDEPENDENTLY: cards render the moment the
@@ -67,7 +83,7 @@ export const useAiRuns = create<AiRunsState>((set, get) => ({
     const featuresDone = api.getFeatures(!!opts?.refresh)
       .then((r) => set({ features: r }))
       .catch((e: unknown) => set({ featuresError: errorMessage(e) }))
-    await Promise.all([toolsDone, featuresDone])
+    await Promise.all([toolsDone, featuresDone, get().refreshDownloads()])
     set({ loading: false })
   },
 }))

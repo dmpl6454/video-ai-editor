@@ -52,6 +52,9 @@ export interface CatalogEntry {
   readOnly?: boolean                     // no timeline mutation — the card renders the result view
   runAsJob?: boolean                     // force runDispatchJob even when not in ASYNC_DISPATCH_TOOLS
   advanced?: boolean                     // path-typing tools: badge "advanced · source install"
+  /** Search-only terms (the engine names a pro may type — "ESRGAN", "Demucs"),
+   *  never displayed: the card's copy speaks editor language (QA-101). */
+  keywords?: string
   fields?: Record<string, FieldOverride>; hide?: string[]; order?: string[]
 }
 
@@ -69,20 +72,20 @@ const BBOX_SEED = [0.4, 0.4, 0.2, 0.2]
 
 export const AI_CATALOG: readonly CatalogEntry[] = [
   // ---- Auto edit --------------------------------------------------------
-  { tool: 'remove_silences', group: 'Auto edit', label: 'Remove silences',
-    description: 'Detect silences in a track and ripple-cut them out. Defaults suit talking-head speech.',
+  { tool: 'remove_silences', keywords: 'ripple', group: 'Auto edit', label: 'Remove silences',
+    description: 'Find the pauses in a track, cut them out and close the gaps. The defaults suit talking-head speech.',
     runAsJob: true,
     fields: { track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' } } },
   { tool: 'remove_fillers', group: 'Auto edit', label: 'Remove filler words',
-    description: 'Cut “um”, “uh”, “like”, “you know” out of the transcript and ripple-close the gaps.',
+    description: 'Cut “um”, “uh”, “like” and “you know” and close the gaps.',
     runAsJob: true,
     fields: { words: { label: 'Words (blank = the built-in list)' },
               track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' } } },
   { tool: 'auto_cut_to_beats', group: 'Auto edit', label: 'Cut to the beat',
-    description: 'Split v1 on every Nth beat of the music track. Needs music on the timeline first.',
+    description: 'Cut the main video on every Nth beat of the music. Add music to the timeline first.',
     gate: 'beats', runAsJob: true },
   { tool: 'auto_reframe', group: 'Auto edit', label: 'Auto-reframe',
-    description: 'Switch the canvas aspect and reframe every clip — subject-tracked when the tracker is installed.',
+    description: 'Change the aspect ratio and reframe every clip to keep the subject in shot.',
     // The handler only imports ai.reframe when subject_track is on; the
     // centre-crop path needs no tracker, so an untracked run stays available
     // on a packaged app / no-opencv install.
@@ -90,22 +93,22 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
     fields: { ratio: { default: '9:16' },
               subject_track: { widget: 'checkbox', default: true, label: 'Track the subject (else centre-crop)' } } },
   { tool: 'make_shorts', group: 'Auto edit', label: 'Find shorts',
-    description: 'Pick highlight ranges from the v1 footage (transcript + audio energy). Optionally save each as a new session.',
+    description: 'Pick the strongest moments from the main video. Optionally save each one as its own project.',
     readOnly: true, runAsJob: true },
-  { tool: 'cut_range', group: 'Auto edit', label: 'Cut range',
-    description: 'Remove the In→Out range from a track and ripple-close the gap.',
+  { tool: 'cut_range', keywords: 'ripple', group: 'Auto edit', label: 'Cut range',
+    description: 'Remove the range between your In and Out marks and close the gap.',
     hide: ['dry_run'],
     fields: { track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' },
               start: { widget: 'time', defaultFrom: 'inMark', label: 'Start (In mark)' },
               end: { widget: 'time', defaultFrom: 'outMark', label: 'End (Out mark)' } } },
   { tool: 'multicam', group: 'Auto edit', label: 'Multicam switch',
-    description: 'Audio-sync several angle files, pick the best take per window and rewrite v1 with the cuts.',
+    description: 'Sync several camera angles by their audio and cut between them on the main video.',
     advanced: true,
     fields: { srcs: { widget: 'list', label: 'Angle files — absolute paths, first = sync reference' } } },
 
   // ---- Captions & speech -----------------------------------------------
-  { tool: 'auto_caption', group: 'Captions & speech', label: 'Auto captions',
-    description: 'Re-transcribe with Whisper large-v3 and lay broadcast-grade cues on the captions track.',
+  { tool: 'auto_caption', keywords: 'Whisper', group: 'Captions & speech', label: 'Auto captions',
+    description: 'Transcribe the speech again at the highest accuracy and lay the captions on the captions track.',
     gate: 'captions',
     fields: { target: { defaultFrom: 'captionTargetPref', label: 'Caption language (blank = as spoken)' },
               language: { label: 'Spoken language (blank = auto-detect)' },
@@ -115,74 +118,76 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
   // exists (Whisper's, or an imported subtitle file) — it never touches the
   // ASR stack, so a packaged Mac without faster-whisper can still run it.
   { tool: 'add_caption_track', group: 'Captions & speech', label: 'Captions from transcript',
-    description: 'Lay the existing transcript (Whisper’s, or an imported subtitle file) on the captions track — no re-transcription.' },
-  { tool: 'translate_captions', group: 'Captions & speech', label: 'Translate captions',
-    description: 'Translate the captions track in place, locally. The first run downloads the MADLAD model (~3 GB).',
+    description: 'Put the existing transcript (or an imported subtitle file) on the captions track, without transcribing again. Choosing another style keeps captions you edited by hand.',
+    // QA-074: a restyle keeps hand-edited cues; this opts into re-laying them.
+    fields: { rebuild: { label: 'Re-lay every caption from the transcript (discards hand edits)' } } },
+  { tool: 'translate_captions', keywords: 'MADLAD', group: 'Captions & speech', label: 'Translate captions',
+    description: 'Translate the captions on this Mac. The first run downloads a translation model (about 3 GB).',
     gate: 'translate', runAsJob: true,
     fields: { target_lang: { widget: 'select', options: ['hi', 'en', 'es', 'fr', 'de', 'pt', 'ja', 'ko', 'zh'], default: 'hi' },
               source_lang: { label: 'Source language (blank = detected)' } } },
-  { tool: 'diarize', group: 'Captions & speech', label: 'Detect speakers',
-    description: 'Who speaks when. Read-only — returns speaker turns you can colour captions by.',
+  { tool: 'diarize', keywords: 'diarization pyannote', group: 'Captions & speech', label: 'Detect speakers',
+    description: 'Find who speaks when, so captions can be coloured by speaker. Doesn’t change the timeline.',
     gate: 'diarize', readOnly: true, runAsJob: true },
-  { tool: 'assign_caption_speakers', group: 'Captions & speech', label: 'Colour captions by speaker',
-    description: 'Run diarization and colour each speaker’s captions from the brand palette.',
+  { tool: 'assign_caption_speakers', keywords: 'diarization', group: 'Captions & speech', label: 'Colour captions by speaker',
+    description: 'Detect the speakers and colour each one’s captions from the brand palette.',
     gate: 'diarize', runAsJob: true, hide: ['turns'] },
   { tool: 'name_speakers', group: 'Captions & speech', label: 'Name speakers',
-    description: 'Map diarized labels to display names for lower-thirds (SPEAKER_00=Host).',
+    description: 'Give the detected speakers names for lower thirds (for example Speaker 1 = Host).',
     fields: { mapping: { label: 'Mapping — one SPEAKER_XX=Name per line' } } },
   { tool: 'import_srt', group: 'Captions & speech', label: 'Import subtitles',
     description: 'Replace the transcript with a .srt / .vtt / .ass file, then run “Captions from transcript” to lay it on the timeline.',
     fields: { path: { widget: 'file', accept: '.srt,.vtt,.ass', label: 'Subtitle file' } } },
   { tool: 'export_srt', group: 'Captions & speech', label: 'Export .srt',
-    description: 'Write the transcript as SubRip. Blank path → <session>/captions.srt.',
+    description: 'Save the captions as a .srt subtitle file. Leave the destination blank to save it with the project.',
     readOnly: true, fields: { path: { label: 'Destination (blank = session folder)' } } },
   { tool: 'export_vtt', group: 'Captions & speech', label: 'Export .vtt',
-    description: 'Write the transcript as WebVTT. Blank path → <session>/captions.vtt.',
+    description: 'Save the captions as a .vtt subtitle file. Leave the destination blank to save it with the project.',
     readOnly: true, fields: { path: { label: 'Destination (blank = session folder)' } } },
   { tool: 'export_ass', group: 'Captions & speech', label: 'Export .ass',
-    description: 'Write the transcript as Advanced SubStation. Blank path → <session>/captions.ass.',
+    description: 'Save the captions as a styled .ass subtitle file. Leave the destination blank to save it with the project.',
     readOnly: true, fields: { path: { label: 'Destination (blank = session folder)' } } },
 
   // ---- Audio ------------------------------------------------------------
   { tool: 'noise_reduce', group: 'Audio', label: 'Reduce noise',
     description: 'Spectrally denoise the selected clip’s audio (hiss, fans, room tone).',
     gate: 'noise_reduce', needsClip: 'media', runAsJob: true, hide: ['clip_id'] },
-  { tool: 'vocal_isolate', group: 'Audio', label: 'Isolate vocals',
-    description: 'Demucs: pull the vocal stem onto the vo track and mute the clip’s own audio.',
+  { tool: 'vocal_isolate', keywords: 'Demucs stems', group: 'Audio', label: 'Isolate vocals',
+    description: 'Separate the voice onto the voiceover track and mute the clip’s own audio.',
     gate: 'stems', needsClip: 'media', hide: ['clip_id'] },
-  { tool: 'instrumental_isolate', group: 'Audio', label: 'Isolate instrumental',
-    description: 'Demucs: everything except vocals onto the music track; the clip’s own audio is muted.',
+  { tool: 'instrumental_isolate', keywords: 'Demucs stems', group: 'Audio', label: 'Isolate instrumental',
+    description: 'Separate everything except the voice onto the music track and mute the clip’s own audio.',
     gate: 'stems', needsClip: 'media', hide: ['clip_id'] },
-  { tool: 'tts_voiceover', group: 'Audio', label: 'AI voiceover',
-    description: 'Piper text-to-speech onto the vo track. The voice downloads on first use (~60 MB).',
+  { tool: 'tts_voiceover', keywords: 'Piper tts', group: 'Audio', label: 'AI voiceover',
+    description: 'Read your text aloud onto the voiceover track. The voice downloads on first use (about 60 MB).',
     gate: 'tts', runAsJob: true,
     fields: { start: { widget: 'time', defaultFrom: 'playhead' } } },
 
   // ---- Enhance ----------------------------------------------------------
-  { tool: 'upscale', group: 'Enhance', label: 'AI upscale',
-    description: 'Real-ESRGAN 2× / 4× on the selected clip. About a second per frame.',
+  { tool: 'upscale', keywords: 'Real-ESRGAN esrgan', group: 'Enhance', label: 'AI upscale',
+    description: 'Sharpen the selected clip to 2× or 4× its resolution. Takes about a second per frame.',
     gate: 'upscale', needsClip: 'video', hide: ['clip_id'] },
-  { tool: 'stabilize', group: 'Enhance', label: 'Stabilize',
-    description: 'Two-pass vidstab on the selected clip. Slow — two full passes over the footage.',
+  { tool: 'stabilize', keywords: 'vidstab', group: 'Enhance', label: 'Stabilize',
+    description: 'Smooth out camera shake on the selected clip. Slow: it reads the footage twice.',
     gate: 'stabilize', needsClip: 'video', hide: ['clip_id'] },
-  { tool: 'smooth_slow_motion', group: 'Enhance', label: 'Smooth slow-mo',
-    description: 'RIFE frame interpolation: the clip becomes factor× longer with generated in-between frames.',
+  { tool: 'smooth_slow_motion', keywords: 'RIFE interpolation', group: 'Enhance', label: 'Smooth slow-mo',
+    description: 'Slow the selected clip down 2× or 4× with generated in-between frames.',
     gate: 'interpolate', needsClip: 'video', hide: ['clip_id'],
     fields: { factor: { widget: 'select', options: [2, 4], default: 2 } } },
 
   // ---- Cutout & effects -------------------------------------------------
-  { tool: 'remove_background', group: 'Cutout & effects', label: 'Remove background',
-    description: 'rembg cutout of the selected clip. Flattens onto green so Chroma key can composite it, or keep true alpha.',
+  { tool: 'remove_background', keywords: 'rembg', group: 'Cutout & effects', label: 'Remove background',
+    description: 'Cut the subject out of the selected clip, onto green for keying or onto transparency.',
     gate: 'bg_remove', needsClip: 'video', hide: ['clip_id'],
     fields: { bg_color: { label: 'Background colour', nullable: { label: 'True alpha (no fill colour)' } } } },
   { tool: 'chroma_key', group: 'Cutout & effects', label: 'Chroma key',
-    description: 'Green/blue-screen key on the selected clip (v1 or PIP).',
+    description: 'Key out a green or blue screen on the selected clip.',
     // Sets four fields and commits — instant. Not a job: it would queue
     // behind an export in api/jobs.py's two-worker pool for a 5 ms edit.
     needsClip: 'video', hide: ['clip_id'],
     fields: { color: { label: 'Key colour', nullable: { label: 'Auto (clear an existing key)' } } } },
-  { tool: 'object_erase', group: 'Cutout & effects', label: 'Erase object',
-    description: 'LaMa inpaint a box out of the selected clip across a time window. The box is drawn on the preview.',
+  { tool: 'object_erase', keywords: 'LaMa inpaint', group: 'Cutout & effects', label: 'Erase object',
+    description: 'Paint out an object inside a box on the selected clip for a stretch of time. Draw the box on the preview.',
     gate: 'object_erase', needsClip: 'video', hide: ['clip_id'],
     fields: { bbox: { default: BBOX_SEED, label: 'Box (x, y, w, h as fractions of the frame)' },
               t_end: { label: 'End (blank = clip end)' } } },
@@ -209,7 +214,7 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
     description: 'Draft three hook lines from the transcript. Pick one to drop it in as a hook overlay.',
     readOnly: true, keyHint: NO_KEY_HINT_HOOK },
   { tool: 'apply_brand_kit', group: 'Text & brand', label: 'Brand kit',
-    description: 'Handle, hashtags, palette, font and end-card — applied as a persistent watermark + end card.',
+    description: 'Your handle, hashtags, colours, font and end card, applied as a watermark and an end card.',
     fields: { end_card: { label: 'End-card image (absolute path)' } } },
   { tool: 'apply_template', group: 'Text & brand', label: 'Show template',
     description: 'Lay down a built-in show’s hook, caption style and labels; refine afterwards.',
@@ -219,10 +224,10 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
 
   // ---- Find & search ----------------------------------------------------
   { tool: 'find_moments', group: 'Find & search', label: 'Find moments',
-    description: 'Natural-language search over the footage: transcript first, vision-verified on top.',
+    description: 'Describe a moment in words and find it in the footage.',
     readOnly: true, runAsJob: true, keyHint: NO_KEY_HINT_VISION },
-  { tool: 'search_media', group: 'Find & search', label: 'Search footage',
-    description: 'Match frames to a phrase with a local CLIP model, search the transcript, or both.',
+  { tool: 'search_media', keywords: 'CLIP', group: 'Find & search', label: 'Search footage',
+    description: 'Find frames that match a phrase, search what was said, or both.',
     gate: 'visual_search', gateUnless: { field: 'scope', equals: 'spoken' },
     readOnly: true, runAsJob: true },
   { tool: 'find_broll', group: 'Find & search', label: 'Find b-roll',
@@ -230,17 +235,17 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
     readOnly: true,   // a filename/sidecar scan, not ML — not a job, see chroma_key
     fields: { bin: { label: 'B-roll folder (blank = configured default)' } } },
   { tool: 'match_style', group: 'Find & search', label: 'Match a reference',
-    description: 'Fingerprint a reference video: cuts/min, shot length, BPM, palette.',
+    description: 'Measure a reference video’s pacing, shot length, tempo and colours.',
     readOnly: true, runAsJob: true, advanced: true },
   { tool: 'audit_aesthetic', group: 'Find & search', label: 'Style audit',
-    description: 'House-style check: hook stack, pacing, captions — a 0–100 score with fixes.',
+    description: 'Score the edit from 0 to 100 on hook, pacing and captions, with suggested fixes.',
     readOnly: true },
 
   // ---- Export -----------------------------------------------------------
   { tool: 'apply_export_preset', group: 'Export', label: 'Platform preset',
-    description: 'Canvas, fps, bitrate and loudness for a platform — the top-bar 9:16 buttons only set the canvas.' },
+    description: 'Set the size, frame rate, quality and loudness a platform expects.' },
   { tool: 'set_loudness_target', group: 'Export', label: 'Export loudness',
-    description: 'LUFS target for the export loudness pass (Reels/TikTok −16, YouTube −14).',
+    description: 'How loud the export is (Reels and TikTok −16 LUFS, YouTube −14).',
     fields: { lufs: { label: 'Target LUFS', nullable: { label: 'Off (skip the loudness pass)' } } } },
 ]
 
@@ -271,7 +276,8 @@ export function filterCatalog(entries: readonly CatalogEntry[], query: string): 
   if (!q) return [...entries]
   return entries.filter((e) =>
     e.label.toLowerCase().includes(q) || e.tool.includes(q)
-    || e.description.toLowerCase().includes(q) || e.group.toLowerCase().includes(q))
+    || e.description.toLowerCase().includes(q) || e.group.toLowerCase().includes(q)
+    || (e.keywords ?? '').toLowerCase().includes(q))
 }
 
 export function groupCatalog(entries: readonly CatalogEntry[]): { group: AiGroup; entries: CatalogEntry[] }[] {

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { api } from '../api'
 import { isMediaClip, clipEnd, type Clip } from '../types'
+import { useSliderCommit } from '../lib/useSliderCommit'
 import './EffectsPanel.css'
+import { Icon } from './Icon'
 
 // The backend Effect model isn't declared on types.ts's Clip ("M1 frontend
 // ignores transform/effects/etc.") — read it via a cast, same pattern as
@@ -196,7 +198,7 @@ export function EffectsPanel() {
         onClick={() => setOpen((o) => !o)}
         title="Filters, effects & LUT looks"
       >
-        {open ? '▼' : '▶'} ✨ Effects
+        {open ? '▼' : '▶'} <Icon name="effects" size={13} /> Effects
       </button>
       {open && (
         <div style={{ marginTop: 8 }}>
@@ -223,13 +225,16 @@ export function EffectsPanel() {
           <div className="fx-subhead">Looks (LUTs)</div>
           <div className="fx-slider-row">
             <label>Intensity</label>
-            <input
-              type="range" min={0} max={100} step={1} value={localIntensity} disabled={disabled}
-              onChange={(e) => { draggingIntensity.current = true; setLocalIntensity(Number(e.target.value)) }}
-              onPointerUp={(e) => { draggingIntensity.current = false; void commitIntensity(Number((e.target as HTMLInputElement).value)) }}
-              onPointerCancel={() => { draggingIntensity.current = false }}
-              onKeyUp={(e) => { draggingIntensity.current = false; void commitIntensity(Number((e.target as HTMLInputElement).value)) }}
-              onBlur={(e) => { draggingIntensity.current = false; void commitIntensity(Number((e.target as HTMLInputElement).value)) }}
+            {/* Keyed by clip: a commit still waiting on its idle delay lands
+                on the clip it was made on (lib/useSliderCommit, QA-087). */}
+            <IntensityRange
+              key={clip?.id ?? ''}
+              value={localIntensity}
+              stored={appliedIntensity ?? 100}
+              disabled={disabled}
+              onLive={(v) => { draggingIntensity.current = true; setLocalIntensity(v) }}
+              onEnd={() => { draggingIntensity.current = false }}
+              onCommit={(v) => { draggingIntensity.current = false; void commitIntensity(v) }}
             />
             <span>{localIntensity}%</span>
           </div>
@@ -275,12 +280,14 @@ export function EffectsPanel() {
 
           {clip && effects.length > 0 && (
             <>
-              <div className="fx-subhead" style={{ marginTop: 10 }}>Applied to selected clip</div>
+              <div className="fx-subhead" style={{ marginTop: 10 }}>
+                {targetIsFallback ? 'On the clip at the playhead' : 'On the selected clip'}
+              </div>
               <div className="fx-chips">
                 {effects.map((e, i) => (
                   <span key={`${e.type}-${i}`} className="fx-chip">
                     {chipLabel(e)}
-                    <button title={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}>×</button>
+                    <button title={`Remove ${chipLabel(e)}`} aria-label={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}><span aria-hidden="true">×</span></button>
                   </span>
                 ))}
               </div>
@@ -289,5 +296,24 @@ export function EffectsPanel() {
         </div>
       )}
     </div>
+  )
+}
+
+/** The LUT intensity range: one commit per gesture (QA-087). */
+function IntensityRange({ value, stored, disabled, onLive, onEnd, onCommit }: {
+  value: number; stored: number; disabled: boolean
+  onLive: (v: number) => void; onEnd: () => void; onCommit: (v: number) => void
+}) {
+  const h = useSliderCommit(stored, onCommit)
+  return (
+    <input
+      type="range" min={0} max={100} step={1} value={value} disabled={disabled}
+      aria-label="Look intensity"
+      onChange={(e) => { const v = Number(e.target.value); onLive(v); h.change(v) }}
+      onPointerUp={(e) => { onEnd(); h.onPointerUp(e) }}
+      onPointerCancel={onEnd}
+      onKeyUp={h.onKeyUp}
+      onBlur={() => { onEnd(); h.onBlur() }}
+    />
   )
 }

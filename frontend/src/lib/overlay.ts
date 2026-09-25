@@ -233,6 +233,11 @@ export interface OverlayBox {
   // nudges off them. Published from TextLayer so the two lists cannot diverge.
   xSentinels?: number[]
   ySentinels?: number[]
+  // QA-075: a caption cue is clickable (selects it, so its style is one click
+  // away in the inspector) but never draggable or resizable — the captions
+  // block owns caption position, so a drag would commit an x/y the renderer
+  // ignores.
+  selectOnly?: boolean
 }
 
 export function boxFromStickerGeom(id: string, g: StickerGeom): OverlayBox {

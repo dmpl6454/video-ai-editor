@@ -1,6 +1,7 @@
 import { useEffect, type KeyboardEvent } from 'react'
 import { isMediaClip, isTextClip, type EDL } from '../types'
-import { baseName } from '../lib/paths'
+import { displayNameFor } from '../lib/mediaNames'
+import { useMediaNameMap } from './MediaName'
 import { useGuideRects } from '../lib/guideRects'
 import { useAiRuns } from '../lib/aiRuns'
 import type { Field } from '../lib/schemaForm'
@@ -36,7 +37,8 @@ function errorText(f: Field, err: string | undefined): string | undefined {
   return err
 }
 
-function clipOptions(edl: EDL | null, filter: 'overlay' | 'video'): { id: string; label: string }[] {
+function clipOptions(edl: EDL | null, filter: 'overlay' | 'video',
+                     names: ReadonlyMap<string, string> = new Map()): { id: string; label: string }[] {
   if (!edl) return []
   const out: { id: string; label: string }[] = []
   for (const t of edl.tracks) {
@@ -49,7 +51,7 @@ function clipOptions(edl: EDL | null, filter: 'overlay' | 'video'): { id: string
       }
     } else if (t.type === 'video') {
       for (const c of t.clips) {
-        if (isMediaClip(c)) out.push({ id: c.id, label: `${t.id} · ${baseName(c.src)} @ ${c.start.toFixed(1)}s` })
+        if (isMediaClip(c)) out.push({ id: c.id, label: `${t.id} · ${displayNameFor(c.src, names)} @ ${c.start.toFixed(1)}s` })
       }
     }
   }
@@ -99,6 +101,7 @@ function BboxField({ id, tool, label, value, disabled, errId, onChange }: {
 
 export function AiToolForm({ tool, label, fields, values, errors, disabled, edl, playhead, onChange, onSubmit }: Props) {
   const onEnter = submitOnEnter(onSubmit)
+  const mediaNames = useMediaNameMap()      // QA-045: clips by their real names
 
   const control = (f: Field, id: string, errId: string | undefined) => {
     const v = values[f.name]
@@ -133,7 +136,7 @@ export function AiToolForm({ tool, label, fields, values, errors, disabled, edl,
         )
       }
       case 'clipSelect': {
-        const opts = clipOptions(edl, f.clipFilter ?? 'video')
+        const opts = clipOptions(edl, f.clipFilter ?? 'video', mediaNames)
         return (
           <select {...common} value={text} onChange={(e) => onChange(f.name, e.target.value)}>
             <option value="">{opts.length ? '— choose —' : `no ${f.clipFilter === 'overlay' ? 'sticker or text overlays' : 'video clips'} on the timeline`}</option>

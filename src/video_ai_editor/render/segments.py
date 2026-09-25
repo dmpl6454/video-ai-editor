@@ -186,6 +186,11 @@ def build_segmented_chunk(
     # published by an atomic rename of a finished render, so a present file is
     # a complete one — and a 12-min clip has ~120 of them to check per build.
     missing = [(s, p) for s, p in zip(subs, seg_paths) if not _present(p)]
+    # Reused segments are the youngest cache entries now (QA-106 LRU).
+    from .cache_budget import touch as _touch
+    for p in seg_paths:
+        if _present(p):
+            _touch(p)
     # Unique per build: two requests may build the same chunk at once.
     audio_path = dst.with_name(
         f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.sound.mp4")

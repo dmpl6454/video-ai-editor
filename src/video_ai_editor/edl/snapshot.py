@@ -28,7 +28,18 @@ class EDLStore:
     on every commit so a crash recovers the project.
     """
 
-    MAX_UNDO = 30
+    # QA-046: undo depth is bounded by COUNT and by BYTES, not by 30. A
+    # snapshot is the whole EDL (2-12 KB for an ordinary timeline, a few
+    # hundred KB for a long captioned one), so 30 was ~29 undo steps while
+    # History listed every op and the Undo button stayed enabled. The count
+    # cap keeps a pathological session from holding thousands of files; the
+    # byte budget keeps a heavy one from filling the disk. The newest
+    # MIN_UNDO_SNAPSHOTS always survive the budget, so at least one step of
+    # undo exists whatever the timeline weighs. `undo_depth` is the honest
+    # number the UI binds to.
+    MAX_UNDO = 500
+    UNDO_DISK_BUDGET_BYTES = 64 * 1024 * 1024
+    MIN_UNDO_SNAPSHOTS = 2
 
     def __init__(self, session_dir: Path):
         self.dir = session_dir
@@ -79,6 +90,32 @@ class EDLStore:
     @property
     def redo_available(self) -> bool:
         return bool(self._redo_stack)
+
+    @property
+    def undo_depth(self) -> int:
+        """How many ⌘Z steps are actually available (QA-046).
+
+        One per retained snapshot beyond the oldest, stopping at the project's
+        own "init" op: create_session commits an empty timeline as op 1, and
+        undoing THAT emptied History to "No edits yet" on a fresh project
+        without changing anything the user made. A store whose ops log is
+        shorter than its snapshots (an unreadable ops.json was reset) keeps
+        the snapshot count — the snapshots are the state, the log is history.
+        """
+        n = max(0, len(self._snapshot_files()) - 1)
+        depth = 0
+        for op in reversed(self.ops.ops):
+            if depth >= n or op.tool == "init":
+                return depth
+            depth += 1
+        return n
+
+    @property
+    def undo_available(self) -> bool:
+        return self.undo_depth > 0
+
+    def _snapshot_files(self) -> list[Path]:
+        return sorted(self.snapshots_dir.glob("*.json"))
 
     @property
     def edl_path(self) -> Path:
@@ -253,19 +290,35 @@ class EDLStore:
         return self.ops.last().edl_hash_after if self.ops.last() else ""
 
     def _snapshot(self, h: str, payload: str | None = None) -> None:
-        # Keep last MAX_UNDO snapshots; named by op seq + 1 so the initial
-        # snapshot (seeded by __init__ as 00000) survives the first commit.
+        # Named by op seq + 1 so the initial snapshot (seeded by __init__ as
+        # 00000) survives the first commit.
         snap = self.snapshots_dir / f"{len(self.ops.ops) + 1:05d}_{h}.json"
         snap.write_text(payload if payload is not None else self.edl.to_json(),
                         encoding="utf-8")
-        snaps = sorted(self.snapshots_dir.glob("*.json"))
-        for old in snaps[:-self.MAX_UNDO]:
+        self._prune_snapshots()
+
+    def _prune_snapshots(self) -> None:
+        """Drop the oldest snapshots past MAX_UNDO or past the byte budget."""
+        snaps = self._snapshot_files()
+        keep = min(len(snaps), self.MAX_UNDO)
+        total = 0
+        kept = 0
+        for p in reversed(snaps[-keep:] if keep else []):
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            if kept >= self.MIN_UNDO_SNAPSHOTS and total + size > self.UNDO_DISK_BUDGET_BYTES:
+                break
+            total += size
+            kept += 1
+        for old in snaps[:len(snaps) - kept]:
             old.unlink(missing_ok=True)
 
     def undo(self) -> bool:
-        snaps = sorted(self.snapshots_dir.glob("*.json"))
-        if len(snaps) < 2:
+        if not self.undo_available:
             return False
+        snaps = self._snapshot_files()
         # Push current onto redo stack
         self._redo_stack.append(self.edl.model_copy(deep=True))
         self._save_redo_stack()

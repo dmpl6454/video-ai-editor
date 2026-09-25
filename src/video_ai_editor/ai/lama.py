@@ -29,7 +29,8 @@ def available() -> bool:
 
 def object_erase(src: Path, cache_dir: Path, *,
                  bbox: tuple[float, float, float, float],
-                 t_start: float = 0.0, t_end: float | None = None) -> Path:
+                 t_start: float = 0.0, t_end: float | None = None,
+                 on_progress=None, cancel_event=None) -> Path:
     """Erase the rectangular region `bbox` (x, y, w, h in normalized 0..1 coords)
     from frames between t_start..t_end. Outside the range, frames are passed
     through unchanged. Returns the new mp4.
@@ -58,25 +59,32 @@ def object_erase(src: Path, cache_dir: Path, *,
     import json as _json
     s = _json.loads(probe.stdout)["streams"][0]
     w, hh = int(s["width"]), int(s["height"])
-    fps_str = s["avg_frame_rate"]
-    if "/" in fps_str:
-        a, b = fps_str.split("/")
-        fps_val = float(a) / max(1.0, float(b))
-    else:
-        fps_val = 30.0
 
     work = cache_dir / f"lama_work_{h}"
     if work.exists():
         shutil.rmtree(work)
+    try:
+        return _erase_frames(src, dst, work, w, hh, bbox, t_start, t_end,
+                             on_progress=on_progress, cancel_event=cancel_event)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _erase_frames(src: Path, dst: Path, work: Path, w: int, hh: int,
+                  bbox: tuple[float, float, float, float], t_start: float,
+                  t_end: float | None, *, on_progress=None, cancel_event=None) -> Path:
+    """QA-066: extract → inpaint frame by frame (progress per frame, a cancel
+    point between frames) → frame-exact encode at the source's exact rate."""
+    from fractions import Fraction
+    from . import jobio
+    stages = jobio.Stages(on_progress, extract=0.05, model=0.85, encode=0.10)
+    rate, _dur, _n = jobio.video_facts(src)
+    fps_val = float(Fraction(rate)) if rate else 30.0
     in_dir = work / "in"
     out_dir = work / "out"
     in_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(in_dir / "f%05d.png")],
-        capture_output=True, check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
+    jobio.extract_frames(src, in_dir, on_progress=stages.sub("extract"), cancel_event=cancel_event)
 
     # Build the binary mask once — same shape for every frame.
     mask = Image.new("L", (w, hh), 0)
@@ -113,26 +121,25 @@ def object_erase(src: Path, cache_dir: Path, *,
     frames = sorted(in_dir.glob("*.png"))
     n = len(frames)
     end = t_end if t_end is not None else n / fps_val
+    model_step = stages.sub("model")
     for i, fp in enumerate(frames):
+        jobio.check(cancel_event)
         t = i / fps_val
         out_path = out_dir / fp.name
         if t < t_start or t > end:
             shutil.copyfile(fp, out_path)
-            continue
-        img = Image.open(fp).convert("RGB")
-        result = lama(img, mask)
-        result.save(out_path)
+        else:
+            img = Image.open(fp).convert("RGB")
+            result = lama(img, mask)
+            result.save(out_path)
+        model_step((i + 1) / n)
 
-    # Re-encode preserving original audio
-    subprocess.run(
-        [_pu.FFMPEG, "-y",
-         "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
-         "-i", str(src),
-         "-map", "0:v", "-map", "1:a?",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-shortest", str(dst)],
-        capture_output=True, check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    shutil.rmtree(work, ignore_errors=True)
+    # Re-encode preserving original audio, every frame kept.
+    part = _pu.part_path(dst)
+    try:
+        jobio.encode_frames(out_dir, src, part, rate=rate,
+                            on_progress=stages.sub("encode"), cancel_event=cancel_event)
+        _pu.replace_with_retry(part, dst)
+    finally:
+        _pu.unlink_with_retry(part)
     return dst

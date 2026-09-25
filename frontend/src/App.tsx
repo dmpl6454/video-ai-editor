@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useStore } from './store'
+import { useStore, startSessionWatch } from './store'
+import { ConnectionBanner } from './components/ConnectionBanner'
 import { TopBar } from './components/TopBar'
 import { LeftPane } from './components/LeftPane'
 import { Preview } from './components/Preview'
@@ -13,8 +14,10 @@ import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
 import { ExportModal } from './components/ExportModal'
+import { CaptionStylePanel } from './components/CaptionStylePanel'
 import { ToastHost } from './components/Toast'
 import { Splitter } from './components/Splitter'
+import { browserStorage, readRightTab, writeRightTab, type RightTab } from './lib/rightTab'
 import { useKeymap } from './keymap/engine'
 
 // The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
@@ -30,6 +33,9 @@ export default function App() {
   const init = useStore((s) => s.init)
   useEffect(() => { void init() }, [init])
   useKeymap()  // customizable CapCut / Premiere / Final Cut keymaps
+  // QA-105/109: notice edits made in another window (focus, visibility, a
+  // light poll) and whether the engine is still there.
+  useEffect(() => startSessionWatch(window), [])
 
   // Resizable panel sizes (Task 9) — persisted in the store (localStorage-
   // backed); drive them onto the .app/.center grids as CSS custom properties
@@ -50,6 +56,18 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
   const showNarrowWarning = viewportWidth < MIN_EDITOR_WIDTH && !narrowDismissed
+
+  // The right sidebar's tab: Inspector (default) or the docked Chat (QA-061).
+  // Remembered per browser, so closing Chat stays closed across reloads.
+  const [rightTab, setRightTabState] = useState<RightTab>(() => readRightTab(browserStorage()))
+  const setRightTab = (t: RightTab) => { setRightTabState(t); writeRightTab(browserStorage(), t) }
+  const onTabKey = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const next: RightTab = e.key === 'Home' ? 'inspect' : e.key === 'End' ? 'chat' : rightTab === 'chat' ? 'inspect' : 'chat'
+    setRightTab(next)
+    document.getElementById(`right-tab-${next}`)?.focus()
+  }
 
   const appVars = {
     '--left-w': `${leftW}px`,
@@ -127,26 +145,45 @@ export default function App() {
         // silently un-collapse the panel; only the explicit tab does that.
         disabled={!rightPanelOpen}
       />
-      <aside className={`sidebar right${rightPanelOpen ? '' : ' collapsed'}`}>
+      <aside className={`sidebar right${rightPanelOpen ? '' : ' collapsed'}${rightTab === 'chat' ? ' is-chat' : ''}`}>
         <button
           className="right-panel-toggle"
           onClick={() => setRightPanelOpen(!rightPanelOpen)}
           title={rightPanelOpen ? 'Collapse panel' : 'Expand panel'}
+          aria-label={rightPanelOpen ? 'Collapse properties panel' : 'Expand properties panel'}
           aria-expanded={rightPanelOpen}
         >
-          {rightPanelOpen ? '›' : '‹'}
+          <span aria-hidden="true">{rightPanelOpen ? '›' : '‹'}</span>
         </button>
         <div className="right-panel-content">
-          <Properties />
-          <OpsLog />
+          {/* Chat is DOCKED here as a tab (QA-061) — it used to float over the
+              timeline tracks and History, open on every load. */}
+          <div className="right-tabs" role="tablist" aria-label="Right panel" data-keymap-ignore onKeyDown={onTabKey}>
+            <button type="button" role="tab" id="right-tab-inspect" aria-controls="right-panel-inspect"
+                    aria-selected={rightTab === 'inspect'} tabIndex={rightTab === 'inspect' ? 0 : -1}
+                    onClick={() => setRightTab('inspect')}>Inspector</button>
+            <button type="button" role="tab" id="right-tab-chat" aria-controls="right-panel-chat"
+                    aria-selected={rightTab === 'chat'} tabIndex={rightTab === 'chat' ? 0 : -1}
+                    onClick={() => setRightTab('chat')}>Chat</button>
+          </div>
+          <div role="tabpanel" id="right-panel-inspect" aria-labelledby="right-tab-inspect" hidden={rightTab !== 'inspect'}>
+            <Properties />
+            <OpsLog />
+          </div>
+          {/* Kept mounted while hidden: a turn keeps streaming, and the
+              conversation is still there when the tab is reopened. */}
+          <div role="tabpanel" id="right-panel-chat" aria-labelledby="right-tab-chat" className="right-chat" hidden={rightTab !== 'chat'}>
+            <ChatOverlay onClose={() => setRightTab('inspect')} />
+          </div>
         </div>
       </aside>
-      <ChatOverlay />
       <Help />
       <ShortcutsSettings />
       <FileDropOverlay />
+      <ConnectionBanner />
     </div>
     <ExportModal />
+    <CaptionStylePanel />
     <ToastHost />
     </>
   )

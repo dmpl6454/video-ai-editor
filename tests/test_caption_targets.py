@@ -119,8 +119,10 @@ def spy(monkeypatch):
 
 
 def _cues(store):
+    # A cue's line break is layout, not content: ig_chunky wraps short
+    # phrases onto two lines (QA-071), so read each cue as one line.
     cap = store.edl.get_track("captions")
-    return [c.text for c in (cap.clips if cap else [])]
+    return [c.text.replace("\n", " ") for c in (cap.clips if cap else [])]
 
 
 # --- English target ---------------------------------------------------------

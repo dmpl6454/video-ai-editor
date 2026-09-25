@@ -76,6 +76,9 @@ def test_pip_clip_gain_is_honored(tmp_path: Path, keep_video_cache: bool):
         Track(id="v1", type="video", clips=[v1_clip]),
         Track(id="v2", type="video", z=1, clips=[pip_clip]),
     ])
+    # Raw mix levels: a loudness-matched preview (QA-082) would lift the
+    # quieter mix back to the target, exactly as the export's loudnorm does.
+    edl.canvas.loudness_lufs = None
     edl.recompute_duration()
 
     loud = _mean_volume(render_preview(edl, tmp_path, height=180).path)

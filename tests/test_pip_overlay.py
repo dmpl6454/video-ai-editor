@@ -140,15 +140,21 @@ def test_a_same_lane_move_never_rebases(tmp_path):
 # ------------------------------------------------------------ the time offset
 
 def test_a_pip_input_is_offset_to_its_timeline_position(tmp_path):
+    """Placed IN THE GRAPH, in whole frames (QA-002): `-itsoffset` broke
+    input seeking (ffmpeg kept the frames from the preceding keyframe and
+    counted `-t` from there), so the offset is a setpts shift after the
+    stream is on the project grid — 8.0 s at 30 fps is tick 240."""
     s = _store(tmp_path)
     s.edl.get_track("v2").clips.append(
         Clip(id="p", src="/x/a.mp4", in_=1.0, out=5.0, start=8.0))
-    _, inputs, _, _ = _chain(s.edl)
-    assert "-itsoffset" in inputs
-    assert inputs[inputs.index("-itsoffset") + 1] == "8.000"
-    # …decoding only the trimmed span, expressed as a DURATION.
-    assert inputs[inputs.index("-ss") + 1] == "1.000"
-    assert inputs[inputs.index("-t") + 1] == "4.000"
+    chain, inputs, _, _ = _chain(s.edl)
+    assert "-itsoffset" not in inputs
+    assert "setpts=PTS-STARTPTS+240," in chain
+    # …decoding only the trimmed span (half a frame of seek pre-roll, then
+    # 120 frames + 2 of slack), expressed as a DURATION.
+    assert inputs[inputs.index("-ss") + 1] == "0.983333"
+    assert inputs[inputs.index("-t") + 1] == "4.083333"
+    assert "trim=end_frame=120," in chain
 
 
 def test_a_duration_is_used_not_an_absolute_end(tmp_path):
@@ -176,9 +182,10 @@ def test_every_pip_gets_its_own_offset(tmp_path):
     v2 = s.edl.get_track("v2")
     v2.clips.append(Clip(id="p1", src="/x/a.mp4", in_=0, out=2, start=1.0))
     v2.clips.append(Clip(id="p2", src="/x/b.mp4", in_=0, out=2, start=6.0))
-    _, inputs, _, _ = _chain(s.edl)
-    offsets = [inputs[i + 1] for i, a in enumerate(inputs) if a == "-itsoffset"]
-    assert offsets == ["1.000", "6.000"]
+    chain, _, _, _ = _chain(s.edl)
+    import re as _re
+    offsets = _re.findall(r"setpts=PTS-STARTPTS\+(\d+),", chain)
+    assert offsets == ["30", "180"]
 
 
 def test_the_render_behaviour_salt_moved_for_this_fix():

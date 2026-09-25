@@ -18,8 +18,10 @@
 import type { EDL, MediaItem } from '../types'
 import { isMediaClip } from '../types'
 import { baseName, isAudioPath } from './paths'
+import { prettyDiskName } from './mediaNames'
 
 const MEDIA_LANES = new Set(['video', 'audio', 'music', 'vo'])
+const AUDIO_LANES = new Set(['audio', 'music', 'vo'])
 
 export interface BinRow {
   /** Library id; null for a timeline-only row the library has not listed. */
@@ -32,6 +34,10 @@ export interface BinRow {
   height: number | null
   uses: number
   clipIds: string[]
+  /** QA-095: the file is gone from disk — offline, with a Relink action. */
+  missing: boolean
+  /** QA-090: a photo. */
+  still: boolean
 }
 
 /** src → ids of the timeline clips on media lanes that reference it. */
@@ -56,12 +62,19 @@ export function binRows(items: readonly MediaItem[] | null, edl: EDL | null): Bi
     for (const id of it.clip_ids) if (live.has(id)) ids.add(id)
     ids.forEach((id) => covered.add(id))
     return { id: it.id, src: it.src, name: it.name, kind: it.kind, duration: it.duration,
-             width: it.width, height: it.height, uses: ids.size, clipIds: [...ids] }
+             width: it.width, height: it.height, uses: ids.size, clipIds: [...ids],
+             missing: !!it.missing, still: !!it.still }
   })
+  // A src on an audio lane is audio whatever its extension (an audio-only
+  // .mp4 on the Music lane, QA-092).
+  const onAudioLane = new Set((edl?.tracks ?? []).filter((t) => AUDIO_LANES.has(t.type))
+    .flatMap((t) => t.clips.filter(isMediaClip).map((c) => c.src)))
   for (const [src, ids] of uses) {
     if (ids.every((id) => covered.has(id))) continue
-    rows.push({ id: null, src, name: baseName(src), kind: isAudioPath(src) ? 'audio' : 'video',
-                duration: null, width: null, height: null, uses: ids.length, clipIds: ids })
+    rows.push({ id: null, src, name: prettyDiskName(baseName(src)),
+                kind: isAudioPath(src) || onAudioLane.has(src) ? 'audio' : 'video',
+                duration: null, width: null, height: null, uses: ids.length, clipIds: ids,
+                missing: false, still: false })
   }
   return rows
 }
@@ -78,7 +91,11 @@ export function clockDuration(sec: number | null | undefined): string {
 
 /** The row's second line: length, size, and whether the timeline uses it. */
 export function binMeta(row: BinRow): string {
-  const parts = [clockDuration(row.duration)]
+  if (row.missing) {
+    // QA-095: the one thing that matters about an offline item.
+    return `Offline — file missing${row.uses ? ` · used ×${row.uses}` : ''}`
+  }
+  const parts = [row.still ? 'photo' : clockDuration(row.duration)]
   if (row.kind === 'video' && row.width && row.height) parts.push(`${row.width}×${row.height}`)
   if (row.kind === 'audio') parts.push('audio')
   parts.push(row.uses ? `used ×${row.uses}` : 'not on timeline')

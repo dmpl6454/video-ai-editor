@@ -7,6 +7,8 @@ import { useAiRuns, type RunState } from '../lib/aiRuns'
 import { buildArgs, fieldsFor, initialValues, reseedContextValues, type FormContext } from '../lib/schemaForm'
 import { AiToolForm } from './AiToolForm'
 import { AiResult } from './AiResult'
+import { etaText } from '../lib/aiEta'
+import { consentText, downloadBadge, downloadKeyFor, pendingDownload, type DownloadInfo } from '../lib/modelDownloads'
 
 interface Props {
   entry: CatalogEntry
@@ -68,6 +70,11 @@ function useNow(running: boolean, doneAt: number | null): number {
 }
 
 const secs = (ms: number) => Math.max(0, Math.floor(ms / 1000))
+// QA-066: the heavy tools report real progress now, so say how long is left.
+const etaSuffix = (elapsedS: number, progress: number) => {
+  const eta = etaText(elapsedS, progress)
+  return eta ? ` · ${eta}` : ''
+}
 const ago = (ms: number) => { const s = secs(ms); return s < 60 ? `${s}s ago` : `${Math.floor(s / 60)} min ago` }
 
 // What the screen reader hears. It changes only on transitions — never on
@@ -92,7 +99,7 @@ function RunningState({ run, now, onCancel }: { run: Running; now: number; onCan
   const pct = Math.round(run.progress * 100)
   const determinate = run.reportsProgress && pct > 0
   const text = run.cancelling ? `Stopping… finishing the current chunk · ${elapsed}s`
-    : run.reportsProgress ? `Working… ${pct > 0 ? `${pct}% · ` : ''}${elapsed}s`
+    : run.reportsProgress ? `Working… ${pct > 0 ? `${pct}% · ` : ''}${elapsed}s${etaSuffix(elapsed, run.progress)}`
     : `Working… ${elapsed}s — this tool can’t be interrupted; the result will still land`
   return (
     <div className="ai-state ai-state-running">
@@ -120,6 +127,10 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
   const features = useAiRuns((s) => s.features)
   const featuresError = useAiRuns((s) => s.featuresError)
   const setRun = useAiRuns((s) => s.setRun)
+  const downloads = useAiRuns((s) => s.downloads)
+  const refreshDownloads = useAiRuns((s) => s.refreshDownloads)
+  // QA-065: a first run that downloads model weights asks first, with the size.
+  const [consent, setConsent] = useState<DownloadInfo | null>(null)
   const patchRun = useAiRuns((s) => s.patchRun)
   const edl = useStore((s) => s.edl)
   const selection = useStore((s) => s.selection)
@@ -172,13 +183,22 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
   const disabledReason = !gate.ok ? `${gate.feature} isn’t installed` : !clipReq.ok ? clipReq.reason : null
   const canRun = !disabledReason && !running
 
-  const submit = async () => {
+  const pending = pendingDownload(downloads, downloadKeyFor(tool, values ?? {}))
+
+  const submit = async (consented = false) => {
     if (!canRun || !values) return
     const built = buildArgs(fields, values)
     setErrors(built.errors)
     if (Object.keys(built.errors).length) return
     const args = clipReq.ok && clipReq.clipId ? { ...built.args, clip_id: clipReq.clipId } : built.args
-    await onRun(entry, args)
+    if (!consented) {
+      // Re-read what is on disk right before the run: a download may have
+      // finished (or been deleted) since the panel loaded.
+      const need = pendingDownload(await refreshDownloads(), downloadKeyFor(tool, args))
+      if (need) { setConsent(need); return }
+    }
+    setConsent(null)
+    try { await onRun(entry, args) } finally { void refreshDownloads() }
   }
 
   const cancel = async () => {
@@ -212,9 +232,11 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
         <span className="ai-chevron" aria-hidden="true">›</span>
       </button>
       <div className="ai-card-meta">
-        {isJob && <span className="ai-badge" title="Runs in the background — the rest of the editor stays usable">long</span>}
-        {entry.readOnly && <span className="ai-badge" title="Doesn’t change the timeline">read-only</span>}
-        {entry.advanced && <span className="ai-badge" title="Takes file paths typed by hand — meant for a source install">advanced · source install</span>}
+        {/* Editor-language badges (QA-101): "long" / "read-only" /
+            "advanced · source install" were developer shorthand on every card. */}
+        {entry.readOnly && <span className="ai-badge" title="Shows a result; doesn’t change the timeline">Report</span>}
+        {entry.advanced && <span className="ai-badge" title="Takes file paths typed by hand">Advanced</span>}
+        {pending && <span className="ai-badge warn" title={consentText(pending)}>{downloadBadge(pending)}</span>}
         {!gate.ok && <span className="ai-badge warn">Not installed</span>}
         {gate.ok && gate.checking && !featuresError && <span className="ai-badge dim">checking…</span>}
         {noKey && <span className="ai-badge dim" title={entry.keyHint}>no API key</span>}
@@ -233,11 +255,21 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
           <AiToolForm tool={tool} label={entry.label} fields={fields} values={values} errors={errors}
                       disabled={running} edl={edl} playhead={playhead} onChange={change}
                       onSubmit={() => { void submit() }} />
-          {run.status === 'idle' && (
+          {run.status === 'idle' && !consent && (
             <>
               {disabledReason && <p className="ai-hint">{disabledReason}</p>}
-              <button type="button" className="primary ai-run" disabled={!canRun} onClick={() => { void submit() }}>Run</button>
+              <button type="button" className="primary ai-run" disabled={!canRun} onClick={() => { void submit() }}
+                      title={isJob ? 'Runs in the background — keep editing while it works' : undefined}>Run</button>
             </>
+          )}
+          {run.status === 'idle' && consent && (
+            <div className="ai-consent" role="alertdialog" aria-label="Download before running?">
+              <p>{consentText(consent)}</p>
+              <div className="ai-consent-actions">
+                <button type="button" className="primary" autoFocus onClick={() => { void submit(true) }}>Download and run</button>
+                <button type="button" onClick={() => setConsent(null)}>Cancel</button>
+              </div>
+            </div>
           )}
           {run.status === 'running' && <RunningState run={run} now={now} onCancel={() => { void cancel() }} />}
           {run.status === 'done' && (

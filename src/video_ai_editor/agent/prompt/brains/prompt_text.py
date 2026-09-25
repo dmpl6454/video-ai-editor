@@ -142,7 +142,10 @@ def draft_key(prompt: str, prior_clarification: dict | None) -> str:
 
 _NON_SLOT_KEYS = frozenset({"recipe", "slots", "why", "reason", "name_of_recipe"})
 _FM_SLOT_FIELDS = ("style", "target", "ratio", "platform", "mood", "look", "count", "duration_s",
-                   "factor", "text", "handle", "name", "lufs", "words")
+                   "factor", "text", "handle", "name", "lufs", "words",
+                   # QA-018 remainder: the fade / volume / mute / duck slots the
+                   # helper's IntentItem gained (tools/fm-planner IntentDraft.swift).
+                   "edge", "change", "db", "muted", "enabled")
 
 
 def _scalar(value: Any) -> str | float | int | bool | None:

@@ -180,3 +180,30 @@ export function answersPayload(questions: NeedsInput[], answers: Answers): Answe
 export function totalDownloadBytes(items: { bytes: number }[] | undefined): number {
   return (items ?? []).reduce((n, d) => n + (Number.isFinite(d.bytes) ? d.bytes : 0), 0)
 }
+
+/**
+ * The card's helper line, derived from what is ACTUALLY selected (QA-063).
+ * It used to read "Defaults are pre-selected — Enter runs" on every card,
+ * including one with no default, nothing highlighted and Run disabled.
+ */
+export function clarifyHelp(questions: NeedsInput[], answers: Answers, escLabel: string | null): string {
+  const esc = escLabel ? `Esc picks “${escLabel}”` : 'Esc drops the question'
+  const missing = missingRequired(questions, answers)
+  if (missing.length) {
+    const what = missing.length === 1 ? 'Choose an answer' : `Answer the ${missing.length} questions`
+    return `${what} to run · ${esc}`
+  }
+  const suggested = questions.some((q) => hasValue(q.default)
+    && String(effective(q, answers)) === String(q.default))
+  return `${suggested ? 'Suggested answers are selected · ' : ''}Enter runs · ${esc}`
+}
+
+/** "Still needed: Which platform?" — the QUESTIONS, not their keys, and only
+ *  once the user has tried to run (the card used to show a red
+ *  "Needed: platform" before anyone had done anything). */
+export function neededLine(questions: NeedsInput[], answers: Answers, attempted: boolean): string | null {
+  if (!attempted) return null
+  const missing = new Set(missingRequired(questions, answers))
+  if (!missing.size) return null
+  return `Still needed: ${questions.filter((q) => missing.has(q.key)).map((q) => q.question).join(' · ')}`
+}

@@ -36,19 +36,57 @@ export function isFileDrag(types: ArrayLike<string> | Iterable<string> | null | 
 export const isAudioFile = (f: FileLike): boolean => AUDIO_EXTS.test(f.name) || f.type.startsWith('audio/')
 
 /**
- * Import files one after another. Sequential on purpose: the store has one
- * `uploading` flag and one progress label, and N concurrent uploads each
- * clobbered the other's progress and raced to append at the same V1 end.
+ * Hand every file to its importer AT ONCE, in drop order, and resolve when
+ * all are done. The store's import queue (QA-044/094) runs them one after
+ * another — so they still land in drop order and never race to append at the
+ * same V1 end — but every file gets its placeholder row the moment it is
+ * dropped, and the panel stays busy until the LAST one is in. (This used to
+ * await each file before handing over the next, so a three-file drop showed
+ * one file and then looked idle between files.)
  */
 export async function importFiles<F extends FileLike>(
   files: ArrayLike<F> | Iterable<F> | null | undefined,
   to: Importers<F>,
 ): Promise<void> {
   if (!files) return
-  for (const f of Array.from(files as ArrayLike<F>)) {
-    if (isAudioFile(f)) await to.uploadAudio(f)
-    else await to.upload(f)
-  }
+  const runs = Array.from(files as ArrayLike<F>).map((f) => (isAudioFile(f) ? to.uploadAudio(f) : to.upload(f)))
+  await Promise.allSettled(runs)
+}
+
+// A file drop the TIMELINE placed on a lane itself (QA-093): the window
+// listener below still clears the overlay for it but must not import it a
+// second time. A marker rather than `defaultPrevented`, for the reason the
+// header gives (the canvas prevents default on every drop it sees).
+const CLAIMED = new WeakSet<object>()
+
+/** Mark a native drop event as imported by its target. */
+export function claimFileDrop(e: Event): void {
+  CLAIMED.add(e)
+}
+
+export function isClaimedFileDrop(e: Event): boolean {
+  return CLAIMED.has(e)
+}
+
+// Whether an OS file drag is over the timeline right now. The timeline shows
+// its own lane-and-time drop preview then, so the full-window "Drop to import"
+// overlay steps aside instead of blurring the lanes it is aiming at (QA-093).
+let timelineOver = false
+const overListeners = new Set<() => void>()
+
+export function setTimelineFileDragOver(over: boolean): void {
+  if (over === timelineOver) return
+  timelineOver = over
+  for (const l of overListeners) l()
+}
+
+export function timelineFileDragOver(): boolean {
+  return timelineOver
+}
+
+export function subscribeTimelineFileDragOver(listener: () => void): () => void {
+  overListeners.add(listener)
+  return () => { overListeners.delete(listener) }
 }
 
 interface DropEventLike extends Event {
@@ -85,7 +123,7 @@ export function installWindowFileDrop(
   const onDragLeave = (e: Event) => {
     if (!isFileDrag(types(e as DropEventLike))) return
     depth = Math.max(0, depth - 1)
-    if (depth === 0) opts.setActive(false)
+    if (depth === 0) { opts.setActive(false); setTimelineFileDragOver(false) }
   }
   const onDrop = (e: Event) => {
     const d = e as DropEventLike
@@ -93,6 +131,8 @@ export function installWindowFileDrop(
     e.preventDefault()
     depth = 0
     opts.setActive(false)
+    setTimelineFileDragOver(false)
+    if (isClaimedFileDrop(e)) return
     const files = d.dataTransfer?.files
     if (files && files.length) opts.importFiles(files)
   }

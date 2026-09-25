@@ -28,8 +28,8 @@
 // "Cancel Esc" that drops the question. The long-run gate used to show both.
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { coerceAnswer, defaultAnswers, escapeTarget, isGate, kindOf, missingRequired, optionsFor,
-         totalDownloadBytes, visibleQuestions, type Answers } from '../lib/clarifyDefaults'
+import { clarifyHelp, coerceAnswer, defaultAnswers, escapeTarget, isGate, kindOf, missingRequired, neededLine,
+         optionsFor, totalDownloadBytes, visibleQuestions, type Answers } from '../lib/clarifyDefaults'
 import { humanBytes, humanDuration, type NeedsInput, type Plan } from '../lib/promptEvents'
 import { clarifyEnterAction } from '../lib/clarifyKeys'
 
@@ -45,6 +45,8 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
   const questions = useMemo(() => visibleQuestions(allQuestions), [allQuestions])
   const [answers, setAnswers] = useState<Answers>(() => defaultAnswers(questions))
   const [touchedBad, setTouchedBad] = useState<string | null>(null)
+  // "Still needed" appears only after the user tried to run (QA-063).
+  const [attempted, setAttempted] = useState(false)
   const firstRef = useRef<HTMLElement | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -62,7 +64,8 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
   const esc = useMemo(() => escapeTarget(questions), [questions])
 
   const submitWith = (next: Answers) => {
-    if (busy || missingRequired(questions, next).length) return
+    if (busy) return
+    if (missingRequired(questions, next).length) { setAttempted(true); return }
     // Refuse a typed value that does not coerce (e.g. "many" for a count)
     // here, with the field marked, rather than letting the store throw.
     for (const q of questions) {
@@ -173,9 +176,9 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
     <div className="clarify" ref={rootRef} onKeyDown={onKey} role="group" aria-label="One question before running">
       <div className="clarify-head">
         <span className="clarify-kicker">{questions.length === 1 ? 'One question' : `${questions.length} questions`}</span>
-        <span className="clarify-sub">
-          Defaults are pre-selected — Enter runs, Esc {esc ? `picks “${esc.option.label}”` : 'drops the question'}
-        </span>
+        {/* Derived from the selection (QA-063): it used to promise
+            "Defaults are pre-selected — Enter runs" with nothing selected. */}
+        <span className="clarify-sub">{clarifyHelp(questions, answers, esc ? esc.option.label : null)}</span>
       </div>
       <div className="clarify-grid">
         {questions.map((q, i) => (
@@ -191,13 +194,16 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
         ))}
       </div>
       <div className="clarify-actions">
-        <button type="button" className="primary" aria-keyshortcuts="Enter" disabled={busy || missing.length > 0} onClick={submit}>
+        {/* Not `disabled` while an answer is missing: pressing it is the
+            attempt that shows what is still needed (aria-disabled says so). */}
+        <button type="button" className="primary" aria-keyshortcuts="Enter" disabled={busy}
+                aria-disabled={missing.length > 0 || undefined} onClick={submit}>
           Run<kbd>↵</kbd>
         </button>
         {!esc && (
           <button type="button" aria-keyshortcuts="Escape" disabled={busy} onClick={onCancel}>Cancel<kbd>Esc</kbd></button>
         )}
-        {missing.length > 0 && <span className="err">Needed: {missing.join(', ')}</span>}
+        {neededLine(questions, answers, attempted) && <span className="err" role="alert">{neededLine(questions, answers, attempted)}</span>}
         {touchedBad && <span className="err">That is not a valid {kindOf(questions.find((q) => q.key === touchedBad)!)}</span>}
       </div>
     </div>

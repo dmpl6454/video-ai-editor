@@ -395,7 +395,8 @@ def test_auto_edit_honours_a_target_length():
     on the live timeline) and `duration_leq` verifies the real length."""
     p = P.plan("make this a 20s reel with hinglish captions", F916, allow_downloads=False)
     trim = _step(p, "cut_range")
-    assert trim.args["start"] == 20.0 and trim.optional and trim.stage == Sc.STAGE_STRUCTURE
+    # QA-069: the cut point is resolved at run time on a sentence boundary.
+    assert trim.args["start"] == "$fit_to:20" and trim.optional and trim.stage == Sc.STAGE_STRUCTURE
     assert _tools(p).index("cut_range") > _tools(p).index("remove_fillers")     # after the cuts
     laid = next(t for t in _tools(p) if t in ("auto_caption", "add_caption_track"))
     assert _tools(p).index("cut_range") < _tools(p).index(laid)                 # before the captions are laid
@@ -486,7 +487,7 @@ def test_lower_third_asks_for_the_name_only_when_neither_name_nor_handle_is_give
     assert next(c for c in filled.postconditions if c.check == "text_present").args["contains"] == "Priya Sharma"
     # headline text is a title, not a person — even though NAME_RE reads "says Big Launch"
     title = P.plan("add a title that says Big Launch", F16)
-    assert _tools(title) == ["add_text"] and _step(title, "add_text").args["text"] == "big launch"
+    assert _tools(title) == ["add_text"] and _step(title, "add_text").args["text"] == "Big Launch"   # typed case (QA-073)
 
 
 def test_an_empty_answer_is_refused_once_then_the_step_is_dropped_never_asked_forever():

@@ -329,24 +329,15 @@ RESTRUCTURE_GROUNDS: dict[str, frozenset[str]] = {
     "split_at": frozenset({"beat_sync", "trim"}),
     "set_speed": frozenset({"speed"}),
     "auto_reframe": frozenset({"reframe", "auto_edit", "export_preset", "shorts"}),
+    # Deleting the music bed ("remove the music", "replace the music").
+    "bulk_delete": frozenset({"remove_music"}),
 }
 
 
 def _mentioned_intents(prompt: str) -> set[str]:
-    """Every intent whose phrase table (ANY row, weak ones included) matches
-    the prompt — "the user used words for this kind of edit"."""
-    import re as _re
-    from .. import grammar as G
-    from .. import slots as S
-    text = S.normalize(prompt)
-    found: set[str] = set()
-    for intent, rows in G.PHRASES.items():
-        if any(_re.search(p, text) for p, _score in rows):
-            found.add(intent)
-    for _rx, intent, _score in G.CUT_PRECEDENCE:
-        if _re.search(_rx, text):
-            found.add(intent)
-    return found
+    """Every intent whose phrase table matches the prompt (content.py owns
+    the rule; the on-device drafts are grounded with the same one)."""
+    return content.mentioned_intents(prompt)
 
 
 def ungrounded_restructure(plan: Plan, prompt: str) -> list[str]:

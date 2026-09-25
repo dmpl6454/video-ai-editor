@@ -53,6 +53,7 @@ export function PromptBar() {
   const runId = usePromptStore((s) => s.runId)
   const reply = usePromptStore((s) => s.reply)
   const lastError = usePromptStore((s) => s.lastError)
+  const cancelling = usePromptStore((s) => s.cancelling)
   const run = usePromptStore((s) => s.run)
   const answer = usePromptStore((s) => s.answer)
   const cancel = usePromptStore((s) => s.cancel)
@@ -128,15 +129,50 @@ export function PromptBar() {
   // second Esc keeps going and Enter on the red button cancels.
   useEffect(() => { if (askCancel) keepRef.current?.focus() }, [askCancel])
 
+  // QA-064: "Esc to cancel" must work wherever focus is while a run is going.
+  // It was handled only in the textarea's onKeyDown, and a run moves focus
+  // off it (onto the Cancel button, or to <body> when the clarify card
+  // unmounts), so Esc did nothing. A window listener (bubble phase: the
+  // keymap's capture-phase Escape → deselect still runs, and other dialogs'
+  // own Esc handlers keep theirs) opens the same confirm.
+  useEffect(() => {
+    if (!busy || cancelling) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.repeat) return
+      const t = e.target as HTMLElement | null
+      // Another dialog or popover owns this Esc (it closes itself).
+      if (t?.closest?.('[role="dialog"], [role="alertdialog"], [role="menu"]')) return
+      setAskCancel(true)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, cancelling])
+
   // The card's first control, in the order ClarifyCard itself focuses it:
   // a text/number field, else the selected chip, else the primary action.
+  // Deferred a frame: called from the textarea's Enter keydown, and Chrome
+  // "clicks" a focused button on the keypress that FOLLOWS that keydown — so
+  // focusing Run synchronously pressed it, and the card showed "Still
+  // needed: …" for an attempt nobody made (QA-063).
   const focusCard = () => {
-    const f = formRef.current
-    const el = f?.querySelector<HTMLElement>('.clarify input, .clarify textarea')
-      ?? f?.querySelector<HTMLElement>('.clarify [role="radio"][tabindex="0"]')
-      ?? f?.querySelector<HTMLElement>('.clarify .clarify-actions button')
-    el?.focus()
+    requestAnimationFrame(() => {
+      const f = formRef.current
+      const el = f?.querySelector<HTMLElement>('.clarify input, .clarify textarea')
+        ?? f?.querySelector<HTMLElement>('.clarify [role="radio"][tabindex="0"]')
+        ?? f?.querySelector<HTMLElement>('.clarify [role="radio"]')
+        ?? f?.querySelector<HTMLElement>('.clarify .clarify-actions button')
+      el?.focus()
+    })
   }
+  // The card takes focus when it APPEARS (wave-B review: 3 of 4 trials left
+  // focus in the textarea — the card's own mount-time focus lost the race
+  // with the run's re-render). Only when focus is not already inside it.
+  useEffect(() => {
+    if (status !== 'clarify' || !clarify) return
+    const inCard = () => !!document.activeElement?.closest?.('.clarify')
+    if (!inCard()) focusCard()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, clarify?.token])
 
   const submit = () => {
     if (!canSubmitPrompt(status, { disabled, text })) {
@@ -188,10 +224,13 @@ export function PromptBar() {
     status === 'planning' ? 'is-planning' : '',
     status === 'done' ? 'is-done' : '',
     status === 'error' ? 'is-error' : '',
+    status === 'cancelled' ? 'is-cancelled' : '',
+    cancelling ? 'is-cancelling' : '',
   ].filter(Boolean).join(' ')
   const showLog = logOpen && status !== 'clarify' && (steps.length > 0 || !!plan || !!reply || !!lastError || busy)
   const placeholder = disabled
     ? (chatBusy ? 'Chat is working — the bar waits for the same session lock' : 'Open a project to start')
+    : cancelling ? 'Stopping after the current step…'
     : busy ? 'Working… Esc to cancel' : `Try: ${EXAMPLES[example]}`
 
   return (
@@ -223,8 +262,9 @@ export function PromptBar() {
         <div className="prompt-actions">
           <BrainBadge />
           {busy ? (
-            <button type="button" className="prompt-run is-cancel" onClick={() => setAskCancel(true)}>
-              Cancel<kbd>Esc</kbd>
+            <button type="button" className="prompt-run is-cancel" disabled={cancelling}
+                    onClick={() => setAskCancel(true)}>
+              {cancelling ? 'Stopping…' : <>Cancel<kbd>Esc</kbd></>}
             </button>
           ) : (
             <button type="submit" className="prompt-run primary" disabled={disabled || !text.trim()}>
@@ -235,7 +275,7 @@ export function PromptBar() {
         <div className="prompt-line" aria-hidden="true" />
       </div>
 
-      {askCancel && busy && (
+      {askCancel && busy && !cancelling && (
         <div className="prompt-confirm" role="alertdialog" aria-label="Cancel the run?"
              onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setAskCancel(false); taRef.current?.focus() } }}>
           <span className="grow">Cancel the run? The timeline is unchanged until it finishes.</span>

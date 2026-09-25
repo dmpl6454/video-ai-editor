@@ -27,7 +27,7 @@ import { useStore, errorMessage } from '../store'
 import { toast } from '../toast'
 import { answersPayload, type Answers } from './clarifyDefaults'
 import {
-  EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, onPromptRunning, promptRunningFromError,
+  EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, onPromptRunning, onSessionSwitch, promptRunningFromError,
   readSseStream, reduce, startRun, type BrainsReport, type PromptEvent, type PromptRunState,
   type ClarifyState, type PromptStatus, type StepRow, type VerifyEvent,
 } from './promptEvents'
@@ -37,6 +37,28 @@ export const HISTORY_MAX = 20
 
 export const isBusy = (status: PromptStatus) =>
   status === 'planning' || status === 'running' || status === 'verifying'
+
+// QA-062: the run a user Cleared, per session, so a reload (or the op-log
+// effect that re-attaches to runs started elsewhere) does not replay it.
+export const DISMISSED_KEY = 'vai.promptDismissed'
+function readDismissed(): Record<string, string> {
+  try {
+    const raw = typeof localStorage === 'undefined' ? null : localStorage.getItem(DISMISSED_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, string> : {}
+  } catch { return {} }
+}
+function writeDismissed(sid: string, runId: string) {
+  // Only the newest few sessions are kept; the map is a convenience, not a log.
+  const next = { ...readDismissed(), [sid]: runId }
+  const keys = Object.keys(next)
+  const trimmed = Object.fromEntries(keys.slice(Math.max(0, keys.length - 50)).map((k) => [k, next[k]]))
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem(DISMISSED_KEY, JSON.stringify(trimmed)) } catch { /* private mode */ }
+}
+const isDismissed = (sid: string, record: PromptRunRecord): boolean => {
+  const d = readDismissed()[sid]
+  return !!d && (d === record.run_id || d === record.plan_id)
+}
 
 function readHistory(): string[] {
   try {
@@ -70,6 +92,9 @@ interface PromptStoreState extends PromptRunState {
   // The stream ended before `done`. The run may still be going on the Mac.
   connectionDropped: boolean
   reconnecting: boolean
+  // QA-064: Cancel was asked for and the run is finishing its current step
+  // (a step is not interruptible); the bar says "Stopping…" meanwhile.
+  cancelling: boolean
 
   run(prompt: string): Promise<void>
   answer(answers: Answers): Promise<void>
@@ -81,6 +106,8 @@ interface PromptStoreState extends PromptRunState {
   loadBrains(refresh?: boolean): Promise<void>
   focus(): void
   dismiss(): void
+  /** QA-062: forget everything about the previous project's runs. */
+  resetForSession(sid: string | null): void
   setLogOpen(open: boolean): void
   setChatBusy(busy: boolean): void
   applyEvent(evt: { type: string }): void
@@ -131,7 +158,8 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
 
   async function startTurn(sid: string, prompt: string, open: () => Promise<Response>): Promise<void> {
     const signal = freshSignal()
-    set({ ...startRun(), sid, runId: null, prompt, logOpen: true, connectionDropped: false, reconnecting: false })
+    set({ ...startRun(), sid, runId: null, prompt, logOpen: true, connectionDropped: false, reconnecting: false,
+          cancelling: false })
     let res: Response
     try {
       res = await open()
@@ -173,11 +201,13 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
     logOpen: false,
     connectionDropped: false,
     reconnecting: false,
+    cancelling: false,
 
     applyEvent: (evt) => {
       const before = get()
       const next = reduce(before, evt as PromptEvent)
       const patch: Partial<PromptStoreState> = { ...next }
+      if (!isBusy(next.status)) patch.cancelling = false
       // The run id is the plan id on the wire (`run p_xxxx` in the provisional
       // reply, `plan.id` on the plan event, `plan_id` on verify/clarify).
       if (evt.type === 'plan' && next.plan?.id) patch.runId = next.plan.id
@@ -246,15 +276,21 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       // the 409 toast's Cancel still has to reach it.
       const sid = s.sid ?? useStore.getState().sessionId
       if (!sid) return
+      // QA-064: say "Stopping…" the instant Cancel is pressed. The step that
+      // is running (a caption pass, a reframe) finishes first and the run
+      // then rolls back — the log used to show it "running" with no sign the
+      // request had been heard.
+      if (isBusy(s.status)) set({ cancelling: true })
       try {
         await api.promptCancel(sid)
         // The server answers on the stream: `error{"Cancelled — timeline
         // unchanged."}` then `done`. If no stream is attached (reconnect
         // pending) say it here so the bar does not sit on "running".
         if (!_abort || _abort.signal.aborted) {
-          set({ status: 'error', lastError: 'Cancelled — timeline unchanged.' })
+          set({ status: 'cancelled', lastError: 'Cancelled — timeline unchanged.', cancelling: false })
         }
       } catch (e) {
+        set({ cancelling: false })
         toast.error(`Couldn't cancel: ${errorMessage(e)}`)
       }
     },
@@ -284,6 +320,9 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
         // console line and nothing more — this is a background probe.
         if (!/^404 /.test(errorMessage(e))) console.warn('[prompt] run lookup failed:', errorMessage(e))
         set({ reconnecting: false })
+        // QA-062: a project with no run of its own must not keep showing the
+        // log of the project that was open before it.
+        if (get().sid !== sid) get().resetForSession(sid)
         return
       }
       // The route answers `{run, live, replayable}`; a stub or an older
@@ -293,6 +332,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       const live = !!env && typeof env === 'object' && env.live === true
       if (!record) {
         set({ reconnecting: false })
+        if (get().sid !== sid) get().resetForSession(sid)
         await get().restorePending(sid)
         return
       }
@@ -300,9 +340,14 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       const busyStatus = status === 'running' || status === 'planning' || status === 'verifying'
       if (!busyStatus || !live) {
         // A finished run — or one the backend no longer holds — is shown
-        // only if nothing newer is on screen.
+        // only if nothing newer is on screen, and never once Cleared (QA-062:
+        // Clear used to come straight back, and again after every reload).
         const s = get()
-        if (s.status === 'idle' || (s.sid === sid && s.connectionDropped) || (s.sid === sid && s.runId === record.run_id)) {
+        if (s.sid !== sid) get().resetForSession(sid)
+        const shown = get()
+        if (isDismissed(sid, record)) {
+          // stays cleared
+        } else if (shown.status === 'idle' || (shown.sid === sid && shown.connectionDropped) || (shown.sid === sid && shown.runId === record.run_id)) {
           get().hydrate(sid, record, live)
         }
         set({ reconnecting: false, connectionDropped: false })
@@ -392,14 +437,15 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       const busyStatus = status === 'running' || status === 'planning' || status === 'verifying'
       const mapped: PromptStatus =
         status === 'done' || status === 'ok' || status === 'completed' ? 'done'
-        : status === 'error' || status === 'failed' || status === 'cancelled' ? 'error'
+        : status === 'cancelled' ? 'cancelled'
+        : status === 'error' || status === 'failed' ? 'error'
         : status === 'clarify' || status === 'pending' ? 'clarify'
         : busyStatus ? (live ? (status as PromptStatus) : 'error')
         : 'done'
       const brainId = typeof record.brain === 'string' ? record.brain : null
       const recordError = typeof record.error === 'string' && record.error ? record.error
         : typeof record.reply === 'string' && record.reply ? record.reply : null
-      const lastError = mapped !== 'error' ? null
+      const lastError = mapped !== 'error' && mapped !== 'cancelled' ? null
         : busyStatus && !live
           // Honest about what is known: the file says "running", the process
           // has no such run — a restart or crash mid-run. The timeline shows
@@ -418,7 +464,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
         reply: typeof record.reply === 'string' ? record.reply : '',
         opSeen: !!record.op,
         lastError,
-        logOpen: steps.length > 0 || !!verify || !!record.reply || mapped === 'error',
+        logOpen: steps.length > 0 || !!verify || !!record.reply || mapped === 'error' || mapped === 'cancelled',
       })
     },
 
@@ -442,10 +488,25 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
     dismiss: () => {
       // Hide the log and forget the last run's rows. Never cancels: a run
       // that is still going keeps going (and the bar keeps showing it).
-      if (isBusy(get().status)) { set({ logOpen: false }); return }
+      const s = get()
+      if (isBusy(s.status)) { set({ logOpen: false }); return }
+      // QA-062: remember WHICH run was cleared, per project, so neither the
+      // op-log reconnect nor a reload brings it back.
+      const sid = s.sid ?? useStore.getState().sessionId
+      const runId = s.runId ?? s.plan?.id ?? null
+      if (sid && runId) writeDismissed(sid, runId)
       _abort?.abort()
       _abort = null
-      set({ ...EMPTY_RUN, runId: null, logOpen: false, connectionDropped: false })
+      set({ ...EMPTY_RUN, runId: null, logOpen: false, connectionDropped: false, cancelling: false })
+    },
+
+    resetForSession: (sid) => {
+      // Only the reader goes; a run still going on the other project keeps
+      // going there (a run outlives its stream, spec §4.2).
+      _abort?.abort()
+      _abort = null
+      set({ ...EMPTY_RUN, sid, runId: null, prompt: '', logOpen: false, connectionDropped: false,
+            reconnecting: false, cancelling: false })
     },
 
     setLogOpen: (open) => set({ logOpen: open }),
@@ -473,3 +534,7 @@ export function _detachPromptStream(): void {
 }
 
 onPromptRunning(notifyPromptRunning)
+// QA-062: a project switch starts the bar clean (store.ts fires this).
+onSessionSwitch((sid) => {
+  if (usePromptStore.getState().sid !== sid) usePromptStore.getState().resetForSession(sid)
+})

@@ -45,17 +45,20 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
     ("export_srt", "path"): "write",
     ("export_vtt", "path"): "write",
     # `font` is a BUNDLED font NAME resolved by name inside config.FONTS_DIR
-    # (apply_brand_kit validates it against a glob of that directory and
-    # rejects anything else). It never reaches the filesystem as a caller path.
+    # (render/fonts.check_font_arg rejects anything that is not a plain leaf
+    # name of a bundled font; render/fonts.resolve_font never leaves the
+    # directory). It never reaches the filesystem as a caller path.
     ("add_text", "font"): "exempt",
+    # Same rule: set_caption_style validates through check_font_arg.
+    ("set_caption_style", "font"): "exempt",
     # A dotted ATTRIBUTE path — "transform.x", "audio.gain_db" — not a
     # filesystem path. The genuinely dangerous half of this tool is its
     # `value` when the leaf is `src`, which the handler guards; see
     # test_set_property_src_value_is_guarded in tests/test_path_guards.py.
     # (Plans may not use set_property at all — schema.PLAN_DENY.)
     ("set_property", "path"): "exempt",
-    # Same as add_text.font: a bundled font NAME, validated against a glob of
-    # config.FONTS_DIR and rejected if it is not one of them.
+    # Same as add_text.font: a bundled font NAME, validated by
+    # render/fonts.check_font_arg and rejected if it is not one of them.
     ("apply_brand_kit", "font"): "exempt",
     # --- `name` args -----------------------------------------------------
     # Added in 0.6.0. `_NAME_HINT` did not match `name`, and these tools
@@ -84,7 +87,7 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
 }
 
 #: For the count pin in tests/test_path_guards.py and test_prompt_contracts.py.
-PATH_ARGS_COUNT = 22   # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised
+PATH_ARGS_COUNT = 23   # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt)
 
 
 def guarded_args(kind: PathGuard) -> frozenset[tuple[str, str]]:

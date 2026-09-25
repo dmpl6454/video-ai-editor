@@ -90,7 +90,20 @@ _LOWER_THIRD_RE = re.compile(r"\blower[- ]?third\b|\bname\s*(?:tag|plate|card|st
                              r"|\bintroduce\b|\bintroducing\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b")
 
 
-def _hit_slots(hit: G.IntentHit, whole: S.Slots) -> dict[str, Any]:
+def _original_case(text: str, prompt: str | None) -> str:
+    """`text` as the user TYPED it (QA-073). Clause slots come from the
+    lower-cased clause, so "a title that says BIG SALE" became "big sale";
+    the words are found again in the original prompt, whitespace-tolerant,
+    and returned with their case. Unchanged when they cannot be found (a
+    Hinglish verb the normaliser rewrote, say)."""
+    if not prompt or not text:
+        return text
+    pattern = r"\s+".join(re.escape(w) for w in text.split())
+    m = re.search(pattern, prompt.replace("’", "'"), flags=re.IGNORECASE)
+    return m.group(0) if m else text
+
+
+def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> dict[str, Any]:
     c, w = hit.slots, whole
     r = hit.intent
     # Clause slots come from the lower-cased clause; the whole-prompt slots
@@ -148,7 +161,7 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots) -> dict[str, Any]:
         if text is None and not name:
             m = _TITLE_TEXT_RE.search(hit.clause)
             if m and len(m.group(1).split()) <= 8:
-                text = m.group(1).strip()
+                text = _original_case(m.group(1).strip(), prompt)
         return {"text": text, "name": name, "handle": c.handle, "dur": c.duration_s,
                 "at": "end" if c.at_end else ("start" if c.at_start else None),
                 "_style": "label_tag" if c.caption_position == "top" else "bold_pop",
@@ -273,11 +286,11 @@ def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
     return {"target": target, "edge": edge, "duration_s": dur, "clip_ref": c.clip_ref}
 
 
-def bind(hit: G.IntentHit, whole: S.Slots) -> Intent:
+def bind(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> Intent:
     if hit.intent == "audit":
         # "... then audit it": the recipe table's own final audit (stage 12).
         return Intent("_audit", {}, score=hit.score, clause=hit.clause)
-    raw = {k: v for k, v in _hit_slots(hit, whole).items() if v not in (None, (), "")}
+    raw = {k: v for k, v in _hit_slots(hit, whole, prompt).items() if v not in (None, (), "")}
     return Intent(hit.intent, normalize_slots(hit.intent, raw) if hit.intent in RECIPE_BY_NAME else raw,
                   score=hit.score, clause=hit.clause)
 
@@ -483,8 +496,10 @@ def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozense
     front: list[NeedsInput] = []
     if downloads and allow_downloads:
         total = sum(d.bytes for d in downloads)
-        listing = "; ".join(f"{d.what} for {d.tool}" for d in downloads)
-        front.append(_ask("downloads", f"First use downloads {listing} ({total / 1e9:.1f} GB total). Reply download or skip.",
+        # A question for a card with Download / Skip buttons (QA-063): no
+        # "Reply download or skip", no tool ids.
+        listing = "; ".join(d.what for d in downloads)
+        front.append(_ask("downloads", f"This needs a one-time download: {listing} ({total / 1e9:.1f} GB in total). Download it now?",
                           kind="confirm", options=[("yes", "Download"), ("no", "Skip")]))
     if est > LONG_RUN_SECONDS and steps:
         heavy = max(steps, key=lambda s: _step_weight(s, facts))
@@ -605,7 +620,7 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
             needs_input=[_ask("intent", "I did not catch that. Which of these did you mean?",
                               options=_guesses(prompt))],
             reply="I did not understand that request.")
-    intents = [bind(h, det.slots) for h in hits]
+    intents = [bind(h, det.slots, prompt) for h in hits]
     exclusions = frozenset(x for x in det.exclusions if x in RECIPE_BY_NAME)
     prefix = None
     if G.NORMALISE_THRESHOLD <= conf < G.RUN_THRESHOLD:

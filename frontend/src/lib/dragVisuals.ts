@@ -101,7 +101,9 @@ export function drawSelectionChrome(
   opts: { dragging: boolean; resizing: boolean; showDelete: boolean
           deleteAt?: { lx: number; ly: number }
           showRotate?: boolean; rotateAt?: { lx: number; ly: number }
-          rotating?: boolean },
+          rotating?: boolean
+          /** false: an outline only — a select-only box (a caption cue). */
+          handles?: boolean },
 ): void {
   ctx.strokeStyle = ACCENT
   if (opts.dragging) {
@@ -116,6 +118,7 @@ export function drawSelectionChrome(
   ctx.strokeRect(-hw, -hh, hw * 2, hh * 2)
   ctx.setLineDash([])
   ctx.shadowBlur = 0
+  if (opts.handles === false) return
   ctx.fillStyle = ACCENT
   for (const [sx, sy] of CORNER_SIGNS) {
     const pad = opts.resizing ? HANDLE + 1 : HANDLE

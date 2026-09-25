@@ -19,6 +19,8 @@ import { layoutPlayhead } from '../lib/timelineLayout'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
+import { useMenuA11y } from '../lib/useMenuA11y'
+import { TEXT_STYLE_PRESETS, textStyleArgs, type TextStylePreset } from '../lib/textStyles'
 
 const PRESETS = [
   { name: 'countdown_3_2_1', label: '3 · 2 · 1', title: 'Center-screen countdown (pop in, fade out)', needsField: false },
@@ -45,6 +47,13 @@ export function TextTool() {
   const [presetText, setPresetText] = useState('')
   const btnRef = useRef<HTMLButtonElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  // Keyboard: focus enters the popover, Tab stays inside, Escape closes and
+  // returns to ▾ (lib/useMenuA11y, QA-102).
+  const popRef = useRef<HTMLDivElement>(null)
+  const a11y = useMenuA11y({
+    open: presetsOpen, ready: !!pos, mode: 'dialog',
+    menuRef: popRef, triggerRef: btnRef, onClose: () => setPresetsOpen(false),
+  })
 
   // Position + outside-click close — same portal pattern as TopBar's session
   // picker / export popovers (.topbar clips overflow, so an in-flow dropdown
@@ -89,7 +98,7 @@ export function TextTool() {
   }
 
   const applyPreset = async (name: string) => {
-    setPresetsOpen(false)
+    a11y.close()
     const { edl, playhead } = useStore.getState()
     const start = layoutPlayhead(edl, playhead)
     const v = presetText.trim()
@@ -101,6 +110,15 @@ export function TextTool() {
       // one typed value into all three slots keeps the UI a single field.
       fields: { text: v, hashtag: v, handle: v },
     })
+    if (res) await selectNewClip(res.result)
+  }
+
+  // A gallery look: one add_text carrying its whole style (QA-078).
+  const applyStyle = async (p: TextStylePreset) => {
+    a11y.close()
+    const { edl, playhead } = useStore.getState()
+    const start = layoutPlayhead(edl, playhead)
+    const res = await dispatch('add_text', textStyleArgs(p, presetText, start, defaultEnd(start)))
     if (res) await selectNewClip(res.result)
   }
 
@@ -117,13 +135,21 @@ export function TextTool() {
         ref={btnRef}
         onClick={() => setPresetsOpen((o) => !o)}
         title="Text presets"
+        aria-label="Text presets"
+        aria-haspopup="dialog"
+        aria-expanded={presetsOpen}
         style={{ fontSize: 11, padding: '2px 5px' }}
       >
-        ▾
+        <span aria-hidden="true">▾</span>
       </button>
       {presetsOpen && pos && createPortal(
         <div
+          ref={popRef}
           data-text-presets
+          data-keymap-ignore
+          role="dialog"
+          aria-label="Text presets"
+          onKeyDown={a11y.onKeyDown}
           style={{
             position: 'fixed',
             left: pos.left,
@@ -143,6 +169,18 @@ export function TextTool() {
               style={{ fontSize: 12, padding: '3px 4px' }}
             />
           </label>
+          <div className="text-style-grid" role="group" aria-label="Text styles">
+            {TEXT_STYLE_PRESETS.map((p) => (
+              <button key={p.id} type="button" className="text-style-chip" onClick={() => { void applyStyle(p) }}
+                      title={`Add “${p.label}” text at the playhead`}>
+                <span className="text-style-sample" style={{
+                  color: p.sample.color, background: p.sample.background ?? 'transparent',
+                  fontFamily: p.sample.fontFamily, fontWeight: p.sample.fontWeight ?? 400,
+                }}>Aa</span>
+                {p.label}
+              </button>
+            ))}
+          </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {PRESETS.map((p) => (
               <button

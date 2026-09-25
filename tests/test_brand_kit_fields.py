@@ -88,4 +88,4 @@ def test_plain_kit_unchanged(store: EDLStore):
                    for c in store.edl.get_track("stickers").clips)
     ec = store.edl.get_track("tx_endcard").clips[0]
     assert ec.style.color == "#FFFFFF"       # sentinel → role style
-    assert ec.style.font == "Inter-Black"    # sentinel → role style
+    assert ec.style.font is None             # unset → role font (EDL v3, QA-076)

@@ -88,10 +88,13 @@ describe('syncPipVideo while PLAYING', () => {
 })
 
 describe('syncPipVideo while PAUSED', () => {
-  it('still seeks, which is what scrubbing needs', () => {
+  it('still seeks, which is what scrubbing needs — just past the frame pts (QA-077)', () => {
     const { v, seeks } = fakeVideo()
     syncPipVideo(v, 3, 0, 0, 30)
-    expect(seeks).toEqual([3])
+    // Never ON the pts: Chromium truncates currentTime to µs, and an exact
+    // seek decoded the previous frame (lib/frameStep.PAUSED_SEEK_BIAS_S).
+    expect(seeks).toHaveLength(1)
+    expect(seeks[0]).toBeCloseTo(3.001, 9)
   })
 
   it('pauses an element left running by playback', () => {

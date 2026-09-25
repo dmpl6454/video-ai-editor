@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  abortOption, answersPayload, coerceAnswer, defaultAnswers, escapeTarget, isGate, missingRequired, optionsFor, parseDuration,
+  abortOption, answersPayload, clarifyHelp, coerceAnswer, defaultAnswers, escapeTarget, isGate, missingRequired, neededLine, optionsFor, parseDuration,
   totalDownloadBytes, visibleQuestions,
 } from './clarifyDefaults'
 import { parseSseText, type ClarifyEvent, type NeedsInput } from './promptEvents'
@@ -145,5 +145,25 @@ describe('Esc is the run-ending option when a question offers one', () => {
     expect(escapeTarget([lang])).toBeNull()
     expect(escapeTarget([clarify.questions[0]])).toBeNull()
     expect(escapeTarget([])).toBeNull()
+  })
+})
+
+describe('clarify card copy follows its state (QA-063)', () => {
+  const PLATFORM: NeedsInput = { key: 'platform', question: 'Which platform?', kind: 'choice', required: true,
+    options: [{ value: 'tiktok', label: 'TikTok' }, { value: 'reels', label: 'Reels' }] }
+
+  it('never claims defaults are selected when nothing is', () => {
+    const help = clarifyHelp([PLATFORM], defaultAnswers([PLATFORM]), null)
+    expect(help).not.toMatch(/pre-selected|Suggested/)
+    expect(help).toMatch(/^Choose an answer to run/)
+  })
+  it('says Enter runs once every required answer is there', () => {
+    expect(clarifyHelp([PLATFORM], { platform: 'reels' }, null)).toBe('Enter runs · Esc drops the question')
+    expect(clarifyHelp([COUNT], defaultAnswers([COUNT]), null)).toMatch(/^Suggested answers are selected · Enter runs/)
+  })
+  it('shows what is still needed only after an attempt, by question', () => {
+    expect(neededLine([PLATFORM], {}, false)).toBeNull()
+    expect(neededLine([PLATFORM], {}, true)).toBe('Still needed: Which platform?')
+    expect(neededLine([PLATFORM], { platform: 'tiktok' }, true)).toBeNull()
   })
 })

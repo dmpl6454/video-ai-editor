@@ -20,6 +20,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from ..config import FONTS_DIR
+from .fonts import resolve_font
 from ..edl import EDL
 from ..edl.schema import TextClip, Sticker
 from ..edl.keyframes import is_keyframed, sample, to_ffmpeg_expr
@@ -253,10 +254,9 @@ ROLE_STYLES: dict[str, dict] = {
 
 
 def _font_path(name: str) -> Path:
-    p = FONTS_DIR / name
-    if not p.exists():
-        p = FONTS_DIR / "Inter-Bold.ttf"
-    return p
+    # Resolved by bundled NAME only (render/fonts.py): `FONTS_DIR / name`
+    # let an absolute or ../ value escape FONTS_DIR and 500 every export.
+    return resolve_font(name) or (FONTS_DIR / "Inter-Bold.ttf")
 
 
 _log = logging.getLogger(__name__)
@@ -338,13 +338,12 @@ def resolve_style_overrides(c: TextClip, role: str = "default"
     if color and color.upper() != _STYLE_SENTINEL_COLOR:
         fill = _parse_hex_color(color)
     role_font = ROLE_STYLES.get(role, ROLE_STYLES["default"])["font"].replace(".ttf", "")
-    fname = (getattr(st, "font", "") or "").strip()
-    if fname and fname != _STYLE_SENTINEL_FONT and fname != role_font:
-        p = FONTS_DIR / fname
-        if not p.exists():
-            p = FONTS_DIR / f"{fname}.ttf"
-        if p.exists():
-            font = p
+    # EDL v3 (QA-076): `style.font` is None when unset, so every string is an
+    # explicit choice — including "Inter-Black", which the v2 sentinel made
+    # impossible to pick. v2 projects are migrated on load (edl/schema.py).
+    fname = (getattr(st, "font", "") or "").strip().removesuffix(".ttf")
+    if fname and fname != role_font:
+        font = resolve_font(fname)
     return fill, font
 
 
@@ -354,6 +353,18 @@ def resolve_style_overrides(c: TextClip, role: str = "default"
 # boundary so new bad names can't get in.
 ANIM_PRESETS = ("pop", "fade", "slide_up", "slide_down")
 ANIM_DUR = 0.35  # seconds, clamped to 40% of the clip at render time
+#: Bounds of a clip's own `anim_dur` (QA-078). Mirrored by lib/textAnim.ts.
+ANIM_DUR_RANGE = (0.1, 3.0)
+
+
+def anim_duration(c: TextClip, rs: float, re: float) -> float:
+    """How long each in/out animation lasts on screen: the clip's own
+    `anim_dur` (QA-078) or the house ANIM_DUR, never more than 40 % of the
+    RENDER window (so in and out never overlap) and never under 0.1 s."""
+    want = getattr(c, "anim_dur", None)
+    base = ANIM_DUR if not isinstance(want, (int, float)) else \
+        min(ANIM_DUR_RANGE[1], max(ANIM_DUR_RANGE[0], float(want)))
+    return min(base, max(0.1, (re - rs) * 0.4))
 
 
 def _anim_name(c: TextClip, attr: str) -> str | None:
@@ -392,6 +403,29 @@ def _pick_script_font(text: str) -> Path | None:
             "cjk":  "NotoSansSC-VF.ttf"}[dominant]
     p = FONTS_DIR / name
     return p if p.exists() else None
+
+
+#: Bundled face per script for a RUN the clip's font does not cover
+#: (render/shaping.py itemises every line by script). `_pick_script_font`
+#: still picks the clip's PRIMARY face by dominant script — so single-script
+#: text renders exactly as before — and this covers the rest: a Devanagari
+#: line inside a Latin-dominant caption used to draw every glyph as .notdef.
+_SCRIPT_FALLBACK_FONTS = {"Deva": "NotoSansDevanagari-VF.ttf",
+                          "Arab": "NotoSansArabic-VF.ttf",
+                          "Hani": "NotoSansSC-VF.ttf"}
+
+
+def _script_fallback(role: str, size_px: int):
+    """`ShapedFont` fallback: script tag -> a Noto face at the role's script
+    weight (SCRIPT_FONT_WEIGHT; the SC face is not weighted, as before)."""
+    def get(script: str):
+        name = _SCRIPT_FALLBACK_FONTS.get(script)
+        p = FONTS_DIR / name if name else None
+        if p is None or not p.exists():
+            return None
+        w = None if "SC" in name else SCRIPT_FONT_WEIGHT.get(role, SCRIPT_FONT_WEIGHT["default"])
+        return _shaping.ShapedFont(p, size_px, w)
+    return get
 
 
 #: Caption anchor on a PORTRAIT canvas, as a fraction of canvas height. The
@@ -443,6 +477,16 @@ def _y_for_role(role: str, transform_y: float | None, canvas_h: int,
     if role == "lower_third":
         return canvas_h - canvas_h * 0.20
     return canvas_h * 0.75
+
+
+def block_anchor_y(role: str, anchor_y: float | None, canvas_h: int, canvas_w: int | None) -> float:
+    """The y a block is laid out on. A caption's `anchor_y` is its captions
+    track's position (caption_position_y, QA-075) and IS honoured here; a
+    cue's own transform never reaches it (resolve_anchor_overrides pins
+    captions to None), which is the rule `_y_for_role` keeps for everyone else."""
+    if role == "caption" and anchor_y is not None:
+        return float(anchor_y)
+    return _y_for_role(role, anchor_y, canvas_h, canvas_w)
 
 
 def resolve_upper_override(c: TextClip, role: str) -> bool:
@@ -561,11 +605,15 @@ def resolve_anchor_overrides(c: TextClip, role: str,
                 return None
         return f
 
-    anchor_y_role = _y_for_role(role, None, canvas_h, canvas_w)
-    ax = _explicit(getattr(tx, "x", None),
-                   (_TRANSFORM_SENTINEL_X, canvas_w / 2))
-    ay = _explicit(getattr(tx, "y", None),
-                   (_TRANSFORM_SENTINEL_Y, canvas_h * 0.85, anchor_y_role))
+    # EDL v3 (QA-076): a scalar x/y renders where it says, except the TextClip
+    # schema default of each axis (x 540, y 1700 — "never positioned on this
+    # axis"; every tool writes real values, and the UI nudges a typed or
+    # dragged 540/1700 by a pixel). The v2 sentinels that depended on the
+    # canvas and role (canvas.w/2, canvas.h·0.85, the role anchor) collided
+    # with ordinary values — a typed Y of 918 on 1080p snapped 76 px while 919
+    # did not — and are gone; v2 projects are migrated on load.
+    ax = _explicit(getattr(tx, "x", None), (_TRANSFORM_SENTINEL_X,))
+    ay = _explicit(getattr(tx, "y", None), (_TRANSFORM_SENTINEL_Y,))
     return ax, ay
 
 
@@ -652,10 +700,77 @@ SCRIPT_FONT_WEIGHT: dict[str, int] = {
 }
 
 
-def line_centers(anchor_y: float, n_lines: int, size: float) -> list[float]:
-    """Rule 2 of the shared model: each line's cap-band centre, top to bottom."""
-    lh = size * LINE_HEIGHT_RATIO
+def line_centers(anchor_y: float, n_lines: int, size: float, spacing: float = 1.0) -> list[float]:
+    """Rule 2 of the shared model: each line's cap-band centre, top to bottom.
+    `spacing` is the clip's `style.line_spacing` (QA-078), a multiplier."""
+    lh = size * LINE_HEIGHT_RATIO * spacing
     return [anchor_y + (i - (n_lines - 1) / 2.0) * lh for i in range(n_lines)]
+
+
+# ---- rule 7 (QA-078): alignment and the background box ----------------------
+# Lines are aligned INSIDE the block, and the block stays centred on its
+# anchor: `left` starts every line at the widest line's left edge, `right`
+# ends it at the right edge. The box spans the widest line plus
+# BG_PAD_X_RATIO·size each side, and the stacked line boxes (line height
+# each, centred on the first/last line centre) plus BG_PAD_Y_RATIO·size above
+# and below, corners rounded BG_RADIUS_RATIO·size — every length × the
+# transform scale, drawn UNDER the shadow and text, turned with the block.
+BG_PAD_X_RATIO = 0.3
+BG_PAD_Y_RATIO = 0.08
+BG_RADIUS_RATIO = 0.18
+
+
+def line_x(align: str, anchor_x: float, block_w: float, w: float) -> float:
+    """Left edge of a line of width `w` in a block of width `block_w`."""
+    if align == "left":
+        return anchor_x - block_w / 2
+    if align == "right":
+        return anchor_x + block_w / 2 - w
+    return anchor_x - w / 2
+
+
+def background_rect(anchor_x: float, centers: list[float], block_w: float, size: float,
+                    spacing: float = 1.0) -> tuple[float, float, float, float, float]:
+    """(left, top, right, bottom, radius) of the background box."""
+    lh = size * LINE_HEIGHT_RATIO * spacing
+    px, py = BG_PAD_X_RATIO * size, BG_PAD_Y_RATIO * size
+    return (anchor_x - block_w / 2 - px, centers[0] - lh / 2 - py,
+            anchor_x + block_w / 2 + px, centers[-1] + lh / 2 + py, BG_RADIUS_RATIO * size)
+
+
+def resolve_block_overrides(c: TextClip) -> dict:
+    """The QA-078 block style of a clip: background rgba (or None), align,
+    line spacing, shadow override (None = the role's). Defaults render exactly
+    as before, so no existing project moves."""
+    st = getattr(c, "style", None)
+    bg = _parse_hex_color(getattr(st, "background", None) or "") if st is not None else None
+    align = getattr(st, "align", "center") if st is not None else "center"
+    spacing = getattr(st, "line_spacing", 1.0) if st is not None else 1.0
+    shadow = getattr(st, "shadow_on", None) if st is not None else None
+    return {"background": bg, "align": align if align in ("left", "right") else "center",
+            "line_spacing": float(spacing or 1.0), "shadow": shadow if isinstance(shadow, bool) else None}
+
+
+def block_key(b: dict) -> str:
+    """Cache-key fragment for resolve_block_overrides' result."""
+    return (f"bg{b['background'] or ''}|{b['align']}|ls{b['line_spacing']:.3f}|"
+            f"sh{'' if b['shadow'] is None else int(b['shadow'])}")
+
+
+def caption_position_y(edl: EDL) -> float | None:
+    """The caption anchor y for the captions track's `config.position`
+    (QA-075), or None for `bottom` — the platform-aware caption_anchor_y, so
+    every existing project renders unchanged. `center` is the frame's middle;
+    `top` sits just inside the 9:16 safe zone (y ≥ 0.10·h) on portrait and at
+    0.12·h elsewhere. Mirrored by lib/textLayout.captionAnchorY."""
+    cap = edl.get_track("captions")
+    pos = getattr(getattr(cap, "config", None), "position", "bottom") if cap else "bottom"
+    w, h = edl.canvas.w, edl.canvas.h
+    if pos == "center":
+        return h * 0.5
+    if pos == "top":
+        return h * (0.14 if h > w else 0.12)
+    return None
 
 
 def resolve_scale_rotation(c: TextClip, role: str) -> tuple[float, float]:
@@ -803,7 +918,11 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     upper: bool | None = None,
                     scale: float = 1.0,
                     rotation: float = 0.0,
-                    surface: tuple[int, int] | None = None) -> Image.Image:
+                    surface: tuple[int, int] | None = None,
+                    background: tuple[int, int, int, int] | None = None,
+                    align: str = "center",
+                    line_spacing: float = 1.0,
+                    shadow: bool | None = None) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role,
     laid out by the SHARED text layout model above (QA-015).
 
@@ -850,6 +969,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         style = {**style, "stroke": stroke}
     if stroke_w is not None:
         style = {**style, "stroke_w": max(0, int(round(stroke_w)))}
+    if shadow is not None:
+        style = {**style, "shadow": bool(shadow)}
     k = max(0.01, float(scale or 1.0))
     size_px = max(1, int(round(style["size"] * k)))
     stroke_px = max(0, int(round(style["stroke_w"] * k)))
@@ -883,7 +1004,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     # falls back to Pillow; text that NEEDS shaping raises ShapingUnavailable
     # (a RuntimeError) — misspelled Hindi must never be delivered silently.
     if _shaping.available() or _shaping.needs_shaping(body):
-        shaped = _shaping.ShapedFont(chosen_font, size_px, weight)
+        shaped = _shaping.ShapedFont(chosen_font, size_px, weight,
+                                     fallback=_script_fallback(role, size_px))
         measure = (lambda s: shaped.width(s, _tokenize_emoji, box))
         lines = _wrap(draw, body, font, max_w, box, measure=measure)
     else:
@@ -891,16 +1013,32 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
 
     cap_top, cap_bottom = _cap_band(font)
     cap_mid = (cap_top + cap_bottom) / 2
-    y_anchor = _y_for_role(role, anchor_y, canvas_h, canvas_w)
+    y_anchor = block_anchor_y(role, anchor_y, canvas_h, canvas_w)
     x_anchor = float(anchor_x) if anchor_x is not None else canvas_w / 2
     sdx, sdy = SHADOW_OFFSET[0] * k, SHADOW_OFFSET[1] * k
     shadow_rgba = (0, 0, 0, SHADOW_ALPHA)
-    for line, cy in zip(lines, line_centers(y_anchor, len(lines), size_px)):
+    spacing = min(3.0, max(0.5, float(line_spacing or 1.0)))
+    centers = line_centers(y_anchor, len(lines), size_px, spacing)
+    # Rule 7: every line's width first — alignment and the box need the block's.
+    run_cache = [shaped.runs(ln, _tokenize_emoji, box) for ln in lines] if shaped is not None else None
+    widths = ([sum(r.width for r in runs) for runs in run_cache] if run_cache is not None
+              else [_line_w(ln, draw, font, box) for ln in lines])
+    block_w = max(widths) if widths else 0.0
+    # The box is its own layer, composited UNDER the finished text below:
+    # Pillow's draw REPLACES pixels, so a shadow drawn straight onto the box
+    # would punch translucent holes in it (the preview draws it behind with
+    # `destination-over` — the same result).
+    bg_layer = None
+    if background is not None and lines:
+        l, t, r, b, rad = background_rect(x_anchor, centers, block_w, size_px, spacing)
+        bg_layer = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        ImageDraw.Draw(bg_layer).rounded_rectangle((l, t, r, b), radius=rad, fill=background)
+    for li, (line, cy) in enumerate(zip(lines, centers)):
         baseline = cy - cap_mid
         if shaped is not None:
-            runs = shaped.runs(line, _tokenize_emoji, box)
-            w = sum(r.width for r in runs)
-            x = float(x_anchor - w / 2)
+            runs = run_cache[li]
+            w = widths[li]
+            x = float(line_x(align, x_anchor, block_w, w))
             if style.get("shadow"):
                 _shaping.draw_runs(img, shaped, runs, x + sdx, baseline + sdy,
                                    fill=shadow_rgba, stroke_w=stroke_px,
@@ -913,8 +1051,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     _paste_emoji(img, r.text, pen, cy, box)
                 pen += r.width
             continue
-        w = _line_w(line, draw, font, box)
-        x = float(x_anchor - w / 2)
+        w = widths[li]
+        x = float(line_x(align, x_anchor, block_w, w))
         # Walk the line's segments left to right, drawing text runs with the
         # font and pasting emoji artwork. One pass per visual layer (shadow,
         # then fill) so an emoji can't land under the next run's shadow.
@@ -938,6 +1076,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
             draw.text((cx, baseline), chunk, font=font, anchor="ls", fill=style["fill"],
                       stroke_width=stroke_px, stroke_fill=style["stroke"])
             cx += draw.textlength(chunk, font=font)
+    if bg_layer is not None:
+        img = Image.alpha_composite(bg_layer, img)
     if abs(float(rotation or 0.0)) > 0.01:
         # Clockwise about the anchor (PIL rotates counter-clockwise).
         img = img.rotate(-float(rotation), resample=Image.BICUBIC,
@@ -980,6 +1120,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     canvas = edl.canvas
+    cap_y = caption_position_y(edl)
     paired: list[tuple[TextClip, str, Path]] = []
     for c, role in collect_text_clips(edl):
         if is_xform_text(c, role):
@@ -989,6 +1130,9 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
         size = resolve_size_override(c)
         stroke, stroke_w = resolve_stroke_overrides(c)
         anchor_x, anchor_y = resolve_anchor_overrides(c, role, canvas.w, canvas.h)
+        if role == "caption":
+            anchor_y = cap_y        # the captions track's position (QA-075)
+        blk = resolve_block_overrides(c)
         opacity = resolve_opacity_override(c)
         caps = resolve_upper_override(c, role)
         k_scale, rotation = resolve_scale_rotation(c, role)
@@ -1011,7 +1155,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                    # size/opacity notes above describe. Keyed on the resolved
                    # value (not `style.upper`) so a clip that explicitly asks for
                    # its role's own default still shares the untouched clip's PNG.
-                   f"{'U' if caps else 'l'}|k{k_scale:.4f}|r{rotation:.3f}")
+                   f"{'U' if caps else 'l'}|k{k_scale:.4f}|r{rotation:.3f}|{block_key(blk)}")
         key = hashlib.sha256(
             # v6: emoji moved from a fixed em-box fraction to the measured cap
             # band, so every PNG holding an emoji changed pixels. The key has no
@@ -1031,7 +1175,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
             # centred lines at 1.15 x size, shadow/outline semantics), shaped
             # complex scripts at the role weight (QA-003) and baked static
             # scale/rotation (QA-036) — every PNG's pixels moved.
-            f"v11|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
+            f"v12|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
@@ -1040,7 +1184,9 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                                   size=size, anchor_x=anchor_x, anchor_y=anchor_y,
                                   stroke=stroke, stroke_w=stroke_w,
                                   opacity=opacity, upper=caps,
-                                  scale=k_scale, rotation=rotation)
+                                  scale=k_scale, rotation=rotation,
+                                  background=blk["background"], align=blk["align"],
+                                  line_spacing=blk["line_spacing"], shadow=blk["shadow"])
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -1087,12 +1233,15 @@ def cache_xform_text_pngs(edl: EDL, cache_dir: Path) -> list[dict]:
         static_scale, static_rot = resolve_scale_rotation(c, role)
         k = max(0.01, _max_key_value(tx.scale, 1.0)) if scale_kf else static_scale
         rot = 0.0 if rot_kf else static_rot
+        blk = resolve_block_overrides(c)
         style_kw = dict(fill=fill, font_file=font_file, size=size, stroke=stroke,
-                        stroke_w=stroke_w, opacity=opacity, upper=caps)
+                        stroke_w=stroke_w, opacity=opacity, upper=caps,
+                        background=blk["background"], align=blk["align"],
+                        line_spacing=blk["line_spacing"], shadow=blk["shadow"])
         key = hashlib.sha256(
-            (f"xf1|{role}|{canvas.w}x{canvas.h}|{fill or ''}|"
+            (f"xf2|{role}|{canvas.w}x{canvas.h}|{fill or ''}|"
              f"{font_file.name if font_file else ''}|{size}|{stroke or ''}|{stroke_w}|"
-             f"{opacity}|{caps}|{k:.4f}|{rot:.3f}|{c.text.strip()}").encode()
+             f"{opacity}|{caps}|{k:.4f}|{rot:.3f}|{block_key(blk)}|{c.text.strip()}").encode()
         ).hexdigest()[:16]
         png = cache_dir / f"textxf_{key}.png"
         if not _png_is_valid(png):
@@ -1332,7 +1481,7 @@ def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
     tx = tc.transform
     role = item["role"]
     a_in, a_out = item["anim_in"], item["anim_out"]
-    d = min(ANIM_DUR, max(0.1, (re - rs) * 0.4))
+    d = anim_duration(tc, rs, re)
     sx = out_w / max(1, canvas.w)
     sy = out_h / max(1, canvas.h)
     w, h = item["size"]
@@ -1572,7 +1721,7 @@ def build_overlay_chain(
             # Anim duration, clamped so in+out never overlap on short clips.
             # Clamped against the RENDER length: that is how long the clip is
             # on screen, and in+out must not overlap inside it.
-            d = min(ANIM_DUR, max(0.1, (re - rs) * 0.4))
+            d = anim_duration(tc, rs, re)
             preprocessed = f"[ov{i}]"
 
             chain = f"[{idx}:v]scale={out_w}:{out_h},format=rgba"
@@ -1615,7 +1764,9 @@ def build_overlay_chain(
             # clips overlay_w==main_w / overlay_h==main_h, so both exprs
             # collapse to 0 — identical to the static path.
             anchor_x, anchor_y = resolve_anchor_overrides(tc, role, canvas.w, canvas.h)
-            cy = _y_for_role(role, anchor_y, canvas.h, canvas.w) * (out_h / max(1, canvas.h))
+            if role == "caption":
+                anchor_y = caption_position_y(edl)   # QA-075, as cache_text_pngs baked it
+            cy = block_anchor_y(role, anchor_y, canvas.h, canvas.w) * (out_h / max(1, canvas.h))
             cx = ((float(anchor_x) if anchor_x is not None else canvas.w / 2)
                   * (out_w / max(1, canvas.w)))
             off = out_h * 0.04

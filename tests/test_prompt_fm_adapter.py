@@ -150,7 +150,8 @@ def test_plan_happy_path_maps_typed_fields_to_slots(expander):
     assert res.ok and res.brain == "apple_intelligence" and res.model == "apple-fm"
     assert res.latency_ms == 900
     plan = res.plan
-    assert plan.brain == "apple_intelligence" and plan.reply == "Reframing and captioning."
+    # The model's free-text reply is dropped (QA-018 live pass).
+    assert plan.brain == "apple_intelligence" and plan.reply is None
     assert [s.tool for s in plan.steps] == ["recipe:reframe", "recipe:captions"]
     assert plan.steps[0].args == {"ratio": "9:16", "platform": "reels"}      # None fields dropped
     argv, payload, timeout = h.calls[-1]

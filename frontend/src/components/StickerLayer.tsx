@@ -700,8 +700,9 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
           // No ✕ on a PIP: Backspace deletes the clip, and a delete handle on
           // the base-adjacent video layer is far too easy to hit by accident
           // while reframing it.
-          showDelete: sel.kind !== 'pip',
+          showDelete: sel.kind !== 'pip' && !sel.selectOnly,
           deleteAt: dv.deleteHandleLocal(sel, width, height),
+          handles: !sel.selectOnly,
         })
         ctx.restore()
       }
@@ -720,7 +721,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       const t = now()
       const boxes = allBoxes(t)
       const sel = stateRef.current.selection
-      const selBox = boxes.find((b) => b.id === sel)
+      // A select-only box (a caption cue) has no handles to grab.
+      const selBox = boxes.find((b) => b.id === sel && !b.selectOnly)
 
       // 1) The ✕ delete handle of the currently-selected overlay (checked
       // before resize — it sits just outside the top-right corner handle).
@@ -822,6 +824,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         const pick = at === -1 ? under[0] : under[(at + 1) % under.length]
         e.preventDefault()
         if (pick.id !== sel) setSelection(pick.id)
+        // A caption cue: selecting it is the whole gesture (QA-075).
+        if (pick.selectOnly) return
         try { cv.setPointerCapture(e.pointerId) } catch { /* synthetic/edge pointer */ }
         // ALT-drag on a cropped PIP pans the picture INSIDE its shape, instead
         // of moving the shape on the canvas — the drag equivalent of the panel's
@@ -913,7 +917,7 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         const sel = stateRef.current.selection
         const boxes = allBoxes(t)
         let cursor = 'default'
-        const selBox = boxes.find((b) => b.id === sel)
+        const selBox = boxes.find((b) => b.id === sel && !b.selectOnly)
         if (selBox) {
           const { lx, ly } = toLocal(px, py, selBox)
           // The rotate grip advertises itself, both so the gesture is
@@ -938,7 +942,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
             }
           }
         }
-        if (cursor === 'default' && boxes.some((b) => hitsBody(px, py, b))) cursor = 'move'
+        const bodyHit = cursor === 'default' ? boxes.find((b) => hitsBody(px, py, b)) : undefined
+        if (bodyHit) cursor = bodyHit.selectOnly ? 'pointer' : 'move'
         // The base video reads as draggable ONLY inside framing mode.
         //
         // It used to advertise `move` whenever any v1 clip was on screen, so the

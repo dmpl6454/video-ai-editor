@@ -83,6 +83,9 @@ def _one_clip_edl(src: Path) -> EDL:
     edl = EDL(canvas=Canvas(w=320, h=180, fps=30), tracks=[
         Track(id="v1", type="video", clips=[_clip(src)]),
     ])
+    # Raw mix levels: a loudness-matched preview (QA-082) would lift a −40 dB
+    # edit of the only source back to the target, as the export does.
+    edl.canvas.loudness_lufs = None
     edl.recompute_duration()
     return edl
 

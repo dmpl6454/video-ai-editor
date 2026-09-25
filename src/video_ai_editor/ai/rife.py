@@ -35,10 +35,15 @@ def available() -> bool:
 
 
 def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
-                       model: str = "rife-v4.6") -> Path:
+                       model: str = "rife-v4.6",
+                       on_progress=None, cancel_event=None) -> Path:
     """Generate `factor`× the input frames via RIFE so playing the result at
     the original fps yields smooth `factor`× slow-mo. Returns the new mp4.
+
+    QA-066: progress (extract → interpolated frames counted as RIFE writes
+    them → encode) and cancel, with the work directory always removed.
     """
+    from . import jobio
     if not available():
         raise RuntimeError(f"RIFE binary not found at {RIFE_BIN}")
     if factor < 2:
@@ -57,52 +62,41 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     frames_out = work / "out"
     frames_in.mkdir(parents=True, exist_ok=True)
     frames_out.mkdir(parents=True, exist_ok=True)
+    stages = jobio.Stages(on_progress, extract=0.05, model=0.85, encode=0.10)
+    part = _pu.part_path(dst)
+    try:
+        rate, _dur, _n = jobio.video_facts(src)
+        from fractions import Fraction
+        fps_val = float(Fraction(rate)) if rate else 30.0
+        n_in = jobio.extract_frames(src, frames_in, on_progress=stages.sub("extract"),
+                                    cancel_event=cancel_event)
+        if n_in < 2:
+            raise RuntimeError("RIFE needs at least 2 frames")
 
-    # Probe source fps
-    fps_str = subprocess.run(
-        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=avg_frame_rate", "-of", "default=nokey=1:noprint_wrappers=1",
-         str(src)], capture_output=True, text=True, check=True,
-        encoding="utf-8", errors="replace",
-        **_pu.SUBPROCESS_FLAGS,
-    ).stdout.strip()
-    if "/" in fps_str:
-        n, d = fps_str.split("/")
-        fps_val = float(n) / max(1.0, float(d))
-    else:
-        fps_val = 30.0
-
-    # Extract frames
-    subprocess.run(
-        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2", str(frames_in / "f%05d.png")],
-        capture_output=True, check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    n_in = len(list(frames_in.glob("*.png")))
-    if n_in < 2:
-        raise RuntimeError("RIFE needs at least 2 frames")
-
-    # RIFE wants total target frame count; -j flag controls threads.
-    # Windows CreateProcess resolves argv[0] against PATH + the PARENT cwd, NOT
-    # the `cwd=` we pass — so a bare exe name fails even with cwd set. Use the
-    # absolute binary path on Windows. On POSIX the "./exe" form works because
-    # the child chdir's into cwd before exec.
-    target = n_in * factor
-    exe = _pu.exe_name("rife-ncnn-vulkan")
-    argv0 = str(RIFE_BIN) if _pu.IS_WINDOWS else f"./{exe}"
-    proc = subprocess.run(
-        [argv0,
-         "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
-         "-m", model, "-n", str(target), "-f", "f%05d.png"],
-        cwd=str(RIFE_DIR), capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"rife failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
-
-    encode_slowmo(frames_out, src, dst, fps=fps_val, factor=factor)
-    shutil.rmtree(work, ignore_errors=True)
+        # RIFE wants total target frame count; -j flag controls threads.
+        # Windows CreateProcess resolves argv[0] against PATH + the PARENT cwd,
+        # NOT the `cwd=` we pass — so a bare exe name fails even with cwd set.
+        # Use the absolute binary path on Windows. On POSIX the "./exe" form
+        # works because the child chdir's into cwd before exec.
+        target = n_in * factor
+        exe = _pu.exe_name("rife-ncnn-vulkan")
+        argv0 = str(RIFE_BIN) if _pu.IS_WINDOWS else f"./{exe}"
+        rc, _out, err = jobio.run(
+            [argv0,
+             "-i", str(frames_in.resolve()), "-o", str(frames_out.resolve()),
+             "-m", model, "-n", str(target), "-f", "f%05d.png"],
+            cwd=str(RIFE_DIR), cancel_event=cancel_event, what="slow motion",
+            on_tick=jobio.count_ticker(frames_out, target, stages.sub("model")))
+        if rc != 0:
+            raise RuntimeError(f"rife failed (rc={rc}):\n{err[-1500:]}")
+        stages.done("model")
+        jobio.check(cancel_event)
+        encode_slowmo(frames_out, src, part, fps=fps_val, factor=factor, rate=rate)
+        stages.done("encode")
+        _pu.replace_with_retry(part, dst)
+    finally:
+        _pu.unlink_with_retry(part)
+        shutil.rmtree(work, ignore_errors=True)
     return dst
 
 
@@ -122,7 +116,7 @@ def _slow_atempo_chain(factor: int) -> str:
 
 
 def encode_slowmo(frames_dir: Path, src: Path, dst: Path, *, fps: float,
-                  factor: int) -> Path:
+                  factor: int, rate: str | None = None) -> Path:
     """Encode interpolated frames at the SOURCE fps (so playback lasts
     factor× the original) WITH the source's audio stretched to match.
 
@@ -139,8 +133,9 @@ def encode_slowmo(frames_dir: Path, src: Path, dst: Path, *, fps: float,
     frames = sorted(frames_dir.glob("f*.png"))
     n = len(frames)
     video_s = n / float(fps) if fps else 0.0
+    # The exact rational when known (QA-066): `29.970030` is not 30000/1001.
     args = [_pu.FFMPEG, "-y",
-            "-framerate", f"{fps:.6f}", "-i", str(frames_dir / "f%05d.png")]
+            "-framerate", rate or f"{fps:.6f}", "-i", str(frames_dir / "f%05d.png")]
     if source_has_audio(str(src)):
         args += ["-i", str(src)]
         af = (f"[1:a:0]aresample=async=1:first_pts=0,{_slow_atempo_chain(factor)},"

@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   EMOJI_BOX_RATIO, EMOJI_INK_RATIO, LINE_HEIGHT_RATIO, SHADOW_ALPHA, SHADOW_OFFSET,
-  TEXT_ROLES, WRAP_WIDTH_RATIO, baselineFor, isAnimated, lineCenters, outlineLineWidth,
-  pickScript, roleAnchorY, scaleRotationAt, staticValue,
+  SCRIPT_FALLBACK_FAMILIES, TEXT_ROLES, WRAP_WIDTH_RATIO, baselineFor, fontFamilyList, isAnimated,
+  lineCenters, outlineLineWidth, pickScript, roleAnchorY, scaleRotationAt, staticValue,
 } from './textLayout'
 
 const CASES = JSON.parse(readFileSync(fileURLToPath(
@@ -60,6 +60,15 @@ describe('shared text layout contract (QA-015)', () => {
     const b = baselineFor(540, 88, 0)
     expect((b - 88 + b + 0) / 2).toBeCloseTo(540, 9)
     expect(outlineLineWidth(5)).toBe(10)
+  })
+
+  it('falls back per run to the same Noto faces as the export (mixed-script parity)', () => {
+    const fb = (CASES as unknown as { script_fallback: { families: string[] } }).script_fallback
+    expect([...SCRIPT_FALLBACK_FAMILIES]).toEqual(fb.families)
+    // A Latin-dominant clip's Hindi line: the canvas must reach the bundled
+    // Noto face before the system font, as the export's per-run fallback does.
+    expect(fontFamilyList('Inter')).toBe('"Inter", "Noto Sans Devanagari", "Noto Sans Arabic", system-ui, sans-serif')
+    expect(fontFamilyList('Noto Sans Devanagari')).toBe('"Noto Sans Devanagari", "Noto Sans Arabic", system-ui, sans-serif')
   })
 
   it('picks the same script fallback as _pick_script_font', () => {

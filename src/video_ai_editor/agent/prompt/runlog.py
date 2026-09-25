@@ -116,7 +116,7 @@ class StepRecord:
     index: int
     total: int
     tool: str
-    status: str = "running"            # running | ok | failed | skipped
+    status: str = "running"            # running | ok | failed | skipped | cancelled
     summary: str = ""
     effect: str | None = None          # "none" when the tool reported nothing to do
     error: str | None = None
@@ -207,6 +207,15 @@ class RunLog:
                 self.record.error = error
             if status in ("done", "failed", "cancelled", "clarify"):
                 self.record.ended = time.time()
+            if status == "cancelled":
+                # The step that was executing never sends a terminal frame; a
+                # client rebuilding the log from GET /prompt/run showed its
+                # spinner forever under a run that says it was cancelled.
+                now = time.time()
+                for rec in self._steps.values():
+                    if rec.status in ("running", "pending"):
+                        rec.status, rec.ended = "cancelled", now
+                self.record.steps = [self._steps[i].as_dict() for i in sorted(self._steps)]
             write_record(self.session_dir, self.record)
 
     def _fold(self, event: dict[str, Any]) -> None:
@@ -219,7 +228,7 @@ class RunLog:
                                  tool=str(event.get("tool", "")))
                 self._steps[idx] = rec
             status = str(event.get("status", rec.status))
-            if status == "running" and rec.status in ("ok", "failed", "skipped"):
+            if status == "running" and rec.status in ("ok", "failed", "skipped", "cancelled"):
                 return              # a progress tick that raced the terminal frame — the step is over
             rec.status = status
             rec.summary = str(event.get("summary") or rec.summary)

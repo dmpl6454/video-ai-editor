@@ -94,6 +94,79 @@ class _Run:
     rtl: bool
     glyphs: tuple = ()        # ((gid, x_off, y_off, x_adv), ...) visual order, px
     width: float = 0.0
+    font: "ShapedFont | None" = None   # the face that shaped it (None = the caller's)
+    script: str | None = None          # ISO 15924 tag it was shaped as
+
+
+# ---- script itemisation ------------------------------------------------------
+#
+# A line is shaped in runs of ONE script each (mixed-script parity, wave-B
+# review). The runs used to be split only by bidi level and emoji, and every
+# run was shaped with `guess_segment_properties()`, which takes the script
+# from the FIRST strong character: "Hello नमस्ते दुनिया" was shaped as Latin, so
+# the Devanagari came out misspelled ('नमस्‌ते दुनयिा'). And the export picked ONE
+# font per clip by dominant script, so a Latin-dominant clip drew its
+# Devanagari line in Inter — every glyph a .notdef box — while the browser
+# preview falls back per character. Now each run carries its script (set on
+# the HarfBuzz buffer explicitly) and its own face: the clip's font when it
+# covers the run, else the bundled Noto face for that script.
+
+#: (first, last, ISO 15924 tag). Anything not listed: a letter is Latin-like
+#: (the clip's font), everything else is Common/Inherited and joins a
+#: neighbouring run.
+_SCRIPT_RANGES: tuple[tuple[int, int, str], ...] = (
+    (0x0370, 0x03FF, "Grek"), (0x0400, 0x052F, "Cyrl"),
+    (0x0590, 0x05FF, "Hebr"), (0x0600, 0x06FF, "Arab"), (0x0700, 0x074F, "Syrc"),
+    (0x0750, 0x077F, "Arab"), (0x0780, 0x07BF, "Thaa"), (0x08A0, 0x08FF, "Arab"),
+    (0x0900, 0x097F, "Deva"), (0x0980, 0x09FF, "Beng"), (0x0A00, 0x0A7F, "Guru"),
+    (0x0A80, 0x0AFF, "Gujr"), (0x0B00, 0x0B7F, "Orya"), (0x0B80, 0x0BFF, "Taml"),
+    (0x0C00, 0x0C7F, "Telu"), (0x0C80, 0x0CFF, "Knda"), (0x0D00, 0x0D7F, "Mlym"),
+    (0x0D80, 0x0DFF, "Sinh"), (0x0E00, 0x0E7F, "Thai"), (0x0E80, 0x0EFF, "Laoo"),
+    (0x0F00, 0x0FFF, "Tibt"), (0x1000, 0x109F, "Mymr"), (0x1780, 0x17FF, "Khmr"),
+    (0x1CD0, 0x1CFF, "Deva"), (0x3040, 0x30FF, "Hani"), (0x3400, 0x4DBF, "Hani"),
+    (0x4E00, 0x9FFF, "Hani"), (0xA8E0, 0xA8FF, "Deva"), (0xFB1D, 0xFB4F, "Hebr"),
+    (0xFB50, 0xFDFF, "Arab"), (0xFE70, 0xFEFF, "Arab"),
+)
+#: Script tags whose runs are right-to-left in isolation (bidi decides).
+_ZW_JOINERS = frozenset("\u200c\u200d")
+
+
+def script_of(ch: str) -> str | None:
+    """ISO 15924 tag of `ch`, or None for a Common/Inherited character
+    (spaces, digits, punctuation, combining marks, ZWJ/ZWNJ) that takes the
+    script of the run around it."""
+    import unicodedata as _ud
+    if ch in _ZW_JOINERS:
+        return None
+    cp = ord(ch)
+    if cp >= 0x0370:
+        for lo, hi, tag in _SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                cat = _ud.category(ch)
+                # Marks and digits inside a script block still belong to it
+                # (matras, nukta, Devanagari digits); block-common punctuation
+                # (danda) too — shaping needs them in the run.
+                return tag if cat[0] in "LMN" or cat.startswith("P") else None
+    return "Latn" if _ud.category(ch).startswith("L") else None
+
+
+def _split_scripts(chunk: str) -> list[tuple[str | None, str]]:
+    """`chunk` as consecutive (script, text) pieces; Common/Inherited
+    characters join the PRECEDING piece (leading ones the following)."""
+    tags = [script_of(ch) for ch in chunk]
+    first = next((t for t in tags if t is not None), None)
+    out: list[tuple[str | None, str]] = []
+    cur_tag, cur = first, []
+    for ch, tag in zip(chunk, tags):
+        if tag is not None and tag != cur_tag and cur:
+            out.append((cur_tag, "".join(cur)))
+            cur = []
+        if tag is not None:
+            cur_tag = tag
+        cur.append(ch)
+    if cur:
+        out.append((cur_tag, "".join(cur)))
+    return out
 
 
 def _levels(line: str) -> list[tuple[str, int]]:
@@ -140,10 +213,15 @@ class ShapedFont:
     and draw a line of complex-script text. Mirrors Pillow's `FreeTypeFont`
     sizing: `size` is the em size in pixels (FT_Set_Pixel_Sizes(0, size))."""
 
-    def __init__(self, path: Path | str, size: int, weight: float | None = None):
+    def __init__(self, path: Path | str, size: int, weight: float | None = None,
+                 fallback: "Callable[[str], ShapedFont | None] | None" = None):
         require()
         self.path = str(path)
         self.size = int(size)
+        # script tag -> the face for a run this one does not cover (text_overlay
+        # supplies the bundled Noto faces); None = no fallback.
+        self._fallback = fallback
+        self._fallback_cache: dict[str, ShapedFont | None] = {}
         self.face = _ft.Face(self.path)
         self.face.set_pixel_sizes(0, self.size)
         blob = _hb.Blob.from_file_path(self.path)
@@ -166,11 +244,37 @@ class ShapedFont:
             except Exception:
                 pass  # not a variable font: its one weight is the weight
 
+    # -- coverage / fallback -------------------------------------------------
+    def covers(self, text: str) -> bool:
+        """Every character that needs a glyph has one in this face."""
+        for ch in text:
+            if ch.isspace() or ch in _ZW_JOINERS or ord(ch) < 0x20:
+                continue
+            if self.face.get_char_index(ord(ch)) == 0:
+                return False
+        return True
+
+    def face_for(self, script: str | None, text: str) -> "ShapedFont":
+        """This face when it covers `text`, else the fallback face for its
+        script (when there is one that covers it better), else this face."""
+        if script is None or self._fallback is None or self.covers(text):
+            return self
+        if script not in self._fallback_cache:
+            try:
+                self._fallback_cache[script] = self._fallback(script)
+            except Exception:  # noqa: BLE001 - a missing fallback keeps this face
+                self._fallback_cache[script] = None
+        return self._fallback_cache[script] or self
+
     # -- shaping -----------------------------------------------------------
-    def _shape(self, text: str, rtl: bool) -> tuple[tuple, float]:
+    def _shape(self, text: str, rtl: bool, script: str | None = None) -> tuple[tuple, float]:
         buf = _hb.Buffer()
         buf.add_str(text)
         buf.guess_segment_properties()
+        if script:
+            # Explicitly, never guessed from the first strong character: a
+            # Devanagari run after a Latin word was shaped as Latin.
+            buf.script = script
         buf.direction = "rtl" if rtl else "ltr"
         _hb.shape(self.hb_font, buf, {"kern": True, "liga": True})
         glyphs = []
@@ -212,9 +316,15 @@ class ShapedFont:
             rtl = bool(lv % 2)
             if kind == "emoji":
                 out.append((lv, _Run("emoji", chunk, rtl, (), float(emoji_box))))
-            else:
-                glyphs, width = self._shape(chunk, rtl)
-                out.append((lv, _Run("text", chunk, rtl, glyphs, width)))
+                continue
+            # One script per run (see _split_scripts), appended in LOGICAL
+            # order at the chunk's level — _visual_order's rule L2 reverses a
+            # right-to-left level's runs, exactly as it does around an emoji.
+            for script, piece in _split_scripts(chunk):
+                face = self.face_for(script, piece)
+                glyphs, width = face._shape(piece, rtl, script)
+                out.append((lv, _Run("text", piece, rtl, glyphs, width,
+                                     None if face is self else face, script)))
         return _visual_order(out)  # type: ignore[return-value]
 
     def width(self, line: str, split_emoji, emoji_box: float) -> float:
@@ -260,13 +370,14 @@ class ShapedFont:
         pen = x
         for run in runs:
             if run.kind == "text":
+                face = run.font or self
                 for gid, gx, gy in run.glyphs:
                     ox = pen + gx
                     ix = int(ox // 1)
                     step = int(round((ox - ix) * self._SUBPIXEL_STEPS))
                     if step == self._SUBPIXEL_STEPS:
                         ix, step = ix + 1, 0
-                    got = self._glyph_bitmap(gid, step, int(stroke_w))
+                    got = face._glyph_bitmap(gid, step, int(stroke_w))
                     if got is None:
                         continue
                     arr, left, top = got
@@ -305,5 +416,5 @@ def draw_runs(img: Image.Image, font: ShapedFont, runs: list[_Run], x: float,
 
 
 __all__ = ["ShapingUnavailable", "ShapedFont", "needs_shaping", "available",
-           "require", "draw_runs"]
+           "require", "draw_runs", "script_of"]
 

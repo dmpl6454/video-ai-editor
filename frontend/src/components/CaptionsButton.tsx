@@ -49,6 +49,11 @@ import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
 import { isMediaClip } from '../types'
+import { useMenuA11y } from '../lib/useMenuA11y'
+import { consentText, downloadBadge, downloadKeyFor, pendingDownload, type DownloadInfo, type DownloadReport } from '../lib/modelDownloads'
+import { Dialog } from './Dialog'
+import { Icon } from './Icon'
+import { openCaptionStyle } from '../lib/captionStyleOpen'
 import './CaptionsButton.css'
 
 type Target = 'as-spoken' | 'en' | 'hi' | 'hinglish' | 'es'
@@ -72,9 +77,9 @@ const SHORT_LABEL: Record<Target, string> = {
 }
 
 const SPEEDS: { id: Speed; label: string; hint: string }[] = [
-  { id: 'quality', label: 'Best quality', hint: 'large-v3 — the most accurate model' },
-  { id: 'fast', label: 'Fastest', hint: '~4x faster (large-v3-turbo). Falls back to the accurate '
-      + "model automatically for the English target, which turbo can't translate." },
+  { id: 'quality', label: 'Best quality', hint: 'The most accurate caption model' },
+  { id: 'fast', label: 'Fastest', hint: 'About 4× faster. English captions still use the accurate '
+      + 'model, which the fast one can’t translate.' },
 ]
 
 // The literal faster-whisper model name — must match a name transcribe.py
@@ -132,6 +137,28 @@ export function CaptionsButton() {
   const jobRef = useRef<string | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const caretRef = useRef<HTMLButtonElement | null>(null)
+  // Keyboard: focus lands on the checked language, arrows move, Escape
+  // closes and returns to the caret (lib/useMenuA11y, QA-102).
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const menuA11y = useMenuA11y({
+    open: menuOpen, ready: !!menuPos, mode: 'menu',
+    menuRef, triggerRef: caretRef, onClose: () => setMenuOpen(false),
+  })
+  // QA-065: which caption models are on disk (GET /api/downloads). An
+  // uncached choice wears its size in the menu and asks before the run.
+  const [downloads, setDownloads] = useState<DownloadReport | null>(null)
+  const [consent, setConsent] = useState<DownloadInfo | null>(null)
+  const mainRef = useRef<HTMLButtonElement | null>(null)
+  const refreshDownloads = async (): Promise<DownloadReport | null> => {
+    try {
+      const r = (await api.getDownloads()).downloads
+      setDownloads(r)
+      return r
+    } catch (e) {
+      console.warn('[captions] download report unavailable:', e)
+      return null
+    }
+  }
 
   // auto_caption transcribes the first media clip on v1 — mirror that guard
   // here so the button is disabled (with an explaining tooltip) instead of
@@ -186,12 +213,10 @@ export function CaptionsButton() {
         setMenuOpen(false)
       }
     }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false) }
+    // Escape is lib/useMenuA11y's (it also hands focus back to the caret).
     window.addEventListener('mousedown', onDown)
-    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('mousedown', onDown)
-      window.removeEventListener('keydown', onKey)
     }
   }, [menuOpen])
 
@@ -226,7 +251,23 @@ export function CaptionsButton() {
     }
   }
 
+  const captionArgs = (): Record<string, unknown> => {
+    const args: Record<string, unknown> = target === 'as-spoken' ? {} : { target }
+    if (speed === 'fast') args.model = TURBO_MODEL
+    return args
+  }
+
+  // Ask before a first run that would download a caption model (QA-065):
+  // "Fastest" used to start a 1.6 GB download with no word about it.
   const run = async () => {
+    if (busy || !hasFootage) return
+    const report = await refreshDownloads()
+    const need = pendingDownload(report, downloadKeyFor('auto_caption', captionArgs()))
+    if (need) { setConsent(need); return }
+    await start()
+  }
+
+  const start = async () => {
     if (busy || !hasFootage) return
     setBusy(true)
     setProgress(0)
@@ -239,9 +280,7 @@ export function CaptionsButton() {
       // and the behaviour every pre-existing caller relies on. Same idea for
       // speed: 'quality' sends no `model` at all, so it rides WHISPER_CAPTION_MODEL
       // (default large-v3) exactly as every existing caller already does.
-      const args: Record<string, unknown> = target === 'as-spoken' ? {} : { target }
-      if (speed === 'fast') args.model = TURBO_MODEL
-      const res = await dispatch('auto_caption', args, {
+      const res = await dispatch('auto_caption', captionArgs(), {
         onProgress: ({ jobId, progress: p }) => {
           jobRef.current = jobId
           setProgress(p)
@@ -265,6 +304,7 @@ export function CaptionsButton() {
       }
       // res === null → the failure toast already fired inside store.dispatch.
     } finally {
+      void refreshDownloads()
       setBusy(false)
       setProgress(0)
       setCancelling(false)
@@ -309,14 +349,32 @@ export function CaptionsButton() {
 
   return (
     <span className="cc-wrap" ref={wrapRef}>
+      <Dialog
+        open={!!consent}
+        title="Download the caption model?"
+        labelId="cc-consent-title"
+        triggerRef={mainRef}
+        onClose={() => setConsent(null)}
+        footer={(
+          <>
+            <button type="button" onClick={() => setConsent(null)}>Cancel</button>
+            <button type="button" className="primary" onClick={() => { setConsent(null); void start() }}>
+              Download and caption
+            </button>
+          </>
+        )}
+      >
+        {consent && <p className="dialog-text">{consentText(consent)} Captions start when it finishes.</p>}
+      </Dialog>
       <button
+        ref={mainRef}
         className="cc-main"
         onClick={() => { void run() }}
         disabled={!hasFootage}
         title={!hasFootage
           ? 'Add a video to the timeline first — captions transcribe the main (v1) footage'
           : `Auto-captions in ${current.label}, ${currentSpeed.label.toLowerCase()} — `
-            + `re-transcribes the footage with Whisper ${speed === 'fast' ? 'large-v3-turbo' : 'large-v3'}. `
+            + 'transcribes the footage again. '
             + 'A long clip can take a while; progress and a Cancel button appear while it runs.'}
         style={{ fontSize: 11 }}
       >
@@ -326,20 +384,24 @@ export function CaptionsButton() {
         ref={caretRef}
         className="cc-caret"
         data-cc-menu
-        onClick={() => setMenuOpen((o) => !o)}
+        onClick={() => { if (!menuOpen) void refreshDownloads(); setMenuOpen((o) => !o) }}
         disabled={!hasFootage}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-label={`Caption language: ${current.label}, speed: ${currentSpeed.label}`}
         title={`Caption language: ${current.label} · Speed: ${currentSpeed.label}`}
       >{SHORT_LABEL[current.id]}
-        {speed === 'fast' ? '⚡' : ''} ▾</button>
+        {speed === 'fast' ? <span aria-hidden="true">⚡</span> : ''} <span aria-hidden="true">▾</span></button>
 
       {menuOpen && menuPos && createPortal(
         <div
+          ref={menuRef}
           className="cc-menu"
           data-cc-menu
+          data-keymap-ignore
           role="menu"
+          aria-label="Caption language and speed"
+          onKeyDown={menuA11y.onKeyDown}
           style={{
             position: 'fixed',
             left: menuPos.left,
@@ -357,7 +419,7 @@ export function CaptionsButton() {
               onClick={() => pick(t.id)}
               title={t.hint}
             >
-              <span className="cc-check" aria-hidden="true">{t.id === target ? '●' : ''}</span>
+              <span className="cc-check menu-check" aria-hidden="true">{t.id === target && <Icon name="check" size={12} />}</span>
               <span>
                 <span className="cc-menu-label">{t.label}</span>
                 <span className="cc-menu-hint">{t.hint}</span>
@@ -375,13 +437,26 @@ export function CaptionsButton() {
               onClick={() => pickSpeed(s.id)}
               title={s.hint}
             >
-              <span className="cc-check" aria-hidden="true">{s.id === speed ? '●' : ''}</span>
+              <span className="cc-check menu-check" aria-hidden="true">{s.id === speed && <Icon name="check" size={12} />}</span>
               <span>
                 <span className="cc-menu-label">{s.label}</span>
                 <span className="cc-menu-hint">{s.hint}</span>
+                {downloadBadge(pendingDownload(downloads, downloadKeyFor('auto_caption', s.id === 'fast' ? { model: TURBO_MODEL } : {}))) && (
+                  <span className="cc-menu-dl">
+                    {downloadBadge(pendingDownload(downloads, downloadKeyFor('auto_caption', s.id === 'fast' ? { model: TURBO_MODEL } : {})))}
+                  </span>
+                )}
               </span>
             </button>
           ))}
+          <div className="cc-menu-sep" role="separator" />
+          {/* QA-075: the captions' look and position, one click from CC. */}
+          <button role="menuitem" className="cc-menu-item"
+                  onClick={() => { menuA11y.close(false); openCaptionStyle() }}>
+            <span className="cc-check" aria-hidden="true" />
+            <span><span className="cc-menu-label">Caption style…</span>
+              <span className="cc-menu-hint">Position, font, colour and box for every caption</span></span>
+          </button>
         </div>,
         document.body,
       )}

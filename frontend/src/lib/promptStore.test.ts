@@ -195,7 +195,8 @@ describe('cancel and disconnect are different things', () => {
     expect(apiMock.promptCancel).toHaveBeenCalledWith('s_test')
     release(sseResponse(failing))
     await running
-    expect(usePromptStore.getState().status).toBe('error')
+    // QA-064: a cancel the user asked for is `cancelled`, not a failure.
+    expect(usePromptStore.getState().status).toBe('cancelled')
     expect(usePromptStore.getState().lastError).toBe('Cancelled — timeline unchanged.')
   })
 

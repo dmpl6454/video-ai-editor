@@ -60,7 +60,7 @@ export interface Plan {
 // ---------------------------------------------------------------------------
 
 export type BrainStatus = 'trying' | 'answered' | 'failed'
-export type StepStatus = 'running' | 'ok' | 'failed' | 'skipped'
+export type StepStatus = 'running' | 'ok' | 'failed' | 'skipped' | 'cancelled'
 
 export interface BrainEvent {
   type: 'brain'; status: BrainStatus; brain: string; label: string
@@ -112,7 +112,12 @@ export const brainLabel = (id: string | null | undefined): string =>
 // Run state + reducer
 // ---------------------------------------------------------------------------
 
-export type PromptStatus = 'idle' | 'planning' | 'running' | 'verifying' | 'clarify' | 'done' | 'error'
+// `cancelled` (QA-064): the user stopped the run and the timeline is as it
+// was — not a failure, and never labelled "Failed".
+export type PromptStatus = 'idle' | 'planning' | 'running' | 'verifying' | 'clarify' | 'done' | 'error' | 'cancelled'
+
+/** The executor's cancel sentence ("Cancelled — timeline unchanged."). */
+export const isPromptCancelMessage = (m: string | null | undefined): boolean => /^Cancelled\b/.test(m ?? '')
 
 export interface BrainAttempt {
   status: BrainStatus; brain: string; label: string
@@ -158,7 +163,7 @@ function stepIndexFromId(id: string | undefined): number | null {
   return m ? Number(m[1]) : null
 }
 
-const TERMINAL: ReadonlySet<StepStatus> = new Set(['ok', 'failed', 'skipped'])
+const TERMINAL: ReadonlySet<StepStatus> = new Set(['ok', 'failed', 'skipped', 'cancelled'])
 
 function upsertStep(steps: StepRow[], next: StepRow): StepRow[] {
   const i = steps.findIndex((s) => s.index === next.index && s.tool === next.tool)
@@ -243,12 +248,18 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
       return { ...state, opSeen: true }
     case 'error': {
       const e = evt as Extract<PromptEvent, { type: 'error' }>
-      return { ...state, status: 'error', lastError: e.message }
+      const cancelled = isPromptCancelMessage(e.message)
+      // A cancel never sends the executing step a terminal frame: its row
+      // stops as "cancelled" instead of spinning forever (QA-064).
+      const steps = cancelled
+        ? state.steps.map((s) => (s.status === 'running' ? { ...s, status: 'cancelled' as const } : s))
+        : state.steps
+      return { ...state, steps, status: cancelled ? 'cancelled' : 'error', lastError: e.message }
     }
     case 'done':
       // `done` closes the turn; what it means depends on what came before it.
       if (state.status === 'clarify') return state
-      if (state.status === 'error') return state
+      if (state.status === 'error' || state.status === 'cancelled') return state
       return { ...state, status: 'done' }
     default:
       return { ...state, unknownEvents: state.unknownEvents + 1 }
@@ -274,6 +285,7 @@ export function terminalAnnouncement(state: PromptRunState): string | null {
     if (state.verify) return `Done — ${state.verify.passed} of ${state.verify.total} checks passed`
     return state.plan && state.plan.steps.length ? 'Done' : 'Answered'
   }
+  if (state.status === 'cancelled') return 'Cancelled — the timeline is unchanged'
   if (state.status === 'error') return `Failed — ${state.lastError ?? 'unknown error'}`
   if (state.status === 'clarify') return 'One question before running'
   return null
@@ -386,6 +398,16 @@ export function firePromptRunning(sid: string): boolean {
   _promptRunningListener(sid)
   return true
 }
+
+// The same bridge for a PROJECT SWITCH (QA-062): the prompt store's run log,
+// pending question and run id belong to one session, and nothing reset them
+// when the editor opened another — a new empty project showed the previous
+// project's "Fit c_… → cover". store.ts fires this whenever `sessionId`
+// changes; the prompt store listens.
+type SessionSwitchListener = (sid: string | null) => void
+let _sessionSwitchListener: SessionSwitchListener | null = null
+export function onSessionSwitch(listener: SessionSwitchListener | null): void { _sessionSwitchListener = listener }
+export function fireSessionSwitch(sid: string | null): void { _sessionSwitchListener?.(sid) }
 
 // ---------------------------------------------------------------------------
 // brains_report() (spec §3.4) — tolerant of the two shapes B may emit

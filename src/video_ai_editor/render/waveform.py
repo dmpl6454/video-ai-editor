@@ -1,90 +1,147 @@
 """Audio waveform peaks for the timeline.
 
-We pipe mono int16 PCM out of ffmpeg, then bucket-max-abs into N peaks per
-second. Cached to JSON next to the source file so re-fetching is instant.
+Each peak is the max |sample| over its bucket, across EVERY channel, of the
+source decoded at 48 kHz — the true sample peak, whatever the file's length,
+content or channel layout. Cached to JSON under the session cache.
+
+QA-081 — what this used to do, and why each part was wrong:
+  * decoded at `peaks_per_sec × 200` Hz (10 kHz at 50 pps, 1 kHz for a
+    12-minute file whose density was lowered to fit the cap): everything above
+    that Nyquist was filtered out before a single peak was taken — a 3 kHz
+    tone read 0.021 at 30 s and 0.0 at 200 s, an 8 kHz tone never showed, and
+    a 12-minute narration peaked at 0.503 against a true 0.754;
+  * `-ac 1` averaged the channels, so a left-only tone drew at half height.
+The density cap stays (the JSON and the redraw stay bounded) but is far
+higher, and a lower density only coarsens WHEN a peak is, never how tall it is.
 """
 from __future__ import annotations
+
 import hashlib
 import json
-import struct
+import os
 import subprocess
+import threading
 from pathlib import Path
 
 from .. import platformutil as _pu
 
 DEFAULT_PEAKS_PER_SEC = 50
-MAX_PEAKS = 4000  # Cap total peaks regardless of source length so JSON stays small.
+#: Cap on the peaks returned for one source: 30 min at the default density.
+MAX_PEAKS = 90_000
+DECODE_RATE = 48_000
+#: Bump when the peak math changes, so a cached pre-fix waveform is not served.
+_WAVE_VERSION = 2
+#: Densities that divide DECODE_RATE exactly, so `idx = floor(t × pps)` on the
+#: client lands on the bucket that holds t, at any length.
+_PPS_LADDER = (100, 80, 60, 50, 48, 40, 32, 30, 25, 24, 20, 16, 15, 12, 10, 8, 6, 5, 4, 3, 2, 1)
 
 
 def _key(src: Path, peaks_per_sec: int) -> str:
-    return hashlib.sha256(f"{src}|{peaks_per_sec}".encode()).hexdigest()[:14]
+    try:
+        st = src.stat()
+        ident = f"{st.st_size}|{st.st_mtime_ns}"
+    except OSError:
+        ident = ""
+    return hashlib.sha256(f"v{_WAVE_VERSION}|{src}|{ident}|{peaks_per_sec}".encode()).hexdigest()[:16]
 
 
 def _effective_pps(duration_hint: float, requested: int) -> int:
-    """If a long source would exceed MAX_PEAKS at `requested` density, scale down."""
-    if duration_hint <= 0:
-        return requested
-    max_pps = max(2, int(MAX_PEAKS / max(1.0, duration_hint)))
-    return min(requested, max_pps)
+    """The densest ladder rate ≤ `requested` that keeps a source of
+    `duration_hint` seconds within MAX_PEAKS."""
+    cap = requested
+    if duration_hint > 0:
+        cap = min(cap, int(MAX_PEAKS / max(1.0, duration_hint)))
+    for pps in _PPS_LADDER:
+        if pps <= max(1, cap):
+            return pps
+    return 1
+
+
+def _probe_audio(src: Path) -> tuple[int, float]:
+    """(channels of the first audio stream, container duration); (0, 0.0)
+    when there is no audio stream."""
+    try:
+        proc = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=channels:format=duration", "-of", "json", str(src)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, **_pu.SUBPROCESS_FLAGS)
+        d = json.loads(proc.stdout or "{}")
+    except Exception:
+        return 0, 0.0
+    streams = d.get("streams") or []
+    ch = int(streams[0].get("channels") or 0) if streams else 0
+    try:
+        dur = float((d.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    return ch, dur
+
+
+def _bucket_peaks(src: Path, channels: int, pps: int) -> tuple[list[float], int]:
+    """Stream-decode `src` at DECODE_RATE (every channel kept) and reduce it to
+    one max-|x| per bucket of DECODE_RATE/pps samples. Returns (peaks, samples)."""
+    import numpy as np
+    bucket = DECODE_RATE // pps
+    frame_bytes = 4 * channels
+    block = bucket * frame_bytes * 50            # ~50 buckets per read
+    proc = subprocess.Popen(
+        [_pu.FFMPEG, "-v", "error", "-i", str(src), "-map", "0:a:0", "-vn",
+         "-ar", str(DECODE_RATE), "-ac", str(channels), "-f", "f32le", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_pu.SUBPROCESS_FLAGS)
+    peaks: list[float] = []
+    carry = b""
+    total = 0
+    try:
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(block)
+            if not chunk:
+                break
+            buf = carry + chunk
+            whole = len(buf) // (bucket * frame_bytes) * (bucket * frame_bytes)
+            carry = buf[whole:]
+            if whole:
+                a = np.frombuffer(buf[:whole], dtype="<f4").reshape(-1, bucket * channels)
+                peaks.extend(np.abs(a).max(axis=1).tolist())
+                total += whole // frame_bytes
+        tail = carry[: len(carry) // frame_bytes * frame_bytes]
+        if tail:
+            peaks.append(float(np.abs(np.frombuffer(tail, dtype="<f4")).max()))
+            total += len(tail) // frame_bytes
+    finally:
+        proc.stdout and proc.stdout.close()
+        proc.wait()
+    if proc.returncode != 0 and not peaks:
+        return [], 0
+    return [round(min(1.0, p), 4) for p in peaks], total
 
 
 def waveform_peaks(src: Path, cache_dir: Path,
                    *, peaks_per_sec: int = DEFAULT_PEAKS_PER_SEC) -> dict:
-    """Return {peaks: [-1..1 floats], peaks_per_sec, duration} for a media file.
+    """Return {peaks: [0..1 floats], peaks_per_sec, duration} for a media file.
 
-    Long sources are auto-downsampled (peaks_per_sec lowered) so total peaks ≤
-    MAX_PEAKS — keeps JSON small and the canvas redraw cheap.
+    Long sources get a lower density (a divisor of DECODE_RATE) so the total
+    stays ≤ MAX_PEAKS; each peak is still the true sample peak of its span.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # Probe duration first so we can clamp peaks_per_sec for long sources
-    try:
-        from ..ingest.probe import probe
-        dur_hint = probe(src).duration
-    except Exception:
-        dur_hint = 0.0
-    peaks_per_sec = _effective_pps(dur_hint, peaks_per_sec)
+    channels, dur_hint = _probe_audio(src)
+    peaks_per_sec = _effective_pps(dur_hint, max(1, int(peaks_per_sec)))
     cache_path = cache_dir / f"wave_{_key(src, peaks_per_sec)}.json"
     if cache_path.exists():
         try:
             return json.loads(cache_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-
-    sr = peaks_per_sec * 200  # 200 samples per peak; gives clean RMS-ish bars
-    proc = subprocess.run(
-        [_pu.FFMPEG, "-v", "error", "-i", str(src),
-         "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
-        capture_output=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    if proc.returncode != 0:
-        # Source has no audio; return zeros
+    if channels <= 0:
+        # No audio stream: nothing to draw (and nothing to cache — an audio
+        # track added to the file later must not be hidden behind this).
         return {"peaks": [], "peaks_per_sec": peaks_per_sec, "duration": 0.0}
-
-    raw = proc.stdout
-    n_samples = len(raw) // 2
-    if n_samples == 0:
+    peaks, n_samples = _bucket_peaks(src, channels, peaks_per_sec)
+    if not peaks:
         return {"peaks": [], "peaks_per_sec": peaks_per_sec, "duration": 0.0}
-
-    # Bucket samples into peaks (max abs) per chunk of `bucket` samples
-    bucket = max(1, sr // peaks_per_sec)
-    n_buckets = n_samples // bucket
-    peaks: list[float] = []
-    # Read int16 efficiently in chunks
-    for i in range(n_buckets):
-        start = i * bucket * 2
-        end = start + bucket * 2
-        chunk = raw[start:end]
-        # Find max abs across the chunk (struct.unpack_from is fast enough here)
-        n = len(chunk) // 2
-        if not n:
-            peaks.append(0.0)
-            continue
-        ints = struct.unpack(f"<{n}h", chunk)
-        m = max(abs(v) for v in ints)
-        peaks.append(m / 32768.0)
-
-    duration = n_samples / sr
-    out = {"peaks": peaks, "peaks_per_sec": peaks_per_sec, "duration": duration}
-    cache_path.write_text(json.dumps(out), encoding="utf-8")
+    out = {"peaks": peaks, "peaks_per_sec": peaks_per_sec, "duration": n_samples / DECODE_RATE}
+    tmp = cache_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
+    _pu.replace_with_retry(tmp, cache_path)
     return out

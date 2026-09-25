@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useStore } from '../store'
-import { importFiles, installWindowFileDrop } from '../lib/fileDrop'
+import {
+  importFiles, installWindowFileDrop, subscribeTimelineFileDragOver, timelineFileDragOver,
+} from '../lib/fileDrop'
+import { Icon } from './Icon'
 
 /**
  * Global file drag-and-drop.
@@ -22,6 +25,9 @@ import { importFiles, installWindowFileDrop } from '../lib/fileDrop'
 export function FileDropOverlay() {
   const upload = useStore((s) => s.upload)
   const uploadAudio = useStore((s) => s.uploadAudio)
+  // QA-010: the Media panel's "Add imports to the timeline" switch applies to
+  // drops too; the drop box says which way this drop will go.
+  const addToTimeline = useStore((s) => s.importAddToTimeline)
   const [active, setActive] = useState(false)
 
   useEffect(() => installWindowFileDrop(window, {
@@ -29,7 +35,11 @@ export function FileDropOverlay() {
     importFiles: (files) => { void importFiles(files, { upload, uploadAudio }) },
   }), [upload, uploadAudio])
 
-  if (!active) return null
+  // Over the timeline the lanes show where the file will land (lane and time);
+  // blurring them under this overlay would hide exactly that (QA-093).
+  const overTimeline = useSyncExternalStore(subscribeTimelineFileDragOver, timelineFileDragOver)
+
+  if (!active || overTimeline) return null
   return (
     <div
       style={{
@@ -44,10 +54,13 @@ export function FileDropOverlay() {
         padding: '48px 72px', textAlign: 'center', color: '#fff',
         background: 'rgba(0,0,0,0.35)',
       }}>
-        <div style={{ fontSize: 44, marginBottom: 10 }}>🎬</div>
+        <div style={{ marginBottom: 10 }}><Icon name="film" size={44} /></div>
         <div style={{ fontSize: 20, fontWeight: 700 }}>Drop to import</div>
         <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
           video or audio · anywhere in the window
+        </div>
+        <div style={{ fontSize: 13, opacity: 0.7, marginTop: 4 }}>
+          {addToTimeline ? 'Added to the timeline' : 'Imported to the media list only'}
         </div>
       </div>
     </div>

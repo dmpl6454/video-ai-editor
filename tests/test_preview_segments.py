@@ -93,9 +93,14 @@ def _pcm(p: Path):
 def _sound_vs_source(preview: Path, source: Path, times: list[float]) -> list[tuple[int, float]]:
     """(lag in samples, relative error) of the preview's sound against the
     source's at each time — the timeline here is the source played straight
-    through, so a correct preview is the source, sample for sample."""
+    through, so a correct preview is the source, sample for sample, up to ONE
+    static gain: the preview is loudness-matched to canvas.loudness_lufs
+    (QA-082, render/preview_loudness.py), so that gain is fitted once over the
+    whole file and removed before comparing."""
     import numpy as np
     a, ref = _pcm(preview), _pcm(source)
+    n_all = min(len(a), len(ref))
+    ref = ref * (float(np.dot(a[:n_all], ref[:n_all])) / (float(np.dot(ref[:n_all], ref[:n_all])) + 1e-12))
     out = []
     for t in times:
         i, n = int(t * 48000), 2400

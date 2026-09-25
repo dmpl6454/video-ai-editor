@@ -51,6 +51,9 @@ def _edl(src: Path, gain_db: float) -> EDL:
     c = Clip(id="c0", src=str(src), in_=0.0, out=DUR, start=0.0,
              audio=AudioProps(gain_db=gain_db))
     e = EDL(canvas=Canvas(w=160, h=90, fps=FPS), tracks=[Track(id="v1", type="video", clips=[c])])
+    # The raw mix is what is measured: with a loudness target the preview is
+    # matched to the export (QA-082) and a −1 dB nudge would be normalised away.
+    e.canvas.loudness_lufs = None
     e.recompute_duration()
     return e
 

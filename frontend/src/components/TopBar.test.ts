@@ -82,8 +82,12 @@ describe('the TopBar tools', () => {
     const t = tools()
     expect(t).toMatch(/<b>T<\/b> Text/)
     expect(t).toContain('Captions')
-    expect(t).toMatch(/>\?<\/button>/)
-    expect(t).toContain('⌨')
+    // Glyph buttons carry a name; the glyph itself is aria-hidden (QA-102).
+    expect(t).toMatch(/aria-label="Keyboard shortcuts"[^>]*><span aria-hidden="true">\?<\/span><\/button>/)
+    // One monochrome icon set (wave-B review): the shortcuts button is the
+    // keyboard ICON, never the '⌨' glyph.
+    expect(t).not.toContain('⌨')
+    expect(t).toMatch(/aria-label="Customize keyboard shortcuts"[^>]*><svg[^>]*class="icon"/)
   })
 })
 
@@ -91,6 +95,9 @@ describe('the TopBar tools', () => {
 // cluster also shows a finished export's "↓ MP4" link and an export error.
 // Both used to render AFTER the Export button, so at every width the download
 // link (or a 340 px error chip) sat to Export's right.
+// The trigger's markup: its ▾ is decorative and hidden from assistive tech (QA-102).
+const EXPORT_LABEL = 'Export <span aria-hidden="true">▾</span>'
+
 describe('the pinned cluster with an export link and an export error', () => {
   const seeded = async () => {
     vi.resetModules()
@@ -111,7 +118,7 @@ describe('the pinned cluster with an export link and an export error', () => {
 
   it('renders the link and the error, both before Export', async () => {
     const pinned = await seeded()
-    const exportAt = pinned.indexOf('Export ▾')
+    const exportAt = pinned.indexOf(EXPORT_LABEL)
     expect(exportAt).toBeGreaterThan(-1)
     expect(pinned).toContain('↓ MP4')
     expect(pinned).toContain('the encoder ran out of disk')
@@ -121,7 +128,7 @@ describe('the pinned cluster with an export link and an export error', () => {
 
   it('ends with the Export button: no control follows it', async () => {
     const pinned = await seeded()
-    const tail = pinned.slice(pinned.indexOf('Export ▾'))
+    const tail = pinned.slice(pinned.indexOf(EXPORT_LABEL))
     expect(tail).not.toMatch(/<button|<a\b|⚠/)
   })
 })

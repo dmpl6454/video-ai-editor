@@ -70,8 +70,14 @@ describe('what an upload failure puts on screen', () => {
   })
 
   it('falls back to the raw text when the body is not an envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 507, statusText: 'Insufficient Storage' })))
+    await useStore.getState().upload(new File(['x'], 'clip.mp4'))
+    expect(useStore.getState().uploadError).toBe('clip.mp4: 507 Insufficient Storage')
+  })
+
+  it('says the engine stopped responding for a bare 500 (the dev proxy with no engine behind it — QA-109)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 500, statusText: 'Internal Server Error' })))
     await useStore.getState().upload(new File(['x'], 'clip.mp4'))
-    expect(useStore.getState().uploadError).toBe('clip.mp4: 500 Internal Server Error')
+    expect(useStore.getState().uploadError).toBe('clip.mp4: the editor engine stopped responding.')
   })
 })

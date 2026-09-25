@@ -102,3 +102,9 @@ def test_role_anchor_is_where_the_role_draws():
     img = T.render_text_png("HH", "label", 1920, 1080, fill=(255, 0, 0, 255), stroke_w=0.0)
     top, bottom = _rows(_alpha(img) > 200)   # fill only: the shadow is alpha 140
     assert abs((top + bottom) / 2 - T._y_for_role("label", None, 1080, 1920)) <= 1.0
+
+
+def test_script_fallback_faces_match_the_contract():
+    """Wave-B review: a run the clip's font does not cover falls back to the
+    bundled Noto face for its script — the same table on both sides."""
+    assert T._SCRIPT_FALLBACK_FONTS == CASES["script_fallback"]["fonts"]

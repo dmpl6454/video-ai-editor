@@ -68,10 +68,55 @@ export function roleAnchorY(role: string, canvasH: number, canvasW?: number): nu
   return canvasH * 0.75
 }
 
-/** Rule 2: each line's cap-band centre, top to bottom. */
-export function lineCenters(anchorY: number, nLines: number, size: number): number[] {
-  const lh = size * LINE_HEIGHT_RATIO
+/** Rule 2: each line's cap-band centre, top to bottom. `spacing` is the
+ *  clip's style.line_spacing (QA-078), a multiplier. */
+export function lineCenters(anchorY: number, nLines: number, size: number, spacing = 1): number[] {
+  const lh = size * LINE_HEIGHT_RATIO * spacing
   return Array.from({ length: nLines }, (_, i) => anchorY + (i - (nLines - 1) / 2) * lh)
+}
+
+// ---- rule 7 (QA-078 / QA-075): alignment, background box, caption position.
+// Mirror of the block in render/text_overlay.py; `block` in the fixture pins both.
+export const BG_PAD_X_RATIO = 0.3
+export const BG_PAD_Y_RATIO = 0.08
+export const BG_RADIUS_RATIO = 0.18
+export const ANIM_DUR = 0.35
+export const ANIM_DUR_RANGE: readonly [number, number] = [0.1, 3.0]
+
+export type TextAlign = 'left' | 'center' | 'right'
+
+/** Left edge of a line of width `w` inside a block of width `blockW` that is
+ *  centred on `anchorX`. */
+export function lineX(align: TextAlign | string | null | undefined, anchorX: number, blockW: number, w: number): number {
+  if (align === 'left') return anchorX - blockW / 2
+  if (align === 'right') return anchorX + blockW / 2 - w
+  return anchorX - w / 2
+}
+
+/** [left, top, right, bottom, radius] of the background box. */
+export function backgroundRect(anchorX: number, centers: number[], blockW: number, size: number, spacing = 1):
+  [number, number, number, number, number] {
+  const lh = size * LINE_HEIGHT_RATIO * spacing
+  const px = BG_PAD_X_RATIO * size
+  const py = BG_PAD_Y_RATIO * size
+  return [anchorX - blockW / 2 - px, centers[0] - lh / 2 - py,
+          anchorX + blockW / 2 + px, centers[centers.length - 1] + lh / 2 + py, BG_RADIUS_RATIO * size]
+}
+
+/** A caption cue's anchor y for its captions track's `config.position`
+ *  (text_overlay.caption_position_y + block_anchor_y). */
+export function captionAnchorY(position: string | null | undefined, canvasW: number, canvasH: number): number {
+  if (position === 'center') return canvasH * 0.5
+  if (position === 'top') return canvasH * (canvasH > canvasW ? 0.14 : 0.12)
+  return roleAnchorY('caption', canvasH, canvasW)
+}
+
+/** Each animation's length: the clip's anim_dur (clamped) or ANIM_DUR, never
+ *  more than 40 % of the on-screen window, never under 0.1 s. */
+export function animDuration(animDur: number | null | undefined, windowLen: number): number {
+  const base = typeof animDur === 'number' && Number.isFinite(animDur)
+    ? Math.min(ANIM_DUR_RANGE[1], Math.max(ANIM_DUR_RANGE[0], animDur)) : ANIM_DUR
+  return Math.min(base, Math.max(0.1, windowLen * 0.4))
 }
 
 /** Rule 3: the alphabetic baseline that centres the 'H' ink (ascent `asc`
@@ -115,6 +160,18 @@ export const SCRIPT_FAMILY: Partial<Record<'deva' | 'arab' | 'cjk', string>> = {
   arab: 'Noto Sans Arabic',
 }
 
+/** Per-RUN fallback families, in the canvas font list after the clip's own
+ *  family — the export's `_SCRIPT_FALLBACK_FONTS` (text_overlay.py): a run
+ *  the clip's font does not cover is drawn in the bundled Noto face, not a
+ *  system Devanagari/Arabic font (a Latin-dominant caption's Hindi line). */
+export const SCRIPT_FALLBACK_FAMILIES: readonly string[] = ['Noto Sans Devanagari', 'Noto Sans Arabic']
+
+/** The canvas `font` family list for a clip whose primary family is `family`. */
+export function fontFamilyList(family: string): string {
+  const rest = SCRIPT_FALLBACK_FAMILIES.filter((f) => f !== family).map((f) => `"${f}"`)
+  return [`"${family}"`, ...rest, 'system-ui', 'sans-serif'].join(', ')
+}
+
 type TxLike = { x?: KFNum; y?: KFNum; scale?: KFNum; rotation?: KFNum } | undefined
 
 /** Rule 6 inputs at clip-local time `localT`: the transform scale and
@@ -144,4 +201,14 @@ export function staticValue(v: unknown): number | null {
     if (Array.isArray(k) && k.length === 1) return k[0][1]
   }
   return null
+}
+
+/** A TextClip's schema-default transform (edl/schema.py): on each axis it
+ *  means "never positioned — role layout" (text_overlay.resolve_anchor_overrides). */
+export const TEXT_AXIS_SENTINEL = { x: 540, y: 1700 } as const
+
+/** A typed/dragged coordinate that lands on an axis's "unset" value moves one
+ *  canvas pixel, so it is honoured instead of snapping to the role layout. */
+export function offAxisSentinel(v: number, sentinel: number): number {
+  return Math.abs(v - sentinel) < 0.5 ? sentinel + 1 : v
 }

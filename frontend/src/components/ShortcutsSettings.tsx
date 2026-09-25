@@ -128,8 +128,8 @@ export function ShortcutsSettings() {
               onClick={() => setPreset(id as PresetId)}
               style={{
                 ...chipStyle,
-                background: presetId === id ? 'var(--accent,#6c8cff)' : 'var(--bg-3,#222)',
-                color: presetId === id ? '#fff' : 'inherit',
+                background: presetId === id ? 'var(--accent-fill)' : 'var(--bg-3,#222)',
+                color: presetId === id ? 'var(--on-accent)' : 'inherit',
                 fontWeight: presetId === id ? 700 : 400,
               }}
             >
@@ -197,21 +197,22 @@ function Row({ cmd, chords, overridden, capturing, conflict, onCapture, onReset 
       </span>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         {capturing ? (
-          <span style={{ ...kbd, background: 'var(--accent,#6c8cff)', color: '#fff' }}>press keys…</span>
+          <span style={{ ...kbd, background: 'var(--accent-fill)', color: 'var(--on-accent)' }}>press keys…</span>
         ) : chords.length ? (
           chords.map((ch, i) => (
             <button key={i} onClick={onCapture}
               title={conflict ? 'Conflicts with another command' : 'Click to rebind'}
+              aria-label={`${cmd.label}: ${chordLabel(ch)}. Rebind`}
               style={{ ...kbd, cursor: 'pointer', border: conflict ? '1px solid #e0556d' : kbd.border }}>
               {chordLabel(ch)}
             </button>
           ))
         ) : (
-          <button onClick={onCapture} style={{ ...kbd, cursor: 'pointer', opacity: 0.5 }}>—</button>
+          <button onClick={onCapture} aria-label={`${cmd.label}: no shortcut. Set one`} style={{ ...kbd, cursor: 'pointer', opacity: 0.5 }}><span aria-hidden="true">—</span></button>
         )}
         {overridden && (
-          <button onClick={onReset} title="Reset to preset default"
-            style={{ ...btnStyle, padding: '1px 6px', fontSize: 11 }}>↺</button>
+          <button onClick={onReset} title="Reset to preset default" aria-label={`Reset ${cmd.label} to the preset default`}
+            style={{ ...btnStyle, padding: '1px 6px', fontSize: 11 }}><span aria-hidden="true">↺</span></button>
         )}
       </div>
     </div>

@@ -28,10 +28,11 @@ from .langs import base_lang, is_latin_hindi, needs_translation
 from .presets import bed_for_mood, edit_templates, transition_entry, transition_looks
 from .recipes import (_PLATFORMS, _RATIOS, FILLERS_STRICT, RECIPE_SLOTS, Context, Expansion, Intent, ask,
                       download, normalize_slots, pc, placeholder, step)
+from .live import MIN_TRANSITION_NEIGHBOUR_S, seams_from_boundaries, smpte
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
                          WORD_EDGE_TOLERANCE_S, beat_split_times, heuristic_hook)
-from .schema import (ARG_REF, SEAM_SENTINEL, STAGE_AUDIO, STAGE_AUDIT, STAGE_CAPTIONS, STAGE_CUTS, STAGE_EXPORT,
+from .schema import (ARG_REF, FIT_SENTINEL_PREFIX, HOOK_SENTINEL, SEAM_SENTINEL, STAGE_AUDIO, STAGE_AUDIT, STAGE_CAPTIONS, STAGE_CUTS, STAGE_EXPORT,
                      STAGE_LOOK, STAGE_MUSIC, STAGE_PREREQ, STAGE_REFRAME, STAGE_STRUCTURE, STAGE_TEXT,
                      STAGE_TRANSITIONS, DownloadNeeded, NeedsInput, Step)
 
@@ -115,8 +116,11 @@ def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     style = it.get("style") or "ig_chunky"
     position = it.get("position") or "bottom"
     target = it.get("target")
-    max_chars = int(it.get("max_chars") or 42)
-    max_chars = min(60, max(16, max_chars))
+    # Only an explicit request packs cues by characters; otherwise the style
+    # decides (ig_chunky = short phrases, QA-071 — a fixed 42 here put up to
+    # 84 characters on every TikTok caption).
+    max_chars = it.get("max_chars")
+    max_chars = None if max_chars is None else min(60, max(16, int(max_chars)))
     notes: list[str] = []
     downloads: list[DownloadNeeded] = []
     pcs = [pc("captions_cover", "captions cover the speech", min_ratio=0.9),
@@ -295,7 +299,11 @@ def _x_reframe(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 def _x_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     if f.has_music and not it.get("_replace") and "remove_music" not in ctx.recipes:
-        return Expansion(notes=("music is already on the timeline — say 'another track' to replace it",))
+        # QA-018: the everyday requests about a bed that is already there
+        # are level / fade / mute / fit — offer those, not only a new track.
+        return Expansion(notes=("music is already on the timeline — say 'turn the music down', "
+                                "'fade the music out', 'mute the music', 'end the music with the video' "
+                                "or 'another track' to replace it",))
     # "replace the music": the OLD bed goes first, else the new one is laid on
     # top of it and both play at once (two beds mixed at 0 s — measured on a
     # session that already carried upbeat_120bpm: `music_present clips: 2`).
@@ -438,11 +446,17 @@ def _x_hook(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         if guess:
             text = guess
             notes.append("hook text: heuristic from your first sentence (no local model available)")
+        elif f.transcript_pending or "transcribe" in ctx.recipes:
+            # QA-072: the transcript lands before this step runs (the executor
+            # waits for the upload's, or the plan transcribes first), so the
+            # line is written from it THEN — live.live_hook_text.
+            text = HOOK_SENTINEL
+            notes.append("hook text: from your first sentence, written once the transcript is ready")
         else:
             text = _CANNED_HOOK
             notes.append("hook text: generic (no transcript yet) — reply with your own line to change it")
             questions = (ask("hook_text", "What should the hook say?", kind="text", default=_CANNED_HOOK, required=False),)
-    text = text[:60]
+    text = text if text == HOOK_SENTINEL else text[:60]
     return Expansion(
         steps=(step("apply_hook_stack", STAGE_TEXT, "text + punch-in + audio fade in the first seconds",
                     text=text, duration=duration, visual="punch_in", audio="fade_boost"),),
@@ -525,11 +539,17 @@ def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         # the live timeline (stage 3, "structure" — the same stage `shorts`
         # reshapes the footage at), so the honest check is the final length,
         # not a removed-range arithmetic against the pre-plan duration.
+        #
+        # QA-069: WHERE it ends is decided at run time, on the live timeline
+        # after those cuts: after the last sentence (else pause) that fits,
+        # never mid-word at exactly `max_s` (agent/prompt/live.fit_cut).
         return Expansion(
-            steps=(step("cut_range", STAGE_STRUCTURE, f"keep the first {float(max_s):g}s (target length)",
-                        optional=bool(it.get("_optional")), track="v1", start=round(start, 3), end=round(end, 3)),),
+            steps=(step("cut_range", STAGE_STRUCTURE,
+                        f"keep the first {float(max_s):g}s, ending on a sentence (target length)",
+                        optional=bool(it.get("_optional")), track="v1",
+                        start=f"{FIT_SENTINEL_PREFIX}{float(max_s):g}", end=round(max(end, f.duration), 3)),),
             postconditions=(pc("duration_leq", "the video fits the target length", max=round(float(max_s) + 0.5, 3)),),
-            notes=(f"trimmed to the first {float(max_s):g}s after the cuts",))
+            notes=(f"trimmed to about {float(max_s):g}s after the cuts, ending on the last sentence that fits",))
     return Expansion(
         steps=(step("cut_range", STAGE_CUTS, f"remove {start:.2f}–{end:.2f}s and close the gap",
                     track="v1", start=round(start, 3), end=round(end, 3)),),
@@ -650,6 +670,11 @@ def _x_end_card(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         questions=questions)
 
 
+#: Up to this many seams get one plan step each (a look cycles its types
+#: across them, and the run log names each seam). More than that — "between
+#: every clip" on a chopped-up edit — becomes ONE `$v1_seams` fan-out step, so
+#: the plan stays inside MAX_STEPS and nothing is dropped (QA-070: the old cap
+#: silently stopped at 12 of 16 seams).
 MAX_TRANSITIONS = 12
 SEAM_SNAP_S = 1.5
 
@@ -661,7 +686,7 @@ def _seams_for(at: Any, boundaries: list[float]) -> tuple[list[float], str | Non
     if not boundaries:
         return [], None
     if at in (None, "all"):
-        return boundaries[:MAX_TRANSITIONS], None
+        return list(boundaries), None
     if at == "first":
         return [boundaries[0]], None
     if at == "last":
@@ -669,7 +694,7 @@ def _seams_for(at: Any, boundaries: list[float]) -> tuple[list[float], str | Non
     try:
         t = float(at)
     except (TypeError, ValueError):
-        return boundaries[:MAX_TRANSITIONS], f"did not understand where {at!r} is — using every seam"
+        return list(boundaries), f"did not understand where {at!r} is — using every seam"
     nearest = min(boundaries, key=lambda b: abs(b - t))
     if abs(nearest - t) > SEAM_SNAP_S:
         return [], f"no clip change within {SEAM_SNAP_S:g}s of {t:g}s — a transition needs a seam between two clips"
@@ -702,7 +727,7 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
             return Expansion(notes=(f"{ttype!r} is not a transition in the catalog",))
         types: tuple[str, ...] = (entry.name,)
         duration = float(it.get("duration") or entry.duration)
-        seams, note = _seams_for(it.get("at"), f.v1_boundaries)
+        seams, note = _usable_seams(it.get("at"), f, notes)
         if note:
             notes.append(note)
         if not seams:
@@ -716,19 +741,29 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
             return Expansion(notes=("no transition looks are installed under presets/transitions",))
         types = look.types
         duration = float(it.get("duration") or look.duration)
-        seams, note = _seams_for(it.get("at"), f.v1_boundaries)
+        seams, note = _usable_seams(it.get("at"), f, notes)
         if note:
             notes.append(note)
         if not seams:
             return Expansion(notes=tuple(notes))
         label = f"{look.name} look"
     duration = min(2.0, max(0.1, duration))
-    steps = [step("add_transition", STAGE_TRANSITIONS, f"{types[i % len(types)]} at the {at:g}s seam",
-                  at=at, type=types[i % len(types)], duration=round(duration, 3))
-             for i, at in enumerate(seams)]
-    pcs = [pc("transitions_count_geq", "transitions were added", n=len(steps),
-              type=types[0] if len(types) == 1 else None)]
-    notes.append(f"{len(steps)} × {label} ({duration:g}s)")
+    if len(seams) > MAX_TRANSITIONS:
+        # Too many for a step each: ONE fan-out over the live seams, with the
+        # same sliver rule and an honest cap (live.seam_fanout).
+        steps = [step("add_transition", STAGE_TRANSITIONS, f"{types[0]} at every one of the {len(seams)} seams",
+                      at=SEAM_SENTINEL, type=types[0], duration=round(duration, 3))]
+        if len(types) > 1:
+            notes.append(f"{len(seams)} seams: every one gets {types[0]} (a look cycles only up to "
+                         f"{MAX_TRANSITIONS} seams)")
+    else:
+        steps = [step("add_transition", STAGE_TRANSITIONS,
+                      f"{types[i % len(types)]} at the {smpte(at, f.fps)} seam",
+                      at=at, type=types[i % len(types)], duration=round(duration, 3))
+                 for i, at in enumerate(seams)]
+    pcs = [pc("transitions_count_geq", "transitions were added", n=len(seams),
+              type=types[0] if len(types) == 1 or len(steps) == 1 else None)]
+    notes.append(f"{len(seams)} × {label} ({duration:g}s)")
     if f.has_captions and "captions" not in ctx.recipes:
         # A cross-fade shortens the timeline and does not ripple overlays, so
         # existing captions would overhang; re-lay them after the seams move.
@@ -738,6 +773,19 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                 pc("captions_sync", "captions stay in sync across cuts", tol=0.1)]
         notes.append("captions re-laid so they follow the shortened timeline")
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs), notes=tuple(notes))
+
+
+def _usable_seams(at: Any, f: TimelineFacts, notes: list[str]) -> tuple[list[float], str | None]:
+    """`_seams_for`, minus seams next to a clip too short to carry a
+    transition (QA-070: silence removal leaves 0.1 s slivers, and five
+    0.10 s "transitions" on them were three-frame flickers)."""
+    usable, short = seams_from_boundaries(f.v1_boundaries, f.duration)
+    if short:
+        notes.append(f"{short} seam(s) skipped: a neighbouring clip is shorter than "
+                     f"{MIN_TRANSITION_NEIGHBOUR_S:g} s")
+    if not usable:
+        return [], None
+    return _seams_for(at, usable)
 
 
 def _transitions_after_cuts(it: Intent, f: TimelineFacts, notes: list[str]) -> Expansion:

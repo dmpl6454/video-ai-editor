@@ -18,7 +18,9 @@
 // text attachment with an unknown extension — produced "<sid>.vae.txt", which
 // POST /load_project's filename gate then refused with 415.
 
-export type SaveExportFn = (sessionId: string, filename: string) => Promise<string | null>
+// `suggestedName` (QA-100): the Export dialog's File name, pre-filled in the
+// Save-As box; the copied source is always `filename`.
+export type SaveExportFn = (sessionId: string, filename: string, suggestedName?: string) => Promise<string | null>
 
 // Narrow shape of what desktop.py's `_Api` exposes over pywebview's js_api —
 // only the one method this module calls, not the whole class.
@@ -40,12 +42,14 @@ export function saveExportBridge(host: unknown = globalThis): SaveExportFn | nul
   if (!fn) return null
   // Called as a method: pywebview installs `api` as a proxy and its members
   // expect that receiver.
-  return (sessionId, filename) => api!.save_export!(sessionId, filename)
+  return (sessionId, filename, suggestedName) => suggestedName
+    ? api!.save_export!(sessionId, filename, suggestedName)
+    : api!.save_export!(sessionId, filename)
 }
 
-// The leaf save_project writes — main.py: `sd / "exports" / f"{sd.name}.vae"`.
-// The session id IS the file name, so the link's filename never has to be
-// threaded through state.
+// The leaf an UNNAMED project's save_project writes (`exports/<sid>.vae`).
+// A named project's file carries its name (QA-098) — save_project answers the
+// leaf as `filename`, and lib/savedProject keeps it on the link record.
 export const projectFilename = (sessionId: string): string => `${sessionId}.vae`
 
 // Runs the native save when the bridge is present. `null` means "no bridge
@@ -56,10 +60,11 @@ export function nativeSave(
   sessionId: string | null,
   filename: string,
   host: unknown = globalThis,
+  suggestedName?: string,
 ): Promise<NativeSaveOutcome> | null {
   const bridge = saveExportBridge(host)
   if (!bridge || !sessionId) return null
-  return bridge(sessionId, filename)
+  return bridge(sessionId, filename, suggestedName)
     .then((path): NativeSaveOutcome => (path ? { kind: 'saved', path } : { kind: 'cancelled' }))
     .catch((error: unknown): NativeSaveOutcome => ({ kind: 'failed', error }))
 }

@@ -93,4 +93,67 @@ describe('the rendered run log', () => {
     for (const v of vals) expect(v).not.toMatch(/[{}[\]]|&quot;/)
     expect(html).not.toContain('class="val"')             // the old nowrap columns are gone
   })
+
+  it('labels steps in editor language, the tool id only as a hover title (QA-101)', async () => {
+    const html = await seed('error')
+    const visible = html.replace(/title="[^"]*"/g, '')
+    expect(visible).toContain('>Reframe<')
+    expect(visible).not.toContain('auto_reframe')
+    expect(html).not.toContain('<code')
+  })
+})
+
+describe('the run log speaks editor language and says what happened (wave-B review)', () => {
+  const seedWith = async (state: Record<string, unknown>) => {
+    vi.resetModules()
+    const { usePromptStore } = await import('../lib/promptStore')
+    Object.assign(usePromptStore.getInitialState(), {
+      prompt: 'p', runId: 'r2', opSeen: false, logOpen: true, verify: null, reply: '', ...state,
+    })
+    const { PromptRunLog } = await import('./PromptRunLog')
+    return renderToStaticMarkup(createElement(PromptRunLog))
+  }
+
+  it('labels a step by its tool title, not the planner rationale; summaries lose ids and (s)', async () => {
+    const html = await seedWith({
+      status: 'error',
+      plan: { steps: [{ tool: 'auto_reframe', args: {}, why: 'fill the frame — auto_reframe may skip a clip and Clip.fit defaults to contain' }] },
+      steps: [{ index: 0, tool: 'auto_reframe', status: 'ok', summary: 'Fit c_3a7c50a2 → cover; reframed 1 clip(s)' }],
+      reply: '· add_text: replaced BIG SALE. 1 step(s) done.',
+    })
+    const visible = html.replace(/title="[^"]*"/g, '')
+    expect(visible).toContain('>Reframe<')
+    expect(visible).not.toMatch(/auto_reframe|Clip\.fit|c_3a7c50a2|\(s\)|add_text/)
+    expect(visible).toContain('Text: replaced BIG SALE')
+  })
+
+  it('a run that applied nothing folds to a neutral chip carrying the reason, not a green tick', async () => {
+    const html = await seedWith({
+      status: 'done', plan: { steps: [] }, steps: [],
+      reply: '[recipes] There is no music on the timeline, so there is nothing to turn down. Add music first.',
+    })
+    expect(html).toContain('class="g is-info"')
+    expect(html).not.toContain('is-pass')
+    expect(html).toContain('There is no music on the timeline, so there is nothing to turn down.')
+  })
+
+  it('a replacement is said in the folded chip (QA-073)', async () => {
+    const html = await seedWith({
+      status: 'done', plan: { steps: [] },
+      steps: [{ index: 0, tool: 'add_text', status: 'ok', summary: "Replaced text 'BIG SALE' with 'Grand Opening'" }],
+      verify: { type: 'verify', plan_id: 'p', checks: [CHECKS[0]], passed: 1, total: 1, rendered: false },
+    })
+    expect(html).toContain('class="g is-info"')
+    expect(html).toContain('Replaced text &#x27;BIG SALE&#x27; with &#x27;Grand Opening&#x27;')
+  })
+
+  it('a step interrupted by a cancel stops as cancelled, never a spinner (QA-064)', async () => {
+    const { reduce } = await import('../lib/promptEvents')
+    const s0 = { status: 'running', steps: [{ index: 0, total: 3, tool: 'transcribe', status: 'running' }] }
+    const s1 = reduce(s0 as never, { type: 'error', message: 'Cancelled — timeline unchanged.' } as never)
+    expect(s1.status).toBe('cancelled')
+    expect(s1.steps[0].status).toBe('cancelled')
+    const s2 = reduce(s1, { type: 'step', index: 0, total: 3, tool: 'transcribe', status: 'running' } as never)
+    expect(s2.steps[0].status).toBe('cancelled')
+  })
 })

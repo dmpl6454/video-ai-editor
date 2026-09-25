@@ -10,7 +10,6 @@ Heavy: first run downloads ~170 MB of model weights to ~/.u2net/. Cached after.
 from __future__ import annotations
 import hashlib
 import shutil
-import subprocess
 from pathlib import Path
 
 from .. import platformutil as _pu
@@ -27,7 +26,8 @@ def available() -> bool:
 
 def remove_background(src: Path, cache_dir: Path, *,
                       model: str = "u2net",
-                      bg_color: str | None = "#00FF00") -> Path:
+                      bg_color: str | None = "#00FF00",
+                      on_progress=None, cancel_event=None) -> Path:
     """Strip the background of `src`. Returns the new mp4.
 
     `bg_color`:
@@ -51,34 +51,26 @@ def remove_background(src: Path, cache_dir: Path, *,
     work = cache_dir / f"rembg_work_{h}"
     if work.exists():
         shutil.rmtree(work)
+    try:
+        return _remove_frames(src, dst, work, model, bg_color, keep_alpha,
+                              on_progress=on_progress, cancel_event=cancel_event)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _remove_frames(src: Path, dst: Path, work: Path, model: str, bg_color: str | None,
+                   keep_alpha: bool, *, on_progress=None, cancel_event=None) -> Path:
+    """QA-066: extract → matte frame by frame (progress per frame, a cancel
+    point between frames) → frame-exact encode at the source's exact rate."""
+    from . import jobio
+    stages = jobio.Stages(on_progress, extract=0.05, model=0.85, encode=0.10)
+    rate, _dur, _n = jobio.video_facts(src)
     in_dir = work / "in"
     out_dir = work / "out"
     in_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Probe fps so the re-encode keeps timing
-    probe = subprocess.run(
-        [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=avg_frame_rate", "-of",
-         "default=nokey=1:noprint_wrappers=1", str(src)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    fps_str = probe.stdout.strip()
-    if "/" in fps_str:
-        n, d = fps_str.split("/")
-        fps_val = float(n) / max(1.0, float(d))
-    else:
-        fps_val = 30.0
-
-    # Extract source frames
-    subprocess.run(
-        [_pu.FFMPEG, "-y", "-i", str(src), "-q:v", "2",
-         str(in_dir / "f%05d.png")],
-        capture_output=True, check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    n_in = len(list(in_dir.glob("*.png")))
+    n_in = jobio.extract_frames(src, in_dir, on_progress=stages.sub("extract"),
+                                cancel_event=cancel_event)
     if n_in < 1:
         raise RuntimeError("rembg: no frames extracted from source")
 
@@ -87,7 +79,9 @@ def remove_background(src: Path, cache_dir: Path, *,
     from rembg import new_session, remove  # type: ignore
     from PIL import Image
     session = new_session(model)
-    for fp in sorted(in_dir.glob("*.png")):
+    model_step = stages.sub("model")
+    for i, fp in enumerate(sorted(in_dir.glob("*.png"))):
+        jobio.check(cancel_event)
         img = Image.open(fp).convert("RGBA")
         out_img = remove(img, session=session)
         if not keep_alpha:
@@ -97,32 +91,18 @@ def remove_background(src: Path, cache_dir: Path, *,
             bg.convert("RGB").save(out_dir / fp.name)
         else:
             out_img.save(out_dir / fp.name)
+        model_step((i + 1) / n_in)
 
-    if keep_alpha:
-        # Use qtrle / .mov to preserve alpha through the encode
-        subprocess.run(
-            [_pu.FFMPEG, "-y",
-             "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
-             "-i", str(src),
-             "-map", "0:v", "-map", "1:a?",
-             "-c:v", "qtrle",
-             "-c:a", "aac", "-shortest", str(dst)],
-            capture_output=True, check=True,
-            **_pu.SUBPROCESS_FLAGS,
-        )
-    else:
-        subprocess.run(
-            [_pu.FFMPEG, "-y",
-             "-framerate", f"{fps_val:.4f}", "-i", str(out_dir / "f%05d.png"),
-             "-i", str(src),
-             "-map", "0:v", "-map", "1:a?",
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-             "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-shortest", str(dst)],
-            capture_output=True, check=True,
-            **_pu.SUBPROCESS_FLAGS,
-        )
-    shutil.rmtree(work, ignore_errors=True)
+    # qtrle in a .mov keeps the alpha plane; otherwise H.264. Every frame kept.
+    video_args = (["-c:v", "qtrle"] if keep_alpha else
+                  ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+    part = _pu.part_path(dst)
+    try:
+        jobio.encode_frames(out_dir, src, part, rate=rate, video_args=video_args,
+                            on_progress=stages.sub("encode"), cancel_event=cancel_event)
+        _pu.replace_with_retry(part, dst)
+    finally:
+        _pu.unlink_with_retry(part)
     return dst
 
 

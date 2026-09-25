@@ -66,6 +66,15 @@ describe('the link the packaged app actually clicks', () => {
     expect(evt.preventDefault).toHaveBeenCalled()
   })
 
+  it('asks the bridge for the file save_project named after the project (QA-098)', async () => {
+    const save = vi.fn(async () => '/Users/me/Desktop/My Trip.vae')
+    const link = savedProject(A, `/api/sessions/${A}/files/exports/My%20Trip.vae`, 3, 'My Trip.vae')
+    await claimClickForNativeSave({ preventDefault: vi.fn() }, link.sid, link.filename, host(save))
+    expect(save).toHaveBeenCalledWith(A, 'My Trip.vae')
+    // an older backend's answer without a filename keeps the session-id leaf
+    expect(savedProject(A, '/x', 0).filename).toBe(`${A}.vae`)
+  })
+
   it('is simply gone after a session change, so no click can ask for the wrong file', () => {
     // The regression: a click here called save_export(B, 'B.vae') — a file that
     // does not exist — and silently did nothing.

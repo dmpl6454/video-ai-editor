@@ -59,20 +59,28 @@ describe('a file dropped on the Media dropzone', () => {
 })
 
 describe('importFiles', () => {
-  it('routes audio to the music ingress and uploads one file at a time', async () => {
-    const order: string[] = []
-    let inFlight = 0
-    const slow = (tag: string) => vi.fn(async (f: { name: string }) => {
-      inFlight += 1
-      expect(inFlight).toBe(1)
-      await new Promise((r) => setTimeout(r, 5))
-      order.push(`${tag}:${f.name}`)
-      inFlight -= 1
+  it('routes audio to the music ingress and hands every file over at once, in drop order', async () => {
+    // QA-094: the store's import queue serialises the uploads; this helper
+    // must enqueue them all immediately (every file gets its placeholder) and
+    // resolve only when the last one is done.
+    const handed: string[] = []
+    const gates: Array<() => void> = []
+    const gated = (tag: string) => vi.fn((f: { name: string }) => {
+      handed.push(`${tag}:${f.name}`)
+      return new Promise<void>((r) => gates.push(r))
     })
-    const upload = slow('video')
-    const uploadAudio = slow('audio')
-    await importFiles([file('a.mp4'), file('song.mp3'), file('voice.bin', 'audio/x-foo')], { upload, uploadAudio })
-    expect(order).toEqual(['video:a.mp4', 'audio:song.mp3', 'audio:voice.bin'])
+    const upload = gated('video')
+    const uploadAudio = gated('audio')
+    let done = false
+    const all = importFiles([file('a.mp4'), file('song.mp3'), file('voice.bin', 'audio/x-foo')], { upload, uploadAudio })
+      .then(() => { done = true })
+    expect(handed).toEqual(['video:a.mp4', 'audio:song.mp3', 'audio:voice.bin'])
+    gates[0](); gates[1]()
+    await Promise.resolve()
+    expect(done).toBe(false)
+    gates[2]()
+    await all
+    expect(done).toBe(true)
   })
 })
 

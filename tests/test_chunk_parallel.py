@@ -94,9 +94,12 @@ def test_warm_cache_is_noop(tmp_path: Path):
     clips = _clips(tmp_path, 3)
     cache = tmp_path / "cache"
     first = C.get_or_build_chunks(clips, cache_dir=cache, **_kw())
-    mtimes = {p: p.stat().st_mtime_ns for p in first}
-    # Second call: every chunk is a cache hit → no rebuild, mtimes unchanged.
+    # Identity, not mtime: a cache HIT now refreshes the file's mtime on
+    # purpose (LRU recency for the byte budget, QA-106). A rebuild writes a
+    # NEW file (staged, then swapped in), so its inode changes.
+    inodes = {p: p.stat().st_ino for p in first}
+    # Second call: every chunk is a cache hit → no rebuild, same files.
     second = C.get_or_build_chunks(clips, cache_dir=cache, **_kw())
     assert [p.name for p in first] == [p.name for p in second]
     for p in second:
-        assert p.stat().st_mtime_ns == mtimes[p], f"{p.name} was rebuilt on warm cache"
+        assert p.stat().st_ino == inodes[p], f"{p.name} was rebuilt on warm cache"

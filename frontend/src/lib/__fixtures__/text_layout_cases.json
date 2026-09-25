@@ -311,5 +311,190 @@
     282.8
    ]
   }
- ]
+ ],
+ "block": {
+  "_comment": "Rule 7 (QA-078/075): alignment inside the block, the background box, line spacing and caption positions. Generated from render/text_overlay.py.",
+  "BG_PAD_X_RATIO": 0.3,
+  "BG_PAD_Y_RATIO": 0.08,
+  "BG_RADIUS_RATIO": 0.18,
+  "ANIM_DUR": 0.35,
+  "ANIM_DUR_RANGE": [
+   0.1,
+   3.0
+  ],
+  "line_x": [
+   {
+    "align": "left",
+    "anchor_x": 540,
+    "block_w": 600,
+    "w": 300,
+    "x": 240.0
+   },
+   {
+    "align": "left",
+    "anchor_x": 960,
+    "block_w": 800,
+    "w": 800,
+    "x": 560.0
+   },
+   {
+    "align": "left",
+    "anchor_x": 100.5,
+    "block_w": 250,
+    "w": 120,
+    "x": -24.5
+   },
+   {
+    "align": "center",
+    "anchor_x": 540,
+    "block_w": 600,
+    "w": 300,
+    "x": 390.0
+   },
+   {
+    "align": "center",
+    "anchor_x": 960,
+    "block_w": 800,
+    "w": 800,
+    "x": 560.0
+   },
+   {
+    "align": "center",
+    "anchor_x": 100.5,
+    "block_w": 250,
+    "w": 120,
+    "x": 40.5
+   },
+   {
+    "align": "right",
+    "anchor_x": 540,
+    "block_w": 600,
+    "w": 300,
+    "x": 540.0
+   },
+   {
+    "align": "right",
+    "anchor_x": 960,
+    "block_w": 800,
+    "w": 800,
+    "x": 560.0
+   },
+   {
+    "align": "right",
+    "anchor_x": 100.5,
+    "block_w": 250,
+    "w": 120,
+    "x": 105.5
+   }
+  ],
+  "background": [
+   {
+    "anchor_x": 540,
+    "centers": [
+     960.0
+    ],
+    "block_w": 400,
+    "size": 64,
+    "spacing": 1.0,
+    "rect": [
+     320.8,
+     918.08,
+     759.2,
+     1001.92,
+     11.52
+    ]
+   },
+   {
+    "anchor_x": 960,
+    "centers": [
+     500.0,
+     573.6,
+     647.2
+    ],
+    "block_w": 700,
+    "size": 64,
+    "spacing": 1.0,
+    "rect": [
+     590.8,
+     458.08,
+     1329.2,
+     689.12,
+     11.52
+    ]
+   },
+   {
+    "anchor_x": 300,
+    "centers": [
+     100.0,
+     250.0
+    ],
+    "block_w": 200,
+    "size": 100,
+    "spacing": 1.3,
+    "rect": [
+     170.0,
+     17.25,
+     430.0,
+     332.75,
+     18.0
+    ]
+   }
+  ],
+  "spaced_lines": [
+   {
+    "anchor_y": 540,
+    "n": 3,
+    "size": 100,
+    "spacing": 1.5,
+    "centers": [
+     367.5,
+     540.0,
+     712.5
+    ]
+   }
+  ],
+  "caption_positions": [
+   {
+    "position": "bottom",
+    "w": 1080,
+    "h": 1920,
+    "y": 1459.2
+   },
+   {
+    "position": "center",
+    "w": 1080,
+    "h": 1920,
+    "y": 960.0
+   },
+   {
+    "position": "top",
+    "w": 1080,
+    "h": 1920,
+    "y": 268.8
+   },
+   {
+    "position": "bottom",
+    "w": 1920,
+    "h": 1080,
+    "y": 907.2
+   },
+   {
+    "position": "center",
+    "w": 1920,
+    "h": 1080,
+    "y": 540.0
+   },
+   {
+    "position": "top",
+    "w": 1920,
+    "h": 1080,
+    "y": 129.6
+   }
+  ]
+ },
+ "script_fallback": {
+  "_comment": "Per-RUN fallback faces (wave-B review): a run the clip's font does not cover is drawn in the bundled Noto face for its script. Export: text_overlay._SCRIPT_FALLBACK_FONTS; preview: textLayout.SCRIPT_FALLBACK_FAMILIES in the canvas font list (CJK has no browser face).",
+  "fonts": {"Deva": "NotoSansDevanagari-VF.ttf", "Arab": "NotoSansArabic-VF.ttf", "Hani": "NotoSansSC-VF.ttf"},
+  "families": ["Noto Sans Devanagari", "Noto Sans Arabic"]
+ }
 }

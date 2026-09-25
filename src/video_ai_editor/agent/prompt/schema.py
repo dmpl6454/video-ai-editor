@@ -124,6 +124,19 @@ CLIP_SENTINELS = ("$v1_all", "$v1_first", "$v1_last", "$selected", "$playhead")
 #: multi-clip project. The executor reads `store.edl` after the cuts instead.
 SEAM_SENTINEL = "$v1_seams"
 
+#: `apply_hook_stack(text=HOOK_SENTINEL)`: the hook line is written from the
+#: transcript AT RUN TIME (agent/prompt/live.py), after the executor's wait
+#: for the upload transcript and after any `transcribe` step (QA-072). Fixing
+#: it at plan time gave "WATCH THIS BEFORE YOU SCROLL" to every prompt sent
+#: before the upload's transcript landed.
+HOOK_SENTINEL = "$hook_from_transcript"
+
+#: `cut_range(start="$fit_to:<seconds>")`: keep the first <seconds> of the
+#: LIVE timeline, ending on the last sentence (or pause) that fits (QA-069).
+#: The number rides in the sentinel because the cut runs after the plan's own
+#: silence/filler cuts, so no plan-time second is the right one.
+FIT_SENTINEL_PREFIX = "$fit_to:"
+
 #: Duration gate (§1.1): above this the planner appends the `go` confirm.
 LONG_RUN_SECONDS = 90.0
 
@@ -338,6 +351,7 @@ TOOL_STAGE: dict[str, int] = {
     "set_speed": 2, "smooth_slow_motion": 2, "stabilize": 2, "upscale": 2,
     "trim_clip": 2, "split_at": 2, "set_clip_timing": 2, "move_clip": 2,
     "reorder_clips": 2, "bulk_delete": 2, "bulk_duplicate": 2, "duplicate_clip": 2,
+    "detach_audio": 2,
     # 3 — structure (terminal for the parent plan)
     "make_shorts": 3,
     # 4 — look (per-clip picture; templates are composites applied first)
@@ -352,6 +366,7 @@ TOOL_STAGE: dict[str, int] = {
     "set_pip_framing": 6,
     # 7 — captions / translate
     "auto_caption": 7, "add_caption_track": 7, "translate_captions": 7,
+    "set_caption_style": 7,
     # 8 — text (hook, title, brand, end card, voiceover)
     "apply_hook_stack": 8, "add_hook_overlay": 8, "generate_hook": 8,
     "add_text": 8, "add_super_text": 8, "add_lower_third": 8,
@@ -360,7 +375,7 @@ TOOL_STAGE: dict[str, int] = {
     "add_music": 9, "set_duck": 9, "auto_cut_to_beats": 9, "fit_music_to_video": 9,
     # 10 — audio (noise, loudness, levels)
     "noise_reduce": 10, "set_loudness_target": 10, "set_volume": 10,
-    "set_clip_muted": 10, "set_track_muted": 10, "add_fade": 10,
+    "set_clip_muted": 10, "set_track_muted": 10, "add_fade": 10, "set_track_solo": 10,
     # 11 — export preset (+ explicit loudness after it)
     "apply_export_preset": 11,
     # 12 — audit / final inspection
@@ -570,19 +585,26 @@ def bind_postconditions(tool: str, args: dict[str, Any]) -> list[Postcondition]:
     bound: list[Postcondition] = []
     for pc in default_postconditions(tool):
         new_args: dict[str, Any] = {}
+        run_time = False
         for key, value in pc.args.items():
             if isinstance(value, str) and value.startswith(ARG_REF):
                 name = value[len(ARG_REF):]
                 if name in args:
                     new_args[key] = args[name]
+                    # A value only known at run time (`$fit_to:30`) cannot be
+                    # checked against a number — the recipe's own check
+                    # (duration_leq) measures that step instead.
+                    run_time = run_time or (isinstance(args[name], str)
+                                            and args[name].startswith(FIT_SENTINEL_PREFIX))
                 continue
             new_args[key] = value
-        bound.append(pc.model_copy(update={"args": new_args}))
+        if not run_time:
+            bound.append(pc.model_copy(update={"args": new_args}))
     return bound
 
 
 __all__ = [
-    "PLAN_JSON_SCHEMA", "CLOUD_PLAN_STRIPPED_FIELDS", "cloud_plan_input_schema", "CLIP_SENTINELS", "SEAM_SENTINEL", "LONG_RUN_SECONDS",
+    "PLAN_JSON_SCHEMA", "CLOUD_PLAN_STRIPPED_FIELDS", "cloud_plan_input_schema", "CLIP_SENTINELS", "SEAM_SENTINEL", "HOOK_SENTINEL", "FIT_SENTINEL_PREFIX", "LONG_RUN_SECONDS",
     "BrainId", "NeedsInputKind", "SlotValue",
     "Step", "NeedsInputOption", "NeedsInput", "Postcondition", "DownloadNeeded", "Plan",
     "IntentItem", "DraftQuestion", "IntentDraft",

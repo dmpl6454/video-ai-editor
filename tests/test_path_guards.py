@@ -100,7 +100,7 @@ def test_every_advertised_path_arg_has_a_table_entry():
 
 def test_the_guard_count_is_pinned():
     """A bare count, so a rename cannot quietly shrink the table."""
-    assert len(EXPECTED_GUARDS) == 22  # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised
+    assert len(EXPECTED_GUARDS) == 23  # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt: bundled font name, render/fonts.py)
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 10
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "write") == 3
 

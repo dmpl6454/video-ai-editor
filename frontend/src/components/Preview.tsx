@@ -16,7 +16,8 @@ import { liveCssTransform, liveCssFilter, colorGradeOf, sampleKF,
 import { planSourceDraw, sourcePreviewApplies } from '../lib/sourcePreview'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import { renderSpanOf } from '../lib/timelineLayout'
-import { frameDuration } from '../lib/frameStep'
+import { displaySeekTime, frameDuration } from '../lib/frameStep'
+import { Icon } from './Icon'
 
 /**
  * Preview pane.
@@ -609,6 +610,10 @@ export function Preview() {
 
     // Is the frame-exact scrubber available to cover the <video>'s own seek?
     const scrubberReady = !isPlaying && !!scrubberRef.current?.isReady()
+    // Where a PAUSED <video> seeks to SHOW the playhead's frame: mid-frame,
+    // never the exact pts (QA-077: Chromium truncates currentTime, so an
+    // exact seek showed the previous frame on every third frame at 30 fps).
+    const shownAt = displaySeekTime(playhead, 1 / frameDur)
 
     // Playback is starting (or already running) with a paused-scrub seek still
     // deferred — land it NOW, before anything below reads currentTime and
@@ -648,7 +653,7 @@ export function Preview() {
       // deliberate jump during playback). While playing, the rAF clock already
       // mirrors the video, so only a large gap warrants a seek — small free-run
       // drift must not trigger a per-frame seek storm.
-      const gap = Math.abs(v.currentTime - playhead)
+      const gap = Math.abs(v.currentTime - (isPlaying ? playhead : shownAt))
       // Don't re-seek an element that is still servicing the previous seek or
       // hasn't got data yet. While playing, this effect re-runs on every rAF
       // playhead tick, so a stalled/ended/reloading <video> used to get a fresh
@@ -702,7 +707,7 @@ export function Preview() {
         // Reached whenever the scrubber is unavailable (WebCodecs/mp4box
         // failed, still loading) — then a raw <video> seek is still far better
         // than not scrubbing at all.
-        try { v.currentTime = playhead } catch { /* non-fatal */ }
+        try { v.currentTime = isPlaying ? playhead : shownAt } catch { /* non-fatal */ }
         clockRef.current = playhead   // keep the clock in step with the jump
       }
     }
@@ -729,7 +734,7 @@ export function Preview() {
     // a full frame away, and every later move of a drag already holds the
     // canvas.
     const covered = scrubbingRef.current || pendingSeekRef.current !== null
-      || Math.abs(v.currentTime - playhead) > frameDur * 0.25
+      || Math.abs(v.currentTime - shownAt) > frameDur * 0.25
     if (scrubberReady && !justPaused && covered) {
       // Prime the canvas with the frame that is ALREADY on screen before it is
       // revealed, so the reveal itself is invisible (identical pixels) — the
@@ -751,10 +756,11 @@ export function Preview() {
       scrubTimer.current = window.setTimeout(() => {
         const vid = ref.current
         if (!vid) { setScrubbingBoth(false); return }
-        const target = pendingSeekRef.current
+        const target = pendingSeekRef.current === null ? null
+          : displaySeekTime(pendingSeekRef.current, 1 / frameDur)   // mid-frame (QA-077)
         pendingSeekRef.current = null
         const needsSeek = target !== null && vid.readyState >= 2
-          && Math.abs(vid.currentTime - target) > 0.02
+          && Math.abs(vid.currentTime - target) > frameDur * 0.25
         if (!needsSeek && !vid.seeking) { setScrubbingBoth(false); return }
         let done = false
         // Guard timer: a <video> that never fires 'seeked' (decode stall,
@@ -901,7 +907,7 @@ export function Preview() {
   if (!edl?.duration) {
     return (
       <div className="preview-empty">
-        <div style={{ fontSize: 24, marginBottom: 6 }}>🎞️</div>
+        <div style={{ marginBottom: 6, color: 'var(--text-dim)' }}><Icon name="film" size={28} /></div>
         <div>Drop a video in the Media panel to start.</div>
         <div style={{ marginTop: 6 }}><span className="kbd">Space</span> play · <span className="kbd">{chordLabel('Mod+KeyB')}</span> split · <span className="kbd">⌫</span> delete</div>
       </div>
@@ -1111,7 +1117,10 @@ export function Preview() {
             }
             if (target > 0.05) {
               awaitingRestoreSeekRef.current = true
-              try { v.currentTime = target } catch { awaitingRestoreSeekRef.current = false }
+              // Paused: the middle of the frame, so it shows THAT frame (QA-077).
+              const seekTo = useStore.getState().isPlaying ? target
+                : Math.min(maxT, displaySeekTime(target, 1 / frameDur))
+              try { v.currentTime = seekTo } catch { awaitingRestoreSeekRef.current = false }
             }
           }}
           onSeeked={() => {
@@ -1214,7 +1223,7 @@ export function Preview() {
         )}
         {rendering && (
           <div style={{ position: 'absolute', top: 8, right: 8, color: 'var(--text-dim)', fontSize: 11, background: 'rgba(0,0,0,0.5)', padding: '2px 6px', borderRadius: 4 }}>
-            ⚙ Rendering…
+            Rendering…
           </div>
         )}
         {error && (

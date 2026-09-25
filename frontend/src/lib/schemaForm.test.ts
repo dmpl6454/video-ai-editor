@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ToolSchema } from '../api'
 import { AI_CATALOG, type CatalogEntry } from './aiCatalog'
-import { buildArgs, fieldsFor, initialValues, reseedContextValues, type Field, type FormContext } from './schemaForm'
+import { buildArgs, fieldsFor, humanize, initialValues, reseedContextValues, type Field, type FormContext } from './schemaForm'
 
 const schema = (name: string, properties: ToolSchema['input_schema']['properties'], required: string[] = []): ToolSchema => ({
   name, description: '', cancellable: false, reports_progress: false,
@@ -147,7 +147,11 @@ describe('fieldsFor — widget derivation', () => {
   })
 
   it('labels come from the override or a humanised name', () => {
-    expect(field('remove_silences', 'threshold_db').label).toBe('Threshold db')
+    // QA-063: "Threshold db" / "Min dur" were the arg names with the underscores off.
+    expect(field('remove_silences', 'threshold_db').label).toBe('Threshold (dB)')
+    expect(humanize('min_dur')).toBe('Minimum duration')
+    expect(humanize('target_lufs')).toBe('Target (LUFS)')
+    expect(humanize('pad_ms')).toBe('Pad (ms)')
     expect(field('cut_range', 'start').label).toBe('Start (In mark)')
   })
 })

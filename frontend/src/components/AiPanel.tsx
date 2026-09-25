@@ -7,6 +7,7 @@ import { useAiRuns } from '../lib/aiRuns'
 import { isCancelMessage } from '../lib/dispatchErrors'
 import { AiToolCard } from './AiToolCard'
 import './aiPanel.css'
+import { featureStatus } from '../lib/featureStatus'
 
 // The AI tab: every chat/MCP-only tool as a searchable, grouped card list.
 // Schemas come from /api/tools, gates from /api/features (lib/aiRuns.ts owns
@@ -108,9 +109,10 @@ export function AiPanel({ active = true }: { active?: boolean }) {
     }
   }, [])
 
+  const fs = featureStatus(features)
   const status = featuresError
-    ? `Feature check failed — ${featuresError}`
-    : features?.summary ?? (loading ? 'Checking optional features…' : 'Optional features not checked yet')
+    ? `Couldn't check which features are installed — ${featuresError}`
+    : fs?.line ?? (loading ? 'Checking features…' : 'Features not checked yet')
 
   return (
     // data-keymap-ignore: inside the panel a focused checkbox / button keeps
@@ -129,6 +131,12 @@ export function AiPanel({ active = true }: { active?: boolean }) {
         />
         <div className="ai-status" role="status">
           <span className="ai-status-text">{status}</span>
+          {fs && fs.missing.length > 0 && (
+            <details className="ai-status-details">
+              <summary>Details</summary>
+              <ul>{fs.missing.map((m) => <li key={m}>{m}</li>)}</ul>
+            </details>
+          )}
           <button
             type="button"
             className="ai-refresh"

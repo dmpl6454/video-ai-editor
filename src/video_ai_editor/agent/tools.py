@@ -117,9 +117,13 @@ EDIT_TOOLS = [
        {"clip_id": {"type": "string"}}, ["clip_id"]),
     _t("set_speed",
        "Set a media clip's playback speed factor (1.0 = normal, 2.0 = double, "
-       "0.5 = half). Constant speed only — no per-clip speed curves yet.",
+       "0.5 = half). Constant speed only — no per-clip speed curves yet. "
+       "`keep_pitch` (default true) time-stretches the sound at its own pitch; "
+       "false is varispeed — sample-exact timing, pitch follows the speed like tape.",
        "edit",
-       {"clip_id": {"type": "string"}, "factor": {"type": "number"}},
+       {"clip_id": {"type": "string"}, "factor": {"type": "number"},
+        "keep_pitch": {"type": "boolean",
+                       "description": "Omit to keep the clip's current setting"}},
        ["clip_id", "factor"]),
     _t("set_clip_fit",
        "Choose how a clip reconciles its aspect ratio with the canvas. 'cover' scales "
@@ -223,11 +227,13 @@ EDIT_TOOLS = [
        "Add or update a keyframe on a clip's transform property to animate it over "
        "time (time is CLIP-LOCAL seconds, 0 = clip start; a keyframe within 1ms of an "
        "existing one replaces it). Exported renders interpolate LINEAR only — ease/"
-       "bounce modes animate in the browser preview but bake as linear.",
+       "bounce modes animate in the browser preview but bake as linear. "
+       "prop 'audio.gain_db' keys the clip's VOLUME (value = level in dB at that "
+       "time): volume automation, rendered on every lane.",
        "edit",
        {
            "clip_id": {"type": "string"},
-           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity", "audio.gain_db"]},
            "props": {"type": "array", "items": {"type": "string"},
                      "description": "Key several properties in ONE commit instead of "
                                     "'prop'. A property left out of 'values' keeps "
@@ -249,7 +255,7 @@ EDIT_TOOLS = [
        "edit",
        {
            "clip_id": {"type": "string"},
-           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity"]},
+           "prop": {"type": "string", "enum": ["x", "y", "scale", "rotation", "opacity", "audio.gain_db"]},
            "props": {"type": "array", "items": {"type": "string"},
                      "description": "Remove from several properties in ONE commit "
                                     "instead of 'prop'. Properties with no key at "
@@ -275,6 +281,14 @@ PROJECT_TOOLS = [
        "Mute or unmute a track (e.g. 'music', 'vo', 'tx_super'). Muted tracks are skipped at render time.",
        "project",
        {"track": {"type": "string"}, "muted": {"type": "boolean", "default": True}},
+       ["track"]),
+    _t("set_track_solo",
+       "Solo or unsolo a track that carries sound (v1/v2, a1, music, vo). While any "
+       "track is soloed only soloed tracks are heard, in the preview and the export; "
+       "pictures are unaffected. Omit `solo` to toggle.",
+       "project",
+       {"track": {"type": "string"},
+        "solo": {"type": "boolean", "description": "Omit to toggle"}},
        ["track"]),
     _t("set_track_locked",
        "Lock or unlock a track (a UI flag that prevents accidental edits in the "
@@ -355,6 +369,27 @@ TEXT_TOOLS = [
                           "description": "style='word_emphasis' only: words per karaoke "
                                          "chunk (1-3 reads well; default 2). Ignored by "
                                          "the other styles."},
+           "rebuild": {"type": "boolean", "default": False,
+                       "description": "Re-lay every cue from the transcript even when "
+                                      "cues were edited by hand. Without it, a style "
+                                      "change on hand-edited captions restyles them in "
+                                      "place and keeps the edits."},
+       }),
+    _t("set_caption_style",
+       "Change how the captions LOOK and where they sit, for every cue at once, in one "
+       "undo step, without re-laying them (hand edits are kept). Keys you pass are set; "
+       "null clears one back to the caption default. Later caption builds keep this look.",
+       "text",
+       {
+           "position": {"type": "string", "enum": ["bottom", "center", "top"]},
+           "font": {"type": ["string", "null"], "description": "Bundled font file stem, e.g. Anton-Regular, Inter-Black"},
+           "color": {"type": ["string", "null"], "description": "#RRGGBB or #RRGGBBAA text fill"},
+           "size": {"type": ["number", "null"], "description": "Font size in canvas px"},
+           "stroke": {"type": ["string", "null"], "description": "#RRGGBB outline colour"},
+           "stroke_w": {"type": ["number", "null"], "description": "Outline width in canvas px"},
+           "background": {"type": ["string", "null"], "description": "#RRGGBB[AA] box behind each cue; null = none"},
+           "shadow_on": {"type": ["boolean", "null"]},
+           "upper": {"type": ["boolean", "null"], "description": "ALL CAPS"},
        }),
     _t("auto_caption",
        "BEST-QUALITY auto captions for Hindi + English + Spanish (and Hinglish). "
@@ -455,6 +490,12 @@ TEXT_TOOLS = [
                       "description": "#RRGGBB outline colour (TextStyle.stroke)"},
            "stroke_w": {"type": "number", "default": 4,
                         "description": "Outline width in canvas px; 0 = no outline"},
+           "background": {"type": "string", "description": "#RRGGBB[AA] box behind the text"},
+           "align": {"type": "string", "enum": ["left", "center", "right"],
+                     "description": "Line alignment inside the block"},
+           "line_spacing": {"type": "number", "description": "Line height multiplier (1 = normal)"},
+           "shadow_on": {"type": "boolean", "description": "Drop shadow on/off (omit = the role's)"},
+           "anim_dur": {"type": "number", "description": "Seconds each in/out animation lasts (default 0.35)"},
            "allow_stack": {"type": "boolean", "default": False,
                            "description": "By default a new clip REPLACES existing "
                                           "text clips of the same role whose time "
@@ -589,6 +630,15 @@ AUDIO_TOOLS = [
        "audio",
        {"clip_id": {"type": "string"},
         "muted": {"type": "boolean", "description": "Omit to toggle"}},
+       ["clip_id"]),
+    _t("detach_audio",
+       "Detach a video clip's sound onto an audio lane so picture and sound trim and "
+       "move independently (J and L cuts). The video clip is muted; the audio clip "
+       "keeps its source, trim, position, gain, fades and volume keyframes. `track` "
+       "picks the audio lane (default: the first with room, else a new one). 1x clips only.",
+       "audio",
+       {"clip_id": {"type": "string"},
+        "track": {"type": "string", "description": "Audio lane id, e.g. 'a1'"}},
        ["clip_id"]),
     _t("add_fade",
        "Add audio fade in / fade out to a clip.",
@@ -1113,6 +1163,10 @@ _ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("add_text", "y"): _POS,
     ("add_text", "size"): (1.0, 2000.0),
     ("add_text", "stroke_w"): (0.0, 200.0),
+    # Same text bounds on the caption look (QA-107: size 1e6 / stroke_w 1e5
+    # returned 200 and then every export 500'd). The models clamp too.
+    ("set_caption_style", "size"): (1.0, 2000.0),
+    ("set_caption_style", "stroke_w"): (0.0, 200.0),
     ("set_pip_framing", "x"): (-10.0, 10.0),
     ("set_pip_framing", "y"): (-10.0, 10.0),
     ("set_pip_framing", "zoom"): (0.1, 20.0),

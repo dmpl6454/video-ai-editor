@@ -48,25 +48,46 @@ def speech_only(edl: EDL) -> EDL:
 
 def render_for_verify(edl: EDL, session_dir: Path, *, max_duration_s: float,
                       on_progress: Callable[[float], None] | None = None,
-                      cancel_event: Any = None, speech_only: bool = False) -> Path | None:
+                      cancel_event: Any = None, speech_only: bool = False,
+                      stem: str | None = None) -> Path | None:
     """The 360p verify render for `edl`, or None when the timeline is too
     long to verify by rendering (the caller reports the checks as unmeasured).
-    `speech_only=True` renders the music-muted variant (see `speech_only`)."""
+    `speech_only=True` renders the music-muted variant (see `speech_only`).
+    `stem` renders an audio STEM in place of the mix (`audio_mix.stem_scope`;
+    `audio_mix.STEM_DUCK_PROBE` is the duck gain the renderer applied)."""
     if edl.duration > max_duration_s or edl.duration <= 0.0:
         return None
     from .compositor import _render
+    from .audio_mix import stem_scope
     if speech_only:
         edl = globals()["speech_only"](edl)
     out_dir = Path(session_dir) / "cache" / "verify"
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_speech" if speech_only else ""
+    suffix = ("_speech" if speech_only else "") + (f"_{stem}" if stem else "")
     dst = out_dir / f"verify_{edl.hash()}_{VERIFY_HEIGHT}{suffix}.mp4"
     if dst.exists() and dst.stat().st_size > 0:
         return dst
-    _render(edl, dst, height=VERIFY_HEIGHT, fps=edl.canvas.fps, preview=False,
-            cache_dir=Path(session_dir) / "cache", crf=VERIFY_CRF,
-            on_progress=on_progress, cancel_event=cancel_event)
+    with stem_scope(stem):
+        _render(edl, dst, height=VERIFY_HEIGHT, fps=edl.canvas.fps, preview=False,
+                cache_dir=Path(session_dir) / "cache", crf=VERIFY_CRF,
+                on_progress=on_progress, cancel_event=cancel_event)
     return dst
+
+
+def window_levels_db(path: Path, *, win_s: float = 0.05, ref: float = 1.0) -> list[float]:
+    """Per-window RMS of `path`'s audio (mono mixdown) in dB relative to an
+    RMS of `ref` — the duck probe's carrier level makes it read as the gain."""
+    import numpy as np
+    proc = subprocess.run([_pu.FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a:0",
+                           "-af", "pan=mono|c0=0.5*c0+0.5*c1", "-ar", "48000", "-f", "f32le", "-"],
+                          capture_output=True, **_pu.SUBPROCESS_FLAGS)
+    a = np.frombuffer(proc.stdout[: len(proc.stdout) // 4 * 4], dtype="<f4").astype(np.float64)
+    n = max(1, int(win_s * 48000))
+    k = len(a) // n
+    if k == 0:
+        return []
+    ms = (a[: k * n].reshape(k, n) ** 2).mean(axis=1)
+    return [float(10 * np.log10(m / (ref * ref))) if m > 1e-20 else -200.0 for m in ms]
 
 
 def _ffmpeg_stderr(args: list[str]) -> str:
@@ -95,5 +116,5 @@ def total_silence(path: Path, *, noise_db: float = -30.0, min_dur: float = 0.5) 
     return round(sum(float(d) for d in _SILENCE_DUR_RE.findall(err)), 3)
 
 
-__all__ = ["render_for_verify", "speech_only", "integrated_loudness", "total_silence",
+__all__ = ["render_for_verify", "speech_only", "integrated_loudness", "total_silence", "window_levels_db",
            "VERIFY_HEIGHT", "VERIFY_CRF"]

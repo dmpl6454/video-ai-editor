@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
+import { Dialog } from './Dialog'
 
 /**
  * Export progress modal. Shows while a background export job runs: a live
@@ -36,44 +37,46 @@ export function ExportModal() {
     progress > 0.02 && progress < 1
       ? Math.max(0, Math.round((elapsed / progress) * (1 - progress)))
       : null
+  // 'reconnecting' (QA-034): the engine stopped answering the status poll;
+  // the store waits a bounded time, and Cancel still closes at once.
   const phase =
-    status === 'queued' ? 'Preparing…' : progress >= 1 ? 'Finishing…' : 'Rendering…'
+    status === 'reconnecting' ? 'Waiting for the editor engine…'
+      : status === 'queued' ? 'Preparing…' : progress >= 1 ? 'Finishing…' : 'Rendering…'
 
+  const cancel = () => {
+    if (cancelling) return
+    setCancelling(true)
+    void cancelExport()
+  }
+
+  // On THE app dialog (components/Dialog): focus lands on Cancel, Tab stays
+  // inside, the editor behind is inert, and Escape means Cancel — it used to
+  // take no focus at all, so Tab walked to the Media panel under the backdrop.
   return (
-    <div className="modal-backdrop export-backdrop">
-      <div className="export-modal" role="dialog" aria-label="Exporting video">
-        <div className="export-modal-head">
-          <span className="export-modal-title">Exporting video</span>
-          <span className="export-modal-phase">{phase}</span>
-        </div>
-
-        <div className={`export-progress-track${indeterminate ? ' indeterminate' : ''}`}>
-          <div
-            className="export-progress-fill"
-            style={indeterminate ? undefined : { width: `${Math.max(3, pct)}%` }}
-          />
-        </div>
-
-        <div className="export-modal-meta">
-          <span className="export-pct">{indeterminate ? '…' : `${pct}%`}</span>
-          <span className="export-eta">
-            {eta != null ? `~${eta}s remaining` : `${elapsed.toFixed(0)}s elapsed`}
-          </span>
-        </div>
-
-        <div className="export-modal-actions">
-          <button
-            className="export-cancel"
-            disabled={cancelling}
-            onClick={() => {
-              setCancelling(true)
-              void cancelExport()
-            }}
-          >
-            {cancelling ? 'Cancelling…' : 'Cancel'}
-          </button>
-        </div>
+    <Dialog open title="Exporting video" labelId="export-progress-title" onClose={cancel}
+            showClose={false} closeOnBackdrop={false} className="export-progress-dialog"
+            footer={<>
+              <span className="export-modal-phase" role="status">{phase}</span>
+              <span className="spacer" />
+              <button className="export-cancel" disabled={cancelling} onClick={cancel}>
+                {cancelling ? 'Cancelling…' : 'Cancel'}
+              </button>
+            </>}>
+      <div className={`export-progress-track${indeterminate ? ' indeterminate' : ''}`}
+           role="progressbar" aria-label="Export progress" aria-valuemin={0} aria-valuemax={100}
+           aria-valuenow={indeterminate ? undefined : pct}>
+        <div
+          className="export-progress-fill"
+          style={indeterminate ? undefined : { width: `${Math.max(3, pct)}%` }}
+        />
       </div>
-    </div>
+
+      <div className="export-modal-meta">
+        <span className="export-pct">{indeterminate ? '…' : `${pct}%`}</span>
+        <span className="export-eta">
+          {eta != null ? `~${eta}s remaining` : `${elapsed.toFixed(0)}s elapsed`}
+        </span>
+      </div>
+    </Dialog>
   )
 }

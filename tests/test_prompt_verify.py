@@ -635,12 +635,13 @@ def test_silence_check_counts_only_long_pauses_and_names_the_longest(store):
     assert r.passed is False and 3.6 <= r.measured <= 4.4 and r.unit == "s", r
     m = re.search(r"longest remaining pause ([\d.]+) s", r.detail or "")
     assert m and abs(float(m.group(1)) - 2.0) < 0.15, r.detail
-    assert "≥ 0.85 s" in r.detail and "2 pause(s)" in r.detail
+    # Editor language (QA-101): the floor explained, not "min_dur + 2×keep_pad".
+    assert "2 pauses of 0.85 s or longer" in r.detail and "keep_pad" not in r.detail
     D.dispatch(store, "remove_silences", {"track": "v1", "threshold_db": -30.0, "min_dur": 0.5, "keep_pad": 0.1})
     ctx = _ctx(store, before=before, plan=plan,
                render_path=R.render_for_verify(store.edl, Path(store.dir), max_duration_s=60.0))
     r = _check(ctx, "silence_total_leq", max_total_s=1.0)
-    assert r.passed is True and r.measured == 0.0 and "0 pause(s) ≥ 0.85 s" in (r.detail or ""), r
+    assert r.passed is True and r.measured == 0.0 and "0 pauses of 0.85 s or longer" in (r.detail or ""), r
 
 
 def test_long_pause_floor_follows_the_plans_remove_silences_args():

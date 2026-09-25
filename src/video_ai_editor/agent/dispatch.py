@@ -129,7 +129,7 @@ def _duplicate_overlay(edl: EDL, track: Track, c) -> str | None:
     return dup.id
 
 
-def _open_main_lane_slot(edl: EDL, track: Track, original, at: float, width: float) -> None:
+def _open_main_lane_slot(edl: EDL, track: Track, original, at: float, width: float) -> float:
     """Make room on the MAIN lane for a copy inserted at `at` (right after
     `original`): every later v1 clip, and every unlocked overlay pinned at or
     after that point, moves right by the copy's footprint.
@@ -140,17 +140,29 @@ def _open_main_lane_slot(edl: EDL, track: Track, original, at: float, width: flo
     red, blue, copy, green. The copy belongs directly after its original (as in
     every NLE), and inserting footage there shifts the picture after it, so the
     overlays over that picture shift with it (the set_speed slow-down rule).
+
+    QA-057: "later" is decided by ORDER, not by comparing starts with `at`.
+    The magnetic lane packs on the frame grid (QA-002), so an original whose
+    footprint is not a whole number of frames (10.02 s at 29.97) is followed
+    by a neighbour that starts BEFORE start+footprint (10.01 s); a `>= at`
+    test left that neighbour where it was and the copy sorted after it.
+    Returns the seam the copy must start at: the next clip's start when the
+    grid pulled it in, else `at`.
     """
-    for x in track.clips:
-        if isinstance(x, Clip) and x is not original and x.start >= at - 1e-9:
-            x.start += width
+    later = [x for x in track.clips
+             if isinstance(x, Clip) and x is not original
+             and x.start > original.start + 1e-9]
+    seam = min([at] + [float(x.start) for x in later])
+    for x in later:
+        x.start += width
     for t in edl.tracks:
         if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
             continue
         for oc in t.clips:
-            if getattr(oc, "start", 0.0) >= at - 1e-9 and hasattr(oc, "end"):
+            if getattr(oc, "start", 0.0) >= seam - 1e-9 and hasattr(oc, "end"):
                 oc.start += width
                 oc.end += width
+    return seam
 
 
 # Track types that can hold a media Clip (an uploaded video/audio file).
@@ -555,16 +567,29 @@ def _validate_tool_args(tool: str, args: dict) -> None:
         spec = props.get(key)
         if not isinstance(spec, dict):
             continue  # alias, or an extra key we deliberately tolerate
-        # An explicit null means "unset"; handlers already treat it that way.
-        if value is None:
-            continue
         declared = spec.get("type")
-        if declared is not None:
-            variants = declared if isinstance(declared, list) else [declared]
+        variants = (declared if isinstance(declared, list) else [declared]) if declared else []
+        # An explicit null means "unset" — so it is made to BE unset (QA-107).
+        # It used to be passed through on the promise that handlers treat it
+        # that way; many read `float(args["time"])` or iterate `args["clip_ids"]`,
+        # so `split_at {time: null}` was a TypeError -> 500. Dropped, the
+        # handler either applies its default or raises the KeyError that
+        # dispatch() below turns into "missing required argument" (400). A
+        # field whose schema admits null keeps it.
+        if value is None:
+            if variants and "null" not in variants:
+                del args[key]
+            continue
+        if variants:
             if not any(_arg_type_ok(value, d) for d in variants):
                 raise ValueError(
                     f"{tool}.{key} must be of type {declared}, got "
                     f"{type(value).__name__} {value!r}")
+            # A number in a string-only slot is tolerated (clip ids, labels)
+            # but handed on AS a string: `add_music {src: 5}` reached
+            # `Path(5.0)` and raised TypeError -> 500 (QA-107).
+            if variants == ["string"] and not isinstance(value, str):
+                args[key] = value = str(value)
         allowed = spec.get("enum")
         if allowed and all(isinstance(a, str) for a in allowed):
             canonical = {a.lower(): a for a in allowed}
@@ -850,8 +875,17 @@ def _reject_caption_geometry(c, props) -> None:
             "not per-cue transforms — change the captions position/style instead")
 
 
+def _v1_media_end(edl: EDL) -> float:
+    """Where the main lane's picture currently ends (0.0 when it is empty)."""
+    v1 = edl.get_track(MAIN_LANE_ID)
+    if v1 is None:
+        return 0.0
+    return max((float(c.start) + c.effective_duration
+                for c in v1.clips if isinstance(c, Clip)), default=0.0)
+
+
 def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
-                      v1_now_empty: bool = False) -> None:
+                      v1_now_empty: bool = False, tail: bool | None = None) -> None:
     """Shift text/sticker/caption overlays to follow a ripple on the video
     track — the same left-shift `_ripple_close_gap` just applied to V1.
 
@@ -915,10 +949,23 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
     followed by deleting every v1 clip and adding a new (shorter) one, is a
     real edit sequence (shorten-then-replace) that must not lose content
     genuinely waiting for the next clip to arrive.
+
+    **`tail` drops a fully-orphaned clip too, when the removal took the END of
+    the main lane** (QA-021-TAIL). Collapsing a title that sat over the last
+    clip onto a 0.1 s stub at the new v1 end held the timeline 0.1 s past the
+    picture: a sliver of black and a flash of the title at the end of every
+    export. There is no footage after the cut for the stub to belong to, so
+    it goes, exactly like the emptied-v1 case. Left as None, it is derived
+    from the lane AFTER the caller's repack — the removal was at the tail iff
+    nothing on v1 now reaches past `removed_start` — which holds for every
+    single-interval caller; `bulk_delete` passes it explicitly because it
+    ripples several intervals given in pre-delete coordinates.
     """
     shift = removed_end - removed_start
     if shift <= 0:
         return
+    if tail is None:
+        tail = _v1_media_end(edl) <= removed_start + 0.5 * _tb.frame_duration(edl.canvas.fps)
 
     def remap(t: float) -> float:
         if t <= removed_start:
@@ -948,8 +995,15 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
             # maps both endpoints to the identical `removed_start`.
             fully_orphaned = new_start == removed_start and new_end == removed_start
             if fully_orphaned:
-                if v1_now_empty:
-                    continue  # no footage left at all — drop, don't keep a stub
+                if v1_now_empty or tail:
+                    continue  # no footage left after it — drop, don't keep a stub
+                if track.type == "captions":
+                    # A cue wholly inside the cut captions words that were
+                    # just removed — there is nothing left for it to caption.
+                    # Its stub overlapped the next cue, which shifts onto the
+                    # same instant (two captions drawn on top of each other).
+                    # The one-stub rule is for a lone user-placed title/sticker.
+                    continue
                 if kept_a_collapsed_clip:
                     continue  # a duplicate stub at the same point — drop it
                 kept_a_collapsed_clip = True
@@ -1426,6 +1480,11 @@ def split_at(store: EDLStore, args: dict) -> dict:
                 video_fade_in=0.0,
             )
             left.audio.fade_out, right.audio.fade_in = 0.0, 0.0   # sound fades too
+            if c.audio.gain_env is not None:
+                # Volume automation is keyed in clip-local timeline seconds:
+                # the right half re-bases to its own zero (QA-086).
+                left.audio.gain_env, right.audio.gain_env = _split_gain_env(
+                    c.audio.gain_env, t - c_start)
             new_clips.append(left)
             new_clips.append(right)
             halves[c.id] = right.id
@@ -1439,6 +1498,10 @@ def split_at(store: EDLStore, args: dict) -> dict:
 
 
 def trim_clip(store: EDLStore, args: dict) -> dict:
+    if "in" not in args and "out" not in args:
+        # Nothing to trim (a null in/out is dropped as "unset" at the boundary,
+        # QA-107): refuse rather than commit a no-op that clears Redo.
+        raise ValueError("trim_clip needs `in` and/or `out`")
     res = store.edl.get_clip(args["clip_id"])
     if not res:
         raise ValueError("clip not found")
@@ -1733,7 +1796,7 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
         # takes the first free span after the original instead.
         dup.start = _first_free_gap(track, dup.effective_duration, dup.start)
     else:
-        _open_main_lane_slot(store.edl, track, c, dup.start, dup.effective_duration)
+        dup.start = _open_main_lane_slot(store.edl, track, c, dup.start, dup.effective_duration)
     track.clips.append(dup)
     _ripple_close_gap(track, store.edl.canvas.fps)
     # Off the main lane _ripple_close_gap no longer repacks (or sorts), so
@@ -1744,12 +1807,161 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "new_clip_id": dup.id}
 
 
+
+#: paste_clips' cap — a clipboard is a handful of clips, not a timeline.
+_PASTE_MAX = 200
+
+
+def _paste_model(edl: EDL, item: object):
+    """One clipboard entry → (destination track, a validated NEW clip).
+
+    The entry is `{"track": <lane id>, "clip": <the clip's EDL JSON>}` — the
+    clip's CONTENT, captured at copy time, so a paste survives the source clip
+    being deleted (QA-056). The lane decides the model: a media lane takes a
+    `Clip`, a text/caption lane a `TextClip`, a sticker lane a `Sticker`."""
+    if not isinstance(item, dict) or not isinstance(item.get("clip"), dict):
+        raise ValueError("each pasted item needs a 'clip' object")
+    track = _v_track(edl, str(item.get("track") or MAIN_LANE_ID))
+    data = dict(item["clip"])
+    data.pop("id", None)
+    if track.type in _MEDIA_TRACK_TYPES:
+        model, prefix = Clip, "c_"
+    elif track.type in ("text", "captions"):
+        model, prefix = TextClip, "t_"
+    elif track.type == "sticker":
+        model, prefix = Sticker, "st_"
+    else:
+        raise ValueError(f"can't paste onto the '{track.type}' lane")
+    try:
+        clip = model.model_validate({**data, "id": _new_clip_id(edl, prefix)})
+    except Exception as e:  # pydantic ValidationError → 400, not 500
+        raise ValueError(f"the copied clip is not valid on '{track.id}': {e}") from e
+    src = getattr(clip, "src", None)
+    if src:
+        clip.src = _safe_src(src)
+        if not Path(clip.src).is_file():
+            raise ValueError(f"The media for a copied clip is no longer on disk "
+                             f"({Path(clip.src).name}) — re-import it, then copy again.")
+        if model is Clip:
+            _reject_videoless_on_video_lane(track, clip.src, "paste_clips")
+    return track, clip
+
+
+def _free_overlay_start(track: Track, span: float, at: float) -> float:
+    """First start >= `at` where an overlay of length `span` overlaps no cue
+    already on the lane (an overlay lane is not magnetic)."""
+    busy = sorted((o.start, o.end) for o in track.clips if hasattr(o, "end"))
+    for s0, e0 in busy:
+        if at + span <= s0 + 1e-9:
+            break
+        if e0 > at + 1e-9 and s0 < at + span - 1e-9:
+            at = e0
+    return at
+
+
+def _open_main_lane_at(store: EDLStore, main: Track, at: float) -> float:
+    """The seam on the MAIN lane a paste at `at` inserts into: the clip under
+    `at` is split there (one piece either side), a time past the lane's end
+    becomes its end (the main lane has no gaps). Returns the seam."""
+    edl = store.edl
+    media = [c for c in main.clips if isinstance(c, Clip)]
+    end = max((c.start + c.effective_duration for c in media), default=0.0)
+    seam = _q(edl, min(max(0.0, at), end))
+    inside = [c for c in media if c.start + 1e-9 < seam < c.start + c.effective_duration - 1e-9]
+    if inside:
+        split_at(store, {"track": main.id, "time": seam})
+        # Within a frame of an edge split_at declines to split; the nearer
+        # edge is then the seam.
+        for c in main.clips:
+            if isinstance(c, Clip) and c.start + 1e-9 < seam < c.start + c.effective_duration - 1e-9:
+                c_end = c.start + c.effective_duration
+                seam = c.start if seam - c.start < c_end - seam else c_end
+                break
+    return seam
+
+
+def paste_clips(store: EDLStore, args: dict) -> dict:
+    """Paste copied clips AT A TIME (the playhead), from their content (QA-056).
+
+    Paste used to be `duplicate_clip` of the copied ids: it ignored the
+    playhead (the copy landed after the source) and failed with "clip not
+    found" once the source was deleted. Here each clipboard entry carries the
+    clip itself. The clips keep their relative spacing, measured from the
+    earliest one, which lands at `at`:
+
+    * the MAIN lane is magnetic: the clip under `at` is split, the copies are
+      inserted there and everything after them (later clips, the unlocked
+      overlays and the transitions over that picture) moves right by the
+      inserted length — the insert semantics `duplicate_clip` uses;
+    * any other lane takes each copy at the first free span at or after its
+      spot — nothing on a non-magnetic lane moves to make room.
+
+    One gesture, one undo step. `at` is LAYOUT time (the client decodes the
+    render-time playhead first, as every "at the playhead" write-back does)."""
+    items = args.get("clips")
+    if not isinstance(items, list) or not items:
+        raise ValueError("paste_clips needs a non-empty 'clips' list")
+    if len(items) > _PASTE_MAX:
+        raise ValueError(f"at most {_PASTE_MAX} clips can be pasted at once")
+    at = _num(args, "at", 0.0, min=0.0) or 0.0
+    edl = store.edl
+    parsed = [_paste_model(edl, it) for it in items]          # validate first
+    base = min(float(getattr(c, "start", 0.0)) for _, c in parsed)
+    new_ids: list[str] = []
+    with store.batch():
+        main_items = sorted(((t, c) for t, c in parsed if t.id == MAIN_LANE_ID and isinstance(c, Clip)),
+                            key=lambda tc: tc[1].start)
+        if main_items:
+            main = main_items[0][0]
+            seam = _open_main_lane_at(store, main, at)
+            width = sum(c.effective_duration for _, c in main_items)
+            for x in main.clips:
+                if isinstance(x, Clip) and x.start >= seam - 1e-9:
+                    x.start = _q(edl, x.start + width)
+            for t in edl.tracks:
+                if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
+                    continue
+                for oc in t.clips:
+                    if getattr(oc, "start", 0.0) >= seam - 1e-9 and hasattr(oc, "end"):
+                        oc.start += width
+                        oc.end += width
+            for tr in main.transitions:
+                if tr.at > seam + 1e-9:
+                    tr.at += width
+            cur = seam
+            for _, c in main_items:
+                c.start = _q(edl, cur)
+                cur += c.effective_duration
+                main.clips.append(c)
+                new_ids.append(c.id)
+            _ripple_close_gap(main, edl.canvas.fps)
+            main.clips.sort(key=lambda x: getattr(x, "start", 0))
+        for track, c in parsed:
+            if track.id == MAIN_LANE_ID and isinstance(c, Clip):
+                continue
+            want = at + (float(getattr(c, "start", 0.0)) - base)
+            if isinstance(c, Clip):
+                c.start = _q(edl, _first_free_gap(track, c.effective_duration, want))
+                track.clips.append(c)
+                track.clips.sort(key=lambda x: getattr(x, "start", 0))
+            else:
+                span = max(0.0, c.end - c.start)
+                start = _free_overlay_start(track, span, want)
+                c.start, c.end = _q(edl, start), _q(edl, start + span)
+                track.clips.append(c)   # appended: list order is stacking order
+            new_ids.append(c.id)
+    n = len(new_ids)
+    summary = f"Paste {n} clip{'s' if n != 1 else ''} at {at:.2f}s"
+    store.commit("paste_clips", {"at": at, "count": n}, summary)
+    return {"summary": summary, "clip_ids": new_ids}
+
+
 # ---------- project ----------
 
 def set_canvas(store: EDLStore, args: dict) -> dict:
     from ..edl.schema import CANVAS_MIN, CANVAS_MAX, FPS_MIN, FPS_MAX
     c = store.edl.canvas
-    old_w, old_h = c.w, c.h
+    old_w, old_h, old_fps = c.w, c.h, c.fps
     # Canvas already clamps these (so no writer can produce a 0×-10 canvas —
     # QA round 5, VAI-05), but a clamp is the wrong answer for a caller that
     # asked for something impossible: silently rendering at 16px would read as
@@ -1765,9 +1977,45 @@ def set_canvas(store: EDLStore, args: dict) -> dict:
         # Canvas validator snaps it to 30000/1001 via edl.timebase.
         setattr(c, key, v if key == "fps" else int(v))
     _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, c.w, c.h)
+    if float(c.fps) != float(old_fps):
+        _requantise_times(store.edl)
     summary = f"Canvas → {c.w}×{c.h} @ {round(float(c.fps), 3):g}fps"
     store.commit("set_canvas", args, summary)
     return {"summary": summary}
+
+
+def _requantise_times(edl: EDL) -> None:
+    """Move every committed time onto a NEW project frame grid (set_canvas
+    fps). Wave A quantises each edit to canvas.fps as it is made; a rate
+    change left the old grid's times behind (30 → 29.97: out=12.0 is 359.64
+    frames, a transition 6 ms off its seam), so edl.duration disagreed with
+    the renderer's frame count. Same rules the edits use: nearest frame, a
+    media out never past its source's picture, overlay spans kept ≥ 1 frame."""
+    fps = edl.canvas.fps
+    q = lambda t: _tb.quantize(float(t), fps)  # noqa: E731
+    one = _tb.frame_duration(fps)
+    extents: dict[str, float | None] = {}
+    for tr in edl.tracks:
+        for c in tr.clips:
+            if isinstance(c, Clip):
+                in_, out = q(c.in_), q(c.out)
+                if tr.type == "video" and c.src:
+                    if c.src not in extents:
+                        extents[c.src] = _source_video_extent(c.src, fps)
+                    ext = extents[c.src]
+                    if ext is not None and out > ext:
+                        out = ext
+                if out <= in_:
+                    out = q(in_ + one)
+                c.start, c.in_, c.out = q(c.start), in_, out
+            elif isinstance(c, (TextClip, Sticker)):
+                start, end = q(c.start), q(c.end)
+                c.start, c.end = start, max(end, q(start + one))
+        tr.transitions = [t.model_copy(update={"at": q(t.at), "duration": max(q(one), q(t.duration))}, deep=True)
+                          for t in tr.transitions]
+    for m in edl.markers:
+        m.time = q(m.time)
+    edl.recompute_duration()
 
 
 _RATIOS = {
@@ -1789,13 +2037,15 @@ def set_aspect_ratio(store: EDLStore, args: dict) -> dict:
 def undo_op(store: EDLStore, args: dict) -> dict:
     ok = store.undo()
     return {"ok": ok, "summary": "Undo" if ok else "Nothing to undo",
-            "redo_available": store.redo_available}
+            "redo_available": store.redo_available,
+            "undo_depth": store.undo_depth}
 
 
 def redo_op(store: EDLStore, args: dict) -> dict:
     ok = store.redo()
     return {"ok": ok, "summary": "Redo" if ok else "Nothing to redo",
-            "redo_available": store.redo_available}
+            "redo_available": store.redo_available,
+            "undo_depth": store.undo_depth}
 
 
 def render_preview_tool(store: EDLStore, args: dict) -> dict:
@@ -2027,6 +2277,146 @@ def _timeline_segments(store: EDLStore, segments: list[dict],
             store.edl.video_extent())
 
 
+#: ig_chunky is the IG/TikTok look: short punchy phrases, never a paragraph
+#: (QA-071 — one cue per ASR segment put 18 words on four lines). Per line;
+#: two lines → about 3-7 words a cue, each on screen at most 3 s.
+IG_CHUNKY_MAX_CHARS = 16
+IG_CHUNKY_MAX_DUR_S = 3.0
+
+
+def _caption_budget(style: str, args: dict) -> dict:
+    """`cues_from_segments` packing for a style. An explicit `max_chars` is the
+    caller's own packing and is honoured as given."""
+    budget: dict = {"max_cps": float(args.get("max_cps", 17.0))}
+    if style == "ig_chunky" and args.get("max_chars") is None:
+        budget.update(max_chars=IG_CHUNKY_MAX_CHARS, max_lines=2, max_dur=IG_CHUNKY_MAX_DUR_S)
+    else:
+        budget["max_chars"] = int(args.get("max_chars", 42))
+    return budget
+
+
+#: Ops that (re)build the caption track from a transcript: the boundary
+#: `_hand_edited_cue_ids` scans back to.
+_CAPTION_BUILD_TOOLS = frozenset({"add_caption_track", "auto_caption", "translate_captions",
+                                  "import_srt"})
+
+
+def _hand_edited_cue_ids(store: EDLStore, cap: Track) -> set[str]:
+    """Ids of caption cues the user changed since the track was last built
+    (QA-074): any op after the newest caption build whose args name a cue
+    still on the track (a text edit, a retime, a move, a keyframe)."""
+    cue_ids = {c.id for c in cap.clips if isinstance(c, TextClip)}
+    if not cue_ids:
+        return set()
+    hit: set[str] = set()
+    for op in reversed(store.ops.ops):
+        steps = op.args.get("steps") if isinstance(op.args, dict) else None
+        if op.tool == "add_caption_track" and isinstance(op.args, dict) and op.args.get("restyle"):
+            continue  # an in-place restyle kept the cues — the edits before it still count
+        if op.tool in _CAPTION_BUILD_TOOLS or (
+                op.tool == "prompt" and isinstance(steps, list) and _CAPTION_BUILD_TOOLS & set(steps)):
+            break
+        args = op.args if isinstance(op.args, dict) else {}
+        for key in ("clip_id", "id", "target"):
+            if isinstance(args.get(key), str) and args[key] in cue_ids:
+                hit.add(args[key])
+        ids = args.get("clip_ids")
+        if isinstance(ids, list):
+            hit.update(i for i in ids if isinstance(i, str) and i in cue_ids)
+    return hit
+
+
+def _restyle_captions_in_place(store: EDLStore, cap: Track, style: str, position: str,
+                               edited: set[str]) -> dict:
+    """Change the look of the cues already on the track without re-laying
+    them, so hand edits survive a style change (QA-074)."""
+    canvas = store.edl.canvas
+    cues = [c for c in cap.clips if isinstance(c, TextClip)]
+    for c in cues:
+        if style == "word_emphasis":
+            c.role, c.transform.y = "hook", canvas.h * 0.5
+        else:
+            c.role, c.transform.y = "caption", overlay_default_y(canvas, "caption", position)
+        c.transform.x = canvas.w / 2
+    summary = (f"Restyled {len(cues)} caption(s) to {style} ({position}) in place — kept your "
+               f"{len(edited)} edited cue(s)")
+    store.commit("add_caption_track", {"style": style, "position": position, "restyle": True}, summary)
+    return {"summary": summary, "lines": len(cues), "restyled": True, "kept_edits": len(edited),
+            "notice": (f"kept {len(edited)} hand-edited caption(s); re-run with rebuild to "
+                       "re-lay every cue from the transcript")}
+
+
+def _check_font(value: Any) -> str | None:
+    """A font argument is a bundled font NAME (render/fonts.py) — 400 for a
+    path or anything else that is not one; None/"" clears."""
+    from ..render.fonts import check_font_arg
+    return check_font_arg(value)
+
+
+#: TextStyle value each CaptionLook field falls back to when cleared (the
+#: schema defaults — "use the caption role's own style").
+_CAPTION_LOOK_UNSET = {"font": None, "color": "#FFFFFF", "size": 96.0, "stroke": "#000000",
+                       "stroke_w": 4.0, "background": None, "shadow_on": None, "upper": None}
+
+
+def _apply_caption_look(cap: Track, fields: list[str] | None = None) -> int:
+    """Stamp the track's CaptionLook onto every caption cue (QA-075) — all of
+    it (a caption build), or only the `fields` a style change touched, so a
+    position-only change keeps any cue someone styled by hand."""
+    look = getattr(cap.config, "look", None) if cap.config is not None else None
+    if look is None:
+        return 0
+    n = 0
+    for c in cap.clips:
+        if isinstance(c, TextClip) and (c.role or "caption") == "caption":
+            for field, unset in _CAPTION_LOOK_UNSET.items():
+                if fields is not None and field not in fields:
+                    continue
+                v = getattr(look, field)
+                setattr(c.style, field, unset if v is None else v)
+            n += 1
+    return n
+
+
+def set_caption_style(store: EDLStore, args: dict) -> dict:
+    """The captions track's look and position in ONE undo step (QA-075).
+
+    Caption style and position used to be reachable only through the AI tab's
+    "Captions from transcript", which re-lays every cue; the CC button and a
+    selected cue offered nothing. Keys present in `args` are set (null clears
+    back to the caption role's own style); absent keys are left alone.
+    `position` is bottom / center / top and is rendered by both renderers."""
+    from ..edl.schema import CaptionLook
+    cap = store.edl.get_track("captions")
+    if cap is None:
+        raise ValueError("there are no captions yet — add captions first")
+    if cap.config is None:
+        cap.config = CaptionsConfig()
+    changed: list[str] = []
+    look_fields: list[str] = []
+    if "position" in args and args["position"] is not None:
+        cap.config.position = _enum_arg(args, "position", _literal_values(CaptionsConfig, "position"), "bottom")  # type: ignore
+        changed.append(f"position {cap.config.position}")
+    look = (cap.config.look or CaptionLook()).model_copy(deep=True)
+    for field in _CAPTION_LOOK_UNSET:
+        if field in args:
+            v = args[field]
+            if field in ("color", "stroke", "background") and v not in (None, ""):
+                if not re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", str(v)):
+                    raise ValueError(f"{field} must be #RRGGBB or #RRGGBBAA hex, got {v!r}")
+            if field == "font":
+                v = _check_font(v)
+            setattr(look, field, None if v in (None, "") else v)
+            changed.append(field)
+            look_fields.append(field)
+    cap.config.look = look
+    _apply_caption_look(cap, look_fields)
+    n = sum(1 for c in cap.clips if isinstance(c, TextClip) and (c.role or "caption") == "caption")
+    summary = f"Caption style: {', '.join(changed) or 'unchanged'} ({n} caption(s))"
+    store.commit("set_caption_style", args, summary)
+    return {"summary": summary, "cues": n, "position": cap.config.position}
+
+
 def add_caption_track(store: EDLStore, args: dict) -> dict:
     # These two land on the EDL by ASSIGNMENT (`cap.config.style = …`) rather
     # than by constructing a CaptionsConfig, which is exactly why an unknown
@@ -2041,9 +2431,15 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
         cap.config = CaptionsConfig()
     if cap.config is None:
         cap.config = CaptionsConfig()
+    edited = _hand_edited_cue_ids(store, cap)
     cap.config.enabled = True
     cap.config.style = style  # type: ignore
     cap.config.position = position  # type: ignore
+    if edited and not args.get("rebuild"):
+        # QA-074: this used to clear the track and rebuild it from the
+        # transcript on every call, so choosing another style silently threw
+        # away the user's text and timing fixes.
+        return _restyle_captions_in_place(store, cap, style, position, edited)
 
     # Resolve through _load_transcript, which knows BOTH transcript writers:
     # `<session>/transcript.json` (import_srt) wins over the whisper
@@ -2096,14 +2492,26 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
                     # hook style = bold/centered/big — perfect for word_emphasis
                     _lay(text.upper(), float(chunk[0]["start"]), float(chunk[-1]["end"]),
                          "hook", canvas.h * 0.5)
+        elif style == "ig_chunky":
+            # Short phrases from the word timing, split at pauses and
+            # punctuation (QA-071) — the same packer auto_caption uses.
+            from ..ingest.caption_format import cues_from_segments
+            for cue in cues_from_segments(segments, **_caption_budget(style, args)):
+                _lay(cue.text, cue.start, cue.end, "caption", y_pos)
         else:
-            # default / ig_chunky: one caption per segment
+            # default: one caption per segment
             for seg in segments:
                 _lay((seg.get("text") or "").strip(),
                      float(seg["start"]), float(seg["end"]), "caption", y_pos)
     summary = f"Add caption track ({style}, {position}) — {seg_count} caption(s)"
+    out = {"summary": summary, "lines": seg_count}
+    if edited:
+        summary += f" — rebuilt from the transcript, {len(edited)} hand-edited cue(s) replaced"
+        out = {"summary": summary, "lines": seg_count,
+               "notice": f"{len(edited)} hand-edited caption(s) were replaced by the rebuild"}
+    _apply_caption_look(cap)      # QA-075: a rebuild keeps the track's look
     store.commit("add_caption_track", args, summary)
-    return {"summary": summary, "lines": seg_count}
+    return out
 
 
 CAPTION_TARGETS = ("hi", "en", "hinglish", "es")
@@ -2434,11 +2842,7 @@ def auto_caption(store: EDLStore, args: dict, *,
     # included) and is the identity on an uncut timeline. Scoped to THIS
     # source: only v1 clips playing the file just transcribed carry its words.
     segments_tl, extent = _timeline_segments(store, tx_dict.get("segments", []), str(src))
-    cues = cues_from_segments(
-        segments_tl,
-        max_chars=int(args.get("max_chars", 42)),
-        max_cps=float(args.get("max_cps", 17.0)),
-    )
+    cues = cues_from_segments(segments_tl, **_caption_budget(style, args))
 
     # Lay down the caption track from the cues.
     cap = store.edl.get_track("captions")
@@ -2496,6 +2900,7 @@ def auto_caption(store: EDLStore, args: dict, *,
         how = caption_lang or "?"
     summary = (f"Auto-captioned ({model}, {how}): {n} {style} cues. "
                f"e.g. “{preview[:60]}”")
+    _apply_caption_look(cap)      # QA-075: new cues wear the track's look
     store.commit("auto_caption", args, summary)
     if set_progress is not None:
         set_progress(1.0)
@@ -2511,11 +2916,11 @@ def apply_brand_kit(store: EDLStore, args: dict) -> dict:
     # a silent no-op later.
     font = args.get("font")
     if font:
-        from ..config import FONTS_DIR
-        f = str(font)
-        if not (FONTS_DIR / f).exists() and not (FONTS_DIR / f"{f}.ttf").exists():
-            available = sorted(p.name for p in FONTS_DIR.glob("*.ttf"))
-            raise ValueError(f"brand font {f!r} is not a bundled font. Available: {available}")
+        # A bundled NAME resolved inside FONTS_DIR only: `(FONTS_DIR / f)
+        # .exists()` accepted '/etc/hosts' (pathlib drops the left side of a
+        # join with an absolute path) — render/fonts.py.
+        from ..render.fonts import check_font_arg
+        font = check_font_arg(font, "brand font")
     end_card = args.get("end_card")
     if end_card:
         end_card = _safe_src(end_card)
@@ -2552,11 +2957,30 @@ def audit_aesthetic(store: EDLStore, args: dict) -> dict:
 
 def add_music(store: EDLStore, args: dict) -> dict:
     src = _safe_src(args["src"])
-    start = float(args.get("start", 0.0))
     in_ = float(args.get("in", 0.0))
     out = float(args.get("out", 0.0))
-    duck = bool(args.get("duck", True))
     volume_db = float(args.get("volume_db", -12.0))
+    from ..edl.schema import Clip as _MediaClip   # `Clip` is rebound locally below
+    existing = store.edl.get_track("music")
+    lane_clips = [c for c in (existing.clips if existing else []) if isinstance(c, _MediaClip)]
+    # QA-083: with no `start`, a second bed goes AFTER the lane's last clip —
+    # defaulting to 0 stacked it over the first and the mixer summed both.
+    # On the project frame grid (wave A's timebase rule, REV-B8-MUSIC-GRID):
+    # the lane end is the previous bed's probe length, not a frame boundary.
+    # CEIL it so the new bed never overlaps that one; an explicit start snaps
+    # to the nearest frame like every other committed edit time.
+    if "start" in args:
+        start = _q(store.edl, max(0.0, float(args["start"])))
+    else:
+        start = _tb.ceil_to_frame(
+            max((float(c.start) + c.effective_duration for c in lane_clips), default=0.0),
+            store.edl.canvas.fps)
+    # QA-083: ducking is a LANE setting the user may have turned off. Only an
+    # explicit `duck` changes it; the first bed on an empty lane gets the
+    # long-standing default (on). It used to be rewritten on every add, so
+    # adding a second song silently re-enabled ducking the user had disabled.
+    duck_explicit = "duck" in args
+    duck = bool(args.get("duck", True))
 
     if out <= 0:
         # Default the out-point to the VIDEO length, not the whole song. Taking
@@ -2566,9 +2990,12 @@ def add_music(store: EDLStore, args: dict) -> dict:
         # A caller that genuinely wants the whole bed passes an explicit `out`.
         from ..ingest.probe import probe
         video_extent = store.edl.video_extent()
+        # The picture still to cover from `start` (the whole video for a bed
+        # at 0); a bed placed after the picture keeps its full length.
+        cover = video_extent - start
         try:
             p = probe(src)
-            out = min(p.duration, video_extent) if video_extent > 0.05 else p.duration
+            out = min(p.duration, cover) if cover > 0.05 else p.duration
         except Exception:
             # Unprobeable source: fall back to the video extent if we have one.
             out = video_extent if video_extent > 0.05 else max(1.0, store.edl.duration)
@@ -2578,11 +3005,14 @@ def add_music(store: EDLStore, args: dict) -> dict:
         from ..edl.schema import Track
         track = Track(id="music", type="music", z=0, label="Music")
         store.edl.tracks.append(track)
-    if duck:
-        from ..edl.schema import MusicDuck
-        track.duck = MusicDuck(to_db=-18.0, track_ref="a1")
+    if duck_explicit or not lane_clips:
+        if duck:
+            from ..edl.schema import MusicDuck
+            track.duck = MusicDuck(to_db=-18.0, track_ref="a1")
+        else:
+            track.duck = None
     else:
-        track.duck = None
+        duck = track.duck is not None       # reported as it IS, not as asked
 
     from ..edl.schema import Clip, AudioProps
     # `loop`: a bed shorter than the video is laid as consecutive clips of the
@@ -3179,8 +3609,48 @@ def tts_voiceover(store: EDLStore, args: dict) -> dict:
     return {"clip_id": clip.id, "duration": p.duration, "summary": summary}
 
 
+def _result_ranges_on_timeline(edl: EDL, src: str, items: list[dict]) -> tuple[list[dict], int]:
+    """Map search/highlight hits from SOURCE seconds to where they play NOW.
+
+    QA-067: ai/vision and ai/shorts read the source file, so their hits are in
+    source time; the result card's "Set in/out" puts them on the timeline. After
+    any ripple edit (remove_silences, fillers, a cut) the two clocks differ and
+    the marks landed ~6.5 s off, on a different sentence. Each hit keeps its
+    source range as `source_start`/`source_end`; `start`/`end` become the
+    timeline span of its first surviving piece (a hit that straddles a removed
+    silence plays contiguously once the gap closes, so the pieces merge), or
+    None when the edit cut it away entirely. Returns (items, how many were cut).
+    """
+    one = _tb.frame_duration(edl.canvas.fps)
+    out: list[dict] = []
+    cut = 0
+    for m in items:
+        try:
+            s0, e0 = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            out.append(m)
+            continue
+        spans = source_range_to_timeline(edl, MAIN_LANE_ID, s0, e0, src=src)
+        mapped = {**m, "source_start": s0, "source_end": e0}
+        if not spans:
+            mapped["start"] = mapped["end"] = None
+            cut += 1
+        else:
+            start, end = spans[0]
+            for a, b in spans[1:]:
+                if a - end > one + 1e-6:
+                    break  # the same source again elsewhere (a duplicate): first run only
+                end = b
+            mapped["start"], mapped["end"] = round(start, 3), round(end, 3)
+        out.append(mapped)
+    return out, cut
+
+
 def find_moments(store: EDLStore, args: dict) -> dict:
-    """Find moments by query: transcript-first, vision verify on top candidates."""
+    """Find moments by query: transcript-first, vision verify on top candidates.
+
+    Matches are returned in TIMELINE seconds (QA-067); a match the current
+    edit removed is left out and counted in `cut_away`."""
     query = str(args["query"])
     top_k = int(args.get("top_k", 3))
     transcript = get_transcript(store, {})
@@ -3192,7 +3662,15 @@ def find_moments(store: EDLStore, args: dict) -> dict:
     from ..ai.vision import find_moments as _find
     matches = _find(query, transcript, Path(src_clip.src),
                     cache_dir=store.dir / "cache", top_k=top_k)
-    return {"matches": matches, "query": query}
+    mapped, cut = _result_ranges_on_timeline(store.edl, src_clip.src, list(matches or []))
+    visible = [m for m in mapped if m.get("start") is not None]
+    out: dict = {"matches": visible, "query": query}
+    if cut:
+        out["cut_away"] = cut
+        if not visible:
+            out["summary"] = (f"{cut} match(es) for “{query}”, all in parts the "
+                              "current edit removed")
+    return out
 
 
 def search_media(store: EDLStore, args: dict) -> dict:
@@ -3437,6 +3915,9 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     for cur, nxt in zip(ordered, ordered[1:]):
         boundary = cur.start + cur.effective_duration
         if abs(at - boundary) < SEAM_MATCH_TOL_S:
+            # Stored ON the seam, on the frame grid: a click's 6.0 left the
+            # record 6 ms off a 29.97 fps seam at 6.006.
+            at = nxt.start if abs(nxt.start - boundary) < SEAM_MATCH_TOL_S else boundary
             shorter = min(cur.effective_duration, nxt.effective_duration)
             # Only when the clamp still yields a renderable number — a clip
             # shorter than the floor is left to the seam table's own clamp,
@@ -3457,7 +3938,7 @@ def add_transition(store: EDLStore, args: dict) -> dict:
         duration = _tb.floor_to_frame(cap, fps)
     if duration < MIN_DURATION_S - 1e-9:
         duration = _tb.ceil_to_frame(MIN_DURATION_S, fps)
-    tr = Transition(at=at, type=ttype, duration=duration)
+    tr = Transition(at=_tb.quantize(at, fps), type=ttype, duration=duration)
     # Replace any transition already sitting on this cut instead of appending.
     # The renderer keys transitions by the seam they belong to, so a second one
     # at the same boundary never rendered — it just accumulated in the EDL,
@@ -3656,6 +4137,90 @@ def set_track_locked(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "locked": track.locked}
 
 
+# ---------- pro audio tools (QA-086) ----------
+
+_SOUND_TRACK_TYPES = ("video", "audio", "music", "vo")
+
+
+def set_track_solo(store: EDLStore, args: dict) -> dict:
+    """Solo/unsolo a sound-bearing track (omit `solo` to toggle). While any
+    track is soloed only soloed tracks are HEARD (render/audio_mix.apply_solo);
+    pictures are untouched. A monitoring switch, so a locked track may be
+    soloed like it may be muted."""
+    track_id = str(args["track"])
+    track = store.edl.get_track(track_id)
+    if not track:
+        raise ValueError(f"track {track_id!r} not found")
+    if track.type not in _SOUND_TRACK_TYPES:
+        raise ValueError(f"track {track_id!r} carries no sound to solo")
+    track.solo = bool(args.get("solo", not track.solo))
+    soloed = [t.id for t in store.edl.tracks if t.solo]
+    summary = f"{'Soloed' if track.solo else 'Unsoloed'} track {track.id}"
+    store.commit("set_track_solo", args, summary)
+    return {"summary": summary, "track": track.id, "solo": track.solo, "soloed": soloed}
+
+
+def _free_audio_lane(edl: EDL, start: float, end: float) -> Track:
+    """The first audio lane with nothing in [start, end), or a new one."""
+    audio = [t for t in edl.tracks if t.type == "audio"]
+    for t in audio:
+        if not t.locked and not any(
+                isinstance(c, Clip) and c.start < end - 1e-9 and c.start + c.effective_duration > start + 1e-9
+                for c in t.clips):
+            return t
+    n = 1
+    ids = {t.id for t in edl.tracks}
+    while f"a{n}" in ids:
+        n += 1
+    lane = Track(id=f"a{n}", type="audio", z=0, label=f"Audio {n}")
+    # Directly below the last audio lane, so the new row sits with its kind.
+    at = max((i for i, t in enumerate(edl.tracks) if t.type == "audio"), default=len(edl.tracks) - 1)
+    edl.tracks.insert(at + 1, lane)
+    return lane
+
+
+def detach_audio(store: EDLStore, args: dict) -> dict:
+    """Detach a video clip's sound onto an audio lane (J/L cuts): the picture
+    clip is muted and an audio clip with the same source, trim, position, gain,
+    fades and automation is placed on `track` (default: the first audio lane
+    with room, else a new one). The two then trim and move independently."""
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    track, c = res
+    if not isinstance(c, Clip) or track.type != "video":
+        raise ValueError("detach_audio needs a media clip on a video track")
+    if c.audio.mute:
+        raise ValueError(f"clip {cid}'s sound is muted — nothing to detach")
+    from ..render.compositor import source_has_audio
+    if not source_has_audio(str(c.src)):
+        raise ValueError(f"clip {cid}'s source has no sound to detach")
+    if abs(c.speed_factor - 1.0) > 1e-9:
+        raise ValueError("detach_audio needs a 1x clip — audio lanes play at native speed")
+    start, end = c.start, c.start + c.effective_duration
+    if args.get("track"):
+        lane = store.edl.get_track(str(args["track"]))
+        if lane is None or lane.type not in _AUDIO_LANE_TYPES:
+            raise ValueError(f"track {args['track']!r} is not an audio lane")
+        if any(isinstance(o, Clip) and o.start < end - 1e-9 and o.start + o.effective_duration > start + 1e-9
+               for o in lane.clips):
+            raise ValueError(f"track {lane.id!r} already has sound in {start:.2f}–{end:.2f}s")
+    else:
+        lane = _free_audio_lane(store.edl, start, end)
+    # `reverse` travels with the sound (QA-037): the reverse render path
+    # handles a reversed clip on any media lane, and dropping the flag turned
+    # a backwards sound into a forward copy the moment it was detached.
+    sound = Clip(src=c.src, in_=c.in_, out=c.out, start=c.start, reverse=c.reverse,
+                 audio=c.audio.model_copy(deep=True))
+    lane.clips.append(sound)
+    lane.clips.sort(key=lambda o: getattr(o, "start", 0.0))
+    c.audio.mute = True
+    summary = f"Detached {cid}'s audio → {lane.id}"
+    store.commit("detach_audio", args, summary)
+    return {"summary": summary, "audio_clip_id": sound.id, "track": lane.id}
+
+
 def set_speed(store: EDLStore, args: dict) -> dict:
     """Set playback-speed factor on a clip (1.0 = normal) and RETIME the
     timeline (CapCut semantics): a 2x clip's footprint halves, later clips on
@@ -3689,6 +4254,9 @@ def set_speed(store: EDLStore, args: dict) -> dict:
 
     old_fp = c.effective_duration
     c.speed = factor
+    if args.get("keep_pitch") is not None:
+        # QA-039 residual: False = varispeed (sample-exact, pitch follows).
+        c.audio.keep_pitch = bool(args["keep_pitch"])
     new_fp = c.effective_duration
     if track.id == "v1" and abs(new_fp - old_fp) > 1e-9:
         _ripple_close_gap(track, store.edl.canvas.fps)
@@ -3890,6 +4458,7 @@ def bulk_delete(store: EDLStore, args: dict) -> dict:
     # new end over black (v1 0-40 minus 0-20 left a 22-24 s title at 22-24 and
     # held the duration at 24 s).
     removed_v1: list[tuple[float, float]] = []
+    old_v1_end = _v1_media_end(store.edl)
     from .dispatch import _ripple_close_gap  # self-import safe
     for cid in ids:
         res = store.edl.get_clip(cid)
@@ -3916,8 +4485,10 @@ def bulk_delete(store: EDLStore, args: dict) -> dict:
         # original timeline's coordinates, and rippling the latest one first
         # never moves anything at or before an earlier one — the same order
         # `remove_silences` walks its cuts in.
+        half_frame = 0.5 * _tb.frame_duration(store.edl.canvas.fps)
         for start, end in reversed(_merge_ranges(removed_v1)):
-            _ripple_overlays(store.edl, start, end, v1_now_empty=v1_now_empty)
+            _ripple_overlays(store.edl, start, end, v1_now_empty=v1_now_empty,
+                             tail=end >= old_v1_end - half_frame)
     summary = f"Bulk delete {n} clip(s)"
     store.commit("bulk_delete", args, summary)
     return {"summary": summary, "deleted": n}
@@ -3952,7 +4523,8 @@ def bulk_duplicate(store: EDLStore, args: dict) -> dict:
         else:
             # Directly after its original, as duplicate_clip does (QA-020).
             dup.start = c.start + c.effective_duration
-            _open_main_lane_slot(store.edl, track, c, dup.start, dup.effective_duration)
+            dup.start = _open_main_lane_slot(store.edl, track, c, dup.start,
+                                             dup.effective_duration)
         track.clips.append(dup)
         new_ids.append(dup.id)
         affected_tracks.add(track.id)
@@ -4298,6 +4870,45 @@ def repair_media_paths(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "repaired": repaired}
 
 
+def relink_media(store: EDLStore, args: dict) -> dict:
+    """Point every clip that plays `src` at `new_src` instead (QA-095) — the
+    Relink action for offline media. One commit, so one Undo restores the old
+    links. The replacement must exist and be long enough for every clip's
+    out-point; a picture-less file cannot replace footage on a video lane."""
+    from ..ingest.probe import probe as _probe
+    old = str(args["src"])
+    new = _safe_src(str(args["new_src"]))
+    if not Path(new).is_file():
+        raise ValueError(f"relink_media: {Path(new).name} does not exist")
+    users = [(t, c) for t in store.edl.tracks for c in t.clips
+             if getattr(c, "src", None) == old]
+    if not users:
+        raise ValueError("relink_media: no clip uses that media")
+    try:
+        info = _probe(Path(new))
+    except Exception as e:
+        raise ValueError(f"relink_media: {Path(new).name} is not a readable media file") from e
+    fps = store.edl.canvas.fps
+    length = _source_video_extent(new, fps) if info.video is not None else None
+    length = length or float(info.duration or 0.0)
+    for t, c in users:
+        if isinstance(c, Clip) and t.type == "video" and info.video is None:
+            raise ValueError(f"relink_media: {Path(new).name} has no picture, so it "
+                             f"can't replace footage on {t.id}")
+        need = float(getattr(c, "out", 0.0) or 0.0)
+        if isinstance(c, Clip) and length + _tb.frame_duration(fps) < need:
+            raise ValueError(
+                f"relink_media: {Path(new).name} is {length:.2f}s long but clip {c.id} "
+                f"plays it up to {need:.2f}s — pick the original file or a longer one")
+    for _, c in users:
+        c.src = new
+    from ..media_offline import display_name_for
+    summary = (f"Relinked {display_name_for(store.dir, old)} → {Path(new).name} "
+               f"({len(users)} clip{'s' if len(users) != 1 else ''})")
+    store.commit("relink_media", args, summary)
+    return {"summary": summary, "clip_ids": [c.id for _, c in users], "new_src": new}
+
+
 def find_broll(store: EDLStore, args: dict) -> dict:
     """Search a local b-roll folder for clips matching `query`. Returns ranked
     candidates the agent can `add_clip` from. The folder is set per-call via
@@ -4463,7 +5074,7 @@ def _load_transcript_with_source(store: EDLStore):
     return None, None
 
 
-def noise_reduce(store: EDLStore, args: dict) -> dict:
+def noise_reduce(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
     """Spectrally denoise a clip's audio (good for hiss/fans/room tone).
     Replaces the clip's src with the cleaned mp4 (video stream copied)."""
     cid = str(args["clip_id"])
@@ -4478,7 +5089,8 @@ def noise_reduce(store: EDLStore, args: dict) -> dict:
         raise RuntimeError("noisereduce not installed (uv add noisereduce soundfile)")
     cache_dir = store.dir / "cache" / "denoise"
     out = denoise.denoise_clip(Path(c.src), cache_dir,
-                               strength=float(args.get("strength", 0.85)))
+                               strength=float(args.get("strength", 0.85)),
+                               on_progress=set_progress, cancel_event=cancel_event)
     _record_derived(out, c.src)
     c.src = str(out)
     summary = f"Denoised {cid} (strength={args.get('strength', 0.85)})"
@@ -4486,7 +5098,8 @@ def noise_reduce(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "out": str(out)}
 
 
-def remove_background(store: EDLStore, args: dict) -> dict:
+def remove_background(store: EDLStore, args: dict, *, set_progress=None,
+                      cancel_event=None) -> dict:
     """Strip the clip's background via rembg. Replaces the clip's src with the
     matted version. By default flattens onto green so a follow-up chroma_key
     keeps the workflow clean (you can pass bg_color=null for true alpha)."""
@@ -4504,7 +5117,9 @@ def remove_background(store: EDLStore, args: dict) -> dict:
     bg_color = args.get("bg_color", "#00FF00")
     out = bgremove.remove_background(Path(c.src), cache_dir,
                                      model=str(args.get("model", "u2net")),
-                                     bg_color=bg_color)
+                                     bg_color=bg_color,
+                                     on_progress=set_progress, cancel_event=cancel_event)
+    _record_derived(out, c.src)       # QA-045: the bin names it after the upload
     c.src = str(out)
     # Auto-key the green so the user gets transparent foreground by default.
     if bg_color == "#00FF00":
@@ -4608,7 +5223,7 @@ def motion_track(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "track_id": track_id, "keyframes": len(x_kfs)}
 
 
-def stabilize(store: EDLStore, args: dict) -> dict:
+def stabilize(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
     """Two-pass libvidstab stabilization on a clip; replaces clip.src in place."""
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
@@ -4618,7 +5233,8 @@ def stabilize(store: EDLStore, args: dict) -> dict:
     if not isinstance(c, Clip):
         raise ValueError("stabilize only supports media clips")
     from ..ai.stabilize import stabilize as _stabilize
-    new_src = _stabilize(Path(c.src), store.dir / "cache" / "stabilize")
+    new_src = _stabilize(Path(c.src), store.dir / "cache" / "stabilize",
+                         on_progress=set_progress, cancel_event=cancel_event)
     _record_derived(new_src, c.src)
     c.src = str(new_src)
     summary = f"Stabilize {cid} → {new_src.name}"
@@ -4626,7 +5242,8 @@ def stabilize(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "new_src": str(new_src)}
 
 
-def smooth_slow_motion(store: EDLStore, args: dict) -> dict:
+def smooth_slow_motion(store: EDLStore, args: dict, *, set_progress=None,
+                       cancel_event=None) -> dict:
     """RIFE frame interpolation for `factor`× smooth slow-mo on a clip."""
     cid = str(args["clip_id"])
     factor = int(args.get("factor", 2))
@@ -4637,7 +5254,8 @@ def smooth_slow_motion(store: EDLStore, args: dict) -> dict:
     if not isinstance(c, Clip):
         raise ValueError("smooth_slow_motion only supports media clips")
     from ..ai.rife import smooth_slow_motion as _slow
-    new_src = _slow(Path(c.src), store.dir / "cache" / "rife", factor=factor)
+    new_src = _slow(Path(c.src), store.dir / "cache" / "rife", factor=factor,
+                    on_progress=set_progress, cancel_event=cancel_event)
     # The new file plays at original fps with `factor`× more frames, so source
     # instant s of the old file is instant s*factor of the new one: the
     # clip's own trim maps across (it used to reset to in=0/out=whole file,
@@ -4664,7 +5282,7 @@ def smooth_slow_motion(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "new_src": str(new_src), "duration": dur}
 
 
-def object_erase(store: EDLStore, args: dict) -> dict:
+def object_erase(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
     """LaMa inpaint: erase a bbox region across a time window on a clip."""
     cid = str(args["clip_id"])
     bbox = _norm_bbox(args.get("bbox"), "object_erase")
@@ -4679,7 +5297,9 @@ def object_erase(store: EDLStore, args: dict) -> dict:
         raise ValueError("object_erase only supports media clips")
     from ..ai.lama import object_erase as _erase
     new_src = _erase(Path(c.src), store.dir / "cache" / "lama",
-                     bbox=bbox, t_start=t_start, t_end=t_end)
+                     bbox=bbox, t_start=t_start, t_end=t_end,
+                     on_progress=set_progress, cancel_event=cancel_event)
+    _record_derived(new_src, c.src)   # QA-045: same frames and timing as its source
     c.src = str(new_src)
     summary = f"Object erase {cid} bbox={bbox} t={t_start}..{t_end or 'end'}"
     store.commit("object_erase", args, summary)
@@ -4899,6 +5519,9 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
         target_count=target_count, max_dur=max_dur, min_dur=min_dur,
     )
 
+    # QA-067: `ranges` are SOURCE seconds; the result card and "Set in/out"
+    # want where each plays now. The saved sessions below cut from the source.
+    ranges, _cut = _result_ranges_on_timeline(store.edl, src_clip.src, list(ranges or []))
     new_sessions: list[str] = []
     if save_as_sessions and ranges:
         from ..storage import new_session_id, session_dir as _sd
@@ -4908,18 +5531,24 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
             sid = new_session_id()
             sd = _sd(sid)
             new_edl = empty_edl()
+            # The short keeps the project's frame rate, and its cut points sit
+            # on that grid like every other committed edit time.
+            new_edl.canvas.fps = store.edl.canvas.fps
             v1_new = new_edl.get_track("v1")
             assert v1_new is not None
             v1_new.clips.append(_Clip(
                 src=src_clip.src,
-                in_=src_clip.in_ + r["start"],
-                out=src_clip.in_ + r["end"],
+                in_=_tb.quantize(r["source_start"], new_edl.canvas.fps),
+                out=_tb.quantize(r["source_end"], new_edl.canvas.fps),
                 start=0.0,
             ))
             new_edl.recompute_duration()
             (sd / "edl.json").write_text(new_edl.to_json(), encoding="utf-8")
+            # QA-068: the short's own opening line travels with it, so the
+            # finishing pass hooks it with a sentence FROM the short.
             (sd / "meta.json").write_text(json.dumps({
                 "name": f"{base_name} short {i}", "source": str(src_clip.src),
+                "hook": r.get("hook") or "",
             }), encoding="utf-8")
             new_sessions.append(sid)
 
@@ -4931,6 +5560,94 @@ def make_shorts(store: EDLStore, args: dict) -> dict:
 
 
 KF_PROPS = ("x", "y", "scale", "rotation", "opacity")
+#: Volume automation's keyframe "property" (QA-086) — the clip's audio level
+#: in dB, stored as offsets from gain_db in `AudioProps.gain_env`.
+GAIN_KF_PROP = "audio.gain_db"
+
+
+def _is_gain_kf(args: dict) -> bool:
+    props = args.get("props")
+    if isinstance(props, (list, tuple)) and list(props) == [GAIN_KF_PROP]:
+        return True
+    return args.get("prop") == GAIN_KF_PROP and not props
+
+
+def _gain_clip(store: EDLStore, cid: str) -> Clip:
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    _, c = res
+    if not isinstance(c, Clip):
+        raise ValueError(f"{GAIN_KF_PROP} keyframes need a media clip")
+    return c
+
+
+def _gain_level(c: Clip, t: float) -> float:
+    from ..edl.keyframes import sample as _kf_sample
+    env = c.audio.gain_env
+    return float(c.audio.gain_db) + (float(_kf_sample(env, t)) if env is not None else 0.0)
+
+
+def _add_gain_keyframe(store: EDLStore, args: dict) -> dict:
+    from ..edl.schema import GAIN_DB_RANGE, Keyframe
+    cid = str(args["clip_id"])
+    c = _gain_clip(store, cid)
+    t = min(max(0.0, float(args["time"])), c.effective_duration)
+    tol = _kf_tol(store)
+    value = args.get("value")
+    if isinstance(args.get("values"), dict) and GAIN_KF_PROP in args["values"]:
+        value = args["values"][GAIN_KF_PROP]
+    level = _gain_level(c, t) if value is None else float(value)
+    level = min(GAIN_DB_RANGE[1], max(GAIN_DB_RANGE[0], level))
+    env = c.audio.gain_env
+    kfs = [tuple(p) for p in env.keyframes] if env is not None else []
+    interp = env.interp if env is not None else str(args.get("interp", "linear"))
+    kfs = [p for p in kfs if abs(p[0] - t) > tol]
+    kfs.append((t, level - float(c.audio.gain_db)))
+    kfs.sort(key=lambda p: p[0])
+    c.audio.gain_env = Keyframe(keyframes=kfs, interp=interp)
+    summary = f"Volume keyframe {cid} @ {t:.2f}s = {level:+.1f} dB (now {len(kfs)} keys)"
+    store.commit("add_keyframe", args, summary)
+    return {"summary": summary, "keys": len(kfs), "props": [GAIN_KF_PROP]}
+
+
+def _remove_gain_keyframe(store: EDLStore, args: dict) -> dict:
+    from ..edl.schema import Keyframe
+    cid = str(args["clip_id"])
+    c = _gain_clip(store, cid)
+    t = float(args["time"])
+    tol = _kf_tol(store)
+    env = c.audio.gain_env
+    kfs = [tuple(p) for p in env.keyframes] if env is not None else []
+    keep = [p for p in kfs if abs(p[0] - t) > tol]
+    if len(keep) == len(kfs):
+        return {"summary": f"{cid} has no volume keyframe at {t:.2f}s", "keys": 0}
+    if len(keep) <= 1:
+        # A single key is a constant: fold it (or the key just removed) into
+        # the clip gain so the level the clip had does not jump.
+        held = keep[0][1] if keep else next(p[1] for p in kfs if abs(p[0] - t) <= tol)
+        c.audio.gain_db = float(c.audio.gain_db) + float(held)
+        c.audio.gain_env = None
+    else:
+        c.audio.gain_env = Keyframe(keyframes=keep, interp=env.interp)
+    summary = f"Removed volume keyframe {cid} @ {t:.2f}s ({len(keep) if len(keep) > 1 else 0} left)"
+    store.commit("remove_keyframe", args, summary)
+    return {"summary": summary, "keys": len(keep) if len(keep) > 1 else 0, "props": [GAIN_KF_PROP]}
+
+
+def _split_gain_env(env, cut: float):
+    """(left, right) volume automation of a clip split at clip-local `cut`:
+    each half keeps its own keys plus the curve's value AT the cut, the right
+    half re-based to its own zero, so the split changes nothing audible."""
+    if env is None:
+        return None, None
+    from ..edl.keyframes import sample as _kf_sample
+    from ..edl.schema import Keyframe
+    at = float(_kf_sample(env, cut))
+    pts = sorted((float(a), float(b)) for a, b in env.keyframes)
+    left = [p for p in pts if p[0] < cut - 1e-9] + [(cut, at)]
+    right = [(0.0, at)] + [(p[0] - cut, p[1]) for p in pts if p[0] > cut + 1e-9]
+    return Keyframe(keyframes=left, interp=env.interp), Keyframe(keyframes=right, interp=env.interp)
 
 
 def _kf_tol(store: EDLStore) -> float:
@@ -5019,6 +5736,8 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
                  look" means and is why the UI needn't compute it
     `interp`   — linear (default) | ease-in | ease-out | ease-in-out | step | back-out
     """
+    if _is_gain_kf(args):
+        return _add_gain_keyframe(store, args)
     cid = str(args["clip_id"])
     props = _kf_props_arg(args)
     t = float(args["time"])
@@ -5066,6 +5785,8 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
 
 def remove_keyframe(store: EDLStore, args: dict) -> dict:
     """Remove the keyframe at `time` from `prop` (or every prop in `props`)."""
+    if _is_gain_kf(args):
+        return _remove_gain_keyframe(store, args)
     cid = str(args["clip_id"])
     props = _kf_props_arg(args)
     t = float(args["time"])
@@ -5366,6 +6087,64 @@ def list_templates(store: EDLStore, args: dict) -> dict:
     return {"templates": list_template_names(), "shows": _list_shows()}
 
 
+def _is_model_field(obj: Any, name: str) -> bool:
+    """True when `name` is a declared pydantic field of `obj` (not a method,
+    a dunder or a private attribute)."""
+    from pydantic import BaseModel
+    return (isinstance(obj, BaseModel) and not name.startswith("_")
+            and name in type(obj).model_fields)
+
+
+def _property_bounds() -> dict[tuple[type, str], tuple[tuple[float, float], str]]:
+    from ..edl.schema import (AudioProps, CaptionLook, TextStyle, GAIN_DB_RANGE,
+                              SPEED_RANGE, TEXT_SIZE_RANGE, TEXT_STROKE_RANGE, TIME_RANGE)
+    return {
+        (Clip, "start"): (TIME_RANGE, "Start"),
+        (Clip, "in_"): (TIME_RANGE, "In point"),
+        (Clip, "out"): (TIME_RANGE, "Out point"),
+        (Clip, "speed"): (SPEED_RANGE, "Speed"),
+        (TextClip, "start"): (TIME_RANGE, "Start"),
+        (TextClip, "end"): (TIME_RANGE, "End"),
+        (Sticker, "start"): (TIME_RANGE, "Start"),
+        (Sticker, "end"): (TIME_RANGE, "End"),
+        (AudioProps, "gain_db"): (GAIN_DB_RANGE, "Volume"),
+        (TextStyle, "size"): (TEXT_SIZE_RANGE, "Text size"),
+        (TextStyle, "stroke_w"): (TEXT_STROKE_RANGE, "Outline width"),
+        (CaptionLook, "size"): (TEXT_SIZE_RANGE, "Text size"),
+        (CaptionLook, "stroke_w"): (TEXT_STROKE_RANGE, "Outline width"),
+    }
+
+
+def _check_property_bounds(obj: Any, leaf: str, value: Any) -> None:
+    """set_property's crisp 400 for a value the model would CLAMP (QA-041 /
+    QA-107). The models clamp so an EDL already holding a bad value stays
+    loadable; a caller asking for 1e9 s or a 1e6 px font gets told instead of
+    silently getting something else. Negative times keep the handlers'
+    long-standing clamp-to-0 (a UI's -0.0004 rounding residue is not an error)."""
+    for (typ, name), ((lo, hi), label) in _property_bounds().items():
+        if name != leaf or not isinstance(obj, typ):
+            continue
+        if value is None or isinstance(value, (dict, bool)) or not isinstance(value, (int, float, str)):
+            return
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return  # the model's own validation answers a non-number
+        import math as _m
+        if not _m.isfinite(f):
+            raise ValueError(f"{label} must be a finite number")
+        if (typ, name) in _TIME_KEYS:
+            lo = -float("inf")
+        if f < lo or f > hi:
+            raise ValueError(f"{label} must be between {lo:g} and {hi:g}"
+                             if lo != -float("inf") else f"{label} must be within 6 hours")
+        return
+
+
+_TIME_KEYS = frozenset({(Clip, "start"), (Clip, "in_"), (Clip, "out"), (TextClip, "start"),
+                        (TextClip, "end"), (Sticker, "start"), (Sticker, "end")})
+
+
 def set_property(store: EDLStore, args: dict) -> dict:
     """Generic dotted-path mutator. The most flexible CapCut-style 'tweak any
     field' operation: `set_property(clip_id, path, value)`.
@@ -5383,17 +6162,23 @@ def set_property(store: EDLStore, args: dict) -> dict:
         raise ValueError(f"clip {cid} not found")
     _, c = res
     parts = path.split(".")
+    # Every step must be a DECLARED FIELD of a model in the EDL tree (QA-107).
+    # `getattr`/`hasattr` also reach dunders and pydantic internals, so
+    # `path='__class__'` walked straight into `setattr(clip, '__class__', 1)`
+    # (TypeError -> 500) and `model_config` / `__dict__` were writable too.
     obj = c
     for p in parts[:-1]:
         if p == "in":
             p = "in_"  # pydantic alias
+        if not _is_model_field(obj, p):
+            raise ValueError(f"path {path!r} does not resolve on {cid}")
         obj = getattr(obj, p, None)
         if obj is None:
             raise ValueError(f"path {path!r} does not resolve on {cid}")
     leaf = parts[-1]
     if leaf == "in":
         leaf = "in_"
-    if not hasattr(obj, leaf):
+    if not _is_model_field(obj, leaf):
         raise ValueError(f"unknown attr {leaf!r} on {type(obj).__name__}")
     if len(parts) == 2 and parts[0] == "transform":
         _reject_caption_geometry(c, [leaf])
@@ -5404,7 +6189,20 @@ def set_property(store: EDLStore, args: dict) -> dict:
         # against. Guarding add_clip and leaving this open would just have moved
         # the hole one tool to the left.
         value = _safe_src(value)
+    from ..edl.schema import TextStyle
+    if leaf == "font" and isinstance(obj, TextStyle):
+        # A bundled font NAME, never a path (render/fonts.py).
+        value = _check_font(value)
+    _check_property_bounds(obj, leaf, value)
+    before = getattr(obj, leaf)
     setattr(obj, leaf, value)
+    if obj is c and isinstance(c, Clip) and leaf in ("in_", "out") and c.out <= c.in_ + 1e-9:
+        setattr(obj, leaf, before)
+        raise ValueError("the clip's end must come after its start (out > in)")
+    if obj is c and isinstance(c, (TextClip, Sticker)) and leaf in ("start", "end") \
+            and c.end <= c.start + 1e-9:
+        setattr(obj, leaf, before)
+        raise ValueError("the clip's end must come after its start")
     summary = f"Set {cid}.{path} = {value!r}"
     store.commit("set_property", args, summary)
     return {"summary": summary}
@@ -5422,7 +6220,7 @@ def add_text(store: EDLStore, args: dict) -> dict:
         anim_in, anim_out: exactly one of pop / fade / slide_up / slide_down
     """
     from ..edl.schema import TextClip, Transform, TextStyle
-    from ..render.text_overlay import ANIM_PRESETS
+    from ..render.text_overlay import ANIM_PRESETS, _y_for_role
     text = str(args["text"])
     # TextClip.role is a Literal WITHOUT "default" — None is how the schema
     # spells it (collect_text_clips maps None → the "default" role style).
@@ -5448,9 +6246,13 @@ def add_text(store: EDLStore, args: dict) -> dict:
             else:
                 anim_out = norm
     canvas = store.edl.canvas
+    # No x/y given → the position this role actually renders at (QA-076). The
+    # old default, canvas.h·0.85, never rendered: it was a sentinel meaning
+    # "role anchor", which is why a user who later TYPED 918 on 1080p saw the
+    # text jump to the anchor. x/y now always render where they say.
     tx = Transform(
         x=float(args.get("x", canvas.w / 2)),
-        y=float(args.get("y", canvas.h * 0.85)),
+        y=float(args.get("y", _y_for_role(role or "default", None, canvas.h, canvas.w))),
         scale=float(args.get("scale", 1.0)),
         rotation=float(args.get("rotation", 0.0)),
         opacity=float(args.get("opacity", 1.0)),
@@ -5470,16 +6272,25 @@ def add_text(store: EDLStore, args: dict) -> dict:
     # explicit choice; pass upper=True for the all-caps house look.
     upper_arg = args.get("upper")
     style = TextStyle(
-        font=str(args.get("font", "Inter-Black")),
+        # None = the role's own font (QA-076: "Inter-Black" was the "unset"
+        # sentinel, so Inter Black itself could never be chosen).
+        font=_check_font(args.get("font")),
         size=float(args.get("size", 96)),
         color=color,
         stroke=str(args.get("stroke", "#000000")),
         stroke_w=float(args.get("stroke_w", 4)),
         upper=bool(upper_arg) if upper_arg is not None else False,
+        # QA-078: the block style (validated by TextStyle itself).
+        background=args.get("background") or None,
+        align=str(args.get("align") or "center"),
+        line_spacing=float(args.get("line_spacing", 1.0)),
+        shadow_on=args.get("shadow_on") if isinstance(args.get("shadow_on"), bool) else None,
     )
+    anim_dur = args.get("anim_dur")
     tc = TextClip(text=text, start=float(args["start"]), end=float(args["end"]),
                   role=role, transform=tx, style=style,
-                  anim_in=anim_in, anim_out=anim_out)
+                  anim_in=anim_in, anim_out=anim_out,
+                  anim_dur=float(anim_dur) if anim_dur is not None else None)
     track = ensure_track(store.edl, "text", "text", z=10)
     # Overlap-replace (default): mirrors add_super_text's guard — two text
     # clips of the SAME role on the SAME track whose [start, end) windows
@@ -5487,16 +6298,27 @@ def add_text(store: EDLStore, args: dict) -> dict:
     # of the narrower exact-match dedupe (still catches identical re-runs).
     # Opt out with allow_stack=True if two overlays are wanted.
     allow_stack = bool(args.get("allow_stack", False))
+    replaced: list[TextClip] = []
     if not allow_stack:
-        track.clips = [
-            c for c in track.clips
-            if not (isinstance(c, TextClip) and getattr(c, "role", None) == tc.role
-                    and c.start < tc.end and c.end > tc.start)
-        ]
+        replaced = [c for c in track.clips
+                    if isinstance(c, TextClip) and getattr(c, "role", None) == tc.role
+                    and c.start < tc.end and c.end > tc.start]
+        track.clips = [c for c in track.clips if not any(c is r for r in replaced)]
     track.clips.append(tc)
-    summary = f"Added text {role!r} {text!r} ({tc.start:.2f}–{tc.end:.2f}s)"
+    out: dict = {"id": tc.id}
+    if replaced:
+        # QA-073: the replace used to be silent — a second "add a title" at
+        # the same spot deleted the first while the run log said "Added".
+        # Say which text went, so the reply (and ⌘Z) can act on it.
+        gone = ", ".join(repr(c.text) for c in replaced)
+        summary = f"Replaced text {gone} with {text!r} ({tc.start:.2f}–{tc.end:.2f}s)"
+        out["replaced"] = [c.id for c in replaced]
+        out["notice"] = (f"replaced {gone}, which overlapped the new text in the same place "
+                         "(⌘Z brings it back)")
+    else:
+        summary = f"Added {role or 'default'} text {text!r} ({tc.start:.2f}–{tc.end:.2f}s)"
     store.commit("add_text", args, summary)
-    return {"summary": summary, "id": tc.id}
+    return {"summary": summary, **out}
 
 
 def apply_text_template(store: EDLStore, args: dict) -> dict:
@@ -5854,7 +6676,7 @@ def instrumental_isolate(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "stem": str(inst)}
 
 
-def upscale(store: EDLStore, args: dict) -> dict:
+def upscale(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
     """Real-ESRGAN upscale a clip; replaces its src with the upscaled file."""
     cid = str(args["clip_id"])
     factor = int(args.get("factor", 2))
@@ -5867,7 +6689,8 @@ def upscale(store: EDLStore, args: dict) -> dict:
     from ..ai.upscale import upscale_clip, available
     if not available():
         raise RuntimeError("Real-ESRGAN binary missing; expected at models/realesrgan/")
-    new_src = upscale_clip(Path(c.src), store.dir / "cache" / "upscale", factor=factor)
+    new_src = upscale_clip(Path(c.src), store.dir / "cache" / "upscale", factor=factor,
+                           on_progress=set_progress, cancel_event=cancel_event)
     _record_derived(new_src, c.src)
     c.src = str(new_src)
     summary = f"Upscale {cid} ×{factor} via Real-ESRGAN"
@@ -5891,6 +6714,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "reorder_clips": reorder_clips,
     "ripple_delete": ripple_delete,
     "duplicate_clip": duplicate_clip,
+    "paste_clips": paste_clips,
     # project
     "set_canvas": set_canvas,
     "set_aspect_ratio": set_aspect_ratio,
@@ -5903,6 +6727,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "add_hook_overlay": add_hook_overlay,
     "apply_hook_stack": apply_hook_stack,
     "add_caption_track": add_caption_track,
+    "set_caption_style": set_caption_style,
     "auto_caption": auto_caption,
     "transcribe": transcribe_tool,
     "apply_brand_kit": apply_brand_kit,
@@ -5936,6 +6761,8 @@ DISPATCH: dict[str, DispatchFn] = {
     "apply_show_template": apply_show_template,
     "generate_hook": generate_hook,
     "set_track_locked": set_track_locked,
+    "set_track_solo": set_track_solo,
+    "detach_audio": detach_audio,
     "set_speed": set_speed,
     "set_clip_transform": set_clip_transform,
     "set_clip_fit": set_clip_fit,
@@ -5976,6 +6803,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "noise_reduce": noise_reduce,
     "find_broll": find_broll,
     "repair_media_paths": repair_media_paths,
+    "relink_media": relink_media,
     "repair_chunks": repair_chunks,
     "multicam": multicam,
     "set_loudness_target": set_loudness_target,
@@ -6022,7 +6850,7 @@ DISPATCH: dict[str, DispatchFn] = {
 #: rather than a lane's clips (a canvas change must re-place every overlay or
 #: they land off-canvas — see `_rescale_overlays_for_canvas_change`).
 _LOCK_EXEMPT = frozenset({
-    "set_track_locked", "set_track_muted", "undo", "redo",
+    "set_track_locked", "set_track_muted", "set_track_solo", "undo", "redo",
     "get_timeline", "get_clip", "get_transcript", "render_preview",
     "find_broll", "find_moments", "search_media", "match_style", "audit_aesthetic",
     "check_features", "pyannote_status", "generate_hook", "diarize",

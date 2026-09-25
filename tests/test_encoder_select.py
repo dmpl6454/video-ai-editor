@@ -120,7 +120,7 @@ def test_render_export_threads_crf_into_render(monkeypatch, tmp_path):
 
     def fake_render(edl, dst, *, height, fps, preview, cache_dir=None,
                      on_progress=None, cancel_event=None, crf=None, bitrate_kbps=None,
-                     bitrate_peak_cap=True):
+                     bitrate_peak_cap=True, chunked=True):
         captured["crf"] = crf
         captured["bitrate_kbps"] = bitrate_kbps
         captured["preview"] = preview

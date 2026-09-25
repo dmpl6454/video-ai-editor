@@ -26,10 +26,13 @@ export interface SavedProject {
   readonly sid: string
   /** `ops.length` at the moment of saving, for the staleness marker. */
   readonly opsAtSave: number
+  /** The leaf save_project wrote — the PROJECT'S name (QA-098), e.g.
+   *  "My Trip.vae"; the native bridge copies exports/<filename>. */
+  readonly filename: string
 }
 
-export const savedProject = (sid: string, url: string, opsAtSave: number): SavedProject =>
-  ({ url, sid, opsAtSave })
+export const savedProject = (sid: string, url: string, opsAtSave: number, filename?: string): SavedProject =>
+  ({ url, sid, opsAtSave, filename: filename || `${sid}.vae` })
 
 /** The record, but only while it belongs to the session currently on screen. */
 export function visibleSavedProject(

@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import subprocess
 import threading
+import time
 from typing import Iterator
 
 from .. import platformutil as _pu
@@ -36,19 +38,71 @@ _POLL_S = 0.05
 
 _SCOPE: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
     "vae_render_cancel", default=None)
+#: Absolute `time.monotonic()` deadline of the active scope, or None (QA-041).
+_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "vae_render_deadline", default=None)
 
 
 class RenderCancelled(Exception):
     """The render was superseded by a newer one for the same session."""
 
 
+class RenderTimedOut(RenderCancelled):
+    """The render outlived its wall-clock deadline (QA-041).
+
+    A subclass, so every place that already cleans up after a cancelled
+    render (unlinking `.part` files, releasing slots) handles it unchanged;
+    the HTTP layer tells the two apart, because "a newer edit replaced this"
+    and "this render ran far longer than it ever should" are different
+    messages to a user."""
+
+
+#: Wall-clock allowance for a preview render nobody supersedes (QA-041): a
+#: fixed floor plus a multiple of the timeline's length. A 540p preview
+#: renders many times faster than real time, so 3x real time is only ever
+#: reached by an ffmpeg that is stuck or by a timeline far longer than anyone
+#: meant (a typo'd start of 100000 s). Overridable for tests and slow boxes.
+DEADLINE_BASE_S = float(os.environ.get("VAI_PREVIEW_DEADLINE_BASE_S", "180") or 180)
+DEADLINE_PER_TIMELINE_S = float(
+    os.environ.get("VAI_PREVIEW_DEADLINE_PER_TIMELINE_S", "3") or 3)
+
+
+#: Longest timeline the deadline scales with (6 h, the EDL's TIME_RANGE). An
+#: EDL written before the model clamped times could still report 1e9 s, which
+#: made the deadline ~95 years — only supersede/disconnect could stop it.
+DEADLINE_MAX_TIMELINE_S = 6 * 3600.0
+
+
+def preview_deadline_s(timeline_s: float) -> float:
+    """Seconds a preview of a `timeline_s`-long timeline may run for."""
+    try:
+        t = float(timeline_s or 0.0)
+    except (TypeError, ValueError):
+        t = 0.0
+    if t != t:  # NaN
+        t = DEADLINE_MAX_TIMELINE_S
+    return DEADLINE_BASE_S + DEADLINE_PER_TIMELINE_S * min(DEADLINE_MAX_TIMELINE_S, max(0.0, t))
+
+
 @contextlib.contextmanager
-def scope(event: threading.Event) -> Iterator[threading.Event]:
-    """Run the enclosed render so that setting `event` aborts it."""
+def scope(event: threading.Event, *, deadline_s: float | None = None
+          ) -> Iterator[threading.Event]:
+    """Run the enclosed render so that setting `event` aborts it.
+
+    `deadline_s` (seconds from now) additionally aborts it with
+    RenderTimedOut once that much wall-clock time has passed. A nested scope
+    never extends an outer deadline, only tightens it."""
     token = _SCOPE.set(event)
+    dtoken = None
+    if deadline_s is not None:
+        new = time.monotonic() + max(0.0, float(deadline_s))
+        outer = _DEADLINE.get()
+        dtoken = _DEADLINE.set(new if outer is None else min(outer, new))
     try:
         yield event
     finally:
+        if dtoken is not None:
+            _DEADLINE.reset(dtoken)
         _SCOPE.reset(token)
 
 
@@ -56,11 +110,22 @@ def current() -> threading.Event | None:
     return _SCOPE.get()
 
 
-def check() -> None:
-    """Raise RenderCancelled if the active scope has been cancelled."""
-    ev = _SCOPE.get()
+def _expired() -> bool:
+    dl = _DEADLINE.get()
+    return dl is not None and time.monotonic() >= dl
+
+
+def _raise_if_stopped(ev: threading.Event | None) -> None:
     if ev is not None and ev.is_set():
         raise RenderCancelled()
+    if _expired():
+        raise RenderTimedOut()
+
+
+def check() -> None:
+    """Raise RenderCancelled if the active scope has been cancelled (or
+    RenderTimedOut if its deadline has passed)."""
+    _raise_if_stopped(_SCOPE.get())
 
 
 def acquire(sem: threading.Semaphore) -> None:
@@ -71,11 +136,12 @@ def acquire(sem: threading.Semaphore) -> None:
         sem.acquire()
         return
     while not sem.acquire(timeout=_POLL_S):
-        if ev.is_set():
-            raise RenderCancelled()
-    if ev.is_set():
+        _raise_if_stopped(ev)
+    try:
+        _raise_if_stopped(ev)
+    except RenderCancelled:
         sem.release()
-        raise RenderCancelled()
+        raise
 
 
 def wait(event: threading.Event, timeout: float) -> bool:
@@ -89,8 +155,7 @@ def wait(event: threading.Event, timeout: float) -> bool:
     while remaining > 0:
         if event.wait(min(_POLL_S, remaining)):
             return True
-        if ev.is_set():
-            raise RenderCancelled()
+        _raise_if_stopped(ev)
         remaining -= _POLL_S
     return event.is_set()
 
@@ -108,7 +173,7 @@ class LatestPerSession:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # sid -> [edl_hash, event, holders]
+        # sid -> [edl_hash, event, holders, abandoned]
         self._live: dict[str, list] = {}
 
     def begin(self, sid: str, edl_hash: str) -> threading.Event:
@@ -120,15 +185,32 @@ class LatestPerSession:
             if cur is not None:
                 cur[1].set()
             ev = threading.Event()
-            self._live[sid] = [edl_hash, ev, 1]
+            self._live[sid] = [edl_hash, ev, 1, 0]
             return ev
 
-    def end(self, sid: str, ev: threading.Event) -> None:
+    def abandon(self, sid: str, ev: threading.Event) -> None:
+        """One holder of `ev` stopped waiting (its HTTP client went away —
+        QA-041). The render is cancelled only once EVERY holder has abandoned
+        it: identical concurrent requests share one render, and a closed tab
+        must not kill the render another window is still waiting for. Call
+        `end(sid, ev, abandoned=True)` afterwards, as usual."""
+        with self._lock:
+            cur = self._live.get(sid)
+            if cur is None or cur[1] is not ev:
+                ev.set()   # no longer the live render: nobody else can want it
+                return
+            cur[3] += 1
+            if cur[3] >= cur[2]:
+                ev.set()
+
+    def end(self, sid: str, ev: threading.Event, *, abandoned: bool = False) -> None:
         with self._lock:
             cur = self._live.get(sid)
             if cur is None or cur[1] is not ev:
                 return
             cur[2] -= 1
+            if abandoned:
+                cur[3] = max(0, cur[3] - 1)
             if cur[2] <= 0:
                 del self._live[sid]
 
@@ -143,8 +225,7 @@ def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
     if ev is None:
         return subprocess.run(args, check=check, capture_output=capture_output,
                               **{**_pu.SUBPROCESS_FLAGS, **kwargs})
-    if ev.is_set():
-        raise RenderCancelled()
+    _raise_if_stopped(ev)
     if capture_output:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
@@ -154,13 +235,16 @@ def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
             out, err = proc.communicate(timeout=_POLL_S)
             break
         except subprocess.TimeoutExpired:
-            if ev.is_set():
+            timed_out = _expired()
+            if ev.is_set() or timed_out:
                 # SIGKILL, not SIGTERM: a terminated ffmpeg first flushes its
                 # encoder and writes a trailer (measured: up to ~2 s under
                 # load), for an output that is about to be deleted anyway —
                 # every caller renders to a `.part` file it unlinks on error.
                 proc.kill()
                 proc.communicate()
+                if timed_out and not ev.is_set():
+                    raise RenderTimedOut() from None
                 raise RenderCancelled() from None
     cp = subprocess.CompletedProcess(args, proc.returncode, out, err)
     if check:

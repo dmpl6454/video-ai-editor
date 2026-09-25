@@ -45,7 +45,7 @@ from ..recipes import from_intents
 from .base import (Availability, BrainRequest, BrainResult, TextResult, TextTask, available,
                    unavailable)
 from ..schema import IntentDraft
-from .content import strip_model_hook_text
+from .content import ground_duck_off, ground_to_prompt, strip_model_hook_text
 from .prompt_text import (DraftShapeError, contains_devanagari, draft_key, facts_to_prompt_block,
                           flatten_fm_item, normalize_draft, user_prompt_with_answers)
 
@@ -115,7 +115,10 @@ def helper_path(*, env: dict[str, str] | None = None, frozen: bool | None = None
             candidates.append(Path(binpath.read_text(encoding="utf-8").strip()) / "fm-planner")
         except OSError:
             pass
-    candidates += [root / ".build" / "arm64-apple-macosx" / "release" / "fm-planner",
+    # Newest first: Swift 6.4's SwiftPM writes products under out/Products/Release;
+    # the older layouts stay as fallbacks (a stale binary there lacks slots).
+    candidates += [root / ".build" / "out" / "Products" / "Release" / "fm-planner",
+                   root / ".build" / "arm64-apple-macosx" / "release" / "fm-planner",
                    root / ".build" / "release" / "fm-planner"]
     for cand in candidates:
         if cand.is_file():
@@ -307,7 +310,13 @@ class FMBrain:
         return self._expand(draft, req, latency=int(body.get("latency_ms") or latency))
 
     def _expand(self, draft: IntentDraft, req: BrainRequest, *, latency: int) -> BrainResult:
-        draft = strip_model_hook_text(draft, req.prompt)
+        draft = ground_duck_off(ground_to_prompt(strip_model_hook_text(draft, req.prompt), req.prompt),
+                                req.prompt)
+        if not draft.intents:
+            # Nothing to do but the model's own questions (dropped above): not
+            # an answer — the ladder falls through to the recipes' reading.
+            return BrainResult.failure(self.id, "rejected:no edit in the draft", latency_ms=latency,
+                                       model=MODEL_NAME)
         try:
             plan = from_intents(draft, req.facts, hook_text=req.hook_text)
         except KeyError as e:

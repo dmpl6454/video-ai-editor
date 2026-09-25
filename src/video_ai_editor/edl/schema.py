@@ -5,9 +5,15 @@ import json
 import math
 from typing import Any, Literal, Union
 from uuid import uuid4
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-EDL_VERSION = 2
+# 3 (QA-076): `TextStyle.font` is nullable (None = the role's own font) and a
+#   text clip's scalar x/y is always where it renders. v2 overloaded values as
+#   "unset" sentinels: font "Inter-Black" (so Inter Black could not be picked)
+#   and y = canvas.h·0.85 (add_text's old default — so a typed Y of 918 on a
+#   1080p canvas snapped 76 px to the role anchor while 919 did not). A v2 EDL
+#   is migrated on load (EDL._migrate_v2) into exactly what it rendered.
+EDL_VERSION = 3
 
 # See EDL.hash()'s docstring — this is a render-cache-busting salt, not a
 # schema-migration version. Bump on any renderer change that makes the same
@@ -65,7 +71,18 @@ EDL_VERSION = 2
 #     instead of float -ss/-to, audio/video fades on a speed-changed clip sit
 #     in timeline time, and preview renders at canvas.fps. A cached chunk or
 #     preview from 11 holds a frame per seam that the timeline does not.
-RENDER_BEHAVIOR_VERSION = 12
+# 13: (QA-037, QA-002 PIP) `Clip.reverse` is rendered (it was ignored, so a
+#     cached render of a reversed clip plays forwards) and PIPs are cut and
+#     placed by frame count (an off-grid PIP rendered a frame late).
+# 14: (QA-076/078/075) text x/y and font have no sentinels (a value renders
+#     where it says), text can carry a background box, alignment, line
+#     spacing, a shadow override and its own animation length, and a captions
+#     track's `position` moves its cues — the same EDL can bake different text.
+# 15: (wave-B review) mixed-script text is shaped per script run with a
+#     per-run face (a Devanagari line in a Latin-dominant caption drew .notdef
+#     boxes; "Hello नमस्ते" was shaped as Latin), and the music duck key is
+#     gated on the raw key's absolute level (room tone ducked the bed's head).
+RENDER_BEHAVIOR_VERSION = 15
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -170,11 +187,47 @@ class Transform(_EDLModel):
         return _clamp_kfnum(v, *_OPACITY_RANGE, "opacity")
 
 
+#: Clip gain bounds — the same physical range set_volume's schema declares.
+GAIN_DB_RANGE = (-96.0, 24.0)
+#: Longest timeline/source time a clip may address (6 h) — the same cap
+#: agent/tools.TIMELINE_MAX_SECONDS puts on every time argument (QA-041).
+#: The model clamps too, because `set_property` reaches Clip.start/in/out
+#: and AudioProps.gain_db without going through a typed tool's bounds.
+TIME_RANGE = (0.0, 6 * 3600.0)
+#: Scalar playback-speed bounds (set_speed's `factor`).
+SPEED_RANGE = (0.1, 100.0)
+#: Text size / outline bounds in canvas px (add_text's `size` / `stroke_w`).
+#: Unbounded, 1e6 made ImageFont.truetype raise "invalid pixel size" and a
+#: 1e5 outline overflowed freetype's rasteriser — every later render 500'd.
+TEXT_SIZE_RANGE = (1.0, 2000.0)
+TEXT_STROKE_RANGE = (0.0, 200.0)
+
+
+def _clamp_num(v: float, rng: tuple[float, float], field: str) -> float:
+    return min(rng[1], max(rng[0], _finite(float(v), field)))
+
+
 class AudioProps(_EDLModel):
     gain_db: float = 0.0
     mute: bool = False
     fade_in: float = 0.0
     fade_out: float = 0.0
+    # Volume automation (QA-086): dB OFFSETS keyed in clip-local TIMELINE
+    # seconds (the fades' clock), ADDED to `gain_db` — so a clip-gain trim
+    # moves the whole curve and keeps its shape, the clip-gain + rubber-band
+    # model every NLE uses. `add_keyframe prop="audio.gain_db"` speaks the
+    # absolute level and stores `level − gain_db`. None = no automation.
+    gain_env: Keyframe | None = None
+    # How a speed change treats the sound (QA-039 residual): True time-
+    # stretches at the original pitch (atempo — WSOLA moves transients up to
+    # ±12 ms), False is varispeed (asetrate: sample-exact, pitch follows the
+    # speed like tape).
+    keep_pitch: bool = True
+
+    @field_validator("gain_db")
+    @classmethod
+    def _check_gain(cls, v: float) -> float:
+        return min(GAIN_DB_RANGE[1], max(GAIN_DB_RANGE[0], _finite(float(v), "gain_db")))
 
 
 class Effect(_EDLModel):
@@ -297,6 +350,23 @@ class Clip(_EDLModel):
 
     model_config = ConfigDict(populate_by_name=True, validate_assignment=True)
 
+    @field_validator("in_", "out", "start")
+    @classmethod
+    def _check_time(cls, v: float, info: ValidationInfo) -> float:
+        # QA-041: clamped into [0, 6 h] like every time argument; non-finite
+        # raises. Clamping (not rejecting) keeps an EDL that already holds a
+        # bad value loadable — set_property rejects before the clamp.
+        return _clamp_num(v, TIME_RANGE, info.field_name or "time")
+
+    @field_validator("speed")
+    @classmethod
+    def _check_speed(cls, v: float | dict | None) -> float | dict | None:
+        if v is None or isinstance(v, dict):
+            return v
+        f = _finite(float(v), "speed")
+        # <= 0 has always meant "normal speed" (speed_factor); store it as such.
+        return None if f <= 0 else min(SPEED_RANGE[1], max(SPEED_RANGE[0], f))
+
     @property
     def duration(self) -> float:
         """SOURCE seconds consumed (out - in). NOT timeline time when speed
@@ -323,7 +393,9 @@ class Clip(_EDLModel):
 
 
 class TextStyle(_EDLModel):
-    font: str = "Inter-Black"
+    # None = the role's own font (QA-076). Was the string "Inter-Black" doubling
+    # as "unset", which made Inter Black itself unselectable.
+    font: str | None = None
     size: float = 96
     color: str = "#FFFFFF"
     stroke: str = "#000000"
@@ -347,6 +419,42 @@ class TextStyle(_EDLModel):
     # defaulting to False would have retroactively un-capitalised every existing
     # hook and super in every saved project.
     upper: bool | None = None
+    # ---- QA-078: the text tool's basics, drawn by BOTH renderers through the
+    # shared layout model (render/text_overlay.py ↔ frontend lib/textLayout.ts).
+    # A filled box behind the whole block, "#RRGGBB" or "#RRGGBBAA"; None = no box.
+    background: str | None = None
+    # Horizontal alignment of the lines inside the block (the block itself is
+    # still centred on the anchor x).
+    align: Literal["left", "center", "right"] = "center"
+    # Line height multiplier on the model's LINE_HEIGHT_RATIO (1 = unchanged).
+    line_spacing: float = 1.0
+    # Drop shadow: None = the role's own choice, True/False = explicit.
+    shadow_on: bool | None = None
+
+    @field_validator("background")
+    @classmethod
+    def _check_background(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        import re as _re
+        if not _re.fullmatch(r"#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", v):
+            raise ValueError(f"background must be #RRGGBB or #RRGGBBAA, got {v!r}")
+        return v
+
+    @field_validator("line_spacing")
+    @classmethod
+    def _clamp_line_spacing(cls, v: float) -> float:
+        return min(3.0, max(0.5, _finite(float(v), "line_spacing")))
+
+    @field_validator("size")
+    @classmethod
+    def _clamp_size(cls, v: float) -> float:
+        return _clamp_num(v, TEXT_SIZE_RANGE, "size")
+
+    @field_validator("stroke_w")
+    @classmethod
+    def _clamp_stroke_w(cls, v: float) -> float:
+        return _clamp_num(v, TEXT_STROKE_RANGE, "stroke_w")
 
 
 class TextClip(_EDLModel):
@@ -358,8 +466,17 @@ class TextClip(_EDLModel):
     transform: Transform = Field(default_factory=lambda: Transform(x=540, y=1700))
     anim_in: str | None = None
     anim_out: str | None = None
+    # QA-078: seconds each in/out animation lasts; None = the house 0.35 s.
+    # Still capped at 40 % of the clip by both renderers.
+    anim_dur: float | None = None
     role: Literal["super", "hook", "lower_third", "caption", "label", "watermark"] | None = None
     speaker: str | None = None  # for lower-thirds attached to a speaker
+
+    @field_validator("anim_dur")
+    @classmethod
+    def _clamp_anim_dur(cls, v: float | None) -> float | None:
+        # Same range as text_overlay.ANIM_DUR_RANGE / lib/textLayout.
+        return None if v is None else min(3.0, max(0.1, _finite(float(v), "anim_dur")))
 
 
 class Sticker(_EDLModel):
@@ -419,11 +536,38 @@ class Transition(_EDLModel):
         return effective_duration(str(info.data.get("type", "fade")), v)
 
 
+class CaptionLook(_EDLModel):
+    """The captions track's LOOK (QA-075): set once with `set_caption_style`,
+    applied to every cue, and re-applied to cues a later caption build lays
+    down. Each field None = the caption role's own style."""
+    font: str | None = None
+    color: str | None = None
+    size: float | None = None
+    stroke: str | None = None
+    stroke_w: float | None = None
+    background: str | None = None
+    shadow_on: bool | None = None
+    upper: bool | None = None
+
+    @field_validator("size")
+    @classmethod
+    def _clamp_size(cls, v: float | None) -> float | None:
+        return None if v is None else _clamp_num(v, TEXT_SIZE_RANGE, "size")
+
+    @field_validator("stroke_w")
+    @classmethod
+    def _clamp_stroke_w(cls, v: float | None) -> float | None:
+        return None if v is None else _clamp_num(v, TEXT_STROKE_RANGE, "stroke_w")
+
+
 class CaptionsConfig(_EDLModel):
     enabled: bool = False
     style: Literal["default", "ig_chunky", "word_emphasis"] = "default"
+    # Where the cues sit — rendered by both renderers since QA-075
+    # (text_overlay.caption_position_y / lib/textLayout.captionAnchorY).
     position: Literal["bottom", "center", "top"] = "bottom"
     lang: str | None = None
+    look: CaptionLook | None = None
 
 
 class MusicDuck(_EDLModel):
@@ -442,6 +586,9 @@ class Track(_EDLModel):
     label: str | None = None
     muted: bool = False  # render skips this track if true
     locked: bool = False
+    # Solo (QA-086): while ANY track is soloed, only soloed tracks are heard —
+    # an audio-only rule (a soloed-out video lane keeps its picture).
+    solo: bool = False
 
 
 # Canvas bounds. The lower bound is not cosmetic: `set_canvas {w:0, h:-10}`
@@ -513,8 +660,52 @@ class Marker(_EDLModel):
     color: str = "#fbbf24"  # amber — must differ from the playhead red (#ff4d6d, Timeline.tsx)
 
 
+def _migrate_v2_text(data: dict) -> dict:
+    """A v2 EDL dict → v3, rendering exactly as before (QA-076).
+
+    Two v2 sentinels go: `style.font == "Inter-Black"` meant "the role's font"
+    and becomes None; a non-caption text clip whose scalar y sat on add_text's
+    old no-arg default (canvas.h·0.85) rendered at its ROLE anchor, so that is
+    the y it gets. Every other value already rendered where it said."""
+    from ..render.text_overlay import _y_for_role   # lazy: render imports this module
+    canvas = data.get("canvas") or {}
+    cw = int(canvas.get("w", 1080) if isinstance(canvas, dict) else getattr(canvas, "w", 1080))
+    ch = int(canvas.get("h", 1920) if isinstance(canvas, dict) else getattr(canvas, "h", 1920))
+    tracks = []
+    for t in data.get("tracks") or []:
+        if not isinstance(t, dict) or t.get("type") not in ("text", "captions"):
+            tracks.append(t)
+            continue
+        clips = []
+        for c in t.get("clips") or []:
+            if isinstance(c, dict) and "text" in c:
+                c = dict(c)
+                st = c.get("style")
+                if isinstance(st, dict) and st.get("font") == "Inter-Black":
+                    c["style"] = {**st, "font": None}
+                role = c.get("role") or "default"
+                tx = c.get("transform")
+                if role != "caption" and isinstance(tx, dict):
+                    y = tx.get("y")
+                    if isinstance(y, (int, float)) and not isinstance(y, bool) and abs(float(y) - ch * 0.85) < 0.5:
+                        c["transform"] = {**tx, "y": _y_for_role(role, None, ch, cw)}
+            clips.append(c)
+        tracks.append({**t, "clips": clips})
+    return {**data, "tracks": tracks, "version": EDL_VERSION}
+
+
 class EDL(_EDLModel):
     version: int = EDL_VERSION
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_v2(cls, data: Any) -> Any:
+        """Loading a v2 project (edl.json, a snapshot, a .vae) upgrades it to
+        v3 in memory; the next commit writes v3. A dict with no version is a
+        caller building a current EDL, never migrated."""
+        if isinstance(data, dict) and isinstance(data.get("version"), int) and data["version"] < 3:
+            return _migrate_v2_text(data)
+        return data
     duration: float = 0.0
     canvas: Canvas = Field(default_factory=Canvas)
     tracks: list[Track] = Field(default_factory=list)

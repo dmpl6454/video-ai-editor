@@ -41,7 +41,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -52,7 +52,8 @@ from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
 from .storage import (new_session_id, session_dir, session_exists,
                        list_sessions, write_meta, read_meta, delete_session,
-                       is_valid_session_id)
+                       is_valid_session_id, default_project_name, rename_session,
+                       name_reopened_copy)
 from .edl import EDLStore
 from .edl import timebase as _tb
 from .ingest.probe import video_frame_extent
@@ -271,7 +272,24 @@ def _safe_filename(name: str | None, fallback: str) -> str:
         import hashlib as _h
         sig = _h.sha1((name or "").encode("utf-8")).hexdigest()[:6]
         stem_clean = f"{Path(fallback).stem}_{sig}"
-    return f"{stem_clean}{suffix_clean}" or fallback
+    if len(stem_clean) > _MAX_STEM:
+        # QA-091: a 235-character name is legal on APFS, but ingest builds
+        # `<stem>_<rand>/<stem>.normalized.mp4.part` from it, which passed the
+        # 255-byte NAME_MAX and failed as "may not be a valid video". The
+        # display name keeps the full original; the disk name only has to be
+        # unique and readable, so cut it and add a hash of what was cut.
+        import hashlib as _h
+        sig = _h.sha1(stem_clean.encode("utf-8")).hexdigest()[:8]
+        stem_clean = f"{stem_clean[:_MAX_STEM - 9].rstrip('._-')}_{sig}"
+    return f"{stem_clean}{suffix_clean[:_MAX_SUFFIX]}" or fallback
+
+
+# Disk-name budget for an upload's stem (QA-091). NAME_MAX is 255 bytes; the
+# longest derived name is `<stem>_<8 hex>` (the import dir) and
+# `<stem>.normalized.mp4.part`, so 80 leaves ample room for every suffix any
+# ingest step appends.
+_MAX_STEM = 80
+_MAX_SUFFIX = 16
 
 
 # The HTML multipart spec has browsers percent-escape exactly three characters
@@ -339,6 +357,12 @@ from .api import locks as _locks
 _session_lock = _locks.session_lock
 
 
+def _is_path_shaped_sid(sid: str) -> bool:
+    """An id that names a directory other than its own leaf in WORKDIR."""
+    return (not sid or sid in (".", "..") or any(ch in sid for ch in "/\\\x00")
+            or sid.startswith("."))
+
+
 def _store(sid: str) -> EDLStore:
     # Fast path: already cached. Mark as recently used.
     with _STORES_LOCK:
@@ -346,6 +370,12 @@ def _store(sid: str) -> EDLStore:
         if cached is not None:
             _STORES.move_to_end(sid)
             return cached
+        # A path-shaped id never reaches session_exists/EDLStore: '.' "exists"
+        # (it is WORKDIR itself) and EDLStore would materialise a project's
+        # tree there, '..' its parent (REV-B2-SID-ROUTES). Anything else that
+        # is not on disk stays the 404 it always was.
+        if _is_path_shaped_sid(sid):
+            raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
         if not session_exists(sid):
             raise HTTPException(404, f"session {sid} not found")
         # OK to create the dir tree now (subdirs etc.); we already proved the
@@ -360,10 +390,20 @@ def _store(sid: str) -> EDLStore:
 class DispatchRequest(BaseModel):
     tool: str
     args: dict[str, Any] = {}
+    # QA-105: the EDL hash the caller's view was built from. When present and
+    # no longer the session's hash, the edit is refused (409 stale_edl) — a
+    # second window on the same project would otherwise apply an edit (or an
+    # UNDO of someone else's edit) against a timeline it is not showing.
+    # Optional: MCP, Claude and older UI builds send none and are unaffected.
+    base_hash: str | None = None
 
 
 class CreateSessionRequest(BaseModel):
     name: str | None = None
+
+
+class RenameSessionRequest(BaseModel):
+    name: str
 
 
 class ExportRequest(BaseModel):
@@ -453,6 +493,17 @@ def features(refresh: int = 0):
     return cached_feature_report(refresh=bool(refresh))
 
 
+@app.get("/api/downloads")
+def downloads():
+    """Which tools fetch model weights on their next run, and how much
+    (QA-065) — what the Captions button and the AI cards badge and check right
+    before a run. Separate from /api/features (whose memoised probes must equal
+    `check_features`) because this changes the moment a download lands:
+    existence checks only, recomputed every call, never downloads anything."""
+    from .ai.weights import weights_report
+    return {"downloads": weights_report()}
+
+
 # ---- MCP server: let external agents (Claude Code / Cursor / Codex) drive the
 # editor over HTTP. Connect with:
 #   claude mcp add --transport http video-ai-editor http://127.0.0.1:8000/mcp
@@ -522,9 +573,11 @@ def mcp_probe():
 @app.post("/api/sessions")
 def create_session(body: CreateSessionRequest | None = None):
     sid = new_session_id()
+    # QA-099: never the raw id — "Untitled project N" when none is given.
+    name = (body.name.strip() if body and body.name and body.name.strip()
+            else default_project_name())
     d = session_dir(sid)
-    name = (body.name if body and body.name else sid)
-    write_meta(sid, {"name": name})
+    write_meta(sid, {"name": name, "created": time.time()})
     # Initialize the EDL store so edl.json exists
     store = EDLStore(d)
     store.commit("init", {}, "Initial empty project")
@@ -549,7 +602,58 @@ def get_session(sid: str):
         "summary": dispatch(store, "get_timeline", {"summary": True}),
         "ops": [op.model_dump() for op in store.ops.ops[-25:]],
         "redo_available": store.redo_available,
+        # QA-046: how many of the newest ops ⌘Z can still reach — the Undo
+        # button and History's undo horizon bind to this, not to ops.length.
+        "undo_depth": store.undo_depth,
     }
+
+
+def _existing_session_or_error(sid: str) -> None:
+    """400 for a malformed id, 404 for one that is not on disk — BEFORE
+    anything calls `_store(sid)`/`session_dir(sid)`, which create the dir."""
+    if not is_valid_session_id(sid):
+        raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
+    if not session_exists(sid):
+        raise HTTPException(404, {"code": "not_found", "message": "session not found"})
+
+
+@app.patch("/api/sessions/{sid}")
+def rename_session_route(sid: str, body: RenameSessionRequest):
+    """QA-099: rename a project (the top-bar chip's inline rename)."""
+    _existing_session_or_error(sid)
+    try:
+        name = rename_session(sid, body.name)
+    except ValueError as e:
+        raise HTTPException(400, {"code": "invalid_name", "message": str(e)})
+    return {"id": sid, "name": name}
+
+
+@app.get("/api/sessions/{sid}/head")
+def session_head(sid: str):
+    """The cheapest answer to "is my view of this project still current?"
+    (QA-105). A window polls it (and asks on focus) and refreshes when the
+    hash moved — another window, an MCP agent or a prompt run edited the
+    project. Also the editor's liveness signal (QA-109)."""
+    _existing_session_or_error(sid)
+    store = _store(sid)
+    return {"id": sid, "edl_hash": store.edl.hash(), "ops": len(store.ops.ops),
+            "redo_available": store.redo_available}
+
+
+def _refuse_stale_base(store: EDLStore, body: DispatchRequest) -> None:
+    """409 `stale_edl` when the caller's view (`base_hash`) is not the
+    timeline the edit would apply to (QA-105). Checked under the session lock
+    on the sync path, so it is the exact state the edit would have mutated."""
+    if not body.base_hash:
+        return
+    current = store.edl.hash()
+    if body.base_hash != current:
+        raise HTTPException(409, {
+            "code": "stale_edl",
+            "message": "This project changed in another window, so that edit was "
+                       "not applied. The timeline has been refreshed — try again.",
+            "edl_hash": current,
+        })
 
 
 @app.delete("/api/sessions/{sid}")
@@ -636,22 +740,31 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     from .edl.schema import Track, Clip, AudioProps
 
     def _edit():
+        from .agent.dispatch import _free_audio_lane
         track = store.edl.get_track("vo")
         if not track:
             track = Track(id="vo", type="vo", z=0, label="Voiceover")
             store.edl.tracks.append(track)
+        at = _tb.quantize(float(start), store.edl.canvas.fps)
+        end = at + p.duration
+        # A take recorded over an earlier one must not stack on it (the mixer
+        # summed both): it goes on the first audio lane with room, else a new
+        # one — every audio lane is mixed like the voiceover lane.
+        if track.locked or any(isinstance(c, Clip) and c.start < end - 1e-9
+                               and c.start + c.effective_duration > at + 1e-9 for c in track.clips):
+            track = _free_audio_lane(store.edl, at, end)
         clip = Clip(
             # QA-002: the VO lands on the project frame grid like every
             # other committed edit time, so a click recorded on a flash stays
             # on it after the picture is cut frame-exactly.
             src=str(norm), in_=0.0, out=p.duration,
-            start=_tb.quantize(float(start), store.edl.canvas.fps),
+            start=at,
             audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
         )
         track.clips.append(clip)
         summary = f"Voiceover {p.duration:.1f}s @ {start:.1f}s ({float(gain_db):+.1f} dB)"
         store.commit("vo_record", {"start": start, "gain_db": gain_db}, summary)
-        return {"clip_id": clip.id, "src": str(norm), "duration": p.duration,
+        return {"clip_id": clip.id, "src": str(norm), "duration": p.duration, "track": track.id,
                 "summary": summary, "edl_hash": store.edl.hash()}
 
     return await _locked_edit(sid, _edit)
@@ -700,9 +813,17 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
 @app.post("/api/sessions/{sid}/audio_upload")
 async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
                        add_to_music: bool = Form(True),
-                       duck: bool = Form(True),
-                       volume_db: float = Form(-12.0)):
-    """Upload an audio file (mp3/wav/m4a) and optionally append to the music track."""
+                       duck: bool | None = Form(None),
+                       volume_db: float = Form(-12.0),
+                       start: float | None = Form(None)):
+    """Upload an audio file (mp3/wav/m4a, or an audio-only mp4/mov) and
+    optionally add it to the music track.
+
+    QA-083: the file lands AFTER whatever is already on the music lane (or at
+    `start` when the caller names one), whole — never trimmed to the video —
+    and the lane's ducking is only changed when `duck` is sent. The answer
+    carries `past_video_s` so the UI can offer "Trim to video" instead of
+    silently cutting an 85 s narration to a 20 s clip."""
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
@@ -712,6 +833,7 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
     audio_dir.mkdir(parents=True, exist_ok=True)
     _assert_room_for(request, audio_dir)
     safe_name = _safe_filename(file.filename, "audio.mp3")
+    display_name = _display_name(file.filename, safe_name)
     # QA-001: a/song.wav then b/song.wav used to share uploads/audio/song.wav,
     # so the first music clip silently started playing the second song.
     dst = _unique_upload_path(audio_dir, safe_name)
@@ -721,38 +843,76 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
     try:
         p = _probe(dst)
     except Exception as e:
-        raise HTTPException(422, {"file": safe_name, "error": str(e)})
+        dst.unlink(missing_ok=True)
+        raise HTTPException(422, {"file": safe_name, "error": "couldn't_import",
+                                  "message": "Couldn't read this audio file — it may be damaged "
+                                             "or in a format we can't decode.",
+                                  "detail": str(e)[-300:]})
+    _remember_display_name(sd, dst, display_name)
 
+    placed: dict = {}
     if add_to_music:
-        await _locked_edit(sid, lambda: _add_uploaded_music(store, dst, p.duration, duck, volume_db))
+        placed = await _locked_edit(
+            sid, lambda: _add_uploaded_music(store, dst, p.duration, duck, volume_db, start))
 
     return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash(),
-            "display_name": _display_name(file.filename, safe_name)}
+            "display_name": display_name, **placed}
 
 
-def _add_uploaded_music(store, dst: Path, duration: float, duck: bool, volume_db: float) -> None:
-    """The music-track edit of `audio_upload`, run under the session lock."""
+def _remember_display_name(session_dir_: Path, src: Path, name: str) -> None:
+    """Keep the user's real file name for a loose upload (QA-045): the disk
+    name is ASCII-only and uniquified, and the Media panel lists loose files
+    from disk, so without this a Hindi or emoji name was lost for good."""
+    from .media_library import record_display_name
+    try:
+        record_display_name(session_dir_, src, name)
+    except OSError:
+        pass  # a name is a nicety; never fail an import over it
+
+
+def _forget_display_name(session_dir_: Path, src: Path) -> None:
+    from .media_library import forget_display_name
+    try:
+        forget_display_name(session_dir_, src)
+    except OSError:
+        pass
+
+
+def _add_uploaded_music(store, dst: Path, duration: float, duck: bool | None,
+                        volume_db: float, start: float | None = None) -> dict:
+    """The music-track edit of `audio_upload`, run under the session lock.
+
+    Placement (QA-083): after the last clip already on the music lane, so a
+    second file never stacks at 0 s over the first (the mixer summed them);
+    an explicit `start` wins. Length: the whole file. Trimming it to the video
+    — the rule this replaced — silently cut an 85 s narration to 20 s. How far
+    it runs past the picture is returned as `past_video_s`, and the UI offers
+    "Trim to video" from that, so the long-song case that rule was protecting
+    (a 6-minute bed on a 29 s video keeps the transport running) is one click
+    away instead of a silent truncation."""
     store.edl.recompute_duration()
-    start = 0.0
-    # Trim the music bed to the VIDEO length. The old expression here was
-    #     min(p.duration, max(edl.duration, p.duration))
-    # which is the algebraic identity `min(d, max(x, d)) == d` for all x — it
-    # ALWAYS returned the full song, so its "trim to project duration"
-    # comment described behaviour that never existed. A 29s video plus a
-    # 6:13 song therefore made edl.duration 373.71s, and the transport and
-    # the render then legitimately ran minutes past the last frame of video
-    # (reported on both the browser and the desktop app as "the timer keeps
-    # running after the clip finishes").
-    #
-    # Music-first-then-video is still valid, and so is a deliberately long
-    # bed on a short video, so when there is no video yet we keep the whole
-    # song rather than trimming it to nothing.
+    music = store.edl.get_track("music")
+    lane_end = max((float(c.start) + c.effective_duration for c in (music.clips if music else [])
+                    if isinstance(c, Clip)), default=0.0)
+    # On the project's frame grid (wave A's timebase rule): the previous bed
+    # ends at its probe length (85.023447 s), not on a frame. CEIL, so the
+    # new bed never overlaps the one before it.
+    fps = store.edl.canvas.fps
+    at = (_tb.ceil_to_frame(lane_end, fps) if start is None
+          else _tb.quantize(max(0.0, float(start)), fps))
+    args: dict = {"src": str(dst), "start": at, "in": 0.0, "out": duration,
+                  "volume_db": volume_db}
+    if duck is not None:
+        args["duck"] = duck
+    result = dispatch(store, "add_music", args)
     video_extent = store.edl.video_extent()
-    out = min(duration, video_extent) if video_extent > 0.05 else duration
-    dispatch(store, "add_music", {
-        "src": str(dst), "start": start, "in": 0.0, "out": out,
-        "duck": duck, "volume_db": volume_db,
-    })
+    clip_id = result.get("clip_id") if isinstance(result, dict) else None
+    placed = next((c for c in store.edl.get_track("music").clips if c.id == clip_id), None)
+    end = (float(placed.start) + placed.effective_duration) if placed is not None else at + duration
+    past = end - video_extent if video_extent > 0.05 else 0.0
+    return {"clip_id": clip_id, "start": at,
+            "past_video_s": round(past, 3) if past > 0.05 else 0.0,
+            "video_end": round(video_extent, 3)}
 
 
 _SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt", ".ass"})
@@ -841,16 +1001,23 @@ def _place_ingested_clip(store, res) -> bool:
     # next video at start=373s, stranding it behind minutes of black (now
     # that gaps actually render, that black is real footage in the export).
     start = store.edl.video_extent()
+    if getattr(res, "still", False):
+        # QA-090: a photo lands at the default still length; its source runs
+        # for minutes, so it can be extended like any clip.
+        from .ingest.still import STILL_DEFAULT_SECONDS
+        out = _tb.quantize(STILL_DEFAULT_SECONDS, store.edl.canvas.fps)
+    else:
+        # The PICTURE's frame-exact length, never format.duration — for an
+        # AAC mp4 that is the padded audio, and a 600-frame clip came in as
+        # out=20.01 (QA-002). add_clip clamps to it as well.
+        out = _tb.floor_to_frame(
+            video_frame_extent(Path(res.normalized)) or res.probe.duration,
+            store.edl.canvas.fps)
     dispatch(store, "add_clip", {
         "track": "v1",
         "src": str(res.normalized),
         "in": 0.0,
-        # The PICTURE's frame-exact length, never format.duration — for an
-        # AAC mp4 that is the padded audio, and a 600-frame clip came in as
-        # out=20.01 (QA-002). add_clip clamps to it as well.
-        "out": _tb.floor_to_frame(
-            video_frame_extent(Path(res.normalized)) or res.probe.duration,
-            store.edl.canvas.fps),
+        "out": out,
         "start": start,
     })
     return was_empty
@@ -865,12 +1032,27 @@ def _ingest_failure(safe_name: str, e: Exception) -> HTTPException:
     logging.getLogger("video_ai_editor").warning(
         "upload ingest failed for %s: %s", safe_name, e)
     msg = str(e)
+    # A filesystem refusal is not a codec problem (QA-091): telling the user to
+    # re-export a perfectly valid video as H.264 sends them the wrong way.
+    import errno as _errno
+    err_no = getattr(e, "errno", None) if isinstance(e, OSError) else None
+    if err_no == _errno.ENAMETOOLONG:
+        code, text = "name_too_long", ("Couldn't import this file — its name is too long to "
+                                       "store. Rename it to something shorter and import it again.")
+    elif err_no == _errno.ENOSPC:
+        code, text = "disk_full", ("Couldn't import this file — the disk is full. Free some "
+                                   "space and import it again.")
+    elif isinstance(e, OSError) and not isinstance(e, FileNotFoundError):
+        code, text = "storage_error", (f"Couldn't import this file — it couldn't be written to "
+                                       f"the project folder ({e.strerror or 'file system error'}).")
+    else:
+        code, text = "couldn't_import", ("Couldn't import this file — it may not be a valid video, "
+                                         "or it uses a codec/container we can't read. Try exporting "
+                                         "it as a standard H.264 .mp4 and re-importing.")
     return HTTPException(status_code=422, detail={
         "file": safe_name,
-        "error": "couldn't_import",
-        "message": "Couldn't import this file — it may not be a valid video, "
-                   "or it uses a codec/container we can't read. Try exporting "
-                   "it as a standard H.264 .mp4 and re-importing.",
+        "error": code,
+        "message": text,
         "detail": msg[-300:] if len(msg) > 300 else msg,
     })
 
@@ -895,6 +1077,29 @@ def _background_transcriber(normalized_path: Path, out_dir: Path, whisper_model:
         except Exception:
             pass
     return _bg_transcribe
+
+
+def _handoff_audio_only(sid: str, dst: Path, upload_dir: Path, safe_name: str,
+                        display_name: str, duration: float, add_to_timeline: bool) -> dict:
+    """An audio-only file sent to the video ingress (QA-092): move it to
+    uploads/audio and add it to the music lane like `audio_upload` does."""
+    sd = session_dir(sid)
+    audio_dir = sd / "uploads" / "audio"
+    target = _unique_upload_path(audio_dir, safe_name)
+    try:
+        _pu.replace_with_retry(dst, target)
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+    _remember_display_name(sd, target, display_name)
+    placed: dict = {}
+    if add_to_timeline:
+        with _session_lock(sid):
+            placed = _add_uploaded_music(_store(sid), target, duration, None, -12.0)
+    return {"kind": "audio", "routed_to": "music", "src": str(target),
+            "display_name": display_name, "duration": duration,
+            "edl_hash": _store(sid).edl.hash(), "transcript_pending": False,
+            "notices": [f"{display_name} has no picture, so it was added to the Music lane."],
+            **placed}
 
 
 @app.post("/api/sessions/{sid}/upload")
@@ -945,30 +1150,36 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
         raise
 
     def _ingest_and_place(set_progress=None, cancel_event=None) -> dict:
+        # A cheap probe first: an audio-only file (QA-092) goes to the music
+        # lane without being transcoded into a picture-less mp4 first.
+        from .ingest.probe import probe as _probe
+        try:
+            pre = _probe(dst)
+        except Exception:
+            pre = None                  # ingest below reports the real error
+        if pre is not None and pre.streams and pre.video is None:
+            return _handoff_audio_only(sid, dst, upload_dir, safe_name, display_name,
+                                       pre.duration, add_to_timeline)
         try:
             res = ingest_upload(dst, upload_dir, transcribe_audio=False,
                                 display_name=display_name,
-                                on_progress=set_progress, cancel_event=cancel_event)
+                                on_progress=set_progress, cancel_event=cancel_event,
+                                still_fps=_store(sid).edl.canvas.fps)
         except Exception as e:
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise _ingest_failure(safe_name, e) from e
 
         # /upload is the VIDEO ingress and hardcodes track v1 below. An
-        # audio-only file reaching it (an .mp4/.mov/.mkv container with no video
-        # stream slips past the frontend's extension-based routing) normalizes
-        # "successfully" into a picture-less mp4, lands on v1, and then breaks
-        # every subsequent render with "[i:v] … matches no streams". Point the
-        # user at the audio ingress instead of letting them build an
-        # unrenderable timeline.
+        # audio-only file (an .mp4/.mov/.mkv with no picture — the frontend
+        # routes by extension, so it lands here) must never reach v1: it would
+        # break every render with "[i:v] … matches no streams". QA-092: it
+        # used to be refused with advice ("Add music…", "drop it on the Music
+        # lane") that routed it straight back here, so the file had no way in.
+        # It is handed to the audio path instead, exactly as if it had been
+        # added with Add music.
         if res.probe.streams and res.probe.video is None:
-            shutil.rmtree(upload_dir, ignore_errors=True)
-            raise HTTPException(status_code=422, detail={
-                "file": safe_name,
-                "error": "audio_only_file",
-                "message": "This file has no video track — it's audio only. "
-                           "Add it with “Add music…” (or drop it on the Music lane) "
-                           "instead of the video track.",
-            })
+            return _handoff_audio_only(sid, dst, upload_dir, safe_name, display_name,
+                                       res.probe.duration, add_to_timeline)
 
         if add_to_timeline:
             with _session_lock(sid):
@@ -997,7 +1208,8 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
             "color": res.color,
             "notices": res.notices,
             "edl_hash": _store(sid).edl.hash(),
-            "transcript_pending": bool(transcribe),
+            "transcript_pending": bool(transcribe) and not res.still,
+            "kind": "image" if res.still else "video",
         }
 
     # Whisper is the slow part (10-60s on CPU); it runs after we've answered
@@ -1012,7 +1224,7 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
             except HTTPException as e:
                 detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
                 raise RuntimeError(detail.get("message") or str(detail)) from e
-            if bg is not None:
+            if bg is not None and out.get("kind") == "video":
                 threading.Thread(target=bg, daemon=True, name="vai-transcribe").start()
             return out
         from .api.jobs import JOB_MANAGER
@@ -1022,7 +1234,7 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
             "display_name": display_name})
 
     out = await asyncio.to_thread(_ingest_and_place)
-    if bg is not None:
+    if bg is not None and out.get("kind") == "video":
         background_tasks.add_task(bg)
     return out
 
@@ -1067,8 +1279,12 @@ def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
     if busy is not None:
         return busy
     if not wait:
+        # The queued job re-checks under the lock; this answers a stale view
+        # with the 409 right away instead of as a failed job.
+        _refuse_stale_base(store, body)
         return _dispatch_async(sid, store, body)
     with _session_lock(sid):
+        _refuse_stale_base(store, body)
         return _dispatch_sync(sid, store, body)
 
 
@@ -1086,7 +1302,9 @@ def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONRes
         # detached copy would write edits that the next request never sees.
         try:
             with _session_lock(sid):
-                return _dispatch_sync(sid, _store(sid), body,
+                live = _store(sid)
+                _refuse_stale_base(live, body)
+                return _dispatch_sync(sid, live, body,
                                       set_progress=set_progress,
                                       cancel_event=cancel_event)
         except HTTPException as e:
@@ -1135,6 +1353,7 @@ def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
         "result": result,
         "edl_hash": store.edl.hash(),
         "op": last_op.model_dump() if last_op else None,
+        "undo_depth": store.undo_depth,  # QA-046
     }
 
 
@@ -1173,6 +1392,91 @@ def remove_media_route(sid: str, media_id: str):
     return {"removed": item["id"], "name": item["name"]}
 
 
+@app.post("/api/sessions/{sid}/media/{media_id}/relink")
+async def relink_media_route(sid: str, media_id: str, request: Request,
+                             file: UploadFile = File(...)):
+    """Relink an offline item (QA-095): import the replacement the same way
+    its kind is imported (video → normalised like /upload, audio → as-is),
+    then `dispatch("relink_media")` every clip that played the missing file —
+    one undoable edit."""
+    from .media_library import list_media
+    _existing_session_or_error(sid)
+    if not re.fullmatch(r"[0-9a-f]{12}", media_id):
+        raise HTTPException(400, {"code": "invalid_media_id", "message": "invalid media id"})
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
+    store = _store(sid)
+    item = next((it for it in list_media(store.dir, store.edl) if it["id"] == media_id), None)
+    if item is None:
+        raise HTTPException(404, {"code": "media_not_found", "message": "no such media in this project"})
+    # The clips hold the path as they were given it; the library row is the
+    # resolved path. Relink every spelling that resolves to it.
+    olds = sorted({c.src for t in store.edl.tracks for c in t.clips
+                   if getattr(c, "src", None) and Path(c.src).resolve() == Path(item["src"])})
+    if not olds:
+        raise HTTPException(409, {"code": "media_unused",
+                                  "message": f"{item['name']} is not used on the timeline"})
+    uploads = session_dir(sid) / "uploads"
+    _assert_room_for(request, uploads)
+    safe_name = _safe_filename(file.filename, "relink.mp4")
+    display_name = _display_name(file.filename, safe_name)
+    work = _unique_upload_dir(uploads, Path(safe_name).stem)
+    dst = work / safe_name
+    try:
+        await _stream_upload_to(file, dst)
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+
+    def _prepare() -> str:
+        if item["kind"] == "audio":
+            target = _unique_upload_path(uploads / "audio", safe_name)
+            _pu.replace_with_retry(dst, target)
+            shutil.rmtree(work, ignore_errors=True)
+            _remember_display_name(session_dir(sid), target, display_name)
+            return str(target)
+        try:
+            res = ingest_upload(dst, work, transcribe_audio=False, display_name=display_name,
+                                still_fps=store.edl.canvas.fps)
+        except Exception as e:
+            shutil.rmtree(work, ignore_errors=True)
+            raise _ingest_failure(safe_name, e) from e
+        return str(res.normalized)
+
+    new_src = await asyncio.to_thread(_prepare)
+
+    def _discard_replacement() -> None:
+        # A refused relink keeps nothing: the audio branch MOVED the file into
+        # uploads/audio (where the library lists it as a new loose item) and
+        # emptied `work`, so removing `work` alone leaked it.
+        shutil.rmtree(work, ignore_errors=True)
+        if item["kind"] == "audio":
+            try:
+                Path(new_src).unlink(missing_ok=True)
+            except OSError:
+                pass
+            _forget_display_name(session_dir(sid), Path(new_src))
+
+    def _edit() -> dict:
+        live = _store(sid)
+        ids: list[str] = []
+        with live.batch():
+            for old in olds:
+                ids += dispatch(live, "relink_media", {"src": old, "new_src": new_src})["clip_ids"]
+        summary = f"Relinked {item['name']} → {display_name}"
+        live.commit("relink_media", {"src": olds[0], "new_src": new_src}, summary)
+        return {"relinked": ids, "new_src": new_src, "name": display_name,
+                "summary": summary, "edl_hash": live.edl.hash()}
+
+    try:
+        return await _locked_edit(sid, _edit)
+    except ValueError as e:
+        # Too short / no picture: the replacement is not kept.
+        _discard_replacement()
+        raise HTTPException(422, {"error": "relink_refused", "message": str(e)})
+
+
 @app.get("/api/sessions/{sid}/ops")
 def get_ops(sid: str, since: int = 0):
     store = _store(sid)
@@ -1206,6 +1510,24 @@ _ERRORISH = re.compile(
 
 def _error_lines(text: str) -> str:
     return "\n".join(ln for ln in text.splitlines() if _ERRORISH.search(ln))
+
+
+def _render_error_types() -> tuple[type[BaseException], ...]:
+    """What a render can raise that is a FAILED RENDER, not a server bug
+    (QA-107): ffmpeg's RuntimeError, PIL's OSError ("invalid pixel size"),
+    a ValueError out of layout, and freetype's FT_Exception ("raster
+    overflow"). Only RuntimeError used to map to 422, so the rest escaped
+    as a bare 500 from every later preview/export."""
+    types: list[type[BaseException]] = [RuntimeError, OSError, ValueError]
+    try:
+        import freetype as _ft  # optional (render/shaping.py)
+        types.append(_ft.FT_Exception)
+    except Exception:  # pragma: no cover - freetype-py absent
+        pass
+    return tuple(types)
+
+
+RENDER_ERRORS = _render_error_types()
 
 
 def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
@@ -1298,7 +1620,88 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
              "frames or an unusual codec.")
 
 
-def _render_preview_latest(sid: str, store):
+class _PreviewTicket:
+    """One HTTP client's claim on an interactive preview render (QA-041).
+
+    The request coroutine and the render thread meet here, under one lock:
+    the render thread records which `render.cancel.PREVIEWS` event it joined,
+    the coroutine records that its client went away. Whichever happens second
+    calls `PREVIEWS.abandon` — exactly once — so a closed tab cancels a
+    render nobody else is waiting for, and never one another window shares.
+    """
+
+    def __init__(self, sid: str) -> None:
+        self.sid = sid
+        self._lock = threading.Lock()
+        self._ev: threading.Event | None = None
+        self._finished = False
+        self.gone = False
+        self.abandoned = False
+
+    def joined(self, ev: threading.Event) -> None:
+        from .render import cancel as _rcancel
+        with self._lock:
+            self._ev = ev
+            if self.gone and not self.abandoned:
+                self.abandoned = True
+                _rcancel.PREVIEWS.abandon(self.sid, ev)
+
+    def client_gone(self) -> None:
+        from .render import cancel as _rcancel
+        with self._lock:
+            self.gone = True
+            if self._ev is not None and not self._finished and not self.abandoned:
+                self.abandoned = True
+                _rcancel.PREVIEWS.abandon(self.sid, self._ev)
+
+    def finish(self, ev: threading.Event) -> None:
+        from .render import cancel as _rcancel
+        with self._lock:
+            self._finished = True
+            _rcancel.PREVIEWS.end(self.sid, ev, abandoned=self.abandoned)
+
+
+def _preview_edl(store):
+    """The EDL a preview renders: the live one, or — when media is missing —
+    a copy with slates in its place (media_offline.render_edl, QA-095)."""
+    from .media_offline import render_edl
+    try:
+        return render_edl(store.edl, store.dir)
+    except Exception:
+        # A slate that cannot be made must not take the preview down with it;
+        # the render then reports the missing file as it always did.
+        import logging
+        logging.getLogger("video_ai_editor").warning("offline slate failed", exc_info=True)
+        return store.edl
+
+
+def _export_edl(edl, height: int | None, *, dry_run: bool = False,
+                on_progress=None, cancel_event=None):
+    """The EDL an export renders (QA-089): clips whose source was clamped to a
+    1080p editing proxy render from a full-quality master of the original when
+    the export is larger than the proxy — never the proxy scaled back up.
+    `dry_run` answers whether any master is needed without making one."""
+    from .ingest.masters import export_edl, master_plan
+    from .render.compositor import export_dimensions
+    w, h = export_dimensions(edl.canvas.w, edl.canvas.h, height)
+    short = min(w, h)
+    if dry_run:
+        return edl.model_copy() if master_plan(edl, short) else edl
+    return export_edl(edl, short, on_progress=on_progress, cancel_event=cancel_event)
+
+
+def _refuse_missing_media(store, verb: str) -> None:
+    """422 naming every missing file (QA-095) — an export must not quietly
+    ship slates, nor fail with "a clip's source file is missing"."""
+    from .media_offline import missing_media, missing_message
+    rows = missing_media(store.dir, store.edl)
+    if rows:
+        raise HTTPException(422, {"error": "media_missing",
+                                  "message": missing_message(rows, verb),
+                                  "missing": rows})
+
+
+def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None):
     """render_preview for an interactive client, newest-EDL-wins (QA-004).
 
     Registers the render with `render.cancel.PREVIEWS`: a request for a
@@ -1306,14 +1709,67 @@ def _render_preview_latest(sid: str, store):
     raises RenderCancelled here. Nobody will look at a superseded preview, and
     before this every one of them ran to completion, holding `_RENDER_SLOTS`
     while the render the user was actually waiting for queued behind it.
+
+    QA-041: a render nobody supersedes is still bounded — a wall-clock
+    deadline (`cancel.preview_deadline_s`, proportional to the timeline)
+    raises RenderTimedOut — and `ticket` lets the HTTP layer abandon it when
+    its client disconnects (`_preview_for_client`).
     """
     from .render import cancel as _rcancel
-    ev = _rcancel.PREVIEWS.begin(sid, store.edl.hash())
+    # QA-095: missing media previews as a "Media offline" slate; the other
+    # clips still play, and the render's key reflects the offline state.
+    edl = _preview_edl(store)
+    ev = _rcancel.PREVIEWS.begin(sid, edl.hash())
+    if ticket is not None:
+        ticket.joined(ev)
     try:
-        with _rcancel.scope(ev):
-            return render_preview(store.edl, store.dir)
+        with _rcancel.scope(ev, deadline_s=_rcancel.preview_deadline_s(edl.duration)):
+            return render_preview(edl, store.dir)
     finally:
-        _rcancel.PREVIEWS.end(sid, ev)
+        if ticket is not None:
+            ticket.finish(ev)
+        else:
+            _rcancel.PREVIEWS.end(sid, ev)
+
+
+async def _await_client_disconnect(request: Request, ticket: _PreviewTicket) -> None:
+    """Wait for the client's `http.disconnect` and mark the ticket.
+
+    A long-lived `receive()`, not `request.is_disconnected()`: the latter
+    polls with an already-cancelled scope, and behind this app's
+    BaseHTTPMiddleware stack that poll never sees the disconnect (measured on
+    Starlette 1.0: a bare app reports it within 0.1 s, the same route behind
+    one BaseHTTPMiddleware reports False forever). The routes that use this
+    take no body, so consuming the request messages here costs nothing."""
+    while True:
+        msg = await request.receive()
+        if msg.get("type") == "http.disconnect":
+            ticket.client_gone()
+            return
+
+
+async def _preview_for_client(request: Request, sid: str, store):
+    """`_render_preview_latest` in the threadpool, abandoned if the HTTP
+    client disconnects before it finishes (QA-041).
+
+    A synchronous preview used to run to completion after its tab or window
+    closed — with no newer request to supersede it, that could be a full
+    render of a mistyped 27-hour timeline. The render runs in a worker
+    thread; a watcher task waits for the client's disconnect and marks the
+    ticket, which sets the render's cancel event (unless another client
+    shares that render), so `render.cancel` kills its ffmpeg and the `.part`
+    file is removed."""
+    from starlette.concurrency import run_in_threadpool
+    ticket = _PreviewTicket(sid)
+    fut = asyncio.ensure_future(
+        run_in_threadpool(_render_preview_latest, sid, store, ticket))
+    watcher = asyncio.ensure_future(_await_client_disconnect(request, ticket))
+    try:
+        # A departed client does not end the wait: the render thread still
+        # has to unwind (it raises RenderCancelled within ~50 ms).
+        return await fut
+    finally:
+        watcher.cancel()
 
 
 def _preview_superseded() -> HTTPException:
@@ -1321,25 +1777,36 @@ def _preview_superseded() -> HTTPException:
                                "message": "A newer edit replaced this preview render."})
 
 
+def _preview_timed_out() -> HTTPException:
+    return HTTPException(504, {"error": "preview_timed_out",
+                               "message": "This preview took far longer than it should "
+                                          "and was stopped. Check the timeline's length "
+                                          "and clip positions, then try again."})
+
+
 @app.post("/api/sessions/{sid}/preview")
-def make_preview(sid: str, wait: int = 1):
+async def make_preview(sid: str, request: Request, wait: int = 1):
     """Render a preview.
 
     `wait=1` (default): blocks until done. Backwards-compatible with the
-    existing frontend.
+    existing frontend. The render is cancelled if the client disconnects
+    first (QA-041), and bounded by a wall-clock deadline (504).
     `wait=0`: returns 202 + `{job_id, status_url}` immediately. Poll
     `/api/jobs/{job_id}` for progress; the result field gets the same
     payload the sync path returns. Use this for hosted/multi-user setups
     where the request thread shouldn't block on a 30s render.
     """
-    store = _store(sid)
+    from starlette.concurrency import run_in_threadpool
+    store = await run_in_threadpool(_store, sid)
     if wait:
-        from .render.cancel import RenderCancelled
+        from .render.cancel import RenderCancelled, RenderTimedOut
         try:
-            res = _render_preview_latest(sid, store)
+            res = await _preview_for_client(request, sid, store)
+        except RenderTimedOut:
+            raise _preview_timed_out() from None
         except RenderCancelled:
             raise _preview_superseded() from None
-        except RuntimeError as e:
+        except RENDER_ERRORS as e:
             # ffmpeg render failure → actionable 422, not a bare 500. Surface a
             # short tail of ffmpeg's reason so the UI can show something useful.
             msg = str(e)
@@ -1351,11 +1818,25 @@ def make_preview(sid: str, wait: int = 1):
                                       "ffmpeg": tail})
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER
-    edl_snapshot = store.edl  # safe — render_preview only reads
+    # The offline-aware view (QA-095), exactly what wait=1 and GET
+    # preview.mp4 render: missing media is slated, not a failed job, and the
+    # hash agrees with the file the <video> is served.
+    edl_snapshot = await run_in_threadpool(_preview_edl, store)
     session_dir_snapshot = store.dir
 
-    def _job() -> dict:
-        res = render_preview(edl_snapshot, session_dir_snapshot)
+    def _job(cancel_event=None) -> dict:
+        # Same wall-clock bound as the interactive path (QA-041), and the
+        # job's own cancel event reaches every ffmpeg of the render.
+        from .render import cancel as _rcancel
+        try:
+            with _rcancel.scope(cancel_event or threading.Event(),
+                                deadline_s=_rcancel.preview_deadline_s(edl_snapshot.duration)):
+                res = render_preview(edl_snapshot, session_dir_snapshot)
+        except _rcancel.RenderTimedOut:
+            raise RuntimeError("This preview took far longer than it should and was stopped.") from None
+        except _rcancel.RenderCancelled:
+            from .api.jobs import JobCancelled
+            raise JobCancelled() from None
         return _preview_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="preview", fn=_job, session_id=sid)
@@ -1364,6 +1845,36 @@ def make_preview(sid: str, wait: int = 1):
         content={"job_id": job.id, "status": job.status,
                  "status_url": f"/api/jobs/{job.id}"},
     )
+
+
+@app.get("/api/sessions/{sid}/render-cache")
+def render_cache_usage(sid: str):
+    """How much disk this project's render caches hold, and its budget
+    (QA-106). Previews, chunks, segments and cached videos are pure functions
+    of the timeline and are trimmed LRU to the budget after every render."""
+    from .render import cache_budget
+    _existing_session_or_error(sid)
+    store = _store(sid)
+    return cache_budget.usage(store.dir)
+
+
+@app.delete("/api/sessions/{sid}/render-cache")
+def clear_render_cache(sid: str):
+    """Delete this project's render caches ("Clear render cache", QA-106).
+    The preview of the CURRENT timeline is kept so the player keeps playing;
+    everything else re-renders on demand. Never touches media, exports,
+    transcripts or AI outputs."""
+    from .render import cache_budget
+    from .render.compositor import session_render_in_flight
+    _existing_session_or_error(sid)
+    store = _store(sid)
+    # The preview on screen is keyed on the RENDERED view: with media offline
+    # that is the slated copy (_preview_edl), not store.edl.
+    keep = {store.dir / "previews" / f"{store.edl.hash()}.mp4",
+            store.dir / "previews" / f"{_preview_edl(store).hash()}.mp4"}
+    recent = cache_budget.PROTECT_RECENT_S if session_render_in_flight(store.dir) else 0.0
+    freed = cache_budget.clear(store.dir, protect=tuple(keep), protect_recent_s=recent)
+    return {"freed_bytes": freed, **cache_budget.usage(store.dir)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1401,9 +1912,13 @@ def list_session_jobs(sid: str):
 
 
 @app.get("/api/sessions/{sid}/preview.mp4")
-def stream_preview(sid: str, h: str | None = None):
-    store = _store(sid)
-    current_hash = store.edl.hash()
+async def stream_preview(sid: str, request: Request, h: str | None = None):
+    from starlette.concurrency import run_in_threadpool
+    store = await run_in_threadpool(_store, sid)
+    # The hash the preview of the CURRENT state is stored under — offline-
+    # aware (QA-095), so a render made while the media was present is never
+    # served once it has gone.
+    current_hash = (await run_in_threadpool(_preview_edl, store)).hash()
     target_hash = h or current_hash
     p = store.dir / "previews" / f"{target_hash}.mp4"
     # Treat a 0-byte leftover (from a killed render that predates atomic writes)
@@ -1417,17 +1932,19 @@ def stream_preview(sid: str, h: str | None = None):
         # user was waiting for (QA-004). Answer the 404 up front.
         if h and h != current_hash:
             raise HTTPException(404, "preview for that hash is no longer available")
-        from .render.cancel import RenderCancelled
+        from .render.cancel import RenderCancelled, RenderTimedOut
         # Same RuntimeError -> 422 mapping the POST /preview and /export paths
         # use. Without it this route answered a render failure with a bare 500
         # plus a full traceback (logged twice), while the very same failure via
         # POST produced a clean, actionable 422. The <video> element polls THIS
         # url, so it was the shape the UI hit most often.
         try:
-            res = _render_preview_latest(sid, store)
+            res = await _preview_for_client(request, sid, store)
+        except RenderTimedOut:
+            raise _preview_timed_out() from None
         except RenderCancelled:
             raise _preview_superseded() from None
-        except RuntimeError as e:
+        except RENDER_ERRORS as e:
             msg = str(e)
             tail = msg[-400:]
             raise HTTPException(422, {"error": "render_failed",
@@ -1446,12 +1963,18 @@ def stream_preview(sid: str, h: str | None = None):
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
 
 
-def _export_payload(sid: str, res) -> dict:
+def _export_payload(sid: str, res, timeline_hash: str | None = None) -> dict:
     # `edl_hash` is the timeline the file was rendered from — what the UI's
     # "↓ MP4 (outdated)" check compares against GET /sessions/{sid}.edl_hash.
+    # The name carries the project's name (QA-098): spaces, Devanagari, … —
+    # percent-encoded in the URL, verbatim as the suggested save name.
+    from urllib.parse import quote
     return {"path": str(res.path), "filename": res.path.name,
-            "url": f"/api/sessions/{sid}/files/exports/{res.path.name}",
-            "edl_hash": res.edl_hash}
+            "url": f"/api/sessions/{sid}/files/exports/{quote(res.path.name)}",
+            # The TIMELINE's hash, not the render view's: _export_edl swaps a
+            # clamped clip's src for its full-quality master, so res.edl_hash
+            # hashed a different tree and a fresh export read "(outdated)".
+            "edl_hash": timeline_hash or res.edl_hash}
 
 
 @app.post("/api/sessions/{sid}/export")
@@ -1462,15 +1985,18 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     client where the request might time out (most browsers/proxies)."""
     store = _store(sid)
     body = body or ExportRequest()
+    _refuse_missing_media(store, "export")
     if wait:
         # Mirror the preview path's RuntimeError→422 handling. Without it an
         # ffmpeg failure fell through to hardening's generic handler as an
         # opaque HTTP 500 with the reason discarded into the server log.
+        timeline_hash = store.edl.hash()
         try:
-            res = render_export(store.edl, store.dir, height=body.height,
+            res = render_export(_export_edl(store.edl, body.height), store.dir, height=body.height,
                                 fps=body.fps, crf=body.crf, container=body.container,
-                                bitrate_kbps=body.bitrate_kbps)
-        except RuntimeError as e:
+                                bitrate_kbps=body.bitrate_kbps,
+                                project_name=read_meta(sid).get("name"))
+        except RENDER_ERRORS as e:
             msg = str(e)
             tail = msg[-400:]
             raise HTTPException(422, {
@@ -1478,26 +2004,38 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
                 "message": _render_failure_message(tail, msg),
                 "ffmpeg": tail,
             })
-        return _export_payload(sid, res)
+        return _export_payload(sid, res, timeline_hash)
     from .api.jobs import JOB_MANAGER
     edl_snapshot = store.edl
     session_dir_snapshot = store.dir
     height, fps, crf, container = body.height, body.fps, body.crf, body.container
     bitrate_kbps = body.bitrate_kbps
+    # QA-098: the file is named after the project (as it is called NOW).
+    project_name = read_meta(sid).get("name")
 
     def _job(set_progress=None, cancel_event=None) -> dict:
+        timeline_hash = edl_snapshot.hash()
         try:
-            res = render_export(edl_snapshot, session_dir_snapshot,
+            # QA-089: first the full-quality masters a larger-than-proxy
+            # export needs (the first 30 % of the bar when there are any).
+            render_progress = set_progress
+            edl = _export_edl(edl_snapshot, height, dry_run=True)
+            if edl is not edl_snapshot:
+                edl = _export_edl(edl_snapshot, height, cancel_event=cancel_event,
+                                  on_progress=(lambda p: set_progress(0.3 * p)) if set_progress else None)
+                if set_progress:
+                    render_progress = lambda p: set_progress(0.3 + 0.7 * p)  # noqa: E731
+            res = render_export(edl, session_dir_snapshot,
                                 height=height, fps=fps, crf=crf, container=container,
-                                on_progress=set_progress, cancel_event=cancel_event,
-                                bitrate_kbps=bitrate_kbps)
-        except RuntimeError as e:
+                                on_progress=render_progress, cancel_event=cancel_event,
+                                bitrate_kbps=bitrate_kbps, project_name=project_name)
+        except RENDER_ERRORS as e:
             # jobs.py stores `f"{type(e).__name__}: {e}"` as job.error and the
             # UI shows it verbatim — so raise something whose str() is already
             # user-facing instead of a 2000-char ffmpeg stderr dump.
             msg = str(e)
             raise RuntimeError(_render_failure_message(msg[-400:], msg)) from e
-        return _export_payload(sid, res)
+        return _export_payload(sid, res, timeline_hash)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
     return JSONResponse(
@@ -1596,13 +2134,38 @@ def get_waveform(sid: str, src: str, peaks_per_sec: int = 50):
     if not target.is_absolute():
         raise HTTPException(403, "src must be an absolute path")
     target = target.resolve()
-    if not target.is_relative_to(sd.resolve()):
+    if not _waveform_src_allowed(target, sd, store):
         raise HTTPException(403, "src must be inside the session workdir")
     if not target.exists():
         raise HTTPException(404, "src not found")
     from .render.waveform import waveform_peaks
     return waveform_peaks(target, sd / "cache" / "waveforms",
                           peaks_per_sec=peaks_per_sec)
+
+
+def _waveform_src_allowed(target: Path, sd: Path, store) -> bool:
+    """/waveform's read boundary (QA-081): the session workdir, the bundled
+    presets (the prompt's music beds live there — drawing one answered 403),
+    or a file this session's timeline already plays (it passed the read
+    allowlist when it was placed, and the renderer reads it anyway)."""
+    from . import config as _cfg
+    if target.is_relative_to(sd.resolve()):
+        return True
+    try:
+        if target.is_relative_to(Path(_cfg.PRESETS_DIR).resolve()):
+            return True
+    except OSError:
+        pass
+    for t in store.edl.tracks:
+        for c in t.clips:
+            src = getattr(c, "src", None)
+            if src:
+                try:
+                    if Path(src).resolve() == target:
+                        return True
+                except OSError:
+                    continue
+    return False
 
 
 @app.get("/api/sessions/{sid}/thumb")
@@ -1639,14 +2202,27 @@ def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
 
 @app.post("/api/sessions/{sid}/save_project")
 def save_project_endpoint(sid: str):
+    _existing_session_or_error(sid)
     sd = session_dir(sid)
+    from urllib.parse import quote
+    from .api.download_names import download_leaf
     from .storage_project import save_project
-    out = sd / "exports" / f"{sd.name}.vae"
+    # Named after the project (QA-098), like its exports — the session id is
+    # an internal name the user never chose. download_leaf keeps it a bare
+    # leaf; the id is the fallback for an unnamed project.
+    out = sd / "exports" / download_leaf(read_meta(sid).get("name"), f"{sd.name}.vae")
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_project(sid, out)
-    return {"path": str(out), "filename": out.name,
-            "url": f"/api/sessions/{sid}/files/exports/{out.name}",
-            "size": out.stat().st_size}
+    report: dict = {}
+    save_project(sid, out, report=report)
+    missing = report.get("missing") or []
+    body = {"path": str(out), "filename": out.name,
+            "url": f"/api/sessions/{sid}/files/exports/{quote(out.name)}",
+            "size": out.stat().st_size, "missing": missing}
+    if missing:
+        # QA-096: saved, but NOT self-contained — say so, naming the files.
+        from .media_offline import saved_missing_message
+        body["warning"] = saved_missing_message(missing)
+    return body
 
 
 _NOT_A_PROJECT = ("That file is not a Video AI Editor project. Choose the .vae "
@@ -1706,6 +2282,10 @@ async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
     finally:
         # Every exit — 200, 415, 422 — leaves no `_import_*` behind in WORKDIR.
         tmp.unlink(missing_ok=True)
+    # QA-099: a second open of the same .vae (or one saved from a project
+    # still here) gets "<name> (opened <date>)", not an identical picker row.
+    now = time.localtime()
+    name_reopened_copy(sid, f"{time.strftime('%b', now)} {now.tm_mday}, {time.strftime('%H:%M', now)}")
     return {"id": sid}
 
 
@@ -1894,7 +2474,7 @@ def _sticker_image_type(path: Path) -> str | None:
 
 
 @app.get("/api/sessions/{sid}/files/{kind}/{name:path}")
-def serve_session_file(sid: str, kind: str, name: str):
+def serve_session_file(sid: str, kind: str, name: str, as_name: str | None = Query(None, alias="name")):
     # Same first-layer sid shape check as DELETE /sessions/{sid} — sid is
     # untrusted URL input that gets joined into a filesystem path below.
     if not is_valid_session_id(sid):
@@ -1933,7 +2513,11 @@ def serve_session_file(sid: str, kind: str, name: str):
     # had no Escape/back affordance and trapped the user). uploads/previews stay
     # inline so the frontend <video> can still stream them.
     if kind == "exports":
-        return FileResponse(candidate, filename=candidate.name,
+        # `?name=` (QA-100): the Export dialog's File name becomes the
+        # downloaded name; api/download_names keeps it a bare leaf with the
+        # file's own extension.
+        from .api.download_names import download_leaf
+        return FileResponse(candidate, filename=download_leaf(as_name, candidate.name),
                             media_type=_export_media_type(candidate))
     return FileResponse(candidate)
 

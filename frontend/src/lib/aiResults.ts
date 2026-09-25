@@ -8,6 +8,7 @@
 // that throws would take the whole panel down with it (AiPanel is not inside
 // an error boundary). resultView must return a raw-JSON view for ANY input.
 
+import { cleanSummary } from './opLabels'
 import { baseName } from './paths'
 
 export type ResultRow =
@@ -48,7 +49,13 @@ function findMoments(r: Rec): ResultView {
   const headline = rows.length
     ? `${plural(rows.length, 'moment')}${query ? ` for “${query}”` : ''}`
     : str(r.summary) || 'No moments found'
-  return { headline, rows, raw: r }
+  // QA-067: the backend maps matches to timeline time and leaves out the ones
+  // the current edit removed; say how many, so a short list is explained.
+  const cut = num(r.cut_away)
+  return {
+    headline, rows, raw: r,
+    ...(cut ? { note: `${plural(cut, 'match', 'matches')} fell in parts the edit removed` } : {}),
+  }
 }
 
 function makeShorts(r: Rec): ResultView {
@@ -132,7 +139,8 @@ function auditAesthetic(r: Rec): ResultView {
   const score = num(r.score)
   const rows: ResultRow[] = recs(r.issues).map((i) => {
     const level = i.level === 'error' ? 'error' : i.level === 'warn' ? 'warn' : 'info'
-    return { kind: 'issue', level, text: str(i.message) || str(i.key) || 'issue' }
+    // The audit names clips by id ("c_1a2b3c4d is 0.2 s") — editor language only (QA-063/101).
+    return { kind: 'issue', level, text: cleanSummary(str(i.message) || str(i.key) || 'issue') }
   })
   const hook = isRec(r.hook) ? num(r.hook.hook_score) : null
   return {

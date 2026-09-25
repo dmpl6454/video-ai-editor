@@ -139,7 +139,8 @@ def _clean_channel(x, sr: int, strength: float):
 
 
 def denoise_clip(src: Path, cache_dir: Path, *,
-                 strength: float = 0.85, sample_rate: int = 48000) -> Path:
+                 strength: float = 0.85, sample_rate: int = 48000,
+                 on_progress=None, cancel_event=None) -> Path:
     """Return a new mp4 with the audio track noise-reduced.
 
     `strength` ∈ [0,1]: higher = more aggressive (with diminishing returns and
@@ -173,6 +174,11 @@ def denoise_clip(src: Path, cache_dir: Path, *,
 
     import soundfile as sf  # type: ignore
     import numpy as np
+    from . import jobio
+    # QA-066: extract → one step per channel → mux, with a cancel point
+    # between every step.
+    stages = jobio.Stages(on_progress, extract=0.15, clean=0.7, mux=0.15)
+    part = _pu.part_path(dst)
 
     with tempfile.TemporaryDirectory() as td:
         wav_in = Path(td) / "in.wav"
@@ -196,9 +202,14 @@ def denoise_clip(src: Path, cache_dir: Path, *,
         if not wav_in.exists() or wav_in.stat().st_size < 100:
             raise RuntimeError("source has no usable audio track")
 
+        stages.done("extract")
         data, sr = sf.read(str(wav_in), dtype="float32", always_2d=True)
-        clean = np.stack([_clean_channel(data[:, ch], sr, strength)
-                          for ch in range(data.shape[1])], axis=1)
+        channels = []
+        for ch in range(data.shape[1]):
+            jobio.check(cancel_event)
+            channels.append(_clean_channel(data[:, ch], sr, strength))
+            stages.sub("clean")((ch + 1) / data.shape[1])
+        clean = np.stack(channels, axis=1)
         peak = float(np.max(np.abs(clean))) if clean.size else 0.0
         if peak > 0.999:
             # Make-up gain must not clip; trade a fraction of a dB instead.
@@ -209,16 +220,22 @@ def denoise_clip(src: Path, cache_dir: Path, *,
         # Without video: just encode the cleaned wav — the source isn't an input
         # at all, so there is no `0:v` to fail to match.
         if has_video:
+            # The PICTURE sets the length (QA-066): `-shortest` alone let a
+            # source whose audio ends early lose its last frames; padded
+            # audio can never be the shorter stream.
             mux = [_pu.FFMPEG, "-y", "-i", str(src), "-i", str(wav_out),
-                   "-map", "0:v", "-map", "1:a",
-                   "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(dst)]
+                   "-map", "0:v", "-map", "1:a", "-af", "apad",
+                   "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(part)]
         else:
             mux = [_pu.FFMPEG, "-y", "-i", str(wav_out),
-                   "-c:a", "aac", "-b:a", "192k", str(dst)]
-        proc = subprocess.run(
-            mux, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", **_pu.SUBPROCESS_FLAGS,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg mux failed: {(proc.stderr or '')[-500:]}")
+                   "-c:a", "aac", "-b:a", "192k", str(part)]
+        jobio.check(cancel_event)
+        try:
+            rc, _out, err = jobio.run(mux, cancel_event=cancel_event, what="noise reduction")
+            if rc != 0:
+                raise RuntimeError(f"ffmpeg mux failed: {(err or '')[-500:]}")
+            _pu.replace_with_retry(part, dst)
+        finally:
+            _pu.unlink_with_retry(part)
+        stages.done("mux")
     return dst

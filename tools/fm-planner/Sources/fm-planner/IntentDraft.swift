@@ -40,6 +40,19 @@ struct IntentItem {
     var name: String?
     var lufs: Double?
     var words: [String]?
+    // QA-018 remainder: the everyday one-liners (fade / volume / mute / duck)
+    // need these, and a slot the struct lacks is one constrained decoding
+    // can never fill — "stop ducking" came back with `enabled` unset (= on).
+    @Guide(description: "fade only: in, out or both")
+    var edge: String?
+    @Guide(description: "volume only: up or down")
+    var change: String?
+    @Guide(description: "volume only: the level in dB, e.g. -20")
+    var db: Double?
+    @Guide(description: "mute only: true mutes, false unmutes")
+    var muted: Bool?
+    @Guide(description: "duck only: false turns ducking off")
+    var enabled: Bool?
 }
 
 @Generable
@@ -80,12 +93,19 @@ struct IntentItemOut: Codable, Sendable {
     var name: String?
     var lufs: Double?
     var words: [String]?
+    var edge: String?
+    var change: String?
+    var db: Double?
+    var muted: Bool?
+    var enabled: Bool?
 
     init(_ item: IntentItem) {
         recipe = item.recipe; style = item.style; target = item.target; ratio = item.ratio
         platform = item.platform; mood = item.mood; look = item.look; count = item.count
         duration_s = item.duration_s; factor = item.factor; text = item.text
         handle = item.handle; name = item.name; lufs = item.lufs; words = item.words
+        edge = item.edge; change = item.change; db = item.db; muted = item.muted
+        enabled = item.enabled
     }
 }
 

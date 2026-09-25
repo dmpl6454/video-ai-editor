@@ -1,3 +1,4 @@
+import { PAUSED_SEEK_BIAS_S } from './frameStep'
 // Client-side painting of PIP (v2+) clips.
 //
 // The preview render deliberately does NOT bake a PIP's picture (see the
@@ -262,7 +263,10 @@ export function syncPipVideo(
   if (!v.paused) v.pause()
   const tol = Math.max(1 / Math.max(1, fps), 0.03)
   if (Math.abs(v.currentTime - want) > tol) {
-    try { v.currentTime = want } catch { /* not seekable yet */ }
+    // Just past the frame's pts, never on it: a µs-truncated exact seek
+    // decodes the previous frame (QA-077, lib/frameStep.displaySeekTime).
+    const target = Math.min(v.duration - 1e-3, want + PAUSED_SEEK_BIAS_S)
+    try { v.currentTime = target } catch { /* not seekable yet */ }
   }
 }
 

@@ -51,3 +51,21 @@ describe('frame step follows the project frame rate (QA-009)', () => {
     expect(nudged).toBeCloseTo(0.04, 12)
   })
 })
+
+describe('displaySeekTime (QA-077: a paused seek never lands on a frame pts)', () => {
+  it('seeks to the MIDDLE of the frame the playhead names, at any rate', async () => {
+    const { displaySeekTime } = await import('./frameStep')
+    for (const fps of [30, 25, 24, 30000 / 1001, 60]) {
+      for (let n = 0; n < 12; n++) {
+        const t = displaySeekTime(n / fps, fps)
+        // Chromium keeps µs: the truncated time must still be inside frame n.
+        const truncated = Math.floor(t * 1e6) / 1e6
+        expect(Math.floor(truncated * fps + 1e-9), `${fps} fps frame ${n}`).toBe(n)
+        expect(truncated * fps - n).toBeGreaterThan(0.25)
+      }
+    }
+    // frame 2 at 30 fps: the exact pts truncates to 0.066666 (frame 1)
+    expect(Math.floor(Math.floor((2 / 30) * 1e6) / 1e6 * 30)).toBe(1)
+    expect(displaySeekTime(2 / 30, 30)).toBeCloseTo(2.5 / 30, 12)
+  })
+})

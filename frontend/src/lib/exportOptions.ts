@@ -15,6 +15,7 @@
 export interface CanvasLike {
   w: number
   h: number
+  fps?: number | null
   bitrate_kbps?: number | null
   loudness_lufs?: number | null
 }
@@ -69,6 +70,8 @@ export const PLATFORM_SPECS: readonly PlatformSpec[] = [
   { label: 'TikTok', preset: 'tiktok', w: 1080, h: 1920, bitrateKbps: 8000, lufs: -16 },
   { label: 'IG 1:1', preset: 'ig_feed_1x1', w: 1080, h: 1080, bitrateKbps: 6000, lufs: -16 },
   { label: 'IG 4:5', preset: 'ig_feed_4x5', w: 1080, h: 1350, bitrateKbps: 6000, lufs: -16 },
+  // QA-100: the backend always had youtube_16x9; nothing in the UI reached it.
+  { label: 'YouTube', preset: 'youtube_16x9', w: 1920, h: 1080, bitrateKbps: 12000, lufs: -14 },
 ]
 
 export function presetTitle(p: PlatformSpec): string {
@@ -115,9 +118,13 @@ export function exportBody(
   canvas: CanvasLike | null | undefined,
   shortSide: number,
   quality: QualityChoice,
-): { height?: number; crf?: number; bitrate_kbps?: number } {
-  const body: { height?: number; crf?: number; bitrate_kbps?: number } = {}
+  fps?: number | null,
+): { height?: number; crf?: number; bitrate_kbps?: number; fps?: number } {
+  const body: { height?: number; crf?: number; bitrate_kbps?: number; fps?: number } = {}
   if (shortSide) body.height = shortSide
+  // QA-009: a frame rate only when it differs from the project's — absent,
+  // the backend renders at edl.canvas.fps (exact, e.g. 30000/1001).
+  if (fps && Number.isFinite(fps) && !sameRate(fps, canvas?.fps)) body.fps = fps
   if (quality === 'platform' && canvas?.bitrate_kbps) return body
   body.crf = typeof quality === 'number' ? quality : 18
   if (canvas?.bitrate_kbps) body.bitrate_kbps = 0
@@ -135,4 +142,92 @@ export function platformMenuCommand(item: { label: string; w: number; h: number;
   const args: Record<string, unknown> = { w: item.w, h: item.h }
   if (item.fps) args.fps = item.fps
   return { tool: 'set_canvas', args }
+}
+
+// ---- frame rate (QA-009) ----------------------------------------------------
+
+/** Delivery rates offered in the Export dialog. NTSC rates are exact
+ *  rationals; the backend turns any float into an ffmpeg rate via
+ *  edl.timebase, so 30000/1001 and 29.97 name the same rate. */
+export const FRAME_RATES: readonly { fps: number; label: string }[] = [
+  { fps: 24000 / 1001, label: '23.976' },
+  { fps: 24, label: '24' },
+  { fps: 25, label: '25' },
+  { fps: 30000 / 1001, label: '29.97' },
+  { fps: 30, label: '30' },
+  { fps: 50, label: '50' },
+  { fps: 60000 / 1001, label: '59.94' },
+  { fps: 60, label: '60' },
+]
+
+/** Two rates are the same delivery rate within a thousandth of a frame. */
+export function sameRate(a: number | null | undefined, b: number | null | undefined): boolean {
+  if (!a || !b) return false
+  return Math.abs(a - b) < 1e-3
+}
+
+/** <select> options: value '' = the project rate (sends nothing). */
+export function frameRateOptions(canvas: CanvasLike | null | undefined): { value: string; label: string }[] {
+  const own = canvas?.fps ? FRAME_RATES.find((r) => sameRate(r.fps, canvas.fps))?.label
+    ?? String(Number(canvas.fps.toFixed(3))) : null
+  return [
+    { value: '', label: own ? `Project (${own} fps)` : 'Project rate' },
+    ...FRAME_RATES.filter((r) => !sameRate(r.fps, canvas?.fps)).map((r) => ({ value: String(r.fps), label: `${r.label} fps` })),
+  ]
+}
+
+// ---- loudness (QA-100) ------------------------------------------------------
+
+/** The loudness targets the dialog offers; null = normalisation off. */
+export const LOUDNESS_TARGETS: readonly { lufs: number | null; label: string }[] = [
+  { lufs: -14, label: '−14 LUFS · YouTube, Spotify' },
+  { lufs: -16, label: '−16 LUFS · Reels, TikTok' },
+  { lufs: -23, label: '−23 LUFS · Broadcast (EBU R128)' },
+  { lufs: null, label: 'Off · keep the mix as it is' },
+]
+
+// ---- size estimate (QA-100) -------------------------------------------------
+
+/** The AAC stream every export carries (compositor `_AAC_OUT`). */
+export const AUDIO_KBPS = 192
+export const AUDIO_DESCRIPTION = 'AAC · stereo · 48 kHz · 192 kbps'
+
+/** Bits per pixel per frame the Mac's quality-mode export lands near.
+ *  Measured with h264_videotoolbox at the -q:v each crf maps to
+ *  (compositor._crf_to_videotoolbox_qv: 18→90, 23→78, 28→65) on the bench
+ *  footage at 720×1280 and 2276×1280, 25 fps: 0.36-0.37 / 0.19-0.20 /
+ *  0.095-0.097 bpp. An ESTIMATE, labelled "About"; the platform-target branch
+ *  is exact up to the encoder's tolerance. */
+const CRF_BPP: Record<number, number> = { 18: 0.36, 23: 0.195, 28: 0.096 }
+
+/** Video kbps the export will average: the (pixel-scaled) platform target, or
+ *  the quality-mode estimate at the chosen size and rate. */
+export function estimateVideoKbps(
+  canvas: CanvasLike | null | undefined, shortSide: number, quality: QualityChoice, fps?: number | null,
+): number {
+  const w0 = canvas?.w ?? 1920
+  const h0 = canvas?.h ?? 1080
+  const [w, h] = exportDimensions(w0, h0, shortSide || null)
+  if (quality === 'platform' && canvas?.bitrate_kbps) {
+    // Same pixel scaling as compositor.render_export's target.
+    return Math.max(1, Math.round(canvas.bitrate_kbps * Math.min(1, (w * h) / Math.max(1, w0 * h0))))
+  }
+  const rate = fps || canvas?.fps || 30
+  const bpp = CRF_BPP[typeof quality === 'number' ? quality : 18] ?? CRF_BPP[18]
+  return Math.round((w * h * rate * bpp) / 1000)
+}
+
+/** Estimated file size in bytes for `seconds` of timeline. */
+export function estimateBytes(videoKbps: number, seconds: number): number {
+  return Math.round(((videoKbps + AUDIO_KBPS) * 1000 / 8) * Math.max(0, seconds))
+}
+
+/** A download name from the project name: no path characters, the right
+ *  extension, never empty. */
+export function exportFileName(name: string | null | undefined, container: 'mp4' | 'mov'): string {
+  // Path separators, the characters a filesystem refuses, and control characters.
+  const base = [...(name ?? '').replace(/\.(mp4|mov)$/i, '')]
+    .map((ch) => (ch.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(ch) ? ' ' : ch)).join('')
+    .replace(/\s+/g, ' ').trim().slice(0, 120) || 'export'
+  return `${base}.${container}`
 }

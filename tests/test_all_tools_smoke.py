@@ -148,6 +148,8 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "reorder_clips": {"track": "v1", "order": ["c1"]},
         "ripple_delete": {"clip_id": "c1"},  # destructive — late
         "duplicate_clip": {"clip_id": "c1"},
+        "paste_clips": {"clips": [{"track": "v1", "clip": {"src": src, "in": 0.0, "out": 1.0,
+                                                           "start": 0.0}}], "at": 1.0},
         "set_speed": {"clip_id": "c1", "factor": 1.5},
         "bulk_delete": {"clip_ids": ["t1"]},
         "bulk_duplicate": {"clip_ids": ["c1"]},
@@ -180,6 +182,8 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "add_music": {"src": music, "start": 0, "in": 0, "out": 4, "duck": True, "volume_db": -12},
         "set_loudness_target": {"lufs": -16.0},
         "set_track_muted": {"track": "music", "muted": True},
+        "set_track_solo": {"track": "music"},
+        "detach_audio": {"clip_id": "c1"},
         "set_track_locked": {"track": "v1", "locked": True},
         "remove_silences": {"clip_id": "c1", "min_silence_s": 0.5, "noise_db": -35},
         "remove_fillers": {"clip_id": "c1"},
@@ -219,6 +223,9 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         # Repair tools
         "repair_chunks": {},
         "repair_media_paths": {},
+        # Needs a missing file and a replacement; tests/test_b8_offline_media.py
+        # drives it end to end through the relink route.
+        "relink_media": None,
     }.get(tool, {})
 
 

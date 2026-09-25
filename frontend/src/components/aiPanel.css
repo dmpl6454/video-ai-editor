@@ -96,6 +96,10 @@
   color: var(--text-dim);
 }
 .ai-status-text { min-width: 0; }
+/* What is missing, in human names, behind "Details" (QA-101). */
+.ai-status-details { font-size: 11px; color: var(--text-dim); }
+.ai-status-details summary { cursor: pointer; color: var(--accent-2); }
+.ai-status-details ul { margin: 4px 0 0; padding-left: 16px; }
 .ai-refresh { font-size: 10px; padding: 2px 8px; white-space: nowrap; }
 
 .ai-banner {
@@ -161,9 +165,9 @@
 .ai-card.is-done::before { background: var(--good); opacity: 1; }
 .ai-card.is-error::before { background: var(--accent); opacity: 1; }
 .ai-card.is-cancelled::before { background: var(--text-dim); opacity: 1; }
-.ai-card.is-unavailable { opacity: 0.55; }
 .ai-card.is-unavailable::before { background: var(--text-dim); opacity: 1; }
-.ai-card.is-unavailable:hover, .ai-card.is-unavailable:focus-within { opacity: 0.9; }
+/* Unavailable reads from the grey bar and the "Not installed" badge, not from
+   fading the whole card: opacity 0.55 put its text at 2.7-3.9:1 (QA-103). */
 
 .ai-card-head {
   display: flex;
@@ -260,7 +264,7 @@
 .ai-check-row .ai-label { cursor: pointer; }
 .ai-label { font-size: 11px; color: var(--text-dim); }
 .ai-label em { font-style: normal; color: var(--accent); margin-left: 2px; }
-.ai-field-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); opacity: 0.8; }
+.ai-field-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); }
 .ai-field-err { font-size: 10.5px; color: var(--accent); }
 
 .ai-field input:not([type="checkbox"]):not([type="file"]),
@@ -450,3 +454,8 @@
   .left-tab::after, .ai-chevron, .ai-bar-fill, .ai-card, .ai-card::before { transition: none; }
   .ai-bar.indeterminate .ai-bar-fill { animation: none; width: 100%; opacity: 0.45; }
 }
+
+/* QA-065: the ask before a first run that downloads model weights. */
+.ai-consent { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 6px; background: var(--bg-2); }
+.ai-consent p { margin: 0 0 8px; font-size: 11.5px; line-height: 1.5; color: var(--text); }
+.ai-consent-actions { display: flex; gap: 6px; }

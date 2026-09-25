@@ -12,13 +12,17 @@ import { SafeZoneToggle } from './SafeZones'
 import { RatioMenu } from './RatioMenu'
 import { TopBarMore } from './TopBarMore'
 import { parseVersionInfo, VERSION_UNKNOWN, type VersionInfo } from '../lib/versionInfo'
-import { claimClickForNativeSave, projectFilename } from '../lib/nativeSave'
+import { claimClickForNativeSave } from '../lib/nativeSave'
 import { isSavedProjectStale, savedProject, visibleSavedProject, type SavedProject } from '../lib/savedProject'
 import { exportKind, exportLinkView } from '../lib/exportLink'
 import { canvasFacts } from '../lib/frameStep'
-import { defaultQuality, exportBody, qualityOptions, resolutionOptions, type CanvasLike, type QualityChoice } from '../lib/exportOptions'
+import { ExportButton } from './ExportDialog'
+import { useMenuA11y } from '../lib/useMenuA11y'
+import { editedLabel, projectLabel } from '../lib/projectName'
+import { ConfirmDialog } from './ConfirmDialog'
+import { Icon } from './Icon'
 
-interface SessionRow { id: string; name: string }
+interface SessionRow { id: string; name: string; modified_at?: number }
 
 export function TopBar() {
   const name = useStore((s) => s.sessionName)
@@ -27,12 +31,9 @@ export function TopBar() {
   const exportLinks = useStore((s) => s.exportLinks)
   const edlHash = useStore((s) => s.edlHash)
   const opsLen = useStore((s) => s.ops.length)
-  const exportStatus = useStore((s) => s.exportStatus)
   const exportError = useStore((s) => s.exportError)
   const clearExportError = useStore((s) => s.clearExportError)
-  const doExport = useStore((s) => s.doExport)
   const downloadExport = useStore((s) => s.downloadExport)
-  const [exportElapsed, setExportElapsed] = useState(0)
   const edl = useStore((s) => s.edl)
   const sid = useStore((s) => s.sessionId)
   const [saving, setSaving] = useState(false)
@@ -51,7 +52,14 @@ export function TopBar() {
   const savedStale = !!savedHere && isSavedProjectStale(savedHere, opsLen)
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
+  const [sessionsListed, setSessionsListed] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  // QA-099: inline rename of the open project (double-click the chip, or
+  // "Rename…" in the picker), and the in-app delete confirm.
+  const [renaming, setRenaming] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<SessionRow | null>(null)
+  const renameCommitted = useRef(false)
+  const shownName = projectLabel(name, sid)
   // One object from the single GET /api/version below, replaced wholesale (never
   // mutated): the semantic version, the git short-sha / baked BUILD_ID shown next
   // to it so a bug report identifies the exact bits (which "v0.3.7" did not), and
@@ -73,31 +81,18 @@ export function TopBar() {
   const pickerBtnRef = useRef<HTMLButtonElement>(null)
   const [pickerPos, setPickerPos] = useState<{ left: number; top: number } | null>(null)
 
-  // Export options popover — resolution + quality. `doExport()` already
-  // forwarded `{height, crf}` all the way to POST /export (store.ts/api.ts),
-  // but this button never passed anything, so every export used the hardcoded
-  // defaults. Rendered via the same document.body portal pattern as the
-  // session picker above, for the same reason (.topbar clips overflow).
-  const [exportOptsOpen, setExportOptsOpen] = useState(false)
-  // 0 = "not yet explicitly chosen" -> falls back to the current canvas height
-  // ("Source") below. Kept as a sentinel rather than initialized straight to
-  // edl.canvas.h and re-synced from a useEffect, so there's no setState call
-  // inside an effect body (react-hooks/set-state-in-effect) and the "Source"
-  // default keeps tracking canvas changes (e.g. aspect-ratio switches) until
-  // the user actually picks a resolution from the <select>.
-  // The value is a NAMED resolution = the canvas's SHORT side (QA-025), and 0
-  // sends no height at all (the backend renders the canvas).
-  const [exportHeightChoice, setExportHeightChoice] = useState<number>(0)
-  // '' = "not explicitly chosen": the platform bitrate target when the project
-  // carries one (QA-027), High otherwise — same sentinel reasoning as above.
-  const [exportQualityChoice, setExportQualityChoice] = useState<string>('')
-  const exportCanvas = edl?.canvas as CanvasLike | undefined
-  const exportQuality: QualityChoice = exportQualityChoice === ''
-    ? defaultQuality(exportCanvas)
-    : exportQualityChoice === 'platform' ? 'platform' : Number(exportQualityChoice)
-  const [exportContainer, setExportContainer] = useState<'mp4' | 'mov'>('mp4')
-  const exportBtnRef = useRef<HTMLButtonElement>(null)
-  const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
+  // Export ▾ opens components/ExportDialog (QA-100): name, resolution as real
+  // WxH, frame rate, quality, format, loudness, audio and a size estimate.
+  // Keyboard: both popovers take focus when they open, Escape closes them
+  // and focus goes back to the trigger (lib/useMenuA11y, QA-102). They used
+  // to close only on an outside mousedown.
+  const pickerMenuRef = useRef<HTMLDivElement>(null)
+  const pickerA11y = useMenuA11y({
+    // Ready once the project list has arrived: the checked row (the project
+    // on screen) is where focus lands, and it is not there while "Loading…".
+    open: pickerOpen, ready: !!pickerPos && sessionsListed, mode: 'menu',
+    menuRef: pickerMenuRef, triggerRef: pickerBtnRef, onClose: () => setPickerOpen(false),
+  })
 
   useEffect(() => {
     // `res.ok` matters: without it a 4xx/5xx body goes to .json(), throws, and
@@ -115,16 +110,6 @@ export function TopBar() {
       .catch((e) => console.warn('[TopBar] version fetch failed:', e))
   }, [])
 
-  // Tick an elapsed-seconds counter while an export is running so the button
-  // shows live progress instead of a frozen "Exporting…".
-  useEffect(() => {
-    if (!exporting) { setExportElapsed(0); return }
-    const startedAt = Date.now()
-    const id = window.setInterval(() => {
-      setExportElapsed(Math.floor((Date.now() - startedAt) / 1000))
-    }, 1000)
-    return () => window.clearInterval(id)
-  }, [exporting])
 
   const onSaveProject = async () => {
     if (!sid) return
@@ -132,7 +117,9 @@ export function TopBar() {
     setSaved(null)
     try {
       const r = await api.saveProject(sid)
-      setSaved(savedProject(sid, r.url, useStore.getState().ops.length))
+      setSaved(savedProject(sid, r.url, useStore.getState().ops.length, r.filename))
+      // QA-096: saved, but without media whose file is gone — never silently.
+      if (r.warning) toast.error(r.warning, 9000)
     } catch (e) {
       // Save used to fail in TOTAL silence: no toast, no console line, and the
       // "Saved" link simply never appeared — indistinguishable from a slow save.
@@ -158,7 +145,8 @@ export function TopBar() {
   // file does not exist there, and a missing source reads back as "cancelled",
   // which this handler deliberately does not toast).
   const onSavedLinkClick = (link: SavedProject) => (e: ReactMouseEvent<HTMLAnchorElement>) => {
-    const pending = claimClickForNativeSave(e, link.sid, projectFilename(link.sid))
+    // The file save_project named after the project (QA-098), not `<sid>.vae`.
+    const pending = claimClickForNativeSave(e, link.sid, link.filename)
     if (!pending) return
     void pending.then((outcome) => {
       if (outcome.kind === 'saved') toast.success(`Saved to ${outcome.path}`)
@@ -188,12 +176,14 @@ export function TopBar() {
     const rect = pickerBtnRef.current?.getBoundingClientRect()
     if (rect) setPickerPos({ left: rect.left, top: rect.bottom + 4 })
     // A swallowed failure here left the picker showing "Loading…" forever.
+    setSessionsListed(false)
     api.listSessions()
       .then((r) => setSessions(r.sessions ?? []))
       .catch((e) => {
         setSessions([])
         toast.error(`Couldn't list sessions: ${errorMessage(e)}`)
       })
+      .finally(() => setSessionsListed(true))
     const close = (e: MouseEvent) => {
       const tgt = e.target as HTMLElement
       if (!tgt.closest('[data-session-picker]')) setPickerOpen(false)
@@ -201,26 +191,6 @@ export function TopBar() {
     setTimeout(() => window.addEventListener('mousedown', close), 0)
     return () => window.removeEventListener('mousedown', close)
   }, [pickerOpen])
-
-  // Position + outside-click-close for the export options popover — same
-  // pattern as the session picker effect above (compute in an effect, not
-  // inline during render, since reading a ref mid-render can see stale layout).
-  useEffect(() => {
-    if (!exportOptsOpen) return
-    const rect = exportBtnRef.current?.getBoundingClientRect()
-    if (rect) setExportOptsPos({ left: rect.right, top: rect.bottom + 4 })
-    const close = (e: MouseEvent) => {
-      const tgt = e.target as HTMLElement
-      if (!tgt.closest('[data-export-opts]')) setExportOptsOpen(false)
-    }
-    setTimeout(() => window.addEventListener('mousedown', close), 0)
-    return () => window.removeEventListener('mousedown', close)
-  }, [exportOptsOpen])
-
-  const confirmExport = () => {
-    setExportOptsOpen(false)
-    void doExport({ ...exportBody(exportCanvas, exportHeightChoice, exportQuality), container: exportContainer })
-  }
 
   const switchSession = async (newId: string) => {
     setPickerOpen(false)
@@ -230,39 +200,97 @@ export function TopBar() {
 
   const newSession = async () => {
     setPickerOpen(false)
-    const r = await api.createSession(`project ${new Date().toLocaleString()}`)
-    await useStore.getState().openSession(r.id)
+    // No client-made name: the server names it "Untitled project N" (QA-099)
+    // — it used to be "project 9/25/2026, 7:03:47 PM".
+    try {
+      const r = await api.createSession()
+      await useStore.getState().openSession(r.id)
+    } catch (e) {
+      toast.error(`Couldn't create a project: ${errorMessage(e)}`)
+    }
   }
 
-  const removeSession = async (id: string, e: React.MouseEvent) => {
+  const removeSession = (row: SessionRow, e: React.MouseEvent) => {
     e.stopPropagation()  // don't trigger switchSession
-    if (!window.confirm(`Delete project ${id}? This removes its media and history permanently.`)) return
-    await api.deleteSession(id)
-    const list = await api.listSessions()
-    setSessions(list.sessions)
-    // If we deleted the active session, switch to the newest remaining, or create one.
-    if (id === sid) {
-      const next = list.sessions[0]?.id ?? (await api.createSession()).id
-      await switchSession(next)
+    setPickerOpen(false)
+    setConfirmDelete(row)
+  }
+
+  const reallyRemoveSession = async (row: SessionRow) => {
+    setConfirmDelete(null)
+    try {
+      await api.deleteSession(row.id)
+      const list = await api.listSessions()
+      setSessions(list.sessions)
+      toast.info(`Deleted “${projectLabel(row.name, row.id)}”.`)
+      // If we deleted the active session, switch to the newest remaining, or create one.
+      if (row.id === sid) {
+        const next = list.sessions[0]?.id ?? (await api.createSession()).id
+        await switchSession(next)
+      }
+    } catch (e) {
+      toast.error(`Couldn't delete the project: ${errorMessage(e)}`)
     }
+  }
+
+  const startRename = () => {
+    setPickerOpen(false)
+    renameCommitted.current = false
+    setRenaming(true)
+  }
+  const finishRename = async (value: string | null) => {
+    if (renameCommitted.current) return
+    renameCommitted.current = true
+    setRenaming(false)
+    // Back onto the chip, not <body> (keyboard users keep their place).
+    requestAnimationFrame(() => pickerBtnRef.current?.focus())
+    if (value === null) return
+    const next = value.replace(/\s+/g, ' ').trim()
+    if (!next || next === name) return
+    await useStore.getState().renameSession(next)
   }
 
   return (
     <header className="topbar">
       <h1 className="topbar-brand">Video AI Editor</h1>
       <div data-session-picker style={{ position: 'relative' }}>
+        {renaming ? (
+          <input
+            className="topbar-session-rename"
+            aria-label="Project name"
+            defaultValue={shownName}
+            maxLength={120}
+            autoFocus
+            data-keymap-ignore
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); void finishRename(e.currentTarget.value) }
+              if (e.key === 'Escape') { e.preventDefault(); void finishRename(null) }
+            }}
+            onBlur={(e) => { void finishRename(e.currentTarget.value) }}
+          />
+        ) : (
         <button
           ref={pickerBtnRef}
           className="pill topbar-session"
-          title={`Switch project — ${name}`}
+          title={`${shownName} — switch project (double-click to rename)`}
+          aria-haspopup="menu"
+          aria-expanded={pickerOpen}
           onClick={() => setPickerOpen((o) => !o)}
+          onDoubleClick={(e) => { e.preventDefault(); startRename() }}
           style={{ cursor: 'pointer', padding: '3px 10px', fontSize: 11 }}
         >
-          {name} ▾
+          {shownName} <span aria-hidden="true">▾</span>
         </button>
+        )}
         {pickerOpen && pickerPos && createPortal(
           <div
+            ref={pickerMenuRef}
             data-session-picker
+            data-keymap-ignore
+            role="menu"
+            aria-label="Projects"
+            onKeyDown={pickerA11y.onKeyDown}
             style={{
               position: 'fixed',
               left: pickerPos.left,
@@ -273,62 +301,70 @@ export function TopBar() {
               overflow: 'auto', padding: 4,
             }}
           >
-            <div
-              onClick={newSession}
-              style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 12, borderRadius: 3 }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              ＋ New project
-            </div>
-            <div
-              onClick={() => { setPickerOpen(false); importRef.current?.click() }}
-              style={{ padding: '6px 10px', cursor: 'pointer', fontSize: 12, borderRadius: 3,
-                       borderBottom: '1px solid var(--line)' }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              📂 Open .vae…
-            </div>
+            {/* Real <button role="menuitem">s (QA-102): these were click-only
+                <div>s with tabIndex -1, so the picker had no keyboard path. */}
+            <button type="button" role="menuitem" className="menu-item" onClick={newSession}>
+              <Icon name="plus" /> New project
+            </button>
+            <button type="button" role="menuitem" className="menu-item"
+              onClick={() => { pickerA11y.close(false); importRef.current?.click() }}>
+              <Icon name="open" /> Open .vae…
+            </button>
+            <button type="button" role="menuitem" className="menu-item" onClick={startRename}>
+              Rename this project…
+            </button>
+            <div role="separator" style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
             {sessions.length === 0 && (
-              <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--text-dim)' }}>
+              <div role="none" style={{ padding: '6px 10px', fontSize: 11, color: 'var(--text-dim)' }}>
                 Loading…
               </div>
             )}
             {sessions.map((s) => (
-              <div
-                key={s.id}
-                onClick={() => switchSession(s.id)}
-                title={s.id}
-                style={{
-                  padding: '6px 10px', cursor: 'pointer', fontSize: 12, borderRadius: 3,
-                  background: s.id === sid ? 'var(--bg-3)' : 'transparent',
-                  fontWeight: s.id === sid ? 600 : 400,
-                  display: 'flex', justifyContent: 'space-between', gap: 8,
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-3)')}
-                onMouseLeave={(e) => (e.currentTarget.style.background = s.id === sid ? 'var(--bg-3)' : 'transparent')}
-              >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                  {s.name || s.id}
-                </span>
-                <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>{s.id.slice(0, 10)}</span>
+              // A row is two menu items: open the project (checked = the one
+              // on screen, where focus lands on open) and delete it. Nesting
+              // the delete button inside a clickable row made it unreachable.
+              <div key={s.id} role="none" className="menu-row">
                 <button
-                  onClick={(e) => removeSession(s.id, e)}
-                  title={`Delete project ${s.id}`}
-                  style={{
-                    background: 'transparent', border: 'none', color: 'var(--text-dim)',
-                    cursor: 'pointer', fontSize: 12, padding: '0 2px', lineHeight: 1,
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = '#ff4d6d')}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={s.id === sid}
+                  className="menu-item"
+                  onClick={() => switchSession(s.id)}
+                  title={projectLabel(s.name, s.id)}
+                  style={{ flex: 1, minWidth: 0 }}
                 >
-                  ×
+                  <span className="menu-check" aria-hidden="true">{s.id === sid && <Icon name="check" size={12} />}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                    {projectLabel(s.name, s.id)}
+                  </span>
+                  {/* When, not the raw id (QA-099): two copies of one project
+                      are told apart by when they were last edited. */}
+                  <span className="menu-item-meta">{editedLabel(s.modified_at)}</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="menu-item-icon"
+                  onClick={(e) => removeSession(s, e)}
+                  title={`Delete “${projectLabel(s.name, s.id)}”`}
+                  aria-label={`Delete project ${projectLabel(s.name, s.id)}`}
+                >
+                  <span aria-hidden="true">×</span>
                 </button>
               </div>
             ))}
           </div>,
           document.body,
+        )}
+        {confirmDelete && (
+          <ConfirmDialog
+            title={`Delete “${projectLabel(confirmDelete.name, confirmDelete.id)}”?`}
+            body={`This removes the project${confirmDelete.modified_at ? ` (${editedLabel(confirmDelete.modified_at)})` : ''}, its imported media and its edit history from this Mac. It can’t be undone.`}
+            confirmLabel="Delete project"
+            danger
+            onConfirm={() => void reallyRemoveSession(confirmDelete)}
+            onCancel={() => setConfirmDelete(null)}
+          />
         )}
       </div>
       {pendingOps > 0 && (
@@ -362,8 +398,13 @@ export function TopBar() {
         <TextTool />
         <CaptionsButton />
         <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
-        <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
-        <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
+        {/* Glyph buttons carry a NAME (QA-102): screen readers announced "?" and "⌨". */}
+        <button onClick={openHelp} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-keyshortcuts="?" style={{ fontSize: 11 }}>
+          <span aria-hidden="true">?</span>
+        </button>
+        <button className="icon-btn" onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" aria-label="Customize keyboard shortcuts">
+          <Icon name="keyboard" />
+        </button>
         {/* The iPhone-pairing affordance, rendered ONLY when this build reports
             `phone_pairing: true` on /api/version.
 
@@ -396,8 +437,9 @@ export function TopBar() {
         <TopBarMore version={versionText} />
         {appInfo.version && (
           <span className="topbar-wide" title={appInfo.build ? `App version ${appInfo.version} · build ${appInfo.build}` : 'App version'}
-                style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
-            {versionText}
+                style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+            {/* The version only; the build id is in its title and in "⋯" (QA-101). */}
+            {`v${appInfo.version}`}
           </span>
         )}
       </div>
@@ -417,15 +459,15 @@ export function TopBar() {
         >
           {/* Below 1100 px the words give way and the icon stays (styles.css
               .topbar-btn-label), so the tools keep their room (QA-012). */}
-          {saving ? 'Saving…' : <>💾<span className="topbar-btn-label"> Save</span></>}
+          {saving ? 'Saving…' : <><Icon name="save" /><span className="topbar-btn-label"> Save</span></>}
         </button>
         <button onClick={() => importRef.current?.click()} title="Open a saved .vae project" aria-label="Open">
-          📂<span className="topbar-btn-label"> Open</span>
+          <Icon name="open" /><span className="topbar-btn-label"> Open</span>
         </button>
         <input ref={importRef} type="file" accept=".vae,.zip" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
         {savedHere && (
-          <a href={savedHere.url} download onClick={onSavedLinkClick(savedHere)}
+          <a href={savedHere.url} download={savedHere.filename} onClick={onSavedLinkClick(savedHere)}
             className={savedStale ? 'stale-dl' : ''}
             title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
             style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
@@ -460,102 +502,27 @@ export function TopBar() {
           // hovering for a 2000-char raw ffmpeg dump. Strip the RuntimeError:
           // prefix jobs.py adds, and cap the width so a long tail (an
           // unmapped ffmpeg error) can't blow out the toolbar.
-          <span
+          <button
             // Width capped per breakpoint in styles.css (.topbar-export-error):
             // at 1024 px a 340 px chip pushed Help and Shortcuts out of the
-            // bar (QA-012). The title has the whole message.
+            // bar (QA-012). The title has the whole message. A <button>, not a
+            // clickable <span>, so the keyboard can dismiss it too (QA-102).
+            type="button"
             className="topbar-export-error"
             style={{
               color: 'var(--accent)', fontSize: 12, cursor: 'pointer',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              background: 'none', border: 'none', padding: 0,
             }}
             title={`${exportError} (click to dismiss)`}
+            aria-label={`Export failed: ${exportError.replace(/^\w*Error:\s*/, '')}. Dismiss`}
             onClick={() => clearExportError()}
           >
-            ⚠ {exportError.replace(/^\w*Error:\s*/, '')} ✕
-          </span>
-        )}
-        <div data-export-opts style={{ position: 'relative', display: 'inline-block' }}>
-          <button
-            ref={exportBtnRef}
-            className="primary"
-            onClick={() => setExportOptsOpen((o) => !o)}
-            disabled={exporting || !edl?.duration}
-            title={!edl?.duration
-              ? 'Nothing to export yet — add a video to the timeline first'
-              : exporting
-                ? 'Export is already running — the button shows elapsed time'
-                : 'Render the final flattened video (MP4/MOV) to share'}
-          >
-            {exporting
-              ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${exportElapsed}s`
-              : 'Export ▾'}
+            <span aria-hidden="true">⚠</span> {exportError.replace(/^\w*Error:\s*/, '')} <span aria-hidden="true">✕</span>
           </button>
-          {exportOptsOpen && exportOptsPos && createPortal(
-            <div
-              data-export-opts
-              style={{
-                position: 'fixed',
-                left: exportOptsPos.left,
-                top: exportOptsPos.top,
-                transform: 'translateX(-100%)',
-                zIndex: 1000,
-                background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 6,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 220,
-                padding: 10, display: 'flex', flexDirection: 'column', gap: 8,
-              }}
-            >
-              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                Resolution
-                {/* Bound to the CHOICE, with 0 as the "source" sentinel — not to
-                    the resolved height. Giving the Source option the canvas
-                    height emitted two options with the same value whenever the
-                    canvas matched a preset (a 1080-tall project had 1080 twice),
-                    and a <select> resolves a duplicate value to the FIRST match,
-                    so picking "1080p" silently snapped back to "Source". */}
-                <select
-                  value={exportHeightChoice}
-                  onChange={(e) => setExportHeightChoice(Number(e.target.value))}
-                  style={{ fontSize: 12, padding: '3px 4px' }}
-                >
-                  {/* Each label carries the size the file will measure: a
-                      named resolution is the SHORT side, so 1080p on 9:16
-                      reads "1080p (1080×1920)" (QA-025). */}
-                  {resolutionOptions(exportCanvas).map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                Quality
-                <select
-                  value={String(exportQuality)}
-                  onChange={(e) => setExportQualityChoice(e.target.value)}
-                  style={{ fontSize: 12, padding: '3px 4px' }}
-                >
-                  {qualityOptions(exportCanvas).map((o) => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                Format
-                <select
-                  value={exportContainer}
-                  onChange={(e) => setExportContainer(e.target.value as 'mp4' | 'mov')}
-                  style={{ fontSize: 12, padding: '3px 4px' }}
-                >
-                  <option value="mp4">MP4</option>
-                  <option value="mov">MOV</option>
-                </select>
-              </label>
-              <button className="primary" onClick={confirmExport} style={{ fontSize: 12, marginTop: 2 }}>
-                Export
-              </button>
-            </div>,
-            document.body,
-          )}
-        </div>
+        )}
+        {/* The right-most pinned control (QA-012): Export ▾ → the dialog. */}
+        <ExportButton />
       </div>
     </header>
   )

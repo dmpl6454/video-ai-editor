@@ -74,6 +74,9 @@ def _store(tmp_path: Path, *, with_music: bool = False) -> EDLStore:
             Clip(src=str(music), in_=0, out=2, start=0, id="m1"),
         ]))
     edl = EDL(canvas=Canvas(w=320, h=180, fps=30), tracks=tracks)
+    # Raw mix levels: a loudness-matched preview (QA-082) lifts the music-only
+    # mix back to the target once the v1 tone is muted, as the export does.
+    edl.canvas.loudness_lufs = None
     edl.recompute_duration()
     (tmp_path / "edl.json").write_text(edl.model_dump_json())
     return EDLStore(tmp_path)

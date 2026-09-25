@@ -6,7 +6,7 @@
    terminal prompt opens a line; the log beneath it is the darker --bg-0 with
    a faint grain so it reads as a different material (a record, not a form).
    Hierarchy is carried by scale, not colour: the reply at 13px, step rows at
-   12px in the monospace stack OpsLog already uses, measured values at 11px in
+   12px in the UI face, measured values at 11px in
    --text-dim. Colour is semantic only — --good landed, --warn in flight,
    --accent failed, --accent-2 the thing you can act on — and every value is a
    token from styles.css:4-21; no new tokens were needed.
@@ -293,9 +293,10 @@
 .brain-row-detail { grid-column: 2; font-size: 11px; line-height: 1.45; color: var(--text-dim); overflow-wrap: anywhere; }
 .brain-row-fix {
   grid-column: 2;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
+  /* A sentence to act on, not a command to copy (QA-063). */
+  font-size: 11px;
   line-height: 1.5;
+  color: var(--text);
   background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -364,11 +365,14 @@
 .prompt-log-meta b { color: var(--text); font-weight: 500; }
 .prompt-log-meta .dl { color: var(--warn); }
 
-/* Step rail — monospace, numbered, one line each. */
-.prompt-steps { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+/* Step rail — numbered, one line each, in the UI face (QA-101: the steps
+   are editor language now, not code). The label column is capped at 45 % so
+   a long label can never squeeze the summary to one character per line
+   (QA-017-EXPANDED at 1024: `max-content` took the whole row). */
+.prompt-steps { list-style: none; margin: 0; padding: 0; font-family: var(--font-ui); font-size: 12px; }
 .prompt-step {
   display: grid;
-  grid-template-columns: 22px 14px minmax(120px, max-content) 1fr;
+  grid-template-columns: 22px 14px fit-content(45%) minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
   padding: 3px 0;
@@ -382,6 +386,8 @@
 .prompt-step.is-failed .g, .prompt-step.is-failed .sum { color: var(--accent); }
 .prompt-step.is-skipped { opacity: 0.6; }
 .prompt-step.is-skipped .g { color: var(--text-dim); }
+.prompt-step.is-cancelled { opacity: 0.6; }
+.prompt-step.is-cancelled .g { color: var(--text-dim); }
 .prompt-step.is-none .sum::after { content: ' · no effect'; color: var(--warn); }
 .prompt-step.is-verify .tool { color: var(--text-dim); font-style: italic; }
 .prompt-step-bar { grid-column: 3 / -1; height: 3px; border-radius: 999px; background: var(--bg-3); overflow: hidden; margin: 2px 0 1px; }
@@ -459,6 +465,8 @@
 .prompt-log-summary .g { flex-shrink: 0; width: 14px; text-align: center; }
 .prompt-log-summary .g.is-pass { color: var(--good); }
 .prompt-log-summary .g.is-fail { color: var(--accent); }
+/* A run that changed nothing, or replaced something: neutral, not a green tick. */
+.prompt-log-summary .g.is-info { color: var(--text-dim); font-weight: 600; }
 .prompt-log-summary .prompt-log-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .prompt-log-summary .sum { flex-shrink: 0; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
 .prompt-log-summary .spacer { flex: 1; }
@@ -564,8 +572,35 @@
 }
 
 /* Run-log step rows: the plan's `why` is the label, the tool id a quiet tag. */
-.prompt-step-id { margin-left: 6px; font-size: 10px; color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 /* Gate cards: the technical remedy behind a disclosure, never in the chip. */
 .clarify-why { font-size: 11px; color: var(--text-dim); }
 .clarify-why > button { padding: 0 4px; font-size: 11px; }
 .clarify-why ul { margin: 4px 0 0 14px; padding: 0; }
+
+/* Run with an answer still missing: looks unavailable, but pressing it is the
+   attempt that shows "Still needed" (QA-063). */
+/* A Run that still needs an answer is NEUTRAL like every disabled primary
+   (QA-103: the faded pink measured 3.15:1), not a dimmed live button. */
+.clarify-actions button.primary[aria-disabled="true"] {
+  opacity: 1; background: var(--bg-3); border-color: var(--line); color: var(--text-faint);
+}
+
+/* ---- the log is a DRAWER, not a row (QA-017-EXPANDED) ---------------------
+   The open log (a live run, a folded summary, or "Details" on a finished run)
+   used to sit in the centre column's auto row above the preview, so its height
+   came straight out of the picture: a 13-step Details took a 9:16 viewer at
+   1440x900 from 504 to 342 px tall. It now hangs from the bottom of the input
+   row OVER the top of the preview, capped at 60 % of the space above the
+   timeline and scrolled inside — the grid row is only the input, so the
+   preview keeps its size whatever the log holds. The bar is raised above the
+   preview pane because container-type makes it its own stacking context. */
+.prompt-bar:has(> .prompt-log) { z-index: 6; }
+.prompt-bar > .prompt-log {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: min(60vh, calc((100vh - 44px - 6px - var(--timeline-h, 280px)) * 0.5));
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5);
+}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore, errorMessage } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
+import { CANCELLED, COUNTDOWN_S, PERMISSION_HINT_MS, cancellable, levelOf, recordStart } from '../lib/voCapture'
 
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the two methods this file calls, not the whole class.
@@ -54,8 +55,18 @@ export function VoRecorder() {
   const playhead = useStore((s) => s.playhead)
   const refresh = useStore((s) => s.refresh)
   const setPlaying = useStore((s) => s.setPlaying)
+  const setPlayhead = useStore((s) => s.setPlayhead)
   const [recording, setRecording] = useState(false)
   const [requesting, setRequesting] = useState(false)  // mic-permission prompt in flight
+  // QA-085: a 3-2-1 count-in, a live level meter, a cancellable permission
+  // request, and playback that RUNS while you narrate (it used to pause).
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [slowPrompt, setSlowPrompt] = useState(false)
+  const cancelRequestRef = useRef<(() => void) | null>(null)
+  const countdownCancelRef = useRef(false)
+  const meterRef = useRef<HTMLSpanElement | null>(null)
+  const meterStopRef = useRef<(() => void) | null>(null)
+  const [metering, setMetering] = useState(false)   // a live mic stream feeds the meter
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
@@ -71,6 +82,9 @@ export function VoRecorder() {
   // exit path (stop, error, unmount). Leaving the stream open keeps the OS mic
   // indicator lit, which reads as "stuck recording" even when the button isn't.
   const teardown = () => {
+    meterStopRef.current?.()
+    meterStopRef.current = null
+    setMetering(false)
     if (tickRef.current) { window.clearInterval(tickRef.current); tickRef.current = null }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop())
@@ -96,6 +110,68 @@ export function VoRecorder() {
     teardown()
   }, [])
 
+  // Live input level from the mic stream: RMS per animation frame, written
+  // straight to the meter element (no React render per frame).
+  const startMeter = (stream: MediaStream) => {
+    try {
+      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!Ctx) return
+      const ctx = new Ctx()
+      const an = ctx.createAnalyser()
+      an.fftSize = 1024
+      ctx.createMediaStreamSource(stream).connect(an)
+      const buf = new Float32Array(an.fftSize)
+      let raf = 0
+      const tick = () => {
+        an.getFloatTimeDomainData(buf)
+        const { dbfs, fraction } = levelOf(buf)
+        const el = meterRef.current
+        if (el) {
+          el.style.transform = `scaleX(${fraction})`
+          el.dataset.dbfs = Number.isFinite(dbfs) ? dbfs.toFixed(1) : '-inf'
+          el.dataset.hot = dbfs > -3 ? 'true' : 'false'
+        }
+        raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+      meterStopRef.current = () => { cancelAnimationFrame(raf); void ctx.close().catch(() => {}) }
+      setMetering(true)
+    } catch (e) {
+      console.warn('[vo] level meter unavailable:', e)
+    }
+  }
+
+  // 3-2-1 before capture; false when the user cancelled it.
+  const runCountdown = async (): Promise<boolean> => {
+    countdownCancelRef.current = false
+    for (let n = COUNTDOWN_S; n > 0; n--) {
+      setCountdown(n)
+      await new Promise((r) => setTimeout(r, 1000))
+      if (countdownCancelRef.current) { setCountdown(null); return false }
+    }
+    setCountdown(null)
+    return true
+  }
+
+  // Capture started: the clip lands on the frame-snapped record point, and
+  // the timeline PLAYS from there so the narration is to picture.
+  const beginTake = () => {
+    const at = recordStart(useStore.getState().playhead, useStore.getState().edl?.canvas?.fps)
+    startedAtRef.current = at
+    setPlayhead(at)
+    setPlaying(true)
+    setRecording(true)
+    setElapsed(0)
+    tickRef.current = window.setInterval(() => {
+      setElapsed((e) => e + 0.1)
+    }, 100) as unknown as number
+  }
+
+  const cancelPending = () => {
+    cancelRequestRef.current?.()
+    countdownCancelRef.current = true
+  }
+
   const start = async () => {
     setError(null)
     if (!sid) return
@@ -112,17 +188,14 @@ export function VoRecorder() {
     const py = (window as unknown as PywebviewVoBridge).pywebview?.api
     if (py?.vo_start && py?.vo_stop) {
       try {
+        // The native capture starts the moment vo_start answers, so the
+        // count-in comes first.
+        setRequesting(false)
+        if (!(await runCountdown())) return
         const res = await py.vo_start(sid)
         if (res?.ok) {
           nativeRecordingRef.current = true
-          startedAtRef.current = playhead
-          setPlaying(false)
-          setRecording(true)
-          setRequesting(false)
-          setElapsed(0)
-          tickRef.current = window.setInterval(() => {
-            setElapsed((e) => e + 0.1)
-          }, 100) as unknown as number
+          beginTake()
           return
         }
         if (!res?.unsupported) {
@@ -158,8 +231,20 @@ export function VoRecorder() {
       return
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // Cancellable (QA-085): a prompt nobody answers used to leave the button
+      // disabled on "Requesting mic access…" forever. A grant that arrives
+      // after Cancel is released at once so the mic light goes out.
+      const req = cancellable(navigator.mediaDevices.getUserMedia({ audio: true }),
+        (late) => late.getTracks().forEach((t) => t.stop()))
+      cancelRequestRef.current = req.cancel
+      const slow = window.setTimeout(() => setSlowPrompt(true), PERMISSION_HINT_MS)
+      const got = await req.promise.finally(() => { window.clearTimeout(slow); setSlowPrompt(false); cancelRequestRef.current = null })
+      if (got === CANCELLED) return
+      const stream = got
       streamRef.current = stream
+      setRequesting(false)
+      startMeter(stream)
+      if (!(await runCountdown())) { teardown(); return }
       const mime = (window as unknown as { MediaRecorder: typeof MediaRecorder })
         .MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -203,14 +288,7 @@ export function VoRecorder() {
       }
       rec.start(250)
       recRef.current = rec
-      startedAtRef.current = playhead
-      setPlaying(false)  // pause playback while recording
-      setRecording(true)
-      setRequesting(false)
-      setElapsed(0)
-      tickRef.current = window.setInterval(() => {
-        setElapsed((e) => e + 0.1)
-      }, 100) as unknown as number
+      beginTake()
     } catch (e) {
       // Any start failure (mic denied, unsupported recorder, throw after the mic
       // was acquired) → fully reset to idle AND release the mic so its indicator
@@ -236,6 +314,7 @@ export function VoRecorder() {
 
   const stop = async () => {
     setRecording(false)
+    setPlaying(false)
     if (tickRef.current) { window.clearInterval(tickRef.current); tickRef.current = null }
 
     if (nativeRecordingRef.current) {
@@ -319,24 +398,45 @@ export function VoRecorder() {
 
   return (
     <div style={{ marginTop: 12 }}>
-      {!recording ? (
+      {recording ? (
         <button
-          style={{ width: '100%', fontSize: 11 }}
-          onClick={start}
-          disabled={submitting || requesting || !sid}
-          title="Record a voiceover from your mic at the current playhead"
+          className="vo-btn is-recording"
+          style={{ width: '100%', fontSize: 11, background: 'var(--accent-fill)', color: 'var(--on-accent)' }}
+          onClick={stop}
         >
-          {submitting ? '⌛ Encoding…'
-            : requesting ? '🎤 Requesting mic access…'
-            : '🎙 Record voiceover'}
+          <span className="vo-dot" aria-hidden="true" /> Recording {elapsed.toFixed(1)} s · click to stop
+        </button>
+      ) : countdown !== null ? (
+        <button className="vo-btn" style={{ width: '100%', fontSize: 11 }} onClick={cancelPending}
+                aria-live="assertive" title="Cancel before recording starts">
+          Recording in <b className="vo-count">{countdown}</b> · Cancel
+        </button>
+      ) : requesting ? (
+        <button className="vo-btn" style={{ width: '100%', fontSize: 11 }} onClick={cancelPending}
+                title="Stop waiting for microphone access">
+          Waiting for microphone access · Cancel
         </button>
       ) : (
         <button
-          style={{ width: '100%', fontSize: 11, background: 'var(--accent)', color: '#fff' }}
-          onClick={stop}
+          className="vo-btn"
+          style={{ width: '100%', fontSize: 11 }}
+          onClick={start}
+          disabled={submitting || !sid}
+          title="Record a voiceover from your mic: a 3-2-1 count-in, then the timeline plays from the playhead while you speak"
         >
-          ⏺ Recording ({elapsed.toFixed(1)}s) · click to stop
+          {submitting ? 'Encoding…' : 'Record voiceover'}
         </button>
+      )}
+      {(recording || countdown !== null) && metering && (
+        <div className="vo-meter" role="meter" aria-label="Microphone level" aria-valuemin={-60} aria-valuemax={0}>
+          <span ref={meterRef} className="vo-meter-fill" />
+        </div>
+      )}
+      {(countdown !== null || recording) && (
+        <div className="vo-hint">Use headphones so the mic doesn’t pick up the playback.</div>
+      )}
+      {requesting && slowPrompt && (
+        <div className="vo-hint">No answer yet — look for the microphone prompt in the address bar, or allow it in System Settings › Privacy &amp; Security › Microphone.</div>
       )}
       {/* Guaranteed-working fallback: import an existing audio file as the
           voiceover clip when live mic capture isn't available (native-bridge
@@ -357,7 +457,7 @@ export function VoRecorder() {
         disabled={submitting || recording || !sid}
         title="Import an existing audio file as the voiceover track (fallback if mic recording isn't available)"
       >
-        📁 Import audio file as voiceover
+        Import audio file as voiceover
       </button>
       {error && (
         <div style={{ color: '#fbb', fontSize: 10, marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
@@ -371,7 +471,8 @@ export function VoRecorder() {
             onClick={() => setError(null)}
             style={{ background: 'none', border: 'none', color: '#fbb', cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1 }}
             title="Dismiss"
-          >×</button>
+            aria-label="Dismiss recording error"
+          ><span aria-hidden="true">×</span></button>
         </div>
       )}
     </div>

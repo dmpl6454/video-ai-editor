@@ -16,6 +16,8 @@
  * whole clip. A lib module rather than an export from TextLayer.tsx so it
  * can be tested in node and Fast Refresh keeps working on the component.
  */
+import { animDuration } from './textLayout'
+
 export interface AnimEnvelope {
   alpha: number
   scale: number
@@ -23,10 +25,11 @@ export interface AnimEnvelope {
 }
 
 export function animEnvelope(
-  c: { anim_in?: string | null; anim_out?: string | null },
+  c: { anim_in?: string | null; anim_out?: string | null; anim_dur?: number | null },
   t: number, height: number, win: { start: number; end: number },
 ): AnimEnvelope {
-  const d = Math.min(0.35, Math.max(0.1, (win.end - win.start) * 0.4))
+  // The clip's own length (QA-078) or 0.35 s — text_overlay.anim_duration.
+  const d = animDuration(c.anim_dur, win.end - win.start)
   const off = height * 0.04
   const qIn = Math.min(1, Math.max(0, (t - win.start) / d))
   const qOut = Math.min(1, Math.max(0, (t - (win.end - d)) / d))

@@ -1,7 +1,8 @@
 import { useStore } from '../store'
 import { usePromptStore } from '../lib/promptStore'
 import { layoutPlayhead } from '../lib/timelineLayout'
-import { frameDuration, stepFrames } from '../lib/frameStep'
+import { frameDuration, stepFrames, toFrameGrid } from '../lib/frameStep'
+import { fitZoom, timelineView } from '../lib/timelineZoom'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -46,20 +47,23 @@ export const COMMANDS: Command[] = [
       s.setPlaying(!s.isPlaying)
       s.setPlaybackRate(1)
     } },
+  // J/L start at 1× from a stop and double only while ALREADY shuttling that
+  // way (QA-058). K resets the rate to 1, so the old `(r || 1) * 2` made the
+  // very first L play at 2×.
   { id: 'shuttleReverse', label: 'Shuttle reverse (J)', category: 'Transport',
-    run: (s) => { const r = s.playbackRate; s.setPlaybackRate(r > 0 ? -1 : Math.max(-8, r * 2)); s.setPlaying(true) } },
+    run: (s) => { const r = s.isPlaying ? s.playbackRate : 0; s.setPlaybackRate(r < 0 ? Math.max(-8, r * 2) : -1); s.setPlaying(true) } },
   { id: 'shuttleStop', label: 'Shuttle stop (K)', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlaybackRate(1) } },
   { id: 'shuttleForward', label: 'Shuttle forward (L)', category: 'Transport',
-    run: (s) => { const r = s.playbackRate; s.setPlaybackRate(r < 0 ? 1 : Math.min(8, (r || 1) * 2 > 1 ? (r || 1) * 2 : 1)); s.setPlaying(true) } },
+    run: (s) => { const r = s.isPlaying ? s.playbackRate : 0; s.setPlaybackRate(r > 0 ? Math.min(8, r * 2) : 1); s.setPlaying(true) } },
   { id: 'frameBack', label: 'Step back 1 frame', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlayhead(stepFrames(s.playhead, -1, fpsOf(s))) } },
   { id: 'frameForward', label: 'Step forward 1 frame', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlayhead(stepFrames(s.playhead, 1, fpsOf(s))) } },
   { id: 'secondBack', label: 'Step back 1 second', category: 'Transport',
-    run: (s) => { s.setPlaying(false); s.setPlayhead(s.playhead - 1) } },
+    run: (s) => { s.setPlaying(false); s.setPlayhead(toFrameGrid(s.playhead - 1, fpsOf(s))) } },
   { id: 'secondForward', label: 'Step forward 1 second', category: 'Transport',
-    run: (s) => { s.setPlaying(false); s.setPlayhead(s.playhead + 1) } },
+    run: (s) => { s.setPlaying(false); s.setPlayhead(toFrameGrid(s.playhead + 1, fpsOf(s))) } },
   { id: 'goToStart', label: 'Go to start', category: 'Transport', run: (s) => s.goToStart() },
   { id: 'goToEnd', label: 'Go to end', category: 'Transport', run: (s) => s.goToEnd() },
 
@@ -105,9 +109,15 @@ export const COMMANDS: Command[] = [
   { id: 'zoomIn', label: 'Zoom in timeline', category: 'View', run: (s) => s.zoomTimeline(1.25) },
   { id: 'zoomOut', label: 'Zoom out timeline', category: 'View', run: (s) => s.zoomTimeline(1 / 1.25) },
   { id: 'zoomFit', label: 'Zoom to fit', category: 'View',
+    // Fits the width the timeline really has (QA-054): the mounted timeline
+    // registers its lane width; `window.innerWidth − 240` ignored both side
+    // panels and the label column, so a 40 s "fit" overflowed by a third.
     run: (s) => {
       const dur = s.edl?.duration ?? 0
-      if (dur > 0) s.setTimelineZoom(Math.max(10, Math.min(600, (window.innerWidth - 240) / dur)))
+      if (!(dur > 0)) return
+      const view = timelineView()
+      if (view) view.fitTo(fitZoom(dur, view.laneWidth()))
+      else s.setTimelineZoom(fitZoom(dur, window.innerWidth * 0.6))
     } },
   { id: 'toggleSnap', label: 'Toggle snapping', category: 'View', run: (s) => s.toggleSnap() },
 

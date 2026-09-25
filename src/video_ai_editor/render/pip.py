@@ -20,6 +20,7 @@ from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 from .effects import build_chromakey_filter
 from .text_overlay import enable_expr
 from . import clock
+from ..edl import timebase as _tb
 
 
 def collect_pip_clips(edl: EDL) -> list[tuple[str, Clip]]:
@@ -122,6 +123,91 @@ def pip_audio_input_index(first_input_index: int, j: int) -> int:
     return first_input_index + INPUTS_PER_PIP * j + 1
 
 
+# ---- Frame-exact PIP timing (QA-002, the PIP half) ---------------------------
+#
+# v1 cuts by frame count since wave A (compositor's "Frame-exact clip timing"
+# block); PIPs were still trimmed with float `-ss/-t %.3f` and placed with a
+# float `-itsoffset`, so a PIP whose start sat off the frame grid (any legacy
+# EDL) showed black on its first frame and every later frame one frame late,
+# and on a 29.97 project the `%.3f` span let one extra source frame through at
+# the tail. A PIP now follows the v1 recipe exactly: seek half a frame early,
+# rebase, resample onto the grid, clone-pad and cut to an exact frame count,
+# and only then shift onto the timeline at its SNAPPED start — so the frame
+# count and the placement no longer depend on float formatting. Its sound
+# drops the same pre-roll and is cut to the same number of frames' samples.
+
+#: Frames of decode slack past a PIP's last frame (as v1's `-to` slack).
+_DECODE_SLACK_FRAMES = 2
+
+
+def pip_frames(rs: float, re: float, fps) -> tuple[int, int]:
+    """(first output frame, frame count) of a PIP on screen for `[rs, re)` —
+    the same frames its `enable` gate (`timebase.enable_window`) admits."""
+    f0 = _tb.frame_of(rs, fps)
+    return f0, max(1, _tb.frame_of(re, fps) - f0)
+
+
+def pip_input_args(c: Clip, n: int, fps) -> list[str]:
+    """`-ss/-t/-i` for a PIP showing `n` frames: seek half a frame before
+    `in_` (timebase.seek_preroll), decode `n` frames plus slack.
+
+    No `-itsoffset`, deliberately (QA-002): with an input offset ffmpeg 8.1
+    stops seeking accurately — it keeps every frame from the keyframe BEFORE
+    `-ss` whose shifted timestamp is still >= 0 — and `-t` is then counted
+    from that keyframe, so a PIP trimmed far from a keyframe (every real
+    camera file, GOPs of several seconds) lost that much of its TAIL, frozen
+    on its last decoded frame. Measured: `-ss 0.983 -t 3 -itsoffset 2.5`
+    decodes frames 0-89, not 30-119. Placement moved into the graph
+    (`pip_video_timing`), where it is exact."""
+    pre = _tb.seek_preroll(c.in_, fps)
+    seek = max(0.0, float(c.in_) - pre)
+    span = pre + _tb.time_of(n + _DECODE_SLACK_FRAMES, fps)
+    return ["-ss", f"{seek:.6f}", "-t", f"{span:.6f}", "-i", str(c.src)]
+
+
+def pip_video_timing(n: int, first_frame: int, fps) -> str:
+    """Filters (no labels, trailing comma) that make a PIP's picture exactly
+    `n` frames on the project grid, starting at timeline frame `first_frame`:
+    the v1 recipe (rebase, `fps=`, clone-pad, `trim=end_frame`), then a shift
+    to the snapped start. This shift is what places a PIP in TIME — without it
+    the PIP's frames would enter at t=0 and be over before its enable window
+    opened (the "black box" bug, see build_pip_overlay_chain).
+
+    The shift is in whole TICKS: after `fps=` the time base is exactly one
+    frame, so `+first_frame` is exact. A seconds expression is not — setpts
+    TRUNCATES, and 1.001/(1001/30000) evaluates to 29.999999999999996, which
+    put every PIP on a 29.97 project one frame early."""
+    return (f"setpts=PTS-STARTPTS,fps={_tb.ffmpeg_rate(fps)},"
+            f"tpad=stop={n}:stop_mode=clone,trim=end_frame={n},"
+            f"setpts=PTS-STARTPTS+{int(first_frame)},")
+
+
+def pip_audio_chain(c: Clip, input_label: str, label_out: str, *, rs: float,
+                    re: float, fps) -> str:
+    """A PIP's sound, sample-exact to its picture: resampled, the seek
+    pre-roll dropped, gain/fade/mute applied, cut to exactly its frames'
+    samples and delayed (in samples) to its snapped start. A source with no
+    audio stream contributes silence of that length instead of failing the
+    graph (the v1 rule, QA-040). No atempo: the PIP picture applies no speed
+    either, and the two must stay together."""
+    from .compositor import _audio_props_filters, source_has_audio
+    f0, n = pip_frames(rs, re, fps)
+    if not source_has_audio(str(c.src)):
+        input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
+    chain = (f"{input_label}aresample=async=1:first_pts=0,"
+             f"aformat=channel_layouts=stereo:sample_rates=48000")
+    pre = _tb.seek_preroll(c.in_, fps)
+    if pre > 1e-9:
+        chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
+    chain += _audio_props_filters(c)
+    m = _tb.samples_for_frames(n, fps)
+    chain += f",apad=whole_len={m},atrim=end_sample={m}"
+    delay = _tb.samples_for_frames(f0, fps)
+    if delay > 0:
+        chain += f",adelay=delays={delay}S:all=1"
+    return chain + label_out
+
+
 def _on_render_clock(pips: list[tuple[str, Clip]], seams: clock.SeamTable
                      ) -> list[tuple[str, Clip, float, float]]:
     """`(track_id, clip, render_start, render_end)` for every PIP the seams
@@ -146,6 +232,7 @@ def build_pip_overlay_chain(
     out_w: int,
     out_h: int,
     preview: bool = False,
+    fps=None,
 ) -> tuple[str, list[str], str, list[Clip]]:
     """Return (filter_chain, extra_inputs, final_video_label, audio_clips).
 
@@ -164,6 +251,9 @@ def build_pip_overlay_chain(
         return "", [], source_label, []
 
     canvas = edl.canvas
+    # The RENDER's rate (an export may override the canvas's) — the grid the
+    # v1 base is built on, so a PIP's frames land on the same instants.
+    fps = canvas.fps if fps is None else fps
     extra_inputs: list[str] = []
     parts: list[str] = []
     audio_clips: list[Clip] = []
@@ -223,15 +313,17 @@ def build_pip_overlay_chain(
         # seam is on screen for less than its source length, and the same span
         # feeds the AUDIO input below — trimming both keeps the sound from
         # outlasting the picture by the seconds the seam consumed.
-        span = f"{max(0.001, min(c.out - c.in_, re - rs)):.3f}"
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", span]
-        if rs > 0.0005:
-            extra_inputs += ["-itsoffset", f"{rs:.3f}"]
-        extra_inputs += ["-i", c.src]
+        #
+        # Frame-exact since QA-002: `n` frames from `pip_frames`, placed at the
+        # SNAPPED start `t0` by `pip_video_timing` inside the graph — not by
+        # `-itsoffset`, which breaks input seeking (see pip_input_args).
+        f0, n = pip_frames(rs, re, fps)
+        t0 = _tb.time_of(f0, fps)
+        extra_inputs += pip_input_args(c, n, fps)
         # The AUDIO input — same span, no offset (see INPUTS_PER_PIP). Added on
         # both the baked and the client-drawn branch, since the audio fold in
         # compositor.py indexes off it either way.
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-t", span, "-i", c.src]
+        extra_inputs += pip_input_args(c, n, fps)
 
         if preview and getattr(c, "chromakey", None) is None:
             # PREVIEW: do not bake the PIP's PICTURE — the browser draws it live
@@ -367,13 +459,15 @@ def build_pip_overlay_chain(
                 # crop clear of the corners.
                 inner_rot = f"rotate={math.radians(f_rot):.6f}:c=black@0,"
             parts.append(
-                f"[{idx}:v]scale={cover_w}:{cover_h}:force_original_aspect_ratio=increase,"
+                f"[{idx}:v]{pip_video_timing(n, f0, fps)}"
+                f"scale={cover_w}:{cover_h}:force_original_aspect_ratio=increase,"
                 f"{inner_rot}"
                 f"crop={box_w}:{box_h}:'{x_expr}':'{y_expr}'{scaled_label}"
             )
         else:
             # We don't know the source aspect; -1 preserves it
-            parts.append(f"[{idx}:v]scale=w={target_long}:h=-1{scaled_label}")
+            parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps)}"
+                         f"scale=w={target_long}:h=-1{scaled_label}")
 
         # Optional chroma key BEFORE rotate/opacity so transparency survives.
         if getattr(c, "chromakey", None) is not None:
@@ -425,7 +519,7 @@ def build_pip_overlay_chain(
         # so every filter before it (shape geq, rotate, opacity) sees a fixed
         # frame size.
         if scale_kf and sc_static > 0:
-            se = to_ffmpeg_expr(tx.scale, time_var=f"(t-{rs:.4f})")
+            se = to_ffmpeg_expr(tx.scale, time_var=f"(t-{t0:.6f})")
             ratio = f"(({se})/{sc_static:.6f})"
             animated = f"[pips{i}]"
             parts.append(
@@ -440,13 +534,13 @@ def build_pip_overlay_chain(
         x_kf = tx.x
         y_kf = tx.y
         if is_keyframed(x_kf):
-            xe = to_ffmpeg_expr(x_kf, time_var=f"(t-{rs:.4f})")
+            xe = to_ffmpeg_expr(x_kf, time_var=f"(t-{t0:.6f})")
             x_expr = f"({xe})*{sx:.6f}-overlay_w/2"
         else:
             xc = float(getattr(tx, "x", 0)) if isinstance(tx.x, (int, float)) else canvas.w / 2
             x_expr = f"({xc * sx:.2f})-overlay_w/2"
         if is_keyframed(y_kf):
-            ye = to_ffmpeg_expr(y_kf, time_var=f"(t-{rs:.4f})")
+            ye = to_ffmpeg_expr(y_kf, time_var=f"(t-{t0:.6f})")
             y_expr = f"({ye})*{sy:.6f}-overlay_h/2"
         else:
             yc = float(getattr(tx, "y", 0)) if isinstance(tx.y, (int, float)) else canvas.h / 2
@@ -457,7 +551,7 @@ def build_pip_overlay_chain(
         next_label = out_label if is_last else f"[pip_post{i}]"
         parts.append(
             f"{cur}{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
-            f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
+            f":enable='{enable_expr(rs, re, fps)}'{next_label}"
         )
         cur = next_label
         audio_clips.append(c)

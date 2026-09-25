@@ -64,7 +64,8 @@ def _emitted(ramp, **kw) -> str:
     chain, _, _, _ = build_pip_overlay_chain(
         edl, source_label="[v]", out_label="[o]", first_input_index=1,
         out_w=1080, out_h=1920)
-    m = re.search(r"\[1:v\](scale=[^,]+,crop=[^\[]+)\[pip0\]", chain)
+    # After the frame-exact timing prefix (QA-002: setpts/fps/tpad/trim).
+    m = re.search(r"\[1:v\](?:[^\[]*?,)?(scale=[^,]+,crop=[^\[]+)\[pip0\]", chain)
     assert m, f"no scale+crop emitted:\n{chain}"
     return m.group(1)
 

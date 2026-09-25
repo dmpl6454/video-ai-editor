@@ -10,11 +10,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { SafeZoneToggle } from './SafeZones'
+import { useMenuA11y } from '../lib/useMenuA11y'
 
 export function TopBarMore({ version }: { version: string | null }) {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<{ right: number; top: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  // Focus enters the popover, Tab stays inside, Escape closes and returns to
+  // "⋯" (lib/useMenuA11y, QA-102).
+  const a11y = useMenuA11y({
+    open, ready: !!pos, mode: 'dialog', menuRef: popRef, triggerRef: btnRef, onClose: () => setOpen(false),
+  })
 
   useEffect(() => {
     if (!open) return
@@ -23,25 +30,24 @@ export function TopBarMore({ version }: { version: string | null }) {
     const close = (e: MouseEvent) => {
       if (!(e.target as HTMLElement).closest('[data-topbar-more]')) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setOpen(false); btnRef.current?.focus() } }
     const t = setTimeout(() => window.addEventListener('mousedown', close), 0)
-    window.addEventListener('keydown', onKey)
-    return () => { clearTimeout(t); window.removeEventListener('mousedown', close); window.removeEventListener('keydown', onKey) }
+    return () => { clearTimeout(t); window.removeEventListener('mousedown', close) }
   }, [open])
 
   return (
     <div data-topbar-more className="topbar-narrow" style={{ display: 'inline-flex' }}>
       <button
         ref={btnRef}
-        aria-haspopup="true"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="More: safe zones and app version"
         title={version ? `More — safe zones · ${version}` : 'More — safe zones'}
         onClick={() => setOpen((o) => !o)}
         style={{ fontSize: 13, padding: '2px 8px' }}
-      >⋯</button>
+      ><span aria-hidden="true">⋯</span></button>
       {open && pos && createPortal(
-        <div data-topbar-more className="topbar-more-menu" style={{ right: pos.right, top: pos.top }}>
+        <div ref={popRef} data-topbar-more data-keymap-ignore role="dialog" aria-label="More options"
+             className="topbar-more-menu" style={{ right: pos.right, top: pos.top }} onKeyDown={a11y.onKeyDown}>
           <label className="topbar-more-row">
             <span>Safe zones</span>
             <SafeZoneToggle />

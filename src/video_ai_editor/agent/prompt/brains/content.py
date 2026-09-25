@@ -32,7 +32,8 @@ from .jsonfix import JsonRepairFailed, repair
 
 __all__ = ["HOOK_MAX_CHARS", "HOOK_MAX_WORDS", "HOOK_TOOL", "HOOK_RECIPE", "HookText", "RankResult",
            "hook_candidates_task", "rank_windows_task", "sanitize_hook_items", "sanitize_ranking",
-           "needs_hook_text", "strip_model_hook_text", "parse_text_items", "text_task_prompts",
+           "needs_hook_text", "strip_model_hook_text", "ground_duck_off", "ground_to_prompt",
+           "mentioned_intents", "parse_text_items", "text_task_prompts",
            "heuristic_hook_candidates", "hook_text", "rank_windows", "HEURISTIC_SOURCE"]
 
 HOOK_TOOL = "apply_hook_stack"
@@ -58,6 +59,128 @@ def strip_model_hook_text(draft: IntentDraft, prompt: str) -> IntentDraft:
         text = it.slots.get("text") if it.recipe == HOOK_RECIPE else None
         if isinstance(text, str) and text.strip() and _one_line(text).lower() not in haystack:
             items.append(it.model_copy(update={"slots": {k: v for k, v in it.slots.items() if k != "text"}}))
+            changed = True
+        else:
+            items.append(it)
+    return draft.model_copy(update={"intents": items}) if changed else draft
+
+
+def mentioned_intents(prompt: str) -> set[str]:
+    """Every intent whose phrase table (ANY row, weak ones included) matches
+    the prompt — "the user used words for this kind of edit"."""
+    from .. import grammar as G
+    from .. import slots as S
+    text = S.normalize(prompt or "")
+    found: set[str] = set()
+    for intent, rows in G.PHRASES.items():
+        if any(re.search(p, text) for p, _score in rows):
+            found.add(intent)
+    for rx, intent, _score in G.CUT_PRECEDENCE:
+        if re.search(rx, text):
+            found.add(intent)
+    return found
+
+
+#: A named recipe also grounds the recipes it is made of or implies.
+_GROUND_RELATIVES: dict[str, frozenset[str]] = {
+    "tighten": frozenset({"remove_silences", "remove_fillers"}),
+    "shorts": frozenset({"reframe", "captions", "hook"}),
+    "captions": frozenset({"transcribe"}),
+    "translate_captions": frozenset({"captions"}),
+    # A bare music noun ("the song is overpowering me") is WEAK in the
+    # grammar, so the model reads it: any level/fade/mute/fit of the bed.
+    "music": frozenset({"duck", "fit_music", "volume", "mute", "fade"}),
+    "beat_sync": frozenset({"music"}),
+    "export_preset": frozenset({"reframe", "loudness"}),
+    "fade": frozenset({"fit_music"}),
+    "fit_music": frozenset({"fade"}),
+}
+
+
+_NUMERIC_SLOTS = ("duration_s", "db", "lufs", "count", "factor", "to_db", "volume_db", "max_dur",
+                  "min_dur", "intensity", "strength", "duration", "dur")
+_NUMBER_RE = re.compile(r"\d|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|"
+                        r"forty|fifty|sixty|ninety|half|a couple|a few|several|dozen)\b")
+_EDGE_IN_RE = re.compile(r"\b(?:in|up|begin\w*|start\w*|opening|open|intro|from black)\b")
+_EDGE_OUT_RE = re.compile(r"\b(?:out|away|end\w*|finish\w*|close|closing|outro|to black|melt|tail)\b")
+
+
+def _fade_edge_of(text: str) -> str | None:
+    """"ease the picture in from black" → in; "let the ending melt to black"
+    → out; both named → both; neither → None (the recipe's default)."""
+    i, o = bool(_EDGE_IN_RE.search(text)), bool(_EDGE_OUT_RE.search(text))
+    return "both" if i and o else "in" if i else "out" if o else None
+
+
+def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
+    """Keep an on-device draft to what the prompt talks about (QA-018 live
+    pass). With the real Apple Intelligence model, "mute the music" came
+    back as mute + voiceover, "fade out at the end" as fade + trim +
+    remove_music, "stop ducking the music" as duck + shorts: the right edit
+    plus unrelated ones, some destructive. When at least one planned recipe
+    is one the prompt's words name, the others are dropped (a draft whose
+    recipes are ALL unnamed is a paraphrase the grammar cannot read and is
+    left to the router's other guards). An exclusion survives only when the
+    grammar also reads it as one — the model listed "remove_music" and "do
+    not mute the music" as exclusions for requests that said neither."""
+    from .. import grammar as G
+    from ..planner import _LOWER_THIRD_RE
+    mentioned = mentioned_intents(prompt)
+    for word in list(mentioned):
+        mentioned |= _GROUND_RELATIVES.get(word, frozenset())
+    named = [it for it in draft.intents if it.recipe in mentioned]
+    intents = list(draft.intents) if ("auto_edit" in mentioned or not named) else named
+    said_not = set(G.detect(prompt or "").exclusions)
+    exclusions = [x for x in draft.exclusions if x in said_not]
+    text = " ".join((prompt or "").lower().split())
+    says_a_number = bool(_NUMBER_RE.search(text))
+    fixed = []
+    for it in intents:
+        slots = dict(it.slots)
+        if not says_a_number:
+            # "let the ending melt to black" came back with duration_s=85 (the
+            # timeline length), "lower the music" with db=-20: a number the
+            # user never said is the recipe's default's job, not the model's.
+            for key in _NUMERIC_SLOTS:
+                slots.pop(key, None)
+        if it.recipe == "fade" and not slots.get("edge"):
+            edge = _fade_edge_of(text)
+            if edge:
+                slots["edge"] = edge
+        if it.recipe == "duck" and slots.get("enabled") is False and not G.duck_off(prompt or ""):
+            # "I want the backing track to sit lower" came back as ducking OFF.
+            slots.pop("enabled")
+        if (it.recipe == "title" and slots.get("name") and not slots.get("text")
+                and not _LOWER_THIRD_RE.search((prompt or "").lower())):
+            # "slap LAUNCH DAY across the top" came back as a NAME card
+            # (a lower third) — headline words are the title's text.
+            slots["text"] = slots.pop("name")
+        fixed.append(it if slots == it.slots else it.model_copy(update={"slots": slots}))
+    # The model's own questions and its reply are dropped: every live answer
+    # asked "which platform?" (options: the music file's name) for edits that
+    # need no platform, and replied "I've stopped ducking the music" before
+    # anything ran. The recipes ask what is really missing; the reply is
+    # built from what the run did (summary.py).
+    return draft.model_copy(update={"intents": fixed, "exclusions": exclusions,
+                                    "needs_input": [], "reply": ""})
+
+
+def ground_duck_off(draft: IntentDraft, prompt: str) -> IntentDraft:
+    """A `duck` intent whose `enabled` the model left unset, on a prompt the
+    grammar reads as "turn ducking OFF", gets `enabled=False` (QA-018
+    remainder). Unset means "on" to the recipe, so "stop ducking the music"
+    planned by an on-device model used to turn ducking ON — the opposite of
+    what was asked, and verified as held because the check measured "on".
+    A value the model DID set is left alone: grounding fills a gap, it does
+    not overrule an answer."""
+    from .. import grammar as G       # lazy: grammar imports slots, content is imported early
+    if not G.duck_off(prompt or ""):
+        return draft
+    items = []
+    changed = False
+    for it in draft.intents:
+        if it.recipe == "duck" and it.slots.get("enabled") is None:
+            items.append(it.model_copy(update={"slots": {**it.slots, "enabled": False}}))
             changed = True
         else:
             items.append(it)

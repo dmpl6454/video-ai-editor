@@ -8,8 +8,25 @@
   --line: #2c2c34;
   --text: #e6e6eb;
   --text-dim: #9b9ba5;
+  /* Tertiary text (muted/locked lane names, counts, empty-state hints). The
+     dimmest text colour allowed: >= 4.5:1 on every surface --bg-0..--bg-3.
+     Dimming text with `opacity` instead is how the version badge and the
+     empty-timeline hint fell below AA (QA-103); use this token. */
+  --text-faint: #8e8e98;
+  /* --accent / --accent-2 are for TEXT, outlines and indicators on the dark
+     surfaces (>= 4.5:1 on --bg-0..--bg-3). White text on them fails (3.21:1
+     and 3.13:1), so a FILLED control uses the -fill pair with --on-accent
+     (4.87:1 and 5.22:1; the hover darkens, never lightens). QA-103. The
+     contract is pinned by lib/contrast.test.ts. */
   --accent: #ff4d6d;
+  --accent-fill: #d9254a;
+  --accent-fill-hover: #c81e41;
   --accent-2: #5b8dff;
+  --accent-2-fill: #3566d6;
+  --accent-2-fill-hover: #2f5fcc;
+  --on-accent: #ffffff;
+  /* Keyboard focus ring (QA-102): visible on every surface. */
+  --focus-ring: #5b8dff;
   --good: #4ade80;
   --warn: #fbbf24;
   --track-v: #5b8dff;
@@ -20,6 +37,11 @@
   --selection: #ffffff;
   --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
 }
+/* The whole app is dark: native controls (select pop-ups, scrollbars, date
+   pickers) follow it even when the system appearance is light. It used to be
+   set on .dialog only, so every <select> in Properties rendered white (QA-100
+   look, wave-B review). */
+html { color-scheme: dark; }
 html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var(--text); font-family: var(--font-ui); font-size: 13px; -webkit-font-smoothing: antialiased; }
 /* Below the editor's minimum width the 3-pane layout scrolls horizontally here
    rather than collapsing. The .app holds the 900px floor; #root is the viewport-
@@ -28,9 +50,29 @@ html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var
 button { font: inherit; color: inherit; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 button:hover:not(:disabled) { background: #2f2f37; }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.primary:hover:not(:disabled) { background: #ff5d7a; }
+button.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+/* A disabled primary is NEUTRAL, not a faded pink (it read as a dimmed live
+   button at 1.54:1 — QA-103). */
+button.primary:disabled { opacity: 1; background: var(--bg-3); border-color: var(--line); color: var(--text-faint); }
+/* One visible keyboard focus ring for every control (QA-102). :focus-visible
+   keeps it off mouse clicks. */
+:where(button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="tab"], a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
 input, textarea { font: inherit; color: inherit; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+/* ONE select style, on the tokens (the Font, Letter case, Animate and Shadow
+   selects rendered as white native controls next to dark inputs). */
+select { font: inherit; color: var(--text); background-color: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+select:hover:not(:disabled) { border-color: var(--text-faint); }
+/* The app icon set (components/Icon.tsx) sits on the text baseline of the
+   control that holds it. */
+svg.icon { display: inline-block; vertical-align: -3px; flex-shrink: 0; }
+button.icon-btn { padding: 5px 8px; line-height: 0; }
+.music-panel-head { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+/* Sliders, checkboxes and radios take the app accent, not the browser blue. */
+input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-2); }
 
 .app {
   display: grid;
@@ -142,10 +184,30 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
   background: transparent; border: none; border-radius: 4px; padding: 5px 10px; font-size: 12px; color: var(--text);
 }
-.ratio-item:hover, .ratio-item:focus-visible { background: var(--bg-3); outline: none; }
+.ratio-item:hover { background: var(--bg-3); }
+.ratio-item:focus-visible { background: var(--bg-3); outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .ratio-item[aria-checked="true"] .ratio-label { font-weight: 600; }
 .ratio-check { width: 12px; flex-shrink: 0; color: var(--good); }
+/* ONE checked marker for every menuitemradio (Ratio, Captions, the project
+   picker): the monochrome check icon, in the same column. */
+span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(--text); line-height: 0; }
 .ratio-hint { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* A plain popover row (project picker, timeline context menu) — QA-102: they
+   were click-only <div>s; now <button role="menuitem"> styled as a row. */
+.menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: 4px; padding: 6px 10px; font-size: 12px; color: var(--text);
+}
+.menu-item:hover:not(:disabled), .menu-item:focus-visible { background: var(--bg-3); }
+.menu-item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.menu-item[aria-checked="true"] { font-weight: 600; background: var(--bg-3); }
+.menu-item-meta { margin-left: auto; color: var(--text-dim); font-size: 10px; font-weight: 400; }
+.menu-item-icon {
+  flex-shrink: 0; background: transparent; border: none; border-radius: 4px; padding: 2px 6px;
+  color: var(--text-dim); font-size: 12px; line-height: 1;
+}
+.menu-item-icon:hover:not(:disabled), .menu-item-icon:focus-visible { color: var(--accent); background: var(--bg-3); }
+.menu-row { display: flex; align-items: center; gap: 2px; }
 .topbar-more-menu { min-width: 200px; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
 .topbar-more-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-dim); }
 .topbar-more-version { font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
@@ -233,18 +295,10 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   background: var(--bg-0);
   overflow: hidden;
 }
-/* While the run log is OPEN (a run in progress, or "Details" on a finished
-   one) the bar's row is also capped at 40% of the space it shares with the
-   preview (the centre minus the splitter and the timeline); the log scrolls
-   inside it. The open log used to take ~60% of that space and shrink a 9:16
-   preview to 41% of its height at 1024x768 (QA-017 remainder). Scoped to the
-   log: a clarify card or the cancel confirm must stay whole, so they keep the
-   plain `auto` row. fit-content() still hugs a bar smaller than the cap. */
-.center:has(> .prompt-bar .prompt-log:not(.is-collapsed)) {
-  grid-template-rows:
-    fit-content(calc((100% - 6px - var(--timeline-h, 280px)) * 0.4))
-    minmax(120px, 1fr) 6px minmax(0, var(--timeline-h, 280px));
-}
+/* The run log no longer takes a grid row at all: it opens as a drawer over
+   the top of the preview (components/promptBar.css, QA-017-EXPANDED), so a
+   13-step "Details" can never shrink the picture. The 40% row cap that lived
+   here only limited how much it shrank. */
 
 /* Drag handles for resizable panels (Task 9). Thin, transparent until
    hovered/dragged, sitting in their own dedicated grid track (see .app and
@@ -338,32 +392,11 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 }
 .narrow-warning .nw-dismiss:hover { background: rgba(0, 0, 0, 0.24); }
 
-/* ---- Export progress modal ------------------------------------------------ */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(8, 8, 10, 0.62);
-  backdrop-filter: blur(3px);
-}
-.export-modal {
-  width: min(440px, 92vw);
-  background: var(--bg-1);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 22px 22px 18px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
-}
-.export-modal-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.export-modal-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+/* ---- Export progress + confirm: both render through components/Dialog ---- */
+.confirm-body { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); overflow-wrap: anywhere; }
+/* The project chip's inline rename (QA-099). */
+.topbar-session-rename { width: 200px; font-size: 11px; padding: 3px 8px; border-radius: 999px; border-color: var(--focus-ring); }
+
 .export-modal-phase { font-size: 12px; color: var(--text-dim); }
 
 .export-progress-track {
@@ -398,7 +431,6 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 .export-pct { font-size: 18px; font-weight: 600; }
 .export-eta { font-size: 12px; color: var(--text-dim); align-self: flex-end; }
 
-.export-modal-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
 .export-cancel {
   background: transparent;
   border: 1px solid var(--line);
@@ -542,13 +574,35 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   background: var(--line);
   margin: 0 2px;
 }
-.timeline-toolbar .tb-hint {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+/* The icon toolbar (QA-053): one monochrome 16 px icon per button, the
+   shortcut in its tooltip — no permanent hint string. */
+.timeline-toolbar .tb-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 24px; padding: 0 5px;
+  color: var(--text-dim);
 }
+.timeline-toolbar .tb-icon:hover:not(:disabled) { color: var(--text); }
+/* A toggle shows its state, not just its hover (snapping, QA-050). */
+.timeline-toolbar .tb-toggle.is-on {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+  background: var(--bg-1);
+}
+/* SMPTE clock (QA-048): a timecode field that reads as a readout until
+   focused, then takes a typed timecode. */
+.timeline-toolbar .tb-clock {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text);
+}
+.timeline-toolbar .tb-clock-field {
+  width: 86px; padding: 1px 4px; font-size: 12px; font-variant-numeric: tabular-nums;
+  background: transparent; border: 1px solid transparent; color: var(--text);
+}
+.timeline-toolbar .tb-clock-field:hover { border-color: var(--line); }
+.timeline-toolbar .tb-clock-field:focus { background: var(--bg-1); border-color: var(--accent-2); }
+.timeline-toolbar .tb-clock-dur { color: var(--text-dim); font-size: 11px; }
+.timeline-toolbar .tb-zoom { width: 88px; }
+.tc-field { font-variant-numeric: tabular-nums; }
 
 /* Ellipsis alone is not enough. Measured at a 950px window: the pane is 438px
    and the FIXED items (two buttons, transport, clock, zoom slider, readout,
@@ -567,15 +621,28 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
    would compress at the wrong moments. Degrades to the ellipsis above if
    unsupported. */
 .timeline-pane { container-type: inline-size; }
-@container (max-width: 620px) { .timeline-toolbar .tb-hint { display: none; } }
-@container (max-width: 470px) { .timeline-toolbar .tb-zoomlabel { display: none; } }
-@container (max-width: 400px) { .timeline-toolbar .tb-zoomval { display: none; } }
+@container (max-width: 760px) { .timeline-toolbar .tb-clock-dur { display: none; } }
+@container (max-width: 640px) { .timeline-toolbar .tb-zoom { display: none; } }
+/* Undo/Redo are icons now, so the zoom steps fit a 512 px pane (1024 window). */
+@container (max-width: 440px) { .timeline-toolbar .tb-zoomstep { display: none; } }
 
 .timeline-canvas-wrap {
   flex: 1;
   overflow: auto;
   position: relative;
 }
+/* The timeline canvas is a tab stop (QA-102); its scroll box clips an outside
+   ring, so draw it inside. */
+.timeline-canvas-wrap canvas:focus-visible { outline-offset: -2px; }
+/* An always-visible scrollbar (QA-014): macOS overlay scrollbars are 0 px
+   wide until you scroll, so nothing said there were lanes below the fold. */
+.timeline-canvas-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
+.timeline-canvas-wrap::-webkit-scrollbar-track { background: var(--bg-1); }
+.timeline-canvas-wrap::-webkit-scrollbar-thumb {
+  background: var(--text-faint); border: 3px solid var(--bg-1); border-radius: 6px;
+}
+.timeline-canvas-wrap::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+.timeline-canvas-wrap::-webkit-scrollbar-corner { background: var(--bg-1); }
 
 .media-bin .item {
   background: var(--bg-2);
@@ -602,9 +669,45 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
                display: flex; align-items: center; justify-content: center; font-size: 16px; }
 .media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .media-text { min-width: 0; flex: 1; }
-.media-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The user's file name (QA-045): up to two lines, then an ellipsis — never
+   the seven-line wrap under the × that a long download name produced. */
+/* Breaks fall between the name's words (<wbr> after _ - . and spaces,
+   MediaBin BreakableName); `anywhere` only rescues a single unbroken run. */
+.media-name { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+              line-clamp: 2; white-space: normal; overflow-wrap: anywhere; word-break: normal; line-height: 1.3; }
+/* Add to timeline (Enter / double-click do the same), beside the ×. */
+.media-add {
+  position: absolute; top: 24px; right: 5px; padding: 2px 3px; line-height: 0;
+  border: none; background: transparent; color: var(--text-dim);
+}
+.media-add:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.media-bin .media-row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* Offline media (QA-095): the file is gone; the row says so and offers Relink. */
+.media-bin .media-row.is-offline { border-color: var(--warn); border-style: solid; cursor: default; }
+.media-row.is-offline .media-meta { color: var(--warn); }
+.media-offline-mark { color: var(--warn); font-weight: 700; }
+.media-relink { margin-top: 4px; font-size: 11px; padding: 2px 8px; }
+.music-clip + .music-clip { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.music-clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .media-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+/* A file still importing (QA-044): its placeholder row, a progress ring in
+   the thumbnail slot, and the stage/ETA line. Not draggable yet. */
+.media-bin .media-row.is-pending { cursor: default; border-style: dashed; }
+.upload-ring {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: conic-gradient(var(--accent-2) calc(var(--p, 0) * 360deg), var(--line) 0);
+  -webkit-mask: radial-gradient(circle, transparent 7px, #000 7.5px);
+          mask: radial-gradient(circle, transparent 7px, #000 7.5px);
+}
+.upload-ring.is-waiting { background: var(--line); }
+/* "Add imports to the timeline" (QA-010): off = import to the library only. */
+.import-toggle { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim);
+                 margin: -4px 0 10px; cursor: pointer; }
+.import-toggle input { margin: 0; }
 
+/* Properties sliders: name left, value right (one layout, wave-B review). */
+.slider-row .slider-name { flex: 0 0 72px; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slider-row .slider-value { flex: 0 0 auto; min-width: 44px; font-size: 10px; color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; }
 /* Break long unbreakable tokens (filenames like a_b_c.normalized.mp4) so they
    wrap inside the fixed-width panel instead of painting past its edge. */
 .props { min-width: 0; overflow-wrap: anywhere; }
@@ -642,6 +745,25 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
 }
 .ops-log .op { padding: 3px 0; overflow-wrap: anywhere; }
 .ops-log .op b { color: var(--text); font-weight: 500; }
+/* QA-046: ops older than the undo horizon stay listed but read as history
+   only; the divider says why. */
+.ops-log .op.past-horizon { color: var(--text-dim); font-style: italic; }
+.ops-log .op.past-horizon b { color: var(--text-dim); }
+.ops-log .undo-horizon { margin: 6px 0 4px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-dim); }
+/* The project's own creation — the list's footer, not an edit (never greyed as "past the horizon"). */
+.ops-log .op.op-origin { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--text-dim); }
+
+/* QA-109: the one sticky "engine disconnected" line, under the top bar. */
+.engine-banner {
+  position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 1200;
+  display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px));
+  padding: 8px 10px 8px 12px; border-radius: 8px;
+  background: var(--bg-2); border: 1px solid var(--warn); color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); font-size: 12px; line-height: 1.4;
+}
+.engine-banner-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.engine-banner-text { flex: 1; min-width: 0; }
+.engine-banner button { flex-shrink: 0; font-size: 11px; padding: 4px 10px; }
 
 .dropzone {
   border: 1px dashed var(--line);
@@ -652,6 +774,9 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   font-size: 12px;
   margin-bottom: 10px;
 }
+/* The dropzone is a <button> (QA-102): full-width, transparent, keyboard-reachable. */
+button.dropzone { display: block; width: 100%; background: transparent; line-height: 1.4; }
+button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
 .dropzone.over { border-color: var(--accent-2); color: var(--text); background: rgba(91,141,255,0.06); }
 
 .kbd {
@@ -664,35 +789,123 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   color: var(--text-dim);
 }
 
-.chat-fab {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 50;
-  background: var(--accent);
-  color: #fff;
-  border-radius: 999px;
-  padding: 10px 14px;
-  border: none;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
-  cursor: pointer;
-}
+/* Chat is DOCKED in the right sidebar as a tab (QA-061) — it used to be a
+   position:fixed 360px panel over the timeline's right-hand tracks and the
+   History list, open on every load. With the Chat tab active the sidebar
+   becomes a column and the pane fills it; its body scrolls, never the page. */
+.right-tabs { display: flex; gap: 2px; padding: 2px; margin-bottom: 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; }
+.right-tabs [role="tab"] { flex: 1; padding: 4px 8px; font-size: 11px; background: transparent; border: none; border-radius: 4px; color: var(--text-dim); }
+.right-tabs [role="tab"]:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.right-tabs [role="tab"][aria-selected="true"] { background: var(--bg-3); color: var(--text); font-weight: 600; }
+.right-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+.sidebar.right.is-chat:not(.collapsed) { display: flex; flex-direction: column; overflow: hidden; }
+.sidebar.right.is-chat:not(.collapsed) .right-panel-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.right-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.right-chat[hidden] { display: none; }
 .chat-pane {
-  position: fixed;
-  right: 16px;
-  bottom: 64px;
-  width: 360px;
-  max-height: 60vh;
+  flex: 1;
+  min-height: 0;
   background: var(--bg-1);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  z-index: 50;
+  border-radius: 8px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
 }
+.chat-step { font-size: 11px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; color: var(--text); }
+.chat-step[data-ok="false"] { border-color: var(--accent); }
+.chat-step[data-ok="true"] b { color: var(--good); }
+.chat-step-sum { color: var(--text-dim); }
 .chat-pane header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
 .chat-pane .body { flex: 1; padding: 12px 14px; color: var(--text-dim); font-size: 12px; line-height: 1.5; overflow: auto; }
 .chat-pane footer { padding: 10px; border-top: 1px solid var(--line); }
 .chat-pane footer textarea { width: 100%; resize: none; min-height: 60px; }
+
+/* Media > Music gain row (QA-088): label · slider · readout on ONE line. The
+   readout never wraps and has room for "−30 dB" / "+6 dB". */
+.music-gain-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin-top: 6px; min-width: 0; }
+.music-gain-row label { flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+.music-gain-row input[type="range"] { flex: 1 1 auto; min-width: 0; }
+.music-gain-row output { flex-shrink: 0; min-width: 6ch; text-align: right; white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* ---- Modal dialog (components/Dialog.tsx) + the Export dialog (QA-100) ----- */
+.dialog-backdrop {
+  position: fixed; inset: 0; z-index: 1100;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 8, 10, 0.62);
+  backdrop-filter: blur(3px);
+}
+.dialog {
+  position: relative;
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column;
+  color-scheme: dark;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.dialog-head { padding: 18px 20px 6px; }
+.dialog-head h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); text-transform: none; }
+.dialog-body { padding: 8px 20px 12px; overflow: auto; }
+.dialog-foot { display: flex; align-items: center; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--line); }
+.dialog-foot .primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.dialog-foot .primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
+.dialog-foot .spacer { flex: 1; }
+/* A destructive confirm (ConfirmDialog): the accent FILL with --on-accent (QA-103). */
+.dialog-foot button.danger { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.dialog-foot button.danger:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+.dialog.confirm-dialog { width: min(400px, calc(100vw - 32px)); }
+.dialog.confirm-dialog .dialog-foot { border-top: none; padding-top: 4px; }
+.dialog.export-progress-dialog { width: min(440px, calc(100vw - 32px)); }
+.dialog.export-progress-dialog .dialog-body { padding-top: 12px; }
+.dialog-x { position: absolute; top: 12px; right: 12px; padding: 2px 8px; font-size: 16px; line-height: 1; background: transparent; border: none; color: var(--text-dim); }
+.dialog-x:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.dialog :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.dialog select, .dialog input[type="text"] {
+  width: 100%; min-width: 0; font: inherit; font-size: 12px;
+  color: var(--text); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+}
+.dialog select:hover, .dialog input[type="text"]:hover { border-color: #3a3a44; }
+
+.export-dialog-grid { display: grid; grid-template-columns: 96px minmax(0, 1fr); column-gap: 12px; row-gap: 8px; align-items: center; }
+.export-dialog-grid > label, .export-dialog-label { font-size: 11px; color: var(--text-dim); }
+.export-dialog-full { grid-column: 2; margin-top: -4px; }
+.export-dialog-help { font-size: 10.5px; color: var(--text-faint); }
+.export-dialog-value { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.export-dialog-name { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.export-dialog-ext { flex-shrink: 0; font-size: 12px; color: var(--text-dim); }
+.export-dialog-seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; justify-self: start; }
+.export-dialog-seg button { padding: 3px 12px; font-size: 11px; background: transparent; border: none; border-radius: 4px; color: var(--text-dim); }
+.export-dialog-seg button[aria-checked="true"] { background: var(--bg-3); color: var(--text); font-weight: 600; }
+.export-dialog-estimate { margin-right: auto; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.export-dialog-estimate b { color: var(--text); font-weight: 600; }
+.help-about { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.dialog-text { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text); }
+
+/* Voiceover recorder (QA-085): count-in, level meter, recording dot. */
+.vo-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--on-accent); margin-right: 4px; vertical-align: middle; }
+.vo-count { font-variant-numeric: tabular-nums; }
+.vo-meter { height: 6px; margin-top: 4px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
+.vo-meter-fill { display: block; height: 100%; width: 100%; background: var(--good); transform-origin: left center; transform: scaleX(0); }
+.vo-meter-fill[data-hot="true"] { background: var(--warn); }
+.vo-hint { margin-top: 4px; font-size: 10px; line-height: 1.45; color: var(--text-faint); }
+@media (prefers-reduced-motion: no-preference) { .vo-meter-fill { transition: transform 60ms linear; } }
+
+/* Caption style panel (QA-075) + the text inspector's segmented alignment. */
+.caption-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 6px; }
+.caption-preset { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 4px; font-size: 11px; background: var(--bg-2); color: var(--text-dim); }
+.caption-preset[aria-checked="true"] { border-color: var(--accent-2); color: var(--text); }
+.caption-preset-sample { font-size: 16px; font-weight: 900; line-height: 1.2; }
+.caption-box-row { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text); }
+.props .seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; }
+.props .seg button { padding: 3px 8px; background: transparent; border: none; border-radius: 4px; color: var(--text-dim); line-height: 0; }
+.props .seg button[aria-checked="true"] { background: var(--bg-3); color: var(--text); }
+.props .seg button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+/* Text ▾ style gallery (QA-078). */
+.text-style-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.text-style-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 4px; font-size: 10.5px; color: var(--text-dim); background: var(--bg-1); }
+.text-style-chip:hover:not(:disabled) { color: var(--text); }
+.text-style-sample { font-size: 15px; line-height: 1.25; padding: 0 5px; border-radius: 3px; text-shadow: 0 1px 0 rgba(0,0,0,0.6); }

@@ -42,8 +42,12 @@ def _ffmpeg_with_vidstab() -> str | None:
     return None
 
 
-def stabilize(src: Path, cache_dir: Path) -> Path:
-    """Two-pass libvidstab. Returns a new mp4 at `cache_dir/stable_<hash>.mp4`."""
+def stabilize(src: Path, cache_dir: Path, *, on_progress=None, cancel_event=None) -> Path:
+    """Two-pass libvidstab. Returns a new mp4 at `cache_dir/stable_<hash>.mp4`.
+
+    QA-066: both passes report ffmpeg's own progress (detect = first half,
+    transform = second) and stop on `cancel_event`."""
+    from . import jobio
     ff = _ffmpeg_with_vidstab()
     if not ff:
         raise RuntimeError(
@@ -62,28 +66,27 @@ def stabilize(src: Path, cache_dir: Path) -> Path:
     # passed as an -i argv, so it needs filtergraph escaping — a raw Windows
     # `C:\...` path breaks the parser (drive colon + backslashes).
     trf_filt = _pu.ffmpeg_filter_path(transforms)
-
-    # Pass 1: detect motion
-    p1 = subprocess.run(
-        [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={trf_filt}",
-         "-f", "null", "-"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    if p1.returncode != 0:
-        raise RuntimeError(f"vidstabdetect failed (rc={p1.returncode}):\n{p1.stderr[-1200:]}")
-
-    # Pass 2: apply transforms
-    p2 = subprocess.run(
-        [ff, "-y", "-i", str(src),
-         "-vf", f"vidstabtransform=input={trf_filt}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-         "-c:a", "copy", str(dst)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        **_pu.SUBPROCESS_FLAGS,
-    )
-    if p2.returncode != 0:
-        raise RuntimeError(f"vidstabtransform failed (rc={p2.returncode}):\n{p2.stderr[-1200:]}")
-    transforms.unlink(missing_ok=True)
+    _rate, dur, _n = jobio.video_facts(src)
+    stages = jobio.Stages(on_progress, detect=0.45, transform=0.55)
+    part = _pu.part_path(dst)
+    try:
+        # Pass 1: detect motion
+        jobio.run_ffmpeg(
+            [ff, "-y", "-i", str(src),
+             "-vf", f"vidstabdetect=shakiness=5:accuracy=15:result={trf_filt}",
+             "-f", "null", "-"],
+            duration=dur, on_progress=stages.sub("detect"), cancel_event=cancel_event,
+            what="vidstabdetect")
+        # Pass 2: apply transforms
+        jobio.run_ffmpeg(
+            [ff, "-y", "-i", str(src),
+             "-vf", f"vidstabtransform=input={trf_filt}:zoom=0:smoothing=10,unsharp=5:5:0.8:3:3:0.4",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+             "-c:a", "copy", str(part)],
+            duration=dur, on_progress=stages.sub("transform"), cancel_event=cancel_event,
+            what="vidstabtransform")
+        _pu.replace_with_retry(part, dst)
+    finally:
+        _pu.unlink_with_retry(part)
+        transforms.unlink(missing_ok=True)
     return dst

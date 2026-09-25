@@ -9,9 +9,11 @@ encode via h264_videotoolbox for ~5–10× the throughput of libx264.
 """
 from __future__ import annotations
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -22,9 +24,11 @@ from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
-from .pip import build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index
+from .pip import (build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index,
+                  pip_audio_chain, pip_frames, pip_input_args)
 from . import clock
 from . import cancel as _cancel
+from . import cache_budget as _cache_budget
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 from ..edl import timebase as _tb
 
@@ -314,6 +318,15 @@ _INFLIGHT_LOCK = threading.Lock()
 _RENDER_SLOTS = threading.BoundedSemaphore(
     max(1, int(os.environ.get("VAI_MAX_CONCURRENT_RENDERS", "2")))
 )
+
+
+#: Most v1 clips an EXPORT renders in a single ffmpeg pass (QA-097); above
+#: this it builds per-clip chunks first to bound decoder memory. See the
+#: chunk stage in `_render_locked`.
+_EXPORT_SINGLE_PASS_MAX_CLIPS = max(
+    0, int(os.environ.get("VAI_EXPORT_SINGLE_PASS_MAX_CLIPS", "48") or 48))
+#: Share of an export's progress bar the chunk stage fills when it runs.
+_CHUNK_PHASE_SHARE = 0.5
 
 
 @dataclass
@@ -807,7 +820,12 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
     pre = _clip_preroll(c, fps)
     if pre > 1e-9:
         a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
-    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
+    if (isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0
+            and not getattr(c.audio, "keep_pitch", True)):
+        # Varispeed (QA-039 residual): re-clocked, sample-exact, pitch moves.
+        from .audio_mix import varispeed_filter
+        a_chain += "," + varispeed_filter(float(c.speed))
+    elif isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         remaining = float(c.speed)
         # Every atempo stage is preceded by `_ATEMPO_LAG` of silence: ffmpeg's
         # WSOLA emits content ~20 ms of ITS INPUT early (measured on a 57-click
@@ -843,6 +861,11 @@ def _audio_props_filters(c: Clip) -> str:
     if c.audio:
         if abs(c.audio.gain_db) > 0.01:
             frag += f",volume={c.audio.gain_db:.2f}dB"
+        # Volume automation (QA-086), keyed in this same clip-local time.
+        from .audio_mix import gain_env_filter
+        env = gain_env_filter(c.audio)
+        if env:
+            frag += "," + env
         if c.audio.fade_in > 0.001:
             # fade-in starts at local t=0 and runs for fade_in seconds.
             frag += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
@@ -1158,7 +1181,8 @@ def _preview_aac_out() -> list[str]:
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None, on_progress=None,
             cancel_event=None, crf: int | None = None,
-            bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True) -> Path:
+            bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True,
+            chunked: bool = True) -> Path:
     # The single chokepoint every ffmpeg render passes through (preview and
     # export both land here), so it is where the concurrency ceiling belongs.
     #
@@ -1174,7 +1198,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                                cache_dir=cache_dir, on_progress=on_progress,
                                cancel_event=cancel_event, crf=crf,
                                bitrate_kbps=bitrate_kbps,
-                               bitrate_peak_cap=bitrate_peak_cap)
+                               bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
         except _cancel.RenderCancelled:
             from ..api.jobs import JobCancelled
             raise JobCancelled() from None
@@ -1186,7 +1210,7 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                               cache_dir=cache_dir, on_progress=on_progress,
                               cancel_event=cancel_event, crf=crf,
                               bitrate_kbps=bitrate_kbps,
-                              bitrate_peak_cap=bitrate_peak_cap)
+                              bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
     finally:
         _RENDER_SLOTS.release()
 
@@ -1194,7 +1218,11 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
 def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                    cache_dir: Path | None = None, on_progress=None,
                    cancel_event=None, crf: int | None = None,
-                   bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True) -> Path:
+                   bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True,
+                   chunked: bool = True) -> Path:
+    # Track solo (QA-086) is an audio rule: soloed-out lanes render muted.
+    from .audio_mix import apply_solo
+    edl = apply_solo(edl)
     canvas = edl.canvas
     # BOTH output dimensions must be even. H.264/yuv420p subsamples chroma 2x2,
     # so an odd dimension is unencodable — and long before the encoder, an odd
@@ -1220,6 +1248,12 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     w_out = int(round(canvas.w * (h_out / canvas.h) / 2) * 2)
     enc_args = _video_encoder_args(preview=preview, crf=crf, bitrate_kbps=bitrate_kbps,
                                    bitrate_peak_cap=bitrate_peak_cap)
+
+    # QA-037: a reversed clip plays a cached intermediate that already runs
+    # backwards (render.reverse); from here on it is an ordinary clip. A copy
+    # of the EDL, and only when something is reversed.
+    from .reverse import with_reversed_sources
+    edl = with_reversed_sources(edl, cache_dir, fps)
 
     clips = _video_clips(edl)
     # The v1 base always spans the WHOLE timeline (see `_v1_segments`): gaps and
@@ -1256,8 +1290,27 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # export chunks stay full-res; the fingerprint includes the dims, keeping
     # preview/export chunks cached separately (they already differed by
     # encoder args anyway).
+    #
+    # EXPORT renders in ONE pass (`chunked=False`, decided in render_export)
+    # unless the timeline has very many clips (QA-097). Chunking an export encoded every frame TWICE — once into its
+    # chunk, again in the assembly — which made it ~2x slower than a single
+    # pass (measured: 200 s clip 28.0 s vs 14 s; 40 clips 13.6 s vs 9.9 s),
+    # cost ~1 dB PSNR of generation loss, and sat at 0 % with no progress for
+    # the whole chunk stage. An export is rendered once per request, so the
+    # cache saved nothing in exchange. The single pass holds every clip's
+    # decoder open at once, so past `_EXPORT_SINGLE_PASS_MAX_CLIPS` inputs the
+    # chunk path stays (it bounds decoder memory: 150 clips measured 3.3 GB
+    # single-pass vs 2.4 GB chunked) — and then reports its own progress.
     chunk_paths: list[Path] | None = None
-    if cache_dir is not None and not transitions:
+    chunk_share = [0.0]
+    use_chunks = cache_dir is not None and not transitions and chunked
+    outer_progress = on_progress
+    if use_chunks:
+        chunk_progress = None
+        if outer_progress is not None:
+            def chunk_progress(frac: float) -> None:
+                chunk_share[0] = _CHUNK_PHASE_SHARE
+                outer_progress(_CHUNK_PHASE_SHARE * max(0.0, min(1.0, frac)))
         try:
             from .chunks import get_or_build_chunks
             chunk_paths = get_or_build_chunks(
@@ -1270,12 +1323,18 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                 # Previews build long clips from cached picture segments, so
                 # an edit re-encodes only the segments it touched (QA-005).
                 segment=preview,
+                on_progress=chunk_progress,
             )
         except _cancel.RenderCancelled:
             raise
         except Exception:
             # Cache miss / chunk render failure → fall back to monolithic.
             chunk_paths = None
+    if outer_progress is not None and chunk_share[0] > 0.0:
+        # The assembly fills the rest of the bar after the chunk stage.
+        share = chunk_share[0]
+        on_progress = (lambda p: outer_progress(  # noqa: E731
+            share + (1.0 - share) * max(0.0, min(1.0, p))))
 
     fc, inputs, labels, mask_inputs = _build_filter_complex(
         clips, w_out, h_out, transitions=transitions, cache_dir=cache_dir,
@@ -1310,6 +1369,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         # so direct manipulation is live; its AUDIO still comes back here. See
         # the preview branch in pip.py.
         preview=preview,
+        fps=fps,
     )
     if pip_chain:
         fc = fc + ";" + pip_chain
@@ -1408,18 +1468,14 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         pa_labels: list[str] = []
         for j, c in enumerate(pip_audio_clips):
             input_idx = pip_audio_input_index(pre_pip, j)
-            delay_ms = max(0, int(round(clock.render_time(seams, c.start) * 1000)))
-            chain = (f"[{input_idx}:a]aresample=async=1:first_pts=0,"
-                     f"aformat=channel_layouts=stereo:sample_rates=48000")
-            # PIP clips' own gain/fade/mute (was ignored — the v2 volume
-            # slider did nothing). No atempo: the PIP video chain doesn't
-            # apply speed either, and audio must stay in sync with it.
-            chain += _audio_props_filters(c)
-            if delay_ms > 0:
-                chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
+            # The same render window pip.py placed the picture in; the chain
+            # is sample-exact to its frames and carries the clip's own
+            # gain/fade/mute (QA-002 PIP half — see pip.pip_audio_chain).
+            win = clock.render_window(seams, c.start, c.start + c.duration)
+            rs, re = win if win is not None else (c.start, c.start + c.duration)
             pa_label = f"[pa{j}]"
-            chain += pa_label
-            pa_parts.append(chain)
+            pa_parts.append(pip_audio_chain(c, f"[{input_idx}:a]", pa_label,
+                                            rs=rs, re=re, fps=fps))
             pa_labels.append(pa_label)
         # Mix pip audio with main audio
         mix_inputs = a_label + "".join(pa_labels)
@@ -1638,6 +1694,9 @@ def _video_only_fingerprint(edl: EDL) -> str:
                 c["_file"] = _file_identity(c["src"])
         if t.id == "v1":
             d.pop("muted", None)
+        # Solo is audio-only (QA-086): it must take the cheap remux, not a
+        # video re-encode.
+        d.pop("solo", None)
         tracks.append(d)
     blob = {
         # See EDL.hash()'s docstring: a version salt so a pre-fix cached
@@ -1699,6 +1758,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
     out_dir.mkdir(parents=True, exist_ok=True)
     dst = out_dir / f"{h}.mp4"
     if dst.exists() and dst.stat().st_size > 0:
+        _cache_budget.touch(dst)          # LRU recency (QA-106)
         return RenderResult(path=dst, cached=True, edl_hash=h)
 
     key = f"{session_dir.name}/{h}"
@@ -1719,6 +1779,9 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
 
     try:
         _cancel.check()
+        # This render's working set (everything it uses from here on) is
+        # never evicted by its own budget pass (QA-106).
+        render_started = time.time()
         # Audio-only-remux fast path
         cache_dir = session_dir / "cache"
         videos_dir = cache_dir / "videos"
@@ -1731,16 +1794,26 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
         from .chunks import chunk_is_valid as _valid
         if _valid(cached_video):
             # Just remux the cached video against a freshly-rendered audio mix.
+            _cache_budget.touch(cached_video)
             try:
-                _remux_with_new_audio(edl, cached_video, dst, fps=fps,
-                                      cache_dir=cache_dir)
+                # QA-082: loudness-matched to the export (render/preview_loudness).
+                from . import preview_loudness as _pl
+                with _pl.matched(edl, session_dir, dst):
+                    _remux_with_new_audio(edl, cached_video, dst, fps=fps,
+                                          cache_dir=cache_dir)
+                _cache_budget.enforce(session_dir, protect=(dst, cached_video),
+                                      since=render_started)
                 return RenderResult(path=dst, cached=False, edl_hash=h)
+            except _cancel.RenderCancelled:
+                raise
             except Exception:
                 # Remux failed → fall through to full render
                 pass
 
-        _render(edl, dst, height=height, fps=fps, preview=True,
-                cache_dir=cache_dir)
+        from . import preview_loudness as _pl
+        with _pl.matched(edl, session_dir, dst):
+            _render(edl, dst, height=height, fps=fps, preview=True,
+                    cache_dir=cache_dir)
         # Also cache the video-only version (extract from the just-rendered
         # full preview — `-c:v copy -an` is essentially free).
         try:
@@ -1766,6 +1839,10 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
         vfiles = sorted(videos_dir.glob("video_*.mp4"), key=lambda p: p.stat().st_mtime)
         for old in vfiles[:-15]:
             _pu.unlink_with_retry(old)
+        # The counts above never bounded BYTES (QA-106): trim every render
+        # cache of this project, then the whole workdir, to their budgets.
+        _cache_budget.enforce(session_dir, protect=(dst, cached_video),
+                              since=render_started)
     finally:
         with _INFLIGHT_LOCK:
             _INFLIGHT.pop(key, None)
@@ -1854,6 +1931,9 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     audio + music ducking + voiceover) but only the audio is encoded.
     Video is `-c:v copy` so this is essentially I/O bound.
 
+    Track solo (QA-086) is applied here too — a solo toggle is audio-only, so
+    it arrives on this path.
+
     "The same way" includes the v1 ASSEMBLY: gap filler and an `acrossfade`
     at every seam the cached video was `xfade`d at (`_assemble_v1_audio`).
     This path used to plain-`concat` the per-clip audio, so on a timeline
@@ -1861,6 +1941,10 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     late by the accumulated overlap against a picture that did not — the
     render-clock drift, re-created on the fast path alone.
     """
+    from .audio_mix import apply_solo
+    edl = apply_solo(edl)
+    from .reverse import with_reversed_sources      # QA-037, as _render_locked
+    edl = with_reversed_sources(edl, cache_dir, fps)
     clips = _video_clips(edl)
     tmp = _part_path(dst)
     if not clips:
@@ -1916,19 +2000,12 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         pa_labels: list[str] = []
         for j, (c, (rs, re)) in enumerate(pip_clips):
             idx = next_idx + j
-            inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
-            delay_ms = max(0, int(round(rs * 1000)))
-            chain = (f"[{idx}:a]aresample=async=1:first_pts=0,"
-                     f"aformat=channel_layouts=stereo:sample_rates=48000")
-            if re - rs < c.duration - 0.0005:
-                # Straddles a seam: shorter on screen than its source length
-                # (pip.py caps the main path's input with `-t` for the same).
-                chain += f",atrim=duration={max(0.0, re - rs):.3f}"
-            chain += _audio_props_filters(c)
-            if delay_ms > 0:
-                chain += f",adelay=delays={delay_ms}|{delay_ms}:all=1"
+            # Same frame-exact span and chain as the full render's fold (a
+            # PIP straddling a seam is cut to its on-screen frames there too).
+            inputs += pip_input_args(c, pip_frames(rs, re, fps)[1], fps)
             pa_label = f"[rpa{j}]"
-            fc_parts.append(chain + pa_label)
+            fc_parts.append(pip_audio_chain(c, f"[{idx}:a]", pa_label,
+                                            rs=rs, re=re, fps=fps))
             pa_labels.append(pa_label)
         fc_parts.append(
             f"{a_main}{''.join(pa_labels)}amix=inputs={1 + len(pa_labels)}"
@@ -1969,11 +2046,71 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
 
 
+#: Characters an export file name may not carry: path separators and the
+#: characters Windows, the concat demuxer, a URL or a glob would misread.
+_UNSAFE_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|#%\[\]{}]+')
+#: Budget for the project-name part of an export file name, in UTF-8 bytes
+#: (APFS and ext4 cap a whole name at 255 bytes; Devanagari is 3 per letter).
+_EXPORT_NAME_MAX_BYTES = 150
+
+
+def export_filename(project_name: str | None, w: int, h: int, fps, *, crf: int,
+                    bitrate_kbps: int | None, ext: str) -> str:
+    """The file an export writes: the PROJECT's name plus the settings that
+    make this file different from another export of it (QA-098).
+
+    Every export of a timeline used to be `export_<edl hash>.mp4`, whatever its
+    resolution, rate or quality: a 480p export overwrote the 1080p one, two
+    concurrent requests at different sizes handed both callers the same file
+    (the 1080p requester received 854x480), and the name the user saved was a
+    hash. Now e.g. `Trip to Goa 1920x1080 30fps q18.mp4` or
+    `Reel 1080x1920 29.97fps 8000kbps.mov`. The same project exported again at
+    the same settings replaces its previous file — that IS the same export.
+    """
+    raw = _UNSAFE_NAME_CHARS.sub(" ", str(project_name or ""))
+    base = " ".join(raw.split()).strip(" .")
+    while len(base.encode("utf-8")) > _EXPORT_NAME_MAX_BYTES:
+        base = base[:-1]
+    base = base.rstrip(" .") or "Export"
+    rate = f"{_tb.fps_float(fps):.3f}".rstrip("0").rstrip(".")
+    quality = f"{int(bitrate_kbps)}kbps" if bitrate_kbps else f"q{int(crf)}"
+    return f"{base} {int(w)}x{int(h)} {rate}fps {quality}.{ext}"
+
+
+#: One lock per export destination: two requests that resolve to the same
+#: file render one after the other instead of racing their `.part` swaps.
+_EXPORT_LOCKS: dict[str, threading.Lock] = {}
+_EXPORT_LOCKS_GUARD = threading.Lock()
+
+
+def _export_lock(dst: Path) -> threading.Lock:
+    key = str(dst.resolve())
+    with _EXPORT_LOCKS_GUARD:
+        lock = _EXPORT_LOCKS.get(key)
+        if lock is None:
+            lock = _EXPORT_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def session_render_in_flight(session_dir: Path) -> bool:
+    """True while a preview or an export of this project is rendering — the
+    renders whose resolved-but-not-yet-opened cache paths "Clear render
+    cache" must not delete (REV-B5-CLEAR-CACHE)."""
+    name = Path(session_dir).name
+    with _INFLIGHT_LOCK:
+        if any(k.startswith(f"{name}/") for k in _INFLIGHT):
+            return True
+    prefix = str((Path(session_dir) / "exports").resolve())
+    with _EXPORT_LOCKS_GUARD:
+        return any(k.startswith(prefix) and lock.locked() for k, lock in _EXPORT_LOCKS.items())
+
+
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
                   fps: int | None = None, crf: int = 18, preset: str = "medium",
                   container: str = "mp4", filename: str | None = None,
                   on_progress=None, cancel_event=None,
-                  bitrate_kbps: int | None = None) -> RenderResult:
+                  bitrate_kbps: int | None = None,
+                  project_name: str | None = None) -> RenderResult:
     """Final export at canvas resolution (or override) with higher quality.
 
     `height` is a NAMED resolution — "1080p" — and names the SHORT side for
@@ -2000,13 +2137,14 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
 
     `on_progress(p)` (0..1) and `cancel_event` (threading.Event) let a background
     job stream progress and abort the underlying ffmpeg mid-render.
+
+    `project_name` names the file (`export_filename`, QA-098); `filename`
+    overrides it outright.
     """
     h = edl.hash()
     out_dir = session_dir / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
     ext = container if container in ("mp4", "mov") else "mp4"
-    name = filename or f"export_{h}.{ext}"
-    dst = out_dir / name
     canvas = edl.canvas
     w_out, h_out = export_dimensions(canvas.w, canvas.h, height)
     f_out = fps or edl.canvas.fps
@@ -2014,6 +2152,29 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     if target:
         ratio = (w_out * h_out) / max(1, canvas.w * canvas.h)
         target = max(1, int(round(target * min(1.0, ratio))))
+    name = filename or export_filename(project_name, w_out, h_out, f_out, crf=crf,
+                                       bitrate_kbps=target, ext=ext)
+    dst = out_dir / name
+    lock = _export_lock(dst)
+    while not lock.acquire(timeout=0.1):
+        if cancel_event is not None and cancel_event.is_set():
+            from ..api.jobs import JobCancelled
+            raise JobCancelled()
+    try:
+        res = _render_export_to(edl, dst, h, height=h_out, fps=f_out, crf=crf,
+                                target=target, session_dir=session_dir,
+                                on_progress=on_progress, cancel_event=cancel_event)
+    finally:
+        lock.release()
+    # A many-clip export builds chunks (QA-097); keep the caches in budget.
+    _cache_budget.enforce(session_dir)
+    return res
+
+
+def _render_export_to(edl: EDL, dst: Path, h: str, *, height: int, fps, crf: int,
+                      target: int | None, session_dir: Path, on_progress,
+                      cancel_event) -> RenderResult:
+    h_out, f_out = height, fps
     # VideoToolbox starves easy footage under a peak cap, so a platform
     # target is encoded uncapped first and re-encoded capped only when the
     # file overshoots (see `_target_bitrate_args`).
@@ -2024,11 +2185,14 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     def report(p: float) -> None:
         seen[0] = max(seen[0], p)
         on_progress(p)
+    # One pass unless there are more clips than one ffmpeg should hold open
+    # decoders for (QA-097, see the chunk stage in `_render_locked`).
+    chunked = len(_video_clips(edl)) > _EXPORT_SINGLE_PASS_MAX_CLIPS
     _render(edl, dst, height=h_out, fps=f_out, preview=False,
             cache_dir=session_dir / "cache",
             on_progress=report if on_progress is not None else None,
             cancel_event=cancel_event, crf=crf,
-            bitrate_kbps=target, bitrate_peak_cap=not vt_target)
+            bitrate_kbps=target, bitrate_peak_cap=not vt_target, chunked=chunked)
     if vt_target and (_video_kbps(dst) or 0) > target * _BITRATE_TOLERANCE:
         # The first pass already reported ~100%; hold the bar there through
         # the capped pass instead of running it backwards.
@@ -2036,7 +2200,7 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
         _render(edl, dst, height=h_out, fps=f_out, preview=False,
                 cache_dir=session_dir / "cache",
                 on_progress=hold, cancel_event=cancel_event, crf=crf,
-                bitrate_kbps=target, bitrate_peak_cap=True)
+                bitrate_kbps=target, bitrate_peak_cap=True, chunked=chunked)
     return RenderResult(path=dst, cached=False, edl_hash=h)
 
 

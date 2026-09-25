@@ -91,10 +91,10 @@
 }
 
 .tp-apply {
-  background: var(--accent-2, #5b8dff);
-  border-color: var(--accent-2, #5b8dff);
-  color: #fff;
+  background: var(--accent-2-fill);
+  border-color: var(--accent-2-fill);
+  color: var(--on-accent);
 }
 .tp-apply:hover:not(:disabled) {
-  background: #6d9aff;
+  background: var(--accent-2-fill-hover);
 }

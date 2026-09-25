@@ -84,13 +84,77 @@ def list_sessions() -> list[dict]:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        mtime = d.stat().st_mtime
         sessions.append({
             "id": d.name,
             "name": meta.get("name", d.name),
             "source": meta.get("source"),
-            "created_at": d.stat().st_mtime,
+            "created_at": mtime,
+            # QA-099: the project picker shows WHEN a project was last worked
+            # on instead of its raw id, so two same-named copies stay apart.
+            # `created_at` above has always been this mtime; kept for callers.
+            "modified_at": mtime,
         })
     return sessions
+
+
+#: QA-099: a project with no name of its own is "Untitled project N", never
+#: its `s_xxxxxxxxxx` id (the chip, picker and delete dialog all showed it).
+UNTITLED_PREFIX = "Untitled project"
+_UNTITLED_RE = re.compile(r"^Untitled project (\d+)$")
+#: Long enough for any real title, short enough for the top-bar chip.
+PROJECT_NAME_MAX = 120
+
+
+def default_project_name() -> str:
+    """The next free "Untitled project N" among the sessions on disk."""
+    taken = [int(m.group(1)) for s in list_sessions()
+             if (m := _UNTITLED_RE.match(str(s.get("name") or "")))]
+    return f"{UNTITLED_PREFIX} {max(taken, default=0) + 1}"
+
+
+def clean_project_name(raw: object) -> str:
+    """A user-typed project name, whitespace-collapsed. ValueError when it is
+    empty or longer than PROJECT_NAME_MAX (the route answers 400)."""
+    import unicodedata
+    text = str(raw if raw is not None else "")
+    # Control/format/unassigned characters (NUL, C1, bidi overrides…) never
+    # belong in a name the picker, the top-bar chip and meta.json show.
+    # ZWJ/ZWNJ stay: Indic names need them. Whitespace controls (\n, \t)
+    # collapse to a space below rather than vanishing.
+    text = "".join(ch for ch in text
+                   if ch.isspace() or ch in "\u200c\u200d"
+                   or not unicodedata.category(ch).startswith("C"))
+    name = " ".join(text.split())
+    if not name:
+        raise ValueError("A project name can't be empty.")
+    if len(name) > PROJECT_NAME_MAX:
+        raise ValueError(f"A project name can be at most {PROJECT_NAME_MAX} characters.")
+    return name
+
+
+def rename_session(session_id: str, name: str) -> str:
+    """Set a session's display name, keeping every other meta key."""
+    clean = clean_project_name(name)
+    write_meta(session_id, {**read_meta(session_id), "name": clean})
+    return clean
+
+
+def name_reopened_copy(session_id: str, when: str) -> str:
+    """A just-opened .vae carries the saved project's name. When another
+    project already has that name the copy becomes "<name> (opened <when>)",
+    so the picker never lists two rows that only their ids tell apart."""
+    meta = read_meta(session_id)
+    name = str(meta.get("name") or "").strip() or default_project_name()
+    others = {str(s.get("name")) for s in list_sessions() if s["id"] != session_id}
+    if name in others:
+        base = f"{name} (opened {when})"
+        name, n = base, 2
+        while name in others:
+            name, n = f"{base} {n}", n + 1
+        name = name[:PROJECT_NAME_MAX]
+    write_meta(session_id, {**meta, "name": name})
+    return name
 
 
 def write_meta(session_id: str, meta: dict) -> None:

@@ -52,7 +52,7 @@ from ..recipes import from_intents
 from ..schema import IntentDraft
 from .base import (Availability, BrainRequest, BrainResult, TextResult, TextTask, available,
                    unavailable)
-from .content import parse_text_items, strip_model_hook_text, text_task_prompts
+from .content import ground_duck_off, ground_to_prompt, parse_text_items, strip_model_hook_text, text_task_prompts
 from .jsonfix import JsonRepairFailed, repair
 from .prompt_text import (DraftShapeError, draft_key, facts_to_prompt_block, mlx_system_prompt,
                           normalize_draft, user_prompt_with_answers)
@@ -273,7 +273,13 @@ class MLXBrain:
         return draft if key == draft_key(req.prompt, req.prior_clarification) else None
 
     def _expand(self, draft: IntentDraft, req: BrainRequest, *, latency: int, model: str) -> BrainResult:
-        draft = strip_model_hook_text(draft, req.prompt)
+        draft = ground_duck_off(ground_to_prompt(strip_model_hook_text(draft, req.prompt), req.prompt),
+                                req.prompt)
+        if not draft.intents:
+            # Nothing to do but the model's own questions (dropped above): not
+            # an answer — the ladder falls through to the recipes' reading.
+            return BrainResult.failure(self.id, "rejected:no edit in the draft", latency_ms=latency,
+                                       model=model)
         try:
             plan = from_intents(draft, req.facts, hook_text=req.hook_text)
         except KeyError as e:

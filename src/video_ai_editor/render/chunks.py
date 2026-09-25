@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -271,8 +272,13 @@ def get_or_build_chunks(
     build_video_chain: Callable[..., str],
     build_audio_chain: Callable[..., str],
     segment: bool = False,
+    on_progress: Callable[[float], None] | None = None,
 ) -> list[Path]:
     """Return one cached chunk path per clip; render any that are missing.
+
+    `on_progress(frac)` (QA-097) reports the share of the missing chunks'
+    frames rendered so far, once per finished chunk — an export that has to
+    build its chunks used to show 0 % for that whole stage.
 
     `segment=True` (previews) builds a missing chunk of a LONG eligible clip
     from cached picture segments (render.segments, QA-005) instead of one
@@ -298,7 +304,24 @@ def get_or_build_chunks(
                 pass
             to_build.append((i, c, chunk))
 
+    from .compositor import clip_frames as _clip_frames
+    total_frames = sum(_clip_frames(c, fps) for _i, c, _p in to_build) or 1
+    done_frames = [0]
+    progress_lock = threading.Lock()
+
+    def _built(clip: Clip) -> None:
+        if on_progress is None:
+            return
+        with progress_lock:
+            done_frames[0] += _clip_frames(clip, fps)
+            frac = done_frames[0] / total_frames
+        on_progress(frac)
+
     def _build(item: tuple[int, Clip, Path]) -> None:
+        _build_one(item)
+        _built(item[1])
+
+    def _build_one(item: tuple[int, Clip, Path]) -> None:
         _, clip, dst = item
         if segment:
             from .segments import build_segmented_chunk, segment_bounds
@@ -339,5 +362,10 @@ def get_or_build_chunks(
             ctxs = [contextvars.copy_context() for _ in to_build]
             list(ex.map(lambda cx, it: cx.run(_build, it), ctxs, to_build))
 
+    # LRU recency for the byte budget (render.cache_budget, QA-106): every
+    # chunk this render uses — hit or freshly built — is now the youngest.
+    from .cache_budget import touch as _touch
+    for p in chunk_paths:
+        _touch(p)
     evict_old_chunks(cache_dir, keep=200)
     return chunk_paths

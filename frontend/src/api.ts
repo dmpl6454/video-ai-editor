@@ -1,6 +1,11 @@
 // Fetch wrappers around the FastAPI backend.
 
+import type { ImportAnswer } from './lib/importFollowUp'
+import type { DownloadReport } from './lib/modelDownloads'
 import type { EDL, SessionInfo, Op, MediaItem } from './types'
+import {
+  EngineOfflineError, isAbort, isGatewayFailure, reportEngineReachable, reportEngineUnreachable,
+} from './lib/connection'
 
 const BASE = '/api'
 
@@ -202,12 +207,38 @@ const CLIENT_HEADERS: Record<string, string> = { 'X-VAE-Client': '1' }
 async function apiError(res: Response): Promise<Error> {
   const head = `${res.status} ${res.statusText}`
   const text = await res.text().catch(() => '')
+  // QA-109: a proxy's 502/504 (or the dev proxy's bare 500) means the engine
+  // is not there — not a server error to toast verbatim.
+  if (isGatewayFailure(res.status, text)) {
+    reportEngineUnreachable()
+    return new EngineOfflineError()
+  }
+  reportEngineReachable()
   return new Error(text ? `${head}: ${text}` : head)
+}
+
+/**
+ * fetch() that reports reachability (QA-109): a network failure marks the
+ * engine offline and throws EngineOfflineError instead of the browser's raw
+ * "Failed to fetch"; any answer from the engine marks it online. An abort
+ * (a superseded preview) is passed through untouched.
+ */
+async function send(url: string, init: RequestInit): Promise<Response> {
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch (e) {
+    if (isAbort(e)) throw e
+    reportEngineUnreachable()
+    throw new EngineOfflineError()
+  }
+  if (res.status < 500) reportEngineReachable()   // a 5xx is judged by apiError
+  return res
 }
 
 async function http<T>(method: string, path: string, body?: unknown,
                        signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await send(`${BASE}${path}`, {
     method,
     headers: body ? { ...CLIENT_HEADERS, 'content-type': 'application/json' } : CLIENT_HEADERS,
     body: body ? JSON.stringify(body) : undefined,
@@ -217,12 +248,48 @@ async function http<T>(method: string, path: string, body?: unknown,
   return res.json()
 }
 
+/** Progress of the BYTES of an upload (QA-044). */
+export interface UploadBytes { loaded: number; total: number }
+
+/**
+ * POST a multipart body and report upload progress. fetch() cannot report
+ * request-body progress, which is why a 12-minute import showed one static
+ * line for minutes; XMLHttpRequest can. Falls back to fetch where there is no
+ * XHR (tests in node). Resolves with a Response so callers keep one contract.
+ */
+function postForm(url: string, fd: FormData,
+                  opts: { onBytes?: (p: UploadBytes) => void; signal?: AbortSignal } = {}): Promise<Response> {
+  if (typeof XMLHttpRequest === 'undefined') return send(url, { method: 'POST', body: fd, signal: opts.signal })
+  return new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) opts.onBytes?.({ loaded: e.loaded, total: e.total })
+    }
+    const onAbort = () => xhr.abort()
+    opts.signal?.addEventListener('abort', onAbort, { once: true })
+    const done = () => opts.signal?.removeEventListener('abort', onAbort)
+    xhr.onload = () => {
+      done()
+      const res = new Response(xhr.status === 204 ? null : xhr.responseText,
+                               { status: xhr.status, statusText: xhr.statusText,
+                                 headers: { 'content-type': xhr.getResponseHeader('content-type') ?? 'application/json' } })
+      if (res.ok || res.status < 500) reportEngineReachable()
+      resolve(res)
+    }
+    xhr.onerror = () => { done(); reportEngineUnreachable(); reject(new EngineOfflineError()) }
+    xhr.onabort = () => { done(); reject(new DOMException('The import was cancelled.', 'AbortError')) }
+    xhr.send(fd)
+  })
+}
+
 const UPLOAD_POLL_MS = 400
 
 export const api = {
   health: () => http<{ ok: boolean }>('GET', '/health'),
 
-  listSessions: () => http<{ sessions: { id: string; name: string }[] }>('GET', '/sessions'),
+  listSessions: () =>
+    http<{ sessions: { id: string; name: string; modified_at?: number }[] }>('GET', '/sessions'),
 
   createSession: (name?: string) =>
     http<{ id: string; name: string }>('POST', '/sessions', { name }),
@@ -230,6 +297,16 @@ export const api = {
   getSession: (sid: string) => http<SessionInfo>('GET', `/sessions/${sid}`),
 
   deleteSession: (sid: string) => http<{ deleted: string }>('DELETE', `/sessions/${sid}`),
+
+  // QA-099: rename a project. 400 for an empty or over-long name.
+  renameSession: (sid: string, name: string) =>
+    http<{ id: string; name: string }>('PATCH', `/sessions/${sid}`, { name }),
+
+  // QA-105: the session's current EDL hash, cheaply — polled (and asked on
+  // focus) so a window notices edits made elsewhere. Doubles as the liveness
+  // signal (QA-109).
+  sessionHead: (sid: string) =>
+    http<{ id: string; edl_hash: string; ops: number; redo_available: boolean }>('GET', `/sessions/${sid}/head`),
 
   getEDL: (sid: string) => http<EDL>('GET', `/sessions/${sid}/edl`),
 
@@ -244,20 +321,43 @@ export const api = {
   removeMedia: (sid: string, mediaId: string) =>
     http<{ removed: string; name: string }>('DELETE', `/sessions/${sid}/media/${mediaId}`),
 
-  audioUpload: async (sid: string, file: File, opts: { addToMusic?: boolean; duck?: boolean; volumeDb?: number } = {}) => {
+  audioUpload: async (sid: string, file: File, opts: { addToMusic?: boolean; duck?: boolean; volumeDb?: number
+                                                     onBytes?: (p: UploadBytes) => void; signal?: AbortSignal } = {}) => {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('add_to_music', String(opts.addToMusic ?? true))
-    fd.append('duck', String(opts.duck ?? true))
+    // QA-083: sent only when the caller chose. Ducking is a lane setting the
+    // user may have turned off; the server keeps it unless told otherwise.
+    if (opts.duck !== undefined) fd.append('duck', String(opts.duck))
     fd.append('volume_db', String(opts.volumeDb ?? -12))
-    const res = await fetch(`${BASE}/sessions/${sid}/audio_upload`, { method: 'POST', body: fd })
+    // QA-044: XHR for byte progress + cancel (postForm).
+    const res = await postForm(`${BASE}/sessions/${sid}/audio_upload`, fd, { onBytes: opts.onBytes, signal: opts.signal })
     if (!res.ok) throw await apiError(res)
-    return res.json() as Promise<{ src: string; duration: number; edl_hash: string }>
+    // `past_video_s` etc.: where it landed and how far it runs past the
+    // picture (QA-083) — lib/importFollowUp turns that into "Trim to video".
+    return res.json() as Promise<{ src: string; duration: number; edl_hash: string } & ImportAnswer>
+  },
+
+  // QA-095: replace an offline item's file. The server imports the new file
+  // like any import of its kind and relinks every clip that played the
+  // missing one — one undoable edit.
+  relinkMedia: async (sid: string, mediaId: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${BASE}/sessions/${sid}/media/${mediaId}/relink`, { method: 'POST', body: fd })
+    if (!res.ok) throw await apiError(res)
+    return res.json() as Promise<{ relinked: string[]; name: string; summary: string; edl_hash: string }>
   },
 
   upload: async (sid: string, file: File, addToTimeline = true,
                  opts: { transcribe?: boolean; whisperModel?: string;
-                         onProgress?: (fraction: number) => void } = {}) => {
+                         onProgress?: (fraction: number) => void
+                         // QA-044: bytes-on-the-wire progress, the server job
+                         // id once the bytes are in (so Cancel can reach the
+                         // normalise), and an abort for the upload itself.
+                         onBytes?: (p: UploadBytes) => void
+                         onJob?: (jobId: string) => void
+                         signal?: AbortSignal } = {}) => {
     type UploadResult = {
       src: string
       normalized: string
@@ -266,7 +366,7 @@ export const api = {
       probe: { duration: number }
       edl_hash: string
       notices?: string[]
-    }
+    } & ImportAnswer
     const fd = new FormData()
     fd.append('file', file)
     fd.append('add_to_timeline', String(addToTimeline))
@@ -277,10 +377,12 @@ export const api = {
     // its event loop, freezing every other request for the whole import).
     // Polling the job gives the bin real progress. A server that predates the
     // job path answers 200 with the result, handled the same way.
-    const res = await fetch(`${BASE}/sessions/${sid}/upload?wait=0`, { method: 'POST', body: fd })
+    const res = await postForm(`${BASE}/sessions/${sid}/upload?wait=0`, fd,
+                               { onBytes: opts.onBytes, signal: opts.signal })
     if (!res.ok) throw await apiError(res)
     if (res.status !== 202) return res.json() as Promise<UploadResult>
     const { job_id } = (await res.json()) as { job_id: string }
+    opts.onJob?.(job_id)
     for (;;) {
       await new Promise((r) => setTimeout(r, UPLOAD_POLL_MS))
       const job = await api.getJob(job_id)
@@ -292,11 +394,15 @@ export const api = {
     }
   },
 
-  dispatch: <T = unknown>(sid: string, tool: string, args: Record<string, unknown> = {}) =>
+  // `baseHash` (QA-105): the EDL hash this window's view was built from; the
+  // server answers 409 `stale_edl` instead of editing a timeline that changed
+  // underneath it. Omitted → no check (the legacy contract).
+  dispatch: <T = unknown>(sid: string, tool: string, args: Record<string, unknown> = {},
+                          baseHash?: string | null) =>
     http<{ result: T; edl_hash: string; op: Op | null }>(
       'POST',
       `/sessions/${sid}/dispatch`,
-      { tool, args }
+      baseHash ? { tool, args, base_hash: baseHash } : { tool, args }
     ),
 
   // Async dispatch (202 + job id), for the handful of tools that load an ML
@@ -304,11 +410,12 @@ export const api = {
   // worker for minutes, which starves the rest of the app — the round-5
   // "becomes unresponsive" report. Poll `getJob` until status is terminal;
   // the completed job's `result` is the same payload the sync path returns.
-  dispatchAsync: (sid: string, tool: string, args: Record<string, unknown> = {}) =>
+  dispatchAsync: (sid: string, tool: string, args: Record<string, unknown> = {},
+                  baseHash?: string | null) =>
     http<{ job_id: string; status: JobStatus; status_url: string }>(
       'POST',
       `/sessions/${sid}/dispatch?wait=0`,
-      { tool, args }
+      baseHash ? { tool, args, base_hash: baseHash } : { tool, args }
     ),
 
   // `signal` aborts the request when a newer render supersedes it (QA-004).
@@ -351,6 +458,10 @@ export const api = {
 
   cancelJob: (jobId: string) => http<Job>('POST', `/jobs/${jobId}/cancel`),
 
+  // Which tools download model weights on their next run, and how much
+  // (QA-065, ai/weights.py). Existence checks only — cheap to ask before a run.
+  getDownloads: () => http<{ downloads: DownloadReport }>('GET', '/downloads'),
+
   // `refresh` re-probes the installed optional features (the panel's Refresh
   // button); otherwise the backend serves its process-lifetime cache — the
   // probes import six ai.* modules and cost ~2s cold.
@@ -379,8 +490,11 @@ export const api = {
       `/sessions/${sid}/waveform?src=${encodeURIComponent(src)}&peaks_per_sec=${peaksPerSec}`
     ),
 
+  // `missing`/`warning` (QA-096): media that could not be bundled because
+  // its file is gone — the saved project is not self-contained.
   saveProject: (sid: string) =>
-    http<{ path: string; filename: string; url: string; size: number }>(
+    http<{ path: string; filename: string; url: string; size: number
+           missing?: { name: string; src: string }[]; warning?: string }>(
       'POST', `/sessions/${sid}/save_project`
     ),
 
@@ -476,7 +590,7 @@ export const api = {
 // LAN mode is armed) and raises the same `${status} ${statusText}: ${body}`
 // error shape on failure.
 async function sse(path: string, body: unknown): Promise<Response> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await send(`${BASE}${path}`, {
     method: 'POST',
     headers: { ...CLIENT_HEADERS, 'content-type': 'application/json' },
     body: JSON.stringify(body),

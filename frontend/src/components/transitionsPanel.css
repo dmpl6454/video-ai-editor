@@ -110,7 +110,7 @@
 .trp-tab[aria-selected="true"] { color: var(--text); border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 .trp-tab:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 .trp-tab:active { transform: translateY(1px); }
-.trp-tab-n { font-size: 9px; font-weight: 500; opacity: 0.7; font-variant-numeric: tabular-nums; }
+.trp-tab-n { font-size: 9px; font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* ---- the grid --------------------------------------------------------------- */
 

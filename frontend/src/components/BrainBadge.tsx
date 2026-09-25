@@ -18,6 +18,7 @@ import { createPortal } from 'react-dom'
 import { api, type PromptModelRow } from '../api'
 import { errorMessage } from '../store'
 import { usePromptStore } from '../lib/promptStore'
+import { brainCopy } from '../lib/brainCopy'
 import { brainLabel, humanBytes, isLoopbackOrigin, shortModel,
          type BrainAttempt, type BrainRow } from '../lib/promptEvents'
 
@@ -196,8 +197,10 @@ export function BrainBadge() {
                       {answered && <span className="tag answered">answered</span>}
                       {!answered && <span className="tag">{row.available ? 'available' : 'unavailable'}</span>}
                     </div>
-                    {row.detail && <div className="brain-row-detail">{row.detail}</div>}
-                    {!row.available && row.fix && <pre className="brain-row-fix">{row.fix}</pre>}
+                    {/* Editor language, not the report's shell commands (QA-063);
+                        the raw report is the row's hover title. */}
+                    <div className="brain-row-detail" title={[row.detail, row.fix].filter(Boolean).join(' · ')}>{brainCopy(row).detail}</div>
+                    {brainCopy(row).fix && <div className="brain-row-fix">{brainCopy(row).fix}</div>}
                     {canDownload && (
                       <div className="brain-row-actions">
                         {dl.status === 'running' ? (

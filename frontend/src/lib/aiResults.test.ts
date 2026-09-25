@@ -21,6 +21,14 @@ describe('resultView — per-tool shapes', () => {
     expect(resultView('find_moments', { matches: [], summary: 'no clips on v1' }).headline).toBe('no clips on v1')
   })
 
+  it('find_moments notes matches the edit removed (QA-067)', () => {
+    const v = resultView('find_moments', { query: 'battery', cut_away: 2,
+      matches: [{ start: 32.58, end: 42.54, source_start: 39.08, source_end: 49.04, transcript: 'x' }] })
+    expect(v.rows).toEqual([{ kind: 'range', start: 32.58, end: 42.54, text: 'x' }])
+    expect(v.note).toBe('2 matches fell in parts the edit removed')
+    expect(resultView('find_moments', { matches: [] }).note).toBeUndefined()
+  })
+
   it('make_shorts → range rows + a saved-sessions note', () => {
     const v = resultView('make_shorts', {
       summary: 'Made 2 short(s)',

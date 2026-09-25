@@ -8,12 +8,21 @@ import { toast } from './toast'
 import { type EDL, type Op } from './types'
 import { splitTargets } from './lib/splitTargets'
 import { deletedLabel } from './lib/deletedLabel'
-import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
-import { firePromptRunning, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
+import { editorValidationMessage, isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
+import { toolTitle } from './lib/opLabels'
+import { firePromptRunning, fireSessionSwitch, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
 import { nativeSave } from './lib/nativeSave'
 import { exportFor, exportLink, withExport, withoutExport, type ExportLinks } from './lib/exportLink'
 import { planNudge } from './lib/nudge'
 import { frameDuration } from './lib/frameStep'
+import { clampZoom } from './lib/timelineZoom'
+import { undoDepthOf, undoRefusedMessage } from './lib/undoHorizon'
+import { engineState, isAbort, isEngineOffline, onEngineState, type EngineState } from './lib/connection'
+import { isStaleEdlError, STALE_VIEW_MESSAGE } from './lib/staleView'
+import type { UploadBatch, UploadItem } from './lib/uploadQueue'
+import { importFollowUp, type ImportAnswer } from './lib/importFollowUp'
+import { placementFor, type LanePlacement, type PlacedAnswer } from './lib/laneDrop'
+import { splitTimeFor } from './lib/splitTargets'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -48,6 +57,12 @@ export const ASYNC_DISPATCH_TOOLS = new Set([
 
 const JOB_POLL_MS = 700
 
+// QA-034's two terminal export messages.
+export const EXPORT_INTERRUPTED = 'The export was interrupted — the editor engine restarted. Export again.'
+export const EXPORT_LOST = 'Lost contact with the export — the editor engine stopped responding.'
+/** How long an export waits for an unreachable engine before giving up. */
+export const EXPORT_LOST_MS = 2 * 60 * 1000
+
 // renderPreview's latest-wins bookkeeping (QA-004): the sequence number of the
 // newest request and the controller that can abort it. Module state, not store
 // state — nothing renders from them.
@@ -55,6 +70,39 @@ let previewSeq = 0
 let previewAbort: AbortController | null = null
 // openSession's latest-wins counter (a quick A→B→C must land on C).
 let openSeq = 0
+// Bumped whenever an edit lands (dispatch success). refresh() compares it to
+// decide whether the EDL it fetched can still judge the selection (QA-047).
+let mutationSeq = 0
+// doExport's run token (QA-034): Cancel bumps it so the poll loop that was
+// running stops without touching the state of whatever export comes next.
+let exportRun = 0
+// The import queue (QA-044/094): every file waits for the one before it, so
+// a drop lands in drop order and each file's progress is its own.
+let importChain: Promise<void> = Promise.resolve()
+// Per-item cancel hooks, by upload id.
+const importCancels = new Map<string, () => void>()
+let importSeq = 0
+// One "edits are paused" toast per offline spell, not one per gesture (QA-109).
+let offlineNoticeShown = false
+
+/** Drop selected ids that are no longer on the timeline (QA-047). Returns the
+ *  patch to apply (empty when nothing changed). */
+export function pruneSelection(
+  s: Pick<State, 'selection' | 'multiSelection' | 'framing'>, edl: EDL | null,
+): Partial<Pick<State, 'selection' | 'multiSelection' | 'framing'>> {
+  if (!edl) return {}
+  const live = new Set<string>()
+  for (const t of edl.tracks) for (const c of t.clips) live.add(c.id)
+  const keep = [s.selection, ...s.multiSelection].filter((id): id is string => !!id && live.has(id))
+  const primaryGone = !!s.selection && !live.has(s.selection)
+  const multiGone = s.multiSelection.some((id) => !live.has(id))
+  const framingGone = !!s.framing && !live.has(s.framing.clipId)
+  if (!primaryGone && !multiGone && !framingGone) return {}
+  return {
+    ...(primaryGone || multiGone ? { selection: keep[0] ?? null, multiSelection: keep.slice(1) } : {}),
+    ...(framingGone ? { framing: null } : {}),
+  }
+}
 
 /** The server's 409 for a render another request superseded. */
 function isPreviewSuperseded(e: unknown): boolean {
@@ -72,8 +120,9 @@ function isPreviewSuperseded(e: unknown): boolean {
 async function runDispatchJob(
   sid: string, tool: string, args: Record<string, unknown>,
   onProgress?: (p: { jobId: string; progress: number }) => void,
+  baseHash?: string | null,
 ): Promise<{ result: { redo_available?: boolean }; edl_hash: string; op: Op | null }> {
-  const { job_id } = await api.dispatchAsync(sid, tool, args)
+  const { job_id } = await api.dispatchAsync(sid, tool, args, baseHash)
   onProgress?.({ jobId: job_id, progress: 0 })
   for (;;) {
     await new Promise((r) => setTimeout(r, JOB_POLL_MS))
@@ -84,7 +133,8 @@ async function runDispatchJob(
         { result: { redo_available?: boolean }; edl_hash: string; op: Op | null }
     }
     if (job.status === 'failed') throw new Error(job.error || `${tool} failed`)
-    if (job.status === 'cancelled') throw new Error(`${tool} was cancelled`)
+    // Named in editor language (QA-101): "AI upscale was cancelled", not "upscale …".
+    if (job.status === 'cancelled') throw new Error(`${toolTitle(tool)} was cancelled`)
   }
 }
 
@@ -118,14 +168,14 @@ export function errorMessage(e: unknown): string {
         ?? (typeof body.detail === 'string'
               ? body.detail
               : body.detail?.message ?? body.detail?.error)
-      if (msg) return stripExceptionPrefix(msg)
+      if (msg) return editorValidationMessage(stripExceptionPrefix(msg))
     } catch {
       // not a JSON tail — fall through to the raw text
     }
   }
   // Job failures arrive as "RuntimeError: …" (api/jobs.py records the class
   // name) — see lib/dispatchErrors.ts for why the prefix is dropped.
-  return stripExceptionPrefix(raw)
+  return editorValidationMessage(stripExceptionPrefix(raw))
 }
 
 // Reads a persisted panel size (Task 9's Splitter drag state). Guards against
@@ -149,12 +199,27 @@ function readStoredBool(key: string, fallback: boolean): boolean {
   return raw === 'true'
 }
 
+/** One copied clip: the lane it came from and its EDL JSON (QA-056). */
+export interface ClipboardItem { track: string; clip: Record<string, unknown> }
+
+/** Per-import options. `addToTimeline` defaults to the Media panel's
+ *  "Add imports to the timeline" switch (QA-010). */
+export interface ImportOptions {
+  addToTimeline?: boolean
+  /** A timeline lane drop (QA-093): import without the default placement,
+   *  then place the file on this lane from what the server answered. */
+  place?: LanePlacement
+}
+
 interface State {
   sessionId: string | null
   sessionName: string
   edl: EDL | null
   ops: Op[]
   redoAvailable: boolean
+  // QA-046: how many ⌘Z steps the server can still take (GET /sessions
+  // undo_depth). The Undo button and History's horizon bind to this.
+  undoDepth: number
   // Count of in-flight dispatch() calls. >0 means at least one edit is being
   // applied server-side. Every gesture (drag, click, chat tool call) used to
   // give NO feedback between the click and the debounced refresh landing —
@@ -175,9 +240,23 @@ interface State {
   // "Rendering…" badge). Owned by renderPreview, so every caller — the Preview
   // effect, chat, the prompt bar — shows the same state (QA-004).
   previewRendering: boolean
+  // True while the import queue holds anything (QA-094: busy until EVERY
+  // file of a drop is in, not until the first one finishes).
   uploading: boolean
   uploadProgress: string | null
   uploadError: string | null
+  // QA-044: one entry per file still importing, in drop order — the Media
+  // panel draws each as a placeholder row with stage, %, ETA and Cancel.
+  uploads: UploadItem[]
+  // How far the current batch has got ("Importing 2 of 3").
+  uploadBatch: UploadBatch
+  // QA-010 remainder: "Add imports to the timeline" (off = import to the
+  // media library only). Remembered per browser.
+  importAddToTimeline: boolean
+  setImportAddToTimeline(on: boolean): void
+  cancelUpload(id: string): void
+  // QA-109: is the editor engine answering? Mirrors lib/connection.
+  engine: EngineState
   exporting: boolean
   // Each session's last finished export as ONE record — session, url, filename
   // and the EDL hash it was rendered from (lib/exportLink — QA-026). TopBar
@@ -266,7 +345,9 @@ interface State {
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
   snapEnabled: boolean
-  clipboard: string[]               // copied clip ids (for paste)
+  // QA-056: the copied clips' CONTENT (lane + clip JSON), not their ids — a
+  // paste must survive the source being deleted and land at the playhead.
+  clipboard: ClipboardItem[]
   flashClipId: string | null        // clip to briefly flash on the timeline
   flashAt: number                   // timestamp the flash started (ms)
   flashClip(id: string): void       // draw attention to a newly-added clip
@@ -283,11 +364,16 @@ interface State {
   // workflow
   init(): Promise<void>
   refresh(): Promise<void>
+  /** QA-105: ask the server whether this window's view is still current and
+   *  refresh when another window (or an agent) changed the project. */
+  syncWithServer(): Promise<void>
+  /** QA-099: rename the open project. Resolves false (and toasts) on failure. */
+  renameSession(name: string): Promise<boolean>
   /** Switch the editor to project `id`, atomically: see the action. */
   openSession(id: string): Promise<void>
   refreshSoon(): void
-  upload(file: File): Promise<void>
-  uploadAudio(file: File): Promise<void>
+  upload(file: File, opts?: ImportOptions): Promise<void>
+  uploadAudio(file: File, opts?: ImportOptions): Promise<void>
   // Resolves with the dispatch response on success (so callers can read the
   // tool's own result, e.g. add_text's new clip id or auto_caption's cue
   // count) or null on failure — the failure is already surfaced via
@@ -308,7 +394,9 @@ interface State {
     },
   ): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
-  doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number }): Promise<void>
+  // `saveAs` (QA-100): the Export dialog's File name — the name the file is
+  // saved under; `fps` (QA-009) only when it differs from the project rate.
+  doExport(opts?: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number; saveAs?: string }): Promise<void>
   // Save the last finished export to disk. In the packaged app this drives the
   // native Save-As dialog (via the pywebview bridge); in a browser it falls
   // back to an `<a download>` click. Wired to the green download-arrow link so
@@ -331,6 +419,7 @@ export const useStore = create<State>((set, get) => ({
   edl: null,
   ops: [],
   redoAvailable: false,
+  undoDepth: 0,
   pendingOps: 0,
   selection: null,
   playhead: 0,
@@ -347,6 +436,10 @@ export const useStore = create<State>((set, get) => ({
   uploading: false,
   uploadProgress: null,
   uploadError: null,
+  uploads: [],
+  uploadBatch: { total: 0, done: 0 },
+  importAddToTimeline: readStoredBool('vai.importAddToTimeline', true),
+  engine: engineState(),
   exporting: false,
   exportLinks: {},
   edlHash: null,
@@ -426,6 +519,17 @@ export const useStore = create<State>((set, get) => ({
   setInMark: (t) => set({ inMark: t }),
   setOutMark: (t) => set({ outMark: t }),
   clearUploadError: () => set({ uploadError: null }),
+  setImportAddToTimeline: (on) => {
+    try { localStorage.setItem('vai.importAddToTimeline', String(on)) } catch { /* private mode */ }
+    set({ importAddToTimeline: on })
+  },
+  cancelUpload: (id) => {
+    // Upload stage → the XHR aborts; processing → the server job is cancelled
+    // (its normalise stops and the half-made files are removed); still
+    // waiting → it never starts. The queue item goes either way.
+    importCancels.get(id)?.()
+    set(afterImportLeaves(get(), id))
+  },
   clearExportError: () => set({ exportError: null }),
 
   // Clears per-session view/selection state. Call when switching sessions so a
@@ -488,10 +592,12 @@ export const useStore = create<State>((set, get) => ({
       if (s.flashClipId === id && s.flashAt === at) set({ flashClipId: null })
     }, 700)
   },
-  setTimelineZoom: (z) => set({ timelineZoom: Math.max(10, Math.min(600, z)) }),
+  // lib/timelineZoom's limits (QA-054): the old 10 px/s floor left a 12-min
+  // timeline 7200 px wide at its most zoomed out.
+  setTimelineZoom: (z) => set({ timelineZoom: clampZoom(z) }),
   zoomTimeline: (factor) => {
     const z = get().timelineZoom
-    set({ timelineZoom: Math.max(10, Math.min(600, z * factor)) })
+    set({ timelineZoom: clampZoom(z * factor) })
   },
   toggleSnap: () => set({ snapEnabled: !get().snapEnabled }),
   selectAll: () => {
@@ -503,22 +609,31 @@ export const useStore = create<State>((set, get) => ({
   },
   copySelection: () => {
     const s = get()
-    const ids = Array.from(new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[]))
-    set({ clipboard: ids })
+    // QA-056: copy the clips THEMSELVES (lane + JSON), not their ids. The ids
+    // made paste a `duplicate_clip` of the source — landing after it instead
+    // of at the playhead, and failing "clip not found" once it was deleted.
+    const ids = new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[])
+    const items: ClipboardItem[] = []
+    for (const t of s.edl?.tracks ?? []) {
+      for (const c of t.clips) {
+        if (ids.has(c.id)) items.push({ track: t.id, clip: JSON.parse(JSON.stringify(c)) as Record<string, unknown> })
+      }
+    }
+    if (items.length) set({ clipboard: items })
   },
   pasteClipboard: async () => {
     const s = get()
-    // Paste = duplicate each clipboard clip (the dispatch duplicates with an
-    // offset). Reuses the existing duplicate path so undo/ops work.
-    let pasted: string | null = null
-    for (const id of s.clipboard) {
-      const res = await s.dispatch('duplicate_clip', { clip_id: id })
-      const nid = (res?.result as { new_clip_id?: string } | undefined)?.new_clip_id
-      if (nid) pasted = nid
-    }
-    // Every copy now has its own id (QA-020), so select the one just pasted —
-    // the next Backspace/trim acts on the copy, as in every NLE.
-    if (pasted) get().setSelection(pasted)
+    if (!s.clipboard.length) return
+    // AT THE PLAYHEAD, in layout time: the playhead is render time, and v1
+    // decodes through its own inverse, every other lane through layoutTime —
+    // the same rule ⌘B uses (lib/splitTargets). One tool call, one undo step.
+    const lane = s.clipboard.some((c) => c.track === 'v1') ? 'v1' : s.clipboard[0].track
+    const at = splitTimeFor(s.edl, lane, s.playhead)
+    const res = await s.dispatch('paste_clips', { clips: s.clipboard, at })
+    const ids = (res?.result as { clip_ids?: string[] } | undefined)?.clip_ids ?? []
+    // Select what was just pasted — the next Backspace/trim acts on the copy,
+    // as in every NLE.
+    if (ids.length) set({ selection: ids[0], multiSelection: ids.slice(1) })
   },
   goToStart: () => set({ playhead: 0 }),
   goToEnd: () => {
@@ -571,6 +686,7 @@ export const useStore = create<State>((set, get) => ({
   refresh: async () => {
     const sid = get().sessionId
     if (!sid) return
+    const seq = mutationSeq
     const [info, edl] = await Promise.all([api.getSession(sid), api.getEDL(sid)])
     // The project changed while this was in flight (a refreshSoon() after an
     // edit, an upload finishing, a project switch): these are the OLD
@@ -578,7 +694,49 @@ export const useStore = create<State>((set, get) => ({
     // screen under project B's session id.
     if (get().sessionId !== sid) return
     set({ edl, ops: info.ops, sessionName: info.name, edlHash: info.summary?.edl_hash ?? null,
-          redoAvailable: !!info.redo_available })
+          redoAvailable: !!info.redo_available, undoDepth: undoDepthOf(info) })
+    // QA-047: a selection is only meaningful while its clips exist. Undoing a
+    // split removed the right half, yet the (invisible) selection still named
+    // it, so ⌘D/Backspace sent it and toasted "clip not found". Skipped when
+    // an edit landed while this fetch was in flight: that EDL may predate a
+    // clip the edit just selected (split → right half, paste → the copy).
+    if (seq === mutationSeq) set(pruneSelection(get(), edl))
+  },
+
+  syncWithServer: async () => {
+    const s = get()
+    const sid = s.sessionId
+    // Never while this window's own edit is in flight: its answer updates
+    // edlHash, and until then the server legitimately differs.
+    if (!sid || s.pendingOps > 0 || s.uploading || engineState() === 'offline') return
+    let head: { edl_hash: string }
+    try {
+      head = await api.sessionHead(sid)
+    } catch (e) {
+      // Offline is the banner's to report; anything else is a background probe.
+      if (!isEngineOffline(e)) console.warn('[store] head check failed:', errorMessage(e))
+      return
+    }
+    const now = get()
+    if (now.sessionId !== sid || now.pendingOps > 0 || head.edl_hash === now.edlHash) return
+    // Another window, an MCP agent or a prompt run changed the project: take
+    // the server's timeline (the store never holds optimistic edits, so there
+    // is nothing local to lose).
+    await get().refresh()
+  },
+
+  renameSession: async (name) => {
+    const sid = get().sessionId
+    const clean = name.replace(/\s+/g, ' ').trim()
+    if (!sid || !clean) return false
+    try {
+      const r = await api.renameSession(sid, clean)
+      if (get().sessionId === sid) set({ sessionName: r.name })
+      return true
+    } catch (e) {
+      toast.error(`Couldn't rename the project: ${errorMessage(e)}`)
+      return false
+    }
   },
 
   // Project switch. Loads the new project FIRST, then swaps session id and
@@ -594,7 +752,8 @@ export const useStore = create<State>((set, get) => ({
     if (seq !== openSeq) return
     get().resetTransient()
     set({ sessionId: id, sessionName: info.name ?? id, edl, ops: info.ops,
-          edlHash: info.summary?.edl_hash ?? null, redoAvailable: !!info.redo_available })
+          edlHash: info.summary?.edl_hash ?? null, redoAvailable: !!info.redo_available,
+          undoDepth: undoDepthOf(info) })
   },
 
   // Coalesce many quick refresh() calls (chat tool storms, drag bursts) into a
@@ -612,59 +771,21 @@ export const useStore = create<State>((set, get) => ({
         // it; the toast is cheap and the alternative is silent divergence.
         useStore.getState().refresh().catch((e) => {
           console.warn('[store] refresh failed:', e)
-          toast.error(`Couldn't refresh the timeline: ${errorMessage(e)}`)
+          // Offline is the banner's to say; it refreshes on reconnect.
+          if (!isEngineOffline(e)) toast.error(`Couldn't refresh the timeline: ${errorMessage(e)}`)
         })
       }, 120)
     }
   })(),
 
-  upload: async (file) => {
-    const sid = get().sessionId
-    if (!sid) return
-    set({ uploading: true, uploadProgress: file.name, uploadError: null })
-    try {
-      // Normalising runs as a server job now (QA-007); show how far it got.
-      await api.upload(sid, file, true, {
-        onProgress: (p) => set({ uploadProgress: `${file.name} · ${Math.round(Math.min(1, Math.max(0, p)) * 100)}%` }),
-      })
-    } catch (e) {
-      // errorMessage(), not `e.message`: api.upload throws the api.ts contract
-      // shape, "<status> <statusText>: <raw envelope>". MediaBin renders this
-      // string verbatim, so reading .message pasted the whole
-      // {"error":{"code":…,"request_id":…}} JSON into the panel instead of the
-      // backend's sentence — the same regression Preview.tsx's comment records
-      // fixing once before.
-      set({ uploadError: `${file.name}: ${errorMessage(e)}` })
-      set({ uploading: false, uploadProgress: null })
-      return
-    }
-    set({ uploading: false, uploadProgress: null })
-    // The upload itself succeeded — media is ingested and on the timeline.
-    // NO renderPreview() here: refresh() changes the EDL, and the Preview
-    // effect renders on exactly that change (and reports a render failure in
-    // the pane, separately from the upload). Calling it here as well started
-    // a SECOND full render of the same timeline for every import — two
-    // concurrent ~195 s renders per 12-min file, four for a three-file drop
-    // (QA-004).
-    await get().refresh()
-  },
+  // Both ingresses go through ONE queue (enqueueImport, below): a drop of
+  // three files shows three placeholder rows at once, imports them in drop
+  // order, and the panel stays busy until the last one is in (QA-044/094).
+  // NO renderPreview() after an import: refresh() changes the EDL and the
+  // Preview effect renders on exactly that change (QA-004).
+  upload: (file, opts) => enqueueImport(file, 'video', opts),
 
-  uploadAudio: async (file) => {
-    const sid = get().sessionId
-    if (!sid) return
-    set({ uploading: true, uploadProgress: file.name, uploadError: null })
-    try {
-      await api.audioUpload(sid, file, { addToMusic: true, duck: true })
-    } catch (e) {
-      // Same contract as upload() above — errorMessage() unwraps the envelope.
-      set({ uploadError: `${file.name}: ${errorMessage(e)}` })
-      set({ uploading: false, uploadProgress: null })
-      return
-    }
-    set({ uploading: false, uploadProgress: null })
-    // Same as upload(): the Preview effect renders on the EDL change.
-    await get().refresh()
-  },
+  uploadAudio: (file, opts) => enqueueImport(file, 'audio', opts),
 
   dispatch: async (tool, args = {}, opts) => {
     const sid = get().sessionId
@@ -676,15 +797,35 @@ export const useStore = create<State>((set, get) => ({
       ? ((args.clip_ids as string[] | undefined) ?? [])
       : tool === 'ripple_delete' ? [String(args.clip_id ?? '')] : []
     const deleteMsg = deleteIds.length ? deletedLabel(get().edl, deleteIds) : ''
+    // QA-109: with the engine gone the gesture cannot land — say so once (the
+    // banner carries the rest) instead of a raw "Failed to fetch" per gesture.
+    if (engineState() === 'offline') { noticeOffline(opts?.onError); return null }
+    // QA-105: the hash this window's view was built from. Only when no other
+    // edit of ours is in flight and no import is placing clips: then the
+    // server's answer can legitimately be ahead of edlHash.
+    const idle = get().pendingOps === 0 && !get().uploading
+    const baseHash = idle ? get().edlHash : null
     set({ pendingOps: get().pendingOps + 1 })
     try {
       // We KEEP the previous export's download link after an edit, but the UI
       // marks it "outdated" once the refreshed edlHash differs from the hash the
       // export was rendered from (lib/exportLink, TopBar).
-      const res: { result: { redo_available?: boolean }; edl_hash: string; op: Op | null } =
+      const res: { result: { redo_available?: boolean; ok?: boolean; undo_depth?: number };
+                   edl_hash: string; op: Op | null; undo_depth?: number } =
         (ASYNC_DISPATCH_TOOLS.has(tool) || opts?.asJob)
-          ? await runDispatchJob(sid, tool, args, opts?.onProgress)
-          : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args)
+          ? await runDispatchJob(sid, tool, args, opts?.onProgress, baseHash)
+          : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args, baseHash)
+      // The view now IS this answer's timeline — the next gesture's base
+      // (QA-105) must not wait for the debounced refresh.
+      mutationSeq += 1
+      if (typeof res.edl_hash === 'string' && get().sessionId === sid) set({ edlHash: res.edl_hash })
+      // QA-046: the server's undo horizon rides on every dispatch answer, so
+      // the Undo button is right the instant an edit (or an undo) lands.
+      const depth = res.result?.undo_depth ?? res.undo_depth
+      if (typeof depth === 'number') set({ undoDepth: Math.max(0, depth) })
+      if (tool === 'undo' && res.result?.ok === false) {
+        toast.info(undoRefusedMessage(get().ops.length))
+      }
       if (tool === 'undo' || tool === 'redo') {
         // Undo/redo get an IMMEDIATE (non-debounced) refresh, not the
         // 120ms-coalesced refreshSoon(): the whole point of Undo/Redo is that
@@ -725,6 +866,16 @@ export const useStore = create<State>((set, get) => ({
       if (promptRunningFromError(e)) {
         opts?.onError?.(PROMPT_RUNNING_MESSAGE)
         if (!firePromptRunning(sid)) toast.info(PROMPT_RUNNING_MESSAGE)
+        return null
+      }
+      if (isEngineOffline(e)) { noticeOffline(opts?.onError); return null }
+      // QA-105: another window (or an agent) changed the project since this
+      // view was fetched, and the server refused to apply the edit to a
+      // timeline we are not showing. Show the real one and say why.
+      if (isStaleEdlError(e)) {
+        opts?.onError?.(STALE_VIEW_MESSAGE)
+        toast.info(STALE_VIEW_MESSAGE)
+        await get().refresh().catch((err) => console.warn('[store] refresh after stale edit failed:', err))
         return null
       }
       const msg = errorMessage(e)
@@ -777,35 +928,64 @@ export const useStore = create<State>((set, get) => ({
   doExport: async (opts = {}) => {
     const sid = get().sessionId
     if (!sid) return
+    // QA-034: this run's token. Cancel (or a newer export) bumps exportRun, and
+    // every await below re-checks it, so a loop that has been abandoned never
+    // writes state again — the modal closes the moment Cancel is clicked.
+    const run = ++exportRun
+    const live = () => run === exportRun
     set({
       exporting: true, exportLinks: withoutExport(get().exportLinks, sid), exportStatus: 'queued',
       exportError: null, exportProgress: 0, exportJobId: null,
     })
     const POLL_MS = 500           // tight enough that the bar feels live
     const MAX_MS = 30 * 60 * 1000 // 30-min ceiling so we never poll forever
+    const { saveAs, ...request } = opts
     try {
-      const { job_id } = await api.exportAsync(sid, opts)
+      const { job_id } = await api.exportAsync(sid, request)
+      if (!live()) {
+        // Cancelled while the job was being created: stop the render too.
+        api.cancelJob(job_id).catch((e) => console.warn('[export] cancel failed:', errorMessage(e)))
+        return
+      }
       set({ exportJobId: job_id })
       const startedAt = Date.now()
+      let lastAnswer = Date.now()
       for (;;) {
         await new Promise((r) => setTimeout(r, POLL_MS))
+        if (!live()) return
         let job
         try {
           job = await api.getJob(job_id)
-        } catch {
-          if (Date.now() - startedAt > MAX_MS) {
-            set({ exportError: 'Export timed out while checking status.' })
+        } catch (e) {
+          if (!live()) return
+          // QA-034: jobs live in the engine's memory, so a 404 means it
+          // restarted and this export is gone — terminal, not "retry for 30
+          // minutes behind a modal".
+          if (e instanceof Error && /^404\b/.test(e.message)) {
+            set({ exportError: EXPORT_INTERRUPTED })
+            toast.error(EXPORT_INTERRUPTED)
+            return
+          }
+          // Unreachable: wait for the engine (the modal says so), but not
+          // forever.
+          if (isEngineOffline(e)) set({ exportStatus: 'reconnecting' })
+          if (Date.now() - lastAnswer > EXPORT_LOST_MS) {
+            set({ exportError: EXPORT_LOST })
+            toast.error(EXPORT_LOST)
             return
           }
           continue
         }
+        if (!live()) return
+        lastAnswer = Date.now()
         if (job.status === 'completed' && job.result) {
           // Bind the link to the session it was rendered from (`sid`, captured
           // before the poll — the user may have switched projects since) and
           // to the EDL hash it rendered, so the UI can flag it "outdated".
           set({ exportLinks: withExport(get().exportLinks, exportLink(sid, job.result)),
                 exportStatus: null, exportProgress: 1 })
-          await triggerDownload(job.result.url, job.result.filename, sid)
+          if (saveAs) exportSaveNames.set(job.result.url, saveAs)
+          await triggerDownload(job.result.url, job.result.filename, sid, saveAs)
           return
         }
         if (job.status === 'failed') {
@@ -829,9 +1009,9 @@ export const useStore = create<State>((set, get) => ({
       // through errorMessage() like every other displayed string — api.ts
       // throws with the raw envelope appended, and a JSON wall in a 1-line
       // toolbar chip is unreadable.
-      set({ exportError: errorMessage(e) })
+      if (live()) set({ exportError: isEngineOffline(e) ? EXPORT_LOST : errorMessage(e) })
     } finally {
-      set({ exporting: false, exportStatus: null, exportJobId: null })
+      if (live()) set({ exporting: false, exportStatus: null, exportJobId: null })
     }
   },
 
@@ -841,17 +1021,26 @@ export const useStore = create<State>((set, get) => ({
     // was rendered from, which by construction is that same one.
     const link = exportFor(get().exportLinks, get().sessionId)
     if (!link) return
-    await triggerDownload(link.url, link.filename, link.sid)
+    await triggerDownload(link.url, link.filename, link.sid, exportSaveNames.get(link.url))
   },
 
   cancelExport: async () => {
+    if (!get().exporting) return
     const id = get().exportJobId
-    if (!id) return
+    // QA-034: Cancel ALWAYS closes, locally and at once. It used to wait for
+    // the poll loop to see 'cancelled' — and when the engine had died the
+    // cancel call 404'd silently, the loop kept polling, and the modal sat on
+    // "Cancelling…" over the editor. The loop is abandoned via its token.
+    exportRun += 1
+    set({ exporting: false, exportStatus: null, exportJobId: null, exportProgress: 0 })
+    toast.info('Export cancelled.')
+    if (!id) return   // not created yet — doExport cancels it when it is
     try {
       await api.cancelJob(id)
-      // The poll loop sees status 'cancelled' and tears down the rest.
-    } catch {
-      // Best-effort; the export will still finish or time out on its own.
+    } catch (e) {
+      // A 404 (the engine already lost it) or no engine at all: nothing is
+      // rendering, so there is nothing more to stop.
+      console.warn('[export] cancel request failed:', errorMessage(e))
     }
   },
 
@@ -935,7 +1124,168 @@ useStore.subscribe((state, prevState) => {
   if (state.sessionId !== prevState.sessionId && state.sessionId) {
     try { localStorage.setItem('vai.sessionId', state.sessionId) } catch { /* private mode */ }
   }
+  // QA-062: the prompt bar's run log belongs to the project it ran in.
+  if (state.sessionId !== prevState.sessionId) fireSessionSwitch(state.sessionId)
 })
+
+// QA-109: mirror the connection state into the store, and on the way back
+// online say so once and take the server's timeline (edits made elsewhere, or
+// by the recovered engine, while this window could not ask).
+onEngineState((next) => {
+  useStore.setState({ engine: next })
+  if (next === 'online') {
+    offlineNoticeShown = false
+    toast.success('Reconnected to the editor engine.')
+    // No project yet = the engine was down at launch and init() never got one.
+    const s = useStore.getState()
+    const again = s.sessionId ? s.refresh() : s.init()
+    again.catch((e) => console.warn('[store] reload after reconnect failed:', e))
+  }
+})
+
+/** Say once per offline spell that edits are paused (the banner stays up). */
+function noticeOffline(onError?: (message: string) => void): void {
+  const msg = 'Not applied — the editor engine is not responding. Edits resume when it reconnects.'
+  onError?.(msg)
+  if (offlineNoticeShown) return
+  offlineNoticeShown = true
+  toast.info(msg)
+}
+
+/** Watch the open project for changes made elsewhere (QA-105) and the engine
+ *  for liveness (QA-109): ask on focus/visibility, and every `HEAD_POLL_MS`
+ *  while the window is visible. Returns the cleanup. Installed by App. */
+export const HEAD_POLL_MS = 4000
+export function startSessionWatch(win: Window = window): () => void {
+  const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
+  const check = () => { if (visible()) void useStore.getState().syncWithServer() }
+  const onVisibility = () => { if (visible()) check() }
+  win.addEventListener('focus', check)
+  win.document?.addEventListener('visibilitychange', onVisibility)
+  const id = win.setInterval(check, HEAD_POLL_MS)
+  return () => {
+    win.removeEventListener('focus', check)
+    win.document?.removeEventListener('visibilitychange', onVisibility)
+    win.clearInterval(id)
+  }
+}
+
+/** The queue once item `id` is gone (finished or cancelled): the batch count
+ *  moves on, and the panel goes idle the moment nothing is left. */
+function afterImportLeaves(
+  s: Pick<State, 'uploads' | 'uploadBatch'>, id: string,
+): Pick<State, 'uploads' | 'uploading' | 'uploadBatch'> & { uploadProgress?: null } {
+  if (!s.uploads.some((u) => u.id === id)) {
+    return { uploads: s.uploads, uploading: s.uploads.length > 0, uploadBatch: s.uploadBatch }
+  }
+  const uploads = s.uploads.filter((u) => u.id !== id)
+  return uploads.length
+    ? { uploads, uploading: true, uploadBatch: { ...s.uploadBatch, done: s.uploadBatch.done + 1 } }
+    : { uploads, uploading: false, uploadProgress: null, uploadBatch: { total: 0, done: 0 } }
+}
+
+/**
+ * Put one file on the import queue (QA-044/094). The item shows at once as a
+ * placeholder row; the file starts when every earlier one has finished, so a
+ * multi-file drop lands in drop order. Resolves when THIS file is done
+ * (imported, failed or cancelled) — never rejects: failures go to the Media
+ * panel's error box like before.
+ */
+function enqueueImport(file: File, kind: 'video' | 'audio', opts?: ImportOptions): Promise<void> {
+  const st = useStore.getState()
+  const sid = st.sessionId
+  if (!sid) return Promise.resolve()
+  const place = opts?.place ?? null
+  // A lane drop places the file itself, after the answer (never the server's
+  // default "append to Main video / Music lane end").
+  const addToTimeline = place ? false : (opts?.addToTimeline ?? st.importAddToTimeline)
+  const id = `up_${++importSeq}`
+  const item: UploadItem = { id, name: file.name, kind, stage: 'queued', progress: 0,
+                             stageStartedAt: Date.now(), addToTimeline: addToTimeline || !!place }
+  const batch = st.uploads.length ? st.uploadBatch : { total: 0, done: 0 }
+  useStore.setState({ uploads: [...st.uploads, item], uploadBatch: { ...batch, total: batch.total + 1 },
+                      uploading: true, uploadError: null })
+  const ac = new AbortController()
+  const ctl = { cancelled: false, jobId: null as string | null }
+  importCancels.set(id, () => {
+    ctl.cancelled = true
+    ac.abort()
+    if (ctl.jobId) api.cancelJob(ctl.jobId).catch((e) => console.warn('[import] cancel failed:', errorMessage(e)))
+  })
+  const run = importChain.then(() => runImport(sid, file, id, kind, addToTimeline, ac.signal, ctl, place))
+  importChain = run.catch(() => undefined)
+  return run
+}
+
+async function runImport(
+  sid: string, file: File, id: string, kind: 'video' | 'audio', addToTimeline: boolean,
+  signal: AbortSignal, ctl: { cancelled: boolean; jobId: string | null },
+  place: LanePlacement | null = null,
+): Promise<void> {
+  const patch = (p: Partial<UploadItem>) => useStore.setState({
+    uploads: useStore.getState().uploads.map((u) => (u.id === id ? { ...u, ...p } : u)),
+  })
+  const stage = (next: UploadItem['stage']) => {
+    const cur = useStore.getState().uploads.find((u) => u.id === id)
+    if (cur && cur.stage !== next) patch({ stage: next, progress: 0, stageStartedAt: Date.now() })
+  }
+  let ok = false
+  let answer: ImportAnswer | null = null
+  try {
+    if (ctl.cancelled) return
+    stage('uploading')
+    const onBytes = ({ loaded, total }: { loaded: number; total: number }) => {
+      // Every byte sent: the rest is the server's (normalise, place).
+      if (total > 0 && loaded >= total) stage('processing')
+      else if (total > 0) patch({ progress: loaded / total })
+    }
+    if (kind === 'video') {
+      answer = await api.upload(sid, file, addToTimeline, {
+        signal, onBytes,
+        onJob: (jobId) => { ctl.jobId = jobId; stage('processing') },
+        onProgress: (p) => { stage('processing'); patch({ progress: p }) },
+      })
+    } else {
+      // No `duck` (QA-083): the lane keeps the ducking choice the user made.
+      answer = await api.audioUpload(sid, file, { addToMusic: addToTimeline, signal, onBytes })
+    }
+    if (place && !ctl.cancelled) {
+      // Still inside the queue item, so the panel stays busy and dispatch()
+      // keeps skipping base_hash until the clip is actually placed.
+      stage('processing')
+      const p = placementFor(answer as PlacedAnswer | null, kind, place)
+      if (p.notice) toast.info(p.notice)
+      if (p.args) await useStore.getState().dispatch('add_clip', p.args)
+    }
+    ok = true
+  } catch (e) {
+    if (ctl.cancelled || isAbort(e)) {
+      toast.info(`Import of ${file.name} cancelled.`)
+      return
+    }
+    // errorMessage(), not `e.message`: the api.ts contract appends the raw
+    // envelope, and MediaBin renders this string verbatim.
+    const why = isEngineOffline(e) ? 'the editor engine stopped responding.' : errorMessage(e)
+    useStore.setState({ uploadError: `${file.name}: ${why}` })
+  } finally {
+    importCancels.delete(id)
+    useStore.setState(afterImportLeaves(useStore.getState(), id))
+  }
+  if (ok && useStore.getState().sessionId === sid) {
+    await useStore.getState().refresh().catch((e) => console.warn('[import] refresh failed:', errorMessage(e)))
+    // QA-083 / QA-092: where an audio-only file went; "Trim to video" when an
+    // audio file runs past the picture (it is no longer cut silently).
+    const follow = importFollowUp(answer, file.name)
+    if (follow?.action) {
+      const { tool, args } = follow.action
+      toast.action(follow.message, { label: follow.action.label,
+                                     onClick: () => { void useStore.getState().dispatch(tool, args) } },
+                   { ttlMs: 12000 })
+    } else if (follow) {
+      toast.info(follow.message)
+    }
+  }
+}
 
 // A finished export needs to reach the user's disk. In a real browser an
 // `<a download>` click does that natively. But the packaged app runs inside
@@ -951,8 +1301,12 @@ useStore.subscribe((state, prevState) => {
 // copy of the `window.pywebview` probe.
 // Kept module-scoped (not in a component) so it can fire from the store's
 // polling loop.
-async function triggerDownload(url: string, filename: string, sessionId: string | null): Promise<void> {
-  const pending = nativeSave(sessionId, filename)
+// The name each export was asked to be saved under (QA-100), by its URL, so
+// "↓ MP4" re-saves it under the same name.
+const exportSaveNames = new Map<string, string>()
+
+async function triggerDownload(url: string, filename: string, sessionId: string | null, saveAs?: string): Promise<void> {
+  const pending = nativeSave(sessionId, filename, globalThis, saveAs)
   if (pending) {
     const outcome = await pending
     if (outcome.kind === 'saved') {
@@ -967,8 +1321,10 @@ async function triggerDownload(url: string, filename: string, sessionId: string 
     // bridge) — fall through to the anchor path as a best effort.
   }
   const a = document.createElement('a')
-  a.href = url
-  a.download = filename
+  // The server's Content-Disposition names a download (an <a download>
+  // attribute cannot override it), so the chosen name rides on ?name= (QA-100).
+  a.href = saveAs ? `${url}${url.includes('?') ? '&' : '?'}name=${encodeURIComponent(saveAs)}` : url
+  a.download = saveAs || filename
   a.style.display = 'none'
   document.body.appendChild(a)
   a.click()

@@ -30,9 +30,23 @@ function baseType(t: JsonSchemaProp['type']): string | undefined {
   return Array.isArray(t) ? t.find((x) => x !== 'null') : t
 }
 
-function humanize(name: string): string {
-  const s = name.replace(/_/g, ' ')
-  return s.charAt(0).toUpperCase() + s.slice(1)
+// Abbreviations in arg names → words (QA-063/QA-101: the form used to read
+// "Threshold db", "Min dur", "Pad ms").
+const WORDS: Record<string, string> = {
+  dur: 'duration', min: 'minimum', max: 'maximum', pct: '%', num: 'number', src: 'source',
+  lang: 'language', idx: 'index', thresh: 'threshold', bg: 'background', fg: 'foreground',
+}
+const UNITS: Record<string, string> = { db: 'dB', ms: 'ms', s: 's', sec: 's', lufs: 'LUFS', px: 'px', fps: 'fps', kbps: 'kbps', hz: 'Hz' }
+
+/** "threshold_db" → "Threshold (dB)", "min_dur" → "Minimum duration". */
+export function humanize(name: string): string {
+  const parts = name.split('_').filter(Boolean)
+  let unit = ''
+  if (parts.length > 1 && UNITS[parts[parts.length - 1].toLowerCase()]) unit = UNITS[parts.pop()!.toLowerCase()]
+  const words = parts.map((w) => WORDS[w.toLowerCase()] ?? w.toLowerCase())
+  const s = words.join(' ')
+  const head = s.charAt(0).toUpperCase() + s.slice(1)
+  return unit ? `${head} (${unit})` : head
 }
 
 function derivedWidget(name: string, prop: JsonSchemaProp, type: string | undefined): Widget {

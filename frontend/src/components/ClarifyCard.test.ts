@@ -88,3 +88,18 @@ describe('a multi-question card', () => {
     expect(html).not.toContain('Esc drops the question')
   })
 })
+
+describe('the card copy follows its state (QA-063)', () => {
+  const PLATFORM: NeedsInput = { key: 'platform', question: 'Which platform?', kind: 'choice', required: true,
+                                 options: [{ value: 'tiktok', label: 'TikTok' }, { value: 'reels', label: 'Reels' }] }
+  it('a card with nothing selected does not claim defaults, and is not red before an attempt', () => {
+    const html = render([PLATFORM])
+    expect(html).not.toMatch(/pre-selected/)
+    expect(html).toContain('Choose an answer to run')
+    expect(html).not.toMatch(/Needed/)
+    expect(html).not.toContain('class="err"')
+  })
+  it('a card whose default IS selected says so', () => {
+    expect(render([LANG])).toContain('Suggested answers are selected · Enter runs')
+  })
+})

@@ -24,6 +24,7 @@ import { brainLabel, readSseStream, type ClarifyEvent, type Plan, type PromptEve
 import type { Answers } from '../lib/clarifyDefaults'
 import { ClarifyCard } from './ClarifyCard'
 import { parseInlineMarkdown } from '../lib/inlineMarkdown'
+import { cleanSummary, toolTitle } from '../lib/opLabels'
 
 type ChatEvent = PromptEvent
 
@@ -40,14 +41,13 @@ interface PendingClarify { token: string; questions: ClarifyEvent['questions']; 
 
 const VIA_RE = /^via ([^—]+?) — /
 
-export function ChatOverlay() {
+export function ChatOverlay({ onClose }: { onClose: () => void }) {
   const sid = useStore((s) => s.sessionId)
   const refresh = useStore((s) => s.refresh)
   const renderPreview = useStore((s) => s.renderPreview)
   const promptStatus = usePromptStore((s) => s.status)
   const setChatBusy = usePromptStore((s) => s.setChatBusy)
 
-  const [open, setOpen] = useState(true)
   const [msgs, setMsgs] = useState<Msg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -186,100 +186,86 @@ export function ChatOverlay() {
     : promptBusy ? 'The Prompt bar is running — chat waits for the same session'
     : 'Tell the editor what to do — Enter to send'
 
+  // Docked in the right sidebar's Chat tab (App.tsx, QA-061): no floating
+  // panel over the timeline, closed by default, the choice remembered.
   return (
-    <>
-      {!open && (
-        <button className="chat-fab" onClick={() => setOpen(true)} title="Chat">
-          💬 Chat
-        </button>
-      )}
-      {open && (
-        <div className="chat-pane">
-          <header>
-            <strong>Chat</strong>
-            {brain && (
-              // The same pill the Prompt bar wears (promptBar.css .brain-pill),
-              // so "which brain answered" looks the same in both places.
-              <span className="brain-pill" title="The brain that answered the last turn">
-                <span className="brain-dot is-answered" aria-hidden="true" />
-                <span className="name">via {brain}</span>
-              </span>
-            )}
-            <div style={{ flex: 1 }} />
-            <button onClick={() => setOpen(false)}>×</button>
-          </header>
-          <div className="body" ref={bodyRef}>
-            {msgs.length === 0 && (
-              <div style={{ color: 'var(--text-dim)' }}>
-                Try: <em>"Apply my brand kit @quicksolutions.in with #techtips, generate a hook,
-                burn IG-style captions, then audit and render the preview."</em>
-              </div>
-            )}
-            {msgs.map((m, i) => (
-              <div key={i} style={{ marginBottom: 10 }}>
-                {m.role === 'user' && (
-                  <div style={{ color: 'var(--text)' }}>
-                    <b style={{ color: 'var(--accent-2)' }}>You:</b> {m.text}
-                  </div>
-                )}
-                {m.role === 'assistant' && (
-                  <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>
-                    {parseInlineMarkdown(m.text ?? '').map((s, k) =>
-                      s.kind === 'bold' ? <b key={k}>{s.text}</b>
-                        : s.kind === 'code' ? <code key={k}>{s.text}</code>
-                          : <span key={k}>{s.text}</span>)}
-                  </div>
-                )}
-                {m.role === 'tool' && (
-                  <div style={{
-                    fontSize: 11,
-                    background: 'var(--bg-2)',
-                    border: '1px solid var(--line)',
-                    borderRadius: 6,
-                    padding: '4px 8px',
-                    color: m.ok === false ? 'var(--accent)' : 'var(--good)',
-                  }}>
-                    🔧 <b>{m.tool}</b>({Object.entries(m.args ?? {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')})
-                    {m.result !== undefined && (
-                      <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
-                        → {summarize(m.result)}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-            {pending && !busy && (
-              <ClarifyCard
-                key={pending.token}
-                questions={pending.questions}
-                plan={pending.plan}
-                onSubmit={(a) => void answerClarify(a)}
-                onCancel={() => void dropClarify()}
-              />
-            )}
-            {busy && <div style={{ color: 'var(--text-dim)' }}>…</div>}
+    <div className="chat-pane">
+      <header>
+        <strong>Chat</strong>
+        {brain && (
+          // The same pill the Prompt bar wears (promptBar.css .brain-pill),
+          // so "which brain answered" looks the same in both places.
+          <span className="brain-pill" title="The brain that answered the last turn">
+            <span className="brain-dot is-answered" aria-hidden="true" />
+            <span className="name">via {brain}</span>
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <button onClick={onClose} aria-label="Close chat" title="Close chat"><span aria-hidden="true">×</span></button>
+      </header>
+      <div className="body" ref={bodyRef}>
+        {msgs.length === 0 && (
+          <div style={{ color: 'var(--text-dim)' }}>
+            Ask for an edit in your own words, for example{' '}
+            <em>“Remove the pauses, add captions, then fade the music out at the end.”</em>
           </div>
-          <footer>
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder={placeholder}
-              disabled={busy || promptBusy}
-            />
-          </footer>
-        </div>
-      )}
-    </>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} style={{ marginBottom: 10 }}>
+            {m.role === 'user' && (
+              <div style={{ color: 'var(--text)' }}>
+                <b style={{ color: 'var(--accent-2)' }}>You:</b> {m.text}
+              </div>
+            )}
+            {m.role === 'assistant' && (
+              <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>
+                {parseInlineMarkdown(m.text ?? '').map((s, k) =>
+                  s.kind === 'bold' ? <b key={k}>{s.text}</b>
+                    : s.kind === 'code' ? <code key={k}>{s.text}</code>
+                      : <span key={k}>{s.text}</span>)}
+              </div>
+            )}
+            {m.role === 'tool' && (
+              // An edit the chat made, in editor language (QA-101): the
+              // tool id and its JSON args stay in the hover title only.
+              <div className="chat-step" data-ok={m.ok === false ? 'false' : m.result === undefined ? 'pending' : 'true'}
+                   title={`${m.tool}(${Object.entries(m.args ?? {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')})`}>
+                <b>{toolTitle(m.tool ?? '')}</b>
+                {m.result !== undefined && <span className="chat-step-sum"> — {summarize(m.result)}</span>}
+              </div>
+            )}
+          </div>
+        ))}
+        {pending && !busy && (
+          <ClarifyCard
+            key={pending.token}
+            questions={pending.questions}
+            plan={pending.plan}
+            onSubmit={(a) => void answerClarify(a)}
+            onCancel={() => void dropClarify()}
+          />
+        )}
+        {busy && <div style={{ color: 'var(--text-dim)' }}>…</div>}
+      </div>
+      <footer>
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          disabled={busy || promptBusy}
+        />
+      </footer>
+    </div>
   )
 }
 
 function summarize(r: unknown): string {
-  if (r && typeof r === 'object' && 'summary' in r) return String((r as { summary: unknown }).summary)
+  if (r && typeof r === 'object' && 'summary' in r) return cleanSummary(String((r as { summary: unknown }).summary))
   if (r && typeof r === 'object' && 'score' in r) {
     const o = r as { score: number; issues?: unknown[] }
-    return `score=${o.score} (${o.issues?.length ?? 0} issues)`
+    return `score ${o.score} (${o.issues?.length ?? 0} issues)`
   }
-  return JSON.stringify(r).slice(0, 80)
+  if (r && typeof r === 'object' && 'error' in r) return cleanSummary(String((r as { error: unknown }).error))
+  return 'done'
 }

@@ -33,8 +33,20 @@ const SHORTCUTS: { keys?: string; label: string; cmds?: string[] }[] = [
   { keys: '?',                    label: 'Toggle this help' },
 ]
 
+/** "Video AI Editor 0.7.2 · build 45d3e15" from GET /api/version. */
+function aboutLine(v: { version?: string; build?: string } | null): string | null {
+  if (!v?.version) return null
+  return `Video AI Editor ${v.version}${v.build ? ` · build ${v.build}` : ''}`
+}
+
 export function Help() {
   const [open, setOpen] = useState(false)
+  const [version, setVersion] = useState<{ version?: string; build?: string } | null>(null)
+  useEffect(() => {
+    if (!open || version) return
+    fetch('/api/version').then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) setVersion(d) })
+      .catch((e) => console.warn('[Help] version fetch failed:', e))
+  }, [open, version])
   // Live keymap inputs for the `cmd`-tagged rows. Subscribed (not getState())
   // so a preset switch re-renders an already-open modal too.
   const presetId = useKeymapStore((s) => s.presetId)
@@ -63,6 +75,7 @@ export function Help() {
   }, [])
 
   if (!open) return null
+  const about = aboutLine(version)
   // Per-command override replaces the preset's chords wholesale — the same
   // merge rule as the engine's effectiveMap(). An unbound command shows "—"
   // rather than falling back to a key that wouldn't work. Single-command rows
@@ -113,9 +126,13 @@ export function Help() {
         </table>
         <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-dim)' }}>
           Tip: drag clips from the Media bin onto the timeline. Drag clips between
-          tracks to move them. Drag clip edges to trim. Edges and the playhead
-          snap when within 8 px.
+          tracks to move them. Drag clip edges to trim. Clip edges, markers and
+          the playhead snap when within 8 px — the magnet button above the
+          timeline (or N) turns snapping on and off.
         </div>
+        {/* About: the build identity lives here and in the version's tooltip,
+            not as developer text in the toolbar (QA-101). */}
+        {about && <div className="help-about">{about}</div>}
       </div>
     </div>
   )

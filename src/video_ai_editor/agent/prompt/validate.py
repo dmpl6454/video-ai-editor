@@ -194,7 +194,15 @@ def _is_placeholder(v: Any) -> bool:
 
 
 def _is_seam_sentinel(tool: str, key: str, v: Any) -> bool:
-    return tool == "add_transition" and key == "at" and v == SEAM_SENTINEL
+    """A run-time sentinel the executor resolves against the live store
+    (agent/prompt/live.py): the seam fan-out, and the target-length cut point
+    (QA-069) — only where each is meaningful, never as a free string."""
+    if tool == "add_transition" and key == "at" and v == SEAM_SENTINEL:
+        return True
+    if tool == "cut_range" and key == "start" and isinstance(v, str):
+        from .live import parse_fit_sentinel
+        return parse_fit_sentinel(v) is not None
+    return False
 
 
 def _blank(v: Any) -> bool:

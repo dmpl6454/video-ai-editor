@@ -81,21 +81,22 @@ def test_schema_default_transform_is_unset():
     assert resolve_anchor_overrides(c, "default", 1080, 1920) == (None, None)
 
 
-def test_center_x_and_add_text_default_y_are_sentinels():
-    # add_text without x/y stores (canvas.w/2, canvas.h*0.85) — positional
-    # no-intent, must keep rendering at the role anchor exactly as today.
+def test_centre_x_and_the_old_add_text_default_y_render_where_they_say():
+    # EDL v3 (QA-076): canvas.w/2 and canvas.h*0.85 used to be "unset"
+    # sentinels, so a user who TYPED y = 0.85·h saw the text jump to the role
+    # anchor. They are ordinary values now; v2 projects are migrated on load
+    # (test_b3_panels) so nothing already saved moves.
     c = TextClip(text="x", start=0, end=1,
                  transform=Transform(x=CW / 2, y=CH * 0.85))
-    assert resolve_anchor_overrides(c, "default", CW, CH) == (None, None)
+    assert resolve_anchor_overrides(c, "default", CW, CH) == (CW / 2, CH * 0.85)
 
 
-def test_role_anchor_y_is_a_sentinel():
-    # add_super_text(role="hook") stores y = canvas.h*0.5 — hook's own
-    # anchor. Writing your own role anchor is a semantic no-op (same
-    # principle as the font sentinel's role-font rule).
+def test_writing_the_role_anchor_renders_at_the_role_anchor():
+    # add_super_text(role="hook") stores y = canvas.h*0.5 — hook's own anchor.
+    # No longer a sentinel (QA-076), and it renders at exactly that anchor.
     c = TextClip(text="x", start=0, end=1, role="hook",
                  transform=Transform(x=CW / 2, y=CH * 0.5))
-    assert resolve_anchor_overrides(c, "hook", CW, CH) == (None, None)
+    assert resolve_anchor_overrides(c, "hook", CW, CH) == (CW / 2, CH * 0.5)
 
 
 def test_custom_x_y_resolve_absolute():
@@ -238,8 +239,9 @@ def test_anim_path_x_compensation_uses_custom_anchor(tmp_path: Path):
 
 
 def test_anim_path_default_keeps_centered_x(tmp_path: Path):
-    edl = _edl([TextClip(text="HI", start=0, end=2, anim_in="fade",
-                         transform=Transform(x=CW / 2, y=CH * 0.85))])
+    # An untouched clip (the schema default transform pair) keeps the legacy
+    # centred expression byte-for-byte.
+    edl = _edl([TextClip(text="HI", start=0, end=2, anim_in="fade")])
     chain, _, _ = build_overlay_chain(
         edl, tmp_path / "cache", source_label="[v]", out_label="[vout]",
         first_input_index=1, out_w=CW, out_h=CH)
