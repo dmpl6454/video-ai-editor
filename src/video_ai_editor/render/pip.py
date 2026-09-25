@@ -18,6 +18,7 @@ from ..edl import EDL
 from ..edl.schema import Clip
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
 from .effects import build_chromakey_filter
+from .text_overlay import enable_expr
 from . import clock
 
 
@@ -94,6 +95,15 @@ def _scalar_or_last(v, default: float = 0.0) -> float:
     return float(sorted(kfs, key=lambda p: p[0])[-1][1])
 
 
+def _max_key(v, default: float = 1.0) -> float:
+    """Largest value a keyframed property takes (keys only — interpolation
+    between two keys never exceeds them, for every interp this app emits
+    except `back-out`'s cubic, which is monotone on [0, 1] too)."""
+    kfs = (v.get("keyframes") if isinstance(v, dict) else getattr(v, "keyframes", None)) or []
+    vals = [float(p[1]) for p in kfs]
+    return max(vals) if vals else default
+
+
 #: ffmpeg inputs pip.py adds PER PIP: the picture input (`-itsoffset` to its
 #: render start) followed by a separate AUDIO input of the same trimmed span
 #: with no offset. One input cannot serve both: `-t` is compared against the
@@ -142,7 +152,7 @@ def build_pip_overlay_chain(
     Each PiP clip is added as a new ffmpeg input (decoded from its src). The
     chain scales it relative to the canvas (default 35% of canvas long side),
     optionally rotates, then overlays at its timeline position with
-    `enable=between(t,rs,re)` — its RENDER window. Audio for each clip is returned separately
+    a half-open `[rs, re)` enable gate (`text_overlay.enable_expr`) — its RENDER window. Audio for each clip is returned separately
     so the audio mixer can fold it in with the same timing.
     """
     # Place each PIP on the RENDER clock first: a PIP whose window the v1
@@ -260,7 +270,14 @@ def build_pip_overlay_chain(
 
         tx = c.transform
         # Scale relative to canvas long edge. Default size = 35% of canvas long edge.
-        sc_static = _scalar_or_last(tx.scale, 1.0)
+        # A KEYFRAMED scale (QA-035) builds the element at its LARGEST keyed
+        # size — so an animated grow/shrink only ever DOWN-scales pixels — and
+        # a per-frame `scale` right before the overlay (below) animates it.
+        # It used to take the last key for the whole clip, so the preview grew
+        # the PiP while the export sat at its final size throughout.
+        scale_kf = is_keyframed(tx.scale)
+        sc_static = (_max_key(tx.scale, 1.0) if scale_kf
+                     else _scalar_or_last(tx.scale, 1.0))
         # Default PiP "1.0" = 35% of canvas. >1 = larger PiP.
         canvas_long = max(canvas.w, canvas.h)
         # Translate canvas-space scale to output-pixel scale
@@ -399,6 +416,23 @@ def build_pip_overlay_chain(
             parts.append(f"{scaled_label}format=yuva420p,colorchannelmixer=aa={opa_static:.3f}{faded}")
             scaled_label = faded
 
+        # Animated scale (QA-035): the element above is built at the largest
+        # keyed scale; shrink it per frame to S(t)/S_max. Same mechanism the
+        # text `pop` preset has always used (scale with eval=frame, then an
+        # overlay whose x/y centre on overlay_w/overlay_h, which overlay
+        # re-reads every frame). Keyframes are clip-local and the input sits
+        # at `rs` via -itsoffset, so the local clock is (t - rs). LAST stage,
+        # so every filter before it (shape geq, rotate, opacity) sees a fixed
+        # frame size.
+        if scale_kf and sc_static > 0:
+            se = to_ffmpeg_expr(tx.scale, time_var=f"(t-{rs:.4f})")
+            ratio = f"(({se})/{sc_static:.6f})"
+            animated = f"[pips{i}]"
+            parts.append(
+                f"{scaled_label}scale=w='max(2\\,trunc(iw*{ratio}/2)*2)'"
+                f":h='max(2\\,trunc(ih*{ratio}/2)*2)':eval=frame{animated}")
+            scaled_label = animated
+
         # Position: x/y are CANVAS-space pixels of the clip's center.
         # Translate to OUTPUT-space top-left.
         sx = out_w / max(1, canvas.w)
@@ -423,7 +457,7 @@ def build_pip_overlay_chain(
         next_label = out_label if is_last else f"[pip_post{i}]"
         parts.append(
             f"{cur}{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
-            f":enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
+            f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
         )
         cur = next_label
         audio_clips.append(c)

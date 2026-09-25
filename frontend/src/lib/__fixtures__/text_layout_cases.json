@@ -1,0 +1,315 @@
+{
+ "_comment": "THE shared text layout contract (QA-015). Generated from render/text_overlay.py; BOTH tests/test_text_layout_contract.py and frontend/src/lib/textLayout.test.ts assert their side against it. Change the model on both sides, then regenerate.",
+ "LINE_HEIGHT_RATIO": 1.15,
+ "SHADOW_OFFSET": [
+  4.0,
+  6.0
+ ],
+ "SHADOW_ALPHA": 140,
+ "WRAP_WIDTH_RATIO": 0.86,
+ "EMOJI_BOX_RATIO": 1.0,
+ "EMOJI_INK_RATIO": 0.92,
+ "roles": {
+  "super": {
+   "size": 140,
+   "stroke_w": 6,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": true,
+   "script_weight": 700
+  },
+  "hook": {
+   "size": 170,
+   "stroke_w": 7,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": true,
+   "script_weight": 700
+  },
+  "lower_third": {
+   "size": 56,
+   "stroke_w": 3,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": false,
+   "script_weight": 700
+  },
+  "caption": {
+   "size": 64,
+   "stroke_w": 5,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": false,
+   "script_weight": 900
+  },
+  "label": {
+   "size": 48,
+   "stroke_w": 3,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": false,
+   "script_weight": 700
+  },
+  "watermark": {
+   "size": 32,
+   "stroke_w": 2,
+   "fill": [
+    255,
+    255,
+    255,
+    200
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    140
+   ],
+   "shadow": false,
+   "upper": false,
+   "script_weight": 700
+  },
+  "default": {
+   "size": 64,
+   "stroke_w": 4,
+   "fill": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "stroke": [
+    0,
+    0,
+    0,
+    255
+   ],
+   "shadow": true,
+   "upper": false,
+   "script_weight": 700
+  }
+ },
+ "anchors": [
+  {
+   "role": "super",
+   "w": 1080,
+   "h": 1920,
+   "y": 1440.0
+  },
+  {
+   "role": "hook",
+   "w": 1080,
+   "h": 1920,
+   "y": 960.0
+  },
+  {
+   "role": "lower_third",
+   "w": 1080,
+   "h": 1920,
+   "y": 1536.0
+  },
+  {
+   "role": "caption",
+   "w": 1080,
+   "h": 1920,
+   "y": 1459.2
+  },
+  {
+   "role": "label",
+   "w": 1080,
+   "h": 1920,
+   "y": 1440.0
+  },
+  {
+   "role": "watermark",
+   "w": 1080,
+   "h": 1920,
+   "y": 1843.2
+  },
+  {
+   "role": "default",
+   "w": 1080,
+   "h": 1920,
+   "y": 1440.0
+  },
+  {
+   "role": "super",
+   "w": 1920,
+   "h": 1080,
+   "y": 810.0
+  },
+  {
+   "role": "hook",
+   "w": 1920,
+   "h": 1080,
+   "y": 540.0
+  },
+  {
+   "role": "lower_third",
+   "w": 1920,
+   "h": 1080,
+   "y": 864.0
+  },
+  {
+   "role": "caption",
+   "w": 1920,
+   "h": 1080,
+   "y": 907.2
+  },
+  {
+   "role": "label",
+   "w": 1920,
+   "h": 1080,
+   "y": 810.0
+  },
+  {
+   "role": "watermark",
+   "w": 1920,
+   "h": 1080,
+   "y": 1036.8
+  },
+  {
+   "role": "default",
+   "w": 1920,
+   "h": 1080,
+   "y": 810.0
+  },
+  {
+   "role": "super",
+   "w": 1080,
+   "h": 1080,
+   "y": 810.0
+  },
+  {
+   "role": "hook",
+   "w": 1080,
+   "h": 1080,
+   "y": 540.0
+  },
+  {
+   "role": "lower_third",
+   "w": 1080,
+   "h": 1080,
+   "y": 864.0
+  },
+  {
+   "role": "caption",
+   "w": 1080,
+   "h": 1080,
+   "y": 907.2
+  },
+  {
+   "role": "label",
+   "w": 1080,
+   "h": 1080,
+   "y": 810.0
+  },
+  {
+   "role": "watermark",
+   "w": 1080,
+   "h": 1080,
+   "y": 1036.8
+  },
+  {
+   "role": "default",
+   "w": 1080,
+   "h": 1080,
+   "y": 810.0
+  }
+ ],
+ "lines": [
+  {
+   "anchor_y": 540,
+   "n": 1,
+   "size": 120,
+   "centers": [
+    540.0
+   ]
+  },
+  {
+   "anchor_y": 960,
+   "n": 3,
+   "size": 100,
+   "centers": [
+    845.0,
+    960.0,
+    1075.0
+   ]
+  },
+  {
+   "anchor_y": 1700,
+   "n": 2,
+   "size": 64,
+   "centers": [
+    1663.2,
+    1736.8
+   ]
+  },
+  {
+   "anchor_y": 200,
+   "n": 4,
+   "size": 48,
+   "centers": [
+    117.2,
+    172.4,
+    227.6,
+    282.8
+   ]
+  }
+ ]
+}

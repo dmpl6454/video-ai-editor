@@ -169,7 +169,7 @@ def test_transition_catalog_intents():
     assert [(s.args["type"], s.args["duration"]) for s in p.steps if s.tool == "add_transition"] == [("vertopen", 0.5)] * 3
     p = P.plan("add a glitch transition at the hook", F916)
     assert [(s.args["at"], s.args["type"], s.args["duration"]) for s in p.steps if s.tool == "add_transition"] == [(5.0, "glitch", 0.3)]
-    p = P.plan("fade to black at the end", F916)
+    p = P.plan("fade to black at the last cut", F916)
     assert _step(p, "add_transition").args == {"at": 20.0, "type": "fadeblack", "duration": 0.6}
     p = P.plan("add a 1 second dissolve at 0:12", F916)
     assert _step(p, "add_transition").args == {"at": 12.0, "type": "dissolve", "duration": 1.0}
@@ -293,7 +293,10 @@ def test_speed_trim_and_loudness_details():
 
 
 def test_auto_edit_order_and_long_run_gate():
-    p = P.plan("make it pop", FLONG)
+    # The denoise is ASKED for here: since QA-028 the auto-edit no longer adds
+    # noise_reduce by itself, and it is the step that makes a 12-minute
+    # auto-edit a long run.
+    p = P.plan("make it pop and remove the background noise", FLONG)
     tools = _tools(p)
     assert tools[:2] == ["remove_silences", "remove_fillers"] and tools[-1] == "audit_aesthetic"
     assert tools.index("add_caption_track") < tools.index("apply_hook_stack") < tools.index("add_music")
@@ -394,7 +397,8 @@ def test_auto_edit_honours_a_target_length():
     trim = _step(p, "cut_range")
     assert trim.args["start"] == 20.0 and trim.optional and trim.stage == Sc.STAGE_STRUCTURE
     assert _tools(p).index("cut_range") > _tools(p).index("remove_fillers")     # after the cuts
-    assert _tools(p).index("cut_range") < _tools(p).index("auto_caption")       # before the captions are laid
+    laid = next(t for t in _tools(p) if t in ("auto_caption", "add_caption_track"))
+    assert _tools(p).index("cut_range") < _tools(p).index(laid)                 # before the captions are laid
     assert any(c.check == "duration_leq" and c.args["max"] == 20.5 for c in p.postconditions)
     assert "20s" in (p.reply or "")
     V.validate_plan(p, F916)

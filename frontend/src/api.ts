@@ -1,6 +1,6 @@
 // Fetch wrappers around the FastAPI backend.
 
-import type { EDL, SessionInfo, Op } from './types'
+import type { EDL, SessionInfo, Op, MediaItem } from './types'
 
 const BASE = '/api'
 
@@ -11,7 +11,9 @@ export interface Job {
   kind: string
   status: JobStatus
   progress: number          // 0..1; export reports live ffmpeg progress
-  result: { path: string; filename: string; url: string } | null
+  // `edl_hash` (export jobs): the timeline the file was rendered from — the
+  // toolbar's "↓ MP4 (outdated)" check compares it with the session's current one.
+  result: { path: string; filename: string; url: string; edl_hash?: string } | null
   error: string | null
   created_at: number
   started_at: number | null
@@ -203,15 +205,19 @@ async function apiError(res: Response): Promise<Error> {
   return new Error(text ? `${head}: ${text}` : head)
 }
 
-async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function http<T>(method: string, path: string, body?: unknown,
+                       signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: body ? { ...CLIENT_HEADERS, 'content-type': 'application/json' } : CLIENT_HEADERS,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   })
   if (!res.ok) throw await apiError(res)
   return res.json()
 }
+
+const UPLOAD_POLL_MS = 400
 
 export const api = {
   health: () => http<{ ok: boolean }>('GET', '/health'),
@@ -230,6 +236,14 @@ export const api = {
   getOps: (sid: string, since = 0) =>
     http<{ ops: Op[] }>('GET', `/sessions/${sid}/ops?since=${since}`),
 
+  // The project's media library (media_library.py): every import, with how
+  // many timeline clips use it. Independent of the timeline (QA-010).
+  listMedia: (sid: string) => http<{ media: MediaItem[] }>('GET', `/sessions/${sid}/media`),
+
+  // Take an item out of the bin; its file stays on disk. 409 while clips use it.
+  removeMedia: (sid: string, mediaId: string) =>
+    http<{ removed: string; name: string }>('DELETE', `/sessions/${sid}/media/${mediaId}`),
+
   audioUpload: async (sid: string, file: File, opts: { addToMusic?: boolean; duck?: boolean; volumeDb?: number } = {}) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -242,21 +256,40 @@ export const api = {
   },
 
   upload: async (sid: string, file: File, addToTimeline = true,
-                 opts: { transcribe?: boolean; whisperModel?: string } = {}) => {
+                 opts: { transcribe?: boolean; whisperModel?: string;
+                         onProgress?: (fraction: number) => void } = {}) => {
+    type UploadResult = {
+      src: string
+      normalized: string
+      display_name?: string
+      duration: number
+      probe: { duration: number }
+      edl_hash: string
+      notices?: string[]
+    }
     const fd = new FormData()
     fd.append('file', file)
     fd.append('add_to_timeline', String(addToTimeline))
     fd.append('transcribe', String(opts.transcribe ?? true))
     if (opts.whisperModel) fd.append('whisper_model', opts.whisperModel)
-    const res = await fetch(`${BASE}/sessions/${sid}/upload`, { method: 'POST', body: fd })
+    // QA-007: `wait=0` — the server answers 202 {job_id} as soon as the bytes
+    // are on disk and normalises in a background job (it used to normalise on
+    // its event loop, freezing every other request for the whole import).
+    // Polling the job gives the bin real progress. A server that predates the
+    // job path answers 200 with the result, handled the same way.
+    const res = await fetch(`${BASE}/sessions/${sid}/upload?wait=0`, { method: 'POST', body: fd })
     if (!res.ok) throw await apiError(res)
-    return res.json() as Promise<{
-      src: string
-      normalized: string
-      duration: number
-      probe: { duration: number }
-      edl_hash: string
-    }>
+    if (res.status !== 202) return res.json() as Promise<UploadResult>
+    const { job_id } = (await res.json()) as { job_id: string }
+    for (;;) {
+      await new Promise((r) => setTimeout(r, UPLOAD_POLL_MS))
+      const job = await api.getJob(job_id)
+      opts.onProgress?.(job.progress ?? 0)
+      if (job.status === 'completed') return job.result as unknown as UploadResult
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        throw new Error(job.error || `${file.name}: import ${job.status}`)
+      }
+    }
   },
 
   dispatch: <T = unknown>(sid: string, tool: string, args: Record<string, unknown> = {}) =>
@@ -278,16 +311,25 @@ export const api = {
       { tool, args }
     ),
 
-  preview: (sid: string) =>
+  // `signal` aborts the request when a newer render supersedes it (QA-004).
+  // The server cancels the superseded render itself when the newer request
+  // arrives; aborting here just stops the browser waiting on (and holding a
+  // connection for) an answer nobody will use.
+  preview: (sid: string, signal?: AbortSignal) =>
     http<{ path: string; cached: boolean; edl_hash: string; url: string }>(
       'POST',
-      `/sessions/${sid}/preview`
+      `/sessions/${sid}/preview`,
+      undefined,
+      signal,
     ),
 
   previewURL: (sid: string, hash?: string) =>
     `${BASE}/sessions/${sid}/preview.mp4${hash ? `?h=${hash}` : ''}`,
 
-  export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' } = {}) =>
+  // `height` is a NAMED resolution (the canvas's short side — QA-025);
+  // `bitrate_kbps` 0 = encode by crf even when the project has a platform
+  // target, omitted = use the project's target (QA-027).
+  export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number } = {}) =>
     http<{ path: string; filename: string; url: string }>(
       'POST',
       `/sessions/${sid}/export`,
@@ -298,7 +340,7 @@ export const api = {
   // request until the render finishes. Poll `getJob` until status is terminal.
   // Exports of long clips take minutes — the sync path can outlive a browser's
   // fetch timeout, which is exactly what made Export appear to "hang forever".
-  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' } = {}) =>
+  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number } = {}) =>
     http<{ job_id: string; status: JobStatus; status_url: string }>(
       'POST',
       `/sessions/${sid}/export?wait=0`,

@@ -38,6 +38,19 @@ from video_ai_editor.agent.timemap import (
     timeline_to_source,
 )
 from video_ai_editor.edl.schema import EDL, Canvas, Clip, TextClip, Track
+from video_ai_editor.edl import timebase as _tb
+
+
+def _F(t: float, fps: float = 30) -> float:
+    """A removal's START as the cut makes it: snapped DOWN to the frame grid
+    (QA-002 — every cut lands on n/fps, and a removal is rounded outward so
+    it takes all of the word/silence it was asked to remove)."""
+    return round(_tb.floor_to_frame(t, fps), 4)
+
+
+def _C(t: float, fps: float = 30) -> float:
+    """A removal's END, snapped UP to the frame grid (see `_F`)."""
+    return round(_tb.ceil_to_frame(t, fps), 4)
 from video_ai_editor.edl.snapshot import EDLStore
 from video_ai_editor.ingest.caption_format import cues_from_segments
 
@@ -372,7 +385,8 @@ def test_remove_fillers_after_remove_silences_removes_exactly_the_fillers(tmp_pa
     # Nothing ELSE was removed: what survives is the pre-filler timeline minus
     # exactly the three padded filler ranges.
     removed_by_fillers = sum(hi - lo for lo, hi in after_silences) - sum(hi - lo for lo, hi in after)
-    assert removed_by_fillers == pytest.approx(3 * (0.3 + 2 * PAD), abs=2e-3)
+    expected = sum(_C(e + PAD) - _F(s - PAD) for w, s, e in WORDS if w in FILLERS)
+    assert removed_by_fillers == pytest.approx(expected, abs=2e-3)
 
     # One undo step for the pass, as before.
     dispatch(store, "undo", {})
@@ -395,7 +409,7 @@ def test_remove_fillers_skips_words_already_cut_and_merges_overlaps(tmp_path: Pa
     after = _surviving_source(store)
     assert not _on_timeline(after, 1.0 - PAD, 1.6 + PAD)
     assert _covered(after, 1.70, 2.20) and _covered(after, 0.0, 0.9)
-    assert after == [(0.0, 0.95), (1.65, 5.0), (8.0, 12.0)]
+    assert after == [(0.0, _F(0.95)), (_C(1.65), 5.0), (8.0, 12.0)]
 
 
 def test_remove_fillers_cuts_both_occurrences_of_a_reused_region(tmp_path: Path):
@@ -427,7 +441,11 @@ def test_remove_fillers_on_a_2x_clip_cuts_the_source_word_not_twice_as_deep(tmp_
     assert r["cuts"] == 1
     # Source [5.5,5.8] plays at timeline [2.75,2.9] on a 2x clip; the pre-fix
     # cut_range(5.5,5.8) would have removed source [11,11.6] — "bye" territory.
-    assert _surviving_source(store) == [(0.0, 5.5), (5.8, 12.0)]
+    # (Snapped on the TIMELINE grid, where the clip plays: [2.75, 2.9] → one
+    # timeline frame is two source frames at 2x.)
+    assert _surviving_source(store) == [
+        (0.0, round(2 * _tb.floor_to_frame(2.75, 30), 4)),
+        (round(2 * _tb.ceil_to_frame(2.9, 30), 4), 12.0)]
 
 
 def test_add_caption_track_on_a_2x_clip_lays_cues_at_timeline_time(tmp_path: Path):
@@ -652,7 +670,7 @@ def test_remove_fillers_with_a_leading_gap_on_v1_removes_the_right_source(tmp_pa
     r = dispatch(store, "remove_fillers", {"words": list(FILLERS), "pad": PAD})
     assert (r["cuts"], r["words"], r["already_removed"]) == (3, 3, 0), r
     assert _surviving_source(store) == [
-        (0.0, 0.55), (0.95, 5.45), (5.85, 10.45), (10.85, 12.0)]
+        (0.0, _F(0.55)), (_C(0.95), _F(5.45)), (_C(5.85), _F(10.45)), (_C(10.85), 12.0)]
 
 
 def test_remove_silences_with_a_leading_gap_on_v1_removes_the_right_source(tmp_path: Path, monkeypatch):
@@ -695,7 +713,7 @@ def test_remove_fillers_second_pass_with_a_bigger_pad_does_not_eat_the_neighbour
     r1 = dispatch(store, "remove_fillers", {"words": ["um"], "pad": 0.05})
     assert r1["cuts"] == 1
     after_first = _surviving_source(store)
-    assert after_first == [(0.0, 0.95), (1.35, 12.0)]
+    assert after_first == [(0.0, _F(0.95)), (_C(1.35), 12.0)]
 
     r2 = dispatch(store, "remove_fillers", {"words": ["um"], "pad": 0.3})
     assert (r2["cuts"], r2["already_removed"]) == (0, 1), r2

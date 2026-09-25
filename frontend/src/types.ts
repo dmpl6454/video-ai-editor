@@ -87,6 +87,25 @@ export interface SessionInfo {
   redo_available?: boolean
 }
 
+/** One entry of the project's media library (GET /sessions/:id/media,
+ *  media_library.py). Listed whether or not any timeline clip uses it. */
+export interface MediaItem {
+  id: string
+  /** Absolute path — what a timeline clip's `src` holds; drag payload. */
+  src: string
+  /** The user's name for it (the original filename), not the on-disk one. */
+  name: string
+  kind: 'video' | 'audio'
+  origin: 'upload' | 'audio' | 'voiceover' | 'imported' | 'timeline'
+  duration: number | null
+  width: number | null
+  height: number | null
+  added: number
+  /** Timeline clips referencing it, and their ids. */
+  uses: number
+  clip_ids: string[]
+}
+
 export function isMediaClip(c: AnyClip): c is Clip {
   return 'src' in c && 'out' in c
 }

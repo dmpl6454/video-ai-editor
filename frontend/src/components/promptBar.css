@@ -405,13 +405,17 @@
 }
 .prompt-verify-head b { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12px; }
 .prompt-verify-head .rendered { color: var(--text-dim); text-transform: none; letter-spacing: 0; font-size: 10.5px; }
-.prompt-checks { display: grid; grid-template-columns: 14px 1fr auto auto; column-gap: 10px; row-gap: 2px; font-size: 11.5px; }
+/* Two columns only: the glyph and the words. The measured/expected values used
+   to sit in two `auto` columns of nowrap JSON, which took the row's whole width
+   and left the label column 1ch wide — one letter per line (QA-017). Values are
+   prose now (lib/checkProse) and wrap on their own line under the label. */
+.prompt-checks { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 10px; row-gap: 1px; font-size: 11.5px; }
 .prompt-check { display: contents; }
-.prompt-check > span { padding: 2px 0; }
+.prompt-check > span { padding: 2px 0 0; }
 .prompt-check .g { text-align: center; }
-.prompt-check .human { color: var(--text); overflow-wrap: anywhere; }
+.prompt-check .human { color: var(--text); overflow-wrap: break-word; min-width: 0; }
 .prompt-check .human small { color: var(--text-dim); margin-left: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
-.prompt-check .val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.prompt-check .vals { grid-column: 2; padding: 0 0 3px; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; min-width: 0; }
 .prompt-check.is-pass .g { color: var(--good); }
 .prompt-check.is-fail .g { color: var(--accent); }
 .prompt-check.is-fail .human { color: var(--accent); }
@@ -448,6 +452,19 @@
 }
 
 .prompt-log-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* A finished run folds to one row so the preview keeps its height (QA-017). */
+.prompt-log.is-collapsed { padding-top: 6px; padding-bottom: 6px; }
+.prompt-log-summary { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; }
+.prompt-log-summary .g { flex-shrink: 0; width: 14px; text-align: center; }
+.prompt-log-summary .g.is-pass { color: var(--good); }
+.prompt-log-summary .g.is-fail { color: var(--accent); }
+.prompt-log-summary .prompt-log-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.prompt-log-summary .sum { flex-shrink: 0; color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+.prompt-log-summary .spacer { flex: 1; }
+.prompt-log-summary button { flex-shrink: 0; font-size: 11px; padding: 3px 10px; }
+.prompt-log-summary .ghost { background: transparent; color: var(--text-dim); }
+.prompt-log-summary .ghost:hover:not(:disabled) { color: var(--text); }
 .prompt-log-actions button { font-size: 11px; padding: 3px 10px; }
 .prompt-log-actions .spacer { flex: 1; }
 .prompt-log-actions .ghost { background: transparent; color: var(--text-dim); }

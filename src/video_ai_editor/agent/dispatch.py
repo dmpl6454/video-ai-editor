@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Callable
 from ..edl import EDLStore
-from ..edl.schema import EDL, Clip, Track, Canvas, TextClip, BrandKit, CaptionsConfig, Transform
+from ..edl.schema import EDL, Clip, Track, Canvas, TextClip, Sticker, BrandKit, CaptionsConfig, Transform
 from ..render import render_preview as _render_preview
 from ..show.brand_kit import apply_brand_kit as _apply_brand_kit, ensure_track
 from ..show.audit import audit as _audit
@@ -31,6 +31,7 @@ from .timemap import (
     clamp_to_extent,
 )
 from .. import platformutil as _pu
+from ..edl import timebase as _tb
 
 DispatchFn = Callable[[EDLStore, dict], dict]
 
@@ -78,6 +79,78 @@ def _clone_clip(c, **updates):
     this file is a bug; a test enforces that.
     """
     return c.model_copy(deep=True, update=updates)
+
+
+def _new_clip_id(edl: EDL, prefix: str = "c_") -> str:
+    """A clip id no clip on this timeline already carries.
+
+    QA-020: `duplicate_clip` and `bulk_duplicate` derived the copy's id from
+    the source's (`c_<id>d`), so duplicating — or pasting, which dispatches the
+    same tool — the same clip twice produced two clips with ONE id, and every
+    clip_id-targeted tool (selection, trim, ripple_delete, Properties) then hit
+    whichever came first. A fresh random id is what `Clip()` itself uses; the
+    membership check makes a collision impossible rather than merely unlikely.
+    """
+    taken = {c.id for t in edl.tracks for c in t.clips}
+    while True:
+        cid = f"{prefix}{uuid4().hex[:8]}"
+        if cid not in taken:
+            return cid
+
+
+def _duplicate_overlay(edl: EDL, track: Track, c) -> str | None:
+    """Copy a title/sticker/caption cue (QA-020 follow-through: Cmd+D and
+    paste on one were a 400 "only supports media clips", and multi-select
+    duplicate skipped them silently). The copy gets a fresh id with the
+    model's own prefix, shares nothing mutable (`_clone_clip`), and lands in
+    the first free span at or after the original's end on the SAME lane — an
+    overlay lane is not magnetic, so nothing moves to make room, and the copy
+    never lands on top of another cue there.
+
+    Returns None (nothing changed) when that span is only past the end of the
+    timeline: in a packed lane (captions) the "first free span" is after the
+    LAST cue, and sending the copy there is the QA-022 teleport again."""
+    span = max(0.0, c.end - c.start)
+    busy = sorted((o.start, o.end) for o in track.clips if o is not c)
+    at = c.end
+    for s0, e0 in busy:
+        if at + span <= s0 + 1e-9:
+            break
+        if e0 > at + 1e-9 and s0 < at + span - 1e-9:
+            at = e0
+    if at > c.end + 1e-9 and at + span > edl.duration + 1e-9:
+        return None
+    prefix = "st_" if isinstance(c, Sticker) else "t_"
+    dup = _clone_clip(c, id=_new_clip_id(edl, prefix), start=_q(edl, at),
+                      end=_q(edl, at + span))
+    # Appended, not re-sorted: list order is the stacking order of cues that
+    # overlap in time, and a duplicate must not restack its neighbours.
+    track.clips.append(dup)
+    return dup.id
+
+
+def _open_main_lane_slot(edl: EDL, track: Track, original, at: float, width: float) -> None:
+    """Make room on the MAIN lane for a copy inserted at `at` (right after
+    `original`): every later v1 clip, and every unlocked overlay pinned at or
+    after that point, moves right by the copy's footprint.
+
+    QA-020 follow-through: a v1 duplicate/paste was appended with
+    start == the next clip's start, and the stable start-sort then kept the
+    NEXT clip first — Cmd+D on red of red/blue/green produced
+    red, blue, copy, green. The copy belongs directly after its original (as in
+    every NLE), and inserting footage there shifts the picture after it, so the
+    overlays over that picture shift with it (the set_speed slow-down rule).
+    """
+    for x in track.clips:
+        if isinstance(x, Clip) and x is not original and x.start >= at - 1e-9:
+            x.start += width
+    for t in edl.tracks:
+        if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
+            continue
+        for oc in t.clips:
+            if getattr(oc, "start", 0.0) >= at - 1e-9 and hasattr(oc, "end"):
+                oc.start += width
+                oc.end += width
 
 
 # Track types that can hold a media Clip (an uploaded video/audio file).
@@ -301,7 +374,7 @@ def _rebase_transform_for_lane(edl: EDL, c: Clip, origin: Track, dest: Track) ->
     return "reset to full-frame"
 
 
-def _repack_media(track: Track, prefer_first: str | None = None) -> None:
+def _repack_media(track: Track, prefer_first: str | None = None, fps=None) -> None:
     """Lay every media Clip on `track` end-to-end from 0 in start order.
 
     This is what `move_clip(close_gap=True)` means: a drag is a REORDER, so the
@@ -324,6 +397,8 @@ def _repack_media(track: Track, prefer_first: str | None = None) -> None:
     for x in media:
         x.start = cursor
         cursor += x.effective_duration
+        if fps is not None:
+            cursor = _tb.quantize(cursor, fps)  # QA-002, as _ripple_close_gap
     track.clips.sort(key=lambda x: getattr(x, "start", 0))
 
 
@@ -509,6 +584,65 @@ def _validate_tool_args(tool: str, args: dict) -> None:
                     raise ValueError(
                         f"{tool}.{key}[{i}] must be of type {items['type']}, "
                         f"got {type(item).__name__} {item!r}")
+        _check_bounds(tool, key, value, spec)
+    _check_ordered_pairs(tool, args, props)
+
+
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n == n and n not in (float("inf"), float("-inf")) else None
+
+
+def _check_bounds(tool: str, key: str, value: Any, spec: dict) -> None:
+    """Enforce a schema-declared `minimum`/`maximum` (QA-041). The bounds are
+    written into the schemas by `tools._apply_numeric_bounds`, so Claude is
+    told the same range this rejects. Rejected, not clamped: an out-of-range
+    value at this boundary is a caller mistake (a typo'd 100000 s start), and
+    silently clamping it would turn the typo into a different wrong edit."""
+    lo, hi = spec.get("minimum"), spec.get("maximum")
+    if lo is None and hi is None:
+        return
+    n = _as_number(value)
+    if n is None:
+        return  # a non-numeric value in a numeric slot was rejected above
+    if (lo is not None and n < lo) or (hi is not None and n > hi):
+        rng = (f"between {lo:g} and {hi:g}" if lo is not None and hi is not None
+               else f"at most {hi:g}" if hi is not None else f"at least {lo:g}")
+        raise ValueError(f"{tool}.{key} must be {rng}, got {value!r}")
+
+
+#: Argument pairs that describe one span: the second must come after the first.
+_ORDERED_PAIRS = (("start", "end"), ("in", "out"), ("t_start", "t_end"))
+
+#: Handlers that deliberately REPAIR an inverted/collapsed span instead of
+#: failing (a documented contract with its own tests): add_sticker floors
+#: `end <= start` to a ~3 s window (StickerPanel clamps `end` to the timeline
+#: end near the tail), and set_clip_timing floors a right-edge drag past the
+#: start. The cross-field rule must not pre-empt them.
+_SPAN_REPAIRED_BY_HANDLER = frozenset({"add_sticker", "set_clip_timing"})
+
+
+def _check_ordered_pairs(tool: str, args: dict, props: dict) -> None:
+    """Cross-field rule (QA-041): `add_text start=5 end=2` validated field by
+    field and was stored as a negative-length clip. Checked only when BOTH
+    ends are present — a handler that fills a missing end from a default
+    decides that itself."""
+    if tool in _SPAN_REPAIRED_BY_HANDLER:
+        return
+    for a, b in _ORDERED_PAIRS:
+        if a not in props or b not in props:
+            continue
+        lo, hi = _as_number(args.get(a)), _as_number(args.get(b))
+        if lo is not None and hi is not None and hi <= lo:
+            raise ValueError(f"{tool}: {b} ({hi:g}) must be greater than {a} ({lo:g})")
+    lo, hi = _as_number(args.get("min_dur")), _as_number(args.get("max_dur"))
+    if lo is not None and hi is not None and hi < lo:
+        raise ValueError(f"{tool}: max_dur ({hi:g}) must be at least min_dur ({lo:g})")
 
 
 # Named canvas anchors, as fractions of (w, h). Captions have always taken a
@@ -606,8 +740,47 @@ def _source_duration(src: str | Path) -> float | None:
         return None
 
 
-def _ripple_close_gap(track: Track) -> None:
-    """After a removal, slide subsequent clips left to close any gap."""
+def _q(edl: EDL, t: float) -> float:
+    """QA-002: every committed edit time lands on the project frame grid.
+
+    Split, trim, move, cut_range, remove_silences/fillers, add_clip and the
+    v1 ripple all stored raw floats (5.0125 s), so the EDL described
+    positions no frame occupies, and the renderer, the preview and the
+    overlays each rounded them differently. `timebase.quantize` is THE rule;
+    nothing here rounds by hand."""
+    return _tb.quantize(float(t), edl.canvas.fps)
+
+
+def _source_video_extent(src: str | Path, fps) -> float | None:
+    """The source's PICTURE length floored to the project grid, or None when
+    it has no video stream / cannot be probed. Not `format.duration`, which
+    for an AAC mp4 is the padded audio (QA-002: out=20.01 on 600 frames)."""
+    try:
+        from ..ingest.probe import video_frame_extent
+        v = video_frame_extent(Path(src))
+    except Exception:
+        return None
+    if not v or v <= 0:
+        return None
+    return _tb.floor_to_frame(v, fps)
+
+
+#: The one MAGNETIC lane. Every other lane (PiP v2+, music, vo, a1) keeps the
+#: absolute starts the user placed its clips at — CapCut's non-main tracks are
+#: not magnetic. QA-013: this function used to repack whatever lane it was
+#: handed from t=0, so one trim/ripple_delete/duplicate on a PiP or music lane
+#: collapsed the whole lane to the start (v2 [8, 25] -> [0, 6.005]), and
+#: MediaBin's "Remove music" (a ripple_delete) dragged the next bed to 0.
+MAIN_LANE_ID = "v1"
+
+
+def _ripple_close_gap(track: Track, fps=None) -> None:
+    """After a removal on the MAIN lane, slide subsequent clips left to close
+    any gap. A no-op on every other lane (see MAIN_LANE_ID) — callers that
+    need a non-main lane re-timed use `_shift_lane_after_cut` /
+    `_first_free_gap` / `_pack_lane_from` explicitly."""
+    if track.id != MAIN_LANE_ID:
+        return
     track.clips.sort(key=lambda c: getattr(c, "start", 0))
     cursor = 0.0
     for c in track.clips:
@@ -618,9 +791,63 @@ def _ripple_close_gap(track: Track) -> None:
         # source time on the timeline — packing by source time re-opened
         # gaps after every speed change.
         cursor = c.start + c.effective_duration
+        if fps is not None:
+            # On the frame grid (QA-002): a 1.5x clip's footprint is rarely a
+            # whole number of frames, and an off-grid neighbour start is a
+            # position no frame occupies (the renderer would round it, the
+            # overlays would not).
+            cursor = _tb.quantize(cursor, fps)
+
+
+def _shift_lane_after_cut(track: Track, start: float, end: float) -> None:
+    """Non-main-lane `cut_range`: close exactly the removed `[start, end)`.
+
+    Clips before the cut keep their start; content that sat after `end` slides
+    left by the cut length; a clip whose head the cut removed now begins AT
+    the cut point. Nothing is repacked from zero (QA-013).
+    """
+    width = end - start
+    for c in track.clips:
+        if not isinstance(c, Clip):
+            continue
+        if c.start >= end - 1e-9:
+            c.start = c.start - width
+        elif c.start > start:
+            c.start = start
+    track.clips.sort(key=lambda c: getattr(c, "start", 0))
+
+
+def _pack_lane_from(track: Track, origin: float) -> None:
+    """Pack a non-main lane's clips in list order, starting at `origin` (the
+    lane's own first start) rather than at 0 — `reorder_clips` on a PiP lane."""
+    cursor = origin
+    for c in track.clips:
+        if not isinstance(c, Clip):
+            continue
+        c.start = cursor
+        cursor = c.start + c.effective_duration
 
 
 _OVERLAY_TRACK_TYPES = ("text", "sticker", "captions")
+
+
+_CAPTION_OWNED_PROPS = ("x", "y", "scale", "rotation")
+
+
+def _reject_caption_geometry(c, props) -> None:
+    """Refuse position/scale/rotation on a CAPTION cue instead of storing a
+    value both renderers ignore (QA-036: "accepted and reported as success
+    but ignored"). The captions block owns caption geometry —
+    text_overlay.resolve_anchor_overrides / resolve_scale_rotation and
+    TextLayer all pin role='caption' to the captions style. Opacity is not
+    geometry and stays allowed (both renderers honour it)."""
+    if not isinstance(c, TextClip) or c.role != "caption":
+        return
+    bad = [p for p in props if p in _CAPTION_OWNED_PROPS]
+    if bad:
+        raise ValueError(
+            f"caption cues take their {'/'.join(bad)} from the captions style, "
+            "not per-cue transforms — change the captions position/style instead")
 
 
 def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
@@ -703,6 +930,11 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
     for track in edl.tracks:
         if track.type not in _OVERLAY_TRACK_TYPES:
             continue
+        if track.locked:
+            # QA-023: a locked lane is immovable — it does not follow a main-
+            # lane ripple (the Premiere rule), and dispatch() refuses any edit
+            # that would change it.
+            continue
         kept_a_collapsed_clip = False
         kept: list = []
         for c in track.clips:
@@ -727,6 +959,14 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
             c.end = new_end
             kept.append(c)
         track.clips = kept
+    # QA-018: the music bed follows a ripple that SHORTENS the video. Every
+    # caller of this function has just removed [removed_start, removed_end)
+    # from v1; the bed stays continuous (it is not shifted) but its tail past
+    # the new video end goes, or the export plays music over black — measured
+    # 85.03 s of music on a 71.67 s video after remove_silences. An emptied v1
+    # keeps its bed (shorten-then-replace, as the overlay rule above).
+    if not v1_now_empty:
+        _fit_music_to_video(edl)
 
 
 def _rescale_transform_xy(transform, sx: float, sy: float) -> None:
@@ -1032,8 +1272,19 @@ def add_clip(store: EDLStore, args: dict) -> dict:
     track = _v_track_for_media(store.edl, args["track"])
     src = _safe_src(args["src"])
     _reject_videoless_on_video_lane(track, src, "add_clip")
-    clip = Clip(src=src, in_=float(args["in"]),
-                out=float(args["out"]), start=float(args["start"]))
+    edl = store.edl
+    in_ = _q(edl, args["in"])
+    out = _q(edl, args["out"])
+    if track.type == "video":
+        # A video clip may not claim frames its source does not have: the
+        # container duration of an AAC mp4 is the padded AUDIO (QA-002).
+        extent = _source_video_extent(src, edl.canvas.fps)
+        if extent is not None and out > extent:
+            out = extent
+    if out <= in_:
+        raise ValueError(
+            f"out ({out:.3f}) must be at least one frame after in ({in_:.3f})")
+    clip = Clip(src=src, in_=in_, out=out, start=_q(edl, args["start"]))
     # Sensible default PiP placement for non-V1 video tracks. The PIP renderer
     # scales by 35% of the canvas long edge × `scale`. We can't know the
     # source aspect without probing, so we center the PIP and use a smaller
@@ -1054,10 +1305,10 @@ def add_clip(store: EDLStore, args: dict) -> dict:
 
 def cut_range(store: EDLStore, args: dict) -> dict:
     track = _v_track(store.edl, args["track"])
-    start = float(args["start"])
-    end = float(args["end"])
+    start = _q(store.edl, args["start"])
+    end = _q(store.edl, args["end"])
     if end <= start:
-        raise ValueError("end must be > start")
+        raise ValueError("end must be > start (by at least one frame)")
     if args.get("dry_run"):
         return {"would_cut": [c.id for c in track.clips
                               if isinstance(c, Clip)
@@ -1085,7 +1336,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
             # split_at: the cut edge is interior to the original shot, so
             # only the outer edges keep their fade (otherwise remove_silences
             # on a faded clip strobes to black at every removed silence).
-            left = _clone_clip(c, out=c.in_ + left_dur * sf,
+            left = _clone_clip(c, out=_q(store.edl, c.in_ + left_dur * sf),
                                start=c_start,
                                video_fade_out=0.0)
             right = _clone_clip(
@@ -1093,27 +1344,32 @@ def cut_range(store: EDLStore, args: dict) -> dict:
                 # Unique suffix — a literal 'b' collides with an earlier
                 # cut/split sibling of the same clip (same bug as split_at).
                 id=f"c_{c.id[2:]}_{uuid4().hex[:6]}",
-                in_=c.in_ + (end - c_start) * sf,
+                in_=_q(store.edl, c.in_ + (end - c_start) * sf),
                 out=c.out,
                 start=start,  # will be ripple-adjusted
                 video_fade_in=0.0,
             )
+            # The SOUND fades partition the same way: copied to both pieces,
+            # speech faded in again after every removed silence.
+            left.audio.fade_out, right.audio.fade_in = 0.0, 0.0
             # Pydantic alias quirk: ensure model carries fresh `in`
             new_clips.append(left)
             new_clips.append(right)
         elif c_start < start:
             # Trim right side
             new_dur = start - c_start
-            c.out = c.in_ + new_dur * sf
+            c.out = _q(store.edl, c.in_ + new_dur * sf)
             new_clips.append(c)
         elif c_end > end:
             # Trim left side
             shift = end - c_start
-            c.in_ = c.in_ + shift * sf
+            c.in_ = _q(store.edl, c.in_ + shift * sf)
             new_clips.append(c)
         # else: fully inside → drop
     track.clips = new_clips
-    _ripple_close_gap(track)
+    _ripple_close_gap(track, store.edl.canvas.fps)
+    if track.id != MAIN_LANE_ID:
+        _shift_lane_after_cut(track, start, end)   # QA-013: close the cut only
     if track.id == "v1":
         _ripple_overlays(store.edl, start, end, v1_now_empty=not track.clips)
     summary = f"Cut {start:.2f}–{end:.2f}s on {track.id} (ripple)"
@@ -1124,7 +1380,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
 def split_at(store: EDLStore, args: dict) -> dict:
     # `track` defaults to v1 — every other split convention does the same.
     track = _v_track(store.edl, args.get("track", "v1"))
-    t = float(args["time"])
+    t = _q(store.edl, args["time"])
     new_clips: list = []
     split_count = 0
     # original clip id → the RIGHT half's new id. The left half keeps the
@@ -1143,14 +1399,21 @@ def split_at(store: EDLStore, args: dict) -> dict:
             # Timeline seconds → SOURCE seconds: a 2x clip covers 2 source-
             # seconds per timeline second, so the cut lands speed× deeper
             # into the source than the timeline offset suggests.
-            local = (t - c_start) * c.speed_factor
+            # Snapped (QA-002): at 1x this is already on the grid; on a
+            # retimed clip speed× a whole frame is not.
+            cut_src = _q(store.edl, c.in_ + (t - c_start) * c.speed_factor)
+            if not (c.in_ < cut_src < c.out):
+                # Within a frame of the clip's edge once snapped: there is no
+                # frame to put on one side, so this is not a split.
+                new_clips.append(c)
+                continue
             # A visual fade belongs to the clip's OUTER edges. The split
             # seam is interior to what the user sees as one continuous shot,
             # so the halves PARTITION the fades (left keeps fade-in, right
             # keeps fade-out) instead of each inheriting both — model_copy
             # would otherwise give every fragment its own fade-to-black tail
             # AND fade-from-black head, strobing to black at every cut.
-            left = _clone_clip(c, out=c.in_ + local, video_fade_out=0.0)
+            left = _clone_clip(c, out=cut_src, video_fade_out=0.0)
             right = _clone_clip(
                 c,
                 # Unique suffix, not a literal 'b': splitting a clip whose
@@ -1158,10 +1421,11 @@ def split_at(store: EDLStore, args: dict) -> dict:
                 # clips with the SAME id, so clip_id-targeted tools hit the
                 # wrong one.
                 id=f"c_{c.id[2:]}_{uuid4().hex[:6]}",
-                in_=c.in_ + local,
+                in_=cut_src,
                 start=t,
                 video_fade_in=0.0,
             )
+            left.audio.fade_out, right.audio.fade_in = 0.0, 0.0   # sound fades too
             new_clips.append(left)
             new_clips.append(right)
             halves[c.id] = right.id
@@ -1191,9 +1455,15 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     # can't be probed (imported .vae media, repaired paths) so nothing that works
     # today starts failing.
     src_dur = _source_duration(c.src)
+    fps = store.edl.canvas.fps
+    new_in, new_out = _q(store.edl, new_in), _q(store.edl, new_out)
+    if track.type == "video":
+        # The PICTURE's frame-exact end, not the audio-padded container.
+        src_dur = _source_video_extent(c.src, fps) or src_dur
     if src_dur is not None and src_dur > 0:
-        new_out = min(new_out, src_dur)
-        new_in = min(new_in, max(0.0, src_dur - 1.0 / 30.0))
+        new_out = min(new_out, _tb.floor_to_frame(src_dur, fps))
+        new_in = min(new_in, max(0.0, _tb.floor_to_frame(src_dur, fps)
+                                 - _tb.frame_duration(fps)))
     # A zero- or negative-length clip is not a valid timeline object: it stays in
     # the EDL, still enters the filtergraph, and renders as a broken segment.
     # Clearing the Out field in the UI used to produce exactly that.
@@ -1202,7 +1472,7 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
             f"out ({new_out:.3f}) must be greater than in ({new_in:.3f})")
     c.in_, c.out = new_in, new_out
     new_duration = c.duration
-    _ripple_close_gap(track)
+    _ripple_close_gap(track, store.edl.canvas.fps)
     if track.id == "v1" and new_duration < old_duration - 1e-9:
         # The clip's OWN start doesn't move here (only _ripple_close_gap
         # repacks positions) — its old TIMELINE footprint was
@@ -1283,7 +1553,7 @@ def move_clip(store: EDLStore, args: dict) -> dict:
     if hasattr(c, "start"):
         # Clamp to >= 0; ffmpeg can't address negative timeline positions
         # and the timeline renderer would crash on the next preview.
-        requested_start = _num(args, "new_start", 0.0, min=0.0)
+        requested_start = _q(store.edl, _num(args, "new_start", 0.0, min=0.0))
         if reorder:
             c.start = requested_start
         elif isinstance(c, Clip):
@@ -1299,9 +1569,34 @@ def move_clip(store: EDLStore, args: dict) -> dict:
             # on the timeline is its effective_duration (speed-adjusted) —
             # passing source `duration` made a 2x clip claim twice its real
             # footprint and get snapped past slots it actually fits in.
-            c.start = _first_free_gap(
+            snapped = _first_free_gap(
                 track, c.effective_duration, requested_start, ignore_clip_id=c.id
             )
+            if not crossed and track.id == "v1" and abs(snapped - requested_start) > 1e-9:
+                # QA-022: on the MAIN lane the forward snap is not a placement,
+                # it is a teleport. Its clips butt against each other, so the
+                # first free slot for a one-frame nudge (start ± 1/30) is past
+                # the LAST clip: the nudged clip jumped from 10.005 to 40.02 s,
+                # left a 10 s black hole and grew the timeline, while a left
+                # nudge snapped straight back — both with no feedback. A
+                # same-lane v1 move either lands where it was asked or is
+                # refused with the reason; reordering is `close_gap` (the
+                # Timeline drag), and other lanes keep the snap.
+                end = requested_start + c.effective_duration
+                blocker = next(
+                    (x for x in track.clips
+                     if isinstance(x, Clip) and x.id != c.id
+                     and requested_start < x.start + x.effective_duration - 1e-9
+                     and end > x.start + 1e-9), None)
+                where = (f" {blocker.id} ({blocker.start:.2f}–"
+                         f"{blocker.start + blocker.effective_duration:.2f}s)"
+                         if blocker is not None else " a neighbouring clip")
+                raise ValueError(
+                    f"Can't move {c.id} to {requested_start:.2f}s: it would overlap"
+                    f"{where} on the main track. Main-track clips sit end to end "
+                    f"— drag the clip to reorder it, or trim the neighbour to "
+                    f"make room.")
+            c.start = snapped
         else:
             # A Sticker/TextClip stores an ABSOLUTE `end`; a media Clip derives
             # its span from in_/out. So moving an overlay by assigning `start`
@@ -1362,9 +1657,9 @@ def move_clip(store: EDLStore, args: dict) -> dict:
             # the clip at a chosen time, and _first_free_gap above already
             # guarantees it doesn't land on top of anything.
             if origin.id == "v1":
-                _repack_media(origin)
+                _repack_media(origin, fps=store.edl.canvas.fps)
         elif track.id == "v1":
-            _repack_media(track, prefer_first=c.id)
+            _repack_media(track, prefer_first=c.id, fps=store.edl.canvas.fps)
 
     summary = f"Move {c.id} → {track.id} @ {c.start:.2f}s"
     if rebased:
@@ -1379,8 +1674,11 @@ def reorder_clips(store: EDLStore, args: dict) -> dict:
     by_id = {c.id: c for c in track.clips}
     if set(order) != set(by_id.keys()):
         raise ValueError("order must contain exactly the current clip ids")
+    origin = min((c.start for c in by_id.values() if isinstance(c, Clip)), default=0.0)
     track.clips = [by_id[i] for i in order]
-    _ripple_close_gap(track)
+    _ripple_close_gap(track, store.edl.canvas.fps)
+    if track.id != MAIN_LANE_ID:
+        _pack_lane_from(track, origin)   # QA-013: never from t=0 off the main lane
     summary = f"Reorder {track.id}: {', '.join(order)}"
     store.commit("reorder_clips", args, summary)
     return {"summary": summary}
@@ -1401,7 +1699,7 @@ def ripple_delete(store: EDLStore, args: dict) -> dict:
         (c.start, c.start + c.effective_duration) if isinstance(c, Clip) else (None, None)
     )
     track.clips.remove(c)
-    _ripple_close_gap(track)
+    _ripple_close_gap(track, store.edl.canvas.fps)
     if track.id == "v1" and removed_start is not None:
         _ripple_overlays(store.edl, removed_start, removed_end, v1_now_empty=not track.clips)
     summary = f"Delete {c.id} (ripple)"
@@ -1414,15 +1712,33 @@ def duplicate_clip(store: EDLStore, args: dict) -> dict:
     if not res:
         raise ValueError("clip not found")
     track, c = res
+    if isinstance(c, (TextClip, Sticker)):
+        new_id = _duplicate_overlay(store.edl, track, c)
+        if new_id is None:
+            raise ValueError(
+                f"No room on '{track.label or track.id}' after this clip — the lane is "
+                f"full to the end of the timeline. Move or trim the next clip first.")
+        summary = f"Duplicate {c.id} → {new_id}"
+        store.commit("duplicate_clip", args, summary)
+        return {"summary": summary, "new_clip_id": new_id}
     if not isinstance(c, Clip):
-        raise ValueError("duplicate_clip only supports media clips")
+        raise ValueError("duplicate_clip only supports media clips, titles and stickers")
     # Place the copy right after the original's TIMELINE footprint —
     # effective_duration, since a sped clip ends earlier than its source
     # length suggests (source-based placement left a gap that
     # _ripple_close_gap then had to paper over).
-    dup = _clone_clip(c, id=f"c_{c.id[2:]}d", start=c.start + c.effective_duration)
+    dup = _clone_clip(c, id=_new_clip_id(store.edl), start=c.start + c.effective_duration)
+    if track.id != MAIN_LANE_ID:
+        # QA-013: a non-magnetic lane moves nothing to make room — the copy
+        # takes the first free span after the original instead.
+        dup.start = _first_free_gap(track, dup.effective_duration, dup.start)
+    else:
+        _open_main_lane_slot(store.edl, track, c, dup.start, dup.effective_duration)
     track.clips.append(dup)
-    _ripple_close_gap(track)
+    _ripple_close_gap(track, store.edl.canvas.fps)
+    # Off the main lane _ripple_close_gap no longer repacks (or sorts), so
+    # keep the lane in timeline order here — the invariant every op keeps.
+    track.clips.sort(key=lambda x: getattr(x, "start", 0))
     summary = f"Duplicate {c.id} → {dup.id}"
     store.commit("duplicate_clip", args, summary)
     return {"summary": summary, "new_clip_id": dup.id}
@@ -1445,9 +1761,11 @@ def set_canvas(store: EDLStore, args: dict) -> dict:
         v = _num(args, key)
         if not (lo <= v <= hi):
             raise ValueError(f"{key} must be between {lo} and {hi}, got {args[key]!r}")
-        setattr(c, key, int(v))
+        # fps stays fractional: 29.97 is a real project rate (QA-009); the
+        # Canvas validator snaps it to 30000/1001 via edl.timebase.
+        setattr(c, key, v if key == "fps" else int(v))
     _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, c.w, c.h)
-    summary = f"Canvas → {c.w}×{c.h} @ {c.fps}fps"
+    summary = f"Canvas → {c.w}×{c.h} @ {round(float(c.fps), 3):g}fps"
     store.commit("set_canvas", args, summary)
     return {"summary": summary}
 
@@ -2314,6 +2632,89 @@ def add_music(store: EDLStore, args: dict) -> dict:
             "summary": summary, "duck": duck}
 
 
+#: The fade a bed gets when fitting cuts it off mid-phrase and it had none —
+#: the same tail `add_music` gives the last loop piece.
+_MUSIC_TAIL_FADE_S = 1.0
+
+
+def _fit_music_to_video(edl: EDL, *, fade_in: float | None = None,
+                        fade_out: float | None = None) -> dict:
+    """Make the music bed end with the video: loop pieces that start at or
+    past `edl.video_extent()` are dropped, the piece that straddles it is
+    trimmed (source `out`, so the bed stays where it is), and the new last
+    piece fades out (`fade_out`, else the bed's own tail fade, else
+    `_MUSIC_TAIL_FADE_S`). A bed shorter than the video is left alone; a
+    locked music lane is never touched. Mutates `edl`; commits nothing —
+    `fit_music_to_video` and every v1 ripple (`_ripple_overlays`) call it
+    inside their own op."""
+    track = edl.get_track("music")
+    extent = edl.video_extent()
+    info: dict = {"trimmed": 0, "removed": 0, "video_end": round(extent, 3), "music_end": None}
+    if track is None or getattr(track, "locked", False) or extent <= 0.05:
+        return info
+    clips = sorted((c for c in track.clips if isinstance(c, Clip)), key=lambda c: c.start)
+    if not clips:
+        return info
+    tail = max(clips, key=lambda c: c.start + c.effective_duration)
+    tail_fade = float(tail.audio.fade_out or 0.0)
+    gone: set[str] = set()
+    for c in clips:
+        if c.start >= extent - 1e-3:
+            gone.add(c.id)
+        elif c.start + c.effective_duration > extent + 1e-3:
+            c.out = c.in_ + (extent - c.start) * c.speed_factor
+            info["trimmed"] += 1
+    if gone:
+        track.clips = [c for c in track.clips if getattr(c, "id", None) not in gone]
+        info["removed"] = len(gone)
+    kept = [c for c in clips if c.id not in gone]
+    if kept:
+        first, last = kept[0], kept[-1]
+        if fade_out is not None:
+            last.audio.fade_out = min(max(0.0, float(fade_out)), last.effective_duration)
+        elif info["trimmed"] or info["removed"]:
+            want = tail_fade if tail_fade > 0 else _MUSIC_TAIL_FADE_S
+            last.audio.fade_out = min(max(float(last.audio.fade_out or 0.0), want), last.effective_duration)
+        if fade_in is not None:
+            first.audio.fade_in = min(max(0.0, float(fade_in)), first.effective_duration)
+        info["music_end"] = round(max(c.start + c.effective_duration for c in kept), 3)
+    return info
+
+
+def fit_music_to_video(store: EDLStore, args: dict) -> dict:
+    """Trim the music bed to the video's length and set its fades (QA-018:
+    "trim the music to the video length", "fade out the music over the last
+    3 seconds"). `fade_in` / `fade_out` are seconds on the bed's first / last
+    piece; omitted, the existing fades stay (a trimmed tail still gets one)."""
+    fades: dict[str, float | None] = {}
+    for key in ("fade_in", "fade_out"):
+        v = args.get(key)
+        if v is None:
+            fades[key] = None
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or v > 30:
+            raise ValueError(f"fit_music_to_video.{key} must be seconds in [0, 30], got {v!r}")
+        fades[key] = float(v)
+    track = store.edl.get_track("music")
+    if track is None or not any(isinstance(c, Clip) for c in track.clips):
+        raise ValueError("there is no music on the timeline to fit")
+    if track.locked:
+        raise ValueError("the music lane is locked — unlock it to fit the music")
+    if store.edl.video_extent() <= 0.05:
+        raise ValueError("there is no video on v1 to fit the music to")
+    info = _fit_music_to_video(store.edl, fade_in=fades["fade_in"], fade_out=fades["fade_out"])
+    bits = [f"music ends at {info['music_end']:.2f}s (video {info['video_end']:.2f}s)"]
+    if info["trimmed"] or info["removed"]:
+        bits.append(f"trimmed {info['trimmed']}, removed {info['removed']} piece(s)")
+    if fades["fade_in"] is not None:
+        bits.append(f"fade in {fades['fade_in']:g}s")
+    if fades["fade_out"] is not None:
+        bits.append(f"fade out {fades['fade_out']:g}s")
+    summary = "Fit music: " + ", ".join(bits)
+    store.commit("fit_music_to_video", args, summary)
+    return {"summary": summary, **info}
+
+
 def set_duck(store: EDLStore, args: dict) -> dict:
     """Toggle (or configure) sidechain ducking on the music track — ONLY the
     duck flag, no clip mutation.
@@ -2504,7 +2905,14 @@ def _cut_source_ranges(store: EDLStore, track_id: str,
             if s_end - s_start <= _MIN_CUT_S:
                 continue
             hits.extend(source_range_to_timeline(store.edl, track_id, s_start, s_end, src=src))
-        return hits
+        # Every cut lands on the frame grid (QA-002) and is rounded OUTWARD
+        # below, so it takes all of each hit. What can still map afterwards
+        # is a sliver no longer than one frame — a retimed clip's source edge
+        # snaps to the grid too — and that is nothing a frame-accurate cut
+        # can remove: counting it as "still there" would loop to the budget
+        # and raise.
+        one = _tb.frame_duration(store.edl.canvas.fps)
+        return [(a, b) for a, b in hits if b - a > one + 1e-9]
 
     hits = _hits()
     budget = len(hits)
@@ -2516,7 +2924,10 @@ def _cut_source_ranges(store: EDLStore, track_id: str,
                 f"{n} cuts (expected at most {budget}) — cut did not remove what the "
                 f"mapper says is there")
         s, e = _merge_ranges(hits)[-1]
-        cut_range(store, {"track": track_id, "start": s, "end": e})
+        fps = store.edl.canvas.fps
+        cut_range(store, {"track": track_id,
+                          "start": _tb.floor_to_frame(s, fps),
+                          "end": _tb.ceil_to_frame(e, fps)})
         n += 1
         hits = _hits()
     return n
@@ -2587,6 +2998,10 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "cuts": n}
 
 
+#: remove_fillers' default single-token fillers (QA-011: no content words).
+_DEFAULT_FILLERS: tuple[str, ...] = ("um", "uh", "umm", "uhh", "erm", "hmm")
+
+
 def remove_fillers(store: EDLStore, args: dict) -> dict:
     """Find filler-word ranges in the transcript and cut them out.
 
@@ -2614,7 +3029,11 @@ def remove_fillers(store: EDLStore, args: dict) -> dict:
     it must not stretch across a cut edge into unrelated footage (the mapper
     clips it there).
     """
-    fillers = [w.lower() for w in args.get("words", ["um", "uh", "like", "you know", "so basically"])]
+    # Default = hesitation sounds only (same set as prompt.recipes.FILLERS_STRICT).
+    # "like" is a content word ("I like this part" lost its verb), and the
+    # multi-word entries never matched: matching is per single token. A
+    # caller who wants "like" gone passes it in `words`.
+    fillers = [w.lower() for w in args.get("words", list(_DEFAULT_FILLERS))]
     pad = float(args.get("pad", 0.05))
     track_id = str(args.get("track", "v1"))
 
@@ -3013,6 +3432,7 @@ def add_transition(store: EDLStore, args: dict) -> dict:
     # 2 s clips used to end the video stream 2 s before the audio.
     at = float(args["at"])
     duration = min(MAX_DURATION_S, effective_duration(ttype, args.get("duration")))
+    cap = MAX_DURATION_S
     ordered = sorted((c for c in v1.clips if isinstance(c, Clip)), key=lambda c: c.start)
     for cur, nxt in zip(ordered, ordered[1:]):
         boundary = cur.start + cur.effective_duration
@@ -3023,7 +3443,20 @@ def add_transition(store: EDLStore, args: dict) -> dict:
             # which never charges more than that clip anyway.
             if shorter >= MIN_DURATION_S:
                 duration = min(duration, shorter)
+                cap = min(cap, shorter)
             break
+    # Whole frames of the project timebase: xfade overlaps the picture by
+    # whole frames, so an off-grid 0.5 s at 25 fps (12.5 frames) ran the sound
+    # half a frame ahead of the picture after this seam. Kept inside
+    # [MIN_DURATION_S, cap] so the schema never swaps in its default and the
+    # overlap never exceeds a neighbour. seam_table_for(fps=...) applies the
+    # same grid to EDLs saved before this.
+    fps = store.edl.canvas.fps
+    duration = _tb.quantize(duration, fps)
+    if duration > cap + 1e-9:
+        duration = _tb.floor_to_frame(cap, fps)
+    if duration < MIN_DURATION_S - 1e-9:
+        duration = _tb.ceil_to_frame(MIN_DURATION_S, fps)
     tr = Transition(at=at, type=ttype, duration=duration)
     # Replace any transition already sitting on this cut instead of appending.
     # The renderer keys transitions by the seam they belong to, so a second one
@@ -3211,7 +3644,8 @@ def set_track_muted(store: EDLStore, args: dict) -> dict:
 
 
 def set_track_locked(store: EDLStore, args: dict) -> dict:
-    """Lock/unlock a track (UI-only flag for now)."""
+    """Lock/unlock a track. Enforced for every mutating tool by `dispatch()`
+    (`_guard_locked_tracks`), not just drawn as a padlock (QA-023)."""
     track_id = str(args["track"])
     track = store.edl.get_track(track_id)
     if not track:
@@ -3257,7 +3691,7 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     c.speed = factor
     new_fp = c.effective_duration
     if track.id == "v1" and abs(new_fp - old_fp) > 1e-9:
-        _ripple_close_gap(track)
+        _ripple_close_gap(track, store.edl.canvas.fps)
         # Overlays after this clip must follow the shift (same contract
         # as cut_range/trim_clip). Speed-UP removes timeline; the removed
         # interval is the tail of the old footprint. _ripple_overlays
@@ -3271,8 +3705,8 @@ def set_speed(store: EDLStore, args: dict) -> dict:
             shift = new_fp - old_fp
             boundary = c.start + old_fp
             for t in store.edl.tracks:
-                if t.type not in _OVERLAY_TRACK_TYPES:
-                    continue
+                if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
+                    continue  # a locked lane never follows a ripple (QA-023)
                 for oc in t.clips:
                     if getattr(oc, "start", 0.0) >= boundary - 1e-9:
                         oc.start += shift
@@ -3293,6 +3727,7 @@ def set_clip_transform(store: EDLStore, args: dict) -> dict:
     if not hasattr(c, "transform"):
         raise ValueError("set_clip_transform needs a media clip or sticker (it has no transform)")
     _reject_audio_lane_clip(t, cid, "set_clip_transform")
+    _reject_caption_geometry(c, [k for k in _CAPTION_OWNED_PROPS if args.get(k) is not None])
     # _num rejects null/NaN/'abc' as a 400; Transform's own field validators
     # then clamp each value into its domain, so `opacity: 5.0` lands as 1.0
     # instead of being stored verbatim and rendered as garbage (VAI-08). The
@@ -3448,6 +3883,13 @@ def bulk_delete(store: EDLStore, args: dict) -> dict:
         raise ValueError("clip_ids must be a non-empty list")
     n = 0
     affected_tracks: set[str] = set()
+    # QA-021: the v1 intervals this delete removes, in TIMELINE coords captured
+    # BEFORE the repack — the same thing single `ripple_delete` hands
+    # `_ripple_overlays`. Without it a multi-select delete re-timed v1 but left
+    # every text/sticker/caption at its old absolute time, stranded past the
+    # new end over black (v1 0-40 minus 0-20 left a 22-24 s title at 22-24 and
+    # held the duration at 24 s).
+    removed_v1: list[tuple[float, float]] = []
     from .dispatch import _ripple_close_gap  # self-import safe
     for cid in ids:
         res = store.edl.get_clip(cid)
@@ -3458,12 +3900,24 @@ def bulk_delete(store: EDLStore, args: dict) -> dict:
             track.clips.remove(c)
             affected_tracks.add(track.id)
             n += 1
+            if track.id == "v1" and isinstance(c, Clip):
+                removed_v1.append((c.start, c.start + c.effective_duration))
         except ValueError:
             pass
     for tid in affected_tracks:
         t = store.edl.get_track(tid)
         if t:
-            _ripple_close_gap(t)
+            _ripple_close_gap(t, store.edl.canvas.fps)
+    if removed_v1:
+        v1 = store.edl.get_track("v1")
+        v1_now_empty = not (v1 and any(isinstance(x, Clip) for x in v1.clips))
+        # Merged (so two adjacent deletions collapse an orphan to ONE stub, not
+        # one per interval) and applied LAST-TO-FIRST: each interval is in the
+        # original timeline's coordinates, and rippling the latest one first
+        # never moves anything at or before an earlier one — the same order
+        # `remove_silences` walks its cuts in.
+        for start, end in reversed(_merge_ranges(removed_v1)):
+            _ripple_overlays(store.edl, start, end, v1_now_empty=v1_now_empty)
     summary = f"Bulk delete {n} clip(s)"
     store.commit("bulk_delete", args, summary)
     return {"summary": summary, "deleted": n}
@@ -3482,9 +3936,23 @@ def bulk_duplicate(store: EDLStore, args: dict) -> dict:
         if not res:
             continue
         track, c = res
+        if isinstance(c, (TextClip, Sticker)):
+            new_id = _duplicate_overlay(store.edl, track, c)
+            if new_id is not None:  # a packed lane skips it, as duplicate_clip refuses
+                new_ids.append(new_id)
+                n += 1
+            continue
         if not isinstance(c, Clip):
             continue
-        dup = _clone_clip(c, id=f"c_{c.id[2:]}d", start=c.start + c.duration)
+        dup = _clone_clip(c, id=_new_clip_id(store.edl), start=c.start + c.duration)
+        if track.id != MAIN_LANE_ID:
+            # QA-013: same rule as duplicate_clip on a non-magnetic lane.
+            dup.start = _first_free_gap(track, dup.effective_duration,
+                                        c.start + c.effective_duration)
+        else:
+            # Directly after its original, as duplicate_clip does (QA-020).
+            dup.start = c.start + c.effective_duration
+            _open_main_lane_slot(store.edl, track, c, dup.start, dup.effective_duration)
         track.clips.append(dup)
         new_ids.append(dup.id)
         affected_tracks.add(track.id)
@@ -3492,7 +3960,8 @@ def bulk_duplicate(store: EDLStore, args: dict) -> dict:
     for tid in affected_tracks:
         t = store.edl.get_track(tid)
         if t:
-            _ripple_close_gap(t)
+            _ripple_close_gap(t, store.edl.canvas.fps)
+            t.clips.sort(key=lambda x: getattr(x, "start", 0))  # as duplicate_clip
     summary = f"Bulk duplicate {n} clip(s)"
     store.commit("bulk_duplicate", args, summary)
     return {"summary": summary, "duplicated": n, "new_ids": new_ids}
@@ -3666,17 +4135,47 @@ _EXPORT_PRESETS = {
 }
 
 
+#: The frame-rate range every platform in _EXPORT_PRESETS accepts for upload.
+_PLATFORM_FPS_MIN, _PLATFORM_FPS_MAX = 24000 / 1001, 60.0
+
+
 def apply_export_preset(store: EDLStore, args: dict) -> dict:
-    """Set canvas + bitrate + loudness target from a named platform preset."""
-    name = str(args.get("name", "reels")).lower()
+    """Set canvas + bitrate + loudness target from a named platform preset.
+
+    `name` is REQUIRED (QA-041): an omitted name used to apply 'reels'
+    silently, so a caller that forgot it got a vertical canvas it never asked
+    for. The bitrate and loudness written here are honoured by the export
+    encode (`render_export` → `_video_encoder_args(bitrate_kbps=…)`,
+    `build_audio_mix`'s loudnorm) — QA-027 found the bitrate was stored and
+    "verified" but never read by any render code.
+    """
+    raw = args.get("name")
+    if raw is None or not str(raw).strip():
+        raise ValueError(
+            f"apply_export_preset: missing required argument 'name' "
+            f"(one of {list(_EXPORT_PRESETS)})")
+    name = str(raw).lower()
     p = _EXPORT_PRESETS.get(name)
     if not p:
         raise ValueError(f"unknown export preset: {name}. options: {list(_EXPORT_PRESETS)}")
     canvas = store.edl.canvas
-    canvas.w, canvas.h, canvas.fps = p["w"], p["h"], p["fps"]
+    old_w, old_h = canvas.w, canvas.h
+    # The project frame rate is kept when a platform can deliver it (QA-009):
+    # every platform here accepts 23.976-60 fps, and forcing 30 onto a
+    # 25/23.976 project re-introduces the pulldown judder ingest now avoids. A
+    # rate NO platform takes (a 120/240 fps phone slow-mo project, a 15 fps
+    # screen recording) is conformed to the preset's rate (QA-027: the preset
+    # "sets canvas, fps, bitrate and loudness").
+    if not (_PLATFORM_FPS_MIN - 1e-3 <= float(canvas.fps) <= _PLATFORM_FPS_MAX + 1e-3):
+        canvas.fps = p["fps"]
+    canvas.w, canvas.h = p["w"], p["h"]
+    # Same overlay re-placement `set_canvas` does: the top-bar platform buttons
+    # now dispatch this tool instead of set_canvas (QA-027), and a sticker near
+    # the bottom of 1080x1920 must not end up off-canvas on 1920x1080.
+    _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, canvas.w, canvas.h)
     canvas.bitrate_kbps = p["bitrate_kbps"]
     canvas.loudness_lufs = p["lufs"]
-    summary = (f"Export preset {name}: {canvas.w}×{canvas.h}@{canvas.fps}, "
+    summary = (f"Export preset {name}: {canvas.w}×{canvas.h}@{round(float(canvas.fps), 3):g}, "
                f"{canvas.bitrate_kbps} kbps, {canvas.loudness_lufs} LUFS")
     store.commit("apply_export_preset", args, summary)
     return {"summary": summary, "preset": name, "config": p}
@@ -4134,21 +4633,35 @@ def smooth_slow_motion(store: EDLStore, args: dict) -> dict:
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
-    _, c = res
+    track, c = res
     if not isinstance(c, Clip):
         raise ValueError("smooth_slow_motion only supports media clips")
     from ..ai.rife import smooth_slow_motion as _slow
     new_src = _slow(Path(c.src), store.dir / "cache" / "rife", factor=factor)
-    # The new file plays at original fps with `factor`× more frames → duration
-    # becomes original * factor. Update clip out so the EDL reflects that.
-    from ..ingest.probe import probe
-    p = probe(new_src)
+    # The new file plays at original fps with `factor`× more frames, so source
+    # instant s of the old file is instant s*factor of the new one: the
+    # clip's own trim maps across (it used to reset to in=0/out=whole file,
+    # swapping a 3 s trimmed shot for the entire slowed source). The out is
+    # the new file's frame-exact PICTURE length (QA-002), never the
+    # audio-padded container duration. The file now carries the stretched
+    # audio (ai/rife.encode_slowmo, QA-040), so the clip stays renderable.
+    fps = store.edl.canvas.fps
+    extent = _source_video_extent(new_src, fps)
+    old_in, old_out = c.in_, c.out
+    new_in = _q(store.edl, old_in * factor)
+    new_out = _q(store.edl, old_out * factor)
+    if extent is not None:
+        new_out = min(new_out, extent)
+        new_in = min(new_in, max(0.0, extent - _tb.frame_duration(fps)))
+    if new_out <= new_in:
+        new_in, new_out = 0.0, extent or new_out
     c.src = str(new_src)
-    c.in_ = 0.0
-    c.out = p.duration
-    summary = f"Smooth slow-mo ×{factor} on {cid} ({p.duration:.1f}s)"
+    c.in_, c.out = new_in, new_out
+    _ripple_close_gap(track, fps)  # the slowed clip is factor× longer on v1
+    dur = c.effective_duration
+    summary = f"Smooth slow-mo ×{factor} on {cid} ({dur:.1f}s)"
     store.commit("smooth_slow_motion", args, summary)
-    return {"summary": summary, "new_src": str(new_src), "duration": p.duration}
+    return {"summary": summary, "new_src": str(new_src), "duration": dur}
 
 
 def object_erase(store: EDLStore, args: dict) -> dict:
@@ -4173,6 +4686,39 @@ def object_erase(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "new_src": str(new_src)}
 
 
+def _captions_to_hinglish(store: EDLStore, cap: Track, source: str, args: dict) -> dict:
+    """Hinglish captions = Hindi written in Latin script (QA-043). From Hindi
+    captions that is TRANSLITERATION — `ai.romanize`, pure Python and bundled,
+    no model and no network; it used to go to MADLAD as if "hinglish" were a
+    language to translate into. Only non-Hindi captions need MADLAD (to
+    Hindi first), and then romanise the result."""
+    from ..ai.romanize import romanize
+    from .prompt.langs import base_lang, is_latin_hindi
+    if is_latin_hindi(source):
+        return {"summary": "captions are already Hinglish; nothing to do", "translated": 0}
+    needs_mt = base_lang(source) != "hi"
+    if needs_mt:
+        from ..ai.translate import translate_text
+    n = 0
+    for c in cap.clips:
+        if not hasattr(c, "text"):
+            continue
+        text = str(c.text)
+        try:
+            if needs_mt:
+                text = translate_text(text, from_code=source, to_code="hi")
+        except Exception as e:
+            raise RuntimeError(f"translate failed at clip {n}: {e}")
+        c.text = romanize(text)
+        n += 1
+    if cap.config:
+        cap.config.lang = "hinglish"  # type: ignore
+    how = f"translated {source}→hi and romanised" if needs_mt else "romanised (Devanagari → Latin, no model)"
+    summary = f"Hinglish captions: {n} caption(s) {how}"
+    store.commit("translate_captions", args, summary)
+    return {"summary": summary, "translated": n, "from": source, "to": "hinglish"}
+
+
 def translate_captions(store: EDLStore, args: dict) -> dict:
     """Translate the existing captions track to a target language via
     MADLAD-400 (local, no cloud — see ai/translate.py). Replaces each
@@ -4193,6 +4739,9 @@ def translate_captions(store: EDLStore, args: dict) -> dict:
         # Detect from transcript metadata
         tx = get_transcript(store, {})
         source = (tx.get("language") or "en").lower()
+    from .prompt.langs import HINGLISH_ALIASES
+    if target.strip().lower() in HINGLISH_ALIASES:
+        return _captions_to_hinglish(store, cap, source, args)
     if source == target:
         return {"summary": f"source and target both '{source}'; nothing to do",
                 "translated": 0}
@@ -4483,6 +5032,7 @@ def add_keyframe(store: EDLStore, args: dict) -> dict:
     _, c = res
     if not hasattr(c, "transform"):
         raise ValueError(f"clip {cid} has no transform")
+    _reject_caption_geometry(c, props)
 
     from ..edl.schema import Keyframe
     from ..edl.keyframes import sample as _kf_sample
@@ -4845,6 +5395,8 @@ def set_property(store: EDLStore, args: dict) -> dict:
         leaf = "in_"
     if not hasattr(obj, leaf):
         raise ValueError(f"unknown attr {leaf!r} on {type(obj).__name__}")
+    if len(parts) == 2 and parts[0] == "transform":
+        _reject_caption_geometry(c, [leaf])
     if leaf == "src" and isinstance(value, str):
         # `path` here is a DOTTED ATTRIBUTE path, not a filesystem one — but
         # `set_property(clip, "src", "/etc/passwd")` re-points a clip at an
@@ -5030,7 +5582,7 @@ def record_voiceover(store: EDLStore, args: dict) -> dict:
     src = Path(_safe_src(args["src"]))
     if not src.exists():
         raise ValueError(f"voiceover file not found: {src}")
-    start = float(args.get("start", 0.0))
+    start = _q(store.edl, args.get("start", 0.0))  # QA-002: on the frame grid
     duration = float(args.get("duration") or _probe_audio_duration(src))
     track = ensure_track(store.edl, "vo", "vo", z=20)
     c = Clip(src=str(src), in_=0.0, out=duration, start=start)
@@ -5358,6 +5910,7 @@ DISPATCH: dict[str, DispatchFn] = {
     # M3: audio + auto-trim + reframe
     "add_music": add_music,
     "set_duck": set_duck,
+    "fit_music_to_video": fit_music_to_video,
     "set_volume": set_volume,
     "set_clip_muted": set_clip_muted,
     "add_fade": add_fade,
@@ -5444,6 +5997,110 @@ DISPATCH: dict[str, DispatchFn] = {
 }
 
 
+# ---------- track lock (QA-023) ----------
+#
+# `set_track_locked` used to store a flag nothing read: its own docstring said
+# "UI-only flag for now", and the UI only dimmed the label and drew a padlock,
+# so Backspace ripple-deleted and Cmd+B split clips on a locked v1. The lock is
+# enforced HERE, at the single mutation path, so Claude, MCP and every UI
+# gesture get the same refusal. Two layers:
+#
+#   1. An explicit pre-check on the lanes the args NAME (clip ids, track ids,
+#      and the v1 default of the tools that assume it) — a crisp message before
+#      any work, which matters for tools that run for minutes.
+#   2. A post-check around the handler, inside `store.batch()`: if ANY locked
+#      lane's content changed (a composite, or a side effect nobody listed),
+#      the batch rolls the in-memory tree back and nothing is committed or
+#      logged. This is what makes the guarantee "every mutating op" instead of
+#      "every op someone remembered to list".
+#
+# Locked overlay lanes do not follow a main-lane ripple at all
+# (`_ripple_overlays` skips them — the Premiere rule), so deleting a v1 clip
+# under a locked caption lane is allowed and simply leaves the captions put.
+
+#: Tools that read, toggle the lock itself, walk history, or change the PROJECT
+#: rather than a lane's clips (a canvas change must re-place every overlay or
+#: they land off-canvas — see `_rescale_overlays_for_canvas_change`).
+_LOCK_EXEMPT = frozenset({
+    "set_track_locked", "set_track_muted", "undo", "redo",
+    "get_timeline", "get_clip", "get_transcript", "render_preview",
+    "find_broll", "find_moments", "search_media", "match_style", "audit_aesthetic",
+    "check_features", "pyannote_status", "generate_hook", "diarize",
+    "list_filters", "list_transitions", "list_text_styles", "list_templates",
+    "list_shows", "list_luts",
+    "export_srt", "export_vtt", "export_ass",
+    "set_canvas", "set_aspect_ratio", "apply_export_preset", "set_loudness_target",
+    "save_show_template", "add_marker", "remove_marker",
+})
+
+#: Tools that operate on v1 when no `track` / `clip_id` is given.
+_V1_DEFAULT_TOOLS = frozenset({
+    "split_at", "remove_silences", "remove_fillers", "auto_cut_to_beats",
+    "add_transition", "remove_transition", "auto_reframe", "multicam",
+})
+
+
+def _named_lanes(edl: EDL, tool: str, args: dict) -> set[str]:
+    """Track ids the args explicitly target (see layer 1 above)."""
+    lanes: set[str] = set()
+    for key in ("track", "new_track"):
+        v = args.get(key)
+        if isinstance(v, str) and edl.get_track(v) is not None:
+            lanes.add(v)
+    refs = [args.get(k) for k in ("clip_id", "target_id", "target")]
+    ids = args.get("clip_ids")
+    if isinstance(ids, (list, tuple)):
+        refs.extend(ids)
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        t = edl.get_track(ref)
+        if t is not None:
+            lanes.add(t.id)
+            continue
+        hit = edl.get_clip(ref)
+        if hit:
+            lanes.add(hit[0].id)
+    if tool in _V1_DEFAULT_TOOLS and not args.get("track"):
+        lanes.add("v1")
+    if tool == "color_grade" and not args.get("clip_id"):
+        lanes.add("v1")  # no clip_id grades every v1 clip
+    return lanes
+
+
+def _locked_refusal(t: Track, tool: str) -> ValueError:
+    # Shown verbatim as the UI toast, so the tool name never fills a verb slot
+    # ("unlock it to add clip its clips." — most tool names are not verbs).
+    name = f"'{t.label}' ({t.id})" if t.label else f"'{t.id}'"
+    return ValueError(f"Track {name} is locked — unlock it to edit its clips "
+                      f"({tool.replace('_', ' ')} was not applied).")
+
+
+def _call_guarded(store: EDLStore, tool: str, fn, args: dict, hooks: dict) -> dict:
+    edl = store.edl
+    locked = {t.id: t for t in edl.tracks if t.locked}
+    if not locked or tool in _LOCK_EXEMPT or not hasattr(store, "batch"):
+        return fn(store, args, **hooks)
+    for lane in _named_lanes(edl, tool, args):
+        if lane in locked:
+            raise _locked_refusal(locked[lane], tool)
+    frozen = {tid: t.model_dump_json() for tid, t in locked.items()}
+    before_hash = edl.hash()
+    with store.batch():
+        result = fn(store, args, **hooks)
+        now = {t.id: t for t in store.edl.tracks}
+        for tid, snap in frozen.items():
+            t = now.get(tid)
+            if t is None or t.model_dump_json() != snap:
+                raise _locked_refusal(locked[tid], tool)
+    # The handler's own commit() calls were folded by batch(); persist the
+    # edit as the ONE op it would have been.
+    if store.edl.hash() != before_hash:
+        summary = result.get("summary", tool) if isinstance(result, dict) else tool
+        store.commit(tool, args, str(summary))
+    return result
+
+
 def dispatch(store: EDLStore, tool: str, args: dict, *,
              set_progress=None, cancel_event=None) -> dict:
     """The single mutation path. `fn(store, args) -> dict`, nothing else.
@@ -5471,7 +6128,7 @@ def dispatch(store: EDLStore, tool: str, args: dict, *,
         if cancel_event is not None and "cancel_event" in params:
             hooks["cancel_event"] = cancel_event
     try:
-        return fn(store, args, **hooks)
+        return _call_guarded(store, tool, fn, args, hooks)
     except KeyError as e:
         # Handlers read mandatory args as `args["clip_id"]`, so omitting one was
         # an unhandled KeyError -> HTTP 500 with a traceback. Converting it here

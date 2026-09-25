@@ -119,8 +119,10 @@ def test_render_export_threads_crf_into_render(monkeypatch, tmp_path):
     captured = {}
 
     def fake_render(edl, dst, *, height, fps, preview, cache_dir=None,
-                     on_progress=None, cancel_event=None, crf=None):
+                     on_progress=None, cancel_event=None, crf=None, bitrate_kbps=None,
+                     bitrate_peak_cap=True):
         captured["crf"] = crf
+        captured["bitrate_kbps"] = bitrate_kbps
         captured["preview"] = preview
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(b"fake")
@@ -134,3 +136,4 @@ def test_render_export_threads_crf_into_render(monkeypatch, tmp_path):
     assert result.path.exists()
     assert captured["crf"] == 28
     assert captured["preview"] is False
+    assert captured["bitrate_kbps"] is None, "no preset target on a default canvas"

@@ -334,7 +334,12 @@ def test_real_helper_probe_and_input_guard():
     assert rc == 0 and probe["ok"] is True
     assert probe["state"] in {"available", "deviceNotEligible", "appleIntelligenceNotEnabled", "modelNotReady"}
     assert probe["available"] == (probe["state"] == "available")
-    assert (probe["fix"] is None) == probe["available"]
+    # The Swift helper encodes `fix: String?` with Codable, which OMITS a nil
+    # optional rather than writing null, so an available Mac sends no `fix`
+    # key at all. fm.availability() already reads it with .get(); this used
+    # to index it directly and only ever ran on Macs where Apple Intelligence
+    # was off (found when macOS 27 turned it on for this machine).
+    assert (probe.get("fix") is None) == probe["available"]
     assert "en" in probe["languages"]
     rc, out, _ = fm.default_runner([_REAL, "plan"], b"not json", 10.0)
     assert rc == 4 and json.loads(out)["code"] == "bad_input"

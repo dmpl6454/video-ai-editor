@@ -10,3 +10,12 @@
 @font-face { font-family: 'Montserrat'; src: url('/fonts/Montserrat-Bold.ttf') format('truetype');     font-weight: 700; font-display: block; }
 @font-face { font-family: 'Inter';      src: url('/fonts/Inter-Bold.ttf') format('truetype');          font-weight: 700; font-display: block; }
 @font-face { font-family: 'Inter';      src: url('/fonts/Inter-Black.ttf') format('truetype');         font-weight: 900; font-display: block; }
+/* The export's complex-script fallbacks (render/text_overlay.py
+ * `_pick_script_font`), declared across their full variable `wght` range so
+ * TextLayer can ask for SCRIPT_FONT_WEIGHT (700/900) exactly as the export
+ * renders it. Without these the preview drew Hindi/Arabic in whatever system
+ * font the browser found — different glyphs, widths and weight from the file
+ * that gets delivered (QA-003 / QA-015). CJK's 17 MB face is not shipped to
+ * the browser; it keeps the system CJK font. */
+@font-face { font-family: 'Noto Sans Devanagari'; src: url('/fonts/NotoSansDevanagari-VF.ttf') format('truetype'); font-weight: 100 900; font-display: block; }
+@font-face { font-family: 'Noto Sans Arabic';     src: url('/fonts/NotoSansArabic-VF.ttf') format('truetype');     font-weight: 100 900; font-display: block; }

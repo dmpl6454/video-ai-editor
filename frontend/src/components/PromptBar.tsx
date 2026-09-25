@@ -21,6 +21,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useStore } from '../store'
 import { usePromptStore, isBusy } from '../lib/promptStore'
 import { runProgress, terminalAnnouncement } from '../lib/promptEvents'
+import { canSubmitPrompt, shouldRefocusPrompt } from '../lib/promptFocus'
 import { BrainBadge } from './BrainBadge'
 import { ClarifyCard } from './ClarifyCard'
 import { PromptRunLog } from './PromptRunLog'
@@ -65,6 +66,7 @@ export function PromptBar() {
   const [askCancel, setAskCancel] = useState(false)
   const [announce, setAnnounce] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const formRef = useRef<HTMLFormElement>(null)
   const keepRef = useRef<HTMLButtonElement>(null)
   const prevStatus = useRef(status)
 
@@ -86,17 +88,19 @@ export function PromptBar() {
   }, [ops, sid, runId, reconnect])
 
   // `/` or ⌘K → focus (keymap), and focus returns to the input after a run
-  // ends — but only if focus was not somewhere the user put it on purpose.
+  // ends — but only if focus was not somewhere the user put it on purpose, and
+  // NEVER when the run paused on a clarify card: the card has just focused its
+  // own first control (child effects run first) and taking it back is what
+  // made Enter re-plan in a loop (lib/promptFocus, QA-019).
   useEffect(() => { if (focusNonce > 0) { taRef.current?.focus(); taRef.current?.select() } }, [focusNonce])
   useEffect(() => {
     const was = prevStatus.current
     prevStatus.current = status
-    if (isBusy(was) && !isBusy(status)) {
-      setAskCancel(false)
-      const active = document.activeElement
-      const insideBar = !!active && !!taRef.current?.closest('.prompt-bar')?.contains(active)
-      if (!active || active === document.body || insideBar) taRef.current?.focus()
-    }
+    if (isBusy(was) && !isBusy(status)) setAskCancel(false)
+    const active = document.activeElement
+    const spot = !active || active === document.body ? 'none'
+      : taRef.current?.closest('.prompt-bar')?.contains(active) ? 'inside-bar' : 'elsewhere'
+    if (shouldRefocusPrompt(was, status, spot)) taRef.current?.focus()
     if (isBusy(was) && !isBusy(status) && status !== 'clarify') setText('')
     const line = terminalAnnouncement(usePromptStore.getState())
     if (line && !isBusy(status) && was !== status) setAnnounce(line)
@@ -124,10 +128,24 @@ export function PromptBar() {
   // second Esc keeps going and Enter on the red button cancels.
   useEffect(() => { if (askCancel) keepRef.current?.focus() }, [askCancel])
 
+  // The card's first control, in the order ClarifyCard itself focuses it:
+  // a text/number field, else the selected chip, else the primary action.
+  const focusCard = () => {
+    const f = formRef.current
+    const el = f?.querySelector<HTMLElement>('.clarify input, .clarify textarea')
+      ?? f?.querySelector<HTMLElement>('.clarify [role="radio"][tabindex="0"]')
+      ?? f?.querySelector<HTMLElement>('.clarify .clarify-actions button')
+    el?.focus()
+  }
+
   const submit = () => {
-    if (busy || disabled) return
+    if (!canSubmitPrompt(status, { disabled, text })) {
+      // A card is waiting: Enter here means "answer it", so send the user there
+      // instead of re-planning the sentence over the open question.
+      if (status === 'clarify') focusCard()
+      return
+    }
     const t = text.trim()
-    if (!t) return
     setHistIdx(-1)
     setDraft('')
     void run(t)
@@ -178,6 +196,7 @@ export function PromptBar() {
 
   return (
     <form
+      ref={formRef}
       className={cls}
       role="form"
       aria-label="Prompt editor"

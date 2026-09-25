@@ -2,16 +2,28 @@
 
 A `.vae` file is a zip containing:
   - edl.json + ops.json + chat.json + meta.json (the session state)
+  - snapshots/*.json + redo_stack.json — the undo/redo history
+  - transcript.json — an imported/hand-corrected transcript (import_srt)
   - manifest.json — list of media srcs and their relative bundled paths
-  - media/  — original uploaded files referenced by V1/music/vo clips
+  - media/  — original uploaded files referenced by the timeline OR by any
+    undo/redo state, each with its upload's `ingest.json` (whisper transcript)
+    alongside when it has one
 
 Loading restores the EDL into a NEW session and rewrites src paths to point at
-the new session's `uploads/imported/`. Caches (previews, transcripts, vision)
-are not bundled — they regenerate on demand.
+the new session's `uploads/imported/`. Render caches (previews, chunks,
+vision) are not bundled — they regenerate on demand.
+
+WHY THE HISTORY AND TRANSCRIPTS TRAVEL (QA-033). They used to be left out
+("transcripts regenerate"). They do not: an imported .srt or a hand-corrected
+transcript exists nowhere else, and whisper cannot reproduce corrections. And
+ops.json WAS bundled while the snapshots undo actually restores were not, so a
+reopened project listed 25 ops in History, showed Undo enabled, and answered
+every press with "Nothing to undo".
 """
 from __future__ import annotations
 import json
 import logging
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -51,6 +63,44 @@ def _media_srcs(edl: EDL) -> set[str]:
     return out
 
 
+#: Snapshot file names EDLStore writes (`00007_<edl hash>.json`). Anything else
+#: under `snapshots/` in an archive is not ours and is not restored.
+_SNAPSHOT_NAME = re.compile(r"^\d{5}_[0-9a-f]{1,64}\.json$")
+
+#: Session-level state files, in addition to edl.json.
+_STATE_FILES = ("ops.json", "meta.json", "chat.json", "transcript.json", "redo_stack.json")
+
+
+def _history_edls(sd: Path) -> list[EDL]:
+    """Every EDL undo/redo can bring back: the snapshots and the redo stack.
+    Unreadable entries are skipped — they could not be restored anyway."""
+    out: list[EDL] = []
+    for snap in sorted((sd / "snapshots").glob("*.json")):
+        try:
+            out.append(EDL.model_validate_json(snap.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    redo = sd / "redo_stack.json"
+    if redo.is_file():
+        try:
+            for item in json.loads(redo.read_text(encoding="utf-8")):
+                out.append(EDL.model_validate(item))
+        except Exception:
+            pass
+    return out
+
+
+def _ingest_json_for(src: str) -> Path | None:
+    """The upload `ingest.json` whose transcript describes `src` — beside the
+    file, or beside the upload a derived file (denoise, reframe, …) came from."""
+    from .agent.media_origin import origin_of
+    for base in (Path(src), Path(origin_of(src))):
+        cand = base.parent / "ingest.json"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def save_project(session_id: str, dst: Path) -> Path:
     sd = session_dir(session_id)
     store = EDLStore(sd)
@@ -76,7 +126,13 @@ def save_project(session_id: str, dst: Path) -> Path:
     if dst.suffix != ".vae":
         dst = dst.with_suffix(".vae")
 
-    media_paths = sorted(_media_srcs(edl))
+    # Plus the project's media LIBRARY (QA-010): an import no clip uses right
+    # now is still part of the project, and must survive a save/open round trip
+    # instead of vanishing from the reopened project's bin.
+    from .media_library import list_media
+    library = [it["src"] for it in list_media(sd, edl)]
+    media_paths = sorted(set().union(_media_srcs(edl), library,
+                                     *(_media_srcs(h) for h in _history_edls(sd))))
     manifest = {"media": [], "session_id": session_id,
                 "load_state": store.load_state}
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -84,10 +140,13 @@ def save_project(session_id: str, dst: Path) -> Path:
         # snapshot recovery the on-disk copy is still the unreadable one, and
         # bundling that would make the archive unloadable too.
         zf.writestr("edl.json", edl.to_json())
-        for name in ("ops.json", "meta.json", "chat.json"):
+        for name in _STATE_FILES:
             p = sd / name
-            if p.exists():
+            if p.is_file():
                 zf.write(p, arcname=name)
+        for snap in sorted((sd / "snapshots").glob("*.json")):
+            if _SNAPSHOT_NAME.match(snap.name):
+                zf.write(snap, arcname=f"snapshots/{snap.name}")
 
         # Media: bundle by basename to keep arcnames simple. If duplicate
         # basenames, suffix with index.
@@ -101,7 +160,12 @@ def save_project(session_id: str, dst: Path) -> Path:
             arc_name = base if n == 0 else f"{sp.stem}__{n}{sp.suffix}"
             seen_names[base] = n + 1
             zf.write(sp, arcname=f"media/{arc_name}")
-            manifest["media"].append({"orig": str(sp), "bundled": f"media/{arc_name}"})
+            entry = {"orig": str(sp), "bundled": f"media/{arc_name}"}
+            ingest = _ingest_json_for(src)
+            if ingest is not None:
+                zf.write(ingest, arcname=f"media/{arc_name}.ingest.json")
+                entry["ingest"] = f"media/{arc_name}.ingest.json"
+            manifest["media"].append(entry)
 
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
     return dst
@@ -303,15 +367,44 @@ def _import_media(manifest: dict, unpack: Path, imported: Path) -> dict[str, str
             continue
         # `.name` on the RESOLVED path, not on the raw manifest string: the raw
         # string is what we just refused to trust.
-        target = imported / bundled.name
-        shutil.move(str(bundled), str(target))
+        ingest = _inside(unpack, entry.get("ingest")) if entry.get("ingest") else None
+        if ingest is not None and ingest.is_file():
+            # Its own directory, so the transcript sits beside the media the
+            # way ingest_upload lays it out and `_current_v1_ingest_json`
+            # finds it (QA-033).
+            home = imported / f"{Path(bundled.name).stem}_{len(src_remap)}"
+            home.mkdir(parents=True, exist_ok=True)
+            target = home / bundled.name
+            shutil.move(str(bundled), str(target))
+            _write_ingest(ingest, home / "ingest.json", target)
+        else:
+            target = imported / bundled.name
+            shutil.move(str(bundled), str(target))
         src_remap[orig] = str(target)
     return src_remap
 
 
+def _write_ingest(bundled: Path, dst: Path, media: Path) -> None:
+    """Restore an upload's ingest.json next to its media, pointing at it."""
+    try:
+        data = json.loads(bundled.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["src"] = str(media)
+    data["normalized"] = str(media)
+    dst.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> None:
     """Copy the state files in, rewriting bundled media paths to the new ones."""
-    for name in ("edl.json", "ops.json", "meta.json", "chat.json"):
+    names = ["edl.json", *_STATE_FILES]
+    snap_dir = _inside(unpack, "snapshots")
+    if snap_dir is not None and snap_dir.is_dir():
+        names += [f"snapshots/{p.name}" for p in sorted(snap_dir.iterdir())
+                  if _SNAPSHOT_NAME.match(p.name)]
+    for name in names:
         # Fixed names, so this cannot escape — routed through `_inside` anyway
         # so there is exactly one rule in this module for "is this path mine?"
         sp = _inside(unpack, name)
@@ -319,8 +412,14 @@ def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> Non
             continue
         text = sp.read_text(encoding="utf-8")
         for old, new in src_remap.items():
-            text = text.replace(json.dumps(old)[1:-1], json.dumps(new)[1:-1])
-        (sd / name).write_text(text, encoding="utf-8")
+            # Both escapings: json.dumps writes \uXXXX for non-ASCII while
+            # pydantic's model_dump_json (edl.json, snapshots) writes UTF-8.
+            for ascii_only in (True, False):
+                text = text.replace(json.dumps(old, ensure_ascii=ascii_only)[1:-1],
+                                    json.dumps(new, ensure_ascii=ascii_only)[1:-1])
+        out = sd / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
 
 
 def load_project(src: Path) -> str:

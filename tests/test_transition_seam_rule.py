@@ -253,7 +253,7 @@ def test_the_first_record_at_a_stacked_cut_is_the_one_rendered(tmp_path, fx):
     # The filtergraph is built from the table (and the render below proves it).
     fc, *_ = C._build_filter_complex(_v1(edl), W, H, transitions=edl.get_track("v1").transitions,
                                      total_duration=4.0)
-    assert "xfade=transition=fade:duration=0.2:" in fc, fc
+    assert "xfade=transition=fade:duration=0.200000:" in fc, fc
     band_layout = (2.0 + BAND[0], 2.0 + BAND[1])
     win = clock.render_window(edl, *band_layout)
     assert win == pytest.approx((2.3, 2.8))

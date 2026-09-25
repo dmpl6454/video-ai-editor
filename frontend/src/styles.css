@@ -66,23 +66,91 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   overflow: hidden;
 }
 .topbar > * { flex-shrink: 0; }
-/* The middle preset/aspect-ratio section scrolls internally when it doesn't
-   fit — NOT the whole toolbar — so .topbar-pinned (Save/Open/Export) stays
-   visible regardless of window width. `min-width: 0` lets this flex item
-   actually shrink below its content size instead of forcing the row wider. */
-.topbar-scroll {
+/* The tools (Ratio ▾, Text, Captions, Help, Shortcuts, ⋯) — QA-012. This was
+   `.topbar-scroll`, an overflow-x strip whose scrollbar was 0 px tall: at 1440
+   wide Help and Shortcuts sat past its edge, at 1024 Text and Captions did too,
+   with nothing on screen to say so. Nothing scrolls now; the bar is budgeted
+   instead (see the width rules below) so every core control fits from 1024 up.
+   `min-width: 0` + clipping stay as a last resort for a transient extra (a
+   long "⋯ Applying" moment), which then clips the trailing version badge
+   first — never a control, and never .topbar-pinned. */
+.topbar-tools {
   display: flex;
   align-items: center;
-  gap: 12px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
+  gap: 8px;
+  overflow: hidden;
   min-width: 0;
   flex-shrink: 1;
 }
-.topbar-scroll > * { flex-shrink: 0; }
+.topbar-tools > * { flex-shrink: 0; }
+.topbar-session { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* WHO GIVES WAY FIRST. When something extra lands in the bar (a long project
+   name, "↓ .vae", "↓ MP4", an export error chip) the DESCRIPTIVE items on the
+   left shrink with an ellipsis — brand, project name, canvas facts — and the
+   tools barely do: flex-shrink is weighted by size, so 0.01 against 1 leaves
+   the tools ~1 % of the squeeze until the left items reach their floor. Before
+   this, the tools absorbed it: at 1440 an export error hid Captions, Help and
+   Shortcuts (QA-012). Their full text stays in each item's title. */
+.topbar-tools { flex-shrink: 0.01; }
+.topbar > .topbar-brand,
+.topbar > .topbar-canvas { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.topbar > [data-session-picker] { flex-shrink: 1; min-width: 56px; display: flex; }
+.topbar > [data-session-picker] > .topbar-session { max-width: min(190px, 100%); }
+.topbar-narrow { display: none !important; }
+/* The width budget, widest-first: below 1440 the brand, the safe-zone picker
+   and the version badge give way (the last two move into "⋯"); below 1280 the
+   canvas pill does too (its facts head the Ratio menu); below 1100 the gaps
+   tighten and the project name narrows. */
+@media (max-width: 1439px) {
+  .topbar-brand, .topbar-wide { display: none !important; }
+  .topbar-narrow { display: inline-flex !important; }
+}
+@media (max-width: 1279px) {
+  .topbar-canvas { display: none; }
+}
+/* An export error chip is the widest thing the pinned cluster can show; its
+   full text is in its title. Below 1280 it gets a laptop-sized share, or it
+   pushed Help and Shortcuts out of .topbar-tools at 1024 (QA-012). */
+.topbar-export-error { max-width: 220px; }
+@media (max-width: 1279px) {
+  .topbar-export-error { max-width: 120px; }
+}
+@media (max-width: 1099px) {
+  .topbar, .topbar-pinned { gap: 8px; }
+  .topbar > [data-session-picker] > .topbar-session { max-width: min(140px, 100%); }
+  /* 💾 / 📂 keep their icon, title and accessible name; the words go. */
+  .topbar-btn-label { display: none; }
+}
+
+/* Ratio ▾ — the aspect ratios and platform presets in one menu. */
+.ratio-trigger { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.ratio-trigger.is-open { border-color: var(--accent-2); }
+.ratio-glyph { display: inline-block; border: 1.5px solid currentColor; border-radius: 2px; opacity: 0.75; width: 9px; height: 13px; }
+.ratio-glyph[data-aspect="16:9"] { width: 14px; height: 8px; }
+.ratio-glyph[data-aspect="1:1"] { width: 11px; height: 11px; }
+.ratio-glyph[data-aspect="4:5"] { width: 10px; height: 12px; }
+.ratio-glyph[data-aspect="custom"] { width: 11px; height: 9px; border-style: dashed; }
+.ratio-menu, .topbar-more-menu {
+  position: fixed; z-index: 1000; min-width: 230px; padding: 4px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.ratio-menu-head { padding: 6px 10px 3px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); }
+.ratio-menu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.ratio-menu-foot { padding: 6px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.ratio-item {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: 4px; padding: 5px 10px; font-size: 12px; color: var(--text);
+}
+.ratio-item:hover, .ratio-item:focus-visible { background: var(--bg-3); outline: none; }
+.ratio-item[aria-checked="true"] .ratio-label { font-weight: 600; }
+.ratio-check { width: 12px; flex-shrink: 0; color: var(--good); }
+.ratio-hint { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.topbar-more-menu { min-width: 200px; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.topbar-more-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-dim); }
+.topbar-more-version { font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* The pinned cluster is never a flex-shrink target and always renders after
-   .topbar-scroll, so Export — its last child — is always the toolbar's
+   .topbar-tools, so Export — its last child — is always the toolbar's
    right-most, always-on-screen element. */
 .topbar-pinned {
   display: flex;
@@ -164,6 +232,18 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
      preview row below keeps its 120px floor and nothing overflows. */
   background: var(--bg-0);
   overflow: hidden;
+}
+/* While the run log is OPEN (a run in progress, or "Details" on a finished
+   one) the bar's row is also capped at 40% of the space it shares with the
+   preview (the centre minus the splitter and the timeline); the log scrolls
+   inside it. The open log used to take ~60% of that space and shrink a 9:16
+   preview to 41% of its height at 1024x768 (QA-017 remainder). Scoped to the
+   log: a clarify card or the cancel confirm must stay whole, so they keep the
+   plain `auto` row. fit-content() still hugs a bar smaller than the cap. */
+.center:has(> .prompt-bar .prompt-log:not(.is-collapsed)) {
+  grid-template-rows:
+    fit-content(calc((100% - 6px - var(--timeline-h, 280px)) * 0.4))
+    minmax(120px, 1fr) 6px minmax(0, var(--timeline-h, 280px));
 }
 
 /* Drag handles for resizable panels (Task 9). Thin, transparent until
@@ -514,10 +594,26 @@ input, textarea { font: inherit; color: inherit; background: var(--bg-2); border
   cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px;
 }
 .media-remove:hover { color: var(--bad, #ff4d6d); }
+/* A library row (QA-010): thumbnail, the user's name, then length · size ·
+   used-count. Unused media stays listed, just quieter, until removed here. */
+.media-bin .media-row { display: flex; gap: 8px; align-items: center; padding: 6px 26px 6px 6px; cursor: grab; word-break: normal; }
+.media-bin .media-row.is-unused { background: transparent; border-style: dashed; }
+.media-thumb { flex-shrink: 0; width: 64px; height: 36px; border-radius: 4px; overflow: hidden; background: var(--bg-3);
+               display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-text { min-width: 0; flex: 1; }
+.media-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; font-variant-numeric: tabular-nums; }
 
 /* Break long unbreakable tokens (filenames like a_b_c.normalized.mp4) so they
    wrap inside the fixed-width panel instead of painting past its edge. */
 .props { min-width: 0; overflow-wrap: anywhere; }
+/* QA-023: a clip on a locked lane — inspectable, not editable. */
+.props-locked > fieldset { border: 0; margin: 0; padding: 0; min-width: 0; opacity: 0.55; }
+.props-locked-note {
+  font-size: 11px; line-height: 1.5; color: var(--warn);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px;
+}
 .props .field { margin: 6px 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .props label { font-size: 11px; color: var(--text-dim); }
 /* Flex rows (sliders, x/y, action buttons) wrap instead of overflowing the

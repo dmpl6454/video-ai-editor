@@ -14,6 +14,12 @@ import {
 import { emojiImage, emojiGeneration } from '../lib/emojiArt'
 import { renderWindow, v1SeamsOf } from '../lib/timelineLayout'
 import { animEnvelope } from '../lib/textAnim'
+import { inEnableWindow } from '../lib/overlayGate'
+import {
+  EMOJI_BOX_RATIO, EMOJI_INK_RATIO, SCRIPT_FAMILY, SHADOW_ALPHA, SHADOW_OFFSET,
+  WRAP_WIDTH_RATIO, baselineFor, isAnimated, lineCenters, outlineLineWidth, pickScript,
+  rgbaCss, roleAnchorY, roleStyle, scaleRotationAt, staticValue, LINE_HEIGHT_RATIO, type RGBA,
+} from '../lib/textLayout'
 
 interface Props {
   edl: EDL
@@ -23,31 +29,12 @@ interface Props {
   height: number
 }
 
-// `size` here is the SAME fixed pixel value render/text_overlay.py's
-// ROLE_STYLES uses (`style["size"]`, sized against the EDL canvas — see
-// `ImageFont.truetype(..., style["size"])` there). Previously this was a
-// hand-tuned fraction of the on-screen preview height (e.g. 0.075 for
-// "super"), which only approximated the server's `140 / canvas.h` ratio for
-// a canvas.h of ~1920 and drifted for any other canvas size (drifted further
-// after set_canvas/set_aspect_ratio/auto_reframe change canvas.h). Drawing
-// now computes `fontPx = (size / edl.canvas.h) * height`, i.e. the same
-// canvas-relative fraction the server derives, scaled to however big the
-// preview box is actually rendered on screen — so the two stay in lockstep
-// for any canvas size, not just the common vertical default.
-// `stroke` is still a fraction of on-screen height (the server's stroke_w is
-// a small fixed px count with no strong visual sensitivity to canvas size,
-// so an approximate on-screen fraction is fine here).
-const ROLE_STYLES: Record<string, {
-  font: string; size: number; weight?: string; stroke: number; upper?: boolean; align: 'top' | 'center' | 'bottom' | 'lower'; opacity?: number;
-}> = {
-  super:       { font: 'Anton',           size: 140, stroke: 0.005, upper: true,  align: 'lower' },
-  hook:        { font: 'Bebas Neue',      size: 170, stroke: 0.006, upper: true,  align: 'center' },
-  lower_third: { font: 'Montserrat',      size: 56,  stroke: 0.0025, weight: '700', align: 'lower' },
-  caption:     { font: 'Inter',           size: 64,  stroke: 0.004, weight: '900', align: 'bottom' },
-  label:       { font: 'Inter',           size: 48,  stroke: 0.0025, weight: '700', align: 'top' },
-  watermark:   { font: 'Inter',           size: 32,  stroke: 0.0015, weight: '700', align: 'bottom', opacity: 0.7 },
-  default:     { font: 'Inter',           size: 64,  stroke: 0.0025, weight: '700', align: 'lower' },
-}
+// Role styles, anchors, line height, outline and shadow all come from
+// lib/textLayout — the client half of the ONE layout model the export uses
+// (QA-015; read the long comment in render/text_overlay.py). This layer used
+// to carry its own role table (label anchored at the TOP, a height-fraction
+// stroke, a blurred shadow), which is how preview text drifted 20-50 px from
+// the delivered file.
 
 // --- inline emoji, mirroring render/text_overlay.py --------------------------
 //
@@ -61,16 +48,8 @@ const ROLE_STYLES: Record<string, {
 // artwork is a pinned release, NOT the local font of the same name — the
 // substitution is never safe, on any platform.)
 //
-// EMOJI_BOX_RATIO must stay equal to text_overlay.py's, or the preview wraps
-// differently from the bake.
-const EMOJI_BOX_RATIO = 1.0
-// Fraction of the box the artwork fills; the rest is side bearing, centred.
-// Mirrors text_overlay.py's EMOJI_INK_RATIO and must move with it. A PNG has no
-// side bearing of its own, and the sources this chain mixes pad their tiles
-// anywhere from 0.000 to 0.131 — so without this, spacing is whatever the
-// artwork happened to ship with, and differs emoji-to-emoji within one line.
-// Advance is unchanged, so wrapping is unaffected on both sides.
-const EMOJI_INK_RATIO = 0.92
+// EMOJI_BOX_RATIO / EMOJI_INK_RATIO live in lib/textLayout (pinned to the
+// export's values by the shared contract fixture).
 const ZWJ = '\u{200D}'
 const EMOJI_MOD = new Set(['\u{FE0F}', '\u{20E3}',
   '\u{1F3FB}', '\u{1F3FC}', '\u{1F3FD}', '\u{1F3FE}', '\u{1F3FF}'])
@@ -129,6 +108,9 @@ function lineWidth(ctx: CanvasRenderingContext2D, line: string, box: number): nu
 
 // Emoji artwork (fetch + cache + the arrival counter) lives in lib/emojiArt.
 
+/** The transform fields TextLayer reads (types.ts omits transform on TextClip). */
+type TxAll = { x?: KFNum; y?: KFNum; scale?: KFNum; rotation?: KFNum; opacity?: KFNum }
+
 function isText(c: unknown): c is TextClip {
   return !!c && typeof c === 'object' && 'text' in (c as object) && 'end' in (c as object)
 }
@@ -163,22 +145,6 @@ const SENTINEL_STROKE_W = 4
 const SENTINEL_X = 540
 const SENTINEL_Y = 1700
 
-// The SERVER's role anchor y in canvas coords (_y_for_role with no
-// override) — this is what add_super_text/brand_kit persist, so it is the
-// value the sentinel comparison must run against. NOT the browser's own
-// draw anchors below (those stay authoritative for how a role-positioned
-// clip actually draws on screen).
-function serverAnchorY(role: string, canvasH: number, canvasW?: number): number {
-  if (role === 'watermark') return canvasH - canvasH * 0.04
-  if (role === 'hook') return canvasH * 0.5
-  // Portrait canvases anchor captions at 0.76·h (inside the TikTok/Reels safe
-  // zone); everything else keeps the historic 0.84·h. Mirrors
-  // render/text_overlay.py::caption_anchor_y.
-  if (role === 'caption') return canvasW != null && canvasH > canvasW ? canvasH * 0.76 : canvasH - canvasH * 0.16
-  if (role === 'lower_third') return canvasH - canvasH * 0.2
-  return canvasH * 0.75
-}
-
 // Explicit (anchorX, anchorY) in EDL-canvas px, or nulls (role layout).
 // Same tolerance (±0.5 canvas px) as the server, absorbing the float noise
 // _rescale_overlays_for_canvas_change multiplication introduces.
@@ -188,8 +154,8 @@ function serverAnchorY(role: string, canvasH: number, canvasW?: number): number 
 function xSentinelsFor(canvasW: number): number[] {
   return [SENTINEL_X, canvasW / 2]
 }
-function ySentinelsFor(role: string, canvasH: number): number[] {
-  return [SENTINEL_Y, canvasH * 0.85, serverAnchorY(role, canvasH)]
+function ySentinelsFor(role: string, canvasH: number, canvasW?: number): number[] {
+  return [SENTINEL_Y, canvasH * 0.85, roleAnchorY(role, canvasH, canvasW)]
 }
 
 function resolveAnchor(
@@ -199,21 +165,24 @@ function resolveAnchor(
   const tx = (c as TextClip & { transform?: { x?: unknown; y?: unknown } }).transform
   if (!tx) return { ax: null, ay: null }
   const pick = (v: unknown, sentinels: number[]): number | null => {
-    if (typeof v !== 'number' || !Number.isFinite(v)) return null // keyframed / missing
+    // A one-key list is a constant someone set on purpose — honoured, never a
+    // sentinel (mirror of resolve_anchor_overrides' `_explicit`).
+    if (v && typeof v === 'object') return staticValue(v)
+    if (typeof v !== 'number' || !Number.isFinite(v)) return null // animated / missing
     for (const s of sentinels) if (Math.abs(v - s) < 0.5) return null
     return v
   }
   return {
     ax: pick(tx.x, xSentinelsFor(canvasW)),
-    ay: pick(tx.y, ySentinelsFor(role, canvasH)),
+    ay: pick(tx.y, ySentinelsFor(role, canvasH, canvasW)),
   }
 }
 
 function roleFontMatches(role: string, ttf: string): boolean {
   const want = cssFont(ttf)
-  const roleStyle = ROLE_STYLES[role] ?? ROLE_STYLES.default
+  const rs = roleStyle(role)
   if (!want) return false
-  return want.family === roleStyle.font && want.weight === (roleStyle.weight ?? '700')
+  return want.family === rs.font && want.weight === rs.weight
 }
 
 // Bundled ttf name (backend) → CSS family + weight (what @font-face declares).
@@ -273,48 +242,62 @@ function wrapUnits(para: string): (readonly [boolean, string])[] {
   return units
 }
 
-/** Vertical middle of the cap band, in canvas y — what the eye aligns an emoji
- *  to. Mirror of text_overlay.py's `_cap_band_mid`, measured from THIS side's
- *  metrics: `cy` is the em-box middle here (textBaseline 'middle') whereas
- *  Pillow draws from the ascender top, so only the measured band is common
- *  ground. Falls back to `cy` on the (long-obsolete) engines that don't report
- *  actualBoundingBox*. */
-function capBandMid(ctx: CanvasRenderingContext2D, cy: number): number {
-  const m = ctx.measureText('H')
-  const asc = m.actualBoundingBoxAscent, desc = m.actualBoundingBoxDescent
-  if (typeof asc !== 'number' || typeof desc !== 'number') return cy
-  return cy + (desc - asc) / 2
-}
-
-/** Draw one wrapped line centred on `cx`, walking text runs and emoji boxes.
- *  `paint` picks the pass: stroke (shadow/outline) or fill. */
-function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, cy: number,
-                  box: number, paint: 'stroke' | 'fill'): void {
+/** Draw one wrapped line centred on `cx` (local coords). Text runs sit on the
+ *  alphabetic `baseline` that centres the 'H' cap band on `center` (rule 3 of
+ *  the shared model); emoji squares centre on `center` itself, exactly where
+ *  render_text_png pastes them. `paint` picks the pass. */
+function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, center: number,
+                  baseline: number, box: number, paint: 'stroke' | 'fill'): void {
   const segs = tokenize(line)
   let x = cx - lineWidth(ctx, line, box) / 2
   const prevAlign = ctx.textAlign
+  const prevDir = ctx.direction
   ctx.textAlign = 'left'
-  // Measured once per line, and only when there IS an emoji to place.
-  let capMid: number | null = null
+  // Paragraph direction from the first strong character (UBA rule P2), the
+  // same base level python-bidi gives the export — a mixed "مرحبا 2026" puts
+  // the number on the LEFT of the word in both.
+  ctx.direction = baseIsRtl(line) ? 'rtl' : 'ltr'
   for (const seg of segs) {
     if (seg.emoji) {
       // Only on the fill pass: an emoji is artwork, it takes no outline, and
       // painting it twice would double its opacity.
       if (paint === 'fill') {
         const im = emojiImage(seg.s)
-        if (capMid === null) capMid = capBandMid(ctx, cy)
         // Drawn at `ink`, centred in the full `box` advance — see EMOJI_INK_RATIO.
         const ink = box * EMOJI_INK_RATIO
-        if (im) ctx.drawImage(im, x + (box - ink) / 2, capMid - ink / 2, ink, ink)
+        if (im) ctx.drawImage(im, x + (box - ink) / 2, center - ink / 2, ink, ink)
       }
       x += box
       continue
     }
-    if (paint === 'stroke') ctx.strokeText(seg.s, x, cy)
-    else ctx.fillText(seg.s, x, cy)
+    if (paint === 'stroke') ctx.strokeText(seg.s, x, baseline)
+    else ctx.fillText(seg.s, x, baseline)
     x += ctx.measureText(seg.s).width
   }
   ctx.textAlign = prevAlign
+  ctx.direction = prevDir
+}
+
+/** First strong character is right-to-left (Hebrew/Arabic blocks)? */
+function baseIsRtl(s: string): boolean {
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    if ((cp >= 0x0590 && cp <= 0x08FF) || (cp >= 0xFB1D && cp <= 0xFDFF) || (cp >= 0xFE70 && cp <= 0xFEFF)) return true
+    if (/\p{L}/u.test(ch)) return false
+  }
+  return false
+}
+
+/** `#RRGGBB[AA]` → RGBA, or null. */
+function parseHex(s: string | null | undefined): RGBA | null {
+  const v = (s ?? '').trim().replace(/^#/, '')
+  const full = v.length === 6 ? v + 'FF' : v
+  if (!/^[0-9a-fA-F]{8}$/.test(full)) return null
+  return [0, 2, 4, 6].map((i) => parseInt(full.slice(i, i + 2), 16)) as unknown as RGBA
+}
+
+function stripEmoji(s: string): string {
+  return tokenize(s).filter((t) => !t.emoji).map((t) => t.s).join('').trim()
 }
 
 export function TextLayer({ edl, videoEl, width, height }: Props) {
@@ -336,6 +319,13 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       '700 32px Montserrat',
       '700 32px Inter',
       '900 32px Inter',
+      // The export's complex-script faces (QA-003/015), at the weights
+      // SCRIPT_FONT_WEIGHT renders them — so the preview measures and draws
+      // the same glyphs rather than a system Devanagari/Arabic font.
+      '700 32px "Noto Sans Devanagari"',
+      '900 32px "Noto Sans Devanagari"',
+      '700 32px "Noto Sans Arabic"',
+      '900 32px "Noto Sans Arabic"',
     ]
     Promise.all(specs.map((spec) => document.fonts.load(spec)))
       .catch(() => { /* best-effort: fall through to fonts.ready below */ })
@@ -374,6 +364,21 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.clearRect(0, 0, cv.width, cv.height)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+    // Two device-sized scratch layers: offB holds one clip (composited once at
+    // the clip's opacity), offA its hard shadow (composited into offB at
+    // SHADOW_ALPHA so overlapping stroke+fill don't double the darkness).
+    const mkLayer = () => {
+      const el = document.createElement('canvas')
+      el.width = cv.width
+      el.height = cv.height
+      return el.getContext('2d')!
+    }
+    const offA = mkLayer()
+    const offB = mkLayer()
+    const clearDevice = (g: CanvasRenderingContext2D) => {
+      g.setTransform(1, 0, 0, 1, 0, 0)
+      g.clearRect(0, 0, g.canvas.width, g.canvas.height)
     }
 
     // If there's neither text nor stickers anywhere, skip RAF entirely.
@@ -444,7 +449,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           // not drawn here either — the preview must not show a caption the
           // export will never contain.
           const w = renderWindow(seams, c.start, c.end)
-          if (!w.dropped && w.start <= t && t <= w.end) {
+          // Half-open on the frame grid (QA-016) — mirror of the export's
+          // enable_expr, so a cue change never shows both cues on one frame.
+          if (!w.dropped && inEnableWindow(w.start, w.end, t, edl.canvas.fps)) {
             active.push({ c, role: (c as TextClip & { role?: string }).role ?? 'default', win: w })
           }
         }
@@ -455,7 +462,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       active.sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role))
 
       for (const { c, role, win } of active) {
-        const s = ROLE_STYLES[role] ?? ROLE_STYLES.default
+        const s = roleStyle(role)
         // Per-clip style overrides (non-sentinel values only — see cssFont/
         // roleFontMatches above; mirrors the server's resolve_style_overrides).
         const styleColor = c.style?.color && c.style.color.toUpperCase() !== SENTINEL_COLOR
@@ -464,9 +471,8 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           && !roleFontMatches(role, c.style.font)
           ? cssFont(c.style.font) : null
         // style.size (non-sentinel) is an explicit size in EDL-canvas px —
-        // exactly the coordinate system s.size (ROLE_STYLES) lives in, so
-        // both rescale to the on-screen preview box the same way. Mirrors
-        // the server's resolve_size_override.
+        // exactly the coordinate system the role size lives in. Mirrors the
+        // server's resolve_size_override.
         const sizeCanvasPx = typeof c.style?.size === 'number'
           && Number.isFinite(c.style.size) && c.style.size > 0
           && Math.abs(c.style.size - SENTINEL_SIZE) > 1e-6
@@ -474,138 +480,173 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         // A live corner-resize scales the drawn glyphs immediately; the EDL
         // only changes on pointer-up (StickerLayer commits style.size then).
         const sizeMul = drag?.id === c.id ? drag.sizeMul : 1
-        const fontPx = Math.round((sizeCanvasPx * sizeMul / edl.canvas.h) * height)
-        const family = styleFont?.family ?? s.font
-        const weight = styleFont?.weight ?? s.weight ?? 'bold'
-        ctx.font = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
-        ctx.textBaseline = 'middle'
-        ctx.textAlign = 'center'
-        ctx.lineJoin = 'round'
-        // Custom stroke_w is in canvas px like the server's; the role
-        // fallback keeps the historic on-screen-height fraction.
-        const styleStrokeW = typeof c.style?.stroke_w === 'number'
-          && Number.isFinite(c.style.stroke_w) && c.style.stroke_w >= 0
-          && Math.abs(c.style.stroke_w - SENTINEL_STROKE_W) > 1e-6
-          ? c.style.stroke_w : null
-        ctx.lineWidth = styleStrokeW != null
-          ? Math.max(1, Math.round((styleStrokeW / edl.canvas.h) * height))
-          : Math.max(2, Math.round(s.stroke * height))
 
-        const env = animEnvelope(c, t, height, win)
-        const styleStroke = c.style?.stroke
-          && c.style.stroke.toUpperCase() !== SENTINEL_STROKE
-          && /^#[0-9a-fA-F]{6}/.test(c.style.stroke)
-          ? c.style.stroke.slice(0, 7) : null
-        ctx.strokeStyle = styleStroke ?? 'rgba(0,0,0,0.95)'
-        ctx.fillStyle = styleColor ?? `rgba(255,255,255,1)`
-        // transform.opacity, sampled the same way the SERVER resolves it, so
-        // preview predicts export in all three shapes: a scalar and a
-        // degenerate 1-keyframe list are baked into the PNG's alpha by
-        // resolve_opacity_override/_scalar_or_last, and a real (>=2)
-        // keyframe list is animated per-frame by the geq path in CLIP-LOCAL
-        // RENDER time (`T - rs`, the clip's render-window start) — hence
-        // `t - win.start` here, matching animEnvelope's time base. types.ts
-        // deliberately omits transform on the mirrored Clip interfaces,
-        // hence the cast (same pattern as resolveAnchor above).
-        const rawOpacity = (c as TextClip & { transform?: { opacity?: KFNum } }).transform?.opacity
-        const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, t - win.start, 1)))
-        ctx.globalAlpha = (s.opacity ?? 1) * env.alpha * txOpacity
-
-        // Emoji are KEPT and drawn as artwork below (see drawLine) — they
-        // used to be stripped here and on the server, so typing one into a
-        // text clip produced nothing at all.
+        // Emoji are KEPT and drawn as artwork (see drawLine) — they used to be
+        // stripped here and on the server, so typing one produced nothing.
         const cleaned = c.text.trim()
         if (!cleaned) continue
         // ALL CAPS: the clip's explicit `style.upper` wins, else the role's own
-        // default. It used to read ONLY the role table, so a lowercase hook or
-        // super was unreachable — "Text layer only shows capital alphabets and
-        // doesn't support the small alphabets". Mirrors
-        // text_overlay.resolve_upper_override; `null`/absent means untouched, so
-        // existing projects keep their capitals.
+        // default. Mirrors text_overlay.resolve_upper_override; `null`/absent
+        // means untouched, so existing projects keep their capitals.
         const wantUpper = (c.style as { upper?: boolean | null } | undefined)?.upper
         const text = (typeof wantUpper === 'boolean' ? wantUpper : s.upper)
           ? cleaned.toUpperCase() : cleaned
-        const maxW = width * 0.86
+
+        // Transform, in CLIP-LOCAL RENDER time (`t - win.start`) — the clock the
+        // export's per-frame expressions run on (`t - rs`). QA-036: scale and
+        // rotation were accepted by the tools and drawn by neither renderer,
+        // and a keyframed x/y resolved to "no override" (centred, static).
+        const tx = (c as TextClip & { transform?: TxAll }).transform
+        const localT = t - win.start
+        const { scale: k, rotation } = scaleRotationAt(tx, role, localT)
+        // Canvas px → display px. The export scales its canvas-px PNG to the
+        // output with these same ratios.
+        const fy = height / edl.canvas.h
+        const fx = width / edl.canvas.w
+        // Rule 6: the scale multiplies every length. Rounded to whole canvas
+        // px where the server rounds (font em, outline), so the glyphs match.
+        const emPx = Math.max(1, Math.round(sizeCanvasPx * sizeMul * k))
+        const fontPx = emPx * fy
+        const script = pickScript(stripEmoji(text) || text)
+        const scriptFamily = script ? SCRIPT_FAMILY[script] : undefined
+        const family = scriptFamily ?? styleFont?.family ?? s.font
+        const weight = scriptFamily ? String(s.scriptWeight) : (styleFont?.weight ?? s.weight)
+        const fontSpec = `${weight} ${fontPx}px "${family}", system-ui, sans-serif`
+        // Custom stroke_w is in canvas px like the server's (rounded there).
+        const styleStrokeW = typeof c.style?.stroke_w === 'number'
+          && Number.isFinite(c.style.stroke_w) && c.style.stroke_w >= 0
+          && Math.abs(c.style.stroke_w - SENTINEL_STROKE_W) > 1e-6
+          ? Math.round(c.style.stroke_w) : null
+        const strokePx = Math.max(0, Math.round((styleStrokeW ?? s.strokeW) * k)) * fy
+        const styleStroke = parseHex(c.style?.stroke && c.style.stroke.toUpperCase() !== SENTINEL_STROKE
+          ? c.style.stroke : null)
+        const strokeRgba: RGBA = styleStroke ?? s.stroke
+        const fillHex = parseHex(styleColor)
+        // An explicit colour with default alpha inherits the role's alpha
+        // (a coloured watermark stays translucent) — resolve_style_overrides.
+        const fillRgba: RGBA = fillHex
+          ? [fillHex[0], fillHex[1], fillHex[2], fillHex[3] !== 255 ? fillHex[3] : s.fill[3]]
+          : s.fill
+
+        const env = animEnvelope(c, t, height, win)
+        // transform.opacity, sampled the same way the SERVER resolves it: a
+        // scalar or a 1-key list is baked into the PNG alpha, a real (>=2)
+        // keyframe list is animated per frame in clip-local render time.
+        const rawOpacity = tx?.opacity
+        const txOpacity = Math.min(1, Math.max(0, sampleKF(rawOpacity, localT, 1)))
+
+        ctx.font = fontSpec
+        offB.font = fontSpec
+        offA.font = fontSpec
         const emojiBox = fontPx * EMOJI_BOX_RATIO
-        const lines = wrap(ctx, text, maxW, emojiBox)
-        const lineH = fontPx * 1.15
+        const maxW = edl.canvas.w * WRAP_WIDTH_RATIO * k * fx
+        const lines = wrap(offB, text, maxW, emojiBox)
+        const lineH = fontPx * LINE_HEIGHT_RATIO
         const totalH = lineH * lines.length
+        // The cap band of THIS font, measured here — the server measures 'H'
+        // in Pillow; only the measured band is common ground (rule 3).
+        const mH = offB.measureText('H')
+        const capAsc = mH.actualBoundingBoxAscent ?? fontPx * 0.7
+        const capDesc = mH.actualBoundingBoxDescent ?? 0
 
-        // Anchor overrides (transform.x / transform.y, EDL-canvas px):
-        // non-sentinel values place the text block's center absolutely,
-        // scaled by the on-screen-box / canvas ratio — the same
-        // canvas→output scale the server applies. Sentinels keep the
-        // browser's own historic role layout below.
+        // Anchor: an animated axis follows its curve; otherwise the explicit
+        // override (non-sentinel) or the ROLE anchor the export uses.
         const { ax, ay } = resolveAnchor(c, role, edl.canvas.w, edl.canvas.h)
-        let anchorX = ax != null ? (ax / edl.canvas.w) * width : width / 2
-
-        let cy: number
-        if (ay != null) cy = (ay / edl.canvas.h) * height
-        else if (s.align === 'top') cy = height * 0.06 + totalH / 2
-        else if (s.align === 'center') cy = height / 2
-        else if (s.align === 'lower') cy = height * 0.78
-        // Captions on a portrait canvas draw where the export puts them
-        // (caption_anchor_y: 0.76·h, clear of the platform UI).
-        else if (s.align === 'bottom' && role === 'caption' && edl.canvas.h > edl.canvas.w) cy = height * 0.76
-        else if (s.align === 'bottom') cy = height - totalH / 2 - height * 0.10
-        else cy = height * 0.78
-        cy += env.dy
-
+        const noTx = role === 'caption'
+        const axC = !noTx && isAnimated(tx?.x) ? sampleKF(tx?.x, localT, edl.canvas.w / 2)
+          : (ax ?? edl.canvas.w / 2)
+        const ayC = !noTx && isAnimated(tx?.y) ? sampleKF(tx?.y, localT, edl.canvas.h / 2)
+          : (ay ?? roleAnchorY(role, edl.canvas.h, edl.canvas.w))
+        let anchorX = axC * fx
+        let cy = ayC * fy + env.dy
         // Live drag offset from <StickerLayer>. Applied AFTER the anchor
         // resolution so a role-positioned clip (no explicit x/y yet) still
-        // follows the pointer — the commit on pointer-up is what makes it
-        // explicit.
+        // follows the pointer — the commit on pointer-up makes it explicit.
         if (drag?.id === c.id) { anchorX += drag.dx; cy += drag.dy }
 
         // Publish the measured box for the interaction layer. Captions are
         // excluded: their position is owned by the captions block server-side
         // (resolveAnchor returns nulls for them), so a drag would commit an
-        // x/y the renderer ignores — a control that does nothing is worse than
-        // no control. Same for a keyframed/motion-tracked clip, whose position
-        // is a curve a single drag can't express.
-        const kfPositioned = typeof (c as TextClip & { transform?: { x?: KFNum } })
-          .transform?.x === 'object'
+        // x/y the renderer ignores. Same for an animated x/y, whose position is
+        // a curve a single drag can't express.
+        const kfPositioned = isAnimated(tx?.x) || isAnimated(tx?.y)
         if (role !== 'caption' && !kfPositioned) {
           boxes.push({
             id: c.id, kind: 'text',
             cx: anchorX, cy,
             // Measured from the wrapped lines, so the box hugs the real glyphs
             // rather than a guessed rectangle.
-            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, lineWidth(ctx, l, emojiBox)), 0) / 2 + fontPx * 0.15),
+            hw: Math.max(12, lines.reduce((m, l) => Math.max(m, lineWidth(offB, l, emojiBox)), 0) / 2 + fontPx * 0.15),
             hh: Math.max(10, totalH / 2 + fontPx * 0.12),
-            rot: 0,
+            rot: (rotation * Math.PI) / 180,
             x: (anchorX / width) * edl.canvas.w,
             y: (cy / height) * edl.canvas.h,
             sizeCanvasPx,
             xSentinels: xSentinelsFor(edl.canvas.w),
-            ySentinels: ySentinelsFor(role, edl.canvas.h),
+            ySentinels: ySentinelsFor(role, edl.canvas.h, edl.canvas.w),
           })
         }
 
+        // Paint the whole clip into offB at full opacity, then composite it
+        // once with the clip's opacity — the export multiplies the FINISHED
+        // image's alpha, so stroke, shadow and fill must dim as one layer.
+        const centers = lineCenters(0, lines.length, fontPx)
+        const place = (g: CanvasRenderingContext2D, ox: number, oy: number) => {
+          g.setTransform(dpr, 0, 0, dpr, 0, 0)
+          g.translate(anchorX, cy)
+          if (rotation) g.rotate((rotation * Math.PI) / 180)
+          // pop: scale around the text's own anchor, like the server's
+          // overlay-position compensation does.
+          if (env.scale !== 1) g.scale(env.scale, env.scale)
+          g.translate(ox, oy)
+        }
+        const paintText = (g: CanvasRenderingContext2D, paint: 'stroke' | 'fill') => {
+          lines.forEach((ln, i) => {
+            drawLine(g, ln, 0, centers[i], baselineFor(centers[i], capAsc, capDesc),
+                     emojiBox, paint)
+          })
+        }
+        clearDevice(offB)
+        offB.lineJoin = 'round'
+        offB.lineCap = 'round'
+        if (s.shadow) {
+          // Rule 5: a HARD copy of outline + fill, offset SHADOW_OFFSET canvas
+          // px (scaled with the block), black at SHADOW_ALPHA — no blur.
+          clearDevice(offA)
+          place(offA, SHADOW_OFFSET[0] * k * fy, SHADOW_OFFSET[1] * k * fy)
+          offA.fillStyle = offA.strokeStyle = '#000'
+          offA.lineJoin = 'round'
+          offA.lineCap = 'round'
+          offA.lineWidth = outlineLineWidth(strokePx)
+          if (strokePx > 0) paintText(offA, 'stroke')
+          paintText(offA, 'fill')
+          offB.setTransform(1, 0, 0, 1, 0, 0)
+          offB.globalAlpha = SHADOW_ALPHA / 255
+          offB.drawImage(offA.canvas, 0, 0)
+          offB.globalAlpha = 1
+        }
+        place(offB, 0, 0)
+        if (strokePx > 0) {
+          // Rule 4: a 2 x stroke line centred on the path, under the fill.
+          offB.strokeStyle = rgbaCss(strokeRgba)
+          offB.lineWidth = outlineLineWidth(strokePx)
+          paintText(offB, 'stroke')
+        }
+        // The fill REPLACES what is under it (Pillow's draw semantics), which
+        // only matters for a translucent fill such as the watermark's.
+        offB.globalCompositeOperation = 'destination-out'
+        offB.fillStyle = '#000'
+        paintText(offB, 'fill')
+        offB.globalCompositeOperation = 'source-over'
+        offB.fillStyle = rgbaCss(fillRgba)
+        paintText(offB, 'fill')
+        offB.setTransform(1, 0, 0, 1, 0, 0)
+
         ctx.save()
-        // pop: scale around the text's own anchor, like the server's
-        // overlay-position compensation does.
-        if (env.scale !== 1) {
-          ctx.translate(anchorX, cy)
-          ctx.scale(env.scale, env.scale)
-          ctx.translate(-anchorX, -cy)
-        }
-        // shadow
-        ctx.save()
-        ctx.shadowColor = 'rgba(0,0,0,0.5)'
-        ctx.shadowBlur = Math.max(4, fontPx * 0.06)
-        ctx.shadowOffsetY = Math.max(2, fontPx * 0.03)
-        for (let i = 0; i < lines.length; i++) {
-          const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          drawLine(ctx, lines[i], anchorX, ly, emojiBox, 'stroke')
-        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.globalAlpha = env.alpha * txOpacity
+        ctx.drawImage(offB.canvas, 0, 0)
         ctx.restore()
-        for (let i = 0; i < lines.length; i++) {
-          const ly = cy - totalH / 2 + lineH / 2 + i * lineH
-          drawLine(ctx, lines[i], anchorX, ly, emojiBox, 'fill')
-        }
-        ctx.restore()
-        ctx.globalAlpha = 1
       }
 
       publishTextBoxes(boxes)

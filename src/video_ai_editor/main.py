@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from pydantic import Field as PydField
 
 from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
@@ -52,7 +54,10 @@ from .storage import (new_session_id, session_dir, session_exists,
                        list_sessions, write_meta, read_meta, delete_session,
                        is_valid_session_id)
 from .edl import EDLStore
+from .edl import timebase as _tb
+from .ingest.probe import video_frame_extent
 from .edl.schema import Canvas, Clip
+from .edl.schema import FPS_MIN as _FPS_MIN, FPS_MAX as _FPS_MAX
 from .ingest import ingest_upload
 from .render import render_preview, render_export
 from .agent.dispatch import DISPATCH, dispatch, list_tools
@@ -251,6 +256,7 @@ def _safe_filename(name: str | None, fallback: str) -> str:
     Strips: : ' [ ] , ; ` $ ( ) * ? & < > | \\ \" + spaces.
     Keeps: A-Z a-z 0-9 . _ - and one final extension.
     """
+    name = _client_filename(name)
     raw = Path(name or fallback).name  # path-traversal guard
     stem = Path(raw).stem
     suffix = Path(raw).suffix.lower()
@@ -266,6 +272,63 @@ def _safe_filename(name: str | None, fallback: str) -> str:
         sig = _h.sha1((name or "").encode("utf-8")).hexdigest()[:6]
         stem_clean = f"{Path(fallback).stem}_{sig}"
     return f"{stem_clean}{suffix_clean}" or fallback
+
+
+# The HTML multipart spec has browsers percent-escape exactly three characters
+# in a filename: `"` as %22, CR as %0D and LF as %0A. They were sanitised
+# undecoded, so `"पहला वीडियो".mp4` became `22_22.mp4` — and so did every other
+# quoted name, which is one of the ways two different imports ended up at one
+# path on disk (QA-001). Only these three are decoded: a real `%41` in a
+# filename is literal text, not an escape.
+_CLIENT_FILENAME_ESCAPES = re.compile(r"%(22|0[dD]|0[aA])")
+
+
+def _client_filename(name: str | None) -> str | None:
+    """The filename the user's file really had, undoing the browser's
+    multipart escaping (see `_CLIENT_FILENAME_ESCAPES`)."""
+    if not name:
+        return name
+    return _CLIENT_FILENAME_ESCAPES.sub(lambda m: chr(int(m.group(1), 16)), name)
+
+
+def _display_name(name: str | None, fallback: str) -> str:
+    """What to call an upload in the UI: its real name, last path component."""
+    decoded = _client_filename(name) or ""
+    return Path(decoded.replace("\\", "/")).name or fallback
+
+
+def _unique_upload_path(parent: Path, safe_name: str) -> Path:
+    """A path in `parent` that no earlier upload can own (QA-001).
+
+    Every upload ingress used to write to `parent / safe_name`, so two files
+    whose names sanitise alike (`clip (1).mp4` / `clip [1].mp4`, two cameras'
+    `C0001.MP4`, a/song.wav and b/song.wav) silently replaced the first
+    import's media — and every clip that referenced it. A random suffix makes a
+    collision impossible, and the file is created with O_EXCL so even the
+    astronomically unlikely repeat is caught instead of overwritten."""
+    parent.mkdir(parents=True, exist_ok=True)
+    stem, suffix = Path(safe_name).stem, Path(safe_name).suffix
+    while True:
+        candidate = parent / f"{stem}_{uuid.uuid4().hex[:8]}{suffix}"
+        try:
+            with candidate.open("xb"):
+                return candidate
+        except FileExistsError:
+            continue
+
+
+def _unique_upload_dir(parent: Path, stem: str) -> Path:
+    """A fresh directory `parent/<stem>_<random>` for one video import — the
+    raw upload, its normalised mp4 and its ingest.json live together in it
+    (see `_unique_upload_path` for why it must be unique)."""
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = parent / f"{stem}_{uuid.uuid4().hex[:8]}"
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            continue
 
 
 # One mutation at a time per session. The registry lives in api/locks.py so
@@ -304,10 +367,22 @@ class CreateSessionRequest(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    height: int | None = None
-    fps: int | None = None
-    crf: int = 18
+    # A NAMED resolution: the SHORT side for the canvas orientation, so 1080 on
+    # a 9:16 project is 1080x1920 (QA-025; see compositor.export_dimensions).
+    # Bounded like every other numeric input (QA-041): an absurd size would
+    # start an unbounded encode.
+    height: int | None = PydField(None, ge=16, le=7680)
+    # float: 23.976 / 29.97 / 59.94 are real delivery rates (QA-009). The
+    # renderer turns it into an exact ffmpeg rational via edl.timebase.
+    # Bounded to the Canvas range (QA-041): fps=1e6 built a 10M-frame graph
+    # per segment — an export with no practical end. None = the canvas rate.
+    fps: float | None = PydField(None, ge=_FPS_MIN, le=_FPS_MAX)
+    crf: int = PydField(18, ge=0, le=51)
     container: Literal["mp4", "mov"] = "mp4"
+    # QA-027: None = the platform target the project carries (set by
+    # apply_export_preset); 0 = no target, encode by `crf` (the Quality
+    # selector's explicit choice); >0 = that average bitrate in kbps.
+    bitrate_kbps: int | None = PydField(None, ge=0, le=200_000)
 
 
 # --- routes ---
@@ -411,6 +486,17 @@ def _mcp_resolve_store(session_id: str | None):
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
+    # MCP-ANY-CONTENT-TYPE: a cross-origin page can POST text/plain or a form
+    # WITHOUT a CORS preflight; application/json forces one, and the CORS
+    # policy refuses it. So a non-JSON body is refused before any tool runs.
+    ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if ctype != "application/json":
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None,
+             "error": {"code": -32600,
+                       "message": "Content-Type must be application/json"}},
+            status_code=415,
+        )
     try:
         body = await request.json()
     except Exception:
@@ -517,12 +603,18 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     vo_dir.mkdir(parents=True, exist_ok=True)
     _assert_room_for(request, vo_dir)
     safe_name = _safe_filename(file.filename, "vo.webm")
-    raw = vo_dir / f"raw_{safe_name}"
+    # Unique per take (QA-001): every browser recording is named "vo.webm" and
+    # the output used to be vo_<whole seconds>.m4a, so two takes in the same
+    # second — or two concurrent uploads — wrote one file.
+    raw = _unique_upload_path(vo_dir, f"raw_{safe_name}")
     await _stream_upload_to(file, raw)
 
     # Normalize to AAC mp4 so the audio mixer can splice it cleanly
-    norm = vo_dir / f"vo_{int(time.time())}.m4a"
-    proc = subprocess.run(
+    norm = _unique_upload_path(vo_dir, f"vo_{int(time.time())}.m4a")
+    # Off the event loop (QA-007): a subprocess.run inside this `async def`
+    # froze every other request for as long as ffmpeg ran.
+    proc = await asyncio.to_thread(
+        subprocess.run,
         [_pu.FFMPEG, "-y", "-i", str(raw),
          "-vn", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
          str(norm)],
@@ -549,7 +641,11 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
             track = Track(id="vo", type="vo", z=0, label="Voiceover")
             store.edl.tracks.append(track)
         clip = Clip(
-            src=str(norm), in_=0.0, out=p.duration, start=float(start),
+            # QA-002: the VO lands on the project frame grid like every
+            # other committed edit time, so a click recorded on a flash stays
+            # on it after the picture is cut frame-exactly.
+            src=str(norm), in_=0.0, out=p.duration,
+            start=_tb.quantize(float(start), store.edl.canvas.fps),
             audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
         )
         track.clips.append(clip)
@@ -573,15 +669,16 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
     sticker_dir = sd / "uploads" / "stickers"
     sticker_dir.mkdir(parents=True, exist_ok=True)
     safe_name = _safe_filename(file.filename, "sticker.png")
-    dst = sticker_dir / safe_name
     # `UploadLimitMiddleware` short-circuits on `if raw and ...`, so a body sent
     # with `Transfer-Encoding: chunked` and no Content-Length skips it entirely.
     # Without the two calls below this route had no second layer at all and a
     # chunked multipart body would fill the volume — the exact failure
     # api/uploads.py's docstring claims is closed on all six ingresses.
     _assert_room_for(request, sticker_dir)
+    dst = _unique_upload_path(sticker_dir, safe_name)   # QA-001: never overwrite
     await _stream_upload_to(file, dst)
-    info = {"src": str(dst), "filename": safe_name}
+    info = {"src": str(dst), "filename": dst.name,
+            "display_name": _display_name(file.filename, safe_name)}
     if add_at_playhead:
         store = _store(sid)
 
@@ -615,7 +712,9 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
     audio_dir.mkdir(parents=True, exist_ok=True)
     _assert_room_for(request, audio_dir)
     safe_name = _safe_filename(file.filename, "audio.mp3")
-    dst = audio_dir / safe_name
+    # QA-001: a/song.wav then b/song.wav used to share uploads/audio/song.wav,
+    # so the first music clip silently started playing the second song.
+    dst = _unique_upload_path(audio_dir, safe_name)
     await _stream_upload_to(file, dst)
     # Probe to get duration
     from .ingest.probe import probe as _probe
@@ -627,7 +726,8 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
     if add_to_music:
         await _locked_edit(sid, lambda: _add_uploaded_music(store, dst, p.duration, duck, volume_db))
 
-    return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash()}
+    return {"src": str(dst), "duration": p.duration, "edl_hash": store.edl.hash(),
+            "display_name": _display_name(file.filename, safe_name)}
 
 
 def _add_uploaded_music(store, dst: Path, duration: float, duck: bool, volume_db: float) -> None:
@@ -680,11 +780,11 @@ async def subtitle_upload(sid: str, request: Request, file: UploadFile = File(..
         })
     uploads = session_dir(sid) / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
-    dst = uploads / safe_name
     # See sticker_upload: the Content-Length middleware is not reached by a
     # chunked body, so the free-space precondition and the mid-stream running
     # total are the real limits on this route.
     _assert_room_for(request, uploads)
+    dst = _unique_upload_path(uploads, safe_name)   # QA-001: never overwrite
     await _stream_upload_to(file, dst)
     return {"path": str(dst), "name": dst.name}
 
@@ -715,12 +815,113 @@ def _match_canvas_to_source(store, probe) -> None:
     dispatch(store, "set_aspect_ratio", {"ratio": ratio})
 
 
+def _user_chose_fps(store) -> bool:
+    """True once anyone explicitly set the project frame rate (set_canvas with
+    an fps). Ingest must not override that choice (QA-009)."""
+    return any(op.tool == "set_canvas" and isinstance(op.args, dict) and op.args.get("fps") is not None
+               for op in store.ops.ops)
+
+
+def _place_ingested_clip(store, res) -> bool:
+    """Put a freshly ingested video on v1 (runs under the session lock).
+    Returns whether the timeline was empty before, i.e. this started a project."""
+    from .edl import timebase as _tb
+    v1 = store.edl.get_track("v1")
+    was_empty = not any(True for _ in (v1.clips if v1 else []))
+    if was_empty:
+        _match_canvas_to_source(store, res.probe)
+        # The project timebase follows the first clip (QA-009) unless the user
+        # already picked one. Set in the same commit as add_clip, so one Undo
+        # removes the clip and restores the old rate together.
+        if res.fps and not _user_chose_fps(store):
+            store.edl.canvas.fps = _tb.fps_float(res.fps)
+    store.edl.recompute_duration()
+    # Append after the last V1 clip — NOT after `edl.duration`, which spans
+    # every track. Importing a 6-minute song first would otherwise park the
+    # next video at start=373s, stranding it behind minutes of black (now
+    # that gaps actually render, that black is real footage in the export).
+    start = store.edl.video_extent()
+    dispatch(store, "add_clip", {
+        "track": "v1",
+        "src": str(res.normalized),
+        "in": 0.0,
+        # The PICTURE's frame-exact length, never format.duration — for an
+        # AAC mp4 that is the padded audio, and a 600-frame clip came in as
+        # out=20.01 (QA-002). add_clip clamps to it as well.
+        "out": _tb.floor_to_frame(
+            video_frame_extent(Path(res.normalized)) or res.probe.duration,
+            store.edl.canvas.fps),
+        "start": start,
+    })
+    return was_empty
+
+
+def _ingest_failure(safe_name: str, e: Exception) -> HTTPException:
+    """ANY ingest failure (unreadable container, exotic codec, corrupt file,
+    ffprobe/ffmpeg error, JSON parse, etc.) must be a clean 422 — never a bare
+    500. This is the "video import failed" path users hit with files that
+    aren't really valid video."""
+    import logging
+    logging.getLogger("video_ai_editor").warning(
+        "upload ingest failed for %s: %s", safe_name, e)
+    msg = str(e)
+    return HTTPException(status_code=422, detail={
+        "file": safe_name,
+        "error": "couldn't_import",
+        "message": "Couldn't import this file — it may not be a valid video, "
+                   "or it uses a codec/container we can't read. Try exporting "
+                   "it as a standard H.264 .mp4 and re-importing.",
+        "detail": msg[-300:] if len(msg) > 300 else msg,
+    })
+
+
+def _background_transcriber(normalized_path: Path, out_dir: Path, whisper_model: str):
+    """The whisper pass that runs after the upload has answered. Writes the
+    transcript into the upload's own ingest.json so get_transcript /
+    add_caption_track find it. `whisper_model` opts the user into a smaller
+    model — `tiny.en` is ~5× faster than `small` for English-only content;
+    `small` (default) is multilingual."""
+    from .ingest.transcribe import transcribe as _transcribe
+    chosen_model = whisper_model.strip() or None
+
+    def _bg_transcribe() -> None:
+        try:
+            tx = _transcribe(normalized_path, model_size=chosen_model)
+            ingest_json = out_dir / "ingest.json"
+            if ingest_json.exists():
+                data = json.loads(ingest_json.read_text(encoding="utf-8"))
+                data["transcript"] = tx.model_dump()
+                ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    return _bg_transcribe
+
+
 @app.post("/api/sessions/{sid}/upload")
 async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
                  file: UploadFile = File(...),
                  add_to_timeline: bool = Form(True),
                  transcribe: bool = Form(True),
-                 whisper_model: str = Form("")):
+                 whisper_model: str = Form(""),
+                 wait: int = 1):
+    """Import a video: stream it to disk, normalise it, put it on v1.
+
+    Normalisation runs OFF the event loop (QA-007). It used to be a plain
+    synchronous call inside this `async def`, so the single uvicorn loop could
+    serve nothing — not /api/health, not an edit, not a thumbnail — until
+    ffmpeg finished: 125 s for a 12-minute file, 233 s for 4K. Now:
+
+    * ``wait=1`` (default): the normalise runs on a worker thread and this
+      request answers when it is done, with the same body as before.
+    * ``wait=0``: answers ``202 {job_id}`` as soon as the bytes are on disk;
+      poll ``GET /api/jobs/{id}`` for ``progress`` (ffmpeg's own
+      ``-progress``, 0..1) and the same body under ``result``.
+
+    Storage (QA-001): every import gets its own directory
+    ``uploads/<stem>_<random>/`` holding the raw file, the normalised mp4 and
+    ingest.json, so two files whose names sanitise alike can never overwrite
+    each other. The user's real filename is kept as ``display_name``.
+    """
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
@@ -734,113 +935,96 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
     # partial file on the way out. See api/uploads.py.
     _assert_room_for(request, uploads)
     safe_name = _safe_filename(file.filename, "upload.mp4")
-    dst = uploads / safe_name
-    await _stream_upload_to(file, dst)
-
-    # Normalize is unavoidable for the timeline to work — it's relatively fast.
-    # Whisper transcription is the slow part (10-60s on CPU); push it to a
-    # background task so the upload response returns immediately and the UI is
-    # responsive. Transcript becomes available later via the transcript endpoint.
+    display_name = _display_name(file.filename, safe_name)
+    upload_dir = _unique_upload_dir(uploads, Path(safe_name).stem)
+    dst = upload_dir / safe_name
     try:
-        res = ingest_upload(dst, uploads / dst.stem, transcribe_audio=False)
-    except HTTPException:
+        await _stream_upload_to(file, dst)
+    except BaseException:
+        shutil.rmtree(upload_dir, ignore_errors=True)
         raise
-    except Exception as e:
-        # ANY ingest failure (unreadable container, exotic codec, corrupt
-        # file, ffprobe/ffmpeg error, JSON parse, etc.) must be a clean 422 —
-        # never a bare 500. This is the "video import failed" path users hit
-        # with files that aren't really valid video.
-        import logging
-        logging.getLogger("video_ai_editor").warning(
-            "upload ingest failed for %s: %s", safe_name, e)
-        msg = str(e)
-        raise HTTPException(status_code=422, detail={
-            "file": safe_name,
-            "error": "couldn't_import",
-            "message": "Couldn't import this file — it may not be a valid video, "
-                       "or it uses a codec/container we can't read. Try exporting "
-                       "it as a standard H.264 .mp4 and re-importing.",
-            "detail": msg[-300:] if len(msg) > 300 else msg,
-        })
 
-    # /upload is the VIDEO ingress and hardcodes track v1 below. An audio-only
-    # file reaching it (an .mp4/.mov/.mkv container with no video stream slips
-    # past the frontend's extension-based routing) normalizes "successfully"
-    # into a picture-less mp4, lands on v1, and then breaks every subsequent
-    # render with "[i:v] … matches no streams". Point the user at the audio
-    # ingress instead of letting them build an unrenderable timeline.
-    if res.probe.streams and res.probe.video is None:
-        raise HTTPException(status_code=422, detail={
-            "file": safe_name,
-            "error": "audio_only_file",
-            "message": "This file has no video track — it's audio only. "
-                       "Add it with “Add music…” (or drop it on the Music lane) "
-                       "instead of the video track.",
-        })
+    def _ingest_and_place(set_progress=None, cancel_event=None) -> dict:
+        try:
+            res = ingest_upload(dst, upload_dir, transcribe_audio=False,
+                                display_name=display_name,
+                                on_progress=set_progress, cancel_event=cancel_event)
+        except Exception as e:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise _ingest_failure(safe_name, e) from e
 
-    if add_to_timeline:
-        def _edit() -> bool:
-            v1 = store.edl.get_track("v1")
-            was_empty = not any(True for _ in (v1.clips if v1 else []))
-            if was_empty:
-                _match_canvas_to_source(store, res.probe)
-            store.edl.recompute_duration()
-            # Append after the last V1 clip — NOT after `edl.duration`, which spans
-            # every track. Importing a 6-minute song first would otherwise park the
-            # next video at start=373s, stranding it behind minutes of black (now
-            # that gaps actually render, that black is real footage in the export).
-            start = store.edl.video_extent()
-            dispatch(store, "add_clip", {
-                "track": "v1",
-                "src": str(res.normalized),
-                "in": 0.0,
-                "out": res.probe.duration,
-                "start": start,
+        # /upload is the VIDEO ingress and hardcodes track v1 below. An
+        # audio-only file reaching it (an .mp4/.mov/.mkv container with no video
+        # stream slips past the frontend's extension-based routing) normalizes
+        # "successfully" into a picture-less mp4, lands on v1, and then breaks
+        # every subsequent render with "[i:v] … matches no streams". Point the
+        # user at the audio ingress instead of letting them build an
+        # unrenderable timeline.
+        if res.probe.streams and res.probe.video is None:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(status_code=422, detail={
+                "file": safe_name,
+                "error": "audio_only_file",
+                "message": "This file has no video track — it's audio only. "
+                           "Add it with “Add music…” (or drop it on the Music lane) "
+                           "instead of the video track.",
             })
-            return was_empty
 
-        was_empty = await _locked_edit(sid, _edit)
-        if was_empty:
-            # This upload starts a brand-new project on an empty timeline —
-            # any chat history is necessarily about DIFFERENT, no-longer-
-            # present footage (or a prior session's resumed project). Replaying
-            # it to Claude is how "describe this video" answers end up
-            # describing a video from a past conversation. A mid-project
-            # upload (b-roll added to existing footage) intentionally keeps
-            # history, since that context is still relevant.
-            _save_history(sid, [])
+        if add_to_timeline:
+            with _session_lock(sid):
+                # Re-resolved under the lock: the LRU may have evicted and
+                # rebuilt the store while a wait=0 job sat in the queue.
+                live = _store(sid)
+                was_empty = _place_ingested_clip(live, res)
+            if was_empty:
+                # This upload starts a brand-new project on an empty timeline —
+                # any chat history is necessarily about DIFFERENT, no-longer-
+                # present footage (or a prior session's resumed project).
+                # Replaying it to Claude is how "describe this video" answers
+                # end up describing a video from a past conversation. A
+                # mid-project upload (b-roll added to existing footage)
+                # intentionally keeps history, since that context is still
+                # relevant.
+                _save_history(sid, [])
 
-    if transcribe:
-        # Run whisper after we've returned. Writes to ingest.json so subsequent
-        # get_transcript / add_caption_track calls find it. `whisper_model`
-        # opts the user into a smaller model — `tiny.en` is ~5× faster than
-        # `small` for English-only content; `small` (default) is multilingual.
-        from .ingest.transcribe import transcribe as _transcribe
-        out_dir = uploads / dst.stem
-        normalized_path = Path(res.normalized)
-        chosen_model = whisper_model.strip() or None
+        return {
+            "src": str(dst),
+            "normalized": str(res.normalized),
+            "display_name": display_name,
+            "duration": res.probe.duration,
+            "probe": res.probe.model_dump(),
+            "fps": res.fps,
+            "color": res.color,
+            "notices": res.notices,
+            "edl_hash": _store(sid).edl.hash(),
+            "transcript_pending": bool(transcribe),
+        }
 
-        def _bg_transcribe() -> None:
+    # Whisper is the slow part (10-60s on CPU); it runs after we've answered
+    # and the transcript arrives later via GET /transcript.
+    bg = _background_transcriber(upload_dir / f"{dst.stem}.normalized.mp4",
+                                 upload_dir, whisper_model) if transcribe else None
+
+    if not wait:
+        def _job(set_progress=None, cancel_event=None) -> dict:
             try:
-                tx = _transcribe(normalized_path, model_size=chosen_model)
-                ingest_json = out_dir / "ingest.json"
-                if ingest_json.exists():
-                    data = json.loads(ingest_json.read_text(encoding="utf-8"))
-                    data["transcript"] = tx.model_dump()
-                    ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+                out = _ingest_and_place(set_progress=set_progress, cancel_event=cancel_event)
+            except HTTPException as e:
+                detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+                raise RuntimeError(detail.get("message") or str(detail)) from e
+            if bg is not None:
+                threading.Thread(target=bg, daemon=True, name="vai-transcribe").start()
+            return out
+        from .api.jobs import JOB_MANAGER
+        job = JOB_MANAGER.submit(kind="upload", fn=_job, session_id=sid)
+        return JSONResponse(status_code=202, content={
+            "job_id": job.id, "status": job.status, "src": str(dst),
+            "display_name": display_name})
 
-        background_tasks.add_task(_bg_transcribe)
-
-    return {
-        "src": str(dst),
-        "normalized": str(res.normalized),
-        "duration": res.probe.duration,
-        "probe": res.probe.model_dump(),
-        "edl_hash": store.edl.hash(),
-        "transcript_pending": bool(transcribe),
-    }
+    out = await asyncio.to_thread(_ingest_and_place)
+    if bg is not None:
+        background_tasks.add_task(bg)
+    return out
 
 
 # Tools that routinely run for tens of seconds to minutes: they load a torch/
@@ -958,6 +1142,35 @@ def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
 def get_edl(sid: str):
     store = _store(sid)
     return JSONResponse(json.loads(store.edl.to_json()))
+
+
+# --- Media library (QA-010): the Media panel's list, independent of the timeline ---
+
+@app.get("/api/sessions/{sid}/media")
+def get_media(sid: str):
+    """Everything imported into this project, with how many timeline clips use
+    each item. Deleting the last clip no longer removes the media from the bin."""
+    from .media_library import list_media
+    store = _store(sid)
+    return {"media": list_media(store.dir, store.edl)}
+
+
+@app.delete("/api/sessions/{sid}/media/{media_id}")
+def remove_media_route(sid: str, media_id: str):
+    """Take an item out of the bin. Its file stays on disk (undo can still need
+    it); an item that timeline clips still use is refused with 409."""
+    from .media_library import MediaInUse, remove_media
+    if not re.fullmatch(r"[0-9a-f]{12}", media_id):
+        raise HTTPException(400, {"code": "invalid_media_id", "message": "invalid media id"})
+    store = _store(sid)
+    try:
+        item = remove_media(store.dir, store.edl, media_id)
+    except KeyError:
+        raise HTTPException(404, {"code": "media_not_found", "message": "no such media in this project"})
+    except MediaInUse as e:
+        raise HTTPException(409, {"code": "media_in_use", "message": str(e),
+                                  "clip_ids": e.item["clip_ids"]})
+    return {"removed": item["id"], "name": item["name"]}
 
 
 @app.get("/api/sessions/{sid}/ops")
@@ -1085,6 +1298,29 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
              "frames or an unusual codec.")
 
 
+def _render_preview_latest(sid: str, store):
+    """render_preview for an interactive client, newest-EDL-wins (QA-004).
+
+    Registers the render with `render.cancel.PREVIEWS`: a request for a
+    DIFFERENT EDL hash of the same session terminates this one's ffmpeg and
+    raises RenderCancelled here. Nobody will look at a superseded preview, and
+    before this every one of them ran to completion, holding `_RENDER_SLOTS`
+    while the render the user was actually waiting for queued behind it.
+    """
+    from .render import cancel as _rcancel
+    ev = _rcancel.PREVIEWS.begin(sid, store.edl.hash())
+    try:
+        with _rcancel.scope(ev):
+            return render_preview(store.edl, store.dir)
+    finally:
+        _rcancel.PREVIEWS.end(sid, ev)
+
+
+def _preview_superseded() -> HTTPException:
+    return HTTPException(409, {"error": "preview_superseded",
+                               "message": "A newer edit replaced this preview render."})
+
+
 @app.post("/api/sessions/{sid}/preview")
 def make_preview(sid: str, wait: int = 1):
     """Render a preview.
@@ -1098,8 +1334,11 @@ def make_preview(sid: str, wait: int = 1):
     """
     store = _store(sid)
     if wait:
+        from .render.cancel import RenderCancelled
         try:
-            res = render_preview(store.edl, store.dir)
+            res = _render_preview_latest(sid, store)
+        except RenderCancelled:
+            raise _preview_superseded() from None
         except RuntimeError as e:
             # ffmpeg render failure → actionable 422, not a bare 500. Surface a
             # short tail of ffmpeg's reason so the UI can show something useful.
@@ -1164,19 +1403,30 @@ def list_session_jobs(sid: str):
 @app.get("/api/sessions/{sid}/preview.mp4")
 def stream_preview(sid: str, h: str | None = None):
     store = _store(sid)
-    target_hash = h or store.edl.hash()
+    current_hash = store.edl.hash()
+    target_hash = h or current_hash
     p = store.dir / "previews" / f"{target_hash}.mp4"
     # Treat a 0-byte leftover (from a killed render that predates atomic writes)
     # as missing — serving it would hand the client a torn file that mp4box
     # rejects with "invalid box". Re-render instead.
     if not p.exists() or p.stat().st_size == 0:
+        # A missing render of a hash that is NOT the current EDL can never be
+        # produced here — rendering would render the CURRENT EDL and then 404
+        # anyway. That used to cost a full render per stale <video> src (a
+        # session switch, an evicted preview), competing with the render the
+        # user was waiting for (QA-004). Answer the 404 up front.
+        if h and h != current_hash:
+            raise HTTPException(404, "preview for that hash is no longer available")
+        from .render.cancel import RenderCancelled
         # Same RuntimeError -> 422 mapping the POST /preview and /export paths
         # use. Without it this route answered a render failure with a bare 500
         # plus a full traceback (logged twice), while the very same failure via
         # POST produced a clean, actionable 422. The <video> element polls THIS
         # url, so it was the shape the UI hit most often.
         try:
-            res = render_preview(store.edl, store.dir)
+            res = _render_preview_latest(sid, store)
+        except RenderCancelled:
+            raise _preview_superseded() from None
         except RuntimeError as e:
             msg = str(e)
             tail = msg[-400:]
@@ -1197,8 +1447,11 @@ def stream_preview(sid: str, h: str | None = None):
 
 
 def _export_payload(sid: str, res) -> dict:
+    # `edl_hash` is the timeline the file was rendered from — what the UI's
+    # "↓ MP4 (outdated)" check compares against GET /sessions/{sid}.edl_hash.
     return {"path": str(res.path), "filename": res.path.name,
-            "url": f"/api/sessions/{sid}/files/exports/{res.path.name}"}
+            "url": f"/api/sessions/{sid}/files/exports/{res.path.name}",
+            "edl_hash": res.edl_hash}
 
 
 @app.post("/api/sessions/{sid}/export")
@@ -1215,7 +1468,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
         # opaque HTTP 500 with the reason discarded into the server log.
         try:
             res = render_export(store.edl, store.dir, height=body.height,
-                                fps=body.fps, crf=body.crf, container=body.container)
+                                fps=body.fps, crf=body.crf, container=body.container,
+                                bitrate_kbps=body.bitrate_kbps)
         except RuntimeError as e:
             msg = str(e)
             tail = msg[-400:]
@@ -1229,12 +1483,14 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     edl_snapshot = store.edl
     session_dir_snapshot = store.dir
     height, fps, crf, container = body.height, body.fps, body.crf, body.container
+    bitrate_kbps = body.bitrate_kbps
 
     def _job(set_progress=None, cancel_event=None) -> dict:
         try:
             res = render_export(edl_snapshot, session_dir_snapshot,
                                 height=height, fps=fps, crf=crf, container=container,
-                                on_progress=set_progress, cancel_event=cancel_event)
+                                on_progress=set_progress, cancel_event=cancel_event,
+                                bitrate_kbps=bitrate_kbps)
         except RuntimeError as e:
             # jobs.py stores `f"{type(e).__name__}: {e}"` as job.error and the
             # UI shows it verbatim — so raise something whose str() is already
@@ -1433,8 +1689,10 @@ async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
     see. The filename is now only a hint for the temp file's name — sanitised
     to its last component, and an empty/missing one still works.
     """
-    name = Path(file.filename or "").name or "project.vae"
-    tmp = WORKDIR / f"_import_{name}"
+    name = Path(_client_filename(file.filename) or "").name or "project.vae"
+    # Unique per request: two projects opened at once under the same name
+    # used to stream into the same temp file (QA-001).
+    tmp = WORKDIR / f"_import_{uuid.uuid4().hex[:8]}_{_safe_filename(name, 'project.vae')}"
     # The worst of the three unguarded ingresses: this one writes to WORKDIR,
     # the app's own working volume, rather than into a session that a user can
     # delete. A chunked body with no Content-Length used to walk straight past
@@ -1597,7 +1855,42 @@ def serve_sticker_image(sid: str, clip_id: str):
         # The artwork is genuinely gone (emoji cache cleared, end-card moved).
         # 404 so the client falls back to its glyph/outline rather than hanging.
         raise HTTPException(404, "sticker image missing")
-    return FileResponse(path)
+    # SEC-REBIND-127-PREFIX defence in depth: the EDL src may be ANY absolute
+    # path (add_sticker's allowlist is a no-op in the default posture), so a
+    # caller that can dispatch could otherwise read any file on the Mac through
+    # this route. Outside the session's own directory, serve only bytes that
+    # are actually a raster image (inside it, sticker_upload's own copies of
+    # any format stay servable, as /files/uploads already allows).
+    if path.resolve().is_relative_to(store.dir.resolve()):
+        return FileResponse(path)
+    media_type = _sticker_image_type(path)
+    if media_type is None:
+        raise HTTPException(404, "sticker image missing")
+    return FileResponse(path, media_type=media_type)
+
+
+_STICKER_MAGIC: tuple[tuple[bytes, int, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", 0, "image/png"),
+    (b"\xff\xd8\xff", 0, "image/jpeg"),
+    (b"GIF87a", 0, "image/gif"),
+    (b"GIF89a", 0, "image/gif"),
+    (b"WEBP", 8, "image/webp"),
+)
+
+
+def _sticker_image_type(path: Path) -> str | None:
+    """The image media type of `path` from its magic bytes, or None."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return None
+    for magic, offset, media_type in _STICKER_MAGIC:
+        if head[offset:offset + len(magic)] == magic:
+            if media_type == "image/webp" and not head.startswith(b"RIFF"):
+                continue
+            return media_type
+    return None
 
 
 @app.get("/api/sessions/{sid}/files/{kind}/{name:path}")

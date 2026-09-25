@@ -43,6 +43,7 @@
  */
 
 import { clipDuration, clipEnd, isMediaClip, type AnyClip, type EDL } from '../types'
+import { inEnableWindow } from './overlayGate'
 
 export interface LayoutClip {
   id: string
@@ -433,6 +434,19 @@ export function activeInRender(
   const w = renderWindow(seams, start, end)
   if (w.dropped) return false
   return w.start <= t && (endInclusive ? t <= w.end : t < w.end)
+}
+
+/**
+ * The overlay gate every preview layer uses (QA-016): the layout window's
+ * RENDER span, half-open `[start, end)` on the frame grid — the same rule as
+ * the export's `enable_expr`, so two abutting overlays are never both on
+ * screen on their boundary frame. A window the renderer drops never shows.
+ */
+export function activeOnFrames(
+  seams: SeamLayout[], start: number, end: number, t: number, fps: number,
+): boolean {
+  const w = renderWindow(seams, start, end)
+  return !w.dropped && inEnableWindow(w.start, w.end, t, fps)
 }
 
 /**

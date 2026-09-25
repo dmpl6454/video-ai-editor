@@ -59,13 +59,30 @@ class Job:
         }
 
 
-class JobManager:
-    """Single global instance. Submit jobs, poll status, retain N completed."""
+#: Job kinds that run on their own worker pool instead of the render pool.
+#: An import is the first thing a user does and it must never wait behind two
+#: running exports (UPLOAD-QUEUES-BEHIND-EXPORT: with the shared 2-worker pool
+#: an upload?wait=0 sat 'queued' for the whole length of both exports).
+_LANE_OF_KIND: dict[str, str] = {"upload": "ingest"}
 
-    def __init__(self, *, workers: int = 2, retain_completed: int = 200):
+
+class JobManager:
+    """Single global instance. Submit jobs, poll status, retain N completed.
+
+    Jobs share one registry (get/list/cancel see every job) but not one pool:
+    kinds listed in `_LANE_OF_KIND` run on the lane named there when
+    `lane_workers` provides one, everything else on the render pool."""
+
+    def __init__(self, *, workers: int = 2, retain_completed: int = 200,
+                 lane_workers: dict[str, int] | None = None):
         self._executor = ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="vai-job"
         )
+        self._lanes: dict[str, ThreadPoolExecutor] = {
+            name: ThreadPoolExecutor(max_workers=max(1, int(n)),
+                                     thread_name_prefix=f"vai-{name}")
+            for name, n in (lane_workers or {}).items()
+        }
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._lock = threading.Lock()
         self._retain = retain_completed
@@ -128,8 +145,12 @@ class JobManager:
                         job.error = f"{type(e).__name__}: {e}"
                     job.completed_at = time.time()
 
-        job._future = self._executor.submit(_run)
+        job._future = self._executor_for(kind).submit(_run)
         return job
+
+    def _executor_for(self, kind: str) -> ThreadPoolExecutor:
+        lane = _LANE_OF_KIND.get(kind)
+        return self._lanes.get(lane, self._executor) if lane else self._executor
 
     def cancel(self, job_id: str) -> Job | None:
         """Signal a job to stop. A running job's fn observes `cancel_event` and
@@ -177,10 +198,13 @@ class JobManager:
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting new jobs; drain in-flight if `wait`."""
         self._executor.shutdown(wait=wait)
+        for lane in self._lanes.values():
+            lane.shutdown(wait=wait)
 
 
 # Singleton — the rest of the codebase imports this directly.
 JOB_MANAGER = JobManager(
     workers=int(os.environ.get("VAI_JOB_WORKERS", "2")),
+    lane_workers={"ingest": int(os.environ.get("VAI_INGEST_WORKERS", "2"))},
     retain_completed=int(os.environ.get("VAI_JOB_RETAIN", "200")),
 )

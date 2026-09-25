@@ -5,8 +5,10 @@ work baked in (scale + transform + effects + speed + mask). The result is
 cached by a content fingerprint, so editing one clip only re-renders THAT
 clip — the timeline assembly + overlays + audio mix is then a fast concat.
 
-The cache is keyed on the clip itself + canvas dims + fps + encoder args
-so previews and exports get separate (matched-quality) chunks.
+The cache is keyed on the clip itself + the IDENTITY of the file it plays
+(size, mtime, inode — `file_identity`) + canvas dims + fps + encoder args, so
+previews and exports get separate (matched-quality) chunks and a file replaced
+at the same path is never served stale.
 
 Caveats:
 - xfade transitions span two clips; chunks are independent so we fall back
@@ -15,6 +17,7 @@ Caveats:
   reused across the two qualities.
 """
 from __future__ import annotations
+import contextvars
 import hashlib
 import json
 import os
@@ -73,9 +76,27 @@ def _canonical(obj):
     return obj
 
 
+def file_identity(path: str | os.PathLike) -> list[int] | None:
+    """[size, mtime_ns, inode] of the file a clip plays, or None if missing.
+
+    QA-001: the chunk key used to hold only ``str(c.src)``, so a file replaced
+    in place at the same path (two uploads whose names sanitised alike used to
+    do exactly that) kept serving the OLD footage from a cached chunk in the
+    preview while the export, which re-reads the file, showed the new one.
+    Keying on what is actually on disk makes a replaced file a cache miss.
+    A stat is microseconds; hashing the content would cost a full read of
+    every clip on every preview."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [int(st.st_size), int(st.st_mtime_ns), int(st.st_ino)]
+
+
 def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
                      encoder_args: list[str]) -> str:
     payload = {
+        "file": file_identity(c.src),
         # RENDER_BEHAVIOR_VERSION (edl/schema.py) is shared with EDL.hash()
         # and the video-only fingerprint — one salt for every render cache,
         # bumped whenever the same clip fields would render to different
@@ -155,20 +176,37 @@ def render_clip_to_chunk(
     build_video_chain: Callable[..., str],
     build_audio_chain: Callable[..., str],
     cache_dir: Path | None = None,
+    streams: str = "av",
+    audio_codec_args: list[str] | None = None,
 ) -> None:
-    """Run a standalone ffmpeg invocation that produces this clip's chunk."""
+    """Run a standalone ffmpeg invocation that produces this clip's chunk.
+
+    `streams` is "av" (a normal chunk), "v" (picture only) or "a" (sound
+    only). The single-stream forms exist so render.segments can build a LONG
+    clip's chunk from cached picture segments plus one sound render (QA-005)
+    through exactly this recipe, rather than a copy of it. `audio_codec_args`
+    replaces the AAC codec args (segments.py stores a segmented chunk's sound
+    losslessly: chunks are ffmpeg-only intermediates, re-encoded to AAC by
+    every assembly path)."""
+    if streams not in ("av", "v", "a"):
+        raise ValueError(f"streams must be 'av', 'v' or 'a', not {streams!r}")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    inputs = ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", str(c.src)]
+    # Frame-exact trim (QA-002): half-frame seek pre-roll + an exact frame
+    # count from the chain, never a float `-ss/-to` that rounds each chunk up
+    # a frame. The same input recipe the monolithic renderer uses.
+    from .compositor import clip_input_args
+    from ..edl import timebase as _tb
+    inputs = clip_input_args(c, fps)
     extras: list[str] = []
 
     v_chain = build_video_chain(
         c, input_label="[0:v]", label_out="[v]",
-        canvas_w=canvas_w, canvas_h=canvas_h,
-    )
+        canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
+    ) if "v" in streams else ""
 
     # Mask: same alphamerge pattern as the monolithic renderer
     v_label = "[v]"
-    if c.mask is not None and cache_dir is not None:
+    if c.mask is not None and cache_dir is not None and "v" in streams:
         from .effects import render_mask_png, mask_png_is_valid
         mask_path = cache_dir / f"mask_{c.id}_{c.mask.type}_{int(c.mask.feather)}_{canvas_w}x{canvas_h}.png"
         if not mask_png_is_valid(mask_path):
@@ -176,22 +214,24 @@ def render_clip_to_chunk(
         extras += ["-i", str(mask_path)]
         v_chain += (
             f";[v][1:v]alphamerge,format=yuva420p[vmrgba];"
-            f"color=c=black:s={canvas_w}x{canvas_h}:r={fps}[bg];"
+            f"color=c=black:s={canvas_w}x{canvas_h}:r={_tb.ffmpeg_rate(fps)}[bg];"
             f"[bg][vmrgba]overlay=format=auto:shortest=1[vm]"
         )
         v_label = "[vm]"
 
-    a_chain = build_audio_chain(c, input_label="[0:a]", label_out="[a]")
-    fc = f"{v_chain};{a_chain}"
+    a_chain = (build_audio_chain(c, input_label="[0:a]", label_out="[a]", fps=fps)
+               if "a" in streams else "")
+    fc = ";".join(x for x in (v_chain, a_chain) if x)
+    v_args = (["-map", v_label, "-r", _tb.ffmpeg_rate(fps), *encoder_args]
+              if "v" in streams else ["-vn"])
+    # Pin AAC output rate/channels so the encoder never hits EINVAL
+    # (-22) on a negotiated PCM layout. See compositor._AAC_OUT.
+    a_codec = audio_codec_args or ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+    a_args = ["-map", "[a]", *a_codec] if "a" in streams else ["-an"]
 
     args = [_pu.FFMPEG, "-y", *inputs, *extras,
             "-filter_complex", fc,
-            "-map", v_label, "-map", "[a]",
-            "-r", str(fps),
-            *encoder_args,
-            # Pin AAC output rate/channels so the encoder never hits EINVAL
-            # (-22) on a negotiated PCM layout. See compositor._AAC_OUT.
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            *v_args, *a_args,
             "-movflags", "+faststart",
             # Stage, then swap. This was the ONLY mp4 writer in the render
             # pipeline that wrote straight to its final path, and here the final
@@ -203,9 +243,12 @@ def render_clip_to_chunk(
             # validity check could tell, because the file genuinely is valid.
             str(tmp := _pu.part_path(dst))]
     try:
-        proc = subprocess.run(args, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              **_pu.SUBPROCESS_FLAGS)
+        # subprocess.run unless a superseded-preview scope is active, in which
+        # case the chunk's ffmpeg is terminated early (render.cancel, QA-004).
+        from .cancel import run as _cancellable_run
+        proc = _cancellable_run(args, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
+                                **_pu.SUBPROCESS_FLAGS)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -227,8 +270,13 @@ def get_or_build_chunks(
     encoder_args: list[str],
     build_video_chain: Callable[..., str],
     build_audio_chain: Callable[..., str],
+    segment: bool = False,
 ) -> list[Path]:
     """Return one cached chunk path per clip; render any that are missing.
+
+    `segment=True` (previews) builds a missing chunk of a LONG eligible clip
+    from cached picture segments (render.segments, QA-005) instead of one
+    whole-clip render; the chunk and its key are the same either way.
 
     Missing chunks render in parallel across the P-cores — on a cold multi-clip
     timeline this is the difference between "8 clips × 0.5s = 4s serial" and
@@ -252,6 +300,19 @@ def get_or_build_chunks(
 
     def _build(item: tuple[int, Clip, Path]) -> None:
         _, clip, dst = item
+        if segment:
+            from .segments import build_segmented_chunk, segment_bounds
+            spans = segment_bounds(clip, fps)
+            if spans:
+                build_segmented_chunk(
+                    clip, spans, dst=dst,
+                    canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
+                    encoder_args=encoder_args,
+                    build_video_chain=build_video_chain,
+                    build_audio_chain=build_audio_chain,
+                    cache_dir=cache_dir,
+                )
+                return
         render_clip_to_chunk(
             clip, dst=dst,
             canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
@@ -272,7 +333,11 @@ def get_or_build_chunks(
             # list() forces every future to resolve and re-raises the first
             # exception so a failed chunk still surfaces (caller falls back to
             # the monolithic render).
-            list(ex.map(_build, to_build))
+            # Each task runs in a COPY of the caller's context: pool threads
+            # do not inherit context variables, and render.cancel's
+            # superseded-preview scope must reach every chunk's ffmpeg.
+            ctxs = [contextvars.copy_context() for _ in to_build]
+            list(ex.map(lambda cx, it: cx.run(_build, it), ctxs, to_build))
 
     evict_old_chunks(cache_dir, keep=200)
     return chunk_paths

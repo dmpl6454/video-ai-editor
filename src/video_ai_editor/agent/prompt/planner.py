@@ -32,12 +32,14 @@ Composition rules (§2.5), each with the reason it exists:
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Iterable
 
 from . import grammar as G
 from . import slots as S
 from .facts import TimelineFacts
+from .langs import needs_translation
 from .expanders import EXPANDERS, audit_expansion, estimate_seconds, expand_auto_edit, step_cost
 from .recipes import (ASK, REASK_PREFIX, RECIPE_BY_NAME, Context, Expansion, Intent, consumes_answer,
                       dropped_note, is_blank_answer, normalize_slots, placeholder, pc, reask, was_reasked)
@@ -52,8 +54,9 @@ CUT_RECIPES: frozenset[str] = frozenset({"tighten", "remove_silences", "remove_f
 RECIPE_ORDER: tuple[str, ...] = (
     "transcribe", "trim", "speed", "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten",
     "shorts", "color_look", "transitions", "reframe", "captions", "translate_captions", "hook", "title",
-    "brand", "end_card", "voiceover", "music", "duck", "beat_sync", "clean_audio", "loudness",
-    "export_preset", "_audit", "ask",
+    "brand", "end_card", "voiceover", "remove_music", "music", "duck", "beat_sync", "fit_music", "fade", "volume",
+    "mute",
+    "clean_audio", "loudness", "export_preset", "_audit", "preview", "ask",
 )
 
 #: Tools the feature gate never blocks (see module docstring).
@@ -69,6 +72,9 @@ _TITLES: dict[str, str] = {
     "speed": "Speed", "trim": "Trim", "title": "Title", "brand": "Brand kit", "end_card": "End card",
     "transitions": "Transitions", "export_preset": "Export preset", "voiceover": "Voiceover",
     "stabilize": "Stabilise", "upscale": "Upscale", "auto_edit": "Auto edit", "ask": "Question",
+    "fade": "Fade", "volume": "Volume", "mute": "Mute", "fit_music": "Fit music", "audit": "Audit",
+    "remove_music": "Remove music",
+    "_audit": "Audit", "preview": "Preview",
 }
 
 
@@ -109,7 +115,10 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots) -> dict[str, Any]:
     if r == "music":
         return {"mood": c.mood or w.mood, "_replace": c.replace_existing}
     if r == "duck":
-        return {"_mood": w.mood}
+        # QA-031: the negation lives in the clause ("turn off ducking").
+        return {"_mood": w.mood, "enabled": False if G.duck_off(hit.clause) else None}
+    if r in ("fade", "volume", "mute", "fit_music"):
+        return _level_slots(r, hit.clause, c)
     if r == "beat_sync":
         return {"_mood": w.mood}
     if r == "hook":
@@ -117,6 +126,12 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots) -> dict[str, Any]:
         return {"text": q0, "duration_s": dur}
     if r == "color_look":
         return {"look": c.look or w.look}
+    if r == "loudness" and lufs is None and not platform:
+        # "turn the volume down" / "make it louder": a direction, relative to
+        # the current target — it used to set the SAME target (a no-op that
+        # still verified) whichever way the user asked.
+        down, up = bool(_LOUD_DOWN_RE.search(hit.clause)), bool(_LOUD_UP_RE.search(hit.clause))
+        return {"_change": "down" if down and not up else ("up" if up and not down else None)}
     if r in ("clean_audio", "loudness"):
         return {"lufs": lufs, "_platform": platform}
     if r == "speed":
@@ -162,7 +177,106 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots) -> dict[str, Any]:
     return {}
 
 
+_MUSIC_WORD_RE = re.compile(r"\b(?:music|song|track|bed|bgm|soundtrack|tune|score)\b")
+_VOICE_WORD_RE = re.compile(r"\b(?:voice|vocals?|speech|dialogue|narration|original (?:audio|sound)|clip audio|"
+                            r"video (?:audio|sound)|audio|sound|video|clips?|footage)\b")
+#: "-20 dB", "to -20db", "at minus 12 dB" (absolute) / "by 6 dB" (a change).
+_DB_RE = re.compile(r"(?:(?P<by>\bby\s+)|(?:\b(?:to|at)\s+))?(?P<sign>-|minus\s+|\+|plus\s+)?(?P<n>\d+(?:\.\d+)?)\s*d\s?b\b")
+#: "to 50%" (absolute: 100 % is the source's own level, as in CapCut) / "by 30%".
+_PCT_RE = re.compile(r"(?P<by>\bby\s+)?(?P<n>\d+(?:\.\d+)?)\s*(?:%|percent\b)")
+_DOWN_RE = re.compile(r"\b(?:down|lower|quieter|softer|reduce|decrease|drop|too loud|too high|less"
+                      r"|kam|dheere|dheema|dheemi|halka|halki)\b")
+_UP_RE = re.compile(r"\b(?:up|louder|raise|increase|boost|higher|too quiet|too soft|too low|more"
+                    r"|zyada|jyada|tez|badha\w*)\b")
+_LOUD_DOWN_RE = re.compile(r"\b(?:down|lower|quieter|softer|reduce|decrease|too loud|kam)\b")
+_LOUD_UP_RE = re.compile(r"\b(?:up|louder|raise|increase|boost|too quiet|too soft|zyada|jyada|tez)\b")
+#: One "fade" and the words after it: the FIRST direction word names that
+#: fade's edge — "fade out the music in the last 2 seconds" is a fade OUT
+#: (the "in" is a preposition), "fade the music in" a fade IN.
+_FADE_WORD_RE = re.compile(r"\bfade(?:s|d)?(?:[- ]?(?P<fused>ins?|outs?|up|down))?\b(?P<tail>(?:\s+[\w'-]+){0,5})")
+_FADE_DIR = {"in": "in", "ins": "in", "up": "in", "out": "out", "outs": "out", "down": "out", "away": "out"}
+_FADE_START_RE = re.compile(r"\bfrom black\b|\bfade\b.*\b(?:start|beginning|intro|opening)\b")
+_FADE_END_RE = re.compile(r"\bto black\b|\bfade\b.*\b(?:end|ending|outro|close)\b")
+
+
+def _fade_edges(clause: str) -> set[str]:
+    """The edges ("in" / "out") a fade clause names, from the first direction
+    word after each "fade"; "in and out" names both."""
+    edges: set[str] = set()
+    for m in _FADE_WORD_RE.finditer(clause):
+        if m.group("fused"):
+            edges.add(_FADE_DIR[m.group("fused")])
+            continue
+        for word in m.group("tail").split():
+            if word in _FADE_DIR:
+                edges.add(_FADE_DIR[word])
+                break
+    if re.search(r"\bin (?:and|&|/) ?out\b|\bin/out\b", clause):
+        edges |= {"in", "out"}
+    if not edges:
+        if _FADE_START_RE.search(clause):
+            edges.add("in")
+        if _FADE_END_RE.search(clause):
+            edges.add("out")
+    return edges
+
+
+def _volume_slots(clause: str, music: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"target": "music" if music or not _VOICE_WORD_RE.search(clause) else "voice"}
+    down, up = bool(_DOWN_RE.search(clause)), bool(_UP_RE.search(clause))
+    change = "down" if down and not up else ("up" if up and not down else None)
+    m = _DB_RE.search(clause)
+    pct = _PCT_RE.search(clause)
+    if m:
+        n = float(m.group("n"))
+        negative = (m.group("sign") or "").strip() in ("-", "minus")
+        if m.group("by"):
+            out["_delta_db"] = n
+            out["change"] = change or "down"
+        else:
+            out["db"] = -n if negative or (change == "down" and n > 0 and not m.group("sign")) else n
+    elif pct and float(pct.group("n")) > 0:
+        n = float(pct.group("n"))
+        if pct.group("by"):
+            ratio = 1.0 - n / 100.0 if (change or "down") == "down" else 1.0 + n / 100.0
+            out["_delta_db"] = round(abs(20.0 * math.log10(max(ratio, 0.01))), 1)
+            out["change"] = change or "down"
+        else:
+            out["db"] = round(20.0 * math.log10(n / 100.0), 1)
+    else:
+        out["change"] = change or "down"
+    return out
+
+
+def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
+    """Slots for the QA-018 one-liners, read from the clause text: which bed
+    (music vs the programme's own sound), which edge of a fade, a level in dB
+    or a direction, and a mute/unmute."""
+    music = bool(_MUSIC_WORD_RE.search(clause))
+    if r == "fit_music":
+        return {"duration_s": c.duration_s or (c.range.end if c.range and c.range.kind == "last" else None)}
+    if r == "mute":
+        return {"target": "music" if music or not _VOICE_WORD_RE.search(clause) else "voice",
+                "muted": not re.search(r"\bunmute|\bturn (?:the )?\w* ?(?:back )?on\b|\b(?:chalu|on) (?:karo|kar do|kardo|do)\b",
+                                       clause)}
+    if r == "volume":
+        return _volume_slots(clause, music)
+    # fade
+    target = "music" if music else ("audio" if re.search(r"\b(?:audio|sound|voice)\b", clause) else "video")
+    edges = _fade_edges(clause)
+    edge = "both" if len(edges) != 1 else next(iter(edges))
+    if not edges:
+        edge = "out" if (music or c.at_end) else ("in" if c.at_start else "both")
+    dur = c.duration_s
+    if dur is None and c.range is not None and c.range.kind in ("first", "last"):
+        dur = c.range.end if c.range.kind == "first" else (c.range.end or c.range.start)
+    return {"target": target, "edge": edge, "duration_s": dur, "clip_ref": c.clip_ref}
+
+
 def bind(hit: G.IntentHit, whole: S.Slots) -> Intent:
+    if hit.intent == "audit":
+        # "... then audit it": the recipe table's own final audit (stage 12).
+        return Intent("_audit", {}, score=hit.score, clause=hit.clause)
     raw = {k: v for k, v in _hit_slots(hit, whole).items() if v not in (None, (), "")}
     return Intent(hit.intent, normalize_slots(hit.intent, raw) if hit.intent in RECIPE_BY_NAME else raw,
                   score=hit.score, clause=hit.clause)
@@ -172,6 +286,19 @@ def bind(hit: G.IntentHit, whole: S.Slots) -> Intent:
 # 2. compose
 # --------------------------------------------------------------------------
 
+def _merge_fades(a: dict[str, Any], b: dict[str, Any], merged: dict[str, Any]) -> dict[str, Any]:
+    """Two fade clauses ("add a fade in and a fade out", "fade in the video
+    and fade out the music") are ONE fade recipe: the edges add up instead of
+    the later clause replacing the earlier (which dropped the fade in). A
+    music fade next to a picture fade rides along as `_music_edge`."""
+    ta, tb = a.get("target") or "video", b.get("target") or "video"
+    if (ta == "music") == (tb == "music"):
+        edges = {e for s in (a, b) for e in ({"in", "out"} if s.get("edge") in (None, "both") else {s["edge"]})}
+        return {**merged, "edge": "both" if len(edges) == 2 else next(iter(edges))}
+    pic, mus = (b, a) if ta == "music" else (a, b)
+    return {**pic, "_music_edge": mus.get("edge") or "out", "_music_duration_s": mus.get("duration_s")}
+
+
 def _merge_intents(intents: Iterable[Intent]) -> list[Intent]:
     """One Intent per recipe; later non-empty slot values win."""
     by_name: dict[str, Intent] = {}
@@ -180,6 +307,8 @@ def _merge_intents(intents: Iterable[Intent]) -> list[Intent]:
         if it.recipe in by_name:
             prev = by_name[it.recipe]
             merged = {**prev.slots, **{k: v for k, v in it.slots.items() if v not in (None, (), "")}}
+            if it.recipe == "fade":
+                merged = _merge_fades(prev.slots, it.slots, merged)
             by_name[it.recipe] = Intent(it.recipe, merged, max(prev.score, it.score), prev.clause or it.clause)
         else:
             by_name[it.recipe] = it
@@ -364,9 +493,12 @@ def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozense
     questions = _cap_questions(front + questions)
 
     postconditions = _dedupe_postconditions(postconditions)
-    recipes_in = [it.recipe for it in ordered if it.recipe not in ("_audit",)]
+    recipes_in = [it.recipe for it in ordered if it.recipe not in ("_audit",)] or \
+        [it.recipe for it in ordered if it.recipe == "_audit"]
     headline = "auto_edit" if any(i.recipe == "auto_edit" for i in intents) else "+".join(recipes_in)
-    title = " · ".join(_TITLES.get(r, r) for r in ([headline] if headline == "auto_edit" else recipes_in))[:80]
+    titles = {**_TITLES, **{it.recipe: "Ducking off" for it in ordered
+                            if it.recipe == "duck" and it.get("enabled") is False}}
+    title = " · ".join(titles.get(r, r) for r in ([headline] if headline == "auto_edit" else recipes_in))[:80]
     reply_parts = ([reply_prefix] if reply_prefix else []) + notes
     reply = "; ".join(dict.fromkeys(p for p in reply_parts if p))[:400] or None
     return Plan.new(intent=headline[:64] or "noop", brain=brain, steps=steps, needs_input=questions,
@@ -390,12 +522,21 @@ def _step_weight(s: Step, facts: TimelineFacts) -> float:
 
 
 def _cap_questions(questions: list[NeedsInput]) -> list[NeedsInput]:
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     uniq: list[NeedsInput] = []
     for q in questions:
         if q.key in seen:
+            # QA-032: a brain's draft question with a BLANK default (Apple
+            # Intelligence sent `default_value: ""` for `handle`) used to shadow
+            # the recipe's blocking one — nothing paused and `$ask:handle`
+            # was burned into the video. The question that will actually get
+            # an answer wins.
+            i = seen[q.key]
+            prev = uniq[i]
+            if q.pauses and not prev.pauses and is_blank_answer(prev.default):
+                uniq[i] = q
             continue
-        seen.add(q.key)
+        seen[q.key] = len(uniq)
         uniq.append(q)
     if len(uniq) <= MAX_QUESTIONS:
         return uniq
@@ -514,12 +655,30 @@ def without_downloads(p: Plan, facts: TimelineFacts) -> Plan:
             if not facts.is_cached(f"whisper:{model}"):
                 args["model"] = facts.whisper_cached_best()
                 notes.append(f"{s.tool} uses the {args['model']} model ({model} not downloaded)")
-            if s.tool == "auto_caption" and args.get("target") in ("hi", "hinglish", "es") and not facts.is_cached("madlad"):
-                notes.append(f"captions stay in the spoken language ({args['target']} translation model not downloaded)")
+            spoken = args.get("language") or facts.spoken_language or facts.language
+            target = args.get("target")
+            if (s.tool == "auto_caption" and target in ("hi", "hinglish", "es") and not facts.is_cached("madlad")
+                    and needs_translation(target, spoken) is not False):
                 args.pop("target")
+                if target == "hinglish":
+                    # QA-043: never Devanagari when Hinglish was asked. The
+                    # captions come out in the spoken language and a
+                    # transliteration pass follows: Hindi → Latin with the
+                    # bundled romaniser; any other language is refused by the
+                    # executor's guard (it would need the skipped model).
+                    steps.append(s.model_copy(update={"args": args}))
+                    steps.append(s.model_copy(update={
+                        "tool": "translate_captions", "args": {"target_lang": "hinglish"},
+                        "why": "Hindi → Latin script (romanise, no model)", "optional": False}))
+                    notes.append("Hinglish by transliteration if the speech is Hindi (translation model skipped)")
+                    continue
+                notes.append(f"captions stay in the spoken language ({target} translation model not downloaded)")
         elif s.tool == "translate_captions" and not facts.is_cached("madlad"):
-            notes.append("translation skipped (model not downloaded)")
-            continue
+            need = needs_translation(args.get("target_lang"), args.get("source_lang"))
+            hinglish_unknown = str(args.get("target_lang") or "").lower() == "hinglish" and need is None
+            if need is not False and not hinglish_unknown:
+                notes.append("translation skipped (model not downloaded)")
+                continue
         elif s.tool == "tts_voiceover":
             voice = str(args.get("voice") or "en_US-amy-medium")
             if not facts.is_cached(f"piper:{voice}"):
@@ -532,10 +691,9 @@ def without_downloads(p: Plan, facts: TimelineFacts) -> Plan:
                 args["voice"] = cached
                 notes.append(f"voiceover uses the {cached} voice ({voice} not downloaded)")
         steps.append(s.model_copy(update={"args": args}))
-    dropped_tools = {s.tool for s in p.steps} - {s.tool for s in steps}
-    pcs = [c for c in p.postconditions
-           if not (c.check == "captions_language" and ("translate_captions" in dropped_tools
-                                                        or not any(s.args.get("target") for s in steps if s.tool == "auto_caption")))]
+    keeps_language = any(st.tool == "translate_captions" or (st.tool == "auto_caption" and st.args.get("target"))
+                         for st in steps)
+    pcs = [c for c in p.postconditions if not (c.check == "captions_language" and not keeps_language)]
     reply = "; ".join(dict.fromkeys([*(p.reply.split("; ") if p.reply else []), *notes]))[:400] or None
     return p.with_(steps=steps, postconditions=pcs, downloads_needed=[], reply=reply,
                    needs_input=[q for q in p.needs_input if q.key != "downloads"])

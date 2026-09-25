@@ -160,25 +160,8 @@ def build_audio_mix(
             music_mix_label = "[music_mix]"
             parts.append(f"{''.join(music_labels)}amix=inputs={len(music_labels)}:duration=longest:dropout_transition=0:normalize=0{music_mix_label}")
 
-    # Apply ducking to music if requested
-    if music_mix_label and music_track and music_track.duck:
-        ducked = "[music_ducked]"
-        # Sidechain compressor: music as input, main_audio as sidechain key.
-        # Music gets attenuated whenever the main (speech) audio is above threshold.
-        # The main audio is duplicated upstream because sidechaincompress consumes
-        # its sidechain input — we tee it via asplit so we can still mix it later.
-        # NOTE: ffmpeg 8 dropped the `makeup` parameter name; use defaults.
-        parts.append(
-            f"{main_audio_label}asplit=2[main_for_mix][main_for_sc];"
-            f"{music_mix_label}[main_for_sc]"
-            f"sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400"
-            f"{ducked}"
-        )
-        music_mix_label = ducked
-        # Replace main audio label so the final mix uses the tee'd copy.
-        main_audio_label = "[main_for_mix]"
-
-    # Mix voiceover clips → [vo_mix]
+    # Mix voiceover + plain audio-lane clips → [vo_mix]. Built BEFORE the duck
+    # stage because it is part of the duck key (QA-029).
     vo_mix_label: str | None = None
     if vo_labels:
         if len(vo_labels) == 1:
@@ -186,6 +169,37 @@ def build_audio_mix(
         else:
             vo_mix_label = "[vo_mix]"
             parts.append(f"{''.join(vo_labels)}amix=inputs={len(vo_labels)}:duration=longest:dropout_transition=0:normalize=0{vo_mix_label}")
+
+    # Apply ducking to music if requested
+    if music_mix_label and music_track and music_track.duck:
+        ducked = "[music_ducked]"
+        # Sidechain compressor: music as input, EVERY speech-bearing lane as
+        # the key — v1 (+ folded PiP audio) AND the voiceover / a1 audio
+        # lanes. QA-029: the key used to be v1 only, so the textbook case (a
+        # bed under a voiceover) never ducked at all: the VO was mixed in
+        # after sidechaincompress and never reached its key. (MusicDuck
+        # .track_ref is still not read — "duck under all speech" is what the
+        # UI's "Duck under speech" checkbox promises.)
+        # Each keyed stream is tee'd via asplit because sidechaincompress
+        # consumes its sidechain input and the stream is still mixed below.
+        # NOTE: ffmpeg 8 dropped the `makeup` parameter name; use defaults.
+        key = "[main_for_sc]"
+        parts.append(f"{main_audio_label}asplit=2[main_for_mix][main_for_sc]")
+        main_audio_label = "[main_for_mix]"
+        if vo_mix_label:
+            parts.append(f"{vo_mix_label}asplit=2[vo_for_mix][vo_for_sc]")
+            vo_mix_label = "[vo_for_mix]"
+            # duration=first: the key must span the main audio, which spans
+            # the timeline; normalize=0 so a quiet VO is not halved.
+            parts.append("[main_for_sc][vo_for_sc]amix=inputs=2:duration=first:"
+                         "dropout_transition=0:normalize=0[duck_key]")
+            key = "[duck_key]"
+        parts.append(
+            f"{music_mix_label}{key}"
+            f"sidechaincompress=threshold=0.05:ratio=8:attack=5:release=400"
+            f"{ducked}"
+        )
+        music_mix_label = ducked
 
     # Final mix: [main] + [music] + [vo]
     final_inputs = [main_audio_label]
@@ -213,6 +227,10 @@ def build_audio_mix(
         return ";".join(parts), extra_inputs, final_inputs[0]
     parts.append(
         f"{''.join(final_inputs)}amix=inputs={len(final_inputs)}:duration=first:dropout_transition=0:normalize=0"
-        f"{norm_chain},alimiter=limit=0.97{out_label}"
+        # `latency=1`: alimiter looks ahead by its 5 ms attack and, without
+        # compensation, DELAYS everything it passes by that much — every
+        # timeline with a music or VO lane played 5 ms late against the
+        # picture (measured on a VO click placed on a flash; QA-002 lane).
+        f"{norm_chain},alimiter=limit=0.97:latency=1{out_label}"
     )
     return ";".join(parts), extra_inputs, out_label

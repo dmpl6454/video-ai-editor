@@ -12,6 +12,7 @@ emoji entirely on non-Mac systems.
 from __future__ import annotations
 import hashlib
 import logging
+import math
 import os
 import re
 import threading
@@ -23,7 +24,9 @@ from ..edl import EDL
 from ..edl.schema import TextClip, Sticker
 from ..edl.keyframes import is_keyframed, sample, to_ffmpeg_expr
 from .. import platformutil as _pu
+from ..edl import timebase
 from . import clock
+from . import shaping as _shaping
 
 
 def _png_is_valid(p: Path) -> bool:
@@ -544,8 +547,14 @@ def resolve_anchor_overrides(c: TextClip, role: str,
         return None, None
 
     def _explicit(v: object, sentinels: tuple[float, ...]) -> float | None:
+        kfs = (v.get("keyframes") if isinstance(v, dict)
+               else getattr(v, "keyframes", None))
+        if kfs is not None and len(kfs) == 1:
+            # A DEGENERATE one-key list is a constant someone set on purpose
+            # (add_keyframe's first key): honour it, never a sentinel.
+            return float(kfs[0][1])
         if not isinstance(v, (int, float)):
-            return None  # keyframed / missing
+            return None  # animated (>= 2 keys — the xform path) / missing
         f = float(v)
         for s in sentinels:
             if abs(f - s) < 0.5:  # canvas px; rescale float noise tolerance
@@ -592,21 +601,133 @@ def resolve_opacity_override(c: TextClip) -> float | None:
     return None if f >= 0.999 else f
 
 
-def _cap_band_mid(draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont) -> float:
-    """Vertical middle of the cap band, as an offset from the y passed to
-    `draw.text()` (Pillow's default 'la' anchor = the ascender top).
+# ---- THE SHARED TEXT LAYOUT MODEL (QA-015) ----------------------------------
+#
+# Preview (frontend/src/lib/textLayout.ts, drawn by TextLayer.tsx) and export
+# (this module) used to lay text out by two different rules, so text landed
+# 20-50 px apart and the export outline was about twice as heavy:
+#   * vertical — the server stacked (size+8)-px line boxes and drew from
+#     Pillow's ASCENDER TOP, the client centred an em box (textBaseline
+#     'middle') at 1.15 x size: the ink sat 18 px lower in the export at
+#     size 120, more for bigger text and for multi-line blocks;
+#   * role anchors — the client had its own table (label at the TOP, 'lower'
+#     at 0.78 h, captions measured up from the bottom) while the export used
+#     `_y_for_role`;
+#   * outline — Pillow's `stroke_width` grows the glyph OUTWARD by the full
+#     width, canvas `lineWidth` is centred on the path so only half of it
+#     shows outside the fill; and the shadow was a hard offset copy here but a
+#     blurred shadowBlur there.
+#
+# ONE model now, and both sides implement it from their own font metrics:
+#   1. The block is centred on its anchor: x = transform.x or canvas centre,
+#      y = transform.y or the role anchor `_y_for_role` (the client mirrors it
+#      exactly — `serverAnchorY` used to be only a sentinel table there).
+#   2. Line i of n is centred at  y + (i - (n-1)/2) * LINE_HEIGHT_RATIO * size.
+#   3. "Centred" means the CAP BAND ('H' top to baseline) is centred on that
+#      line centre: baseline = centre - (H_top + H_bottom) / 2, each side
+#      measuring 'H' in its own rasteriser — the only common ground between
+#      an ascender-top origin and an em-box origin.
+#   4. Outline: `stroke_w` canvas px OUTSIDE the glyph edge (Pillow's
+#      semantics; the client strokes at lineWidth = 2 x stroke_w under the
+#      fill so exactly stroke_w shows).
+#   5. Shadow (roles with shadow=True): a hard copy of fill+outline, offset
+#      SHADOW_OFFSET canvas px, black at SHADOW_ALPHA — no blur on either side.
+#   6. Transform scale k multiplies every length of the block (size, outline,
+#      shadow offset, line height, wrap width); rotation turns the finished
+#      block about its anchor (clockwise, degrees).
+# `frontend/src/lib/__fixtures__/text_layout_cases.json` pins the numbers for
+# BOTH sides (tests/test_text_layout_contract.py + lib/textLayout.test.ts).
+LINE_HEIGHT_RATIO = 1.15
+SHADOW_OFFSET = (4.0, 6.0)
+SHADOW_ALPHA = 140
+WRAP_WIDTH_RATIO = 0.86
 
-    'H' stands in for the band because cap height is what the eye aligns to and
-    every font this app loads has one — including the Noto script fallbacks,
-    which are Latin-complete. Falls back to the em-box middle if the glyph is
-    missing or degenerate rather than letting a zero bbox slam every emoji to
-    the top of the line.
+#: `wght` the Noto script fallbacks (Devanagari / Arabic, both variable fonts)
+#: render at, per role. They used to render at the VF default (400) while the
+#: preview asked the browser for the role's CSS weight (700/900) — a visibly
+#: lighter export. Mirrored by `SCRIPT_WEIGHT` in lib/textLayout.ts.
+SCRIPT_FONT_WEIGHT: dict[str, int] = {
+    "super": 700, "hook": 700, "lower_third": 700, "caption": 900,
+    "label": 700, "watermark": 700, "default": 700,
+}
+
+
+def line_centers(anchor_y: float, n_lines: int, size: float) -> list[float]:
+    """Rule 2 of the shared model: each line's cap-band centre, top to bottom."""
+    lh = size * LINE_HEIGHT_RATIO
+    return [anchor_y + (i - (n_lines - 1) / 2.0) * lh for i in range(n_lines)]
+
+
+def resolve_scale_rotation(c: TextClip, role: str) -> tuple[float, float]:
+    """STATIC (scale, rotation) of a text clip: a scalar, a 1-key list's value,
+    or — for an animated property — its last key (the xform path animates it
+    per frame, so this is only what the static bake would use). Captions
+    return (1, 0): the captions block owns caption geometry, the same rule as
+    resolve_anchor_overrides. QA-036: both were accepted by add_keyframe /
+    set_property / set_clip_transform and ignored by preview and export."""
+    if role == "caption":
+        return 1.0, 0.0
+    tx = getattr(c, "transform", None)
+    if tx is None:
+        return 1.0, 0.0
+    scale = max(0.01, _scalar_or_last(getattr(tx, "scale", 1.0), 1.0))
+    rot = _scalar_or_last(getattr(tx, "rotation", 0.0), 0.0)
+    return scale, rot
+
+
+def is_xform_text(c: TextClip, role: str) -> bool:
+    """True when x / y / scale / rotation is ANIMATED (>= 2 keys): the clip
+    then renders through the per-frame transform path in build_overlay_chain
+    (QA-036) instead of a canvas-sized still. Captions never do."""
+    if role == "caption":
+        return False
+    tx = getattr(c, "transform", None)
+    return tx is not None and any(
+        is_keyframed(getattr(tx, p, None)) for p in ("x", "y", "scale", "rotation"))
+
+
+def _cap_band(font: ImageFont.FreeTypeFont) -> tuple[float, float]:
+    """(top, bottom) of the 'H' ink relative to the BASELINE (top < 0).
+
+    'H' stands in for the cap band because cap height is what the eye aligns
+    to and every font this app loads has one — including the Noto script
+    fallbacks, which are Latin-complete. Falls back to 0.7 em if the glyph is
+    missing or degenerate.
     """
     try:
-        bb = draw.textbbox((0, 0), "H", font=font)
+        bb = font.getbbox("H", anchor="ls")
     except Exception:      # pragma: no cover - a font with no 'H' at all
-        return font.size * 0.5
-    return (bb[1] + bb[3]) / 2 if bb[3] > bb[1] else font.size * 0.5
+        return -font.size * 0.7, 0.0
+    if bb[3] <= bb[1]:
+        return -font.size * 0.7, 0.0
+    return float(bb[1]), float(bb[3])
+
+
+def _cap_band_mid(draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont) -> float:
+    """Vertical middle of the cap band relative to the BASELINE (negative)."""
+    top, bottom = _cap_band(font)
+    return (top + bottom) / 2
+
+
+def _set_weight(font: ImageFont.FreeTypeFont, weight: float | None) -> None:
+    """Apply a `wght` to a variable font (no-op for a static font)."""
+    if weight is None:
+        return
+    try:
+        axes = font.get_variation_axes()
+    except Exception:
+        return
+    vals = []
+    for ax in axes:
+        name = ax.get("name")
+        if name in (b"Weight", "Weight"):
+            vals.append(max(ax["minimum"], min(ax["maximum"], float(weight))))
+        else:
+            vals.append(ax["default"])
+    try:
+        font.set_variation_by_axes(vals)
+    except Exception:
+        pass
 
 
 def _word_w(word: str, draw: ImageDraw.ImageDraw,
@@ -626,7 +747,10 @@ def _line_w(line: str, draw: ImageDraw.ImageDraw,
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
-          max_w: int, box: int = 0) -> list[str]:
+          max_w: int, box: int = 0, measure=None) -> list[str]:
+    """Greedy word wrap. `measure(line) -> px` overrides the Pillow width —
+    the shaped (complex-script) path measures SHAPED advances, which is the
+    width that is actually drawn (a conjunct is narrower than its letters)."""
     lines: list[str] = []
     for paragraph in text.splitlines():
         # Emoji become their own words so their real (box) width counts toward
@@ -641,7 +765,10 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
         cur = words[0][1]
         for glued, w in words[1:]:
             trial = f"{cur}{'' if glued else ' '}{w}"
-            width = _line_w(trial, draw, font, box) if box else draw.textlength(trial, font=font)
+            if measure is not None:
+                width = measure(trial)
+            else:
+                width = _line_w(trial, draw, font, box) if box else draw.textlength(trial, font=font)
             if width <= max_w:
                 cur = trial
             else:
@@ -649,6 +776,16 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
                 cur = w
         lines.append(cur)
     return lines
+
+
+def _paste_emoji(img: Image.Image, cluster: str, x: float, cy: float, box: int) -> None:
+    """Emoji artwork at `ink`, centred in its `box` advance and on the line's
+    cap-band centre `cy` (rule 3 — the line centre IS the cap-band middle)."""
+    ink = max(1, int(round(box * EMOJI_INK_RATIO)))
+    pad = (box - ink) / 2
+    im_e = _emoji_image(cluster, ink)
+    if im_e is not None:
+        img.alpha_composite(im_e, dest=(int(round(x + pad)), int(round(cy - ink / 2))))
 
 
 def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
@@ -663,11 +800,12 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     # None keeps the role's own default (see resolve_upper_override);
                     # an explicit bool is the caller's choice. A keyword with a
                     # None default so every existing caller is unaffected.
-                    upper: bool | None = None) -> Image.Image:
-    """Render a transparent canvas-sized PNG with text drawn for the given role.
-
-    Emoji are stripped from the text before drawing (bundled fonts have no
-    emoji glyphs and would render as boxes).
+                    upper: bool | None = None,
+                    scale: float = 1.0,
+                    rotation: float = 0.0,
+                    surface: tuple[int, int] | None = None) -> Image.Image:
+    """Render a transparent canvas-sized PNG with text drawn for the given role,
+    laid out by the SHARED text layout model above (QA-015).
 
     `fill` / `font_file` / `size` / `stroke` / `stroke_w` are per-clip
     TextStyle overrides (see resolve_style_overrides / resolve_size_override
@@ -678,18 +816,29 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
 
     `anchor_x` / `anchor_y` are per-clip Transform overrides (see
     resolve_anchor_overrides) in ABSOLUTE canvas pixels: the text block is
-    centered on the anchor. None keeps the historic layout (horizontal
-    centering; vertical role anchor via _y_for_role).
+    centered on the anchor. None keeps the role layout (horizontal centering;
+    vertical role anchor via _y_for_role).
+
+    `scale` / `rotation` are the resolved STATIC transform.scale / rotation
+    (QA-036: accepted by add_keyframe / set_property for years and never
+    drawn): the whole block scales about, and turns clockwise about, its
+    anchor. `surface` is the image size when it is not the canvas (the
+    animated-transform path renders onto a larger working surface).
 
     `opacity` is the resolved scalar transform.opacity (see
     resolve_opacity_override); it multiplies the finished image's alpha
     channel so fill, stroke and shadow all dim uniformly. None means fully
     opaque.
+
+    Complex scripts (Devanagari, Arabic, … — `shaping.needs_shaping`) are
+    SHAPED with HarfBuzz and laid out bidi-correctly (QA-003); everything else
+    keeps Pillow's basic layout.
     """
+    img_w, img_h = surface if surface is not None else (canvas_w, canvas_h)
     # Emoji are kept and composited as images below (see _emoji_image). Only a
     # string with NOTHING drawable left is an empty render.
     if not text.strip():
-        return Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        return Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
     style = ROLE_STYLES.get(role, ROLE_STYLES["default"])
     if fill is not None:
         role_alpha = style["fill"][3]
@@ -701,32 +850,71 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         style = {**style, "stroke": stroke}
     if stroke_w is not None:
         style = {**style, "stroke_w": max(0, int(round(stroke_w)))}
+    k = max(0.01, float(scale or 1.0))
+    size_px = max(1, int(round(style["size"] * k)))
+    stroke_px = max(0, int(round(style["stroke_w"] * k)))
     # Fall back to a Noto script font when the caption isn't Latin. Judged on
     # the TEXT only: emoji live in pictograph blocks that no script font
     # covers, and letting them vote pushed a plain-Latin caption with one 🔥
     # onto a Devanagari font.
     script_font = _pick_script_font(_strip_emoji(text) or text)
     chosen_font = script_font if script_font is not None else (font_file or _font_path(style["font"]))
-    font = ImageFont.truetype(str(chosen_font), style["size"])
-    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    weight = (SCRIPT_FONT_WEIGHT.get(role, SCRIPT_FONT_WEIGHT["default"])
+              if script_font is not None and script_font.name.endswith("-VF.ttf")
+              and "SC" not in script_font.name else None)
+    font = ImageFont.truetype(str(chosen_font), size_px)
+    _set_weight(font, weight)
+    img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    max_w = int(canvas_w * 0.86)
+    max_w = int(canvas_w * WRAP_WIDTH_RATIO * k)
     box = int(round(font.size * EMOJI_BOX_RATIO))
-    cap_mid = _cap_band_mid(draw, font)
     # The caps decision comes from ROLE_STYLES (or the caller's explicit
     # override), not a hardcoded role list — see resolve_upper_override.
     caps = bool(ROLE_STYLES.get(role, ROLE_STYLES["default"]).get("upper", False)) \
         if upper is None else upper
-    lines = _wrap(draw, text.upper() if caps else text, font, max_w, box)
-    line_h = font.size + 8
-    total_h = line_h * len(lines)
-    y_center = _y_for_role(role, anchor_y, canvas_h, canvas_w)
-    y_top = int(y_center - total_h / 2)
-    x_center = float(anchor_x) if anchor_x is not None else canvas_w / 2
-    for i, line in enumerate(lines):
+    body = text.upper() if caps else text
+
+    shaped = None
+    # EVERY string goes through HarfBuzz when it is available — not only the
+    # scripts that cannot render without it. The browser preview shapes all
+    # text (GPOS kerning, ligatures); Pillow's basic layout applies only the
+    # legacy `kern` table, which Inter/Montserrat do not use, so "TILTED"
+    # exported ~2 % wider with a visible L-T gap. Without the engine, Latin
+    # falls back to Pillow; text that NEEDS shaping raises ShapingUnavailable
+    # (a RuntimeError) — misspelled Hindi must never be delivered silently.
+    if _shaping.available() or _shaping.needs_shaping(body):
+        shaped = _shaping.ShapedFont(chosen_font, size_px, weight)
+        measure = (lambda s: shaped.width(s, _tokenize_emoji, box))
+        lines = _wrap(draw, body, font, max_w, box, measure=measure)
+    else:
+        lines = _wrap(draw, body, font, max_w, box)
+
+    cap_top, cap_bottom = _cap_band(font)
+    cap_mid = (cap_top + cap_bottom) / 2
+    y_anchor = _y_for_role(role, anchor_y, canvas_h, canvas_w)
+    x_anchor = float(anchor_x) if anchor_x is not None else canvas_w / 2
+    sdx, sdy = SHADOW_OFFSET[0] * k, SHADOW_OFFSET[1] * k
+    shadow_rgba = (0, 0, 0, SHADOW_ALPHA)
+    for line, cy in zip(lines, line_centers(y_anchor, len(lines), size_px)):
+        baseline = cy - cap_mid
+        if shaped is not None:
+            runs = shaped.runs(line, _tokenize_emoji, box)
+            w = sum(r.width for r in runs)
+            x = float(x_anchor - w / 2)
+            if style.get("shadow"):
+                _shaping.draw_runs(img, shaped, runs, x + sdx, baseline + sdy,
+                                   fill=shadow_rgba, stroke_w=stroke_px,
+                                   stroke_fill=shadow_rgba)
+            _shaping.draw_runs(img, shaped, runs, x, baseline, fill=style["fill"],
+                               stroke_w=stroke_px, stroke_fill=style["stroke"])
+            pen = x
+            for r in runs:
+                if r.kind == "emoji":
+                    _paste_emoji(img, r.text, pen, cy, box)
+                pen += r.width
+            continue
         w = _line_w(line, draw, font, box)
-        x = float(x_center - w / 2)
-        y = y_top + i * line_h
+        x = float(x_anchor - w / 2)
         # Walk the line's segments left to right, drawing text runs with the
         # font and pasting emoji artwork. One pass per visual layer (shadow,
         # then fill) so an emoji can't land under the next run's shadow.
@@ -737,26 +925,23 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                 if kind == "emoji":
                     cx += box
                     continue
-                draw.text((cx + 4, y + 6), chunk, font=font, fill=(0, 0, 0, 140),
-                          stroke_width=style["stroke_w"], stroke_fill=(0, 0, 0, 140))
+                draw.text((cx + sdx, baseline + sdy), chunk, font=font, anchor="ls",
+                          fill=shadow_rgba, stroke_width=stroke_px,
+                          stroke_fill=shadow_rgba)
                 cx += draw.textlength(chunk, font=font)
         cx = x
         for kind, chunk in segs:
             if kind == "emoji":
-                # Drawn at `ink`, centred in the full `box` advance — the gap is
-                # ours, not whatever margin this source's tile happens to carry.
-                ink = max(1, int(round(box * EMOJI_INK_RATIO)))
-                pad = (box - ink) / 2
-                im_e = _emoji_image(chunk, ink)
-                if im_e is not None:
-                    img.alpha_composite(
-                        im_e, dest=(int(round(cx + pad)),
-                                    int(round(y + cap_mid - ink / 2))))
+                _paste_emoji(img, chunk, cx, cy, box)
                 cx += box
                 continue
-            draw.text((cx, y), chunk, font=font, fill=style["fill"],
-                      stroke_width=style["stroke_w"], stroke_fill=style["stroke"])
+            draw.text((cx, baseline), chunk, font=font, anchor="ls", fill=style["fill"],
+                      stroke_width=stroke_px, stroke_fill=style["stroke"])
             cx += draw.textlength(chunk, font=font)
+    if abs(float(rotation or 0.0)) > 0.01:
+        # Clockwise about the anchor (PIL rotates counter-clockwise).
+        img = img.rotate(-float(rotation), resample=Image.BICUBIC,
+                         center=(x_anchor, y_anchor))
     if opacity is not None and opacity < 0.999:
         # Multiply the finished image's alpha so fill, stroke and shadow dim
         # uniformly — same pattern as the static-sticker opacity bake in
@@ -797,6 +982,8 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
     canvas = edl.canvas
     paired: list[tuple[TextClip, str, Path]] = []
     for c, role in collect_text_clips(edl):
+        if is_xform_text(c, role):
+            continue   # cache_xform_text_pngs renders these (QA-036)
         displayable = c.text.strip()
         fill, font_file = resolve_style_overrides(c, role)
         size = resolve_size_override(c)
@@ -804,6 +991,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
         anchor_x, anchor_y = resolve_anchor_overrides(c, role, canvas.w, canvas.h)
         opacity = resolve_opacity_override(c)
         caps = resolve_upper_override(c, role)
+        k_scale, rotation = resolve_scale_rotation(c, role)
         # Every override is part of the pixels, so every override is part of
         # the key — keyed on the RESOLVED values (sentinels normalize to '')
         # so a sentinel-valued clip shares its PNG with an untouched one.
@@ -823,7 +1011,7 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                    # size/opacity notes above describe. Keyed on the resolved
                    # value (not `style.upper`) so a clip that explicitly asks for
                    # its role's own default still shares the untouched clip's PNG.
-                   f"{'U' if caps else 'l'}")
+                   f"{'U' if caps else 'l'}|k{k_scale:.4f}|r{rotation:.3f}")
         key = hashlib.sha256(
             # v6: emoji moved from a fixed em-box fraction to the measured cap
             # band, so every PNG holding an emoji changed pixels. The key has no
@@ -839,7 +1027,11 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
             # v10: the caption role's anchor became portrait-aware
             # (caption_anchor_y) — a 9:16 caption PNG keyed under v9 holds the
             # old 0.84·h placement and nothing else in the key tracks it.
-            f"v10|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
+            # v11: the shared preview/export layout model (QA-015: cap-band
+            # centred lines at 1.15 x size, shadow/outline semantics), shaped
+            # complex scripts at the role weight (QA-003) and baked static
+            # scale/rotation (QA-036) — every PNG's pixels moved.
+            f"v11|{role}|{canvas.w}x{canvas.h}|{style_key}|{geo_key}|{displayable}".encode()
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
@@ -847,10 +1039,96 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                                   fill=fill, font_file=font_file,
                                   size=size, anchor_x=anchor_x, anchor_y=anchor_y,
                                   stroke=stroke, stroke_w=stroke_w,
-                                  opacity=opacity, upper=caps)
+                                  opacity=opacity, upper=caps,
+                                  scale=k_scale, rotation=rotation)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
+
+
+def _max_key_value(v, default: float = 1.0) -> float:
+    kfs = (v.get("keyframes") if isinstance(v, dict) else getattr(v, "keyframes", None)) or []
+    vals = [float(p[1]) for p in kfs]
+    return max(vals) if vals else default
+
+
+def _even(n: float) -> int:
+    v = max(2, int(round(n)))
+    return v + (v % 2)
+
+
+def cache_xform_text_pngs(edl: EDL, cache_dir: Path) -> list[dict]:
+    """Text clips whose x / y / scale / rotation is ANIMATED (QA-036), each
+    rendered as a TIGHT PNG with the block's anchor at its exact centre, so
+    build_overlay_chain can move it (overlay x/y), turn it (rotate) and size it
+    (scale, eval=frame) per frame — the same mechanism an animated sticker
+    uses. Before this, a keyframed x resolved to "no override" and the text sat
+    centred and static in both preview and export.
+
+    Returns dicts: {clip, role, png, size:(w,h) canvas px, smax, rot_kf}.
+    A keyframed scale is baked at its LARGEST key (`smax`) so the animation
+    only ever down-scales pixels; a keyframed rotation is baked upright and
+    turned by ffmpeg; static scale/rotation are baked in.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    canvas = edl.canvas
+    out: list[dict] = []
+    for c, role in collect_text_clips(edl):
+        if not is_xform_text(c, role):
+            continue
+        tx = c.transform
+        fill, font_file = resolve_style_overrides(c, role)
+        size = resolve_size_override(c)
+        stroke, stroke_w = resolve_stroke_overrides(c)
+        opacity = resolve_opacity_override(c)
+        caps = resolve_upper_override(c, role)
+        scale_kf = is_keyframed(tx.scale)
+        rot_kf = is_keyframed(tx.rotation)
+        static_scale, static_rot = resolve_scale_rotation(c, role)
+        k = max(0.01, _max_key_value(tx.scale, 1.0)) if scale_kf else static_scale
+        rot = 0.0 if rot_kf else static_rot
+        style_kw = dict(fill=fill, font_file=font_file, size=size, stroke=stroke,
+                        stroke_w=stroke_w, opacity=opacity, upper=caps)
+        key = hashlib.sha256(
+            (f"xf1|{role}|{canvas.w}x{canvas.h}|{fill or ''}|"
+             f"{font_file.name if font_file else ''}|{size}|{stroke or ''}|{stroke_w}|"
+             f"{opacity}|{caps}|{k:.4f}|{rot:.3f}|{c.text.strip()}").encode()
+        ).hexdigest()[:16]
+        png = cache_dir / f"textxf_{key}.png"
+        if not _png_is_valid(png):
+            # Probe the unscaled, upright block on a 2x-canvas surface to size
+            # the real one: its half-diagonal x k bounds the block at ANY
+            # rotation, so nothing is clipped however it is turned.
+            pw, ph = canvas.w * 2, canvas.h * 2
+            probe = render_text_png(c.text, role, canvas.w, canvas.h,
+                                    anchor_x=pw / 2, anchor_y=ph / 2,
+                                    surface=(pw, ph), **style_kw)
+            bb = probe.getbbox()
+            if bb is None:
+                continue
+            hw = max(pw / 2 - bb[0], bb[2] - pw / 2)
+            hh = max(ph / 2 - bb[1], bb[3] - ph / 2)
+            side = min(8192, _even(2 * (math.hypot(hw, hh) * k + 8)))
+            img = render_text_png(c.text, role, canvas.w, canvas.h,
+                                  anchor_x=side / 2, anchor_y=side / 2,
+                                  surface=(side, side), scale=k, rotation=rot,
+                                  **style_kw)
+            ib = img.getbbox()
+            if ib is None:
+                continue
+            ex = max(side / 2 - ib[0], ib[2] - side / 2)
+            ey = max(side / 2 - ib[1], ib[3] - side / 2)
+            cw, ch = _even(2 * ex + 2), _even(2 * ey + 2)
+            left, top = int(side / 2 - cw / 2), int(side / 2 - ch / 2)
+            _save_png_atomic(img.crop((left, top, left + cw, top + ch)), png)
+        try:
+            with Image.open(png) as im:
+                wh = im.size
+        except Exception:
+            continue
+        out.append({"clip": c, "role": role, "png": png, "size": wh,
+                    "smax": k if scale_kf else None, "rot_kf": rot_kf})
+    return out
 
 
 def collect_stickers(edl: EDL) -> list[Sticker]:
@@ -1003,7 +1281,7 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
 def _layout_window(item: dict) -> tuple[float, float]:
     """The `[start, end)` an overlay item was AUTHORED at, in layout time."""
     kind = item["kind"]
-    if kind == "anim_text":
+    if kind in ("anim_text", "xform_text"):
         tc = item["text_clip"]
         return float(tc.start), float(tc.end)
     if kind == "anim":
@@ -1023,6 +1301,93 @@ def _on_render_clock(items: list[dict], seams: clock.SeamTable) -> list[dict]:
             continue
         placed.append({**it, "rs": win[0], "re": win[1]})
     return placed
+
+
+def enable_expr(rs: float, re: float, fps: float | int | None) -> str:
+    """The ffmpeg `enable=` gate for an overlay shown over `[rs, re)`.
+
+    HALF-OPEN on frame-exact bounds (`timebase.enable_window`), never the
+    closed `between(t,rs,re)` this used to be: with `between`, two abutting
+    overlays (an SRT cue change, a title handoff) were BOTH drawn on the
+    boundary frame — QA-016. Commas are pre-escaped for a filtergraph value.
+    Shared by pip.py so every overlay lane uses the one rule.
+    """
+    lo, hi = timebase.enable_window(rs, re, fps)
+    return f"gte(t\\,{lo:.6f})*lt(t\\,{hi:.6f})"
+
+
+def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
+                      canvas, out_w: int, out_h: int, rs: float, re: float) -> list[str]:
+    """Filters for an animated-transform text clip (QA-036).
+
+    The input is the tight PNG from cache_xform_text_pngs (anchor at its
+    centre), looped and offset to `rs`, so every expression below runs on
+    clip-local time `(t - rs)` / `(T - rs)` — the same clock the keyframes are
+    authored in (clip-local, render clock). Order: opacity → fades → rotate
+    (fixed-size input, square hypot output) → per-frame scale (keyed scale
+    and/or `pop`, LAST so nothing after it sees a varying size) → overlay
+    centred on the animated anchor. Mirrored by TextLayer.tsx (textLayout).
+    """
+    tc: TextClip = item["text_clip"]
+    tx = tc.transform
+    role = item["role"]
+    a_in, a_out = item["anim_in"], item["anim_out"]
+    d = min(ANIM_DUR, max(0.1, (re - rs) * 0.4))
+    sx = out_w / max(1, canvas.w)
+    sy = out_h / max(1, canvas.h)
+    w, h = item["size"]
+    tvar = f"(t-{rs:.4f})"
+    pre = f"[ov{i}]"
+    chain = f"[{idx}:v]format=rgba,scale={_even(w * sx)}:{_even(h * sy)}"
+    if is_keyframed(getattr(tx, "opacity", None)):
+        aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{rs:.4f})")
+        chain += f",geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
+    if a_in == "fade":
+        chain += f",fade=t=in:st={rs:.3f}:d={d:.3f}:alpha=1"
+    if a_out == "fade":
+        chain += f",fade=t=out:st={re - d:.3f}:d={d:.3f}:alpha=1"
+    if item.get("rot_kf"):
+        rexpr = to_ffmpeg_expr(tx.rotation, time_var=tvar)
+        chain += (f",rotate=a='({rexpr})*PI/180':ow='hypot(iw\\,ih)'"
+                  f":oh='hypot(iw\\,ih)':c=black@0")
+    s_terms: list[str] = []
+    if item.get("smax"):
+        s_terms.append(f"(({to_ffmpeg_expr(tx.scale, time_var=tvar)})/{item['smax']:.6f})")
+    if a_in == "pop":
+        q = f"clip((t-{rs:.4f})/{d:.4f}\\,0\\,1)"
+        s_terms.append(f"if(lt({q}\\,0.7)\\,0.6+0.657*{q}\\,1.06-0.2*({q}-0.7))")
+    if a_out == "pop":
+        q = f"clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)"
+        s_terms.append(f"(1-0.4*{q})")
+    if s_terms:
+        f = "*".join(s_terms)
+        chain += (f",scale=w='max(2\\,trunc(iw*({f})/2)*2)'"
+                  f":h='max(2\\,trunc(ih*({f})/2)*2)':eval=frame")
+    parts = [chain + pre]
+
+    ax, ay = resolve_anchor_overrides(tc, role, canvas.w, canvas.h)
+    if is_keyframed(tx.x):
+        x_c = f"({to_ffmpeg_expr(tx.x, time_var=tvar)})*{sx:.6f}"
+    else:
+        x_c = f"{(ax if ax is not None else canvas.w / 2) * sx:.3f}"
+    if is_keyframed(tx.y):
+        y_c = f"({to_ffmpeg_expr(tx.y, time_var=tvar)})*{sy:.6f}"
+    else:
+        y_c = f"{_y_for_role(role, ay, canvas.h, canvas.w) * sy:.3f}"
+    off = out_h * 0.04
+    y_terms = [f"{y_c}-overlay_h/2"]
+    if a_in == "slide_up":
+        y_terms.append(f"+{off:.1f}*(1-clip((t-{rs:.4f})/{d:.4f}\\,0\\,1))")
+    elif a_in == "slide_down":
+        y_terms.append(f"-{off:.1f}*(1-clip((t-{rs:.4f})/{d:.4f}\\,0\\,1))")
+    if a_out == "slide_up":
+        y_terms.append(f"-{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
+    elif a_out == "slide_down":
+        y_terms.append(f"+{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
+    parts.append(
+        f"{cur}{pre}overlay=x='{x_c}-overlay_w/2':y='{''.join(y_terms)}'"
+        f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}")
+    return parts
 
 
 def build_overlay_chain(
@@ -1059,6 +1424,7 @@ def build_overlay_chain(
     of this flag; this only ever changes what the in-app preview looks like.
     """
     text_paired = [] if preview else cache_text_pngs(edl, cache_dir)
+    xform_texts = [] if preview else cache_xform_text_pngs(edl, cache_dir)
     static_stickers = [] if preview else cache_sticker_pngs(edl, cache_dir)
     animated_stickers = [] if preview else cache_animated_sticker_pngs(edl, cache_dir)
 
@@ -1095,6 +1461,14 @@ def build_overlay_chain(
                           "opacity": 1.0,
                           "z": zmap.get(c.id, 0),
                           "sort_start": c.start, "is_sticker": 0})
+    for xt in xform_texts:
+        c = xt["clip"]
+        items.append({"kind": "xform_text", "text_clip": c, "png": xt["png"],
+                      "role": xt["role"], "size": xt["size"], "smax": xt["smax"],
+                      "rot_kf": xt["rot_kf"],
+                      "anim_in": _anim_name(c, "anim_in"),
+                      "anim_out": _anim_name(c, "anim_out"),
+                      "z": zmap.get(c.id, 0), "sort_start": c.start, "is_sticker": 0})
     for s, png in static_stickers:
         items.append({"kind": "static", "start": s.start, "end": s.end, "png": png,
                       "opacity": 1.0, "z": zmap.get(s.id, 0),
@@ -1162,6 +1536,13 @@ def build_overlay_chain(
             dur = max(0.5, re - rs) + 0.5
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
                              "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
+        elif item["kind"] == "xform_text":
+            # At the PROJECT rate: a transform that moves every frame must
+            # have a frame for every output frame, or a 60 fps project steps.
+            dur = max(0.5, re - rs) + 0.5
+            extra_inputs += ["-itsoffset", f"{rs:.3f}",
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-t", f"{dur:.3f}", "-i", str(item["png"])]
         else:
             extra_inputs += ["-i", str(item["png"])]
         is_last = i == len(items) - 1
@@ -1179,8 +1560,11 @@ def build_overlay_chain(
                 pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
             parts.append(pre + scaled)
             parts.append(
-                f"{cur}{scaled}overlay=enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
+                f"{cur}{scaled}overlay=enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
             )
+        elif item["kind"] == "xform_text":
+            parts.extend(_xform_text_parts(item, idx, i, cur, next_label, canvas,
+                                           out_w, out_h, rs, re))
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
             role = item["role"]
@@ -1256,7 +1640,7 @@ def build_overlay_chain(
                 x_expr = f"{cx:.2f}*(1-overlay_w/main_w)"
             parts.append(
                 f"{cur}{preprocessed}overlay=x='{x_expr}':y='{''.join(y_terms)}'"
-                f":enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
+                f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
             )
         else:
             s: Sticker = item["sticker"]
@@ -1311,7 +1695,7 @@ def build_overlay_chain(
                     parts.append(f"{sticker_stream}null{preprocessed}")
 
             parts.append(
-                f"{cur}{preprocessed}overlay=x='{xexpr}':y='{yexpr}':enable='between(t\\,{rs:.3f}\\,{re:.3f})'{next_label}"
+                f"{cur}{preprocessed}overlay=x='{xexpr}':y='{yexpr}':enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
             )
         cur = next_label
     return ";".join(parts), extra_inputs, cur

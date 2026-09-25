@@ -6,6 +6,7 @@ import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
 import { clipLocalTime } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
 import { setLivePipFraming } from '../lib/pipDraw'
+import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -163,7 +164,26 @@ function keyAt(v: unknown, t: number, fps?: number): boolean {
 // "just take a number out of it" helper: the value of an animated property is
 // meaningless without a time.
 
+// QA-023: a clip on a LOCKED lane is still inspectable, but every control is
+// disabled (a <fieldset disabled> reaches every nested input/select/button)
+// and a banner says why — the backend refuses the edit anyway, and a panel
+// full of live controls that each answer with an error toast reads as broken.
 export function Properties() {
+  const edl = useStore((s) => s.edl)
+  const sel = useStore((s) => s.selection)
+  const locked = lockedTrackOf(edl, sel)
+  if (!locked) return <PropertiesPanel />
+  return (
+    <div className="props-locked">
+      <div className="props-locked-note" role="status">🔒 {lockedNotice(locked)}</div>
+      <fieldset disabled aria-disabled="true">
+        <PropertiesPanel />
+      </fieldset>
+    </div>
+  )
+}
+
+function PropertiesPanel() {
   const edl = useStore((s) => s.edl)
   const sel = useStore((s) => s.selection)
   const dispatch = useStore((s) => s.dispatch)
@@ -952,7 +972,7 @@ interface TextClipLike {
   }
   anim_in?: string | null
   anim_out?: string | null
-  transform?: { x?: unknown; y?: unknown; opacity?: unknown }
+  transform?: { x?: unknown; y?: unknown; opacity?: unknown; scale?: unknown; rotation?: unknown }
 }
 
 function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
@@ -973,6 +993,11 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   const x = sampleKF(c.transform?.x as KFNum | undefined, txLocalT, canvas.w / 2)
   const y = sampleKF(c.transform?.y as KFNum | undefined, txLocalT, canvas.h * 0.85)
   const opacity = sampleKF(c.transform?.opacity as KFNum | undefined, txLocalT, 1)
+  // QA-036: rotation and scale are drawn by BOTH renderers now (baked into
+  // the export PNG, or animated per frame when keyed; TextLayer mirrors it),
+  // so the inspector exposes them like the media inspector does.
+  const txScale = sampleKF(c.transform?.scale as KFNum | undefined, txLocalT, 1)
+  const txRotation = sampleKF(c.transform?.rotation as KFNum | undefined, txLocalT, 0)
   const setTx = (p: Record<string, number>) =>
     dispatch('set_clip_transform', { clip_id: c.id, ...p, time: txLocalT })
   const isCaption = c.role === 'caption'
@@ -1212,6 +1237,20 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
               <label>Y</label>
               <NumberField value={y} dp={0} step={1}
                 onCommit={(n) => void setTx({ y: n })} />
+            </div>
+          </div>
+        )}
+        {!isCaption && (
+          <div className="row two">
+            <div className="field">
+              <label>Rotation (°)</label>
+              <NumberField value={txRotation} dp={1} step={1}
+                onCommit={(n) => void setTx({ rotation: n })} />
+            </div>
+            <div className="field">
+              <label>Scale</label>
+              <NumberField value={txScale} dp={2} step={0.05} min={0.01}
+                onCommit={(n) => void setTx({ scale: n })} />
             </div>
           </div>
         )}

@@ -46,7 +46,7 @@ from ..schema import PLAN_DENY, NeedsInput, NeedsInputOption, Plan
 from . import content
 from .base import BRAIN_IDS, BRAIN_LABELS, Availability, Brain, BrainRequest, BrainResult
 
-__all__ = ["Attempt", "RoutedPlan", "RECIPES_CONFIDENT", "RECIPES_FALLBACK", "LLM_MIN_CONFIDENCE",
+__all__ = ["Attempt", "RoutedPlan", "RESTRUCTURE_GROUNDS", "ungrounded_restructure", "RECIPES_CONFIDENT", "RECIPES_FALLBACK", "LLM_MIN_CONFIDENCE",
            "PLANNING_BUDGET_S", "HOOK_TEXT_TIMEOUT_S", "BRAIN_PIN_ENV", "PIN_ALIASES", "resolve_order",
            "default_brains", "build_request", "prefetch_availability", "plan", "brains_report", "ValidateFn"]
 
@@ -264,6 +264,28 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
             record(Attempt(bid, "failed", reason=f"rejected:low confidence {validated.confidence:.2f}",
                            latency_ms=result.latency_ms, model=result.model))
             continue
+        ungrounded = ungrounded_restructure(validated, req.prompt) if bid in ON_DEVICE else []
+        if ungrounded:
+            # QA-018: "fade in the first clip" and "banana wobble zebra" came
+            # back from Apple Intelligence as make_shorts — a whole-timeline
+            # re-cut nobody asked for. An on-device plan may only restructure
+            # the footage when the prompt names that kind of edit; otherwise
+            # the ladder falls through to the recipes' "did you mean" list.
+            record(Attempt(bid, "failed", reason=f"rejected:ungrounded {', '.join(ungrounded)}",
+                           latency_ms=result.latency_ms, model=result.model))
+            continue
+        if _recipes_read_more(recipes_result, validated):
+            # QA-032: the grammar understood every edit the model planned and
+            # more (the Chat example: brand + hook + captions vs the model's
+            # brand + hook) — the fuller reading wins, labelled as a reading.
+            rp = recipes_result.plan  # type: ignore[union-attr]
+            note = f"I read that as: {rp.title or rp.intent}"
+            record(Attempt(bid, "failed", reason="rejected:recipes read more of the prompt",
+                           latency_ms=result.latency_ms, model=result.model))
+            record(Attempt("recipes", "answered", latency_ms=recipes_result.latency_ms,  # type: ignore[union-attr]
+                           model=recipes_result.model, detail=f"fuller reading · confidence {rp.confidence:.2f}"))  # type: ignore[union-attr]
+            return _finish(RoutedPlan(rp.with_(reply=_fallback_reply(rp, note)), "recipes", tuple(attempts), note=note),
+                           req, brains=brains, order=order, validate=validate)
         if validated.brain != bid:
             validated = validated.with_(brain=bid)
         record(Attempt(bid, "answered", latency_ms=result.latency_ms, model=result.model,
@@ -293,6 +315,59 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
     else:
         clarify = _clarify_from(None)
     return RoutedPlan(None, None, tuple(attempts), clarify=clarify, note="clarify_intent")
+
+
+#: Steps that restructure the footage, and the grammar intents whose words
+#: in the prompt make that restructure something the user asked for.
+RESTRUCTURE_GROUNDS: dict[str, frozenset[str]] = {
+    "make_shorts": frozenset({"shorts", "auto_edit"}),
+    "remove_silences": frozenset({"remove_silences", "tighten", "auto_edit"}),
+    "remove_fillers": frozenset({"remove_fillers", "tighten", "auto_edit"}),
+    "cut_range": frozenset({"trim", "tighten", "auto_edit"}),
+    "ripple_delete": frozenset({"trim"}),
+    "auto_cut_to_beats": frozenset({"beat_sync"}),
+    "split_at": frozenset({"beat_sync", "trim"}),
+    "set_speed": frozenset({"speed"}),
+    "auto_reframe": frozenset({"reframe", "auto_edit", "export_preset", "shorts"}),
+}
+
+
+def _mentioned_intents(prompt: str) -> set[str]:
+    """Every intent whose phrase table (ANY row, weak ones included) matches
+    the prompt — "the user used words for this kind of edit"."""
+    import re as _re
+    from .. import grammar as G
+    from .. import slots as S
+    text = S.normalize(prompt)
+    found: set[str] = set()
+    for intent, rows in G.PHRASES.items():
+        if any(_re.search(p, text) for p, _score in rows):
+            found.add(intent)
+    for _rx, intent, _score in G.CUT_PRECEDENCE:
+        if _re.search(_rx, text):
+            found.add(intent)
+    return found
+
+
+def ungrounded_restructure(plan: Plan, prompt: str) -> list[str]:
+    """The restructuring tools in `plan` that nothing in `prompt` asked for."""
+    tools = [s.tool for s in plan.steps if s.tool in RESTRUCTURE_GROUNDS]
+    if not tools:
+        return []
+    mentioned = _mentioned_intents(prompt)
+    return sorted({t for t in tools if not (RESTRUCTURE_GROUNDS[t] & mentioned)})
+
+
+def _recipes_read_more(recipes_result: BrainResult | None, llm: Plan) -> bool:
+    """True when the recipes plan (below the confident bar, above the
+    fallback one) covers every tool the model's plan uses AND more."""
+    if recipes_result is None or not recipes_result.ok or recipes_result.plan is None:
+        return False
+    rp = recipes_result.plan
+    if rp.confidence < RECIPES_FALLBACK or rp.blocking_questions or not rp.steps:
+        return False
+    mine, theirs = {s.tool for s in rp.steps}, {s.tool for s in llm.steps}
+    return bool(theirs) and theirs < mine
 
 
 def _fallback_reply(rp: Plan, note: str) -> str:

@@ -160,7 +160,8 @@ def test_subtitle_upload_stores_the_file_in_the_session(client, tmp_path):
     body = r.json()
     path = Path(body["path"])
     assert path.exists()
-    assert body["name"] == path.name == "my_captions.srt"     # _safe_filename applied
+    assert body["name"] == path.name                          # _safe_filename applied,
+    assert path.name.startswith("my_captions_") and path.suffix == ".srt"   # + unique suffix (QA-001)
     assert path.is_relative_to(tmp_path)                      # under the session dir
     # It must NOT dispatch: the panel follows with import_srt itself so the
     # import lands in the op log / undo like every other edit.

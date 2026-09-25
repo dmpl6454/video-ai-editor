@@ -117,6 +117,12 @@ else
   echo "note: macOS 26 SDK/Xcode not present — building without the Apple Intelligence helper"
 fi
 
+# Complex-script text shaping (render/shaping.py, QA-003): uharfbuzz,
+# freetype-py (its OWN libfreetype.dylib) and python-bidi are self-contained
+# wheels, so the bundle needs no Homebrew library. They are named explicitly
+# below — a missing shaper makes Hindi/Arabic exports FAIL (loudly, by design)
+# rather than misspell, so a silently-dropped module would break every export
+# of that text. Verified with a frozen PyInstaller build of the shaper.
 ROOT="$(pwd)"
 SPEC_DIR="$ROOT/build/pyinstaller-spec"
 mkdir -p "$SPEC_DIR"
@@ -138,6 +144,9 @@ uv run pyinstaller \
   --hidden-import "uvicorn.logging" \
   --hidden-import "video_ai_editor.main" \
   --collect-submodules video_ai_editor \
+  --hidden-import uharfbuzz \
+  --hidden-import bidi.algorithm \
+  --collect-binaries freetype \
   --collect-submodules huggingface_hub \
   --collect-data webview \
   --exclude-module torch \

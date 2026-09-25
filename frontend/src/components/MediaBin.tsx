@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../store'
-import { isMediaClip } from '../types'
-import { AUDIO_EXTS, baseName } from '../lib/paths'
+import { useStore, errorMessage } from '../store'
+import { api } from '../api'
+import { toast } from '../toast'
+import type { MediaItem } from '../types'
+import { baseName } from '../lib/paths'
+import { dropzoneHandlers, importFiles } from '../lib/fileDrop'
+import { binMeta, binRows, type BinRow } from '../lib/mediaLibrary'
 import { StickerPanel } from './StickerPanel'
 import { EffectsPanel } from './EffectsPanel'
 import { VoRecorder } from './VoRecorder'
@@ -20,28 +24,42 @@ export function MediaBin() {
   const audioRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
-  const onFiles = async (files: FileList | null) => {
-    if (!files) return
-    for (const f of Array.from(files)) {
-      // Route audio files to the music endpoint, video to the timeline.
-      if (AUDIO_EXTS.test(f.name) || f.type.startsWith('audio/')) {
-        await uploadAudio(f)
-      } else {
-        await upload(f)
-      }
-    }
-  }
+  const sid = useStore((s) => s.sessionId)
 
-  // Unique source paths → the clip ids that reference them (for delete + count).
-  const sources = new Map<string, string[]>()
-  for (const t of edl?.tracks ?? []) {
-    for (const c of t.clips) {
-      if (isMediaClip(c)) {
-        const arr = sources.get(c.src) ?? []
-        arr.push(c.id)
-        sources.set(c.src, arr)
-      }
+  // The click-to-pick input; a DROP is imported by FileDropOverlay's window
+  // listener alone (lib/fileDrop — two importers imported every drop twice).
+  const onFiles = (files: FileList | null) => importFiles(files, { upload, uploadAudio })
+  const zone = dropzoneHandlers(setDragOver)
+
+  // The project's media library (QA-010) — every import, used or not. Fetched
+  // per session and again whenever the EDL object is replaced (every refresh,
+  // i.e. after uploads, edits, undo) or an upload finishes; the rows' used-
+  // counts come from the live EDL in binRows, so they never lag the timeline.
+  const [library, setLibrary] = useState<{ sid: string; items: MediaItem[] } | null>(null)
+  const [libraryTick, setLibraryTick] = useState(0)
+  useEffect(() => {
+    if (!sid) return
+    let live = true
+    api.listMedia(sid)
+      .then((r) => { if (live) setLibrary({ sid, items: r.media }) })
+      .catch((e) => console.warn('[MediaBin] media library fetch failed:', e))
+    return () => { live = false }
+  }, [sid, edl, uploading, libraryTick])
+  const rows = binRows(library && library.sid === sid ? library.items : null, edl)
+
+  const removeRow = async (row: BinRow) => {
+    if (!sid) return
+    const msg = row.uses
+      ? `Remove ${row.name} from the project? Its ${row.uses} clip(s) are deleted from the timeline too (Undo brings them back).`
+      : `Remove ${row.name} from the project's media? The file stays on disk; re-import it to use it again.`
+    if (!window.confirm(msg)) return
+    try {
+      if (row.uses) await dispatch('bulk_delete', { clip_ids: row.clipIds })
+      if (row.id) await api.removeMedia(sid, row.id)
+    } catch (e) {
+      toast.error(`Couldn't remove ${row.name}: ${errorMessage(e)}`)
     }
+    setLibraryTick((n) => n + 1)
   }
 
   return (
@@ -50,9 +68,9 @@ export function MediaBin() {
       <div
         className={`dropzone${dragOver ? ' over' : ''}`}
         title="Video lands on the main video track; audio lands on the Music track"
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); void onFiles(e.dataTransfer.files) }}
+        onDragOver={zone.onDragOver}
+        onDragLeave={zone.onDragLeave}
+        onDrop={zone.onDrop}
         onClick={() => fileRef.current?.click()}
       >
         {uploading ? `Uploading ${progress}…` : 'Drop video or audio · or click'}
@@ -62,7 +80,7 @@ export function MediaBin() {
           type="file"
           accept="video/*,audio/*,.mov,.MOV,.mp4,.MP4,.m4v,.mkv,.webm,.avi,.MTS,.mp3,.wav,.m4a,.aac,.flac"
           hidden
-          onChange={(e) => onFiles(e.target.files)}
+          onChange={(e) => { void onFiles(e.target.files) }}
         />
       </div>
       <button
@@ -112,45 +130,59 @@ export function MediaBin() {
         </div>
       )}
 
-      {sources.size === 0 && !uploading && (
+      {rows.length === 0 && !uploading && (
         <div style={{ color: 'var(--text-dim)', fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-          Your clips appear here after upload — drag one onto a timeline row
-          (v1 main, v2 for picture-in-picture) to add it again.
+          Imported media stays here until you remove it — drag an item onto a
+          timeline row (v1 main, v2 for picture-in-picture) to use it again.
         </div>
       )}
-      {[...sources.entries()].map(([src, ids]) => (
-        <div
-          key={src}
-          className="item"
-          title={`${src}\n\nDrag onto the timeline to add another instance.`}
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.effectAllowed = 'copy'
-            e.dataTransfer.setData('application/x-vai-src', src)
-            e.dataTransfer.setData('text/plain', src)  // fallback for sniffers
-          }}
-          style={{ cursor: 'grab' }}
-        >
-          {baseName(src)}
-          <div style={{ color: 'var(--text-dim)', fontSize: 10, marginTop: 4 }}>
-            ×{ids.length} on timeline · drag to add
-          </div>
-          <button
-            className="media-remove"
-            title="Remove this media and all its clips from the timeline"
-            onClick={async (e) => {
-              e.stopPropagation()
-              if (!window.confirm(`Remove ${baseName(src)} and its ${ids.length} clip(s) from the timeline?`)) return
-              await dispatch('bulk_delete', { clip_ids: ids })
-            }}
-          >×</button>
-        </div>
+      {rows.map((row) => (
+        <MediaRow key={row.id ?? row.src} row={row} sid={sid} onRemove={() => void removeRow(row)} />
       ))}
 
       <VoRecorder />
       <MusicPanel />
       <StickerPanel />
       <EffectsPanel />
+    </div>
+  )
+}
+
+function MediaRow({ row, sid, onRemove }: { row: BinRow; sid: string | null; onRemove: () => void }) {
+  // One JPEG frame from /thumb (the timeline filmstrip's route); a frame a
+  // second in (or mid-clip for a short one) rather than the often-black first.
+  const t = row.duration ? Math.min(1, row.duration / 2) : 0
+  const thumb = row.kind === 'video' && sid
+    ? `/api/sessions/${sid}/thumb?src=${encodeURIComponent(row.src)}&t=${t.toFixed(2)}&h=54`
+    : null
+  return (
+    <div
+      className={`item media-row${row.uses ? '' : ' is-unused'}`}
+      data-media-row
+      title={`${row.name}\n${baseName(row.src)}\n\nDrag onto the timeline to add ${row.uses ? 'another instance' : 'it'}.`}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'copy'
+        e.dataTransfer.setData('application/x-vai-src', row.src)
+        if (row.duration) e.dataTransfer.setData('application/x-vai-duration', String(row.duration))
+        e.dataTransfer.setData('text/plain', row.src)  // fallback for sniffers
+      }}
+    >
+      <div className="media-thumb" aria-hidden="true">
+        {thumb ? <img src={thumb} alt="" width={96} height={54} loading="lazy" draggable={false} /> : <span>🎵</span>}
+      </div>
+      <div className="media-text">
+        <div className="media-name">{row.name}</div>
+        <div className="media-meta">{binMeta(row)}</div>
+      </div>
+      <button
+        className="media-remove"
+        title={row.uses
+          ? `Remove from the project, with its ${row.uses} clip(s) on the timeline`
+          : 'Remove from the project (the file stays on disk)'}
+        aria-label={`Remove ${row.name}`}
+        onClick={(e) => { e.stopPropagation(); onRemove() }}
+      >×</button>
     </div>
   )
 }

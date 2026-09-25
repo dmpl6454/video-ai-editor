@@ -202,7 +202,11 @@ def test_the_enable_window_still_matches_the_clip(tmp_path):
     s.edl.get_track("v2").clips.append(
         Clip(id="p", src="/x/a.mp4", in_=1.0, out=5.0, start=8.0))
     chain, _, _, _ = _chain(s.edl)
-    assert "between(t\\,8.000\\,12.000)" in chain
+    # Half-open on frame-exact bounds since QA-016 (text_overlay.enable_expr):
+    # the closed between() drew an outgoing overlay on the incoming one's
+    # first frame.
+    from video_ai_editor.render.text_overlay import enable_expr
+    assert f"enable='{enable_expr(8.0, 12.0, s.edl.canvas.fps)}'" in chain
 
 
 # ------------------------------------- the preview/export split (client pixels)
@@ -254,7 +258,7 @@ def test_a_pip_timeline_is_never_assembled_by_chunk_streamcopy(tmp_path):
     from video_ai_editor.render import compositor
 
     src = inspect.getsource(compositor)
-    i = src.index("_assemble_chunks_streamcopy(edl, chunk_paths, dst)")
+    i = src.index("_assemble_chunks_streamcopy(edl, chunk_paths, dst, fps=fps)")
     gate = src[src.rindex("if (preview and chunk_paths", 0, i):i]
     assert "not pip_audio_clips" in gate, (
         "the streamcopy gate must test for PIP AUDIO, not just an empty PIP "

@@ -357,7 +357,7 @@ TOOL_STAGE: dict[str, int] = {
     "add_text": 8, "add_super_text": 8, "add_lower_third": 8,
     "apply_text_template": 8, "apply_brand_kit": 8, "tts_voiceover": 8,
     # 9 — music (add, duck, beats)
-    "add_music": 9, "set_duck": 9, "auto_cut_to_beats": 9,
+    "add_music": 9, "set_duck": 9, "auto_cut_to_beats": 9, "fit_music_to_video": 9,
     # 10 — audio (noise, loudness, levels)
     "noise_reduce": 10, "set_loudness_target": 10, "set_volume": 10,
     "set_clip_muted": 10, "set_track_muted": 10, "add_fade": 10,
@@ -419,8 +419,19 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("overlays_inside_safe_zone", "text stays clear of the platform UI", ratio=None),
     # music / beats
     _spec("music_present", "music is on the timeline", ducked=None, count=None),
-    _spec("music_ducked", "music ducks under speech", to_db=-12),
+    # `enabled=False` is "ducking is OFF" — the verifier checks the state the
+    # user asked for, not always "on" (QA-031: "turn off ducking" verified ON).
+    _spec("music_ducked", "music ducks under speech", to_db=-12, enabled=True),
     _spec("music_within_video_extent", "music does not outlast the video"),
+    # levels / fades / mutes (QA-018): measured on the EDL the renderer reads.
+    # `in_s`/`out_s` are minimum fade lengths; a sentinel clip_id resolves on the
+    # live timeline ($v1_first → the first v1 clip, $v1_all → every one).
+    _spec("video_fade_set", "the picture fades", clip_id=None, in_s=None, out_s=None),
+    _spec("audio_fade_set", "the sound fades", clip_id=None, in_s=None, out_s=None),
+    _spec("music_fade_set", "the music fades", in_s=None, out_s=None),
+    _spec("volume_db", "the level is set", target=None, db=None, tol=0.05),
+    _spec("track_muted", "the track is muted", track=None, muted=True),
+    _spec("clips_muted", "the clip audio is muted", clip_id=None, muted=True),
     _spec("music_covers", "music runs under the whole video", min_ratio=0.95),
     _spec("beat_splits_geq", "cuts were placed on beats", n=2),
     _spec("min_shot_geq", "no shot is too short", seconds=0.8),
@@ -503,7 +514,20 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "add_music": [_pc("music_present", "music is on the timeline"),
                   _pc("music_covers", "music runs under the whole video", min_ratio=0.95),
                   _pc("music_within_video_extent", "music does not outlast the video")],
-    "set_duck": [_pc("music_ducked", "music ducks under speech", to_db=f"{ARG_REF}to_db")],
+    "set_duck": [_pc("music_ducked", "music ducks under speech", to_db=f"{ARG_REF}to_db",
+                     enabled=f"{ARG_REF}enabled")],
+    "set_video_fade": [_pc("video_fade_set", "the picture fades", clip_id=f"{ARG_REF}clip_id",
+                           in_s=f"{ARG_REF}in_s", out_s=f"{ARG_REF}out_s")],
+    "add_fade": [_pc("audio_fade_set", "the sound fades", clip_id=f"{ARG_REF}clip_id",
+                     in_s=f"{ARG_REF}in_s", out_s=f"{ARG_REF}out_s")],
+    "set_volume": [_pc("volume_db", "the level is set", target=f"{ARG_REF}target", db=f"{ARG_REF}db")],
+    "set_track_muted": [_pc("track_muted", "the track is muted", track=f"{ARG_REF}track",
+                            muted=f"{ARG_REF}muted")],
+    "set_clip_muted": [_pc("clips_muted", "the clip audio is muted", clip_id=f"{ARG_REF}clip_id",
+                           muted=f"{ARG_REF}muted")],
+    "fit_music_to_video": [_pc("music_within_video_extent", "music does not outlast the video"),
+                           _pc("music_fade_set", "the music fades", in_s=f"{ARG_REF}fade_in",
+                               out_s=f"{ARG_REF}fade_out")],
     "auto_cut_to_beats": [_pc("beat_splits_geq", "cuts were placed on beats", n=2),
                           _pc("min_shot_geq", "no shot is too short", seconds=0.8)],
     "apply_hook_stack": [_pc("hook_text_starts_leq", "the hook starts immediately", t=0.5),

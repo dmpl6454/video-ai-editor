@@ -11,6 +11,9 @@ import { deletedLabel } from './lib/deletedLabel'
 import { isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
 import { firePromptRunning, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
 import { nativeSave } from './lib/nativeSave'
+import { exportFor, exportLink, withExport, withoutExport, type ExportLinks } from './lib/exportLink'
+import { planNudge } from './lib/nudge'
+import { frameDuration } from './lib/frameStep'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -44,6 +47,19 @@ export const ASYNC_DISPATCH_TOOLS = new Set([
 // own thread (spec §4.2) — so nothing here would pin a request worker.
 
 const JOB_POLL_MS = 700
+
+// renderPreview's latest-wins bookkeeping (QA-004): the sequence number of the
+// newest request and the controller that can abort it. Module state, not store
+// state — nothing renders from them.
+let previewSeq = 0
+let previewAbort: AbortController | null = null
+// openSession's latest-wins counter (a quick A→B→C must land on C).
+let openSeq = 0
+
+/** The server's 409 for a render another request superseded. */
+function isPreviewSuperseded(e: unknown): boolean {
+  return String((e as Error)?.message ?? e).includes('preview_superseded')
+}
 
 /** Submit a tool as a background job and resolve when it finishes, so callers
  *  of `store.dispatch()` see the same promise contract either way.
@@ -155,17 +171,26 @@ interface State {
   isPlaying: boolean
   playbackRate: number       // J/K/L shuttle
   previewHash: string | null
+  // True while the NEWEST preview render is in flight (drives the corner
+  // "Rendering…" badge). Owned by renderPreview, so every caller — the Preview
+  // effect, chat, the prompt bar — shows the same state (QA-004).
+  previewRendering: boolean
   uploading: boolean
   uploadProgress: string | null
   uploadError: string | null
   exporting: boolean
-  exportUrl: string | null
-  exportFilename: string | null // leaf name of the finished export (for the native save dialog)
+  // Each session's last finished export as ONE record — session, url, filename
+  // and the EDL hash it was rendered from (lib/exportLink — QA-026). TopBar
+  // shows only the one for the session on screen, marked outdated when
+  // `edlHash` differs.
+  exportLinks: ExportLinks
+  // The current timeline's hash (GET /sessions/:id summary.edl_hash), refreshed
+  // with the EDL. What "is the export still this timeline?" is asked against.
+  edlHash: string | null
   exportStatus: string | null   // 'queued' | 'running' — coarse job phase for the UI
   exportError: string | null
   exportProgress: number        // 0..1 live ffmpeg progress
   exportJobId: string | null    // current export job (for cancel)
-  exportGen: number             // ops.length when the current export finished (staleness check)
 
   // Client-side live transform: set while a transform slider is being dragged
   // so Preview applies a CSS transform to the <video> for instant feedback,
@@ -258,6 +283,8 @@ interface State {
   // workflow
   init(): Promise<void>
   refresh(): Promise<void>
+  /** Switch the editor to project `id`, atomically: see the action. */
+  openSession(id: string): Promise<void>
   refreshSoon(): void
   upload(file: File): Promise<void>
   uploadAudio(file: File): Promise<void>
@@ -281,7 +308,7 @@ interface State {
     },
   ): Promise<DispatchResponse | null>
   renderPreview(): Promise<string>
-  doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov' }): Promise<void>
+  doExport(opts?: { height?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number }): Promise<void>
   // Save the last finished export to disk. In the packaged app this drives the
   // native Save-As dialog (via the pywebview bridge); in a browser it falls
   // back to an `<a download>` click. Wired to the green download-arrow link so
@@ -309,6 +336,7 @@ export const useStore = create<State>((set, get) => ({
   playhead: 0,
   isPlaying: false,
   previewHash: null,
+  previewRendering: false,
   multiSelection: [],
   inMark: null,
   outMark: null,
@@ -320,13 +348,12 @@ export const useStore = create<State>((set, get) => ({
   uploadProgress: null,
   uploadError: null,
   exporting: false,
-  exportUrl: null,
-  exportFilename: null,
+  exportLinks: {},
+  edlHash: null,
   exportStatus: null,
   exportError: null,
   exportProgress: 0,
   exportJobId: null,
-  exportGen: 0,
 
   // Panel sizes: read from localStorage (falls back to the historical fixed
   // CSS defaults — 220/280/280 — when unset, invalid, or running server-side
@@ -385,8 +412,8 @@ export const useStore = create<State>((set, get) => ({
   replayFromStart: () => {
     const s = get()
     const dur = s.edl?.duration ?? 0
-    // 1/30 = one frame at the timeline's normalised 30fps.
-    if (!s.isPlaying && dur > 0 && s.playhead >= dur - 1 / 30) {
+    // Within one frame of the end, at the PROJECT rate (QA-009).
+    if (!s.isPlaying && dur > 0 && s.playhead >= dur - frameDuration(s.edl?.canvas?.fps)) {
       s.setPlayhead(0)
       return true
     }
@@ -404,12 +431,24 @@ export const useStore = create<State>((set, get) => ({
   // Clears per-session view/selection state. Call when switching sessions so a
   // stale playhead/selection/marks from the previous project don't bleed onto
   // the new timeline (which read as "a second frozen playhead").
+  //
+  // `previewHash` and `edlHash` belong to the project on screen too: a kept
+  // previewHash made the new project's scrubber ask for
+  // `<new sid>/preview.mp4?h=<old project's hash>` (a 404), and a kept edlHash
+  // would judge the other project's export link against the wrong timeline
+  // until the refresh landed. `exportLinks` is NOT cleared — each link names its
+  // own session, so it is not shown elsewhere and comes back with its project.
   resetTransient: () => set({
     playhead: 0,
     selection: null,
     multiSelection: [],
     inMark: null,
     outMark: null,
+    previewHash: null,
+    edlHash: null,
+    // An export failure is about the project it was rendered from; left set,
+    // project B showed A's "⚠ ffmpeg failed …" chip (QA-026's leak, again).
+    exportError: null,
   }),
 
   // Persists a panel size to localStorage as the drag happens (not just on
@@ -471,9 +510,15 @@ export const useStore = create<State>((set, get) => ({
     const s = get()
     // Paste = duplicate each clipboard clip (the dispatch duplicates with an
     // offset). Reuses the existing duplicate path so undo/ops work.
+    let pasted: string | null = null
     for (const id of s.clipboard) {
-      await s.dispatch('duplicate_clip', { clip_id: id })
+      const res = await s.dispatch('duplicate_clip', { clip_id: id })
+      const nid = (res?.result as { new_clip_id?: string } | undefined)?.new_clip_id
+      if (nid) pasted = nid
     }
+    // Every copy now has its own id (QA-020), so select the one just pasted —
+    // the next Backspace/trim acts on the copy, as in every NLE.
+    if (pasted) get().setSelection(pasted)
   },
   goToStart: () => set({ playhead: 0 }),
   goToEnd: () => {
@@ -482,16 +527,13 @@ export const useStore = create<State>((set, get) => ({
   },
   nudgeSelection: async (deltaSeconds) => {
     const s = get()
-    if (!s.selection || !s.edl) return
-    // Find the clip's current start, move by delta.
-    for (const t of s.edl.tracks) {
-      for (const c of t.clips) {
-        if (c.id === s.selection && 'start' in c) {
-          const newStart = Math.max(0, (c.start as number) + deltaSeconds)
-          await s.dispatch('move_clip', { clip_id: s.selection, new_start: newStart })
-          return
-        }
-      }
+    // QA-022: planned locally (lib/nudge) — one frame of the project rate, and
+    // a nudge into a neighbour is refused with the reason instead of being
+    // sent to a backend whose free-gap snap teleported it past the last clip.
+    const plan = planNudge(s.edl, s.selection, deltaSeconds)
+    if (plan.kind === 'refuse') { toast.info(plan.message); return }
+    if (plan.kind === 'move') {
+      await s.dispatch('move_clip', { clip_id: plan.clipId, new_start: plan.newStart })
     }
   },
 
@@ -530,8 +572,29 @@ export const useStore = create<State>((set, get) => ({
     const sid = get().sessionId
     if (!sid) return
     const [info, edl] = await Promise.all([api.getSession(sid), api.getEDL(sid)])
-    set({ edl, ops: info.ops, sessionName: info.name,
+    // The project changed while this was in flight (a refreshSoon() after an
+    // edit, an upload finishing, a project switch): these are the OLD
+    // project's EDL and ops. Writing them would put project A's timeline on
+    // screen under project B's session id.
+    if (get().sessionId !== sid) return
+    set({ edl, ops: info.ops, sessionName: info.name, edlHash: info.summary?.edl_hash ?? null,
           redoAvailable: !!info.redo_available })
+  },
+
+  // Project switch. Loads the new project FIRST, then swaps session id and
+  // EDL in one set(). The old sequence (resetTransient → set sessionId →
+  // refresh()) left one render with the new sessionId and the previous
+  // project's EDL: the Media bin built rows from that EDL and asked
+  // `/sessions/<B>/thumb?src=<A's file>` (a 403 on every switch), and the
+  // timeline showed A's clips under B's id until the fetch landed. Latest
+  // call wins, so a quick A→B→C cannot land on B.
+  openSession: async (id) => {
+    const seq = ++openSeq
+    const [info, edl] = await Promise.all([api.getSession(id), api.getEDL(id)])
+    if (seq !== openSeq) return
+    get().resetTransient()
+    set({ sessionId: id, sessionName: info.name ?? id, edl, ops: info.ops,
+          edlHash: info.summary?.edl_hash ?? null, redoAvailable: !!info.redo_available })
   },
 
   // Coalesce many quick refresh() calls (chat tool storms, drag bursts) into a
@@ -560,7 +623,10 @@ export const useStore = create<State>((set, get) => ({
     if (!sid) return
     set({ uploading: true, uploadProgress: file.name, uploadError: null })
     try {
-      await api.upload(sid, file, true)
+      // Normalising runs as a server job now (QA-007); show how far it got.
+      await api.upload(sid, file, true, {
+        onProgress: (p) => set({ uploadProgress: `${file.name} · ${Math.round(Math.min(1, Math.max(0, p)) * 100)}%` }),
+      })
     } catch (e) {
       // errorMessage(), not `e.message`: api.upload throws the api.ts contract
       // shape, "<status> <statusText>: <raw envelope>". MediaBin renders this
@@ -574,14 +640,13 @@ export const useStore = create<State>((set, get) => ({
     }
     set({ uploading: false, uploadProgress: null })
     // The upload itself succeeded — media is ingested and on the timeline.
-    // A subsequent preview-render failure (e.g. a corrupt cached overlay PNG)
-    // is a SEPARATE concern and must not be reported as "upload failed".
+    // NO renderPreview() here: refresh() changes the EDL, and the Preview
+    // effect renders on exactly that change (and reports a render failure in
+    // the pane, separately from the upload). Calling it here as well started
+    // a SECOND full render of the same timeline for every import — two
+    // concurrent ~195 s renders per 12-min file, four for a three-file drop
+    // (QA-004).
     await get().refresh()
-    try {
-      await get().renderPreview()
-    } catch (e) {
-      toast.error(`Preview render failed: ${errorMessage(e)}`)
-    }
   },
 
   uploadAudio: async (file) => {
@@ -597,12 +662,8 @@ export const useStore = create<State>((set, get) => ({
       return
     }
     set({ uploading: false, uploadProgress: null })
+    // Same as upload(): the Preview effect renders on the EDL change.
     await get().refresh()
-    try {
-      await get().renderPreview()
-    } catch (e) {
-      toast.error(`Preview render failed: ${errorMessage(e)}`)
-    }
   },
 
   dispatch: async (tool, args = {}, opts) => {
@@ -618,7 +679,8 @@ export const useStore = create<State>((set, get) => ({
     set({ pendingOps: get().pendingOps + 1 })
     try {
       // We KEEP the previous export's download link after an edit, but the UI
-      // marks it "outdated" by comparing ops.length to exportGen (see TopBar).
+      // marks it "outdated" once the refreshed edlHash differs from the hash the
+      // export was rendered from (lib/exportLink, TopBar).
       const res: { result: { redo_available?: boolean }; edl_hash: string; op: Op | null } =
         (ASYNC_DISPATCH_TOOLS.has(tool) || opts?.asJob)
           ? await runDispatchJob(sid, tool, args, opts?.onProgress)
@@ -675,19 +737,48 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  // LATEST-WINS (QA-004). Every call supersedes the one before it: the older
+  // request is aborted (the server cancels its render when the newer request
+  // arrives), and a response that is no longer the newest can never set
+  // previewHash. Before, whichever response arrived LAST won — an edit followed
+  // by an undo 0.7 s later left the player on the edited state's render
+  // indefinitely, because the undone state's cached render answered first and
+  // the slow render of the edit landed on top of it.
+  //
+  // A superseded call resolves (with the hash currently on screen) rather than
+  // rejecting: being replaced by a newer render is not an error for any caller.
   renderPreview: async () => {
     const sid = get().sessionId
     if (!sid) return ''
-    const r = await api.preview(sid)
-    set({ previewHash: r.edl_hash })
-    return r.edl_hash
+    const seq = ++previewSeq
+    previewAbort?.abort()
+    const ac = new AbortController()
+    previewAbort = ac
+    set({ previewRendering: true })
+    const superseded = () => seq !== previewSeq || get().sessionId !== sid
+    try {
+      const r = await api.preview(sid, ac.signal)
+      if (superseded()) return get().previewHash ?? ''
+      set({ previewHash: r.edl_hash })
+      return r.edl_hash
+    } catch (e) {
+      if (superseded() || ac.signal.aborted || isPreviewSuperseded(e)) {
+        return get().previewHash ?? ''
+      }
+      throw e
+    } finally {
+      if (seq === previewSeq) {
+        previewAbort = null
+        set({ previewRendering: false })
+      }
+    }
   },
 
   doExport: async (opts = {}) => {
     const sid = get().sessionId
     if (!sid) return
     set({
-      exporting: true, exportUrl: null, exportFilename: null, exportStatus: 'queued',
+      exporting: true, exportLinks: withoutExport(get().exportLinks, sid), exportStatus: 'queued',
       exportError: null, exportProgress: 0, exportJobId: null,
     })
     const POLL_MS = 500           // tight enough that the bar feels live
@@ -709,10 +800,11 @@ export const useStore = create<State>((set, get) => ({
           continue
         }
         if (job.status === 'completed' && job.result) {
-          // Stamp the export with the current history length so the UI can flag
-          // it "outdated" once the user edits past this point.
-          set({ exportUrl: job.result.url, exportFilename: job.result.filename,
-                exportStatus: null, exportProgress: 1, exportGen: get().ops.length })
+          // Bind the link to the session it was rendered from (`sid`, captured
+          // before the poll — the user may have switched projects since) and
+          // to the EDL hash it rendered, so the UI can flag it "outdated".
+          set({ exportLinks: withExport(get().exportLinks, exportLink(sid, job.result)),
+                exportStatus: null, exportProgress: 1 })
           await triggerDownload(job.result.url, job.result.filename, sid)
           return
         }
@@ -744,12 +836,12 @@ export const useStore = create<State>((set, get) => ({
   },
 
   downloadExport: async () => {
-    const { exportUrl, exportFilename, sessionId } = get()
-    if (!exportUrl) return
-    // Derive the leaf name from the URL if we somehow lack the stored filename
-    // (e.g. an export from before this field existed).
-    const filename = exportFilename || exportUrl.split('/').pop() || 'export.mp4'
-    await triggerDownload(exportUrl, filename, sessionId)
+    // Only the export of the project on screen — another project's file is
+    // never what "↓ MP4" means here — and the bridge gets the session the file
+    // was rendered from, which by construction is that same one.
+    const link = exportFor(get().exportLinks, get().sessionId)
+    if (!link) return
+    await triggerDownload(link.url, link.filename, link.sid)
   },
 
   cancelExport: async () => {
@@ -823,8 +915,8 @@ export const useStore = create<State>((set, get) => ({
   rippleDeleteSelection: async () => {
     const sel = get().selection
     if (!sel) return
-    await get().dispatch('ripple_delete', { clip_id: sel })
-    set({ selection: null })
+    // Refused (locked track, QA-023) -> null: the clip is still there.
+    if (await get().dispatch('ripple_delete', { clip_id: sel })) set({ selection: null })
   },
 
   duplicateSelection: async () => {

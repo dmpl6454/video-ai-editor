@@ -131,6 +131,13 @@ class TimelineFacts(BaseModel):
     word_spans: list[SpeechSpan] = Field(default_factory=list)     # TIMELINE seconds, per word
     transcript_head: str = ""                                      # first words still on the timeline
     music_clip_ids: list[str] = Field(default_factory=list)        # the bed(s) a "replace" must remove first
+    #: What the microphone heard (ingest.json `spoken_language`, else the
+    #: transcript's language) — NOT the caption language a translated run
+    #: persisted. "hinglish from Hindi speech" is transliteration, and only
+    #: this field can say the speech is Hindi (QA-043, agent/prompt/langs.py).
+    spoken_language: str | None = None
+    music_gain_db: float | None = None                             # the bed's current gain ("turn it down" is relative)
+    music_muted: bool = False
 
     @classmethod
     def minimal(cls, session_id: str = "s_test", **overrides: Any) -> "TimelineFacts":
@@ -322,6 +329,20 @@ def _resolved(p: Path) -> str:
         return str(p)
 
 
+def _spoken_language(ingest_json: Path | None, transcript_language: str | None) -> str | None:
+    """`ingest.json["spoken_language"]` (written by auto_caption beside a
+    possibly translated transcript), else the transcript's own language."""
+    if ingest_json is not None:
+        try:
+            data = json.loads(ingest_json.read_text(encoding="utf-8"))
+            spoken = str(data.get("spoken_language") or "").strip().lower()
+            if spoken:
+                return spoken
+        except (OSError, ValueError):
+            pass
+    return (transcript_language or "").strip().lower() or None
+
+
 def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | None = None) -> TimelineFacts:
     """Pure reads of `store` + `ui_state` → TimelineFacts (spec §2.1).
 
@@ -391,6 +412,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         head = " ".join(text.split())[:TRANSCRIPT_HEAD_CHARS]
 
     ingest_json = _current_v1_ingest_json(store)
+    spoken_language = _spoken_language(ingest_json, language)
     transcript_pending = False
     if transcript is None and ingest_json is not None:
         try:
@@ -447,7 +469,10 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         transcript_backend=backend, language=language, words=words_total,
         speech_spans=speech_spans, speech_seconds=speech_seconds, filler_count=filler_count,
         has_music=bool(music_clips), music_ducked=bool(music and music.duck is not None),
-        music_clip_ids=[c.id for c in music_clips],
+        music_clip_ids=[c.id for c in sorted(music_clips, key=lambda c: c.start)],
+        spoken_language=spoken_language,
+        music_gain_db=(float(music_clips[0].audio.gain_db) if music_clips else None),
+        music_muted=bool(music and music.muted),
         has_captions=bool(caption_clips), caption_style=caption_style,
         v1_boundaries=v1_boundaries, hook_axes=_hook_axes(edl),
         brand_handle=(edl.brand_kit.handle if edl.brand_kit and edl.brand_kit.handle else None),

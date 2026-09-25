@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import inspect
 import importlib
+import re
 import shutil
 import threading
 import time
@@ -51,6 +52,7 @@ from ...edl.schema import EDL, Clip
 from .. import path_args as _path_args
 from ..tools import input_schema_for
 from .facts import TimelineFacts
+from .langs import needs_translation
 from .runlog import RunBus, RunLog, RunRecord, new_run_id
 from .schema import CLIP_SENTINELS, PLAN_DENY, SEAM_SENTINEL, Plan, Step
 from .service import SNAPSHOT_DIR, TRANSCRIPT_WAIT_S
@@ -185,11 +187,17 @@ def _missing_downloads(tool: str, args: dict[str, Any]) -> list[tuple[str, str]]
         if not voice_paths(voice)[0].exists():
             out.append((f"piper:{voice}", f"tts_voiceover.voice: {voice!r} is not downloaded"))
     target = None
+    source = None
     if tool == "auto_caption":
         target = args.get("target") or args.get("target_lang") or args.get("caption_lang")
+        source = args.get("language")
     elif tool == "translate_captions":
         target = args.get("target_lang") or args.get("to")
-    if target is not None and str(target).lower() in _TRANSLATED_TARGETS:
+        source = args.get("source_lang")
+    if (target is not None and str(target).lower() in _TRANSLATED_TARGETS
+            and needs_translation(target, source) is not False):
+        # QA-043: hi → hinglish (and hi → hi) needs no model — the bundled
+        # romaniser does it; only a KNOWN non-matching or unknown source can.
         from ...ai import translate as _tr
         if not (_tr._model_dir() / "model.bin").exists():
             out.append(("madlad", f"{tool}: translating to {target!r} needs the MADLAD model, "
@@ -208,6 +216,35 @@ def _check_download_strings(tool: str, args: dict[str, Any], reasons: list[str],
         reasons.append(why)
 
 
+def _unresolved_placeholders(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value} if value.startswith(("$ask:", "$arg:")) else set()
+    if isinstance(value, dict):
+        return set().union(*(_unresolved_placeholders(v) for v in value.values())) if value else set()
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_unresolved_placeholders(v) for v in value)) if value else set()
+    return set()
+
+
+def live_source_language(store: EDLStore, step: Step) -> dict[str, Any]:
+    """`step.args` with a `translate_captions` source language read from the
+    LIVE transcript when the plan could not know it (the plan transcribed
+    first). Resolved like a clip sentinel, before the guard, so the guard's
+    MADLAD rule sees the real source: Hindi → Hinglish runs with the bundled
+    romaniser, anything else without the model is refused, never fetched."""
+    args = dict(step.args)
+    if step.tool != "translate_captions" or args.get("source_lang"):
+        return args
+    try:
+        tx = _D.get_transcript(store, {})
+    except Exception:  # noqa: BLE001 — no transcript: the guard treats the source as unknown
+        return args
+    lang = str((tx or {}).get("language") or "").strip().lower()
+    if lang and re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2,4})?", lang):
+        args["source_lang"] = lang
+    return args
+
+
 def guard_step(tool: str, args: dict[str, Any], facts: TimelineFacts, *,
                consented: frozenset[str] = frozenset()) -> None:
     """Refuse anything a model-authored step must never do, even after
@@ -220,6 +257,11 @@ def guard_step(tool: str, args: dict[str, Any], facts: TimelineFacts, *,
     reasons: list[str] = []
     if tool in PLAN_DENY:
         raise StepRefused(f"{tool}: tool is denied to plans")
+    unresolved = _unresolved_placeholders(args)
+    if unresolved:
+        # QA-032: the last line. A `$ask:` the user never answered must not
+        # become the literal watermark / end-card / title text.
+        raise StepRefused(f"{tool}: unanswered placeholder(s) {sorted(unresolved)} — the plan must ask first")
     if tool not in _D.DISPATCH:
         raise StepRefused(f"{tool}: unknown tool")
     allowed = _allowed_arg_names(tool)
@@ -581,8 +623,9 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     tool = step.tool
     started = time.monotonic()
     call_id = f"{plan_id}_s{index}"
-    guard_step(tool, step.args, facts, consented=consented)
-    arg_sets = resolve_step_args(store.edl, step.args, facts)
+    live_args = live_source_language(store, step)
+    guard_step(tool, live_args, facts, consented=consented)
+    arg_sets = resolve_step_args(store.edl, live_args, facts)
     outcome = StepOutcome(index=index, tool=tool, args=arg_sets)
     emit({"type": "step", "index": index, "total": total, "tool": tool, "status": "running",
           "progress": 0.0})

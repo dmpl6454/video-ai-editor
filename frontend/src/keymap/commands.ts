@@ -1,6 +1,7 @@
 import { useStore } from '../store'
 import { usePromptStore } from '../lib/promptStore'
 import { layoutPlayhead } from '../lib/timelineLayout'
+import { frameDuration, stepFrames } from '../lib/frameStep'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -22,7 +23,8 @@ export interface Command {
   run: (s: Store) => void | Promise<unknown>
 }
 
-const FRAME = 1 / 30  // one frame at 30fps; the timeline is normalised to 30fps
+// One frame of THIS project (QA-009): edl.canvas.fps, not a hardcoded 30.
+const fpsOf = (s: Store): unknown => s.edl?.canvas?.fps
 
 const selectedIds = (s: Store): string[] =>
   Array.from(new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[]))
@@ -51,9 +53,9 @@ export const COMMANDS: Command[] = [
   { id: 'shuttleForward', label: 'Shuttle forward (L)', category: 'Transport',
     run: (s) => { const r = s.playbackRate; s.setPlaybackRate(r < 0 ? 1 : Math.min(8, (r || 1) * 2 > 1 ? (r || 1) * 2 : 1)); s.setPlaying(true) } },
   { id: 'frameBack', label: 'Step back 1 frame', category: 'Transport',
-    run: (s) => { s.setPlaying(false); s.setPlayhead(s.playhead - FRAME) } },
+    run: (s) => { s.setPlaying(false); s.setPlayhead(stepFrames(s.playhead, -1, fpsOf(s))) } },
   { id: 'frameForward', label: 'Step forward 1 frame', category: 'Transport',
-    run: (s) => { s.setPlaying(false); s.setPlayhead(s.playhead + FRAME) } },
+    run: (s) => { s.setPlaying(false); s.setPlayhead(stepFrames(s.playhead, 1, fpsOf(s))) } },
   { id: 'secondBack', label: 'Step back 1 second', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlayhead(s.playhead - 1) } },
   { id: 'secondForward', label: 'Step forward 1 second', category: 'Transport',
@@ -67,9 +69,11 @@ export const COMMANDS: Command[] = [
   { id: 'rippleDelete', label: 'Ripple delete selection', category: 'Editing',
     run: async (s) => {
       const ids = selectedIds(s)
-      if (ids.length === 1) await s.dispatch('ripple_delete', { clip_id: ids[0] })
-      else if (ids.length > 1) await s.dispatch('bulk_delete', { clip_ids: ids })
-      s.clearSelection()
+      const res = ids.length === 1 ? await s.dispatch('ripple_delete', { clip_id: ids[0] })
+        : ids.length > 1 ? await s.dispatch('bulk_delete', { clip_ids: ids }) : null
+      // A refused delete (a locked track, QA-023) resolves null and its toast
+      // says why; the clip is still there, so it stays selected.
+      if (res) s.clearSelection()
     } },
   { id: 'duplicate', label: 'Duplicate selection', category: 'Editing',
     run: async (s) => {
@@ -80,9 +84,9 @@ export const COMMANDS: Command[] = [
   { id: 'copy', label: 'Copy', category: 'Editing', run: (s) => s.copySelection() },
   { id: 'paste', label: 'Paste', category: 'Editing', run: (s) => s.pasteClipboard() },
   { id: 'nudgeLeft', label: 'Nudge clip left 1 frame', category: 'Editing',
-    run: (s) => s.nudgeSelection(-FRAME) },
+    run: (s) => s.nudgeSelection(-frameDuration(fpsOf(s))) },
   { id: 'nudgeRight', label: 'Nudge clip right 1 frame', category: 'Editing',
-    run: (s) => s.nudgeSelection(FRAME) },
+    run: (s) => s.nudgeSelection(frameDuration(fpsOf(s))) },
 
   // ---------- Marks ----------
   { id: 'markIn', label: 'Mark in', category: 'Marks', run: (s) => s.setInMark(s.playhead) },

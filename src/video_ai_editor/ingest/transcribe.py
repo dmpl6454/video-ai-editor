@@ -295,6 +295,201 @@ def _whisper_cpp_model_path(name: str) -> Path:
     return _WHISPER_CPP_MODEL_DIRS[0] / fname
 
 
+#: Analysis frame for the voicing refinement of word boundaries.
+_VAD_FRAME_S = 0.01
+#: A silence at least this long inside a word's span ends the word.
+_VAD_GAP_S = 0.1
+#: How far a word's start may be pulled EARLIER onto speech already under way.
+_VAD_MAX_LEAD_S = 0.3
+
+
+def _fix_text(text: str) -> str:
+    """Token text read with surrogateescape → valid text. Joining the tokens
+    of a word BEFORE this rebuilds multibyte characters that whisper split
+    across tokens (Devanagari), which is why word text is assembled from raw
+    bytes rather than per token."""
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").replace("\ufffd", "")
+
+
+def _voicing(wav: Path):
+    """(frame dB array, threshold) for a 16-bit mono wav, or None when the
+    clip has no measurable silence (music bed, constant noise) — then word
+    boundaries are left as whisper gave them."""
+    try:
+        import wave
+        import numpy as np
+        with wave.open(str(wav), "rb") as w:
+            sr = w.getframerate()
+            data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        return None
+    n = max(1, int(sr * _VAD_FRAME_S))
+    usable = (len(data) // n) * n
+    if usable < n * 10:
+        return None
+    rms = np.sqrt(np.mean(np.square(data[:usable].reshape(-1, n)), axis=1))
+    db = 20 * np.log10(rms + 1e-9)
+    ref, floor = float(np.percentile(db, 95)), float(np.percentile(db, 10))
+    if ref - floor < 12.0:
+        return None
+    return db, max(floor + 8.0, ref - 35.0)
+
+
+#: Voiced runs shorter than this are clicks/breaths, not the start of speech.
+_VAD_MIN_RUN_S = 0.03
+#: Silence at a segment's edge beyond this means whisper's token times are
+#: spread over the pause rather than over the speech.
+_VAD_EDGE_SLACK_S = 0.15
+
+
+def _fit_words_to_voicing(words: list[list], voicing) -> None:
+    """Pull a segment's word times off the silence at its edges, in place.
+
+    whisper.cpp's token times (without DTW, see _transcribe_via_whisper_cpp)
+    spread a segment's words over the whole window whisper chose — which,
+    after a pause, starts at the END of the previous speech: "The second
+    thing" came out at 5.0-6.5 s over a pause whose speech started at 6.6 s.
+    When the words' span has more than _VAD_EDGE_SLACK_S of silence at either
+    edge, map it linearly onto the voiced span [first, last voiced run]; the
+    per-word _refine_words snap then finishes the job. A segment whose edges
+    are already on speech is left untouched."""
+    if voicing is None or not words:
+        return
+    import numpy as np
+    db, thr = voicing
+    ws, we = words[0][0], words[-1][1]
+    if we - ws < 0.1:
+        return
+    a = max(0, int(ws / _VAD_FRAME_S))
+    b = min(len(db), int(np.ceil(we / _VAD_FRAME_S)) + 1)
+    voiced = db[a:b] >= thr
+    min_run = max(1, int(round(_VAD_MIN_RUN_S / _VAD_FRAME_S)))
+    runs, i = [], 0
+    while i < len(voiced):
+        if voiced[i]:
+            j = i
+            while j < len(voiced) and voiced[j]:
+                j += 1
+            if j - i >= min_run:
+                runs.append((i, j))
+            i = j
+        else:
+            i += 1
+    if not runs:
+        return
+    v0 = max(ws, (a + runs[0][0]) * _VAD_FRAME_S)
+    v1 = min(we, (a + runs[-1][1]) * _VAD_FRAME_S)
+    if v1 - v0 < 0.1 or (v0 - ws <= _VAD_EDGE_SLACK_S and we - v1 <= _VAD_EDGE_SLACK_S):
+        return
+    k = (v1 - v0) / (we - ws)
+    for w in words:
+        w[0] = v0 + (w[0] - ws) * k
+        w[1] = v0 + (w[1] - ws) * k
+
+
+def _refine_words(words: list[list], voicing) -> None:
+    """Snap each word [start, end, text] onto the voiced audio in place:
+    an end that runs into silence is pulled back to the last voiced frame, a
+    start that lands in silence moves to the first voiced frame, and a start
+    that lands mid-sound is pulled back (≤0.3 s, never past the previous word)
+    to where that sound began."""
+    if voicing is None:
+        return
+    import numpy as np
+    db, thr = voicing
+    voiced = db >= thr
+    nf = len(voiced)
+
+    def fi(t: float) -> int:
+        return min(nf - 1, max(0, int(t / _VAD_FRAME_S)))
+
+    prev_end = 0.0
+    for w in words:
+        s, e = w[0], w[1]
+        a, b = fi(s), fi(e)
+        idx = np.nonzero(voiced[a:b + 1])[0]
+        if len(idx) == 0:
+            prev_end = max(prev_end, e)
+            continue
+        first = a + int(idx[0])
+        # The word ends where its sound does: the last voiced frame before the
+        # first silence of ≥ _VAD_GAP_S (a real pause, not a stop consonant),
+        # so a word whisper stretched across a pause stops at the pause.
+        last, quiet = first, 0
+        gap_frames = max(1, int(_VAD_GAP_S / _VAD_FRAME_S))
+        for j in range(first, b + 1):
+            if voiced[j]:
+                last, quiet = j, 0
+            else:
+                quiet += 1
+                if quiet >= gap_frames:
+                    break
+        if first == a:
+            j = a
+            floor_frame = fi(max(prev_end, s - _VAD_MAX_LEAD_S))
+            while j - 1 >= floor_frame and voiced[j - 1]:
+                j -= 1
+            new_s = j * _VAD_FRAME_S
+        else:
+            new_s = first * _VAD_FRAME_S
+        new_e = min(e, (last + 1) * _VAD_FRAME_S + 0.03)
+        if new_e - new_s >= 0.02:
+            w[0], w[1] = max(new_s, prev_end), new_e
+        prev_end = max(prev_end, w[1])
+
+
+def _segment_words(seg: dict, text: str, seg_start: float, seg_end: float) -> list[list]:
+    """Real per-word times from whisper.cpp's token list (QA-011).
+
+    Tokens that start with a space open a new word; the rest (punctuation, the
+    tail of a split word) join the previous one. A word starts at its first
+    token's DTW time when present, else at the token's own start; it ends at
+    the next word's start when DTW is present (DTW gives onsets only), else at
+    its last token's end. The segment's clean `text` supplies the spelling when
+    the word counts agree."""
+    words: list[list] = []
+    has_dtw = False
+    for tok in seg.get("tokens") or []:
+        t = tok.get("text") or ""
+        if t.startswith("[_") and t.endswith("]"):
+            continue
+        off = tok.get("offsets") or {}
+        t0 = float(off.get("from", 0)) / 1000.0
+        t1 = float(off.get("to", 0)) / 1000.0
+        dtw = tok.get("t_dtw", -1)
+        start = t0
+        if isinstance(dtw, (int, float)) and dtw >= 0:
+            start = float(dtw) / 100.0
+            has_dtw = True
+        if t.startswith(" ") or not words:
+            words.append([start, t1, t])
+        else:
+            words[-1][1] = max(words[-1][1], t1)
+            words[-1][2] += t
+    out: list[list] = []
+    for w in words:
+        txt = _fix_text(w[2]).strip()
+        if txt and not all(ch in ".,!?;:-–—…\"'" for ch in txt):
+            out.append([w[0], w[1], txt])
+        elif out:
+            out[-1][2] += txt
+    if not out:
+        return []
+    clean = [t for t in text.split(" ") if t]
+    if len(clean) == len(out):
+        for w, t in zip(out, clean):
+            w[2] = t
+    for i, w in enumerate(out):
+        w[0] = min(max(w[0], seg_start), seg_end)
+        if i and w[0] < out[i - 1][0]:
+            w[0] = out[i - 1][0]
+    for i, w in enumerate(out):
+        nxt = out[i + 1][0] if i + 1 < len(out) else seg_end
+        end = nxt if has_dtw else min(w[1], nxt) if w[1] > w[0] else nxt
+        w[1] = max(w[0] + 0.02, min(end, seg_end if seg_end > w[0] else w[0] + 0.02))
+    return out
+
+
 def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
                                 model_size: str | None,
                                 task: str = "transcribe") -> Transcript:
@@ -340,39 +535,50 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
         # We do NOT use `-ml 1` (one token per segment): on Devanagari it splits
         # multibyte characters at token boundaries, writing invalid UTF-8 into
         # the JSON ('कौन' → 'क' + two broken bytes + 'न'). Segment mode keeps
-        # each segment's `text` field whole and valid; we synthesize word-level
-        # timing below by spreading the segment duration across its words.
-        cmd = [_WHISPER_CPP_BIN, "-m", str(model_path), "-f", str(wav),
-               "-of", str(out_prefix), "-oj",
-               "-et", "2.8", "-mc", "0",
-               "-l", language if language else "auto"]
+        # each segment's `text` field whole and valid.
+        #
+        # Word timing (QA-011) comes from the FULL JSON's per-token times
+        # (`-ojf`), then snapped onto the voiced audio (_refine_words). It used
+        # to be synthesised by spreading each segment's duration evenly over its
+        # words — so after every pause captions came up ~2 s early over silence
+        # and remove_fillers cut the wrong audio.
+        #
+        # NO `-dtw`: DTW requires `-nfa` (flash attention off), and with it the
+        # `small` model decoded 29 s of the normalised benchmark Hindi as 73
+        # repeated 'ॐ' tokens (4 sentences lost; `-ojf` alone: 0). On English
+        # the DTW onsets were also worse than token times + voicing snap
+        # (mean onset error 0.041 s vs 0.008 s) and dropped an "um".
+        # tests/test_whisper_cpp_no_dtw_collapse.py pins this.
+        base = [_WHISPER_CPP_BIN, "-m", str(model_path), "-f", str(wav),
+                "-of", str(out_prefix), "-ojf",
+                "-et", "2.8", "-mc", "0",
+                "-l", language if language else "auto"]
         if task == "translate":
-            cmd.append("-tr")
+            base.append("-tr")
         # errors="replace" on the captured pipes (progress meter can split a
         # multibyte char across buffers).
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = subprocess.run(base, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
         json_path = Path(f"{out_prefix}.json")
         if not json_path.exists():
             raise RuntimeError(f"whisper-cli produced no JSON output:\n{proc.stdout[-500:]}")
-        # Read bytes + decode with errors="replace": the per-token array in the
-        # JSON can carry split-multibyte garbage, but each segment's `text`
-        # field is valid UTF-8 and survives intact (only the already-broken
-        # token bytes become U+FFFD, which we never read).
-        data = json.loads(json_path.read_bytes().decode("utf-8", "replace"))
+        # Read bytes + decode with surrogateescape: the per-token array in the
+        # JSON can carry split-multibyte fragments. Kept as escaped bytes, the
+        # fragments of one word are rejoined into valid UTF-8 by `_fix_text`;
+        # each segment's `text` field is valid UTF-8 on its own.
+        data = json.loads(json_path.read_bytes().decode("utf-8", "surrogateescape"))
+        voicing = _voicing(wav)
 
     # Segment mode: each `transcription` entry is a whole sentence/segment with
-    # millisecond offsets and a clean `text`. Build Segment objects directly and
-    # synthesize even word timing across each segment so word_emphasis captions
-    # and word-level tools still work.
+    # millisecond offsets, a clean `text` and (with -ojf) its tokens.
     segments: list[Segment] = []
     for seg in data.get("transcription", []) or []:
         offsets = seg.get("offsets") or {}
         start = float(offsets.get("from", 0)) / 1000.0
         end = float(offsets.get("to", 0)) / 1000.0
-        text = (seg.get("text") or "")
+        text = _fix_text(seg.get("text") or "")
         # Drop U+FFFD replacement chars left by any rare segment-text byte split,
         # then collapse the whitespace they leave behind.
         text = text.replace("�", "").strip().lstrip("-").strip()
@@ -384,15 +590,34 @@ def _transcribe_via_whisper_cpp(audio_path: Path, language: str | None,
         # split occasionally produces a 14.2→14.2 stub).
         if end - start < 0.06:
             continue
-        toks = [t for t in text.split(" ") if t]
-        words: list[Word] = []
-        if toks and end > start:
-            step = (end - start) / len(toks)
-            for j, tok in enumerate(toks):
-                words.append(Word(start=start + j * step,
-                                  end=start + (j + 1) * step, word=tok))
+        raw_words = _segment_words(seg, text, start, end)
+        _fit_words_to_voicing(raw_words, voicing)
+        _refine_words(raw_words, voicing)
+        words = [Word(start=round(w[0], 3), end=round(w[1], 3), word=w[2]) for w in raw_words]
+        if not words:
+            # No token list (an older whisper-cli without -ojf): even spread,
+            # the historical behaviour, rather than no word timing at all.
+            toks = [t for t in text.split(" ") if t]
+            if toks and end > start:
+                step = (end - start) / len(toks)
+                words = [Word(start=start + j * step, end=start + (j + 1) * step, word=tok)
+                         for j, tok in enumerate(toks)]
+        else:
+            # The segment spans its words: a segment boundary whisper placed
+            # inside the preceding pause must not make a cue start early.
+            start, end = words[0].start, max(words[-1].end, words[0].start + 0.06)
         segments.append(Segment(id=len(segments), start=start, end=end,
                                 text=text, words=words))
+
+    # Segments may overlap by a few frames at their boundaries; a word must
+    # never run past the start of the next one.
+    flat = [w for seg in segments for w in seg.words]
+    for prev, nxt in zip(flat, flat[1:]):
+        if prev.end > nxt.start:
+            prev.end = max(prev.start + 0.02, nxt.start)
+    for seg in segments:
+        if seg.words:
+            seg.end = max(seg.words[-1].end, seg.start + 0.06)
 
     duration = segments[-1].end if segments else 0.0
     detected_lang = data.get("result", {}).get("language") if isinstance(data.get("result"), dict) else None

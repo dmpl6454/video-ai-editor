@@ -37,6 +37,8 @@ INTENTS: tuple[str, ...] = (
     "shorts", "reframe", "music", "duck", "beat_sync", "hook", "color_look", "clean_audio",
     "loudness", "speed", "trim", "title", "brand", "end_card", "transitions", "export_preset",
     "voiceover", "stabilize", "upscale", "undo", "redo", "ask",
+    # QA-018: the everyday one-liners — fades, levels, mutes, fitting the bed.
+    "fade", "volume", "mute", "fit_music", "audit", "preview", "remove_music",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -161,6 +163,7 @@ _NEG_TARGETS: tuple[tuple[str, str], ...] = (
     (r"noise reduction|denoise|denoising|audio clean ?up", "clean_audio"),
     (r"loudness|normali[sz]ation|normali[sz]e", "loudness"),
     (r"translation|translate", "translate_captions"),
+    (r"duck(?:ing)?|sidechain(?:ing)?|auto[- ]?duck(?:ing)?", "duck"),
 )
 _NEG_RE = re.compile(
     r"(?:\bno\b|\bwithout\b|\bdon'?t\b|\bdo not\b|\bskip(?:\s+the)?\b|\bleave out\b|\bnot?\s+any\b|\bnever\b|\bminus\b|\bexcept\b|\bbut no\b|\bnahi\b|\bmat\b)"
@@ -180,6 +183,25 @@ def exclusions_in(clause: str) -> list[str]:
     return out
 
 
+#: A duck clause that asks for ducking to be OFF (QA-031). Checked on the
+#: clause the `duck` hit came from — "turn off ducking", "turn ducking off",
+#: "stop ducking", "disable auto-duck", "don't duck the music", "no ducking",
+#: "unduck". Without it every one of those produced `set_duck(enabled=True)`
+#: at confidence 1.0 and a VERIFIED card.
+_DUCK_OFF_RE = re.compile(
+    r"\b(?:turn(?:ed)?|switch(?:ed)?|shut)\s+(?:the\s+)?(?:music\s+)?(?:(?:auto[- ]?)?duck(?:ing)?\s+)?off\b"
+    r"|\b(?:turn|switch)\s+off\b|\bstop(?:ped)?\s+(?:the\s+)?(?:auto[- ]?)?(?:duck|sidechain)"
+    r"|\bdisabl\w*|\bdeactivat\w*|\bdon'?t\b|\bdo not\b|\bno\b|\bwithout\b|\bnever\b|\bnot\b"
+    r"|\bun-?duck\w*|\bremove (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\b(?:duck(?:ing)?|sidechain) off\b"
+    r"|\b(?:kill|cancel|drop) (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\bnahi\b|\bband karo\b|\bmat\b"
+    r"|\b(?:undo|revert|get rid of|lose|remove) (?:the |all (?:the )?|that )?(?:auto[- ]?)?(?:duck|sidechain)\w*")
+
+
+def duck_off(clause: str) -> bool:
+    """True when a `duck` clause asks for ducking to be turned OFF."""
+    return bool(_DUCK_OFF_RE.search(S.normalize(clause)))
+
+
 def strip_negations(clause: str) -> str:
     """The clause with negated phrases removed, so "add music but no captions"
     still yields `music`."""
@@ -194,6 +216,13 @@ _HAS_RANGE = r"(?:\bfirst\b|\blast\b|\bfrom\b|\bbetween\b|\d+\s*(?:s|sec|secs|se
 
 #: (regex, intent, score) checked in order BEFORE the phrase table (§2.3).
 CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
+    # QA-018: a fade to/from black anchored at the END / START of the video is
+    # the programme fade (last / first clip), not a seam transition — as a
+    # transition it landed on the last SEAM (mid-video) or, on a one-clip
+    # timeline, did nothing ("there is no seam").
+    (r"\bfade (?:out |down )?(?:to|into) black (?:at|by|towards?|for) (?:the )?(?:very )?(?:end|ending|finish|close|outro)\b"
+     r"|\bfade (?:in |up )?from black (?:at|in|for) (?:the )?(?:very )?(?:start|beginning|opening|intro)\b"
+     r"|\b(?:end|finish|close) (?:it |the video |everything )?(?:with|on) a fade(?: out| to black)?\b", "fade", EXACT),
     (r"\bcut(?:s|ting)?\s+(?:it\s+|this\s+|the\s+video\s+)?(?:to|on|with|along)\s+the\s+(?:beat|music|rhythm|drums?|bpm)\b|\bcut to the beat\b|\bon the beat\b|\bbeat[- ]sync\b|\bsync(?:ed)?\s+to\s+the\s+(?:beat|music)\b|\bbeat[- ]match\b", "beat_sync", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:ums?|uhs?|umms?|filler(?:s| words?)|hesitations?|stutters?)\b", "remove_fillers", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:silences?|pauses?|dead air|gaps?|quiet parts?)\b", "remove_silences", EXACT),
@@ -201,6 +230,14 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     (rf"\bcut\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?=.*{_HAS_RANGE})", "trim", EXACT),
     (r"\bcut\s+(?:it\s+|this\s+|the\s+video\s+)?(?:down|shorter|tighter)\b", "tighten", SYNONYM),
 )
+
+#: The music bed, as the object of a level / fade / mute / fit request.
+_MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|background music)"
+#: The programme's own sound (v1 clip audio), as the object of a level / mute.
+_VOICE_NOUN = r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound)"
+#: What "fade the ___ in/out" may name besides the music.
+_FADE_OBJECT = (r"video|clip|clips|first clip|last clip|opening clip|final clip|picture|image|footage|start|end|"
+                r"beginning|ending|intro|outro|audio|sound|voice|whole thing|whole video")
 
 #: intent → list of (regex, score). First match per pattern; best score wins.
 PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
@@ -227,6 +264,46 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 (r"\bvertical\b|\bportrait\b|\blandscape\b|\bsquare\b|\b9:16\b|\b16:9\b|\b1:1\b|\b4:5\b", SYNONYM)),
     "duck": ((r"\bduck(?:ing)?\b|\blower the music (?:under|behind|when|during)\b|\bmusic (?:under|behind|below) (?:my|the) (?:voice|speech|talking|dialogue)\b|\bquiet(?:er)? (?:the )?music (?:when|while|under)\b|\bmusic (?:quieter|softer|lower|down) (?:when|while|under|during)\b|\bturn (?:the )?music down (?:when|while|under)\b|\bsidechain\b|\bauto[- ]?duck\b", EXACT),
              (r"\bmusic (?:too )?loud\b|\bmusic (?:is )?drowning\b|\bbalance (?:the )?music\b|\bmusic under\b", SYNONYM)),
+    # --- QA-018 -------------------------------------------------------
+    # Music nouns a level/fade/mute/fit row names (the object, never the verb).
+    "fit_music": ((rf"\b(?:trim|cut|fit|match|shorten|end|stop|sync|clip|crop|chop|cut off)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:to|with|at)\s+(?:the\s+)?(?:(?:same\s+)?length of the video|video(?:'s)?(?: length| duration)?|length(?: of the video)?|end(?: of the video)?|footage|clip|same length|duration)\b"
+                   rf"|\bmake (?:the\s+)?{_MUSIC_NOUN} (?:end|stop|finish) (?:with|when|at) the (?:video|end|footage)\b"
+                   rf"|\b{_MUSIC_NOUN} (?:is |runs? )?(?:too long|longer than the video|past the (?:video|end)|over the end|after the video ends)\b"
+                   rf"|\b{_MUSIC_NOUN} (?:to|matches|should match) (?:the )?video(?:'s)? length\b"
+                   rf"|\b{_MUSIC_NOUN} (?:keeps? (?:on )?playing|continues|carries on|goes on|plays on|runs on|still plays)\b"
+                   r"(?:\s+(?:after|past|beyond|over|when|once))?"
+                   rf"|\b(?:end|stop|finish) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN} (?:when|where|as|with|at) (?:the\s+)?video\b"
+                   rf"|\b{_MUSIC_NOUN} (?:should |must |needs to |has to )?(?:end|stop|finish) (?:with|when|at|where) the (?:video|footage)\b"
+                   r"|\bblack (?:tail|screen|frames?) at the end\b", EXACT),),
+    # "remove the music" / "delete the song" / "music hatao" — the bed goes.
+    "remove_music": ((rf"\b(?:remove|delete|get rid of|take out|take off|clear|lose|ditch|scrap)\s+(?:the\s+|all\s+(?:the\s+)?|my\s+)?(?:background\s+)?{_MUSIC_NOUN}\b(?!\s+(?:from|in|at|for|between|during|under)\b)"
+                      rf"|\b{_MUSIC_NOUN}\s+(?:hatao|hata do|nikalo|nikal do|remove|delete)\b", EXACT),),
+    "fade": ((rf"\bfade(?:s|d)?\s+(?:it\s+|this\s+|everything\s+|the\s+(?:{_FADE_OBJECT})\s+|{_MUSIC_NOUN}\s+)?(?:in|out|up|down|away)\b"
+              r"|\bfade[- ]?(?:ins?|outs?)\b|\bfade (?:up |in )?from black\b"
+              rf"|\bfade (?:the\s+)?(?:{_FADE_OBJECT}|{_MUSIC_NOUN})\b", EXACT),
+             (r"\bfades?\b|\bfading\b", SYNONYM)),
+    "mute": ((rf"\b(?:un)?mute(?:d)?\s+(?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}|audio|sound|clip|video|it|everything)\b"
+              rf"|\b(?:silence|turn off|switch off|kill)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
+              rf"|\b(?:turn|switch)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+off\b"
+              rf"|\b(?:turn|switch|put)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:back\s+)?on\b"
+              rf"|\b{_MUSIC_NOUN}\s+(?:band|bandh|off|chalu|on)\s*(?:karo|kar do|kardo|kijiye|karein|do)\b"
+              rf"|\b(?:un)?mute\b", EXACT),),
+    "volume": ((rf"\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
+                rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?(?:\s+(?:volume|level|gain))?\b"
+                rf"|\b(?:turn|bring|crank|pump|dial|knock|push|pull)\s+(?:up|down)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
+                rf"|\b(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s+(?:volume|level|gain)\b"
+                rf"|\b(?:{_MUSIC_NOUN})(?:'s)?\s+(?:volume\s+|level\s+|gain\s+)?(?:at|to|=)?\s*[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|%)"
+                rf"|\b(?:{_MUSIC_NOUN})\s+(?:ka\s+volume\s+|ki\s+awaa?z\s+)?(?:thoda\s+|thodi\s+|aur\s+)?(?:kam|dheere|dheema|dheemi|halka|halki|zyada|jyada|tez|badha\w*)\b"
+                rf"|\b(?:volume|level|gain) (?:of|on|for) (?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
+                rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:quieter|softer|louder|lower)\b"
+                rf"|\b(?:{_MUSIC_NOUN}) (?:quieter|softer|louder|lower|down|up)\b(?!\s+(?:when|while|under|during))"
+                rf"|\b(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:is |'s )?(?:way |far |much |a bit |a little |kind of |so |really )?(?:too loud|too quiet|too soft|too low|too high)\b(?!\s+(?:when|while|under|during))"
+                rf"|\bvolume (?:down|up) (?:on|for) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
+                rf"|\b(?:quieter|softer|louder|lower) (?:background\s+)?{_MUSIC_NOUN}\b"
+                rf"|\bcan'?t hear (?:my|the) (?:voice|speech|dialogue|narration|words|talking) (?:over|under|because of|with|through) (?:the\s+)?{_MUSIC_NOUN}\b"
+                rf"|\b{_MUSIC_NOUN} (?:drowns|is drowning|covers|buries|overpowers) (?:out )?(?:my|the) (?:voice|speech|dialogue|narration)\b", EXACT),),
+    "audit": ((r"\b(?:audit|review|check|score|grade)\s+(?:it|this|the (?:edit|video|result|timeline)|everything)\b|\b(?:aesthetic )?audit\b|\bquality check\b", EXACT),),
+    "preview": ((r"\brender (?:a |the )?preview\b|\bpreview render\b|\b(?:render|make|build|export) (?:a |the )?(?:quick |low[- ]res )?(?:preview|draft)(?: render| video| file)?\b", EXACT),),
     "beat_sync": ((r"\b(?:cut|edit|sync|snap|match|time|align)\w*\s+(?:it\s+|this\s+|the\s+(?:video|cuts|clips|footage)\s+)?(?:to|on|with|along)\s+(?:the\s+)?(?:beat|music|rhythm|drums?|bpm|tempo)\b|\bbeat[- ]?sync\b|\bon[- ]beat\b|\bbeat[- ]match(?:ed|ing)?\b|\bpulse (?:to|with|on) the (?:beat|music)\b|\bcuts? on (?:the )?beats?\b|\bbeat drops?\b", EXACT),
                   (r"\bto the (?:beat|music|rhythm)\b|\brhythm\b", SYNONYM)),
     "music": ((r"\b(?:add|put|drop|lay|throw in|give (?:it|me)|i want|need|play|with|use|set)\s+(?:some\s+|a\s+|the\s+|an?\s+\w+\s+|\w+\s+)?(?:background\s+)?(?:music|track|song|bed|beat|soundtrack|bgm|tune|score)\b|\bbackground music\b|\b(?:chill|upbeat|lo-?fi|cinematic|calm|energetic|epic|happy|dramatic|relaxing)\s+(?:background\s+)?(?:music|track|song|bed|beat|vibes?|tune)\b|\bmusic bed\b|\bbgm\b|\bsome music\b|\bmusic (?:please|pls)\b|\banother (?:track|song|music)\b|\breplace the (?:music|track|song)\b", EXACT),
@@ -251,8 +328,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                  (r"\bcta\b|\bcall to action\b|\bfollow (?:me|us)\b", SYNONYM)),
     "transitions": ((r"\btransitions?\b|\bcross[- ]?(?:fade|dissolve)s?\b|\bdissolves?\b|\bwipes?\b|\bwhip pans?\b|\bswipes? between\b|\b(?:smooth|soft|clean|punchy|cinematic|fancy|nice|cool|fun)\s+(?:cuts|transitions?)\s+between\b|\bfade between (?:the )?clips\b|\bblend (?:the )?(?:clips|cuts)\b|\bsoften the cuts\b|\bcut points? (?:smoother|softer)\b"
                      # A named look + a seam reference is a transition request even without the word:
-                     # "smooth zoom between every clip", "a glitch at every cut", "fade to black at the end".
-                     r"|\b(?:zoom|glitch|whip|wipe|slide|push|blur|dissolve|flash|pixelat\w*|mosaic|spiral|spin|ripple|iris|diamond|blinds|checkerboard|film burn|(?:dip|fade) to (?:black|white))\b(?=.*\b(?:between|at|on) (?:the |every |each |all (?:the )?)?(?:clips?|cuts?|seams?|scenes?|shots?|hook|start|end|beginning|clip changes?)\b)", EXACT),
+                     # "smooth zoom between every clip", "a glitch at every cut", "fade to black at the last cut".
+                     # ("fade to black at the END" is the closing fade — CUT_PRECEDENCE routes it to `fade`.)
+                     r"|\b(?:zoom|glitch|whip|wipe|slide|push|blur|dissolve|flash|pixelat\w*|mosaic|spiral|spin|ripple|iris|diamond|blinds|checkerboard|film burn|(?:dip|fade) to (?:black|white))\b(?=.*\b(?:between|at|on) (?:the |every |each |all (?:the )?)?(?:(?:last|first|final|next|second) )?(?:clips?|cuts?|seams?|scenes?|shots?|hook|start|end|beginning|clip changes?)\b)", EXACT),
                     (r"\bbetween (?:the |every |each |all (?:the )?)?(?:clips?|cuts?|scenes?|shots?)\b|\bsmooth(?:er)? cuts\b|\bthe cuts\b", SYNONYM)),
     "export_preset": ((r"\bexport (?:preset|settings?|for|as|to)\b|\bexport[- ]ready\b|\brender (?:for|as|settings?)\b|\b(?:set|use|apply)\s+(?:the\s+)?(?:\w+\s+)?(?:export\s+)?preset\b|\boptimi[sz]e (?:the )?(?:export|output|render|settings) for\b|\bformat (?:it|this) for\b|\bsettings for (?:instagram|reels|tiktok|youtube|shorts|linkedin|stories)\b|\b(?:instagram|reels|tiktok|youtube|shorts|linkedin|story|stories) (?:export|settings?|specs?|format|preset|ready|spec)\b|\bbitrate\b|\bready to (?:upload|post|publish)\b", EXACT),
                       (r"\bexport\b|\bpreset\b|\bupload (?:it|this|ready)\b", SYNONYM)),
@@ -296,6 +374,16 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("remove_silences", "trim"), ("remove_fillers", "captions"), ("upscale", "export_preset"),
     ("upscale", "reframe"), ("stabilize", "speed"), ("speed", "trim"), ("title", "captions"),
     ("captions", "translate_captions"), ("undo", "trim"), ("ask", "captions"),
+    # QA-018: "turn the music down" is a LEVEL, "set the music to -20 dB" is not
+    # a request for a second bed, "fade to black between the clips" stays the
+    # seam transition it always was, and "lower the music under my voice" stays duck.
+    ("volume", "music"), ("fade", "music"), ("mute", "music"), ("fit_music", "music"),
+    ("fit_music", "trim"), ("fit_music", "fade"), ("fit_music", "volume"), ("fade", "trim"),
+    ("volume", "loudness"), ("volume", "clean_audio"), ("mute", "clean_audio"), ("mute", "volume"),
+    ("duck", "volume"), ("duck", "mute"), ("transitions", "fade"), ("fade", "volume"),
+    ("audit", "ask"), ("preview", "export_preset"),
+    ("remove_music", "music"), ("remove_music", "trim"), ("remove_music", "mute"),
+    ("remove_music", "clean_audio"), ("remove_music", "fit_music"),
 )
 
 
@@ -380,14 +468,22 @@ def detect(prompt: str) -> Detection:
     exclusions: list[str] = []
     unmatched: list[str] = []
     for clause in clauses:
-        for ex in exclusions_in(clause):
+        clause_ex = exclusions_in(clause)
+        positive = strip_negations(clause) if clause_ex else clause
+        resolved = _resolve_clause(positive) if positive.strip() else None
+        if "duck" in clause_ex and (resolved is None or (resolved[0] == "music" and resolved[1] < EXACT)):
+            # QA-031: "don't duck the music" / "no ducking on the music" is a
+            # request to turn ducking OFF, not a pure negation to ignore (and
+            # never, as it used to be, a request to turn it ON). The duck hit
+            # carries the clause; `duck_off()` reads the negation from it.
+            clause_ex = [x for x in clause_ex if x != "duck"]
+            positive, resolved = clause, ("duck", EXACT)
+        for ex in clause_ex:
             if ex not in exclusions:
                 exclusions.append(ex)
-        positive = strip_negations(clause) if exclusions_in(clause) else clause
         if not positive.strip():
             continue                       # pure negation clause: counted as understood
         template = _template_hit(positive)
-        resolved = _resolve_clause(positive)
         if template and (resolved is None or resolved[0] != "shorts"):
             resolved = ("auto_edit", EXACT)
         if resolved is None:
@@ -405,5 +501,5 @@ def detect(prompt: str) -> Detection:
 
 
 __all__ = ["INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
-           "IntentHit", "Detection", "split_clauses", "exclusions_in", "strip_negations",
+           "IntentHit", "Detection", "split_clauses", "exclusions_in", "strip_negations", "duck_off",
            "CUT_PRECEDENCE", "PHRASES", "detect"]

@@ -31,6 +31,7 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import { coerceAnswer, defaultAnswers, escapeTarget, isGate, kindOf, missingRequired, optionsFor,
          totalDownloadBytes, visibleQuestions, type Answers } from '../lib/clarifyDefaults'
 import { humanBytes, humanDuration, type NeedsInput, type Plan } from '../lib/promptEvents'
+import { clarifyEnterAction } from '../lib/clarifyKeys'
 
 interface Props {
   questions: NeedsInput[]
@@ -87,8 +88,12 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); escape(); return }
     if (e.key === 'Enter' && !e.shiftKey) {
-      const tag = (e.target as HTMLElement).tagName
-      if (tag === 'TEXTAREA') return
+      // Enter on a focused action button (Start, Skip, Cancel, Why?) clicks
+      // THAT button; it used to be swallowed into submit(), which on a gate
+      // card with no default did nothing and on Cancel ran the card instead.
+      const el = e.target as HTMLElement
+      const action = clarifyEnterAction({ tagName: el.tagName, role: el.getAttribute('role') })
+      if (action !== 'submit') return
       e.preventDefault()
       submit()
     }

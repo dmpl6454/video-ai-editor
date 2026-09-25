@@ -63,6 +63,7 @@ DOES arm the posture still works.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import time
 import uuid
@@ -182,12 +183,17 @@ def host_header_allowed(raw: str) -> bool:
         host = host.split("]", 1)[0].lstrip("[")
     elif host.count(":") == 1:                    # 10.0.0.5:8765
         host = host.split(":", 1)[0]
-    if host in {"localhost", "127.0.0.1", "::1", "testserver", "0.0.0.0"}:
+    if host in {"localhost", "testserver"}:
         return True
-    if host.startswith("127."):
-        return True
-    parts = host.split(".")
-    return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
+    # A real IP literal only. This used to accept any name STARTING with
+    # "127." — `127.attacker.example` / `127.0.0.1.nip.io` are DNS NAMES an
+    # attacker controls, i.e. exactly the rebinding case this check exists
+    # for (SEC-REBIND-127-PREFIX). Parse, never prefix-match.
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 def _record_failure(ip: str) -> bool:

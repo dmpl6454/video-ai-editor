@@ -9,19 +9,23 @@ import { PhonePanel } from './PhonePanel'
 import { TextTool } from './TextTool'
 import { CaptionsButton } from './CaptionsButton'
 import { SafeZoneToggle } from './SafeZones'
+import { RatioMenu } from './RatioMenu'
+import { TopBarMore } from './TopBarMore'
 import { parseVersionInfo, VERSION_UNKNOWN, type VersionInfo } from '../lib/versionInfo'
 import { claimClickForNativeSave, projectFilename } from '../lib/nativeSave'
 import { isSavedProjectStale, savedProject, visibleSavedProject, type SavedProject } from '../lib/savedProject'
+import { exportKind, exportLinkView } from '../lib/exportLink'
+import { canvasFacts } from '../lib/frameStep'
+import { defaultQuality, exportBody, qualityOptions, resolutionOptions, type CanvasLike, type QualityChoice } from '../lib/exportOptions'
 
 interface SessionRow { id: string; name: string }
 
 export function TopBar() {
   const name = useStore((s) => s.sessionName)
-  const dispatch = useStore((s) => s.dispatch)
   const pendingOps = useStore((s) => s.pendingOps)
   const exporting = useStore((s) => s.exporting)
-  const exportUrl = useStore((s) => s.exportUrl)
-  const exportGen = useStore((s) => s.exportGen)
+  const exportLinks = useStore((s) => s.exportLinks)
+  const edlHash = useStore((s) => s.edlHash)
   const opsLen = useStore((s) => s.ops.length)
   const exportStatus = useStore((s) => s.exportStatus)
   const exportError = useStore((s) => s.exportError)
@@ -31,7 +35,6 @@ export function TopBar() {
   const [exportElapsed, setExportElapsed] = useState(0)
   const edl = useStore((s) => s.edl)
   const sid = useStore((s) => s.sessionId)
-  const refresh = useStore((s) => s.refresh)
   const [saving, setSaving] = useState(false)
   // url + sid + generation as ONE record — see lib/savedProject for why the
   // session id belongs in it. `saved` is only shown while it belongs to the
@@ -39,10 +42,12 @@ export function TopBar() {
   // native bridge is handed another's id.
   const [saved, setSaved] = useState<SavedProject | null>(null)
   const savedHere = visibleSavedProject(saved, sid)
-  // A download link is "outdated" once history advances past the generation it
-  // was made at. We keep the link (you can still grab the last render) but mark
-  // it so nobody ships a stale file by mistake.
-  const exportStale = !!exportUrl && opsLen > exportGen
+  // The export link belongs to the project it was rendered from and is shown
+  // only there (lib/exportLink). It is "outdated" whenever the timeline on
+  // screen is not the one it rendered — by EDL hash, so Undo past the export
+  // marks it and Redo back un-marks it. We keep the link (you can still grab
+  // the last render) but mark it so nobody ships a stale file by mistake.
+  const exportView = exportLinkView(exportLinks, sid, edlHash)
   const savedStale = !!savedHere && isSavedProjectStale(savedHere, opsLen)
   const importRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<SessionRow[]>([])
@@ -54,6 +59,7 @@ export function TopBar() {
   // Starts at VERSION_UNKNOWN, whose phonePairing is false, so the phone button
   // cannot flash in and out while the request is in flight.
   const [appInfo, setAppInfo] = useState<VersionInfo>(VERSION_UNKNOWN)
+  const versionText = appInfo.version ? `v${appInfo.version}${appInfo.build ? ` · ${appInfo.build}` : ''}` : null
   // The phone-pairing panel. Closed by default and mounted only while open:
   // it shows a live credential, and a panel that is merely hidden is one
   // stylesheet mistake away from being a code left on screen.
@@ -61,7 +67,7 @@ export function TopBar() {
   // The session-picker dropdown is rendered via a portal to document.body
   // (positioned from this ref's rect) instead of as a normal absolutely-
   // positioned child of .topbar. .topbar clips overflow on both axes to keep
-  // the toolbar on one line (see .topbar-scroll/.topbar-pinned), so a child
+  // the toolbar on one line (see .topbar-tools/.topbar-pinned), so a child
   // positioned `top:100%` — below the 44px toolbar row — was always cut off
   // by that same clip (issue 11, "dropdown is half-cut when clicked").
   const pickerBtnRef = useRef<HTMLButtonElement>(null)
@@ -79,9 +85,16 @@ export function TopBar() {
   // inside an effect body (react-hooks/set-state-in-effect) and the "Source"
   // default keeps tracking canvas changes (e.g. aspect-ratio switches) until
   // the user actually picks a resolution from the <select>.
+  // The value is a NAMED resolution = the canvas's SHORT side (QA-025), and 0
+  // sends no height at all (the backend renders the canvas).
   const [exportHeightChoice, setExportHeightChoice] = useState<number>(0)
-  const exportHeight = exportHeightChoice || edl?.canvas?.h || 1080
-  const [exportCrf, setExportCrf] = useState<number>(18)
+  // '' = "not explicitly chosen": the platform bitrate target when the project
+  // carries one (QA-027), High otherwise — same sentinel reasoning as above.
+  const [exportQualityChoice, setExportQualityChoice] = useState<string>('')
+  const exportCanvas = edl?.canvas as CanvasLike | undefined
+  const exportQuality: QualityChoice = exportQualityChoice === ''
+    ? defaultQuality(exportCanvas)
+    : exportQualityChoice === 'platform' ? 'platform' : Number(exportQualityChoice)
   const [exportContainer, setExportContainer] = useState<'mp4' | 'mov'>('mp4')
   const exportBtnRef = useRef<HTMLButtonElement>(null)
   const [exportOptsPos, setExportOptsPos] = useState<{ left: number; top: number } | null>(null)
@@ -158,9 +171,8 @@ export function TopBar() {
   const onLoadProject = async (file: File) => {
     try {
       const r = await api.loadProject(file)
-      // Switch to the new session and refresh
-      useStore.setState({ sessionId: r.id, sessionName: r.id })
-      await refresh()
+      // Switch to the new session (loaded first, then swapped in atomically)
+      await useStore.getState().openSession(r.id)
     } catch (e) {
       toast.error(`Couldn't open that .vae project: ${errorMessage(e)}`)
     }
@@ -207,22 +219,19 @@ export function TopBar() {
 
   const confirmExport = () => {
     setExportOptsOpen(false)
-    void doExport({ height: exportHeight, crf: exportCrf, container: exportContainer })
+    void doExport({ ...exportBody(exportCanvas, exportHeightChoice, exportQuality), container: exportContainer })
   }
 
   const switchSession = async (newId: string) => {
     setPickerOpen(false)
     if (newId === sid) return
-    useStore.getState().resetTransient()
-    useStore.setState({ sessionId: newId, sessionName: newId })
-    await refresh()
+    await useStore.getState().openSession(newId)
   }
 
   const newSession = async () => {
     setPickerOpen(false)
     const r = await api.createSession(`project ${new Date().toLocaleString()}`)
-    useStore.setState({ sessionId: r.id, sessionName: r.name })
-    await refresh()
+    await useStore.getState().openSession(r.id)
   }
 
   const removeSession = async (id: string, e: React.MouseEvent) => {
@@ -240,12 +249,12 @@ export function TopBar() {
 
   return (
     <header className="topbar">
-      <h1>Video AI Editor</h1>
+      <h1 className="topbar-brand">Video AI Editor</h1>
       <div data-session-picker style={{ position: 'relative' }}>
         <button
           ref={pickerBtnRef}
-          className="pill"
-          title="Switch project"
+          className="pill topbar-session"
+          title={`Switch project — ${name}`}
           onClick={() => setPickerOpen((o) => !o)}
           style={{ cursor: 'pointer', padding: '3px 10px', fontSize: 11 }}
         >
@@ -328,52 +337,31 @@ export function TopBar() {
         </span>
       )}
       {edl && (
-        <span className="pill">
-          {edl.canvas.w}×{edl.canvas.h} · {edl.canvas.fps}fps · {edl.duration.toFixed(1)}s
+        // Hidden below 1280 px (styles.css) — the same facts head the Ratio menu.
+        <span className="pill topbar-canvas">
+          {canvasFacts(edl.canvas, edl.duration)}
         </span>
       )}
       <div className="grow" />
-      {/* Scrollable middle section: aspect-ratio + platform-preset buttons.
-          These can grow without bound (more presets, longer labels) — if this
-          section overflows the window, IT scrolls internally, but the
-          right-side cluster below (Save/Open/Export) never does. Previously
-          every button here shared one flex row with Export at the tail end,
-          so on a ~1280px window (a common 13" laptop size) Export could sit
-          past the visible edge with no visual cue that scrolling the
-          TOOLBAR ITSELF (not the page) would reveal it — issues 9/10. */}
-      <div className="topbar-scroll">
-        {/* Undo/Redo MOVED to the timeline toolbar (Timeline.tsx). They were
-            in `.topbar-scroll`, which scrolls horizontally once enough presets
-            are added — so the app's two most-used buttons could end up
-            off-screen with no cue that the toolbar itself scrolls. */}
-        {(['9:16', '16:9', '1:1', '4:5'] as const).map((r) => (
-          <button
-            key={r}
-            title={`Set canvas aspect ratio to ${r} — overlays reposition to fit`}
-            onClick={() => dispatch('set_aspect_ratio', { ratio: r })}
-          >{r}</button>
-        ))}
-        <SafeZoneToggle />
-        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
+      {/* The tools: every core action is VISIBLE at every supported width
+          (1024–1920; QA-012). This used to be `.topbar-scroll`, an overflow-x
+          strip with a 0 px scrollbar and no fade: at 1440 wide TikTok, the
+          IG presets, Help and Shortcuts sat past its edge, and at 1024 so did
+          Text and Captions — reachable only by a sideways scroll nobody could
+          see. Now the four aspect buttons and five platform presets are ONE
+          "Ratio ▾" menu that checks the canvas' current choice, the safe-zone
+          picker and the version badge move into "⋯" below 1440 px, and the
+          brand / canvas pills give way first (styles.css). Nothing here
+          scrolls, and .topbar-pinned (Save/Open/Export) still never moves. */}
+      <div className="topbar-tools">
+        {/* Undo/Redo MOVED to the timeline toolbar (Timeline.tsx): the app's
+            two most-used buttons must never be the ones a narrow bar hides. */}
+        <RatioMenu />
+        <span className="topbar-wide"><SafeZoneToggle /></span>
+        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
         <TextTool />
         <CaptionsButton />
-        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 4px' }} />
-        {[
-          { label: 'Reels',    title: 'Instagram Reels — 1080×1920 @ 30fps',  w: 1080, h: 1920, fps: 30 },
-          { label: 'Shorts',   title: 'YouTube Shorts — 1080×1920 @ 30fps',   w: 1080, h: 1920, fps: 30 },
-          { label: 'TikTok',   title: 'TikTok — 1080×1920 @ 30fps',           w: 1080, h: 1920, fps: 30 },
-          { label: 'IG 1:1',   title: 'Instagram feed square — 1080×1080',    w: 1080, h: 1080, fps: 30 },
-          { label: 'IG 4:5',   title: 'Instagram feed portrait — 1080×1350',  w: 1080, h: 1350, fps: 30 },
-        ].map((p) => (
-          <button
-            key={p.label}
-            title={p.title}
-            onClick={() => dispatch('set_canvas', { w: p.w, h: p.h, fps: p.fps })}
-            style={{ fontSize: 11 }}
-          >
-            {p.label}
-          </button>
-        ))}
+        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
         <button onClick={openHelp} title="Keyboard shortcuts (?)" style={{ fontSize: 11 }}>?</button>
         <button onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" style={{ fontSize: 13 }}>⌨</button>
         {/* The iPhone-pairing affordance, rendered ONLY when this build reports
@@ -387,7 +375,7 @@ export function TopBar() {
             on, this is exactly the old behaviour. PhonePanel.tsx and
             phonePanel.css stay in the tree for the release that flips it back.
 
-            Both the button and the panel live in .topbar-scroll rather than
+            Both the button and the panel live in .topbar-tools rather than
             .topbar-pinned: the pinned cluster's invariant is that Export is the
             right-most, always-visible control, and pairing a phone is a
             once-a-month action that has no business competing with it. The
@@ -405,30 +393,34 @@ export function TopBar() {
             {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
           </>
         )}
+        <TopBarMore version={versionText} />
         {appInfo.version && (
-          <span title={appInfo.build ? `App version ${appInfo.version} · build ${appInfo.build}` : 'App version'}
+          <span className="topbar-wide" title={appInfo.build ? `App version ${appInfo.version} · build ${appInfo.build}` : 'App version'}
                 style={{ fontSize: 10, color: 'var(--text-dim, #888)', opacity: 0.7 }}>
-            v{appInfo.version}{appInfo.build ? ` · ${appInfo.build}` : ''}
+            {versionText}
           </span>
         )}
       </div>
-      {/* Pinned right-side cluster: never scrolls away, regardless of how
-          much content is in .topbar-scroll above. Export is always the
-          right-most, always-visible element. */}
+      {/* Pinned right-side cluster: never moves, regardless of how much is in
+          .topbar-tools above. Export is always the right-most, always-visible
+          element. */}
       <div className="topbar-pinned">
         <button
           onClick={onSaveProject}
           disabled={saving || !edl?.duration}
+          aria-label={saving ? 'Saving…' : 'Save'}
           title={!edl?.duration
             ? 'Nothing to save yet — add a video to the timeline first'
             : saving
               ? 'Saving the project file…'
               : 'Save an editable project file (.vae) you can reopen later'}
         >
-          {saving ? 'Saving…' : '💾 Save'}
+          {/* Below 1100 px the words give way and the icon stays (styles.css
+              .topbar-btn-label), so the tools keep their room (QA-012). */}
+          {saving ? 'Saving…' : <>💾<span className="topbar-btn-label"> Save</span></>}
         </button>
-        <button onClick={() => importRef.current?.click()} title="Open a saved .vae project">
-          📂 Open
+        <button onClick={() => importRef.current?.click()} title="Open a saved .vae project" aria-label="Open">
+          📂<span className="topbar-btn-label"> Open</span>
         </button>
         <input ref={importRef} type="file" accept=".vae,.zip" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
@@ -439,6 +431,49 @@ export function TopBar() {
             style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
             ↓ .vae{savedStale ? ' (outdated)' : ''}
           </a>
+        )}
+        {/* The export's result — its download link, or why it failed — sits
+            BEFORE the Export button, so Export stays the cluster's right-most
+            control at every width (QA-012); it used to trail it. */}
+        {exportView && !exporting && (
+          // Deliberately a <button>, NOT an <a href={exportUrl} download>. In the
+          // packaged app (pywebview WKWebView/WebView2) the `download` attribute is
+          // ignored, so clicking an anchor NAVIGATES the webview to the inline
+          // .mp4 — which macOS opens as a borderless native fullscreen player with
+          // no Escape/back affordance, trapping the user (force-quit only). Routing
+          // through downloadExport() → the native save bridge avoids any navigation
+          // and pops a real Save-As dialog instead.
+          <button
+            type="button"
+            onClick={() => downloadExport()}
+            className={exportView.stale ? 'stale-dl' : ''}
+            title={exportView.stale ? 'This render is not the timeline you have now — re-export for an up-to-date file' : `Save exported ${exportKind(exportView.link)}`}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: exportView.stale ? undefined : 'var(--good)', fontSize: 12 }}>
+            {exportView.label}
+          </button>
+        )}
+        {exportError && (
+          // Show the REASON, not just "failed". The backend now maps ffmpeg
+          // stderr through _render_failure_message, so this is a sentence a
+          // user can act on ("…an audio-only file on the video track. Move
+          // that clip to the Music lane") — it used to be reachable only by
+          // hovering for a 2000-char raw ffmpeg dump. Strip the RuntimeError:
+          // prefix jobs.py adds, and cap the width so a long tail (an
+          // unmapped ffmpeg error) can't blow out the toolbar.
+          <span
+            // Width capped per breakpoint in styles.css (.topbar-export-error):
+            // at 1024 px a 340 px chip pushed Help and Shortcuts out of the
+            // bar (QA-012). The title has the whole message.
+            className="topbar-export-error"
+            style={{
+              color: 'var(--accent)', fontSize: 12, cursor: 'pointer',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+            title={`${exportError} (click to dismiss)`}
+            onClick={() => clearExportError()}
+          >
+            ⚠ {exportError.replace(/^\w*Error:\s*/, '')} ✕
+          </span>
         )}
         <div data-export-opts style={{ position: 'relative', display: 'inline-block' }}>
           <button
@@ -483,26 +518,24 @@ export function TopBar() {
                   onChange={(e) => setExportHeightChoice(Number(e.target.value))}
                   style={{ fontSize: 12, padding: '3px 4px' }}
                 >
-                  {edl?.canvas?.h && (
-                    <option value={0}>Source ({edl.canvas.w}×{edl.canvas.h})</option>
-                  )}
-                  <option value={2160}>2160p (4K)</option>
-                  <option value={1440}>1440p (2K)</option>
-                  <option value={1080}>1080p</option>
-                  <option value={720}>720p</option>
-                  <option value={480}>480p</option>
+                  {/* Each label carries the size the file will measure: a
+                      named resolution is the SHORT side, so 1080p on 9:16
+                      reads "1080p (1080×1920)" (QA-025). */}
+                  {resolutionOptions(exportCanvas).map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
                 </select>
               </label>
               <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
                 Quality
                 <select
-                  value={exportCrf}
-                  onChange={(e) => setExportCrf(Number(e.target.value))}
+                  value={String(exportQuality)}
+                  onChange={(e) => setExportQualityChoice(e.target.value)}
                   style={{ fontSize: 12, padding: '3px 4px' }}
                 >
-                  <option value={18}>High</option>
-                  <option value={23}>Medium</option>
-                  <option value={28}>Small file</option>
+                  {qualityOptions(exportCanvas).map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
                 </select>
               </label>
               <label style={{ fontSize: 11, color: 'var(--text-dim)', display: 'flex', flexDirection: 'column', gap: 3 }}>
@@ -523,43 +556,6 @@ export function TopBar() {
             document.body,
           )}
         </div>
-        {exportUrl && !exporting && (
-          // Deliberately a <button>, NOT an <a href={exportUrl} download>. In the
-          // packaged app (pywebview WKWebView/WebView2) the `download` attribute is
-          // ignored, so clicking an anchor NAVIGATES the webview to the inline
-          // .mp4 — which macOS opens as a borderless native fullscreen player with
-          // no Escape/back affordance, trapping the user (force-quit only). Routing
-          // through downloadExport() → the native save bridge avoids any navigation
-          // and pops a real Save-As dialog instead.
-          <button
-            type="button"
-            onClick={() => downloadExport()}
-            className={exportStale ? 'stale-dl' : ''}
-            title={exportStale ? 'This render predates your latest edits — re-export for an up-to-date file' : `Save exported ${exportUrl.split('.').pop()?.toUpperCase()}`}
-            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: exportStale ? undefined : 'var(--good)', fontSize: 12 }}>
-            ↓ {exportUrl.split('.').pop()?.toUpperCase()}{exportStale ? ' (outdated)' : ''}
-          </button>
-        )}
-        {exportError && (
-          // Show the REASON, not just "failed". The backend now maps ffmpeg
-          // stderr through _render_failure_message, so this is a sentence a
-          // user can act on ("…an audio-only file on the video track. Move
-          // that clip to the Music lane") — it used to be reachable only by
-          // hovering for a 2000-char raw ffmpeg dump. Strip the RuntimeError:
-          // prefix jobs.py adds, and cap the width so a long tail (an
-          // unmapped ffmpeg error) can't blow out the toolbar.
-          <span
-            style={{
-              color: 'var(--accent)', fontSize: 12, cursor: 'pointer',
-              maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-            title={`${exportError} (click to dismiss)`}
-            onClick={() => clearExportError()}
-          >
-            ⚠ {exportError.replace(/^\w*Error:\s*/, '')} ✕
-          </span>
-        )}
       </div>
     </header>
   )

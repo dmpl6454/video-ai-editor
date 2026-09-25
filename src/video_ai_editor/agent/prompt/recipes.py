@@ -123,7 +123,8 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
           ratio=_RATIOS, platform=_PLATFORMS, subject_track=_YES_NO),
     _card("music", "Add background music, ducked under speech.",
           mood=_MOODS, src="text", volume_db="number", duck=_YES_NO),
-    _card("duck", "Lower the music under speech.", to_db="number"),
+    _card("duck", "Lower the music under speech (enabled=no turns ducking off).", to_db="number",
+          enabled=_YES_NO),
     _card("beat_sync", "Cut and pulse the picture on the music's beats.",
           subdivision="number", pulse=_YES_NO),
     _card("hook", "Add an attention hook in the first seconds.", text="text", duration_s="number"),
@@ -144,6 +145,18 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("voiceover", "Add a synthesised voiceover.", text="text", voice=_VOICES, start="number"),
     _card("stabilize", "Stabilise shaky footage.", clip_ref="text"),
     _card("upscale", "Upscale the resolution.", clip_ref="text", upscale_factor=("2", "4")),
+    # QA-018: the everyday one-liners. Slot names reuse the FM helper's typed
+    # fields where one fits (`target`, `duration_s`) so Apple Intelligence can
+    # fill them; the rest take their defaults.
+    _card("fade", "Fade the picture and sound in at the start or out at the end, or fade the music bed.",
+          target=("video", "audio", "music"), edge=("in", "out", "both"), duration_s="number",
+          clip_ref="text"),
+    _card("volume", "Turn the music bed or the original sound up or down, or set its level in dB.",
+          target=("music", "voice"), change=("up", "down"), db="number"),
+    _card("mute", "Mute or unmute the music bed or the original sound.",
+          target=("music", "voice"), muted=_YES_NO),
+    _card("fit_music", "Trim the music so it ends with the video, with a fade-out.", duration_s="number"),
+    _card("remove_music", "Take the music bed off the timeline."),
     _card("auto_edit", "Do the whole edit for a platform.",
           platform=_PLATFORMS, language=_LANGS, mood=_MOODS, look=_LOOKS),
     _card("ask", "Answer a question about the timeline without editing."),

@@ -17,6 +17,7 @@ import { useStore } from '../store'
 import { toast } from '../toast'
 import { usePromptStore, isBusy } from '../lib/promptStore'
 import { brainLabel, humanBytes, humanDuration, type Plan, type StepRow, type VerifyCheck } from '../lib/promptEvents'
+import { checksHeadline, checkValues } from '../lib/checkProse'
 
 const pad2 = (n: number) => String(n + 1).padStart(2, '0')
 
@@ -48,18 +49,6 @@ function stepLabel(s: StepRow, plan: Plan | null): string {
   return TOOL_TITLES[s.tool] ?? s.tool.replace(/_/g, ' ')
 }
 
-function fmt(v: unknown, unit?: string): string {
-  if (v === null || v === undefined) return '—'
-  if (typeof v === 'number') {
-    const s = Number.isInteger(v) ? String(v) : v.toFixed(Math.abs(v) < 10 ? 2 : 1)
-    return unit ? `${s} ${unit}` : s
-  }
-  if (typeof v === 'boolean') return v ? 'yes' : 'no'
-  if (typeof v === 'string') return v
-  if (Array.isArray(v)) return v.map((x) => fmt(x)).join(', ')
-  return JSON.stringify(v)
-}
-
 export function PromptRunLog() {
   const status = usePromptStore((s) => s.status)
   const plan = usePromptStore((s) => s.plan)
@@ -73,8 +62,14 @@ export function PromptRunLog() {
   const connectionDropped = usePromptStore((s) => s.connectionDropped)
   const reconnecting = usePromptStore((s) => s.reconnecting)
   const dismiss = usePromptStore((s) => s.dismiss)
+  const runId = usePromptStore((s) => s.runId)
   const dispatch = useStore((s) => s.dispatch)
   const [copied, setCopied] = useState(false)
+  // A FINISHED run folds to one summary row so the log stops taking the
+  // preview's height (QA-017: the open log squeezed a 9:16 viewer to 128×228).
+  // "Details" opens it again; a new run, a failure or a live run shows in full.
+  const runKey = runId ?? prompt ?? ''
+  const [openFor, setOpenFor] = useState<string | null>(null)
 
   const busy = isBusy(status)
   const title = plan?.title || plan?.intent || prompt || 'Prompt'
@@ -94,6 +89,29 @@ export function PromptRunLog() {
     } catch {
       toast.error('Clipboard is not available here')
     }
+  }
+
+  const collapsed = status === 'done' && openFor !== runKey
+  if (collapsed) {
+    const failed = !!verify && verify.checks.some((c) => c.pass === false && c.headline !== false)
+    return (
+      <section className="prompt-log is-collapsed" aria-label="Prompt run">
+        <div className="prompt-log-summary">
+          <span className={`g ${failed ? 'is-fail' : 'is-pass'}`} aria-hidden="true">{failed ? '✗' : '✓'}</span>
+          <span className="prompt-log-title">{title}</span>
+          <span className="sum">
+            {checksHeadline(verify) ?? `${steps.filter((s) => s.status === 'ok').length} step${steps.length === 1 ? '' : 's'} done`}
+          </span>
+          <span className="spacer" />
+          <button type="button" className="prompt-log-expand" aria-expanded={false}
+                  onClick={() => setOpenFor(runKey)} title="Show the steps and what the verifier measured">Details</button>
+          {opSeen && (
+            <button type="button" onClick={() => void dispatch('undo')} title="Undo the whole prompt (one history step)">Undo</button>
+          )}
+          <button type="button" className="ghost" onClick={dismiss}>Clear</button>
+        </div>
+      </section>
+    )
   }
 
   return (
@@ -181,6 +199,9 @@ export function PromptRunLog() {
           <button type="button" onClick={() => void copyPlan()}>{copied ? 'Copied' : 'Copy plan'}</button>
         )}
         <span className="spacer" />
+        {status === 'done' && (
+          <button type="button" className="ghost" aria-expanded={true} onClick={() => setOpenFor(null)}>Fold</button>
+        )}
         <button type="button" className="ghost" onClick={dismiss}>{busy ? 'Hide' : 'Clear'}</button>
       </div>
     </section>
@@ -191,6 +212,8 @@ function CheckRow({ c }: { c: VerifyCheck }) {
   const state = c.pass === true ? 'pass' : c.pass === false ? 'fail' : 'skip'
   const g = c.pass === true ? '✓' : c.pass === false ? '✗' : '—'
   const label = c.pass === true ? 'passed' : c.pass === false ? 'failed' : 'not measured'
+  // Prose, never JSON (lib/checkProse): one wrapping line under the label.
+  const values = checkValues(c)
   return (
     <div className={`prompt-check is-${state}`} role="row">
       <span className="g" aria-hidden="true">{g}</span>
@@ -199,8 +222,7 @@ function CheckRow({ c }: { c: VerifyCheck }) {
         {c.headline === false && <small>info</small>}
         <span className="prompt-sr-only"> {label}</span>
       </span>
-      <span className="val" title="measured">{fmt(c.measured, c.unit)}</span>
-      <span className="val" title="expected">{c.expected === undefined || c.expected === null ? '' : `expected ${fmt(c.expected, c.unit)}`}</span>
+      {values && <span className="vals">{values}</span>}
       {c.detail && <div className="prompt-check-detail">{c.detail}</div>}
     </div>
   )

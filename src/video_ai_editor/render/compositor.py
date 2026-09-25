@@ -24,7 +24,9 @@ from .audio_mix import build_audio_mix
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
 from .pip import build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index
 from . import clock
+from . import cancel as _cancel
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
+from ..edl import timebase as _tb
 
 
 def _part_path(dst: Path) -> Path:
@@ -134,8 +136,55 @@ def _usable_encoder(name: str) -> bool:
 _HW_ENCODER_ORDER = ["h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"]
 
 
-def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
+def _target_bitrate_args(name: str, kbps: int, *, peak_cap: bool = True) -> list[str]:
+    """Average-bitrate rate control for a platform delivery target (QA-027).
+
+    `canvas.bitrate_kbps` (written by `apply_export_preset`) used to have NO
+    reader anywhere in render/: every export ran in quality mode, so a
+    6000 kbps 'story' preset shipped ~8.5 Mbps and a 12000 kbps 'youtube_16x9'
+    ~22.5 Mbps while the prompt verifier reported the target as met.
+
+    `-b:v` is the target; the peak is capped at 1.5x over a 2x buffer, which is
+    what the platforms' "recommended bitrate" means (an average, not a CBR
+    ceiling). Measured on VideoToolbox, 15 s of 1080x1920 scene footage:
+    `-b:v 8000k` alone → 8.00 Mbps; with `-maxrate 12000k -bufsize 16000k` →
+    8.00 Mbps; with `-maxrate` pinned AT the target → 5.6 Mbps (VT treats a
+    tight cap as a hard ceiling and undershoots), hence 1.5x rather than 1x.
+
+    `peak_cap=False` (VideoToolbox only) drops the cap: VT treats ANY -maxrate
+    as a data-rate limit and starves compressible footage — the 16:9 bench
+    scene measured 7948 kb/s against 12000 capped (-34%) and 11998 uncapped,
+    testsrc2 9123 vs ~12000. `render_export` encodes uncapped first and only
+    re-encodes with the cap when the file overshoots (pure-noise content ran
+    +58% uncapped, on target capped). The other encoders honour the cap as an
+    average-with-peak and always take it.
+    """
+    b, peak, buf = f"{kbps}k", f"{int(kbps * 1.5)}k", f"{kbps * 2}k"
+    rate = ["-b:v", b, "-maxrate", peak, "-bufsize", buf]
+    if name == "h264_videotoolbox":
+        vt_rate = rate if peak_cap else ["-b:v", b]
+        return ["-c:v", name, *vt_rate, "-allow_sw", "1", "-realtime", "0",
+                "-pix_fmt", "yuv420p"]
+    if name == "h264_nvenc":
+        return ["-c:v", name, "-preset", "p6", "-tune", "hq", "-rc", "vbr", *rate,
+                "-pix_fmt", "yuv420p"]
+    if name == "h264_qsv":
+        return ["-c:v", name, "-preset", "slower", *rate, "-pix_fmt", "nv12"]
+    if name == "h264_amf":
+        return ["-c:v", name, "-quality", "quality", "-rc", "vbr_peak", *rate,
+                "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "medium", *rate, "-pix_fmt", "yuv420p"]
+
+
+def _video_encoder_args(*, preview: bool, crf: int | None = None,
+                        bitrate_kbps: int | None = None,
+                        bitrate_peak_cap: bool = True) -> list[str]:
     """Pick the fastest usable H.264 encoder; fall back to libx264.
+
+    `bitrate_kbps` (export only) switches the chosen encoder from quality mode
+    to the platform's average-bitrate target — see `_target_bitrate_args`.
+    Preview never takes it: previews are sized and tuned for scrubbing, not
+    for delivery.
 
     `crf` is an optional caller-supplied override (e.g. from ExportRequest.crf)
     for the export Quality selector. It's threaded into whichever encoder is
@@ -148,8 +197,11 @@ def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
     (VideoToolbox). `crf=None` (the default) preserves the exact prior
     hardcoded values for both branches.
     """
+    target = int(bitrate_kbps) if bitrate_kbps and not preview else None
     for name in _HW_ENCODER_ORDER:
         if _usable_encoder(name):
+            if target:
+                return _target_bitrate_args(name, target, peak_cap=bitrate_peak_cap)
             # The GOP bound must apply to the HARDWARE encoders too, not just
             # the libx264 fallback below. It was only ever set on libx264, on
             # the assumption that "HW encoders already emit ~0.4-1s GOPs" —
@@ -159,6 +211,8 @@ def _video_encoder_args(*, preview: bool, crf: int | None = None) -> list[str]:
             # the scrubber paid a full ~30-frame decode per drag tick.
             return _hw_encoder_args(name, preview=preview, crf=crf) + (
                 ["-g", str(_PREVIEW_GOP)] if preview else [])
+    if target:
+        return _target_bitrate_args("libx264", target)
     default_crf = 30 if preview else 20
     crf_val = crf if crf is not None else default_crf
     preset = "ultrafast" if preview else "medium"
@@ -319,19 +373,150 @@ def _v1_segments(clips: list[Clip], total_duration: float) -> list[tuple[str, ob
     return segs
 
 
-def _has_v1_gaps(clips: list[Clip], total_duration: float) -> bool:
+def _has_v1_gaps(clips: list[Clip], total_duration: float, fps=None) -> bool:
     """True when the v1 base needs filler (so packet-level concat can't be used)."""
+    if fps is not None:
+        return any(kind == "gap" for kind, _i, _n in _v1_frame_plan(clips, total_duration, fps))
     return any(kind == "gap" for kind, _ in _v1_segments(clips, total_duration))
 
 
+# ---- Frame-exact clip timing (QA-002 / QA-039) -----------------------------
+#
+# WHY. Every clip used to be decoded with input-side `-ss %.3f -to %.3f`, and
+# ffmpeg rounds each such segment UP to whole frames, so every seam gained a
+# frame: a pure split of a 600-frame clip exported 602 frames with frames 151
+# and 154 doubled, and after the TikTok recipe's 17 cuts the picture ran 14
+# frames behind the EDL clock every other lane is placed on. The fix is to
+# stop letting float seconds decide how many frames a clip emits:
+#
+#   * the input is seeked HALF A FRAME before `in_` (timebase.seek_preroll), so
+#     the frame that starts at `in_` is always the first one kept and the one
+#     before it never is, and `-to` only bounds decoding (two frames of slack);
+#   * the video chain rebases to PTS 0, retimes for speed, resamples onto the
+#     project grid with `fps=`, pads by cloning the last frame if the source
+#     runs short and cuts with `trim=end_frame=N` — N from `clip_frames`;
+#   * the audio chain drops the same pre-roll with `atrim=start`, and ends
+#     with `apad`+`atrim=end_sample=M`, M = exactly N frames of samples, so the
+#     concat of every clip's audio stays locked to the concat of its picture.
+#
+# N depends only on the clip's own fields and the rate (never on `start`),
+# which is what keeps a cached chunk valid wherever the clip sits. Layout in
+# frames (`_v1_frame_plan`) then decides gaps on the same grid, so a clip that
+# ends within a frame of its neighbour's start is a seam, never a 1-frame gap.
+
+#: Frames of decode slack past `out` — `trim`/`atrim` make the cut, this only
+#: stops ffmpeg decoding to the end of a 12-minute source for a 3 s clip.
+_DECODE_SLACK_FRAMES = 2
+
+
+def clip_frames(c: Clip, fps) -> int:
+    """Frames clip `c` occupies on the timeline at rate `fps` (≥ 1)."""
+    return max(1, _tb.frame_of(c.effective_duration, fps))
+
+
+def clip_input_args(c: Clip, fps) -> list[str]:
+    """`-ss/-to/-i` for clip `c`: seek half a frame early, decode a little past
+    `out`. Precision is µs, not the old `%.3f` (which alone could land a seek
+    after the frame it meant to keep)."""
+    pre = _tb.seek_preroll(c.in_, fps)
+    seek = max(0.0, float(c.in_) - pre)
+    end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
+    return ["-ss", f"{seek:.6f}", "-to", f"{end:.6f}", "-i", str(c.src)]
+
+
+def _clip_preroll(c: Clip, fps) -> float:
+    return _tb.seek_preroll(c.in_, fps) if fps is not None else 0.0
+
+
+@lru_cache(maxsize=512)
+def _has_audio_stream_cached(src: str, mtime_ns: int, size: int) -> bool:
+    try:
+        out = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", src],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, **_pu.SUBPROCESS_FLAGS)
+        return bool(out.stdout.strip())
+    except Exception:
+        return True  # unknown: keep the historical assumption
+
+
+def source_has_audio(src: str) -> bool:
+    """Whether `src` carries an audio stream (cached on path+mtime+size).
+
+    QA-040: every v1 chain read `[i:a]`, so a picture-only source — the output
+    of smooth slow-mo, or anything else that bypassed ingest's silent-track
+    fill — failed the WHOLE timeline's preview and export with "matches no
+    streams". Such a clip now gets digital silence of its exact length.
+    """
+    try:
+        st = os.stat(src)
+    except OSError:
+        return True  # a missing file fails later with its own, clearer error
+    return _has_audio_stream_cached(str(src), st.st_mtime_ns, st.st_size)
+
+
+def _v1_frame_plan(clips: list[Clip], total_duration: float,
+                   fps) -> list[tuple[str, int | None, int]]:
+    """`_v1_segments` on the frame grid: ("clip", i, frames) | ("gap", None, frames).
+
+    Same packing rule (a gap is emitted only where the next clip starts after
+    the cursor; overlaps keep the old `max(cursor, start)` packing), but in
+    whole frames — so the plan's total is exactly what the renderer emits and
+    a sub-frame difference between a clip's end and its neighbour's start is
+    not a sliver of black.
+    """
+    plan: list[tuple[str, int | None, int]] = []
+    cursor = 0
+    for i, c in enumerate(clips):
+        sf = _tb.frame_of(c.start, fps)
+        if sf - cursor >= 1:
+            plan.append(("gap", None, sf - cursor))
+            cursor = sf
+        n = clip_frames(c, fps)
+        plan.append(("clip", i, n))
+        cursor = max(cursor, sf) + n
+    tail = _tb.frame_of(total_duration, fps) - cursor
+    if tail >= 1:
+        plan.append(("gap", None, tail))
+    return plan
+
+
+def _gap_filler_chains(w: int, h: int, fps, frames: int) -> tuple[str, str]:
+    """Black picture and digital silence exactly `frames` frames long (no
+    labels). `d=` alone rounds to the source's own tick; `trim`/`atrim` make
+    the length exact."""
+    m = _tb.samples_for_frames(frames, fps)
+    d = _tb.time_of(frames + 1, fps)
+    v = (f"color=c=black:s={w}x{h}:r={_tb.ffmpeg_rate(fps)}:d={d:.6f},"
+         f"trim=end_frame={frames},format=yuv420p,setsar=1")
+    a = (f"anullsrc=channel_layout=stereo:sample_rate=48000:d={d:.6f},"
+         f"atrim=end_sample={m},"
+         f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo")
+    return v, a
+
+
+def _plan_seconds(plan, fps) -> float:
+    return _tb.time_of(sum(n for _k, _i, n in plan), fps)
+
+
 def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
-                            canvas_w: int, canvas_h: int) -> str:
+                            canvas_w: int, canvas_h: int, fps=None) -> str:
     """Build the per-clip video filter chain (scale + transform + effects + speed),
     starting from `input_label` (e.g. "[0:v]") and ending at `label_out`.
 
     Used by both the monolithic renderer (where input_label = [N:v] for the
     Nth input) and the chunk renderer (where input_label = [0:v]).
+
+    With `fps` (every render path passes it) the chain is FRAME-EXACT: it
+    starts at PTS 0 and emits exactly `clip_frames(c, fps)` frames on the
+    project grid — see the block above `clip_frames`. The input must then be
+    opened with `clip_input_args`.
     """
+    if fps is not None:
+        # Rebase first: the half-frame seek pre-roll leaves the first kept
+        # frame at PTS ≈ half a frame, and every retime below assumes 0.
+        input_label = f"{input_label}setpts=PTS-STARTPTS,"
     tx = c.transform
     rot_static = float(tx.rotation) if isinstance(tx.rotation, (int, float)) else 0.0
     sc_static = float(tx.scale) if isinstance(tx.scale, (int, float)) else 1.0
@@ -556,23 +741,36 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     if getattr(c, "chromakey", None) is not None:
         v_chain += "," + build_chromakey_filter(c.chromakey)
 
+    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
+        v_chain += f",setpts=PTS/{float(c.speed)}"
+
     # Visual fade from/to black (clip.video_fade_in/out). st/d are clip-local
-    # SOURCE-time seconds: the clip input is -ss/-to trimmed so its PTS start
-    # at 0, and this sits IMMEDIATELY BEFORE the speed setpts below —
-    # deliberately the same convention as the audio side (_audio_props_filters
-    # also positions fades in source-time c.duration). Speed quirk, shared
-    # with audio fades: on a 2x clip a 1s fade displays over 0.5s wall-clock.
-    # d is clamped to the clip duration (and skipped entirely for
-    # zero-duration clips, where fade=d=0 would error).
-    vfi = min(float(getattr(c, "video_fade_in", 0.0) or 0.0), c.duration)
-    vfo = min(float(getattr(c, "video_fade_out", 0.0) or 0.0), c.duration)
+    # TIMELINE seconds: this sits AFTER the speed setpts, so a 1 s fade on a
+    # 2x clip lasts 1 s on screen and ends exactly at the clip's end. Same
+    # convention as the audio side, which runs its afade after atempo against
+    # `effective_duration` (QA-038 — it used source `duration`, so a 0.5x clip
+    # went silent for its second half and a 2x clip never faded). At 1x the
+    # two conventions are identical. d is clamped to the clip's length (and
+    # skipped entirely for zero-duration clips, where fade=d=0 would error).
+    eff = c.effective_duration
+    vfi = min(float(getattr(c, "video_fade_in", 0.0) or 0.0), eff)
+    vfo = min(float(getattr(c, "video_fade_out", 0.0) or 0.0), eff)
     if vfi > 0.001:
         v_chain += f",fade=t=in:st=0:d={vfi:.3f}"
     if vfo > 0.001:
-        v_chain += f",fade=t=out:st={max(0.0, c.duration - vfo):.3f}:d={vfo:.3f}"
+        v_chain += f",fade=t=out:st={max(0.0, eff - vfo):.3f}:d={vfo:.3f}"
 
-    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
-        v_chain += f",setpts=PTS/{float(c.speed)}"
+    if fps is not None:
+        # QA-002/QA-039: land on the project grid HERE, inside the clip, and
+        # emit an exact frame count. Before, a bare `setpts=PTS/speed` was left
+        # to the output `-r`, whose frame picking ran ~2 frames late on a
+        # retimed clip, and `-to` decided the length by rounding up.
+        # `tpad` clones the last frame when a source is a frame short of what
+        # its `out` claims (legacy audio-padded extents), so the count holds.
+        n = clip_frames(c, fps)
+        v_chain += (f",fps={_tb.ffmpeg_rate(fps)}"
+                    f",tpad=stop={n}:stop_mode=clone"
+                    f",trim=end_frame={n},setpts=PTS-STARTPTS")
 
     # Normalize sample aspect ratio at the end. rotate / scale-with-eval=frame
     # can produce SAR like 86519:86488 which makes concat fail with
@@ -582,7 +780,12 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
-def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str:
+#: See the atempo loop in `_build_clip_audio_chain` (960 samples = 20 ms @ 48k).
+_ATEMPO_LAG = "adelay=delays=960S:all=1"
+
+
+def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
+                            fps=None) -> str:
     """Per-clip audio chain: resample + atempo for speed + gain/fade/mute.
 
     Gain/fade/mute were previously only applied to music + vo clips (via
@@ -590,20 +793,42 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str) -> str
     on render. The fade is positioned relative to the clip's LOCAL audio
     (which is `-ss/-to`-trimmed and starts at t=0), since concat then
     sequences these clips into the timeline absolute time.
+
+    With `fps` the chain is SAMPLE-EXACT to the frame-exact picture: it drops
+    the input's half-frame seek pre-roll and ends at exactly
+    `samples_for_frames(clip_frames(c, fps))` samples (see `clip_frames`).
+    A source with no audio stream at all gets silence of that length
+    (QA-040) instead of failing the whole graph on `[i:a]`.
     """
+    if fps is not None and not source_has_audio(str(c.src)):
+        input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
     a_chain = (f"{input_label}aresample=async=1:first_pts=0,"
                f"aformat=channel_layouts=stereo:sample_rates=48000")
+    pre = _clip_preroll(c, fps)
+    if pre > 1e-9:
+        a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
     if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         remaining = float(c.speed)
+        # Every atempo stage is preceded by `_ATEMPO_LAG` of silence: ffmpeg's
+        # WSOLA emits content ~20 ms of ITS INPUT early (measured on a 57-click
+        # track: -42.4 ms at 0.5x, -24.0 at 0.75x, -15.6 at 1.25x, -12.4 at
+        # 1.5x — a constant 18-21 ms of source time, divided by the tempo).
+        # Delaying the stage's input by that much centres transients on the
+        # retimed picture at every tempo (QA-039), leaving only WSOLA's own
+        # ±12 ms jitter, at the cost of that sliver of silence at the head of
+        # a retimed clip. The tail is cut back by the exact-length atrim.
         while remaining > 2.0:
-            a_chain += ",atempo=2.0"
+            a_chain += f",{_ATEMPO_LAG},atempo=2.0"
             remaining /= 2.0
         while remaining < 0.5:
-            a_chain += ",atempo=0.5"
+            a_chain += f",{_ATEMPO_LAG},atempo=0.5"
             remaining /= 0.5
         if abs(remaining - 1.0) > 0.001:
-            a_chain += f",atempo={remaining:.4f}"
+            a_chain += f",{_ATEMPO_LAG},atempo={remaining:.4f}"
     a_chain += _audio_props_filters(c)
+    if fps is not None:
+        m = _tb.samples_for_frames(clip_frames(c, fps), fps)
+        a_chain += f",apad=whole_len={m},atrim=end_sample={m}"
     a_chain += label_out
     return a_chain
 
@@ -622,8 +847,14 @@ def _audio_props_filters(c: Clip) -> str:
             # fade-in starts at local t=0 and runs for fade_in seconds.
             frag += f",afade=t=in:st=0:d={c.audio.fade_in:.3f}"
         if c.audio.fade_out > 0.001:
-            # fade-out ends at clip duration; start at duration - fade_out.
-            fade_out_start = max(0.0, c.duration - c.audio.fade_out)
+            # fade-out ends at the clip's TIMELINE end. This fragment runs
+            # after atempo (`_build_clip_audio_chain`), where local time is
+            # timeline seconds, so the end is `effective_duration` — QA-038:
+            # it used source `duration`, so a 0.5x clip faded at its midpoint
+            # and sat in -180 dB silence for the rest, and a 2x clip's fade
+            # started after its audio had already ended (never heard). PIP
+            # audio calls this too; a PIP is always 1x, where the two agree.
+            fade_out_start = max(0.0, c.effective_duration - c.audio.fade_out)
             frag += (f",afade=t=out:st={fade_out_start:.3f}"
                      f":d={c.audio.fade_out:.3f}")
         if c.audio.mute:
@@ -680,15 +911,20 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         if use_chunks:
             inputs += ["-i", str(chunk_paths[i])]
             fc_parts.append(f"[{i}:v]null[ve{i}]")
-            fc_parts.append(f"[{i}:a]anull[a{i}]")
+            # A decoded chunk's AAC runs up to one codec frame past its
+            # picture (the padded last frame is not trimmed on decode), and
+            # concat advances by the LONGER stream — a frame duplicated every
+            # couple of seams. Cut it back to exactly the clip's frames.
+            m = _tb.samples_for_frames(clip_frames(c, fps), fps)
+            fc_parts.append(f"[{i}:a]apad=whole_len={m},atrim=end_sample={m}[a{i}]")
             v_labels.append(f"[ve{i}]")
             a_labels.append(f"[a{i}]")
             continue
 
-        inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+        inputs += clip_input_args(c, fps)
         fc_parts.append(_build_clip_video_chain(
             c, input_label=f"[{i}:v]", label_out=f"[ve{i}]",
-            canvas_w=canvas_w, canvas_h=canvas_h,
+            canvas_w=canvas_w, canvas_h=canvas_h, fps=fps,
         ))
         if c.mask is not None and cache_dir is not None:
             mask_path = cache_dir / f"mask_{c.id}_{c.mask.type}_{int(c.mask.feather)}_{canvas_w}x{canvas_h}.png"
@@ -697,7 +933,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
             pending_masks.append((i, mask_path))
 
         fc_parts.append(_build_clip_audio_chain(
-            c, input_label=f"[{i}:a]", label_out=f"[a{i}]",
+            c, input_label=f"[{i}:a]", label_out=f"[a{i}]", fps=fps,
         ))
         a_labels.append(f"[a{i}]")
         v_labels.append(f"[ve{i}]")  # tentative; rewritten below if mask present
@@ -712,13 +948,16 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
         fc_parts.append(
             f"[ve{clip_i}][{mask_idx}:v]"
             f"alphamerge,format=yuva420p[vmrgba{clip_i}];"
-            f"color=c=black:s={canvas_w}x{canvas_h}:r=30[bg{clip_i}];"
+            f"color=c=black:s={canvas_w}x{canvas_h}:r={_tb.ffmpeg_rate(fps)}[bg{clip_i}];"
             f"[bg{clip_i}][vmrgba{clip_i}]overlay=format=auto:shortest=1{v_masked}"
         )
         v_labels[clip_i] = v_masked
 
     # ---- Segment plan: clips interleaved with black+silent gap filler ----
-    segments = _v1_segments(clips, total_duration)
+    # On the FRAME grid (`_v1_frame_plan`): every segment's length is a whole
+    # number of frames and its audio exactly that many frames of samples, so
+    # the assembled stream is exactly the plan long (QA-002).
+    segments = _v1_frame_plan(clips, total_duration, fps)
     if not segments:
         return "", [], [], []
 
@@ -726,27 +965,22 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     seg_a: list[str] = []
     seg_dur: list[float] = []
     seg_of_clip: dict[int, int] = {}
-    for kind, val in segments:
+    for kind, ci, nfr in segments:
         if kind == "clip":
-            ci = int(val)  # type: ignore[arg-type]
             seg_of_clip[ci] = len(seg_v)
             seg_v.append(v_labels[ci])
             seg_a.append(a_labels[ci])
-            seg_dur.append(clips[ci].effective_duration)
+            seg_dur.append(_tb.time_of(nfr, fps))
         else:
-            g = float(val)  # type: ignore[arg-type]
+            g = _tb.time_of(nfr, fps)
             k = len(seg_v)
             vg, ag = f"[vgap{k}]", f"[agap{k}]"
+            vf, af = _gap_filler_chains(canvas_w, canvas_h, fps, nfr)
             # format/setsar/aformat pin the filler to the same parameters the
             # clip chains produce — concat refuses inputs whose link params
             # differ (it does not auto-convert).
-            fc_parts.append(
-                f"color=c=black:s={canvas_w}x{canvas_h}:r={fps}:d={g:.3f},"
-                f"format=yuv420p,setsar=1{vg}")
-            fc_parts.append(
-                f"anullsrc=channel_layout=stereo:sample_rate=48000:d={g:.3f},"
-                f"aformat=sample_fmts=fltp:sample_rates=48000:"
-                f"channel_layouts=stereo{ag}")
+            fc_parts.append(vf + vg)
+            fc_parts.append(af + ag)
             seg_v.append(vg)
             seg_a.append(ag)
             seg_dur.append(g)
@@ -774,7 +1008,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     from ..edl.schema import seam_matching, seam_table_for
     records = list(transitions)
     if seams is None:
-        seams = seam_table_for(clips, records)
+        seams = seam_table_for(clips, records, fps=fps)
     seg_trans: dict[int, tuple[str, float]] = {}
     for idx, c in enumerate(clips[:-1]):
         si = seg_of_clip.get(idx)
@@ -813,7 +1047,10 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 # crashing the render the way the raw passthrough used to.
                 from .transitions import resolve_transition
                 xf_name, xf_expr = resolve_transition(ttype)
-                xf = f"xfade=transition={xf_name}:duration={tdur}:offset={offset:.3f}"
+                # Both numbers are whole frames (seam_table_for(fps=...)), printed
+                # at µs precision so neither is re-rounded off the grid, and the
+                # acrossfade below overlaps the sound by the SAME seconds.
+                xf = f"xfade=transition={xf_name}:duration={tdur:.6f}:offset={offset:.6f}"
                 if xf_expr:
                     # expr is wrapped in single quotes; it contains no quotes itself.
                     xf += f":expr='{xf_expr}'"
@@ -858,7 +1095,7 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                     fc_parts.append(f"{ltb}{rtb}{xf}{new_v}")
                 # acrossfade performs no such timebase check — leave it alone.
                 fc_parts.append(
-                    f"{cur_a}{seg_a[i]}acrossfade=d={tdur}{new_a}"
+                    f"{cur_a}{seg_a[i]}acrossfade=d={tdur:.6f}{new_a}"
                 )
                 cur_dur = cur_dur + seg_dur[i] - tdur
             else:
@@ -891,21 +1128,73 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
 _AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
 
+@lru_cache(maxsize=1)
+def _preview_aac_out() -> list[str]:
+    """AAC args for the preview fast path, whose only encode is the audio
+    (QA-030: it must be re-encoded to stay in sync). AudioToolbox (`aac_at`)
+    is ~3x faster than ffmpeg's native coder on a Mac; elsewhere, or if it
+    fails a real 0.1 s encode, the native encoder with its fast coder. Same
+    rate/channel pinning as `_AAC_OUT`.
+
+    `-aac_at_quality 2` is AudioToolbox's speed end of its quality/speed knob
+    (QA-005): 2.6x faster again on speech (180 s: 1.13 s -> 0.43 s) for 0.7 dB
+    of SNR at 192k (45.7 vs 46.4 dB on narration; the native coder: 38.7), and
+    the same zero lag. This encode is the floor of every warm preview edit —
+    a 12-min timeline's whole sound, re-encoded per split or volume change."""
+    at_args = ["-c:a", "aac_at", "-b:a", "192k", "-aac_at_quality", "2"]
+    try:
+        proc = subprocess.run(
+            [_pu.FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+             "anullsrc=channel_layout=stereo:sample_rate=48000", "-t", "0.1",
+             *at_args, "-f", "null", "-"],
+            capture_output=True, timeout=15, **_pu.SUBPROCESS_FLAGS)
+        if proc.returncode == 0:
+            return [*at_args, "-ar", "48000", "-ac", "2"]
+    except Exception:
+        pass
+    return [*_AAC_OUT, "-aac_coder", "fast"]
+
+
 def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             cache_dir: Path | None = None, on_progress=None,
-            cancel_event=None, crf: int | None = None) -> Path:
+            cancel_event=None, crf: int | None = None,
+            bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True) -> Path:
     # The single chokepoint every ffmpeg render passes through (preview and
-    # export both land here, and it never recurses), so it is where the
-    # concurrency ceiling belongs.
-    with _RENDER_SLOTS:
+    # export both land here), so it is where the concurrency ceiling belongs.
+    #
+    # A background export's `cancel_event` becomes the render.cancel scope for
+    # the whole render: the chunk stage (get_or_build_chunks) and the slot wait
+    # run their ffmpegs through render.cancel, which only ever honoured the
+    # preview-supersede scope — so POST /jobs/{id}/cancel left the chunk
+    # ffmpegs running to completion and the job 'running' for minutes.
+    if cancel_event is not None and _cancel.current() is None:
+        try:
+            with _cancel.scope(cancel_event):
+                return _render(edl, dst, height=height, fps=fps, preview=preview,
+                               cache_dir=cache_dir, on_progress=on_progress,
+                               cancel_event=cancel_event, crf=crf,
+                               bitrate_kbps=bitrate_kbps,
+                               bitrate_peak_cap=bitrate_peak_cap)
+        except _cancel.RenderCancelled:
+            from ..api.jobs import JobCancelled
+            raise JobCancelled() from None
+    # Cancel-aware acquire: a superseded preview (render.cancel) gives up its
+    # place in the queue instead of waiting for a slot it will never use.
+    _cancel.acquire(_RENDER_SLOTS)
+    try:
         return _render_locked(edl, dst, height=height, fps=fps, preview=preview,
                               cache_dir=cache_dir, on_progress=on_progress,
-                              cancel_event=cancel_event, crf=crf)
+                              cancel_event=cancel_event, crf=crf,
+                              bitrate_kbps=bitrate_kbps,
+                              bitrate_peak_cap=bitrate_peak_cap)
+    finally:
+        _RENDER_SLOTS.release()
 
 
 def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                    cache_dir: Path | None = None, on_progress=None,
-                   cancel_event=None, crf: int | None = None) -> Path:
+                   cancel_event=None, crf: int | None = None,
+                   bitrate_kbps: int | None = None, bitrate_peak_cap: bool = True) -> Path:
     canvas = edl.canvas
     # BOTH output dimensions must be even. H.264/yuv420p subsamples chroma 2x2,
     # so an odd dimension is unencodable — and long before the encoder, an odd
@@ -929,7 +1218,8 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # still returns 540. Rewriting it as _even(round(canvas.w*h_out/canvas.h))
     # would return 538 and change a width that works today.
     w_out = int(round(canvas.w * (h_out / canvas.h) / 2) * 2)
-    enc_args = _video_encoder_args(preview=preview, crf=crf)
+    enc_args = _video_encoder_args(preview=preview, crf=crf, bitrate_kbps=bitrate_kbps,
+                                   bitrate_peak_cap=bitrate_peak_cap)
 
     clips = _video_clips(edl)
     # The v1 base always spans the WHOLE timeline (see `_v1_segments`): gaps and
@@ -977,7 +1267,12 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
                 encoder_args=enc_args,
                 build_video_chain=_build_clip_video_chain,
                 build_audio_chain=_build_clip_audio_chain,
+                # Previews build long clips from cached picture segments, so
+                # an edit re-encodes only the segments it touched (QA-005).
+                segment=preview,
             )
+        except _cancel.RenderCancelled:
+            raise
         except Exception:
             # Cache miss / chunk render failure → fall back to monolithic.
             chunk_paths = None
@@ -1085,10 +1380,10 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # the honest "are there PIPs" signal.
     if (preview and chunk_paths is not None and not pip_chain and not pip_audio_clips
             and not overlay_chain and not mask_inputs
-            and not _has_v1_gaps(clips, total_duration)
+            and not _has_v1_gaps(clips, total_duration, fps)
             and on_progress is None and cancel_event is None):
         try:
-            return _assemble_chunks_streamcopy(edl, chunk_paths, dst)
+            return _assemble_chunks_streamcopy(edl, chunk_paths, dst, fps=fps)
         except Exception:
             pass  # any concat/copy hiccup → fall through to the re-encode path
 
@@ -1152,7 +1447,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     args = [_pu.FFMPEG, "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
-            "-r", str(fps),
+            "-r", _tb.ffmpeg_rate(fps),
             *enc_args,
             *_AAC_OUT,
             "-movflags", "+faststart",
@@ -1166,7 +1461,13 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             _pu.unlink_with_retry(tmp)
             raise
     else:
-        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+        # _cancel.run IS subprocess.run unless a superseded-preview scope is
+        # active (render.cancel), in which case it can terminate ffmpeg early.
+        try:
+            proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+        except BaseException:
+            _pu.unlink_with_retry(tmp)
+            raise
         rc, err = proc.returncode, proc.stderr
     if rc != 0:
         _pu.unlink_with_retry(tmp)
@@ -1189,50 +1490,99 @@ def _probe_duration(p: Path) -> float | None:
 
 
 def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
-                                dst: Path) -> Path:
-    """Assemble cached chunks via the concat demuxer with `-c:v copy`.
+                                dst: Path, *, fps=None) -> Path:
+    """Assemble cached chunks: PICTURE by the concat demuxer with `-c:v copy`,
+    SOUND decoded from each chunk, cut to its exact sample count and
+    re-encoded once.
 
     Only valid when the timeline is exactly the chunk sequence (the caller
-    guarantees no transitions/PIP/overlays/masks). Chunks share codec,
+    guarantees no transitions/PIP/overlays/masks/gaps). Chunks share codec,
     resolution and encoder args by construction (fingerprint_clip includes
-    them), which is what makes packet-level concat safe. Music/vo still mix
-    through build_audio_mix against the concatenated chunk audio ([0:a]);
-    with no music/vo the audio packets are copied too.
+    them), which is what makes packet-level video concat safe.
+
+    QA-030 — why the audio is NOT packet-copied any more. Every chunk's AAC
+    carries encoder priming and a padded final frame, and its audio stream is
+    a little longer than its picture. The concat demuxer offsets each file by
+    the file's own (audio-inflated) duration and copies the priming through,
+    so every join pushed the sound ~21-32 ms later against the picture:
+    282 ms after 10 cuts, while the export (a re-encode) stayed in sync.
+    Now each file's duration is PINNED in the concat list to its exact frame
+    count, and the audio comes from decoding each chunk on its own (where the
+    mp4 edit list strips the priming), `apad`+`atrim` to exactly its frames'
+    worth of samples, joined with the concat FILTER and encoded once — the
+    cost is an AAC encode of the timeline's audio, not a video re-encode.
     """
+    fps = edl.canvas.fps if fps is None else fps
+    clips = _video_clips(edl)
+    all_frames = [clip_frames(c, fps) for c in clips]
+    # One chunk per clip by construction; if that ever does not hold, pin
+    # nothing per file (0 = unknown) and let the length check below decide.
+    frames = all_frames if len(all_frames) == len(chunk_paths) else [0] * len(chunk_paths)
     tmp = _part_path(dst)
     list_path = tmp.with_suffix(".concat.txt")
     lines = []
-    for p in chunk_paths:
+    for p, n in zip(chunk_paths, frames):
         # concat-demuxer list syntax: single-quoted path with embedded quotes
         # close-escape-reopened; forward slashes keep Windows paths intact.
         esc = p.resolve().as_posix().replace("'", "'\\''")
         lines.append(f"file '{esc}'")
+        # `inpoint 0`: without it the demuxer takes the file's start from its
+        # EARLIEST packet, and the AAC priming packet sits before zero — so
+        # every chunk's picture came out ~21 ms late against its own sound.
+        lines.append("inpoint 0")
+        if n > 0:
+            # The picture's exact length: the next file starts here, not where
+            # this file's longer AAC stream happens to end.
+            lines.append(f"duration {_tb.time_of(n, fps):.6f}")
     _pu.write_text_utf8(list_path, "\n".join(lines) + "\n")
     try:
+        args = [_pu.FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_path)]
+        a_parts: list[str] = []
+        a_labels: list[str] = []
+        for k, (p, n) in enumerate(zip(chunk_paths, frames)):
+            # -vn: this input is only here for its sound; don't demux the
+            # picture a second time (the concat input copies it).
+            args += ["-vn", "-i", str(p)]
+            lbl = f"[ca{k}]"
+            chain = f"[{k + 1}:a]"
+            if n > 0:
+                m = _tb.samples_for_frames(n, fps)
+                chain += f"apad=whole_len={m},atrim=end_sample={m}"
+            else:
+                chain += "anull"
+            a_parts.append(chain + lbl)
+            a_labels.append(lbl)
+        if len(a_labels) == 1:
+            a_parts.append(f"{a_labels[0]}anull[amain0]")
+        else:
+            a_parts.append("".join(a_labels)
+                           + f"concat=n={len(a_labels)}:v=0:a=1[amain0]")
+        main_label = "[amain0]"
         # Track-level v1 mute — mirror of the main render path (audio-only).
-        main_label = "[0:a]"
-        pre = ""
         v1_track = edl.get_track("v1")
         if v1_track is not None and v1_track.muted:
-            pre = "[0:a]volume=0[amain]"
+            a_parts.append(f"{main_label}volume=0[amain]")
             main_label = "[amain]"
         audio_chain, audio_inputs, final_audio_label = build_audio_mix(
-            edl, main_audio_label=main_label, first_input_index=1,
+            edl, main_audio_label=main_label, first_input_index=1 + len(chunk_paths),
             apply_loudnorm=False,
         )
-        args = [_pu.FFMPEG, "-y", "-f", "concat", "-safe", "0",
-                "-i", str(list_path), *audio_inputs]
-        fc_all = ";".join(x for x in (pre, audio_chain) if x)
-        if fc_all:
-            final_lbl = final_audio_label if audio_chain else main_label
-            args += ["-filter_complex", fc_all,
-                     "-map", "0:v", "-map", final_lbl,
-                     "-c:v", "copy", *_AAC_OUT]
-        else:
-            args += ["-map", "0:v", "-map", "0:a", "-c", "copy"]
-        args += ["-movflags", "+faststart", str(tmp)]
-        proc = subprocess.run(args, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+        args += audio_inputs
+        fc_all = ";".join(x for x in (";".join(a_parts), audio_chain) if x)
+        final_lbl = final_audio_label if audio_chain else main_label
+        args += ["-filter_complex", fc_all,
+                 "-map", "0:v", "-map", final_lbl,
+                 # The one encode this path pays for — the fastest AAC
+                 # encoder that works here (a preview, never the export).
+                 "-c:v", "copy", *_preview_aac_out(),
+                 "-movflags", "+faststart", str(tmp)]
+        try:
+            proc = _cancel.run(args, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+        except BaseException:
+            _pu.unlink_with_retry(tmp)
+            raise
         if proc.returncode != 0:
             _pu.unlink_with_retry(tmp)
             raise RuntimeError(
@@ -1248,8 +1598,8 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
         # an 8s timeline — with rc=0 and no warning. Rather than depend on a
         # platform's concat-demuxer quirk, assert the invariant and re-encode
         # when it doesn't hold. Callers reach here only when the timeline has
-        # no gaps, so edl.duration IS the expected v1 extent.
-        expected = float(edl.duration)
+        # no gaps, so the frame plan IS the expected v1 extent.
+        expected = _tb.time_of(sum(all_frames), fps) if all_frames else float(edl.duration)
         if expected > 0:
             got = _probe_duration(tmp)
             if got is not None and abs(got - expected) > 0.5:
@@ -1270,6 +1620,7 @@ def _video_only_fingerprint(edl: EDL) -> str:
     video re-encode."""
     import hashlib, json
     from ..edl.schema import RENDER_BEHAVIOR_VERSION
+    from .chunks import file_identity as _file_identity
     tracks = []
     for t in edl.tracks:
         if t.type not in ("video", "text", "sticker"):  # video covers v1 AND v2
@@ -1281,6 +1632,10 @@ def _video_only_fingerprint(edl: EDL) -> str:
         # the overlay) but is stripped for v1, where mute is audio-only.
         for c in d.get("clips", []):
             c.pop("audio", None)
+            # What is ON DISK, not just the path (QA-001): a file replaced at
+            # the same path must not be remuxed from a stale cached video.
+            if c.get("src"):
+                c["_file"] = _file_identity(c["src"])
         if t.id == "v1":
             d.pop("muted", None)
         tracks.append(d)
@@ -1305,7 +1660,8 @@ def _video_only_fingerprint(edl: EDL) -> str:
     return hashlib.sha256(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
-def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int = 30) -> RenderResult:
+def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
+                   fps: float | int | None = None) -> RenderResult:
     """Render a preview keyed by EDL hash, with an audio-only-remux fast path.
 
     `height` is the SHORT edge of the preview. On a portrait 9:16 canvas a
@@ -1321,6 +1677,11 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
          skips the expensive video re-encode when only music/vo changed.
       3. Else do the full render and cache by both video-fp and full hash.
     """
+    # The project timebase, not a hardcoded 30 (QA-002): at 30 a 25 fps
+    # project previewed resampled frames the export never shows, and the
+    # preview's frame at 8.0 s disagreed with the export's.
+    if fps is None:
+        fps = edl.canvas.fps
     canvas = edl.canvas
     if canvas.h > canvas.w:
         # Portrait: short edge is the WIDTH → scale height so width ≈ `height`.
@@ -1352,11 +1713,12 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
             owner = False
 
     if not owner:
-        event.wait(timeout=120)
+        _cancel.wait(event, timeout=120)
         if dst.exists() and dst.stat().st_size > 0:
             return RenderResult(path=dst, cached=True, edl_hash=h)
 
     try:
+        _cancel.check()
         # Audio-only-remux fast path
         cache_dir = session_dir / "cache"
         videos_dir = cache_dir / "videos"
@@ -1413,7 +1775,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540, fps: int =
 
 def _assemble_v1_audio(fc_parts: list[str], clips: list[Clip], a_labels: list[str],
                        *, total_duration: float, seams: clock.SeamTable,
-                       out_label: str) -> None:
+                       out_label: str, fps=None) -> None:
     """Audio-only twin of the timeline assembly in `_build_filter_complex`:
     the per-clip audio streams in `a_labels`, walked over `_v1_segments` (so
     gaps become silent filler exactly as the video got black filler) and
@@ -1433,22 +1795,23 @@ def _assemble_v1_audio(fc_parts: list[str], clips: list[Clip], a_labels: list[st
 
     `total_duration` is the LAYOUT end, as in `_build_filter_complex`.
     """
-    segments = _v1_segments(clips, total_duration)
+    # Same frame plan as the picture it will be muxed onto (QA-002): the
+    # cached video was assembled from exactly these segment lengths.
+    fps = 30 if fps is None else fps
+    segments = _v1_frame_plan(clips, total_duration, fps)
     seg_a: list[str] = []
     seg_dur: list[float] = []
     seg_of_clip: dict[int, int] = {}
-    for kind, val in segments:
+    for kind, ci, nfr in segments:
         if kind == "clip":
-            ci = int(val)  # type: ignore[arg-type]
             seg_of_clip[ci] = len(seg_a)
             seg_a.append(a_labels[ci])
-            seg_dur.append(clips[ci].effective_duration)
+            seg_dur.append(_tb.time_of(nfr, fps))
         else:
-            g = float(val)  # type: ignore[arg-type]
+            g = _tb.time_of(nfr, fps)
             ag = f"[ragap{len(seg_a)}]"
-            fc_parts.append(
-                f"anullsrc=channel_layout=stereo:sample_rate=48000:d={g:.3f},"
-                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo{ag}")
+            _vf, af = _gap_filler_chains(2, 2, fps, nfr)
+            fc_parts.append(af + ag)
             seg_a.append(ag)
             seg_dur.append(g)
     if not seg_a:
@@ -1476,7 +1839,7 @@ def _assemble_v1_audio(fc_parts: list[str], clips: list[Clip], a_labels: list[st
         new = f"[rxa{i}]"
         d = seg_fade.get(i - 1)
         if d:
-            fc_parts.append(f"{cur}{seg_a[i]}acrossfade=d={d:.3f}{new}")
+            fc_parts.append(f"{cur}{seg_a[i]}acrossfade=d={d:.6f}{new}")
         else:
             fc_parts.append(f"{cur}{seg_a[i]}concat=n=2:v=0:a=1{new}")
         cur = new
@@ -1521,9 +1884,9 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     a_labels: list[str] = []
     for i, c in enumerate(clips):
         idx = i + 1  # +1 because video_only is input 0
-        inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+        inputs += clip_input_args(c, fps)
         fc_parts.append(_build_clip_audio_chain(
-            c, input_label=f"[{idx}:a]", label_out=f"[a{i}]"
+            c, input_label=f"[{idx}:a]", label_out=f"[a{i}]", fps=fps,
         ))
         a_labels.append(f"[a{i}]")
     seams = clock.seam_table(edl)
@@ -1532,7 +1895,7 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     # than its picture would truncate the file on `-shortest`.
     _assemble_v1_audio(fc_parts, clips, a_labels,
                        total_duration=max(0.0, edl.duration + sum(d for _s, d in seams)),
-                       seams=seams, out_label="[aout]")
+                       seams=seams, out_label="[aout]", fps=fps)
 
     # Track-level v1 mute — mirror of the main render path (audio-only).
     a_main = "[aout]"
@@ -1588,11 +1951,18 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
             "-c:v", "copy",
-            *_AAC_OUT,
-            "-r", str(fps),
+            # This path's only encode (preview-only, like the streamcopy
+            # assembly): the fastest working AAC coder, not the native one —
+            # 10.4 s -> ~5 s for a volume edit on a 12-min timeline (QA-005).
+            *_preview_aac_out(),
+            "-r", _tb.ffmpeg_rate(fps),
             "-movflags", "+faststart",
             str(tmp)]
-    proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+    try:
+        proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+    except BaseException:
+        _pu.unlink_with_retry(tmp)
+        raise
     if proc.returncode != 0:
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
@@ -1602,8 +1972,23 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
 def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
                   fps: int | None = None, crf: int = 18, preset: str = "medium",
                   container: str = "mp4", filename: str | None = None,
-                  on_progress=None, cancel_event=None) -> RenderResult:
+                  on_progress=None, cancel_event=None,
+                  bitrate_kbps: int | None = None) -> RenderResult:
     """Final export at canvas resolution (or override) with higher quality.
+
+    `height` is a NAMED resolution — "1080p" — and names the SHORT side for
+    the canvas orientation (QA-025), exactly like `render_preview`'s `height`.
+    It used to be applied as the literal output height, so "1080p" on a 9:16
+    project exported 608x1080 and "2160p" 1216x2160 — sub-spec for every
+    vertical platform. Now 1080p is 1080x1920 portrait, 1920x1080 landscape,
+    1080x1080 square, 1080x1350 for 4:5. See `export_dimensions`.
+
+    `bitrate_kbps`: None = the platform target the project carries
+    (`canvas.bitrate_kbps`, set by `apply_export_preset`); 0 = no target
+    (quality mode, `crf`); >0 = that target. A target is a delivery spec for
+    the CANVAS size, so an export rendered SMALLER than the canvas scales it by
+    the pixel ratio (a 720p render of a 1080p/8000 kbps preset gets ~3556) —
+    never above the preset.
 
     `container` selects the output file extension ("mp4" or "mov"). Both are
     QuickTime/ISO-BMFF-family containers muxed by ffmpeg's same `mov` muxer
@@ -1622,9 +2007,73 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     ext = container if container in ("mp4", "mov") else "mp4"
     name = filename or f"export_{h}.{ext}"
     dst = out_dir / name
-    h_out = height or edl.canvas.h
+    canvas = edl.canvas
+    w_out, h_out = export_dimensions(canvas.w, canvas.h, height)
     f_out = fps or edl.canvas.fps
+    target = canvas.bitrate_kbps if bitrate_kbps is None else (bitrate_kbps or None)
+    if target:
+        ratio = (w_out * h_out) / max(1, canvas.w * canvas.h)
+        target = max(1, int(round(target * min(1.0, ratio))))
+    # VideoToolbox starves easy footage under a peak cap, so a platform
+    # target is encoded uncapped first and re-encoded capped only when the
+    # file overshoots (see `_target_bitrate_args`).
+    vt_target = bool(target) and _video_encoder_args(
+        preview=False, bitrate_kbps=target)[1] == "h264_videotoolbox"
+    seen = [0.0]
+
+    def report(p: float) -> None:
+        seen[0] = max(seen[0], p)
+        on_progress(p)
     _render(edl, dst, height=h_out, fps=f_out, preview=False,
             cache_dir=session_dir / "cache",
-            on_progress=on_progress, cancel_event=cancel_event, crf=crf)
+            on_progress=report if on_progress is not None else None,
+            cancel_event=cancel_event, crf=crf,
+            bitrate_kbps=target, bitrate_peak_cap=not vt_target)
+    if vt_target and (_video_kbps(dst) or 0) > target * _BITRATE_TOLERANCE:
+        # The first pass already reported ~100%; hold the bar there through
+        # the capped pass instead of running it backwards.
+        hold = (lambda _p: on_progress(max(0.99, seen[0]))) if on_progress is not None else None
+        _render(edl, dst, height=h_out, fps=f_out, preview=False,
+                cache_dir=session_dir / "cache",
+                on_progress=hold, cancel_event=cancel_event, crf=crf,
+                bitrate_kbps=target, bitrate_peak_cap=True)
     return RenderResult(path=dst, cached=False, edl_hash=h)
+
+
+#: How far over a platform bitrate target an uncapped VideoToolbox export may
+#: land before it is re-encoded with the peak cap.
+_BITRATE_TOLERANCE = 1.15
+
+
+def _video_kbps(path: Path) -> float | None:
+    """The encoded video stream's average bitrate in kb/s (ffprobe), or None."""
+    try:
+        out = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=bit_rate", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, **_pu.SUBPROCESS_FLAGS)
+        return int(out.stdout.strip().splitlines()[0]) / 1000
+    except Exception:
+        return None
+
+
+def export_dimensions(canvas_w: int, canvas_h: int, short_side: int | None) -> tuple[int, int]:
+    """(w, h) an export renders at for a named resolution (QA-025).
+
+    `short_side` None = the canvas itself. Otherwise the named size is the
+    canvas's SHORT side and the long side follows the canvas aspect. Both are
+    even, computed with the exact arithmetic `_render_locked` applies to the
+    height it is handed (floor-even height, width rounded-even from it), so
+    this function is what the file will measure — the frontend's option labels
+    (`lib/exportOptions.ts`) mirror it.
+    """
+    if not short_side:
+        h = int(canvas_h)
+    elif canvas_h > canvas_w:
+        h = int(round(int(short_side) * canvas_h / max(1, canvas_w)))
+    else:
+        h = int(short_side)
+    h = max(2, h // 2 * 2)
+    w = int(round(canvas_w * (h / canvas_h) / 2) * 2)
+    return w, h

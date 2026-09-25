@@ -23,6 +23,7 @@ import { usePromptStore, isBusy } from '../lib/promptStore'
 import { brainLabel, readSseStream, type ClarifyEvent, type Plan, type PromptEvent } from '../lib/promptEvents'
 import type { Answers } from '../lib/clarifyDefaults'
 import { ClarifyCard } from './ClarifyCard'
+import { parseInlineMarkdown } from '../lib/inlineMarkdown'
 
 type ChatEvent = PromptEvent
 
@@ -222,7 +223,12 @@ export function ChatOverlay() {
                   </div>
                 )}
                 {m.role === 'assistant' && (
-                  <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>{m.text}</div>
+                  <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text)' }}>
+                    {parseInlineMarkdown(m.text ?? '').map((s, k) =>
+                      s.kind === 'bold' ? <b key={k}>{s.text}</b>
+                        : s.kind === 'code' ? <code key={k}>{s.text}</code>
+                          : <span key={k}>{s.text}</span>)}
+                  </div>
                 )}
                 {m.role === 'tool' && (
                   <div style={{

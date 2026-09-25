@@ -18,6 +18,7 @@ from video_ai_editor.edl import EDLStore
 from video_ai_editor.edl.schema import EDL, Canvas, Clip, Track, Transition
 from video_ai_editor.render import render_preview
 from video_ai_editor.render import transitions as T
+from video_ai_editor.edl import timebase as tb
 
 
 # ---------------------------------------------------------------- catalog
@@ -89,9 +90,12 @@ def test_add_transition_uses_the_transitions_own_default(tmp_path, ttype, expect
     store = _two_clip_store(tmp_path)
     r = dispatch(store, "add_transition", {"at": 2.0, "type": ttype})
     tr = store.edl.get_track("v1").transitions[0]
+    # Stored on the project frame grid (30 fps here): whip's 0.25 s is 7.5
+    # frames, which xfade and acrossfade would overlap by different amounts.
+    expected = tb.quantize(expected, store.edl.canvas.fps)
     assert tr.duration == expected and r["transition_duration"] == expected and r["type"] == ttype
     assert store.edl.duration == pytest.approx(4.0 - expected)
-    assert r["shortened_by"] == pytest.approx(expected) and f"({expected:.2f}s)" in r["summary"]
+    assert r["shortened_by"] == pytest.approx(expected, abs=1e-3) and f"({expected:.2f}s)" in r["summary"]
 
 
 def test_add_transition_honours_an_explicit_duration_and_treats_zero_as_default(tmp_path):
@@ -99,7 +103,7 @@ def test_add_transition_honours_an_explicit_duration_and_treats_zero_as_default(
     dispatch(store, "add_transition", {"at": 2.0, "type": "whip", "duration": 0.9})
     assert store.edl.get_track("v1").transitions[0].duration == 0.9
     dispatch(store, "add_transition", {"at": 2.0, "type": "whip", "duration": 0})
-    assert store.edl.get_track("v1").transitions[0].duration == 0.25       # replaced, not stacked
+    assert store.edl.get_track("v1").transitions[0].duration == tb.quantize(0.25, 30)  # replaced, not stacked
     assert len(store.edl.get_track("v1").transitions) == 1
 
 
@@ -110,7 +114,7 @@ def test_add_transition_accepts_every_catalog_name_and_the_schema_advertises_the
     store = _two_clip_store(tmp_path)
     for name in names:
         r = dispatch(store, "add_transition", {"at": 2.0, "type": name})
-        assert r["transition_duration"] == T.default_duration(name)
+        assert r["transition_duration"] == tb.quantize(T.default_duration(name), 30)
     with pytest.raises(ValueError, match="unknown transition"):
         dispatch(store, "add_transition", {"at": 2.0, "type": "kapow"})
 

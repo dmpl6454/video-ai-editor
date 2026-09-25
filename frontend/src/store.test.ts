@@ -12,7 +12,7 @@ const arm = (save_export: (sid: string, filename: string) => Promise<string | nu
   vi.stubGlobal('pywebview', { api: { save_export } })
 
 beforeEach(() => {
-  useStore.setState({ sessionId: 's1', exportUrl: '/api/sessions/s1/files/exports/s1.mp4', exportFilename: 's1.mp4' })
+  useStore.setState({ sessionId: 's1', exportLinks: { s1: { sid: 's1', url: '/api/sessions/s1/files/exports/s1.mp4', filename: 's1.mp4', edlHash: null } } })
   useToasts.setState({ toasts: [] })
 })
 afterEach(() => vi.unstubAllGlobals())
@@ -35,7 +35,7 @@ describe('downloadExport in the packaged app', () => {
   it('does nothing without an export', async () => {
     const save = vi.fn(async () => '/p')
     arm(save)
-    useStore.setState({ exportUrl: null })
+    useStore.setState({ exportLinks: {} })
     await useStore.getState().downloadExport()
     expect(save).not.toHaveBeenCalled()
   })

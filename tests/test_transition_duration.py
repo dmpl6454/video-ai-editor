@@ -17,6 +17,7 @@ import pytest
 from video_ai_editor.agent.dispatch import dispatch
 from video_ai_editor.edl.schema import Clip, TextClip, Transition
 from video_ai_editor.edl.snapshot import EDLStore
+from video_ai_editor.edl import timebase as tb
 
 
 def _store(tmp_path: Path, spans=((0.0, 2.0), (2.0, 2.0), (4.0, 2.0), (6.0, 2.0))) -> EDLStore:
@@ -52,7 +53,8 @@ def test_removing_the_transition_gives_the_time_back(tmp_path):
     t = s.edl.get_track("v1")
     t.transitions.append(Transition(at=4.0, duration=0.75))
     s.edl.recompute_duration()
-    assert s.edl.duration == pytest.approx(7.25)
+    # The seam is charged whole frames: 0.75 s is 22.5 frames at 30 fps.
+    assert s.edl.duration == pytest.approx(8.0 - tb.quantize(0.75, 30))
     t.transitions.clear()
     s.edl.recompute_duration()
     assert s.edl.duration == pytest.approx(8.0)

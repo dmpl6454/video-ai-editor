@@ -40,6 +40,7 @@ from ...edl import EDLStore
 from ...edl.schema import EDL, Clip, Sticker, TextClip
 from ..timemap import map_words_to_timeline, source_range_to_timeline
 from .facts import TimelineFacts
+from .langs import base_lang
 from .recipes import FILLERS_STRICT
 from .schema import CHECK_SPECS, CLIP_SENTINELS, Plan, Postcondition, bind_postconditions
 from .service import VERIFY_RENDER_MAX_DURATION_S
@@ -517,7 +518,23 @@ def c_captions_language(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     if target == "hi":
         return _ok(pc, ratios["deva"] >= 0.7, round(ratios["deva"], 3), "devanagari ≥ 70%", unit="ratio")
     if target == "hinglish":
-        if (ctx.facts_before.language or "").lower() != "hi":
+        # QA-043: Devanagari delivered for a Hinglish request is a failure
+        # whatever the source — it used to read "4/4 held".
+        if ratios["deva"] >= 0.3:
+            return _ok(pc, False, round(ratios["latin"], 3), "latin ≥ 90%", unit="ratio",
+                       detail=f"{ratios['deva']:.0%} of the caption letters are Devanagari")
+        spoken = ctx.facts_before.spoken_language or ctx.facts_before.language
+        if not spoken:
+            # The plan may have made the transcript itself (upload with
+            # transcribe=false, then "add hinglish captions"): facts_before
+            # predates it, so read the language the run persisted.
+            tx, _src = ctx.transcript()
+            spoken = getattr(tx, "language", None) if tx is not None else None
+        spoken = base_lang(spoken) if spoken else None
+        if spoken is None:
+            return _ok(pc, None, round(ratios["latin"], 3), "latin ≥ 90% of a Hindi source",
+                       detail="source language unknown; romanisation cannot be judged")
+        if spoken != "hi":
             return _ok(pc, None, round(ratios["latin"], 3), "latin ≥ 90% of a Hindi source",
                        detail="source language is not Hindi; romanisation cannot be judged")
         return _ok(pc, ratios["latin"] >= 0.9, round(ratios["latin"], 3), "latin ≥ 90%", unit="ratio")
@@ -760,6 +777,9 @@ def c_music_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     want_duck = _arg(pc, "ducked")
     count = _arg(pc, "count")          # the replace path: exactly one bed, not one on top of another
     ducked = bool(track and track.duck)
+    if count is not None and int(count) == 0:
+        # "remove the music": the check is an EMPTY music lane.
+        return _ok(pc, not clips, {"clips": len(clips)}, {"clips": "= 0"})
     passed = bool(clips) and (not want_duck or ducked) and (count is None or len(clips) == int(count))
     return _ok(pc, passed, {"clips": len(clips), "ducked": ducked},
                {"clips": f"= {int(count)}" if count is not None else "≥ 1", "ducked": bool(want_duck) or "any"})
@@ -768,6 +788,12 @@ def c_music_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 def c_music_ducked(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     to_db = float(_arg(pc, "to_db") if _arg(pc, "to_db") is not None else -12)
     track = ctx.edl.get_track("music")
+    if _arg(pc, "enabled") is False:
+        # QA-031: "turn off ducking" is verified as OFF — it used to be
+        # measured against "on" whatever was asked.
+        if not track or not music_clips(ctx.edl):
+            return _ok(pc, None, None, "ducking off", detail="no music")
+        return _ok(pc, track.duck is None, "on" if track.duck else "off", "off")
     if not track or not music_clips(ctx.edl):
         return _ok(pc, False, None, f"≤ {to_db} dB", detail="no music")
     if not track.duck:
@@ -794,6 +820,94 @@ def c_music_covers(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
                                         for c in clips], gap=0.0))
     ratio = covered / extent
     return _ok(pc, ratio >= min_ratio, round(ratio, 3), f"≥ {min_ratio:.0%}", unit="ratio")
+
+
+def _clips_for_ref(ctx: VerifyCtx, ref: Any) -> list[Clip]:
+    """v1 clips a fade/mute `clip_id` names at verify time: `$v1_first` /
+    `$v1_last` the first / last clip, another sentinel (or None) every clip,
+    a real id that clip (on any track)."""
+    clips = v1_clips(ctx.edl)
+    if ref == "$v1_first":
+        return clips[:1]
+    if ref == "$v1_last":
+        return clips[-1:]
+    if ref and ref not in CLIP_SENTINELS:
+        hit = ctx.edl.get_clip(str(ref))
+        return [hit[1]] if hit and isinstance(hit[1], Clip) else []
+    return clips
+
+
+def _fade_result(pc: Postcondition, clips: list, get_in, get_out) -> CheckResult:
+    want_in, want_out = _arg(pc, "in_s"), _arg(pc, "out_s")
+    if not clips:
+        return _ok(pc, False, None, {"in": want_in, "out": want_out}, detail="no clip to fade")
+    got = [{"in": round(float(get_in(c) or 0.0), 3), "out": round(float(get_out(c) or 0.0), 3)} for c in clips]
+    ok = all((want_in is None or g["in"] >= float(want_in) - 1e-3)
+             and (want_out is None or g["out"] >= float(want_out) - 1e-3) for g in got)
+    return _ok(pc, ok, got[0] if len(got) == 1 else got,
+               {k: f"≥ {v:g}s" for k, v in (("in", want_in), ("out", want_out)) if v is not None} or "any")
+
+
+def c_video_fade_set(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    return _fade_result(pc, _clips_for_ref(ctx, _arg(pc, "clip_id")),
+                        lambda c: getattr(c, "video_fade_in", 0.0), lambda c: getattr(c, "video_fade_out", 0.0))
+
+
+def c_audio_fade_set(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    return _fade_result(pc, _clips_for_ref(ctx, _arg(pc, "clip_id")),
+                        lambda c: c.audio.fade_in, lambda c: c.audio.fade_out)
+
+
+def c_music_fade_set(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """The bed's first piece fades in ≥ `in_s`, its last piece out ≥ `out_s`."""
+    clips = sorted(music_clips(ctx.edl), key=lambda c: c.start)
+    want_in, want_out = _arg(pc, "in_s"), _arg(pc, "out_s")
+    if not clips:
+        return _ok(pc, False, None, {"in": want_in, "out": want_out}, detail="no music")
+    got = {"in": round(float(clips[0].audio.fade_in or 0.0), 3), "out": round(float(clips[-1].audio.fade_out or 0.0), 3)}
+    ok = (want_in is None or got["in"] >= float(want_in) - 1e-3) and (want_out is None or got["out"] >= float(want_out) - 1e-3)
+    return _ok(pc, ok, got, {k: f"≥ {v:g}s" for k, v in (("in", want_in), ("out", want_out)) if v is not None} or "any")
+
+
+def c_volume_db(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Every clip of the `target` track (or the one clip) carries `db` of gain
+    — what `render/audio_mix` applies."""
+    target, db = _arg(pc, "target"), _arg(pc, "db")
+    tol = float(_arg(pc, "tol") or 0.05)
+    track = ctx.edl.get_track(str(target)) if target else None
+    if track is not None:
+        clips = [c for c in track.clips if isinstance(c, Clip)]
+    else:
+        hit = ctx.edl.get_clip(str(target)) if target else None
+        clips = [hit[1]] if hit and isinstance(hit[1], Clip) else []
+    if not clips:
+        return _ok(pc, False, None, db, unit="dB", detail=f"nothing to measure on {target!r}")
+    gains = sorted({round(float(c.audio.gain_db), 2) for c in clips})
+    if db is None:
+        return _ok(pc, None, gains, None, unit="dB", detail="no level requested")
+    ok = all(abs(g - float(db)) <= tol for g in gains)
+    return _ok(pc, ok, gains[0] if len(gains) == 1 else gains, float(db), unit="dB")
+
+
+def c_track_muted(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    track_id, want = _arg(pc, "track"), _arg(pc, "muted")
+    track = ctx.edl.get_track(str(track_id)) if track_id else None
+    if track is None:
+        return _ok(pc, False, None, want, detail=f"no track {track_id!r}")
+    if want is None:
+        return _ok(pc, None, bool(track.muted), None, detail="no state requested")
+    return _ok(pc, bool(track.muted) == bool(want), bool(track.muted), bool(want))
+
+
+def c_clips_muted(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    clips = _clips_for_ref(ctx, _arg(pc, "clip_id"))
+    want = _arg(pc, "muted")
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    states = [bool(c.audio.mute) for c in clips]
+    if want is None:
+        return _ok(pc, None, states, None, detail="no state requested")
+    return _ok(pc, all(st == bool(want) for st in states), states[0] if len(set(states)) == 1 else states, bool(want))
 
 
 def c_beat_splits_geq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -1046,6 +1160,14 @@ def run_check(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     if fn is None:
         return CheckResult(check=pc.check, human=pc.human, passed=None,
                            detail="unknown check", headline=pc.headline)
+    unresolved = sorted(k for k, v in pc.args.items() if isinstance(v, str) and v.startswith(("$ask:", "$arg:")))
+    if unresolved:
+        # QA-032: a check still holding a placeholder measures nothing real —
+        # `text_present(contains="$ask:handle")` passed against the burned-in
+        # placeholder itself. It fails, loudly.
+        return CheckResult(check=pc.check, human=pc.human, passed=False,
+                           measured={k: pc.args[k] for k in unresolved}, expected="a real value",
+                           detail="unresolved placeholder — the value was never supplied", headline=pc.headline)
     try:
         return fn(ctx, pc)
     except Exception as e:  # noqa: BLE001 — a broken check is reported, never fatal

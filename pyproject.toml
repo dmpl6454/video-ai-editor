@@ -31,6 +31,9 @@ dependencies = [
     "pyannote-audio>=4.0.4",
     "open-clip-torch>=3.3.0",
     "pyobjc-framework-avfoundation>=11.0; sys_platform == 'darwin'",
+    "uharfbuzz>=0.45",
+    "freetype-py>=2.5",
+    "python-bidi>=0.6",
 ]
 
 [project.optional-dependencies]

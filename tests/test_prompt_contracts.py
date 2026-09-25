@@ -275,7 +275,9 @@ def test_recipe_table_matches_the_grammar_intents():
     spec_intents = {"auto_edit", "captions", "translate_captions", "remove_silences", "remove_fillers",
                     "tighten", "shorts", "reframe", "music", "duck", "beat_sync", "hook", "color_look",
                     "clean_audio", "loudness", "speed", "trim", "title", "brand", "end_card",
-                    "transitions", "export_preset", "voiceover", "stabilize", "upscale", "ask"}
+                    "transitions", "export_preset", "voiceover", "stabilize", "upscale", "ask",
+                    # QA-018: the everyday one-liners (fades, levels, mutes, fitting the bed)
+                    "fade", "volume", "mute", "fit_music", "remove_music"}
     assert spec_intents | {"transcribe"} == set(recipes.RECIPE_NAMES)   # undo/redo are intents, not recipes
     offered = {c.name for c in recipes.cards()}
     assert "transcribe" not in offered and "ask" not in offered and "auto_edit" in offered

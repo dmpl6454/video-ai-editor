@@ -16,6 +16,7 @@ import { liveCssTransform, liveCssFilter, colorGradeOf, sampleKF,
 import { planSourceDraw, sourcePreviewApplies } from '../lib/sourcePreview'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import { renderSpanOf } from '../lib/timelineLayout'
+import { frameDuration } from '../lib/frameStep'
 
 /**
  * Preview pane.
@@ -44,7 +45,10 @@ export function Preview() {
   const selection = useStore((s) => s.selection)
 
   const ref = useRef<HTMLVideoElement>(null)
-  const [rendering, setRendering] = useState(false)
+  // The store owns this (renderPreview is latest-wins across every caller);
+  // a local flag cleared by whichever call settled first went false while the
+  // render the player was actually waiting for was still running.
+  const rendering = useStore((s) => s.previewRendering)
 
   // What the render CURRENTLY ON SCREEN has baked into it, latched when a live
   // transform gesture begins and held until the override clears.
@@ -199,6 +203,51 @@ export function Preview() {
     : null
   const [error, setError] = useState<string | null>(null)
   const [boxSize, setBoxSize] = useState({ w: 0, h: 0 })
+
+  // LAST GOOD FRAME across a render swap (QA-005). Changing <video src> tears
+  // the player down and the element shows NOTHING until the new file has
+  // decoded a frame — measured in Chromium as a fully black preview for one
+  // ~50 ms screenshot after every edit's render landed, then the frame again
+  // (and longer again when the restored playhead needs a seek). So the frame
+  // on screen is copied into this canvas at the instant previewHash changes —
+  // a store subscription runs synchronously inside set(), BEFORE React
+  // re-renders the src — and held over the <video> until the new render has
+  // painted the restored frame (onSeeked after the restore seek, else
+  // onLoadedData), with a 4 s net for a load that never completes.
+  const freezeRef = useRef<HTMLCanvasElement>(null)
+  const [frozen, setFrozen] = useState(false)
+  const awaitingRestoreSeekRef = useRef(false)
+  const freezeTimerRef = useRef<number | null>(null)
+  const unfreeze = () => {
+    if (freezeTimerRef.current != null) window.clearTimeout(freezeTimerRef.current)
+    freezeTimerRef.current = null
+    awaitingRestoreSeekRef.current = false
+    // One frame later, so the new picture is composited before the cover goes.
+    requestAnimationFrame(() => setFrozen(false))
+  }
+  useEffect(() => useStore.subscribe((st, prev) => {
+    if (st.previewHash === prev.previewHash || !prev.previewHash || !st.previewHash) return
+    const v = ref.current
+    const cv = freezeRef.current
+    if (!v || !cv || v.readyState < 2 || !v.videoWidth) return
+    try {
+      const r = v.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      cv.width = Math.max(1, Math.round(r.width * dpr))
+      cv.height = Math.max(1, Math.round(r.height * dpr))
+      cv.getContext('2d')!.drawImage(v, 0, 0, cv.width, cv.height)
+      // Carry the live CSS stand-in (transform / opacity / filter) the frame
+      // is being shown with, so the cover matches what was on screen.
+      cv.style.transform = v.style.transform
+      cv.style.opacity = v.style.opacity
+      cv.style.filter = v.style.filter
+    } catch {
+      return   // a tainted or undecodable frame: just take the swap as before
+    }
+    setFrozen(true)
+    if (freezeTimerRef.current != null) window.clearTimeout(freezeTimerRef.current)
+    freezeTimerRef.current = window.setTimeout(unfreeze, 4000)
+  }), [])
   const wrapRef = useRef<HTMLDivElement>(null)
 
   // --- source-based live transform preview -------------------------------
@@ -456,22 +505,19 @@ export function Preview() {
     })
   }, [edl])
 
-  // Debounced + abortable preview render
+  // Debounced preview render. Superseding an in-flight render (abort + server
+  // cancel) and ignoring stale responses both live in store.renderPreview, so
+  // they hold for every caller, not only this effect (QA-004). The old local
+  // AbortController here was never passed to fetch: aborting it only hid the
+  // spinner while the stale response still went on to replace the preview.
   const debounceRef = useRef<number | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
   useEffect(() => {
     if (!sid || !edl?.duration) return
     if (debounceRef.current) window.clearTimeout(debounceRef.current)
     debounceRef.current = window.setTimeout(() => {
-      // Cancel any in-flight request
-      abortRef.current?.abort()
-      const ac = new AbortController()
-      abortRef.current = ac
-      setRendering(true)
       setError(null)
       renderPreview()
         .catch((e) => {
-          if (ac.signal.aborted) return
           // `String(e)` pasted the whole error envelope — status line, request
           // id and a 400-char raw ffmpeg stderr dump — into the preview pane as
           // a wall of red text (see the tester screenshots). errorMessage()
@@ -483,10 +529,6 @@ export function Preview() {
           // for the full safety-net timeout.
           setLiveTransform(null)
           setLiveFilter(null)
-        })
-        .finally(() => {
-          if (ac.signal.aborted) return
-          setRendering(false)
         })
     }, 250)
     return () => {
@@ -554,7 +596,7 @@ export function Preview() {
   // One frame of the project's timebase, in seconds. Several thresholds below
   // are "did the displayed frame change?" questions, and a fixed 0.05s answered
   // them wrongly for a 30fps project (a frame is 0.033s).
-  const frameDur = 1 / Math.max(1, edl?.canvas?.fps ?? 30)
+  const frameDur = frameDuration(edl?.canvas?.fps)
 
   useEffect(() => {
     const v = ref.current
@@ -866,7 +908,10 @@ export function Preview() {
     )
   }
 
-  const url = previewHash ? api.previewURL(sid, previewHash) : api.previewURL(sid)
+  // No hash yet → no src. The hashless URL made GET preview.mp4 render the
+  // timeline SYNCHRONOUSLY, a third full render racing the POST this pane's
+  // effect had just issued for the same EDL (QA-004).
+  const url = previewHash ? api.previewURL(sid, previewHash) : undefined
 
   // The base v1 clip, if IT is the current selection — drives <CropReposition>
   // below. Scoped to v1 for the same reason StickerLayer's direct-drag is:
@@ -1065,10 +1110,17 @@ export function Preview() {
               clockRef.current = target
             }
             if (target > 0.05) {
-              try { v.currentTime = target } catch { /* non-fatal */ }
+              awaitingRestoreSeekRef.current = true
+              try { v.currentTime = target } catch { awaitingRestoreSeekRef.current = false }
             }
           }}
+          onSeeked={() => {
+            // The restored frame of a freshly swapped-in render is on screen.
+            if (awaitingRestoreSeekRef.current) unfreeze()
+          }}
+          onError={() => { if (frozen) unfreeze() }}
           onLoadedData={(e) => {
+            if (frozen && !awaitingRestoreSeekRef.current) unfreeze()
             // The committed transform (Properties.tsx's onChange) is only
             // visible once THIS reload finishes — clearing liveTransform any
             // earlier drops the CSS preview back to the untransformed old
@@ -1098,12 +1150,17 @@ export function Preview() {
             }
           }}
         />
+        {/* Last-good-frame cover while a new render swaps in (see freezeRef). */}
+        <canvas
+          ref={freezeRef}
+          style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
+                   pointerEvents: 'none', display: frozen ? 'block' : 'none' }} />
         {/* WebCodecs frame-accurate scrubber. Sits between <video> and text
             overlays; only opaque while seeking (caller decides). Wrapped in
             an ErrorBoundary so a mp4box / VideoDecoder hiccup on an unusual
             preview can never blank the entire editor — we silently fall back
             to <video>.currentTime, which still scrubs (just less precisely). */}
-        {boxSize.w > 0 && (
+        {boxSize.w > 0 && url && (
           <ErrorBoundary resetKey={url} fallback={() => null}>
             <FrameScrubber
               ref={scrubberRef}

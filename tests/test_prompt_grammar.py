@@ -151,8 +151,10 @@ def test_each_clause_yields_one_intent_with_its_own_slots():
 
 
 def test_transition_requests_without_the_word_transition():
-    for prompt in ("smooth zoom between every clip", "add a glitch at the hook", "fade to black at the end"):
+    for prompt in ("smooth zoom between every clip", "add a glitch at the hook", "fade to black at the last cut"):
         assert G.detect(prompt).intents == ["transitions"], prompt
+    # QA-018: "at the END" is the closing fade of the video, not the last seam.
+    assert G.detect("fade to black at the end").intents == ["fade"]
     assert G.detect("add a hook").intents == ["hook"]        # no seam vocabulary → still a hook
     assert G.detect("zoom in on the product").intents == []
 

@@ -43,13 +43,85 @@ describe('the TopBar at boot, before /api/version answers', () => {
   })
 
   // No empty gap and no orphaned separator where the button was: the two 1px
-  // separators in .topbar-scroll are the ones before TextTool and before the
-  // platform presets, and both still sit between real controls.
-  it('leaves no trailing separator at the end of the scrolling section', () => {
+  // separators in .topbar-tools are the ones before TextTool and before Help,
+  // and both still sit between real controls.
+  it('leaves no trailing separator at the end of the tools section', () => {
     const html = boot()
-    const scroll = html.slice(html.indexOf('topbar-scroll'), html.lastIndexOf('topbar-pinned'))
-    // The last thing in the scrolling section is a button (⌨ shortcuts), not a
+    const scroll = html.slice(html.indexOf('topbar-tools'), html.lastIndexOf('topbar-pinned'))
+    // The last thing in the tools section is a button (⌨ / ⋯), not a
     // separator span left behind by a removed neighbour.
     expect(scroll.lastIndexOf('</button>')).toBeGreaterThan(scroll.lastIndexOf('width:1px'))
+  })
+})
+
+// QA-012: every core control is IN the bar — none behind a sideways scroller.
+// Which of them is visible at 1024/1280/1440/1920 is measured in a real browser
+// (qa-fix/A7-panels live_check.py); this pins the structure that makes it so.
+describe('the TopBar tools', () => {
+  const tools = () => {
+    const html = boot()
+    return html.slice(html.indexOf('topbar-tools'), html.lastIndexOf('topbar-pinned'))
+  }
+
+  it('has no horizontally scrolling strip', () => {
+    expect(boot()).not.toContain('topbar-scroll')
+  })
+
+  it('holds one Ratio menu instead of nine loose aspect/preset buttons', () => {
+    const t = tools()
+    expect(t).toContain('ratio-trigger')
+    expect(t).toMatch(/aria-haspopup="menu"/)
+    const buttonTexts = [...t.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)]
+      .map((m) => m[1].replace(/<[^>]+>/g, '').trim())
+    for (const label of ['Reels', 'Shorts', 'TikTok', 'IG 1:1', 'IG 4:5', '9:16', '16:9', '1:1', '4:5']) {
+      expect(buttonTexts, label).not.toContain(label)
+    }
+  })
+
+  it('keeps Text, Captions, Help and Shortcuts inline', () => {
+    const t = tools()
+    expect(t).toMatch(/<b>T<\/b> Text/)
+    expect(t).toContain('Captions')
+    expect(t).toMatch(/>\?<\/button>/)
+    expect(t).toContain('⌨')
+  })
+})
+
+// QA-012 / QA-026: Export stays the RIGHT-MOST pinned control even when the
+// cluster also shows a finished export's "↓ MP4" link and an export error.
+// Both used to render AFTER the Export button, so at every width the download
+// link (or a 340 px error chip) sat to Export's right.
+describe('the pinned cluster with an export link and an export error', () => {
+  const seeded = async () => {
+    vi.resetModules()
+    const { useStore } = await import('../store')
+    // SSR reads the store's INITIAL state (zustand's server snapshot), so the
+    // finished-export state is seeded there — the real component, the real store.
+    Object.assign(useStore.getInitialState(), {
+      sessionId: 'A', sessionName: 'A', edlHash: 'aaaaaaaaaaaaaaa1',
+      edl: { canvas: { w: 1080, h: 1920, fps: 30, bg: '#000' }, duration: 4, tracks: [] },
+      exportLinks: { A: { sid: 'A', url: '/api/sessions/A/files/exports/export_aaaaaaaaaaaaaaa1.mp4',
+                          filename: 'export_aaaaaaaaaaaaaaa1.mp4', edlHash: 'aaaaaaaaaaaaaaa1' } },
+      exportError: 'RuntimeError: the encoder ran out of disk',
+    })
+    const { TopBar: Bar } = await import('./TopBar')
+    const html = renderToStaticMarkup(createElement(Bar))
+    return html.slice(html.lastIndexOf('topbar-pinned'))
+  }
+
+  it('renders the link and the error, both before Export', async () => {
+    const pinned = await seeded()
+    const exportAt = pinned.indexOf('Export ▾')
+    expect(exportAt).toBeGreaterThan(-1)
+    expect(pinned).toContain('↓ MP4')
+    expect(pinned).toContain('the encoder ran out of disk')
+    expect(pinned.indexOf('↓ MP4')).toBeLessThan(exportAt)
+    expect(pinned.indexOf('the encoder ran out of disk')).toBeLessThan(exportAt)
+  })
+
+  it('ends with the Export button: no control follows it', async () => {
+    const pinned = await seeded()
+    const tail = pinned.slice(pinned.indexOf('Export ▾'))
+    expect(tail).not.toMatch(/<button|<a\b|⚠/)
   })
 })

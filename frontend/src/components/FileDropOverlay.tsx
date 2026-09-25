@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { AUDIO_EXTS } from '../lib/paths'
+import { importFiles, installWindowFileDrop } from '../lib/fileDrop'
 
 /**
  * Global file drag-and-drop.
@@ -12,7 +12,9 @@ import { AUDIO_EXTS } from '../lib/paths'
  *      navigates.
  *   2. Shows a full-window overlay while files are dragged in, so the WHOLE
  *      window is a drop target — drop anywhere to import.
- *   3. Routes each dropped file to the right uploader (audio vs video).
+ *   3. Is the ONLY importer of an OS file drop — including one that lands on
+ *      the Media panel's own dropzone, which just highlights (lib/fileDrop
+ *      explains the double import that two importers caused).
  *
  * It only reacts to FILE drags (dataTransfer has a "Files" type); internal
  * clip/emoji drags within the timeline are ignored so they still work.
@@ -21,57 +23,11 @@ export function FileDropOverlay() {
   const upload = useStore((s) => s.upload)
   const uploadAudio = useStore((s) => s.uploadAudio)
   const [active, setActive] = useState(false)
-  // dragenter/dragleave fire for every child element, so track depth to know
-  // when the cursor has truly left the window.
-  const depth = useRef(0)
 
-  useEffect(() => {
-    const isFileDrag = (e: DragEvent) =>
-      !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')
-
-    const onDragEnter = (e: DragEvent) => {
-      if (!isFileDrag(e)) return
-      e.preventDefault()
-      depth.current += 1
-      setActive(true)
-    }
-    const onDragOver = (e: DragEvent) => {
-      if (!isFileDrag(e)) return
-      e.preventDefault()
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
-    }
-    const onDragLeave = (e: DragEvent) => {
-      if (!isFileDrag(e)) return
-      depth.current = Math.max(0, depth.current - 1)
-      if (depth.current === 0) setActive(false)
-    }
-    const onDrop = (e: DragEvent) => {
-      if (!isFileDrag(e)) return
-      e.preventDefault()
-      depth.current = 0
-      setActive(false)
-      const files = e.dataTransfer?.files
-      if (!files || !files.length) return
-      for (const f of Array.from(files)) {
-        if (AUDIO_EXTS.test(f.name) || f.type.startsWith('audio/')) {
-          void uploadAudio(f)
-        } else {
-          void upload(f)
-        }
-      }
-    }
-
-    window.addEventListener('dragenter', onDragEnter)
-    window.addEventListener('dragover', onDragOver)
-    window.addEventListener('dragleave', onDragLeave)
-    window.addEventListener('drop', onDrop)
-    return () => {
-      window.removeEventListener('dragenter', onDragEnter)
-      window.removeEventListener('dragover', onDragOver)
-      window.removeEventListener('dragleave', onDragLeave)
-      window.removeEventListener('drop', onDrop)
-    }
-  }, [upload, uploadAudio])
+  useEffect(() => installWindowFileDrop(window, {
+    setActive,
+    importFiles: (files) => { void importFiles(files, { upload, uploadAudio }) },
+  }), [upload, uploadAudio])
 
   if (!active) return null
   return (

@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from . import slots as S
 from .facts import TimelineFacts, VOICE_IDS
+from .langs import base_lang, is_latin_hindi, needs_translation
 from .presets import bed_for_mood, edit_templates, transition_entry, transition_looks
 from .recipes import (_PLATFORMS, _RATIOS, FILLERS_STRICT, RECIPE_SLOTS, Context, Expansion, Intent, ask,
                       download, normalize_slots, pc, placeholder, step)
@@ -70,6 +71,46 @@ def _caption_model(f: TimelineFacts, it: Intent, ctx: Context) -> tuple[str, tup
     return best, downloads, notes
 
 
+def _hinglish_captions(it: Intent, f: TimelineFacts, ctx: Context, style: str, position: str,
+                       pcs: list, notes: list[str]) -> Expansion | None:
+    """Hinglish captions by TRANSLITERATION (QA-043): lay the captions from the
+    persisted transcript, then `translate_captions(target_lang=hinglish)`,
+    which romanises Hindi with the bundled `ai.romanize` — no model, no
+    network, seconds instead of a large-v3 re-transcription. Only when the
+    transcript is known NOT to be Hindi does it take MADLAD (asked for like any
+    download); an unknown language (no transcript yet) is resolved by the
+    executor from the live transcript, and the run-time guard refuses the step
+    rather than fetch a model nobody agreed to. Never Devanagari: with no
+    translation model and non-Hindi speech the captions stay in the (Latin)
+    spoken language and the language check says so. None → not this path."""
+    if it.get("model_upgrade"):
+        return None
+    source = f.language if f.has_transcript else None
+    need = needs_translation("hinglish", source)
+    downloads: tuple[DownloadNeeded, ...] = ()
+    if need and not f.is_cached("madlad"):
+        if not ctx.allow_downloads:
+            notes.append(f"captions stay in {source} — Hinglish from {source} speech needs the MADLAD "
+                         "translation model (3 GB), which is not downloaded")
+            return Expansion(steps=(step("add_caption_track", STAGE_CAPTIONS, "captions from the persisted transcript",
+                                         style=style, position=position),),
+                             postconditions=tuple(pcs), notes=tuple(notes))
+        downloads = (download("madlad", "translate_captions"),)
+    if need is False:
+        notes.append("Hinglish by transliteration of the Hindi transcript (no translation model)")
+    tr_args: dict[str, Any] = {"target_lang": "hinglish"}
+    if source:
+        tr_args["source_lang"] = source
+    return Expansion(
+        steps=(step("add_caption_track", STAGE_CAPTIONS, "captions from the persisted transcript (no model)",
+                    style=style, position=position),
+               step("translate_captions", STAGE_CAPTIONS,
+                    "Hindi → Latin script (romanise)" if need is False else "captions → Hinglish", **tr_args)),
+        postconditions=(*pcs, pc("captions_language", "captions are in the requested language", target="hinglish")),
+        downloads=downloads, notes=tuple(notes),
+        prerequisites=(Intent("transcribe"),) if not f.has_transcript else ())
+
+
 def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     style = it.get("style") or "ig_chunky"
     position = it.get("position") or "bottom"
@@ -84,8 +125,23 @@ def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
            pc("captions_style", "captions use the requested style", style=style)]
     if f.has_captions:
         notes.append("replacing the existing captions")
-    needs_translation = target in ("hi", "hinglish", "es")
-    if needs_translation and not f.is_cached("madlad"):
+    if target == "hinglish":
+        x = _hinglish_captions(it, f, ctx, style, position, pcs, notes)
+        if x is not None:
+            return x
+    if (target and not it.get("model_upgrade") and f.has_transcript
+            and base_lang(f.language) == base_lang(target) and base_lang(target) is not None
+            and target != "hinglish" and not is_latin_hindi(f.language)):
+        # The transcript on disk is already in the requested language: the
+        # captions come from it, and the language check still measures them.
+        return Expansion(
+            steps=(step("add_caption_track", STAGE_CAPTIONS, "captions from the persisted transcript (no model)",
+                        style=style, position=position),),
+            postconditions=(*pcs, pc("captions_language", "captions are in the requested language", target=target)),
+            notes=tuple(notes))
+    spoken = f.spoken_language or f.language
+    translation_needed = needs_translation(target, spoken) is not False
+    if translation_needed and not f.is_cached("madlad"):
         if ctx.allow_downloads:
             downloads.append(download("madlad", "auto_caption"))
         else:
@@ -98,10 +154,16 @@ def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         notes.extend(mnotes)
         pcs.append(pc("captions_language", "captions are in the requested language", target=target)
                    if target else pc("transcript_present", "a transcript exists"))
+        # The spoken language, when known, spares auto_caption its detection
+        # pass and tells the executor's guard that hi → hinglish needs no model.
+        spoken_base = base_lang(spoken)
+        language = (spoken_base if target and spoken_base and len(spoken_base) <= 3
+                    and needs_translation(target, spoken) is False else None)
         return Expansion(
             steps=(step("auto_caption", STAGE_PREREQ if not f.has_transcript else STAGE_CAPTIONS,
                         "language change or model upgrade needs a fresh transcription",
-                        style=style, position=position, target=target, max_chars=max_chars, model=model),),
+                        style=style, position=position, target=target, max_chars=max_chars, model=model,
+                        language=language),),
             postconditions=tuple(pcs), downloads=tuple(downloads), notes=tuple(notes))
     return Expansion(
         steps=(step("add_caption_track", STAGE_CAPTIONS, "captions from the persisted transcript (no model)",
@@ -121,15 +183,24 @@ def _x_translate(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         target_arg: Any = placeholder("target_lang")
     else:
         target_arg = target
-        if target in ("hi", "hinglish", "es") and not f.is_cached("madlad"):
+        # The captions on the timeline are in the transcript's language:
+        # hi → hinglish is transliteration (bundled, no model — QA-043).
+        source = f.language if f.has_transcript else None
+        need = needs_translation(target, source)
+        if need is False and target != "hinglish" and not is_latin_hindi(source):
+            return Expansion(notes=(f"the captions are already in {target} — nothing to translate",))
+        if need is not False and not (target == "hinglish" and need is None) and not f.is_cached("madlad"):
             if ctx.allow_downloads:
                 downloads.append(download("madlad", "translate_captions"))
             else:
                 notes.append("translation skipped — the MADLAD model (3 GB) is not downloaded")
                 return Expansion(notes=tuple(notes))
+    tr_args: dict[str, Any] = {"target_lang": target_arg}
+    if target == "hinglish" and f.has_transcript and f.language:
+        tr_args["source_lang"] = f.language
     prereq = () if f.has_captions or "captions" in ctx.recipes else (Intent("captions"),)
     return Expansion(
-        steps=(step("translate_captions", STAGE_CAPTIONS, "translate the caption track", target_lang=target_arg),),
+        steps=(step("translate_captions", STAGE_CAPTIONS, "translate the caption track", **tr_args),),
         postconditions=(pc("captions_language", "captions are in the requested language", target=target),),
         questions=questions, downloads=tuple(downloads), notes=tuple(notes), prerequisites=prereq)
 
@@ -223,7 +294,7 @@ def _x_reframe(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 
 def _x_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
-    if f.has_music and not it.get("_replace"):
+    if f.has_music and not it.get("_replace") and "remove_music" not in ctx.recipes:
         return Expansion(notes=("music is already on the timeline — say 'another track' to replace it",))
     # "replace the music": the OLD bed goes first, else the new one is laid on
     # top of it and both play at once (two beds mixed at 0 s — measured on a
@@ -239,7 +310,8 @@ def _x_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     volume_db = float(it.get("volume_db", -14.0))
     volume_db = min(0.0, max(-40.0, volume_db))
     duck = it.get("duck")
-    duck = True if duck is None else bool(duck)
+    # "add music without ducking" / "... but don't duck it" (QA-031).
+    duck = (False if "duck" in ctx.exclusions else True) if duck is None else bool(duck)
     mood = it.get("mood")
     src_slot = it.get("src")
     questions: tuple[NeedsInput, ...] = ()
@@ -283,6 +355,17 @@ def _x_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 
 def _x_duck(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    if it.get("enabled") is False:
+        # QA-031: "turn off ducking" turns it OFF, and the check measures OFF.
+        if not f.has_music and "music" not in ctx.recipes:
+            return Expansion(notes=("there is no music on the timeline — nothing to stop ducking",))
+        if f.has_music and not f.music_ducked and "music" not in ctx.recipes:
+            return Expansion(notes=("ducking is already off — the music plays at its own level",))
+        return Expansion(
+            steps=(step("set_duck", STAGE_MUSIC, "stop ducking the music under speech", track="music",
+                        enabled=False),),
+            postconditions=(pc("music_ducked", "ducking is off", enabled=False),),
+            notes=("ducking off — the music keeps its level under speech",))
     to_db = float(it.get("to_db", -18.0))
     to_db = min(0.0, max(-40.0, to_db))
     prereq = () if f.has_music or "music" in ctx.recipes else (Intent("music", {"mood": it.get("_mood")}),)
@@ -399,6 +482,9 @@ def _x_loudness(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     lufs = it.get("lufs")
     explicit = lufs is not None
     target = float(lufs) if explicit else S.default_lufs(it.get("_platform"), f.loudness_lufs)
+    change = it.get("_change") if not explicit else None
+    if change in ("up", "down"):
+        target += LOUDNESS_STEP_LU if change == "up" else -LOUDNESS_STEP_LU
     target = min(-9.0, max(-24.0, target))
     stage = STAGE_EXPORT if (explicit and "export_preset" in ctx.recipes) else STAGE_AUDIO
     return Expansion(
@@ -760,6 +846,189 @@ def _x_upscale(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         postconditions=(pc("clip_src_changed", "the clip was upscaled"),))
 
 
+#: "turn the volume up/down" (no object) moves the export loudness target.
+LOUDNESS_STEP_LU = 3.0
+
+#: QA-018 defaults: a programme fade reads as a second; a music bed breathes
+#: out over two; "turn it down/up" moves the bed by 6 dB (half/double loudness).
+FADE_DEFAULT_S = 1.0
+MUSIC_FADE_IN_S = 1.0
+MUSIC_FADE_OUT_S = 2.0
+FADE_MAX_S = 10.0
+VOLUME_STEP_DB = 6.0
+VOLUME_MIN_DB, VOLUME_MAX_DB = -40.0, 6.0
+#: The bed's level when facts cannot say (the music recipe's own default).
+MUSIC_DEFAULT_DB = -14.0
+
+
+def _no_music(f: TimelineFacts, ctx: Context) -> bool:
+    return not f.has_music and "music" not in ctx.recipes
+
+
+def _fade_seconds(it: Intent, default: float, f: TimelineFacts) -> float:
+    d = float(it.get("duration_s") or default)
+    d = min(FADE_MAX_S, max(0.1, d))
+    if f.duration > 0:
+        d = min(d, max(0.1, f.duration / 2))
+    return round(d, 3)
+
+
+def _x_fade(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """"fade in the first clip", "add a fade in at the start", "fade out at the
+    end", "fade the music out over 3 seconds" (QA-018). The picture fades
+    from/to black (`set_video_fade`) and the sound with it (`add_fade`) on the
+    first / last v1 clip — sentinels, so a cut earlier in the plan cannot
+    leave a stale id; the music fades on the bed via `fit_music_to_video`,
+    which also ends the bed with the video (a fade at a music end past the
+    last frame is inaudible)."""
+    target = it.get("target") or "video"
+    edge = it.get("edge") or "both"
+    if target == "music":
+        return _music_fade(edge, it.get("duration_s"), f, ctx)
+    picture = _picture_fade(it, edge, target, f)
+    if not it.get("_music_edge"):
+        return picture
+    # "fade in the video and fade out the music": both, in one recipe.
+    music = _music_fade(it.get("_music_edge"), it.get("_music_duration_s"), f, ctx)
+    return Expansion(steps=picture.steps + music.steps, postconditions=picture.postconditions + music.postconditions,
+                     notes=picture.notes + music.notes)
+
+
+def _music_fade(edge: str, duration_s: float | None, f: TimelineFacts, ctx: Context) -> Expansion:
+    if _no_music(f, ctx):
+        return Expansion(notes=("there is no music on the timeline to fade — add a track first",))
+    it = Intent("fade", {"duration_s": duration_s})
+    fin = _fade_seconds(it, MUSIC_FADE_IN_S, f) if edge in ("in", "both") else None
+    fout = _fade_seconds(it, MUSIC_FADE_OUT_S, f) if edge in ("out", "both") else None
+    what = " and ".join(x for x in (f"in over {fin:g}s" if fin else "", f"out over {fout:g}s" if fout else "") if x)
+    return Expansion(
+        steps=(step("fit_music_to_video", STAGE_AUDIO, f"fade the music {what}", fade_in=fin, fade_out=fout),),
+        postconditions=(pc("music_fade_set", "the music fades", in_s=fin, out_s=fout),
+                        pc("music_within_video_extent", "music does not outlast the video")),
+        notes=(f"music fades {what}; the bed ends with the video",))
+
+
+def _picture_fade(it: Intent, edge: str, target: str, f: TimelineFacts) -> Expansion:
+    if not f.v1_clip_ids and "v1" not in f.track_ids:
+        return Expansion(notes=("there is no clip on the timeline to fade",))
+    d = _fade_seconds(it, FADE_DEFAULT_S, f)
+    ref = it.get("clip_ref")
+    picture = target == "video"
+    steps: list[Step] = []
+    pcs: list = []
+
+    def _add(clip: str, **sides: float) -> None:
+        if picture:
+            steps.append(step("set_video_fade", STAGE_TRANSITIONS,
+                              f"picture fades {'/'.join(k[:-2] for k in sides)} over {d:g}s", clip_id=clip, **sides))
+            pcs.append(pc("video_fade_set", "the picture fades", clip_id=clip, **sides))
+        steps.append(step("add_fade", STAGE_AUDIO, f"sound fades {'/'.join(k[:-2] for k in sides)} over {d:g}s",
+                          clip_id=clip, **sides))
+        pcs.append(pc("audio_fade_set", "the sound fades", clip_id=clip, **sides))
+
+    first = ref or "$v1_first"
+    last = ref or "$v1_last"
+    if edge == "both" and first == last:
+        _add(first, in_s=d, out_s=d)
+    else:
+        if edge in ("in", "both"):
+            _add(first, in_s=d)
+        if edge in ("out", "both"):
+            _add(last, out_s=d)
+    where = {"in": "in at the start", "out": "out at the end", "both": "in at the start and out at the end"}[edge]
+    if ref:
+        where = {"in": "in", "out": "out", "both": "in and out"}[edge] + " on the named clip"
+    return Expansion(steps=tuple(steps), postconditions=tuple(pcs),
+                     notes=(f"{'picture and sound' if picture else 'sound'} fade {where} ({d:g}s)",))
+
+
+def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """"turn the music down", "lower the music to -20 dB", "voice louder"
+    (QA-018). `db` is an absolute level; `change` moves the CURRENT level by
+    `delta_db` (default 6 dB) — relative to what facts measured, so "down"
+    twice goes down twice."""
+    target = it.get("target") or "music"
+    change = it.get("change")
+    db = it.get("db")
+    delta = float(it.get("_delta_db") or VOLUME_STEP_DB)
+    if target == "music":
+        if _no_music(f, ctx):
+            return Expansion(notes=("there is no music on the timeline to turn up or down",))
+        current = f.music_gain_db if f.music_gain_db is not None else MUSIC_DEFAULT_DB
+        track, label = "music", "music"
+    else:
+        current = 0.0
+        track, label = "v1", "original sound"
+    if db is None:
+        level = current + (delta if change == "up" else -delta)
+    else:
+        level = float(db)
+    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
+    notes = [f"{label} {current:g} dB → {level:g} dB"]
+    if target == "music" and f.music_muted:
+        notes.append("the music track is muted — say 'unmute the music' to hear it")
+    return Expansion(
+        steps=(step("set_volume", STAGE_AUDIO, f"set the {label} level to {level:g} dB", target=track, db=level),),
+        postconditions=(pc("volume_db", "the level is set", target=track, db=level),),
+        notes=tuple(notes))
+
+
+def _x_mute(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    target = it.get("target") or "music"
+    muted = it.get("muted")
+    muted = True if muted is None else bool(muted)
+    verb = "mute" if muted else "unmute"
+    if target == "music":
+        if _no_music(f, ctx):
+            return Expansion(notes=(f"there is no music on the timeline to {verb}",))
+        if f.has_music and f.music_muted == muted and "music" not in ctx.recipes:
+            return Expansion(notes=(f"the music is already {'muted' if muted else 'playing'}",))
+        return Expansion(
+            steps=(step("set_track_muted", STAGE_AUDIO, f"{verb} the music track", track="music", muted=muted),),
+            postconditions=(pc("track_muted", "the music track is muted" if muted else "the music track plays",
+                               track="music", muted=muted),))
+    return Expansion(
+        steps=(step("set_clip_muted", STAGE_AUDIO, f"{verb} the original sound of every v1 clip",
+                    clip_id="$v1_all", muted=muted),),
+        postconditions=(pc("clips_muted", "the clip audio is muted" if muted else "the clip audio plays",
+                           clip_id="$v1_all", muted=muted),))
+
+
+def _x_fit_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    if _no_music(f, ctx):
+        return Expansion(notes=("there is no music on the timeline to fit",))
+    fout = _fade_seconds(it, MUSIC_FADE_OUT_S, f) if it.get("duration_s") else None
+    pcs = [pc("music_within_video_extent", "music does not outlast the video")]
+    if fout:
+        pcs.append(pc("music_fade_set", "the music fades", out_s=fout))
+    return Expansion(
+        steps=(step("fit_music_to_video", STAGE_AUDIO, "end the music with the video, fading out",
+                    fade_out=fout),),
+        postconditions=tuple(pcs), notes=("the music now ends with the video",))
+
+
+def _x_remove_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """"remove the music" (QA-018 class): the bed's clips go, and the check
+    measures an empty music lane. It used to read as `add_music` and answer
+    "music is already on the timeline — say 'another track'"."""
+    if not f.has_music:
+        return Expansion(notes=("there is no music on the timeline to remove",))
+    if not f.music_clip_ids:
+        return Expansion(notes=("cannot remove the music — its clips are not known; remove it on the timeline",))
+    return Expansion(
+        steps=(step("bulk_delete", STAGE_MUSIC, "take the music bed off the timeline",
+                    clip_ids=list(f.music_clip_ids)),),
+        # "remove the music and add a chill track": the new bed's own checks apply.
+        postconditions=() if "music" in ctx.recipes else (pc("music_present", "the music is gone", count=0),),
+        notes=("the music bed is removed",))
+
+
+def _x_preview(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    return Expansion(
+        steps=(step("render_preview", STAGE_AUDIT, "render the preview of the finished edit", optional=True),),
+        postconditions=(pc("tool_ok", "the preview rendered", tool="render_preview"),))
+
+
 def _x_ask(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     return Expansion()
 
@@ -772,6 +1041,8 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     "speed": _x_speed, "trim": _x_trim, "title": _x_title, "brand": _x_brand, "end_card": _x_end_card,
     "transitions": _x_transitions, "export_preset": _x_export_preset, "voiceover": _x_voiceover,
     "stabilize": _x_stabilize, "upscale": _x_upscale, "ask": _x_ask,
+    "fade": _x_fade, "volume": _x_volume, "mute": _x_mute, "fit_music": _x_fit_music, "preview": _x_preview,
+    "remove_music": _x_remove_music,
 }
 
 
@@ -822,7 +1093,16 @@ def expand_auto_edit(it: Intent, f: TimelineFacts, exclusions: frozenset[str]) -
     if "music" not in exclusions:
         out.append(Intent("music", {"mood": mood or "chill"}, it.score, it.clause))
     if "clean_audio" not in exclusions:
-        out.append(Intent("clean_audio", {"lufs": it.get("_lufs"), "_platform": platform}, it.score, it.clause))
+        # Loudness only — NOT clean_audio (QA-028). The auto-edit used to add
+        # noise_reduce 0.85 to every platform recipe, on clean speech nobody
+        # asked to denoise, costing ~10 dB of dialogue under the music bed.
+        # Asking for it ("… and remove the background noise") still adds the
+        # clean_audio recipe through the grammar. With an export preset the
+        # preset records the loudness target, as clean_audio's own rule did.
+        if it.get("_lufs") is not None or not (platform and "export_preset" not in exclusions):
+            if "loudness" not in exclusions:
+                out.append(Intent("loudness", {"lufs": it.get("_lufs"), "_platform": platform},
+                                  it.score, it.clause))
     if platform and "export_preset" not in exclusions:
         out.append(Intent("export_preset", {"platform": platform, "_ratio": ratio}, it.score, it.clause))
     out.extend(_target_length(it, f, exclusions))

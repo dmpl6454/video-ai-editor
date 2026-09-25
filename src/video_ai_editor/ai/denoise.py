@@ -54,12 +54,102 @@ def _has_video_stream(src: Path) -> bool:
     return False
 
 
+#: Bumped whenever the DSP changes what the same input produces, so a cached
+#: output from the old algorithm (mono, 10 dB quieter — QA-028) is never reused.
+_DSP_VERSION = "dsp2"
+#: Analysis frame for the noise-profile / level measurements.
+_FRAME_S = 0.05
+#: Frames at or below this energy percentile are treated as noise-only.
+_NOISE_PERCENTILE = 15.0
+#: Frames above this percentile are the programme (speech) the gain match
+#: keeps at its original level.
+_ACTIVE_PERCENTILE = 60.0
+#: The programme must sit at least this far above the quiet frames for them to
+#: count as a measurable noise floor.
+_MIN_SEPARATION_DB = 10.0
+#: Never add more than this much make-up gain (a near-silent clip must not be
+#: pumped up to meet a meaningless "speech" level).
+_MAX_MAKEUP_DB = 12.0
+
+
+def _frame_rms(x, n: int):
+    import numpy as np
+    usable = (len(x) // n) * n
+    if usable == 0:
+        return np.array([float(np.sqrt(np.mean(np.square(x)))) if len(x) else 0.0])
+    frames = x[:usable].reshape(-1, n)
+    return np.sqrt(np.mean(np.square(frames), axis=1))
+
+
+def _noise_sample(x, sr: int):
+    """The quietest frames of `x`, concatenated: the noise profile.
+
+    QA-028: `reduce_noise(stationary=True)` with no `y_noise` estimates the
+    noise from the WHOLE signal — speech included — so its gate threshold sat
+    near the speech level and cut dialogue by 10-11 dB. The quietest ~15 % of
+    50 ms frames of a speech clip are the pauses between words, i.e. the room
+    tone / hiss the user wants gone."""
+    import numpy as np
+    n = max(1, int(sr * _FRAME_S))
+    rms = _frame_rms(x, n)
+    if len(rms) < 4:
+        return x
+    cut = np.percentile(rms, _NOISE_PERCENTILE)
+    idx = np.nonzero(rms <= cut)[0]
+    return np.concatenate([x[i * n:(i + 1) * n] for i in idx]) if len(idx) else x
+
+
+def _active_level(x, sr: int, ref_mask=None):
+    """RMS of the loud (programme) frames; `ref_mask` reuses the INPUT's frame
+    selection so before/after compare the same instants."""
+    import numpy as np
+    n = max(1, int(sr * _FRAME_S))
+    rms = _frame_rms(x, n)
+    if ref_mask is None:
+        ref_mask = rms >= np.percentile(rms, _ACTIVE_PERCENTILE)
+    sel = rms[ref_mask[:len(rms)]] if len(rms) else rms
+    return (float(np.sqrt(np.mean(np.square(sel)))) if len(sel) else 0.0), ref_mask
+
+
+def _clean_channel(x, sr: int, strength: float):
+    """Denoise ONE channel against its own noise profile, then gain-match its
+    programme level back to the input's (QA-028: the output used to be
+    ~9.5 LU quieter than what went in)."""
+    import numpy as np
+    import noisereduce as nr  # type: ignore
+    x = x.astype(np.float32)
+    noise = _noise_sample(x, sr)
+    before, mask = _active_level(x, sr)
+    noise_rms = float(np.sqrt(np.mean(np.square(noise)))) if len(noise) else 0.0
+    if before <= 1e-6 or noise_rms <= 1e-9 or \
+            20 * np.log10(before / noise_rms) < _MIN_SEPARATION_DB:
+        # No quiet frames distinct from the programme (a steady tone, wall-to-
+        # wall music, digital silence): there is no noise floor to measure, and
+        # gating against the programme itself is exactly the old bug. Leave
+        # this channel untouched.
+        return x
+    clean = nr.reduce_noise(y=x, sr=sr, stationary=True, y_noise=noise,
+                            prop_decrease=max(0.0, min(1.0, float(strength))))
+    clean = np.asarray(clean, dtype=np.float32)[: len(x)]
+    after, _ = _active_level(clean, sr, mask)
+    if before > 1e-6 and after > 1e-6:
+        gain = min(before / after, 10 ** (_MAX_MAKEUP_DB / 20))
+        clean = clean * np.float32(gain)
+    return clean
+
+
 def denoise_clip(src: Path, cache_dir: Path, *,
                  strength: float = 0.85, sample_rate: int = 48000) -> Path:
     """Return a new mp4 with the audio track noise-reduced.
 
     `strength` ∈ [0,1]: higher = more aggressive (with diminishing returns and
     growing artifacts above ~0.9). Default 0.85 is the speech sweet spot.
+
+    Level- and channel-preserving (QA-028): every channel is processed on its
+    own against a noise profile taken from the quiet frames, and the result is
+    gain-matched so speech leaves at the level it arrived at. It used to fold
+    stereo to mono (`-ac 1` + a channel average) and estimate the noise from
+    speech as well, costing 10-11 dB of dialogue.
     """
     if not available():
         raise RuntimeError("noisereduce not installed (uv add noisereduce soundfile)")
@@ -75,24 +165,24 @@ def denoise_clip(src: Path, cache_dir: Path, *,
     # `has_video`/ext are part of the cache key so a path cached under the old
     # shape can never be served for the new one.
     h = hashlib.sha256(
-        f"{src}|{strength}|{sample_rate}|{src.stat().st_mtime}|{ext}".encode()
+        f"{src}|{strength}|{sample_rate}|{src.stat().st_mtime}|{ext}|{_DSP_VERSION}".encode()
     ).hexdigest()[:14]
     dst = cache_dir / f"denoise_{h}.{ext}"
     if dst.exists() and dst.stat().st_size > 0:
         return dst
 
-    import noisereduce as nr  # type: ignore
     import soundfile as sf  # type: ignore
     import numpy as np
 
     with tempfile.TemporaryDirectory() as td:
         wav_in = Path(td) / "in.wav"
         wav_out = Path(td) / "out.wav"
-        # Extract audio to mono 48k float wav for noisereduce
+        # Float wav at the source's own channel count: no downmix, no clipping
+        # headroom lost to 16-bit.
         proc = subprocess.run(
             [_pu.FFMPEG, "-y", "-i", str(src),
-             "-vn", "-ac", "1", "-ar", str(sample_rate),
-             "-c:a", "pcm_s16le", str(wav_in)],
+             "-vn", "-ar", str(sample_rate),
+             "-c:a", "pcm_f32le", str(wav_in)],
             # text= is required for the error string below to be readable — without
             # it stderr is bytes and the message interpolated a b"..." repr. The
             # encoding/errors kwargs are mandatory alongside text on Windows
@@ -106,16 +196,14 @@ def denoise_clip(src: Path, cache_dir: Path, *,
         if not wav_in.exists() or wav_in.stat().st_size < 100:
             raise RuntimeError("source has no usable audio track")
 
-        data, sr = sf.read(str(wav_in))
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        clean = nr.reduce_noise(
-            y=data.astype(np.float32),
-            sr=sr,
-            stationary=True,
-            prop_decrease=max(0.0, min(1.0, float(strength))),
-        )
-        sf.write(str(wav_out), clean, sr, subtype="PCM_16")
+        data, sr = sf.read(str(wav_in), dtype="float32", always_2d=True)
+        clean = np.stack([_clean_channel(data[:, ch], sr, strength)
+                          for ch in range(data.shape[1])], axis=1)
+        peak = float(np.max(np.abs(clean))) if clean.size else 0.0
+        if peak > 0.999:
+            # Make-up gain must not clip; trade a fraction of a dB instead.
+            clean = clean * np.float32(0.999 / peak)
+        sf.write(str(wav_out), clean, sr, subtype="FLOAT")
 
         # Mux back. With video: keep the original video, swap in cleaned audio.
         # Without video: just encode the cleaned wav — the source isn't an input
@@ -123,7 +211,7 @@ def denoise_clip(src: Path, cache_dir: Path, *,
         if has_video:
             mux = [_pu.FFMPEG, "-y", "-i", str(src), "-i", str(wav_out),
                    "-map", "0:v", "-map", "1:a",
-                   "-c:v", "copy", "-c:a", "aac", "-shortest", str(dst)]
+                   "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(dst)]
         else:
             mux = [_pu.FFMPEG, "-y", "-i", str(wav_out),
                    "-c:a", "aac", "-b:a", "192k", str(dst)]

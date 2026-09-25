@@ -60,7 +60,7 @@ import {
 } from '../lib/pipDraw'
 import * as dv from '../lib/dragVisuals'
 import {
-  activeInRender, layoutClock, renderLocal, renderTime, v1ClipAt, v1LayoutOf, v1SeamsOf,
+  activeOnFrames, layoutClock, renderLocal, renderTime, v1ClipAt, v1LayoutOf, v1SeamsOf,
 } from '../lib/timelineLayout'
 
 interface Props {
@@ -281,8 +281,8 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         if (tk.type !== 'sticker') continue
         const tz = (tk as unknown as { z?: number }).z ?? 0
         for (const c of tk.clips) {
-          // `t` is the render clock; `[start, end]` is layout — see activeInRender.
-          if (isSticker(c) && activeInRender(seams, c.start, c.end, t, true)) {
+          // `t` is the render clock; `[start, end)` is layout — see activeOnFrames.
+          if (isSticker(c) && activeOnFrames(seams, c.start, c.end, t, stateRef.current.edl.canvas.fps)) {
             out.push({ sk: c, tz, cz: (c as unknown as { z?: number }).z ?? 0 })
           }
         }
@@ -366,7 +366,7 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
         for (const c of tk.clips) {
           // A PiP is positioned against v1's picture in layout time and played
           // by the renderer at render_time(start) — same rule as a sticker.
-          if (isMediaClip(c) && activeInRender(seams, c.start, clipEnd(c), t, false)) out.push(c)
+          if (isMediaClip(c) && activeOnFrames(seams, c.start, clipEnd(c), t, stateRef.current.edl.canvas.fps)) out.push(c)
         }
       }
       return out

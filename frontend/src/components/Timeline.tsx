@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useStore } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
@@ -15,6 +16,8 @@ import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 import { splitTimeFor } from '../lib/splitTargets'
 import { v1CutPoints } from '../lib/cutPoints'
 import { chordLabel } from '../keymap/engine'
+import { contentTransform, spanVisible, viewportCanvasSize, visibleColumns, visibleTicks } from '../lib/timelineViewport'
+import { rulerLabel } from '../lib/rulerLabel'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -165,6 +168,16 @@ export function Timeline() {
 
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // The content-sized scroll-extent element (QA-024). The canvases are only
+  // VIEWPORT-sized now and stick to the visible pane, so this — which scrolls
+  // natively — is what pointer positions are measured against: its rect gives
+  // CONTENT coordinates, the same space the draw loop and hit-testing use.
+  const contentRef = useRef<HTMLDivElement>(null)
+  const contentRect = (): DOMRect =>
+    (contentRef.current ?? canvasRef.current!).getBoundingClientRect()
+  // wrap.scrollLeft, mirrored into state so the viewport canvases redraw the
+  // newly visible slice of the timeline on every scroll.
+  const [scrollX, setScrollX] = useState(0)
   // Zoom + snap live in the store so keyboard shortcuts can drive them.
   const zoom = useStore((s) => s.timelineZoom)
   const setZoomStore = useStore((s) => s.setTimelineZoom)
@@ -239,12 +252,11 @@ export function Timeline() {
     [edl]
   )
 
-  // The canvas is sized to the full timeline CONTENT, not the viewport — the
-  // wrapper scrolls it natively (overflow:auto). Previously the canvas was
-  // sized to the viewport (`size.w`/`size.h`) and anything past that was
-  // simply never drawn (`if (x > size.w) break`), so there was nothing to
-  // scroll to: only ctrl/meta+wheel zoom worked. `Math.max(size.w, …)` keeps
-  // a short timeline filling the visible pane instead of leaving a gap.
+  // contentW is the scroll EXTENT (the spacer element's width), not a canvas
+  // size: the canvases are viewport-sized and draw the visible slice (see
+  // lib/timelineViewport — a content-sized canvas blanked the whole timeline
+  // past the browser's canvas limit, QA-024). `Math.max(size.w, …)` keeps a
+  // short timeline filling the visible pane instead of leaving a gap.
   const labelWidth = 80
   const trackHeight = 36
   const headerHeight = 24
@@ -382,21 +394,24 @@ export function Timeline() {
   useEffect(() => {
     const cv = canvasRef.current
     if (!cv) return
-    // Sized to the full CONTENT (contentW/contentH), not the viewport — the
-    // wrapper's native overflow:auto scrolls it. This is what makes the
-    // timeline scrollable at all: previously the canvas was viewport-sized
-    // and anything past the visible edge was never drawn in the first place.
-    cv.width = contentW * dpr
-    cv.height = contentH * dpr
-    cv.style.width = `${contentW}px`
-    cv.style.height = `${contentH}px`
+    // VIEWPORT-sized (QA-024): the backing store covers only the visible pane,
+    // and everything below draws in CONTENT coordinates under a −scrollX
+    // translate, so the canvas can never outgrow the browser's size limit
+    // however long the timeline or deep the zoom.
+    const vs = viewportCanvasSize(size.w, contentW, contentH, dpr)
+    if (cv.width !== vs.pxW) cv.width = vs.pxW
+    if (cv.height !== vs.pxH) cv.height = vs.pxH
+    cv.style.width = `${vs.cssW}px`
+    cv.style.height = `${vs.cssH}px`
+    const viewL = scrollX
+    const viewR = scrollX + vs.cssW
     const ctx = cv.getContext('2d')!
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, contentW, contentH)
+    ctx.setTransform(...contentTransform(dpr, scrollX))
+    ctx.clearRect(viewL, 0, vs.cssW, contentH)
 
     // bg
     ctx.fillStyle = '#16161a'
-    ctx.fillRect(0, 0, contentW, contentH)
+    ctx.fillRect(viewL, 0, vs.cssW, contentH)
 
     // ruler
     ctx.fillStyle = '#1d1d22'
@@ -406,11 +421,10 @@ export function Timeline() {
     const dur = edl?.duration ?? 0
     const pixelsPerTick = 80
     const tickSec = niceTick(pixelsPerTick / zoom)
-    for (let t = 0; t <= dur + 30; t += tickSec) {
+    for (const t of visibleTicks(viewL, viewR, labelWidth, zoom, tickSec, dur + 30)) {
       const x = labelWidth + t * zoom
-      if (x > contentW) break
       ctx.fillRect(x, headerHeight - 4, 1, 4)
-      ctx.fillText(formatTime(t), x + 3, headerHeight - 7)
+      ctx.fillText(rulerLabel(t, tickSec), x + 3, headerHeight - 7)
     }
 
     // tracks
@@ -484,6 +498,9 @@ export function Timeline() {
         seenRanges.push([rawStartT, rawEndT])
         const x = labelWidth + start * zoom
         const w = Math.max(2, dur * zoom)
+        // Off-screen: nothing of it is visible (the overlap bookkeeping above
+        // still ran, so a later on-screen clip is still judged against it).
+        if (!spanVisible(x, w, viewL, viewR)) continue
         const isSel = c.id === selection || multiSelection.includes(c.id)
         const color = TRACK_COLORS[t.type] ?? '#5b8dff'
         ctx.fillStyle = color
@@ -510,6 +527,8 @@ export function Timeline() {
           ctx.clip()
           if (t.muted) ctx.globalAlpha = 0.35
           for (let k = 0; k < n; k++) {
+            // Off-screen tile: don't draw it, and don't FETCH it either.
+            if (!spanVisible(x + k * tileW, tileW, viewL, viewR, 0)) continue
             let ts = c.in + ((k + 0.5) * srcDur) / n
             ts = Math.round(ts * 2) / 2  // 0.5s steps → bounded URL count across zooms
             ts = Math.min(Math.max(ts, c.in), Math.max(c.in, c.out - 0.05))
@@ -544,7 +563,10 @@ export function Timeline() {
             const cols = Math.max(1, Math.floor(w))
             const startSampleSec = isMediaClip(c) ? c.in : 0
             const sampleDur = isMediaClip(c) ? (c.out - c.in) : dur
-            for (let px = 0; px < cols; px++) {
+            // Only the columns on screen: a 12-min clip at 600 px/s is 432k
+            // columns, redrawn on every scroll frame otherwise.
+            const [px0, px1] = visibleColumns(x, cols, viewL, viewR)
+            for (let px = px0; px < px1; px++) {
               const tSec = startSampleSec + (px / cols) * sampleDur
               const idx = Math.floor(tSec * wave.peaks_per_sec)
               if (idx < 0 || idx >= wave.peaks.length) continue
@@ -715,7 +737,7 @@ export function Timeline() {
       ctx.textAlign = 'center'
       ctx.fillText(
         'Timeline is empty — drop media here, or add files in the Media panel',
-        labelWidth + (Math.min(size.w, contentW) - labelWidth) / 2,
+        viewL + labelWidth + (vs.cssW - labelWidth) / 2,
         headerHeight + (contentH - headerHeight) / 2 + 4,
       )
       ctx.restore()
@@ -773,7 +795,7 @@ export function Timeline() {
     // (`tracks` is derived from `edl` via useMemo; `edl` is already in deps.
     //  `thumbTick` repaints as filmstrip tiles load — waveTick's mechanism;
     //  `sid` feeds thumbImage's URLs; `v1Cuts` derives from `edl` via useMemo.)
-  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, v1LayoutAll, inMark, outMark, flashClipId])
+  }, [edl, selection, multiSelection, zoom, size, contentW, contentH, dpr, waveTick, thumbTick, sid, v1Cuts, v1LayoutAll, inMark, outMark, flashClipId, scrollX])
 
   // Sticky track-label column. The main canvas draws labels at its own x=0,
   // but that canvas is the thing that SCROLLS (contentW-sized) — so once the
@@ -831,25 +853,25 @@ export function Timeline() {
   }, [tracks, contentH, dpr])
 
   // Cheap playhead-only overlay redraw — avoids re-tessellating the whole
-  // timeline 60×/s while the video plays. Sized to the same full CONTENT
-  // dimensions as the main canvas (not the viewport) so it scrolls in lockstep
-  // with it inside the shared wrapper, instead of the two disagreeing about
-  // where x=0 is once the wrapper is scrolled.
+  // timeline 60×/s while the video plays. Viewport-sized and translated by the
+  // same −scrollX as the main canvas (QA-024), so the two always agree about
+  // where content x=0 is.
   const playheadCanvasRef = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const cv = playheadCanvasRef.current
     if (!cv) return
-    cv.width = Math.max(1, Math.round(contentW * dpr))
-    cv.height = Math.max(1, Math.round(contentH * dpr))
-    cv.style.width = `${contentW}px`
-    cv.style.height = `${contentH}px`
+    const vs = viewportCanvasSize(size.w, contentW, contentH, dpr)
+    if (cv.width !== vs.pxW) cv.width = vs.pxW
+    if (cv.height !== vs.pxH) cv.height = vs.pxH
+    cv.style.width = `${vs.cssW}px`
+    cv.style.height = `${vs.cssH}px`
     const ctx = cv.getContext('2d')!
     // Device-pixel clear — this canvas draws only the playhead over a fully
     // transparent field, so a missed column keeps a red line that no later
     // paint covers. Same rule as the label canvas above.
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, cv.width, cv.height)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.setTransform(...contentTransform(dpr, scrollX))
     const ph = labelWidth + playhead * zoom
     ctx.strokeStyle = '#ff4d6d'
     ctx.lineWidth = 1.5
@@ -872,12 +894,12 @@ export function Timeline() {
       : `${Math.floor(playhead / 60)}:${(playhead % 60).toFixed(1).padStart(4, '0')}`
     ctx.font = '9px var(--font-ui)'
     const tcw = ctx.measureText(tcode).width
-    const tcx = ph + 8 + tcw + 6 > contentW ? ph - 8 - tcw - 4 : ph + 8
+    const tcx = ph + 8 + tcw + 6 > Math.min(contentW, scrollX + vs.cssW) ? ph - 8 - tcw - 4 : ph + 8
     ctx.fillStyle = 'rgba(14,14,16,0.85)'
     ctx.fillRect(tcx - 3, 2, tcw + 6, 12)
     ctx.fillStyle = '#ff4d6d'
     ctx.fillText(tcode, tcx, 11)
-  }, [playhead, zoom, contentW, contentH, dpr, dragTick])
+  }, [playhead, zoom, contentW, contentH, dpr, dragTick, size, scrollX])
 
   // Live drag chrome — drawn on the SAME overlay canvas as the playhead (which
   // this effect runs after, so drag chrome layers on top), gated on an active
@@ -896,7 +918,7 @@ export function Timeline() {
       // only fires AFTER a bad drop — this says so before release, and the
       // wash goes red instead of always reading "OK" over any row.
       const ctx2 = cv.getContext('2d')!
-      ctx2.save(); ctx2.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx2.save(); ctx2.setTransform(...contentTransform(dpr, scrollX))
       let ti = -1
       for (let i = 0; i < tracks.length; i++) {
         const ty = trackY(i)
@@ -937,7 +959,7 @@ export function Timeline() {
     // The playhead effect already sized + cleared + drew the playhead this
     // frame; do NOT clear (that would erase the playhead). We overlay on top.
     ctx.save()
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.setTransform(...contentTransform(dpr, scrollX))
 
     // Resolve the hovered target track index from live pointerY.
     let targetIdx = -1
@@ -1037,7 +1059,7 @@ export function Timeline() {
       // Edge-drag: live edge line + mode/result label.
       const oi = originIdx >= 0 ? originIdx : 0
       const ty = trackY(oi)
-      const dt = (drag.pointerX - (drag.startX - (canvasRef.current!.getBoundingClientRect().left))) / zoom
+      const dt = (drag.pointerX - (drag.startX - contentRect().left)) / zoom
       const side = drag.kind === 'trim-l' ? 'l' : 'r'
       let edgeSec: number
       let label: string
@@ -1102,7 +1124,7 @@ export function Timeline() {
       ctx.fillText(label, ex + 4, ty + 12)
     }
     ctx.restore()
-  }, [dragTick, tracks, zoom, contentW, dpr, v1Seams])
+  }, [dragTick, tracks, zoom, contentW, dpr, v1Seams, scrollX])
 
   // Escape cancels an in-progress clip drag with NO commit (mousedown captured
   // state, but we simply drop it and repaint to clear the ghost). Only active
@@ -1121,12 +1143,12 @@ export function Timeline() {
 
   // mouse → seek / select / drag
   function onMouseDown(e: React.MouseEvent) {
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
+    const rect = contentRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
-    // x/y are canvas-CONTENT coords (the canvas itself is content-sized and
-    // scrolls inside the wrap, so its bounding rect moves with scrollLeft) —
-    // the same space the draw loop uses. Viewport coords for the popover come
+    // x/y are CONTENT coords (measured against the scroll-extent element,
+    // whose bounding rect moves with scrollLeft) — the same space the draw
+    // loop uses. Viewport coords for the popover come
     // from e.clientX/Y directly.
 
     // Transition-affordance hit-test FIRST — before the near-playhead grab
@@ -1195,6 +1217,26 @@ export function Timeline() {
         return  // shift-click only toggles, doesn't start a drag
       }
       setSelection(hit.clip.id)
+      // QA-023: a clip on a LOCKED lane is selectable (Properties shows it)
+      // but never draggable or trimmable. The backend refuses every mutation
+      // on a locked lane anyway; stopping the gesture here means the ghost
+      // never moves only to snap back. A real drag attempt says why.
+      const hitTrack = tracks.find((t) => t.id === hit.trackId)
+      if (hitTrack && isTrackLocked(hitTrack)) {
+        const x0 = e.clientX
+        const stop = () => {
+          window.removeEventListener('mousemove', onLockedMove)
+          window.removeEventListener('mouseup', stop)
+        }
+        const onLockedMove = (ev: MouseEvent) => {
+          if (Math.abs(ev.clientX - x0) < 4) return
+          toast.info(`Track "${hitTrack.label ?? hitTrack.id}" is locked — unlock it to move or trim its clips.`)
+          stop()
+        }
+        window.addEventListener('mousemove', onLockedMove)
+        window.addEventListener('mouseup', stop)
+        return
+      }
       const edge = 6
       const right = hit.x + hit.w
       let kind: 'move' | 'trim-l' | 'trim-r' = 'move'
@@ -1252,7 +1294,7 @@ export function Timeline() {
     function onWindowMouseMove(e: MouseEvent) {
       const drag = dragRef.current
       if (!drag || !canvasRef.current) return
-      const rect = canvasRef.current.getBoundingClientRect()
+      const rect = contentRect()
       const x = e.clientX - rect.left
       const y = e.clientY - rect.top
       if (drag.kind === 'playhead') {
@@ -1350,7 +1392,7 @@ export function Timeline() {
     if (Math.abs(dx) < 3) return
 
     // Figure out target track from the drop Y (cross-track drag)
-    const rect = (e.target as HTMLElement).getBoundingClientRect()
+    const rect = contentRect()
     const y = e.clientY - rect.top
     let targetTrackId: string | undefined
     for (let i = 0; i < tracks.length; i++) {
@@ -1533,7 +1575,7 @@ export function Timeline() {
       // row hit-testing use canvas-CONTENT coords — the wrap rect is off by
       // scrollLeft/scrollTop once the timeline is scrolled (same convention
       // as onMouseDown, whose rect comes from the scrolling canvas itself).
-      const rect = (canvasRef.current ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+      const rect = contentRect()
       dndOverRef.current = {
         x: e.clientX - rect.left,
         y: e.clientY - rect.top,
@@ -1559,7 +1601,7 @@ export function Timeline() {
     // Canvas rect, not the wrap's — content coords, see onCanvasDragOver.
     // With the wrap rect a drop on a scrolled timeline landed shifted by
     // scrollLeft/scrollTop: wrong time, and potentially the wrong ROW.
-    const rect = (canvasRef.current ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+    const rect = contentRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     if (x < labelWidth) return
@@ -1629,8 +1671,12 @@ export function Timeline() {
     // and let the user trim. Using duration 30s is a reasonable default.
     // Better: query the EDL — if this src is already on the timeline, reuse
     // its duration.
-    let dur = 30
-    for (const tk of edl?.tracks ?? []) {
+    // Best: the media bin is a library now (QA-010) and can hold media that no
+    // clip uses, so it sends the source's real length with the drag.
+    const draggedDur = Number(e.dataTransfer.getData('application/x-vai-duration'))
+    const hasDraggedDur = Number.isFinite(draggedDur) && draggedDur > 0
+    let dur = hasDraggedDur ? draggedDur : 30
+    for (const tk of hasDraggedDur ? [] : edl?.tracks ?? []) {
       for (const c of tk.clips) {
         if (isMediaClip(c) && c.src === src) {
           dur = c.out - c.in
@@ -1654,7 +1700,7 @@ export function Timeline() {
   }
 
   function onContextMenu(e: React.MouseEvent) {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const rect = contentRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     // Right-clicking a marker's diamond removes it. This is the ONLY way to get
@@ -1761,6 +1807,21 @@ export function Timeline() {
   // OVERLAY the main canvas at the same row positions, not stack after it in
   // normal flow — so this is a small manual re-implementation of "sticky"
   // using `position: absolute` + a scroll listener instead.
+  // Viewport canvases redraw the visible slice on every horizontal scroll.
+  // flushSync so the redraw lands in the SAME frame as the native scroll —
+  // a deferred render would show the sticky canvas's stale slice for a frame.
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const onScroll = () => {
+      const x = wrap.scrollLeft
+      flushSync(() => setScrollX((prev) => (prev === x ? prev : x)))
+    }
+    setScrollX(wrap.scrollLeft)
+    wrap.addEventListener('scroll', onScroll, { passive: true })
+    return () => wrap.removeEventListener('scroll', onScroll)
+  }, [])
+
   useEffect(() => {
     const wrap = wrapRef.current
     const label = labelCanvasRef.current
@@ -1921,18 +1982,25 @@ export function Timeline() {
         onDragLeave={onCanvasDragLeave}
         onDrop={onCanvasDrop}
       >
-        <canvas
-          ref={canvasRef}
-          onMouseDown={onMouseDown}
-          onMouseMove={onMouseMove}
-          onMouseUp={onMouseUp}
-          onContextMenu={onContextMenu}
-          style={{ display: 'block', cursor: 'crosshair' }}
-        />
-        <canvas
-          ref={playheadCanvasRef}
-          style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-        />
+        {/* Scroll extent (contentW × contentH) with a STICKY viewport layer
+            inside it: the canvases are only as wide as the visible pane and
+            stay pinned to it while this element scrolls natively (QA-024). */}
+        <div ref={contentRef} style={{ position: 'relative', width: contentW, height: contentH }}>
+          <div style={{ position: 'sticky', left: 0, width: Math.min(size.w, contentW), height: contentH }}>
+            <canvas
+              ref={canvasRef}
+              onMouseDown={onMouseDown}
+              onMouseMove={onMouseMove}
+              onMouseUp={onMouseUp}
+              onContextMenu={onContextMenu}
+              style={{ display: 'block', cursor: 'crosshair' }}
+            />
+            <canvas
+              ref={playheadCanvasRef}
+              style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+            />
+          </div>
+        </div>
         {/* Sticky label column: absolutely positioned and re-translated to
             track wrapRef's scrollLeft on every scroll event (see the effect
             below), so track names + mute toggles stay pinned to the visible
@@ -2071,11 +2139,4 @@ function niceTick(approx: number): number {
   const candidates = [0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 300, 600]
   for (const c of candidates) if (c >= approx) return c
   return 600
-}
-
-function formatTime(t: number): string {
-  if (t < 60) return `${t.toFixed(t < 10 ? 1 : 0)}s`
-  const m = Math.floor(t / 60)
-  const s = Math.floor(t % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
 }

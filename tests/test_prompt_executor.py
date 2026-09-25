@@ -606,7 +606,10 @@ def test_seam_sentinel_fans_out_over_the_live_seams_after_the_cuts(session):
     assert res.error is None, res.error
     v1 = store.edl.get_track("v1")
     assert sorted(round(t.at, 3) for t in v1.transitions) == [3.0, 7.0]
-    assert all(t.type == "whip" and t.duration == 0.25 for t in v1.transitions)
+    # Stored on the project frame grid: 0.25 s is 7.5 frames at 30 fps.
+    from video_ai_editor.edl import timebase as tb
+    assert all(t.type == "whip" and t.duration == tb.quantize(0.25, store.edl.canvas.fps)
+               for t in v1.transitions)
     use = next(e for e in events if e["type"] == "tool_use" and e["name"] == "add_transition")
     assert use["args"]["at"] == [3.0, 7.0]
     ok = next(e for e in events if e["type"] == "step" and e["tool"] == "add_transition" and e["status"] == "ok")

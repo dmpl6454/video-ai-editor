@@ -87,6 +87,9 @@ def test_whisper_cpp_bin_uses_exe_name(monkeypatch):
     import importlib, video_ai_editor.ingest.transcribe as t
     importlib.reload(t)
     assert t._WHISPER_CPP_BIN == "C:/tools/whisper-cli.exe"
+    # Undo the Windows patches BEFORE the restoring reload, or the module keeps
+    # the fake "C:/tools/whisper-cli.exe" for every later test in the session.
+    monkeypatch.undo()
     importlib.reload(t)
 
 

@@ -46,6 +46,8 @@ correctly-identified word, not comprehension failures.
 """
 from __future__ import annotations
 
+import unicodedata
+
 # --- consonants -------------------------------------------------------------
 # Each maps to its bare consonant sound; the inherent vowel is added by the
 # walker, never baked in here.
@@ -63,6 +65,8 @@ _CONSONANTS = {
     # `thoda` — so the common spelling wins over the closer phonetics.
     "क़": "q", "ख़": "kh", "ग़": "gh", "ज़": "z", "ड़": "d", "ढ़": "dh",
     "फ़": "f", "य़": "y", "ऴ": "l",
+    # Rare letters Whisper still emits (Dravidian-loan / Sindhi forms).
+    "ऱ": "r", "ऩ": "n",
 }
 
 # --- independent vowels -----------------------------------------------------
@@ -73,7 +77,8 @@ _VOWELS = {
     "अ": ("a", "a"), "आ": ("aa", "a"), "इ": ("i", "i"), "ई": ("ee", "i"),
     "उ": ("u", "u"), "ऊ": ("oo", "u"), "ऋ": ("ri", "ri"),
     "ए": ("e", "e"), "ऐ": ("ai", "ai"), "ओ": ("o", "o"), "औ": ("au", "au"),
-    "ऑ": ("o", "o"), "ऍ": ("e", "e"),
+    "ऑ": ("o", "o"), "ऍ": ("e", "e"), "ऎ": ("e", "e"), "ऒ": ("o", "o"), "ॲ": ("e", "e"),
+    "ॠ": ("ri", "ri"), "ऌ": ("lri", "lri"),
 }
 
 # --- matras: (medial spelling, word-final spelling) -------------------------
@@ -92,6 +97,9 @@ _MATRAS = {
     "ौ": ("au", "au"),
     "ॉ": ("o", "o"),
     "ॅ": ("e", "e"),
+    "ॆ": ("e", "e"),
+    "ॊ": ("o", "o"),
+    "ॄ": ("ri", "ri"),
 }
 
 _VIRAMA = "्"       # ् — suppresses the inherent vowel
@@ -105,6 +113,11 @@ _DIGITS = {"०": "0", "१": "1", "२": "2", "३": "3", "४": "4",
            "५": "5", "६": "6", "७": "7", "८": "8", "९": "9"}
 
 _PUNCT = {"।": ".", "॥": ".", "॰": "."}
+
+#: Whole-word symbols. ॐ is what Whisper hallucinates over music and silence
+#: (a 29 s run of "ॐ ॐ ॐ …" on the bench Hindi clip); left alone it put
+#: Devanagari into captions the user asked to have in Latin (QA-043).
+_SYMBOLS = {"ॐ": "om"}
 
 # A nasal before a labial is written `m` (संभव -> sambhav), else `n`.
 _LABIALS = {"p", "b", "m", "ph", "bh"}
@@ -224,6 +237,10 @@ def romanize(text: str) -> str:
     """
     if not text:
         return text
+    # NFC splits the precomposed nukta letters (U+0958–U+095F, composition
+    # exclusions) into consonant + nukta — the two-character form the table
+    # knows — so ज़ typed either way comes out `z`, never Devanagari.
+    text = unicodedata.normalize("NFC", text)
 
     out: list[str] = []
     word = _Word()
@@ -318,14 +335,16 @@ def romanize(text: str) -> str:
             i += 1
             continue
 
-        if ch in _PUNCT:
+        if ch in _PUNCT or ch in _SYMBOLS:
             close_word()
-            out.append(_PUNCT[ch])
+            out.append(_PUNCT.get(ch) or _SYMBOLS[ch])
             i += 1
             continue
 
-        if ch in (_NUKTA, _AVAGRAHA) or ch == "‍" or ch == "‌":
-            i += 1                      # stray combining mark — drop it
+        if ch in (_NUKTA, _AVAGRAHA) or ch == "‍" or ch == "‌" or _is_devanagari(ch):
+            # A stray combining mark, a Vedic accent or a letter no Hindi
+            # caption uses — drop it: the output is Latin by contract.
+            i += 1
             continue
 
         # Anything else (Latin, space, punctuation, emoji) ends the current

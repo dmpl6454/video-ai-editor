@@ -264,7 +264,8 @@ EDIT_TOOLS = [
 
 PROJECT_TOOLS = [
     _t("set_canvas", "Set output canvas size and fps.", "project",
-       {"w": {"type": "integer"}, "h": {"type": "integer"}, "fps": {"type": "integer"}}),
+       {"w": {"type": "integer"}, "h": {"type": "integer"},
+        "fps": {"type": "number", "description": "Project frame rate, e.g. 23.976, 24, 25, 29.97, 30, 50, 59.94, 60."}}),
     _t("set_aspect_ratio", "Switch canvas to a named aspect ratio.", "project",
        {"ratio": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]}}, ["ratio"]),
     _t("undo", "Undo the last operation.", "project", {}),
@@ -301,7 +302,8 @@ PROJECT_TOOLS = [
        {"marker_id": {"type": "string"}},
        ["marker_id"]),
     _t("apply_export_preset",
-       "One-call platform setup: sets canvas size/fps, bitrate, and loudness target "
+       "One-call platform setup: sets canvas size, bitrate and loudness target (and "
+       "fps, only when the project rate is outside the 23.976-60 fps platforms accept) "
        "from a named preset (reels/tiktok/story 1080×1920 -16 LUFS, shorts 1080×1920 "
        "-14, ig_feed_1x1 1080×1080, ig_feed_4x5 1080×1350, youtube_16x9 1920×1080 -14, "
        "youtube_4k 3840×2160 -14). Use before export when the user names a platform.",
@@ -568,6 +570,13 @@ AUDIO_TOOLS = [
            "to_db": {"type": "number", "default": -18.0, "description": "How much to attenuate music under speech, dB"},
            "track_ref": {"type": "string", "default": "a1", "description": "Sidechain key track id (the speech track)"},
        }),
+    _t("fit_music_to_video",
+       "Trim the music bed so it ends with the video (drops loop pieces past the end, "
+       "trims the one that straddles it) and set the bed's fade-in / fade-out. Omitted "
+       "fades keep their value; a trimmed tail always gets a fade-out.",
+       "audio",
+       {"fade_in": {"type": "number", "description": "Seconds of fade-in on the first music piece"},
+        "fade_out": {"type": "number", "description": "Seconds of fade-out on the last music piece"}}),
     _t("set_volume",
        "Set audio gain (dB) on a track id (e.g. 'a1', 'music', 'vo') or a clip id ('c_xxx').",
        "audio",
@@ -606,7 +615,8 @@ AUDIO_TOOLS = [
            "keep_pad": {"type": "number", "default": 0.1, "description": "Seconds of silence to leave at each edge for breathing room"},
        }),
     _t("remove_fillers",
-       "Find filler-word ranges in the transcript and ripple-cut them out (um, uh, like, …).",
+       "Find filler-word ranges in the transcript and ripple-cut them out (default: um, uh, "
+       "umm, uhh, erm, hmm; pass `words` to add others such as 'like').",
        "auto",
        {
            "words": {"type": "array", "items": {"type": "string"}},
@@ -1047,6 +1057,118 @@ ALL_TOOLS: list[ToolSchema] = (
     + AUDIO_TOOLS + SHOW_TOOLS + EFFECT_TOOLS + VISION_TOOLS + TTS_TOOLS
     + HEAVY_AI_TOOLS
 )
+
+
+# --- Numeric bounds (QA-041) -------------------------------------------------
+#
+# Every numeric argument used to be unbounded: `move_clip new_start=1e12`,
+# `set_volume db=+1000000`, `color_grade brightness=1e9`, `add_marker
+# time=1e300` and `set_speed factor=1e6` all returned 200. A typo of 100000 in
+# Properties' "Start on timeline" built a 27-hour timeline and started an ffmpeg
+# that rendered black for minutes, still running after Undo. The bounds live IN
+# the schema (so Claude sees them as `minimum`/`maximum`), and
+# `dispatch._validate_tool_args` enforces whatever the schema declares — one
+# source, the same pattern as the enums.
+#
+# The ranges are "physically meaningful", not stylistic: the prompt validator's
+# `ARG_BOUNDS` is deliberately tighter (a plan from a small local model should
+# stay inside house style), while these only reject values no edit can mean.
+# Time arguments get an UPPER bound only — handlers have always CLAMPED a
+# negative time to 0 (`_num(min=0)`), and rejecting a UI's -0.0004 rounding
+# residue would turn a harmless clamp into a failed edit.
+
+#: Longest timeline any time argument may address: 6 hours. Well past a
+#: feature-length edit or a long podcast, far short of a typo's 100000 s.
+TIMELINE_MAX_SECONDS = 6 * 3600
+
+#: Argument names that are timeline/source seconds, on every tool that has them.
+_TIME_ARGS = frozenset({"start", "end", "new_start", "time", "at", "in", "out",
+                        "t_start", "t_end", "in_s", "out_s", "max_dur", "min_dur",
+                        "total", "max_duration"})
+
+_GAIN = (-96.0, 24.0)
+_UNIT = (0.0, 1.0)
+_POS = (-100000.0, 100000.0)
+
+#: (tool, arg) -> (minimum, maximum); None leaves that side open.
+_ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
+    ("set_volume", "db"): _GAIN,
+    ("add_music", "volume_db"): _GAIN,
+    ("tts_voiceover", "volume_db"): _GAIN,
+    ("set_duck", "to_db"): (-96.0, 0.0),
+    ("set_loudness_target", "lufs"): (-70.0, -5.0),
+    ("set_speed", "factor"): (0.1, 100.0),
+    ("color_grade", "brightness"): (-1.0, 1.0),
+    ("color_grade", "contrast"): (0.0, 4.0),
+    ("color_grade", "saturation"): (0.0, 3.0),
+    ("color_grade", "sat"): (0.0, 3.0),
+    ("color_grade", "gamma"): (0.1, 10.0),
+    ("color_grade", "temp"): (-1.0, 1.0),
+    ("color_grade", "tint"): (-1.0, 1.0),
+    ("add_transition", "duration"): (0.0, 60.0),
+    ("add_hook_overlay", "duration"): (0.1, 60.0),
+    ("set_clip_transform", "x"): _POS,
+    ("set_clip_transform", "y"): _POS,
+    ("add_text", "x"): _POS,
+    ("add_text", "y"): _POS,
+    ("add_text", "size"): (1.0, 2000.0),
+    ("add_text", "stroke_w"): (0.0, 200.0),
+    ("set_pip_framing", "x"): (-10.0, 10.0),
+    ("set_pip_framing", "y"): (-10.0, 10.0),
+    ("set_pip_framing", "zoom"): (0.1, 20.0),
+    ("set_pip_framing", "rotation"): (-3600.0, 3600.0),
+    ("chroma_key", "similarity"): _UNIT,
+    ("chroma_key", "smoothness"): _UNIT,
+    ("chroma_key", "spill_suppress"): _UNIT,
+    # (apply_lut.intensity is deliberately absent: the handler CLAMPS it to
+    # [0, 1] and test_apply_lut_clamps_intensity pins that contract.)
+    ("noise_reduce", "strength"): _UNIT,
+    ("add_mask", "feather"): (0.0, 1000.0),
+    ("auto_cut_to_beats", "subdivision"): (1, 64),
+    ("auto_cut_to_beats", "min_shot"): (0.0, 60.0),
+    ("remove_silences", "threshold_db"): (-120.0, 0.0),
+    ("remove_silences", "min_dur"): (0.0, 60.0),
+    ("remove_silences", "keep_pad"): (0.0, 10.0),
+    ("remove_fillers", "pad"): (0.0, 10.0),
+    ("find_broll", "top_k"): (1, 1000),
+    ("find_moments", "top_k"): (1, 1000),
+    ("search_media", "limit"): (1, 1000),
+    ("make_shorts", "target_count"): (1, 50),
+    ("multicam", "window_s"): (0.1, 3600.0),
+    ("diarize", "num_speakers"): (1, 32),
+    ("assign_caption_speakers", "num_speakers"): (1, 32),
+    ("auto_caption", "max_chars"): (1, 500),
+    ("auto_caption", "max_cps"): (1.0, 100.0),
+    ("motion_track", "sample_every"): (1, 1000),
+    ("smooth_slow_motion", "factor"): (2, 16),
+    ("upscale", "factor"): (1, 4),
+}
+
+
+def _is_numeric(spec: dict) -> bool:
+    declared = spec.get("type")
+    variants = declared if isinstance(declared, list) else [declared]
+    return any(v in ("number", "integer") for v in variants)
+
+
+def _apply_numeric_bounds(tools: list[ToolSchema]) -> None:
+    """Write `minimum`/`maximum` into each numeric property that has a bound
+    and does not already declare one (a hand-written bound always wins)."""
+    for t in tools:
+        props = t["input_schema"].get("properties") or {}
+        for key, spec in props.items():
+            if not isinstance(spec, dict) or not _is_numeric(spec):
+                continue
+            lo, hi = _ARG_BOUNDS.get((t["name"], key), (None, None))
+            if key in _TIME_ARGS and (t["name"], key) not in _ARG_BOUNDS:
+                hi = TIMELINE_MAX_SECONDS
+            if lo is not None and "minimum" not in spec:
+                spec["minimum"] = lo
+            if hi is not None and "maximum" not in spec:
+                spec["maximum"] = hi
+
+
+_apply_numeric_bounds(ALL_TOOLS)
 
 
 def list_tools(categories: list[str] | None = None) -> list[ToolSchema]:

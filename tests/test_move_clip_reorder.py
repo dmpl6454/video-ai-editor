@@ -77,14 +77,19 @@ def test_a_reorder_leaves_no_hole_and_no_overlap(tmp_path):
     assert s.edl.duration == pytest.approx(9.0)
 
 
-def test_without_close_gap_a_leftward_move_still_snaps(tmp_path):
-    """The gap snap is NOT gone — it is the correct answer for an absolute
-    placement. apply_template / b-roll insertion / MCP callers name a time and
-    must never have neighbours shuffle underneath them, so an occupied slot
-    still pushes the clip to the first free one.
+def test_without_close_gap_an_occupied_main_lane_slot_is_refused(tmp_path):
+    """An absolute placement still never shuffles neighbours underneath the
+    caller — but on the MAIN lane it no longer silently snaps either (QA-022).
+
+    This test used to pin the snap: c2 asked for 0.0 and was put straight back
+    at 4.0, a silent no-op. The same snap sent a one-frame RIGHT nudge past the
+    last clip (10.005 -> 40.02 s, a 10 s black hole). On v1 the move is now
+    refused with the reason and nothing moves; other lanes keep the snap
+    (test_tools_dispatch::test_move_clip_onto_occupied_range_snaps_to_free_gap).
     """
     s = _store(tmp_path)
-    dispatch(s, "move_clip", {"clip_id": "c2", "new_start": 0.0})
+    with pytest.raises(ValueError, match="overlap c0"):
+        dispatch(s, "move_clip", {"clip_id": "c2", "new_start": 0.0})
     assert _starts(s, "v1") == [("c0", 0.0), ("c1", 2.0), ("c2", 4.0)]
 
 

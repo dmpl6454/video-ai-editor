@@ -63,6 +63,7 @@ from .. import path_args as _path_args
 from .. import tools as _tools
 from . import slots as S
 from .facts import TimelineFacts, VOICE_IDS, WHISPER_MODELS
+from .langs import needs_translation
 from .presets import font_names, lut_names, music_beds, show_template_names
 from .recipes import (ASK, FILLERS_STRICT, RECIPE_BY_NAME, Intent, ask, estimate_seconds,
                       normalize_slots, placeholder)
@@ -150,6 +151,10 @@ ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("add_text", "size"): (8, 400),
     ("add_lower_third", "start"): (0.0, None),
     ("add_keyframe", "time"): (0.0, None),
+    ("set_volume", "db"): (-60.0, 12.0),
+    ("add_fade", "in_s"): (0.0, 30.0), ("add_fade", "out_s"): (0.0, 30.0),
+    ("set_video_fade", "in_s"): (0.0, 30.0), ("set_video_fade", "out_s"): (0.0, 30.0),
+    ("fit_music_to_video", "fade_in"): (0.0, 30.0), ("fit_music_to_video", "fade_out"): (0.0, 30.0),
 }
 
 #: (tool, arg) → max characters for free text that lands on screen or in a
@@ -316,6 +321,14 @@ def _check_whitelists(tool: str, args: dict[str, Any], facts: TimelineFacts, pla
             if str(target) not in _D.CAPTION_TARGETS:
                 reasons.append(f"{tool}: caption target {target!r} is not one of {list(_D.CAPTION_TARGETS)}")
             elif str(target) in _TRANSLATED_TARGETS and not facts.is_cached("madlad") and tool not in asked:
+                # QA-043: hi → hinglish is transliteration (bundled, no model).
+                # A translate_captions whose source is only known once the plan
+                # has transcribed is decided by the executor's run-time guard.
+                source = args.get("source_lang") if tool == "translate_captions" else args.get("language")
+                need = needs_translation(target, source)
+                if need is False or (need is None and tool == "translate_captions"
+                                     and str(target) == "hinglish"):
+                    continue
                 reasons.append(f"{tool}: translating to {target!r} needs the MADLAD model, which is not "
                                "downloaded and not asked for")
         for key in ("language", "source_lang"):
@@ -476,6 +489,64 @@ def _check_refs(tool: str, args: dict[str, Any], facts: TimelineFacts, has_cuts:
             reasons.append(f"add_transition.at: {float(args['at']):g}s is not a seam between two v1 clips")
         elif not facts.v1_boundaries and facts.v1_clip_ids:
             reasons.append("add_transition: there is no seam on v1 to put a transition on")
+
+
+def _explicit_toggle(tool: str, args: dict[str, Any], facts: TimelineFacts) -> dict[str, Any]:
+    """`set_duck` without `enabled` and `set_track_muted` without `muted`
+    TOGGLE in the handler, so their checks cannot know what to expect. Pin
+    the state the toggle will produce, from facts, so the verifier checks
+    the state this plan asked for (QA-031) instead of assuming "on"."""
+    if tool == "set_duck" and "enabled" not in args and str(args.get("track", "music")) == "music":
+        return {**args, "enabled": not facts.music_ducked}
+    if tool == "set_track_muted" and "muted" not in args and args.get("track") == "music":
+        return {**args, "muted": not facts.music_muted}
+    return args
+
+
+def _placeholders(value: Any) -> list[str]:
+    """Every `$ask:` / `$arg:` string anywhere in `value` (nested included)."""
+    if isinstance(value, str):
+        return [value] if value.startswith((ASK, ARG_REF)) else []
+    if isinstance(value, dict):
+        return [p for v in value.values() for p in _placeholders(v)]
+    if isinstance(value, (list, tuple)):
+        return [p for v in value for p in _placeholders(v)]
+    return []
+
+
+def _fill_value(value: Any, key: str, answer: Any) -> Any:
+    if isinstance(value, str):
+        return answer if value == f"{ASK}{key}" else value
+    if isinstance(value, dict):
+        return {k: _fill_value(v, key, answer) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill_value(v, key, answer) for v in value]
+    return value
+
+
+def _resolve_placeholders(tool: str, args: dict[str, Any], questions: list[NeedsInput],
+                          reasons: list[str]) -> dict[str, Any]:
+    """QA-032: an `$ask:<key>` placeholder may only reach the executor paired
+    with a BLOCKING question for `<key>` (the run pauses and the answer fills
+    it). A same-key question with a real default pre-fills it here (that is
+    what "a default executes immediately" means, §1.1). Anything else — no
+    question, or one whose default is blank — is refused: it used to reach
+    `apply_brand_kit` as the literal text "$ask:handle", burned in as the
+    watermark and the end card. `$arg:` belongs in postconditions only."""
+    out = args
+    for ph in dict.fromkeys(_placeholders(args)):
+        if ph.startswith(ARG_REF):
+            reasons.append(f"{tool}: {ph!r} is a postcondition reference, not a step value")
+            continue
+        key = ph[len(ASK):]
+        q = next((q for q in questions if q.key == key), None)
+        if q is not None and q.pauses:
+            continue
+        if q is not None and q.default is not None and not (isinstance(q.default, str) and not q.default.strip()):
+            out = _fill_value(out, key, q.default)
+            continue
+        reasons.append(f"{tool}: {ph!r} is unresolved and no question asks for {key!r}")
+    return out
 
 
 def _normalise_defaults(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -655,11 +726,13 @@ def validate_plan(plan: Plan | dict[str, Any], facts: TimelineFacts) -> Plan:
         step_reasons: list[str] = []
         args = _check_shape(s.tool, dict(s.args), schema, step_reasons)
         args = _normalise_defaults(s.tool, args)
+        args = _explicit_toggle(s.tool, args, facts)
         args = _check_hook_text(s.tool, args, step_reasons, notes)
         args = _check_paths(s.tool, args, facts, schema, step_reasons, notes, questions)
         _check_refs(s.tool, args, facts, has_cuts, step_reasons)
         _check_bounds(s.tool, args, step_reasons)
         _check_whitelists(s.tool, args, facts, p, step_reasons)
+        args = _resolve_placeholders(s.tool, args, questions, step_reasons)
         reasons.extend(f"{tag}: {r}" if not r.startswith(s.tool) else f"step {i + 1} {r}" for r in step_reasons)
         stage = s.stage if s.stage is not None else TOOL_STAGE.get(s.tool, STAGE_AUDIT)
         checked.append(s.model_copy(update={"args": args, "stage": stage}))

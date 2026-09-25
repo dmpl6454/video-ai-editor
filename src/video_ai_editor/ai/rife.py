@@ -44,7 +44,8 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     if factor < 2:
         raise ValueError("RIFE factor must be ≥ 2")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    h = hashlib.sha256(f"{src}|{factor}|{model}|{src.stat().st_mtime}".encode()).hexdigest()[:14]
+    # "|a1": outputs from before QA-040 carry no audio and must not be reused.
+    h = hashlib.sha256(f"{src}|{factor}|{model}|{src.stat().st_mtime}|a1".encode()).hexdigest()[:14]
     dst = cache_dir / f"smooth_{h}_x{factor}.mp4"
     if dst.exists() and dst.stat().st_size > 0:
         return dst
@@ -100,16 +101,56 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
     if proc.returncode != 0:
         raise RuntimeError(f"rife failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
 
-    # Re-encode at the SOURCE fps so playback duration becomes factor× original.
-    # Audio is dropped — slow motion of speech is rarely useful and stretching
-    # audio cleanly is a separate concern.
-    subprocess.run(
-        [_pu.FFMPEG, "-y",
-         "-framerate", f"{fps_val:.4f}", "-i", str(frames_out / "f%05d.png"),
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-         "-an", str(dst)],
-        capture_output=True, check=True,
-        **_pu.SUBPROCESS_FLAGS,
-    )
+    encode_slowmo(frames_out, src, dst, fps=fps_val, factor=factor)
     shutil.rmtree(work, ignore_errors=True)
+    return dst
+
+
+def _slow_atempo_chain(factor: int) -> str:
+    """atempo stages for 1/factor (each stage is limited to [0.5, 2]), each
+    preceded by the compositor's WSOLA lag compensation so the stretched
+    sound sits on the interpolated picture (see compositor._ATEMPO_LAG)."""
+    from ..render.compositor import _ATEMPO_LAG
+    stages = []
+    remaining = 1.0 / float(factor)
+    while remaining < 0.5:
+        stages.append(f"{_ATEMPO_LAG},atempo=0.5")
+        remaining /= 0.5
+    if abs(remaining - 1.0) > 0.001:
+        stages.append(f"{_ATEMPO_LAG},atempo={remaining:.6f}")
+    return ",".join(stages) or "anull"
+
+
+def encode_slowmo(frames_dir: Path, src: Path, dst: Path, *, fps: float,
+                  factor: int) -> Path:
+    """Encode interpolated frames at the SOURCE fps (so playback lasts
+    factor× the original) WITH the source's audio stretched to match.
+
+    QA-040: this used to encode with ``-an``. smooth_slow_motion then swapped
+    the clip's src for a picture-only file, and because every v1 source is
+    assumed to carry audio (ingest adds a silent track to one that doesn't),
+    the whole timeline's preview and export failed with "missing a needed
+    stream", and every later audio tool failed on the clip. The audio is
+    time-stretched with atempo (pitch kept) to the new length; a source with
+    no audio yields a SILENT track rather than none, so the output always
+    satisfies the invariant ingest establishes.
+    """
+    from ..render.compositor import source_has_audio
+    frames = sorted(frames_dir.glob("f*.png"))
+    n = len(frames)
+    video_s = n / float(fps) if fps else 0.0
+    args = [_pu.FFMPEG, "-y",
+            "-framerate", f"{fps:.6f}", "-i", str(frames_dir / "f%05d.png")]
+    if source_has_audio(str(src)):
+        args += ["-i", str(src)]
+        af = (f"[1:a:0]aresample=async=1:first_pts=0,{_slow_atempo_chain(factor)},"
+              f"apad,atrim=end={video_s:.6f}[a]")
+    else:
+        args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        af = f"[1:a]atrim=end={video_s:.6f}[a]"
+    args += ["-filter_complex", af, "-map", "0:v", "-map", "[a]",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+             "-frames:v", str(n), str(dst)]
+    subprocess.run(args, capture_output=True, check=True, **_pu.SUBPROCESS_FLAGS)
     return dst

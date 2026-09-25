@@ -60,7 +60,12 @@ EDL_VERSION = 2
 #     trailing filler out to the LAYOUT end, so a timeline whose overlay lane
 #     outlives v1 renders to edl.duration instead of edl.duration − overlap. A
 #     cache written under 10 can hold a short file for such an EDL.
-RENDER_BEHAVIOR_VERSION = 11
+# 12: (QA-002/030/038/039) clips are cut by FRAME COUNT on the project grid
+#     (half-frame seek pre-roll, fps=, trim=end_frame, sample-exact audio)
+#     instead of float -ss/-to, audio/video fades on a speed-changed clip sit
+#     in timeline time, and preview renders at canvas.fps. A cached chunk or
+#     preview from 11 holds a frame per seam that the timeline does not.
+RENDER_BEHAVIOR_VERSION = 12
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -245,9 +250,9 @@ class Clip(_EDLModel):
     transform: Transform = Field(default_factory=Transform)
     speed: float | dict | None = None  # number or curve {"curve":[[t,r],...]}
     reverse: bool = False
-    # Visual fade-from/to-black on the clip's VIDEO, in clip-local SOURCE
-    # seconds (same time convention as audio.fade_in/out — on a 2x clip a 1s
-    # fade displays over 0.5s of wall-clock). Deliberately TOP-LEVEL fields,
+    # Visual fade-from/to-black on the clip's VIDEO, in clip-local TIMELINE
+    # seconds (same time convention as audio.fade_in/out since QA-038 — a 1s
+    # fade on a 2x clip lasts 1s on screen). Deliberately TOP-LEVEL fields,
     # NOT inside AudioProps: compositor._video_only_fingerprint pops each
     # clip's "audio" key (audio props never change pixels), so a video-fade
     # change must live outside it to invalidate the cached video-only mp4 —
@@ -450,7 +455,12 @@ FPS_MIN, FPS_MAX = 1, 240
 class Canvas(_EDLModel):
     w: int = 1080
     h: int = 1920
-    fps: int = 30
+    # The project timebase (QA-009). A float so broadcast rates are
+    # representable (29.97002997… = 30000/1001); the validator snaps every value
+    # through `edl.timebase.fps_float`, so 29.97, 29.97002997 and "30000/1001"
+    # are one rate. Integer rates are stored as ints so an EDL written before
+    # this change serialises — and therefore hashes — byte-identically.
+    fps: int | float = 30
     bg: str = "#000000"
 
     @field_validator("w", "h")
@@ -463,10 +473,23 @@ class Canvas(_EDLModel):
         v = min(CANVAS_MAX, max(CANVAS_MIN, int(v)))
         return v - (v % 2)
 
-    @field_validator("fps")
+    @field_validator("fps", mode="before")
     @classmethod
-    def _check_fps(cls, v: int) -> int:
-        return min(FPS_MAX, max(FPS_MIN, int(v)))
+    def _check_fps(cls, v: object) -> int | float:
+        from . import timebase as _tb
+        if isinstance(v, bool):
+            raise ValueError("fps must be a number")
+        try:
+            raw = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            if isinstance(v, str) and "/" in v:
+                raw = _tb.fps_float(v)
+            else:
+                raise ValueError(f"fps must be a number, got {v!r}") from None
+        if raw != raw or raw in (float("inf"), float("-inf")):
+            raise ValueError("fps must be finite")
+        f = _tb.fps_float(min(FPS_MAX, max(FPS_MIN, raw)))
+        return int(f) if f.is_integer() else f
     # Audio loudness target for export (LUFS). Reels/TikTok target is -16; -14
     # for YouTube. None = skip the loudnorm pass.
     loudness_lufs: float | None = -16.0
@@ -572,7 +595,7 @@ class EDL(_EDLModel):
         if not v1 or not v1.transitions:
             return []
         return seam_table_for([c for c in v1.clips if isinstance(c, Clip)],
-                              v1.transitions)
+                              v1.transitions, fps=self.canvas.fps)
 
     def transition_overlap(self) -> float:
         """Seconds the v1 transitions remove from the rendered timeline.
@@ -651,11 +674,17 @@ def seam_matching(transitions: list[Transition], boundary: float) -> Transition 
                  if abs(tr.at - boundary) < SEAM_MATCH_TOL_S), None)
 
 
-def seam_table_for(clips: list[Clip], transitions: list[Transition]
-                   ) -> list[tuple[float, float]]:
+def seam_table_for(clips: list[Clip], transitions: list[Transition],
+                   fps: float | int | None = None) -> list[tuple[float, float]]:
     """`EDL.v1_seam_table()` for an explicit clip list and transition list —
     the compositor calls this with the very lists it assembles, so the seams
-    it xfades and the seams the EDL charges are one computation."""
+    it xfades and the seams the EDL charges are one computation.
+
+    With `fps` (the project timebase) every cost is a WHOLE number of frames
+    (at least one): xfade overlaps the picture by whole frames while
+    acrossfade overlaps the sound by the exact seconds it is given, so an
+    off-grid cost (0.5 s at 25 fps = 12.5 frames) put the audio half a frame
+    ahead of the picture from that seam to the end of the video."""
     if not transitions:
         return []
     ordered = sorted(clips, key=lambda c: c.start)
@@ -680,9 +709,13 @@ def seam_table_for(clips: list[Clip], transitions: list[Transition]
             # every other lane by (d − clamped) and ended the video stream
             # before the audio (A=2 s, B=0.3 s, fade 0.5: video 1.8 s, audio
             # 2.0 s, edl.duration 2.0).
-            cost = max(0.0, min(float(match.duration),
-                                cur.effective_duration,
-                                nxt.effective_duration))
+            shorter = min(cur.effective_duration, nxt.effective_duration)
+            cost = max(0.0, min(float(match.duration), shorter))
+            if fps is not None and cost > 0.0:
+                from . import timebase as _tb
+                cost = _tb.time_of(max(1, _tb.frame_of(cost, fps)), fps)
+                if cost > shorter + 1e-9:
+                    cost = _tb.floor_to_frame(shorter, fps)
             if cost > 0.0:
                 seams.append((boundary, cost))
     return seams
