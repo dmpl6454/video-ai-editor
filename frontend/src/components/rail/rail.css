@@ -115,6 +115,37 @@
   }
 }
 
+/* ---- the rail foot (R3) ------------------------------------------------ */
+
+/* Its OWN grid item (area `foot`), last in the DOM: Help, Customize shortcuts
+   and Settings, 36 px icon buttons under the rail, never scrolled away. */
+.rail-foot {
+  grid-area: foot;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 0 10px;
+  background: var(--bg-0);
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+.rail-foot-btn {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: var(--rail-foot-btn);
+  height: var(--rail-foot-btn);
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.rail-foot-btn:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
+.rail-foot-btn:active:not(:disabled) { transform: scale(0.94); }
+
 /* ---- the tool panel --------------------------------------------------- */
 
 .tool-panel {
@@ -150,6 +181,26 @@
 }
 .tool-panel-kbd { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .tool-panel-grow { flex: 1; }
+/* A panel's header action (Media: "From iPhone", only with phone pairing on).
+   Its word gives way when the panel is narrower than 260 px. */
+.tool-panel-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.tool-panel-act:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+@container toolpanel (max-width: 259px) {
+  .tool-panel-act-word { display: none; }
+}
 .tool-panel-collapse {
   display: grid;
   place-items: center;
@@ -284,6 +335,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .tool-tabpanel, .rail-tip { animation: none; }
-  .rail-indicator, .rail-item, .rail-chip, .tool-panel-collapse,
-  .right-head-btn, .right-rail button { transition: none; }
+  .rail-indicator, .rail-item, .rail-chip, .tool-panel-collapse, .tool-panel-act,
+  .rail-foot-btn, .right-head-btn, .right-rail button { transition: none; }
 }

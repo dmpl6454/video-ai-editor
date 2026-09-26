@@ -421,8 +421,16 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
     if chan:
         parts.append(chan.lstrip(","))
     # QA-086: speed on an audio lane — the v1 rule (`speed_filters`), so the
-    # source's `in..out` fills `effective_duration` timeline seconds.
+    # source's `in..out` fills `effective_duration` timeline seconds. A speed
+    # CURVE reads its cached intermediate instead (render/speed_audio.py,
+    # the v1 rule for curves); a FREEZE is silent.
+    from . import speed_audio as _speed_audio
     retime = speed_filters(clip)
+    if getattr(clip, "freeze", None) is not None:
+        retime = ",volume=0"
+    elif _speed_audio.has_curve(clip):
+        in_label = _speed_audio.chain_source(clip, None)
+        retime = ",anull"
     if retime:
         parts.append(retime.lstrip(","))
     # A clip straddling a seam is SHORTER on the render clock by what the

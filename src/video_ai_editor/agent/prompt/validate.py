@@ -118,6 +118,8 @@ KNOWN_TRACK_IDS: frozenset[str] = frozenset(
 #: (tool, arg) → (min, max); None = unbounded on that side.
 ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("set_speed", "factor"): (0.25, 4.0),
+    ("freeze_frame", "duration"): (0.5, 10.0),
+    ("freeze_frame", "time"): (0.0, None),
     ("smooth_slow_motion", "factor"): (2, 8),
     ("add_music", "volume_db"): (-40.0, 0.0),
     ("add_music", "start"): (0.0, None),
@@ -300,6 +302,38 @@ def _check_bounds(tool: str, args: dict[str, Any], reasons: list[str]) -> None:
     for (t, key), limit in TEXT_LIMITS.items():
         if t == tool and isinstance(args.get(key), str) and not _is_placeholder(args[key]) and len(args[key]) > limit:
             reasons.append(f"{tool}.{key}: {len(args[key])} characters is over the {limit} limit")
+
+
+def _canonical_speed_args(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """`set_speed.preset` as a person or a model spells it ("Jump Cut",
+    "flash-in") → its id, before the enum check (wave D lane S2)."""
+    if tool == "set_speed" and isinstance(args.get("preset"), str) and not _is_placeholder(args["preset"]):
+        from ...edl.speed_presets import preset_id
+        pid = preset_id(args["preset"])
+        if pid is not None:
+            return {**args, "preset": pid}
+    return args
+
+
+def _check_speed(tool: str, args: dict[str, Any], reasons: list[str]) -> None:
+    """`set_speed` takes exactly ONE of factor / curve / preset, and a curve
+    is checked point by point the way the handler checks it (2-32 points,
+    position 0-1, speed 0.1-10x, one speed per position) — a malformed curve
+    is a refusal here, not a 400 halfway through a run."""
+    if tool != "set_speed":
+        return
+    from ...edl.speed_presets import validate_curve_points
+    given = [k for k in ("factor", "curve", "preset") if k in args]
+    if not given:
+        reasons.append("set_speed: needs one of factor, curve or preset")
+    elif len(given) > 1:
+        reasons.append(f"set_speed: give ONE of factor, curve or preset, not {' and '.join(given)}")
+    curve = args.get("curve")
+    if curve is not None and not _is_placeholder(curve):
+        try:
+            validate_curve_points(curve)
+        except ValueError as e:
+            reasons.append(f"set_speed.curve: {e}")
 
 
 def _check_whitelists(tool: str, args: dict[str, Any], facts: TimelineFacts, plan: Plan,
@@ -732,13 +766,14 @@ def validate_plan(plan: Plan | dict[str, Any], facts: TimelineFacts) -> Plan:
             reasons.append(f"{tag}: tool has no schema")
             continue
         step_reasons: list[str] = []
-        args = _check_shape(s.tool, dict(s.args), schema, step_reasons)
+        args = _check_shape(s.tool, _canonical_speed_args(s.tool, dict(s.args)), schema, step_reasons)
         args = _normalise_defaults(s.tool, args)
         args = _explicit_toggle(s.tool, args, facts)
         args = _check_hook_text(s.tool, args, step_reasons, notes)
         args = _check_paths(s.tool, args, facts, schema, step_reasons, notes, questions)
         _check_refs(s.tool, args, facts, has_cuts, step_reasons)
         _check_bounds(s.tool, args, step_reasons)
+        _check_speed(s.tool, args, step_reasons)
         _check_whitelists(s.tool, args, facts, p, step_reasons)
         args = _resolve_placeholders(s.tool, args, questions, step_reasons)
         reasons.extend(f"{tag}: {r}" if not r.startswith(s.tool) else f"step {i + 1} {r}" for r in step_reasons)

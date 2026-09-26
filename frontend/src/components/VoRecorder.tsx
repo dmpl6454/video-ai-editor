@@ -5,6 +5,7 @@ import { toast } from '../toast'
 import { Icon } from './Icon'
 import { CANCELLED, COUNTDOWN_S, PERMISSION_HINT_MS, cancellable, levelOf, recordStart } from '../lib/voCapture'
 import { MIC_UNAVAILABLE, micErrorMessage } from '../lib/micErrors'
+import { useActivityStore } from '../lib/activityStore'
 
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the two methods this file calls, not the whole class.
@@ -79,6 +80,10 @@ export function VoRecorder() {
   const tickRef = useRef<number | null>(null)
   const nativeRecordingRef = useRef(false)  // true while a native (pywebview) capture is in flight
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  // The take's wall-clock start, for the top-bar activity chip's clock.
+  const takeWallStartRef = useRef(0)
+  // The latest stop(), so the activity chip's Stop is THIS stop (§2.8).
+  const stopRef = useRef<() => Promise<void>>(async () => {})
 
   // Release the mic + stop the elapsed ticker. Idempotent — safe to call on any
   // exit path (stop, error, unmount). Leaving the stream open keeps the OS mic
@@ -162,6 +167,7 @@ export function VoRecorder() {
     startedAtRef.current = at
     setPlayhead(at)
     setPlaying(true)
+    takeWallStartRef.current = Date.now()
     setRecording(true)
     setElapsed(0)
     tickRef.current = window.setInterval(() => {
@@ -345,6 +351,21 @@ export function VoRecorder() {
       teardown()        // already inactive: release the mic/ticker ourselves
     }
   }
+
+  // Publish the live take to lib/activityStore (LEFT_RAIL_SPEC §2.8): the
+  // top-bar activity chip shows it with a Stop that calls THIS stop(), and the
+  // rail's Audio tab wears the recording dot — so a take stays stoppable with
+  // another tool panel showing, or the tool panel collapsed. Cleared when the
+  // take ends by any path (stop, recorder error, failed start) and on unmount.
+  useEffect(() => { stopRef.current = stop })
+  useEffect(() => {
+    if (!recording) return
+    useActivityStore.getState().setRecording({
+      startedAt: takeWallStartRef.current,
+      stop: () => { void stopRef.current() },
+    })
+    return () => useActivityStore.getState().setRecording(null)
+  }, [recording])
 
   // Guaranteed-working fallback: if neither the native bridge nor
   // getUserMedia can capture a mic in this window (TCC denial in the

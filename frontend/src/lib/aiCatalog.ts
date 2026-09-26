@@ -266,7 +266,9 @@ export function gateFor(
   if (entry.gateUnless && values && values[entry.gateUnless.field] === entry.gateUnless.equals) {
     return { ok: true, checking: false }
   }
-  if (report === null) return { ok: true, checking: true }
+  // a report without its `unavailable` list (a malformed or partial answer)
+  // is as unknown as none: it must never take a whole panel down
+  if (report === null || !Array.isArray(report?.unavailable)) return { ok: true, checking: true }
   const missing = report.unavailable.find((f) => f.key === entry.gate)
   if (!missing) return { ok: true, checking: false }
   return { ok: false, feature: missing.feature, fix: missing.fix ?? '',

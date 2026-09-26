@@ -9,8 +9,9 @@
 // carries the reasons, for the "≈" badge, the spinner and telemetry.
 
 import {
-  clipStart, effectiveDuration, v1Transitions, videoClips, isMediaClip, type EdlClip, type EdlLike,
+  clipStart, effectiveDuration, freezeOf, v1Transitions, videoClips, isMediaClip, type EdlClip, type EdlLike,
 } from './framePlan'
+import { isCurve } from './speedCurve'
 import { renderTime as layoutRenderTime, seamTable } from '../../timelineLayout'
 import { frameOf, type FpsLike } from './timebase'
 import { KIND_BLEND, KIND_GAP, type ProgramMap } from './programMap'
@@ -41,21 +42,25 @@ export interface Capabilities {
   nativeTransitions: Mode
   /** Pitch-preserving speed audio (atempo) — varispeed until tempo sidecars. */
   tempoAudio: Mode
+  /** Speed-CURVE sound (render/speed_audio.py: varispeed or WSOLA on a
+   *  warped map) — the client plays it with playbackRate automation, never
+   *  sample-exact. (The curve's PICTURE is always EXACT.) */
+  curveAudio: Mode
 }
 
 /** The capability table. Unmeasured ports are APPROX until the P3/P4 PSNR
  *  tables promote them (see `TRANSITION_EXACT`). */
 export const PHASE_CAPS: Record<Phase, Capabilities> = {
   1: { colour: MODE_BAKED, shaderEffects: MODE_BAKED, noiseEffects: MODE_BAKED, chromaKey: MODE_BAKED,
-       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_BAKED, tempoAudio: MODE_APPROX },
+       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_BAKED, tempoAudio: MODE_APPROX, curveAudio: MODE_APPROX },
   2: { colour: MODE_EXACT, shaderEffects: MODE_BAKED, noiseEffects: MODE_BAKED, chromaKey: MODE_BAKED,
-       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_BAKED, tempoAudio: MODE_APPROX },
+       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_BAKED, tempoAudio: MODE_APPROX, curveAudio: MODE_APPROX },
   3: { colour: MODE_EXACT, shaderEffects: MODE_BAKED, noiseEffects: MODE_BAKED, chromaKey: MODE_BAKED,
-       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_APPROX, tempoAudio: MODE_APPROX },
+       masks: MODE_BAKED, matte: MODE_BAKED, nativeTransitions: MODE_APPROX, tempoAudio: MODE_APPROX, curveAudio: MODE_APPROX },
   4: { colour: MODE_EXACT, shaderEffects: MODE_APPROX, noiseEffects: MODE_APPROX, chromaKey: MODE_APPROX,
-       masks: MODE_EXACT, matte: MODE_APPROX, nativeTransitions: MODE_APPROX, tempoAudio: MODE_EXACT },
+       masks: MODE_EXACT, matte: MODE_APPROX, nativeTransitions: MODE_APPROX, tempoAudio: MODE_EXACT, curveAudio: MODE_APPROX },
   5: { colour: MODE_EXACT, shaderEffects: MODE_APPROX, noiseEffects: MODE_APPROX, chromaKey: MODE_APPROX,
-       masks: MODE_EXACT, matte: MODE_APPROX, nativeTransitions: MODE_APPROX, tempoAudio: MODE_EXACT },
+       masks: MODE_EXACT, matte: MODE_APPROX, nativeTransitions: MODE_APPROX, tempoAudio: MODE_EXACT, curveAudio: MODE_APPROX },
 }
 
 /** Native transitions measured EXACT (≥ 35 dB) in the P3 table. Empty until
@@ -133,6 +138,14 @@ export function clipFeatures(c: EdlClip, caps: Capabilities): Array<[Mode, strin
   if (c.track_to) out.push([MODE_BAKED, 'motion-track'])
   const sp = c.speed
   const retimed = typeof sp === 'number' && sp > 0 && sp !== 1
+  // A freeze's picture is one proxy frame, its sound silence: EXACT.
+  if (freezeOf(c) !== null) return out
+  if (isCurve(sp)) {
+    // The curve's picture is EXACT (frameMap models its setpts to the bit);
+    // its sound is not sample-addressed on the client.
+    out.push([caps.curveAudio, 'audio:curve'])
+    return out
+  }
   if (retimed && c.reverse) {
     // The export resamples the reversed intermediate; frameMap has no
     // sample-exact runs for it (programMap.audioPlacements).
@@ -212,10 +225,13 @@ export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Su
     for (const c of t.clips) {
       if (!isMediaClip(c)) continue
       const a = frameOf(renderTime(c.start ?? 0), fps)
-      const eff = Math.max(0, (c.out ?? 0) - (c.in ?? 0)) / (typeof c.speed === 'number' && c.speed > 0 ? c.speed : 1)
+      const eff = effectiveDuration(c)
       const b = frameOf(renderTime((c.start ?? 0) + eff), fps)
       if (ducked) bump(a, b, MODE_APPROX, 'audio:duck')
-      if (typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 && (c.audio?.keep_pitch ?? true)) {
+      if (freezeOf(c) !== null) continue
+      if (isCurve(c.speed)) {
+        bump(a, b, caps.curveAudio, 'audio:curve')
+      } else if (typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 && (c.audio?.keep_pitch ?? true)) {
         bump(a, b, caps.tempoAudio, 'audio:tempo')
       }
     }

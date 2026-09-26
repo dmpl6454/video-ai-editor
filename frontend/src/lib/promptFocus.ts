@@ -38,6 +38,17 @@ export function shouldRefocusPrompt(prev: PromptStatus, next: PromptStatus, focu
   return focus === 'none' || focus === 'inside-bar'
 }
 
+/**
+ * A clarify question is waiting (it survives a reload) and the user typed a
+ * DIFFERENT sentence and pressed Enter: that is a new instruction, not an
+ * answer. The stale question is dropped and the new text runs (review RD2:
+ * Enter used to move focus to the old card and send nothing).
+ */
+export function supersedesClarify(status: PromptStatus, text: string, clarifyPrompt: string): boolean {
+  const t = text.trim()
+  return status === 'clarify' && t.length > 0 && t !== clarifyPrompt.trim()
+}
+
 /** May the input's Enter / Run start a new prompt right now? */
 export function canSubmitPrompt(status: PromptStatus, opts: { disabled: boolean; text: string }): boolean {
   if (isBusy(status) || opts.disabled) return false

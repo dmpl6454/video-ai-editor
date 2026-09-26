@@ -41,6 +41,14 @@ _SCOPE: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
 #: Absolute `time.monotonic()` deadline of the active scope, or None (QA-041).
 _DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "vae_render_deadline", default=None)
+#: Wave D (instant preview §4.1 step 8, §9.4): a preview render the client
+#: engine does not wait on runs at lower CPU priority. Every ffmpeg that
+#: `run()` starts inside `low_priority()` is niced (POSIX `nice -n 10`,
+#: Windows BELOW_NORMAL_PRIORITY_CLASS) — the render's own process, never
+#: the server's. Thread pools that submit `contextvars.copy_context().run`
+#: (chunks.get_or_build_chunks) carry it into their workers.
+_LOW_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vae_render_low_priority", default=False)
 
 
 class RenderCancelled(Exception):
@@ -108,6 +116,28 @@ def scope(event: threading.Event, *, deadline_s: float | None = None
 
 def current() -> threading.Event | None:
     return _SCOPE.get()
+
+
+@contextlib.contextmanager
+def low_priority(enabled: bool = True) -> Iterator[None]:
+    """Run the enclosed render's ffmpeg processes niced (see _LOW_PRIORITY)."""
+    token = _LOW_PRIORITY.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _LOW_PRIORITY.reset(token)
+
+
+def is_low_priority() -> bool:
+    return _LOW_PRIORITY.get()
+
+
+def _prioritised(args, kwargs: dict) -> tuple:
+    """(argv, Popen kwargs) with the active priority applied."""
+    if not _LOW_PRIORITY.get() or isinstance(args, (str, bytes)):
+        return args, {**_pu.SUBPROCESS_FLAGS, **kwargs}
+    return (_pu.low_priority_argv(list(args)),
+            {**_pu.SUBPROCESS_FLAGS, **kwargs, **_pu.LOW_PRIORITY_SUBPROCESS_FLAGS})
 
 
 def _expired() -> bool:
@@ -239,14 +269,15 @@ def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
         ) -> subprocess.CompletedProcess:
     """``subprocess.run`` that honours the active cancellation scope."""
     ev = _SCOPE.get()
+    argv, kw = _prioritised(args, kwargs)
     if ev is None:
-        return subprocess.run(args, check=check, capture_output=capture_output,
-                              **{**_pu.SUBPROCESS_FLAGS, **kwargs})
+        return subprocess.run(argv, check=check, capture_output=capture_output,
+                              **{**_pu.SUBPROCESS_FLAGS, **kw})
     _raise_if_stopped(ev)
     if capture_output:
-        kwargs["stdout"] = subprocess.PIPE
-        kwargs["stderr"] = subprocess.PIPE
-    proc = subprocess.Popen(args, **{**_pu.SUBPROCESS_FLAGS, **kwargs})
+        kw["stdout"] = subprocess.PIPE
+        kw["stderr"] = subprocess.PIPE
+    proc = subprocess.Popen(argv, **{**_pu.SUBPROCESS_FLAGS, **kw})
     while True:
         try:
             out, err = proc.communicate(timeout=_POLL_S)

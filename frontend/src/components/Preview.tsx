@@ -9,9 +9,11 @@ import { SafeZones } from './SafeZones'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
 import { ErrorBoundary } from './ErrorBoundary'
 import { CommandKey } from './CommandKey'
-import { pipIsClientDrawn, sourcePreviewVideo, releaseSourcePreviewVideos,
+import { sourcePreviewVideo, releaseSourcePreviewVideos,
          syncPipVideo } from '../lib/pipDraw'
-import { liveCssTransform, liveCssFilter, colorGradeOf, sampleKF,
+import { videoFingerprintOf } from '../lib/previewFingerprint'
+import { ClientPreview } from './preview/ClientPreview'
+import { liveCssTransform, liveCssFilter, committedGradeOf, committedPoseAt, sampleKF,
          liveVideoCssApplies } from '../lib/overlay'
 import { planSourceDraw, sourcePreviewApplies } from '../lib/sourcePreview'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
@@ -20,7 +22,17 @@ import { displaySeekTime, frameDuration } from '../lib/frameStep'
 import { Icon } from './Icon'
 
 /**
- * Preview pane.
+ * Preview pane: the instant client engine (wave D, INSTANT_PREVIEW_SPEC §3,
+ * components/preview/ClientPreview) when `previewEngine` resolved to
+ * 'client', else today's server preview below, unchanged.
+ */
+export function Preview() {
+  const engine = useStore((s) => s.previewEngine)
+  return engine === 'client' ? <ClientPreview /> : <ServerPreview />
+}
+
+/**
+ * The server preview: one <video> playing the server's render.
  *
  * Realtime strategy:
  *   - The <video> only re-renders on the server when the *video/audio* tracks
@@ -29,7 +41,7 @@ import { Icon } from './Icon'
  *   - Re-render requests are debounced (300ms quiescence) and cancelled if
  *     superseded, so rapid edits collapse to one server call.
  */
-export function Preview() {
+function ServerPreview() {
   const sid = useStore((s) => s.sessionId)
   const edl = useStore((s) => s.edl)
   const previewHash = useStore((s) => s.previewHash)
@@ -109,29 +121,7 @@ export function Preview() {
   const screenTxRef = useRef<{ hash: string | null; clipId: string | null
                                scale: number; rotation: number; opacity: number } | null>(null)
 
-  const sampleTxOf = (clipId: string | null) => {
-    let sc = 1, rot = 0, opa = 1
-    if (!clipId) return { scale: sc, rotation: rot, opacity: opa }
-    for (const tk of edl?.tracks ?? []) {
-      const found = tk.clips.find((k) => (k as { id?: string }).id === clipId)
-      if (!found) continue
-      const c = found as unknown as {
-        start?: number
-        transform?: { scale?: never; rotation?: never; opacity?: never }
-      }
-      // Clip-local time from where the clip PLAYS (render time), not from
-      // its layout `start` — the same origin the source-draw path below uses.
-      // A keyframed v1 clip after 1.0 s of overlap sampled its pose 1.0 s
-      // early here, so the first frame of a rotation drag snapped the picture
-      // to a different scale before the live value took over.
-      const localT = playhead - renderSpanOf(edl, tk.id, found).start
-      sc = sampleKF(c.transform?.scale, localT, 1)
-      rot = sampleKF(c.transform?.rotation, localT, 0)
-      opa = sampleKF(c.transform?.opacity, localT, 1)
-      break
-    }
-    return { scale: sc, rotation: rot, opacity: opa }
-  }
+  const sampleTxOf = (clipId: string | null) => committedPoseAt(edl, clipId, playhead)
 
   // Snapshot for the SELECTED clip: a transform drag can only start on one, so
   // that is the only clip whose baked pose is ever needed, and snapshotting the
@@ -192,12 +182,7 @@ export function Preview() {
     bakedFxRef.current = null
   } else if (bakedFxRef.current?.clipId !== liveFilter.clipId
              || bakedFxRef.current?.hash !== previewHash) {
-    let g = { brightness: 0, contrast: 1, saturation: 1 }
-    for (const tk of edl?.tracks ?? []) {
-      const found = tk.clips.find((k) => (k as { id?: string }).id === liveFilter.clipId)
-      if (found) { g = colorGradeOf(found); break }
-    }
-    bakedFxRef.current = { clipId: liveFilter.clipId, hash: previewHash, ...g }
+    bakedFxRef.current = { clipId: liveFilter.clipId, hash: previewHash, ...committedGradeOf(edl, liveFilter.clipId) }
   }
   const liveFx = liveFilter
     ? liveCssFilter(liveFilter, bakedFxRef.current ?? { brightness: 0, contrast: 1, saturation: 1 })
@@ -437,74 +422,8 @@ export function Preview() {
 
   // A fingerprint that changes only for video-relevant edits. Text edits do
   // NOT change this, so the server preview is reused while client overlays
-  // update in real time.
-  //
-  // Serializes the WHOLE clip object on video/audio-family tracks rather than
-  // hand-picking fields (id/src/in/out/start): the backend Clip schema also
-  // carries speed, effects (color grade, chromakey, mask…), transform
-  // (x/y/scale/rotation/opacity, incl. keyframes) and audio (gain/fade/mute),
-  // which types.ts's frontend Clip interface doesn't declare — Properties.tsx
-  // reaches them via `as unknown as {...}` casts. A hand-picked field list
-  // silently goes stale every time a new video-affecting property is added
-  // (that's exactly how speed/color/transform/audio edits used to commit to
-  // the EDL but never trigger a preview re-render). Hashing the full clip
-  // mirrors how the backend itself decides "did anything render-relevant
-  // change" — edl.hash() in schema.py hashes the entire EDL, not a field
-  // subset — so this fingerprint can't drift out of sync with the schema again.
-  const videoFingerprint = useMemo(() => {
-    if (!edl) return ''
-    // Sticker tracks are EXCLUDED, exactly like text: StickerLayer now draws
-    // every sticker client-side each frame and build_overlay_chain(preview)
-    // no longer bakes them (see StickerLayer's pixel-ownership rule). Leaving
-    // them in would fire a full ffmpeg re-render for an edit whose result is
-    // already on screen — and it was that re-render round-trip which produced
-    // the "sticker disappears, then leaves a copy at the old position" gap.
-    // NOTE: this is only safe while the preview genuinely skips stickers. If
-    // baking ever comes back, sticker tracks must come back here too, or
-    // sticker edits stop producing any visual result at all.
-    const vidTracks = edl.tracks.filter(t =>
-      t.type === 'video' || t.type === 'audio' || t.type === 'music' || t.type === 'vo')
-    return JSON.stringify({
-      canvas: edl.canvas,
-      // Track-LEVEL props matter too: transitions and mute live on the track,
-      // not a clip — omitting them left the preview stale after adding a
-      // transition (surfaced the day transitions got a UI). `z` is the
-      // compositing order (PIP/sticker stacking) — also render-relevant.
-      tracks: vidTracks.map(t => ({
-        id: t.id,
-        z: t.z,
-        muted: t.muted,
-        transitions: (t as unknown as { transitions?: unknown }).transitions,
-        // A PIP lane's clips are reduced to what still affects the RENDER: its
-        // audio (pip.py keeps mixing that) and the timing that positions it.
-        // Placement, size, shape and framing are the client's now — pip.py's
-        // `preview` branch skips baking the picture and StickerLayer paints it
-        // — so including them fired a full ffmpeg re-render for a change that
-        // was already on screen. That round-trip IS the reported lag: "the
-        // video doesn't follow the blue box… it reacts very late".
-        //
-        // Exactly the same reduction, and the same caveat, as the sticker
-        // tracks above: only safe while the preview genuinely skips the PIP
-        // picture. If baking ever returns, restore the whole clip here or PIP
-        // edits stop producing any visual result.
-        clips: t.type === 'video' && t.id !== 'v1'
-          ? t.clips.map((c) => {
-            const k = c as unknown as {
-              id: string; start: number; in?: number; out?: number
-              speed?: unknown; audio?: unknown; src?: string; chromakey?: unknown
-            }
-            // A chromakey'd PIP is the one kind still baked in preview (see
-            // pipIsClientDrawn), so it must keep its FULL clip here — reducing
-            // it would mean moving or resizing it changed nothing on screen at
-            // all, since no client draw is coming to show it.
-            if (!pipIsClientDrawn(k)) return c
-            return { id: k.id, src: k.src, start: k.start, in: k.in, out: k.out,
-                     speed: k.speed, audio: k.audio }
-          })
-          : t.clips,
-      })),
-    })
-  }, [edl])
+  // update in real time. What it covers and why: lib/previewFingerprint.
+  const videoFingerprint = useMemo(() => videoFingerprintOf(edl), [edl])
 
   // Debounced preview render. Superseding an in-flight render (abort + server
   // cancel) and ignoring stale responses both live in store.renderPreview, so

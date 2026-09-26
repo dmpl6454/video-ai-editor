@@ -69,8 +69,12 @@ def test_preview_engine_reads_app_settings_and_env(client, monkeypatch):
     assert (body["engine"], body["source"]) == ("client", "env")
 
 
-def test_preview_engine_route_is_read_only(client):
-    assert client.post("/api/settings/preview", json={"engine": "client"}).status_code == 405
+def test_preview_engine_is_written_only_by_put(client):
+    """The write path is PUT (tests/test_preview_engine_write.py); no other
+    verb changes the setting."""
+    for verb in ("post", "patch", "delete"):
+        r = getattr(client, verb)("/api/settings/preview")
+        assert r.status_code == 405, verb
 
 
 # ---- proxy discovery ------------------------------------------------------------------

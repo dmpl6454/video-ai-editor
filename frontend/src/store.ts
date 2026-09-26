@@ -3,7 +3,7 @@
 // share one mutation path.
 
 import { create } from 'zustand'
-import { api } from './api'
+import { api, clientFetch } from './api'
 import { toast } from './toast'
 import { type EDL, type Op } from './types'
 import { splitTargets } from './lib/splitTargets'
@@ -24,6 +24,13 @@ import type { UploadBatch, UploadItem } from './lib/uploadQueue'
 import { importFollowUp, type ImportAnswer } from './lib/importFollowUp'
 import { placementFor, type LanePlacement, type PlacedAnswer } from './lib/laneDrop'
 import { splitTimeFor } from './lib/splitTargets'
+import {
+  parsePreviewSettings, probePreviewCapabilities, resolvePreviewMode,
+  type PreviewCapabilities, type PreviewEngine as PreviewEngineSetting, type PreviewSettings,
+} from './lib/previewEngineSetting'
+import { PreviewController, type ControllerView } from './lib/preview/previewController'
+import { ticksPerFrame } from './lib/preview/timeline/timebase'
+import type { EdlLike } from './lib/preview/timeline/framePlan'
 
 // Shape of POST /sessions/:id/dispatch's response as surfaced to UI callers.
 // `result` is the tool handler's own return dict (e.g. add_text returns
@@ -85,6 +92,21 @@ const importCancels = new Map<string, () => void>()
 let importSeq = 0
 // One "edits are paused" toast per offline spell, not one per gesture (QA-109).
 let offlineNoticeShown = false
+
+// INSTANT PREVIEW (wave D, INSTANT_PREVIEW_SPEC §3.5, §4.1, §7, §9.2): the
+// client engine's controller lives here, outside React (like LIVE_FRAMING),
+// one per open project while `previewEngine` is 'client'. Server mode never
+// creates it, so every server-mode path below is exactly what it was.
+let previewCtl: PreviewController | null = null
+let previewCaps: PreviewCapabilities | null = null
+/** Why the engine fell back to server mode this session (sticky until the
+ *  project or the setting changes: §7's engine-level fallback). */
+let previewFailure: string | null = null
+
+/** The client preview's controller, or null in server mode. */
+export function previewController(): PreviewController | null {
+  return previewCtl
+}
 
 /** Drop selected ids that are no longer on the timeline (QA-047). Returns the
  *  patch to apply (empty when nothing changed). */
@@ -309,6 +331,20 @@ interface State {
   // are the EDL grade params (ffmpeg eq semantics) — Preview converts to CSS.
   liveFilter: { clipId: string; brightness?: number; contrast?: number; saturation?: number } | null
 
+  // Which preview runs (wave D): today's server render ('server', the
+  // default), or the instant client engine ('client') — resolved from the
+  // `preview.engine` setting, this window's capabilities and the project
+  // rate (lib/previewEngineSetting.resolvePreviewMode).
+  previewEngine: 'server' | 'client'
+  previewEngineReason: string | null
+  previewSettings: PreviewSettings | null
+  /** The client engine's spinner / fidelity view (null in server mode). */
+  clientView: ControllerView | null
+  /** Read the setting and pick the engine. */
+  resolvePreviewEngine(): Promise<void>
+  /** Settings' "Instant preview (beta)": write it, then re-pick. */
+  setPreviewEngineSetting(engine: PreviewEngineSetting): Promise<boolean>
+
   // setters
   setLiveTransform(t: State['liveTransform']): void
   setFraming(f: State['framing']): void
@@ -396,7 +432,11 @@ interface State {
       asJob?: boolean
     },
   ): Promise<DispatchResponse | null>
-  renderPreview(): Promise<string>
+  /** `priority: 'low'`: the client engine's background render (niced). */
+  renderPreview(opts?: { priority?: 'low' }): Promise<string>
+  /** Session fields only (ops, undo depth, redo, name) — the client engine
+   *  already has the EDL from the dispatch answer (spec §4.1 step 3). */
+  refreshSession(): Promise<void>
   // `saveAs` (QA-100): the Export dialog's File name — the name the file is
   // saved under; `fps` (QA-009) only when it differs from the project rate.
   doExport(opts?: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' | 'm4a' | 'wav'; bitrate_kbps?: number; saveAs?: string }): Promise<void>
@@ -436,6 +476,10 @@ export const useStore = create<State>((set, get) => ({
   liveTransform: null,
   framing: null,
   liveFilter: null,
+  previewEngine: 'server',
+  previewEngineReason: null,
+  previewSettings: null,
+  clientView: null,
   uploading: false,
   uploadProgress: null,
   uploadError: null,
@@ -503,6 +547,20 @@ export const useStore = create<State>((set, get) => ({
     // No-op guard — see setPlayhead. onPlay/onPause + the rAF re-clamp otherwise
     // hammer setPlaying with the same value every frame, re-running effects.
     if (get().isPlaying === p) return
+    const ctl = get().previewEngine === 'client' ? previewCtl : null
+    if (ctl) {
+      // Client engine: Space, the transport click and L all land HERE, inside
+      // the key/click handler, so laneA.play() and AudioContext.resume() run
+      // synchronously in the user's gesture (spec §3.5). The shuttle's rates
+      // are Phase 4: forward plays at 1x, reverse does not start.
+      if (p && get().playbackRate < 0) return
+      if (p) set({ isPlaying: ctl.play(get().playhead) })
+      else {
+        ctl.pause()
+        set({ isPlaying: false })
+      }
+      return
+    }
     set({ isPlaying: p })
   },
   replayFromStart: () => {
@@ -515,7 +573,16 @@ export const useStore = create<State>((set, get) => ({
     }
     return false
   },
-  setPlaybackRate: (r) => set({ playbackRate: r }),
+  setPlaybackRate: (r) => {
+    // Client engine: no reverse until Phase 4 — a reverse rate while it plays
+    // forward stops it (inside the same key handler), never left running.
+    if (r < 0 && get().isPlaying && get().previewEngine === 'client' && previewCtl) {
+      previewCtl.pause()
+      set({ playbackRate: r, isPlaying: false })
+      return
+    }
+    set({ playbackRate: r })
+  },
   setLiveTransform: (t) => set({ liveTransform: t }),
   setFraming: (f) => set({ framing: f }),
   setLiveFilter: (f) => set({ liveFilter: f }),
@@ -534,6 +601,30 @@ export const useStore = create<State>((set, get) => ({
     set(afterImportLeaves(get(), id))
   },
   clearExportError: () => set({ exportError: null }),
+
+  resolvePreviewEngine: async () => {
+    let wire: unknown
+    try {
+      wire = await api.previewSettings()
+    } catch {
+      wire = null   // an older backend, or offline: the server preview
+    }
+    set({ previewSettings: parsePreviewSettings(wire) })
+    applyPreviewMode()
+  },
+
+  setPreviewEngineSetting: async (engine) => {
+    try {
+      const wire = await api.setPreviewEngine(engine)
+      previewFailure = null
+      set({ previewSettings: parsePreviewSettings(wire) })
+      applyPreviewMode()
+      return true
+    } catch (e) {
+      toast.error(`Couldn't change the preview: ${errorMessage(e)}`)
+      return false
+    }
+  },
 
   // Clears per-session view/selection state. Call when switching sessions so a
   // stale playhead/selection/marks from the previous project don't bleed onto
@@ -674,6 +765,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   init: async () => {
+    void get().resolvePreviewEngine()
     // Reconnect to what THIS BROWSER was last showing, not whatever session
     // happens to be most recently touched on the SERVER. `listSessions()` is
     // sorted by each session directory's own mtime (storage.py), which any
@@ -777,6 +869,14 @@ export const useStore = create<State>((set, get) => ({
           undoDepth: undoDepthOf(info) })
   },
 
+  refreshSession: async () => {
+    const sid = get().sessionId
+    if (!sid) return
+    const info = await api.getSession(sid)
+    if (get().sessionId !== sid) return
+    set({ ops: info.ops, sessionName: info.name, redoAvailable: !!info.redo_available, undoDepth: undoDepthOf(info) })
+  },
+
   // Coalesce many quick refresh() calls (chat tool storms, drag bursts) into a
   // single fetch ~120ms after the last request. Keeps the EDL fetch from
   // becoming the bottleneck during a flurry of dispatches.
@@ -831,14 +931,28 @@ export const useStore = create<State>((set, get) => ({
       // We KEEP the previous export's download link after an edit, but the UI
       // marks it "outdated" once the refreshed edlHash differs from the hash the
       // export was rendered from (lib/exportLink, TopBar).
+      // Client engine (spec §4.1): the answer carries the post-op EDL and its
+      // render hash, applied at once; the refresh then only fetches the
+      // session fields. Server mode sends exactly the request it always did.
+      const ctl = get().previewEngine === 'client' ? previewCtl : null
+      const job = ASYNC_DISPATCH_TOOLS.has(tool) || !!opts?.asJob
       const res: { result: { redo_available?: boolean; ok?: boolean; undo_depth?: number };
-                   edl_hash: string; op: Op | null; undo_depth?: number } =
-        (ASYNC_DISPATCH_TOOLS.has(tool) || opts?.asJob)
+                   edl_hash: string; op: Op | null; undo_depth?: number
+                   edl?: EDL; render_hash?: string } =
+        job
           ? await runDispatchJob(sid, tool, args, opts?.onProgress, baseHash)
-          : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args, baseHash)
+          : ctl
+            ? await api.dispatchWithEdl<{ redo_available?: boolean }>(sid, tool, args, baseHash)
+            : await api.dispatch<{ redo_available?: boolean }>(sid, tool, args, baseHash)
       // The view now IS this answer's timeline — the next gesture's base
       // (QA-105) must not wait for the debounced refresh.
       mutationSeq += 1
+      const landed = !!ctl && !!res.edl && typeof res.render_hash === 'string'
+        && get().sessionId === sid && previewCtl === ctl
+      if (landed) {
+        ctl!.applyTimeline(res.edl as unknown as EdlLike, res.render_hash!)
+        set({ edl: res.edl!, ...pruneSelection(get(), res.edl!) })
+      }
       if (typeof res.edl_hash === 'string' && get().sessionId === sid) set({ edlHash: res.edl_hash })
       // QA-046: the server's undo horizon rides on every dispatch answer, so
       // the Undo button is right the instant an edit (or an undo) lands.
@@ -858,12 +972,13 @@ export const useStore = create<State>((set, get) => ({
         if (typeof res.result?.redo_available === 'boolean') {
           set({ redoAvailable: res.result.redo_available })
         }
-        await get().refresh()
+        await (landed ? get().refreshSession() : get().refresh())
         return res
       }
       // Use the debounced refresh: chained tool calls (chat storms) coalesce
       // into one EDL fetch instead of N.
-      get().refreshSoon()
+      if (landed) refreshSessionSoon()
+      else get().refreshSoon()
       // Offer a quick Undo on destructive deletes — covers every entry point
       // (keyboard, Properties Delete, timeline context menu) in one spot. The
       // backend's own undo is the restore; 'undo' isn't a delete so it can't loop.
@@ -921,7 +1036,7 @@ export const useStore = create<State>((set, get) => ({
   //
   // A superseded call resolves (with the hash currently on screen) rather than
   // rejecting: being replaced by a newer render is not an error for any caller.
-  renderPreview: async () => {
+  renderPreview: async (opts) => {
     const sid = get().sessionId
     if (!sid) return ''
     const seq = ++previewSeq
@@ -931,7 +1046,7 @@ export const useStore = create<State>((set, get) => ({
     set({ previewRendering: true })
     const superseded = () => seq !== previewSeq || get().sessionId !== sid
     try {
-      const r = await api.preview(sid, ac.signal)
+      const r = opts?.priority === 'low' ? await api.previewLow(sid, ac.signal) : await api.preview(sid, ac.signal)
       if (superseded()) return get().previewHash ?? ''
       set({ previewHash: r.edl_hash })
       return r.edl_hash
@@ -1150,6 +1265,87 @@ useStore.subscribe((state, prevState) => {
   // QA-062: the prompt bar's run log belongs to the project it ran in.
   if (state.sessionId !== prevState.sessionId) fireSessionSwitch(state.sessionId)
 })
+
+// INSTANT PREVIEW: pick the engine, keep one controller per open project in
+// client mode, and feed it every EDL that did not come from a dispatch answer
+// (first load, imports, jobs, another window) and every preview render that
+// lands (bakes). Nothing here runs in server mode.
+function applyPreviewMode(): void {
+  const s = useStore.getState()
+  if (!s.previewSettings) return
+  previewCaps ??= probePreviewCapabilities()
+  const rateOk = ticksPerFrame(s.edl?.canvas?.fps ?? 30) !== null
+  let r = resolvePreviewMode(s.previewSettings, previewCaps, rateOk)
+  if (r.mode === 'client' && previewFailure) r = { mode: 'server', reason: previewFailure }
+  if (r.mode !== s.previewEngine || r.reason !== s.previewEngineReason) {
+    useStore.setState({ previewEngine: r.mode, previewEngineReason: r.reason })
+  }
+}
+
+function syncPreviewController(): void {
+  const s = useStore.getState()
+  const want = s.previewEngine === 'client' && s.sessionId ? s.sessionId : null
+  if (previewCtl && previewCtl.sessionId === want) return
+  previewCtl?.dispose()
+  previewCtl = null
+  if (!want) {
+    if (s.clientView) useStore.setState({ clientView: null })
+    return
+  }
+  const ctl = new PreviewController({
+    sessionId: want,
+    fetch: (url, init) => clientFetch(url, init),
+    onFallback: (reason) => {
+      if (previewCtl !== ctl) return
+      previewFailure = reason
+      console.warn(`[preview] client engine off for this project: ${reason}`)
+      if (useStore.getState().isPlaying) useStore.setState({ isPlaying: false })
+      applyPreviewMode()
+    },
+    onPlaying: (playing) => { if (previewCtl === ctl) useStore.setState({ isPlaying: playing }) },
+    onView: (view) => { if (previewCtl === ctl) useStore.setState({ clientView: view }) },
+    onServerTimeline: (edl, edlHash) => {
+      const now = useStore.getState()
+      if (previewCtl !== ctl || now.sessionId !== want || now.pendingOps > 0 || now.edlHash === edlHash) return
+      useStore.setState({ edl: edl as unknown as EDL, edlHash, ...pruneSelection(now, edl as unknown as EDL) })
+    },
+  })
+  previewCtl = ctl
+  if (s.edl) ctl.applyTimeline(s.edl as unknown as EdlLike, null)
+  if (s.previewHash) ctl.onPreviewLanded(s.previewHash)
+}
+
+useStore.subscribe((state, prev) => {
+  if (state.sessionId !== prev.sessionId) previewFailure = null
+  const fpsChanged = state.edl?.canvas?.fps !== prev.edl?.canvas?.fps
+  if (fpsChanged || state.sessionId !== prev.sessionId) applyPreviewMode()
+  const now = useStore.getState()
+  if (now.previewEngine !== prev.previewEngine || now.sessionId !== prev.sessionId || (now.previewEngine === 'client' && !previewCtl)) {
+    syncPreviewController()
+  }
+  const ctl = previewCtl
+  if (!ctl) return
+  if (now.edl && now.edl !== prev.edl && (now.edl as unknown) !== ctl.appliedEdl) {
+    ctl.applyTimeline(now.edl as unknown as EdlLike, null)
+  }
+  if (now.previewHash !== prev.previewHash) ctl.onPreviewLanded(now.previewHash)
+})
+
+// The session-only counterpart of refreshSoon() for client-mode dispatches
+// (spec §4.1 step 3): same 120 ms coalescing, no EDL fetch.
+const refreshSessionSoon = (() => {
+  let pending: ReturnType<typeof setTimeout> | null = null
+  return () => {
+    if (pending) clearTimeout(pending)
+    pending = setTimeout(() => {
+      pending = null
+      useStore.getState().refreshSession().catch((e) => {
+        console.warn('[store] session refresh failed:', e)
+        if (!isEngineOffline(e)) toast.error(`Couldn't refresh the project: ${errorMessage(e)}`)
+      })
+    }, 120)
+  }
+})()
 
 // QA-109: mirror the connection state into the store, and on the way back
 // online say so once and take the server's timeline (edits made elsewhere, or

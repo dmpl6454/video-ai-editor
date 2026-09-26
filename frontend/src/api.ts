@@ -79,7 +79,9 @@ export interface AppVersion {
 // KEPT ON PURPOSE, unreachable in the shipped build but NOT dead. These types
 // and the pair* client functions below describe /api/pair/*, which the backend
 // answers with 404 while `phone_pairing` is false. Their only consumer is
-// PhonePanel.tsx, and TopBar mounts PhonePanel exactly when /api/version reports
+// PhonePanel.tsx, and the tool panel's "From iPhone" header action (ToolPanel's
+// FromIPhone, wave D R3; the top bar mounted it before) mounts PhonePanel
+// exactly when /api/version reports
 // `phone_pairing: true` — so with the shipped flag off nothing here is called,
 // and the release that flips `VAE_PHONE_PAIRING` back on brings the panel and
 // these calls back with no frontend change at all. That conditional, not a
@@ -415,6 +417,17 @@ export const api = {
       baseHash ? { tool, args, base_hash: baseHash } : { tool, args }
     ),
 
+  // The same dispatch, answered WITH the post-op EDL and its render hash
+  // (`include=edl`, INSTANT_PREVIEW_SPEC §4.1): the client preview engine
+  // shows the edit from this answer alone. Only the client engine asks.
+  dispatchWithEdl: <T = unknown>(sid: string, tool: string, args: Record<string, unknown> = {},
+                                 baseHash?: string | null) =>
+    http<DispatchWithEdl<T>>(
+      'POST',
+      `/sessions/${sid}/dispatch?include=edl`,
+      baseHash ? { tool, args, base_hash: baseHash } : { tool, args }
+    ),
+
   // Async dispatch (202 + job id), for the handful of tools that load an ML
   // model and process every frame. Held on the sync path they pin a request
   // worker for minutes, which starves the rest of the app — the round-5
@@ -436,6 +449,16 @@ export const api = {
     http<{ path: string; cached: boolean; edl_hash: string; url: string }>(
       'POST',
       `/sessions/${sid}/preview`,
+      undefined,
+      signal,
+    ),
+
+  // The client engine's background render (bakes, §4.1 step 8): niced on
+  // the server (`priority=low`), same answer as preview().
+  previewLow: (sid: string, signal?: AbortSignal) =>
+    http<{ path: string; cached: boolean; edl_hash: string; url: string }>(
+      'POST',
+      `/sessions/${sid}/preview?priority=low`,
       undefined,
       signal,
     ),
@@ -609,8 +632,13 @@ export const api = {
   testAnthropicKey: () =>
     http<{ ok: boolean; message: string }>('POST', '/settings/anthropic-key/test', {}),
   // Wave D: which preview engine runs (auto | client | server; default server).
-  // READ-ONLY here — it lives in settings.json / VAI_PREVIEW_ENGINE.
+  // Stored in settings.json (`preview.engine`), overridden by
+  // VAI_PREVIEW_ENGINE; read here, written by setPreviewEngine below
+  // (PUT /api/settings/preview, Settings' "Instant preview (beta)").
   previewSettings: () => http<PreviewSettingsWire>('GET', '/settings/preview'),
+  // Write it (loopback, same origin, JSON only on the server); answers the GET body.
+  setPreviewEngine: (engine: 'auto' | 'client' | 'server') =>
+    http<PreviewSettingsWire>('PUT', '/settings/preview', { engine }),
 
   // This project's render caches against their byte budget, and Clear
   // (QA-106; render/cache_budget.py). Clear keeps the preview on screen.
@@ -620,6 +648,25 @@ export const api = {
 }
 
 export interface RenderCacheUsage { bytes: number; budget_bytes: number; by_area: Record<string, number> }
+
+/** `/dispatch?include=edl`'s answer: the usual one plus the post-op EDL
+ *  (or `edl_omitted` past 1 MB) and the render hash of that state. */
+export interface DispatchWithEdl<T = unknown> {
+  result: T
+  edl_hash: string
+  op: Op | null
+  undo_depth?: number
+  render_hash: string
+  edl?: EDL
+  edl_omitted?: boolean
+}
+
+/** A fetch that carries the app's client header (api/auth.py asks every
+ *  non-media request for it once LAN mode is armed) — for the preview
+ *  engine's own requests (frame_map, proxy lookups). */
+export function clientFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, headers: { ...CLIENT_HEADERS, ...(init.headers as Record<string, string> | undefined) } })
+}
 
 // One POST that returns the Response for an SSE body. Kept separate from
 // http() because the body is a stream, not JSON, but it sends the same

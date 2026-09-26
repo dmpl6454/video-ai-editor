@@ -233,8 +233,11 @@ def rps_for_path(path: str) -> float | None:
 #: any other path and any other method keep the per-path bucket.
 PREVIEW_MEDIA_RPS = 400.0
 PREVIEW_MEDIA_BUCKET = "preview-media"
+#: Bake media (spec §5.3: one session's bake of one render hash, init + span
+#: packs) are the same kind of request and share the same bucket.
 _PREVIEW_MEDIA = re.compile(
-    r"^/api/proxies/[0-9a-f]{24}/(init\.mp4|v/\d{1,6}\.bin|a/\d{1,6}\.flac)$")
+    r"^/api/proxies/[0-9a-f]{24}/(init\.mp4|v/\d{1,6}\.bin|a/\d{1,6}\.flac)$"
+    r"|^/api/sessions/s_[A-Za-z0-9]{6,64}/bake/[0-9a-f]{16}/(init\.mp4|v/\d{1,6}\.bin)$")
 _PREVIEW_MEDIA_METHODS = frozenset({"GET", "HEAD"})
 
 

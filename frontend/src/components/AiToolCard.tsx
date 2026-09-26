@@ -22,7 +22,7 @@ interface Props {
 type Running = Extract<RunState, { status: 'running' }>
 const IDLE: RunState = { status: 'idle' }
 
-// The CC button's remembered choices (CaptionsButton.tsx) so the Auto captions
+// The Captions panel's remembered choices (lib/captionRun.ts) so the Auto captions
 // card agrees with it. 'as-spoken' / 'quality' mean "send nothing".
 function readCaptionPrefs(): { captionTargetPref: string | null; captionSpeedPref: string | null } {
   try {

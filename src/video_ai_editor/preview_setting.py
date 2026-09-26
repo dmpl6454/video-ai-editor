@@ -13,8 +13,11 @@ Spec: docs/design/INSTANT_PREVIEW_SPEC.md §1 G6, §7, §12.
 Stored with the app settings (``settings.json`` next to the phone-pairing
 state, read through ``api.pairing.load_settings`` — one file, one mtime
 cache) under ``"preview": {"engine": ...}``. ``VAI_PREVIEW_ENGINE`` overrides
-it for development and the harness. The frontend only READS it
-(``GET /api/settings/preview``): there is no write route in this milestone.
+it for development and the harness. The frontend reads it at
+``GET /api/settings/preview`` and writes it at ``PUT /api/settings/preview``
+(``set_preview_engine``: validated to ``auto | client | server``, written
+read-modify-write under the settings lock so a concurrent phone-pairing
+write is never lost).
 
 It also gates BACKGROUND work: eager proxy builds after an import run only
 when the engine is not ``server`` (on-demand spans always work), so the
@@ -55,6 +58,28 @@ def preview_engine() -> tuple[str, str]:
     return DEFAULT_ENGINE, "default"
 
 
+def set_preview_engine(value: object) -> str:
+    """Store ``preview.engine`` in the app settings; returns the stored
+    value. Raises ValueError for anything but ``auto | client | server``
+    (exact names; surrounding space and case are forgiven, like the reader).
+    Other keys of the ``preview`` section and of the file are kept."""
+    engine = _normalise(value)
+    if engine is None:
+        raise ValueError(f"preview.engine must be one of {', '.join(ENGINES)}")
+    from .api import pairing
+
+    def apply(data: dict) -> dict:
+        out = dict(data)
+        section = out.get("preview")
+        section = dict(section) if isinstance(section, dict) else {}
+        section["engine"] = engine
+        out["preview"] = section
+        return out
+
+    pairing._mutate(apply)
+    return engine
+
+
 def eager_proxies_enabled() -> bool:
     """Whether imports queue a full proxy build in the background."""
     flag = (os.environ.get("VAI_PROXY_EAGER") or "").strip().lower()
@@ -65,4 +90,5 @@ def eager_proxies_enabled() -> bool:
     return preview_engine()[0] != "server"
 
 
-__all__ = ["ENGINES", "DEFAULT_ENGINE", "ENV_VAR", "preview_engine", "eager_proxies_enabled"]
+__all__ = ["ENGINES", "DEFAULT_ENGINE", "ENV_VAR", "preview_engine", "set_preview_engine",
+           "eager_proxies_enabled"]

@@ -1954,7 +1954,8 @@ def _refuse_empty_export(store) -> None:
                                              "Add a clip, then export."})
 
 
-def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None):
+def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None,
+                           low_priority: bool = False):
     """render_preview for an interactive client, newest-EDL-wins (QA-004).
 
     Registers the render with `render.cancel.PREVIEWS`: a request for a
@@ -1976,7 +1977,8 @@ def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None
     if ticket is not None:
         ticket.joined(ev)
     try:
-        with _rcancel.scope(ev, deadline_s=_rcancel.preview_deadline_s(edl.duration)):
+        with _rcancel.scope(ev, deadline_s=_rcancel.preview_deadline_s(edl.duration)), \
+                _rcancel.low_priority(low_priority):
             return render_preview(edl, store.dir)
     finally:
         if ticket is not None:
@@ -2001,7 +2003,7 @@ async def _await_client_disconnect(request: Request, ticket: _PreviewTicket) -> 
             return
 
 
-async def _preview_for_client(request: Request, sid: str, store):
+async def _preview_for_client(request: Request, sid: str, store, low_priority: bool = False):
     """`_render_preview_latest` in the threadpool, abandoned if the HTTP
     client disconnects before it finishes (QA-041).
 
@@ -2015,7 +2017,7 @@ async def _preview_for_client(request: Request, sid: str, store):
     from starlette.concurrency import run_in_threadpool
     ticket = _PreviewTicket(sid)
     fut = asyncio.ensure_future(
-        run_in_threadpool(_render_preview_latest, sid, store, ticket))
+        run_in_threadpool(_render_preview_latest, sid, store, ticket, low_priority))
     watcher = asyncio.ensure_future(_await_client_disconnect(request, ticket))
     try:
         # A departed client does not end the wait: the render thread still
@@ -2037,8 +2039,19 @@ def _preview_timed_out() -> HTTPException:
                                           "and clip positions, then try again."})
 
 
+def _preview_priority_is_low(priority: str | None) -> bool:
+    """`priority` of POST /preview: absent or `normal` → False, `low` → True,
+    anything else a 422 (a typo must not silently render at full priority)."""
+    p = (priority or "normal").strip().lower()
+    if p not in ("normal", "low"):
+        raise HTTPException(422, {"error": "invalid_priority",
+                                  "message": "priority must be 'normal' or 'low'."})
+    return p == "low"
+
+
 @app.post("/api/sessions/{sid}/preview")
-async def make_preview(sid: str, request: Request, wait: int = 1):
+async def make_preview(sid: str, request: Request, wait: int = 1,
+                       priority: str | None = Query(None, max_length=16)):
     """Render a preview.
 
     `wait=1` (default): blocks until done. Backwards-compatible with the
@@ -2048,13 +2061,18 @@ async def make_preview(sid: str, request: Request, wait: int = 1):
     `/api/jobs/{job_id}` for progress; the result field gets the same
     payload the sync path returns. Use this for hosted/multi-user setups
     where the request thread shouldn't block on a 30s render.
+    `priority=low` (wave D, INSTANT_PREVIEW_SPEC §4.1 step 8): the client
+    engine already shows the edit, so this render is background work — its
+    ffmpeg processes run niced (nice 10; BELOW_NORMAL on Windows). A render
+    of the same hash already in flight is shared as it is.
     """
     from starlette.concurrency import run_in_threadpool
+    low = _preview_priority_is_low(priority)
     store = await run_in_threadpool(_store, sid)
     if wait:
         from .render.cancel import RenderCancelled, RenderTimedOut
         try:
-            res = await _preview_for_client(request, sid, store)
+            res = await _preview_for_client(request, sid, store, low)
         except RenderTimedOut:
             raise _preview_timed_out() from None
         except RenderCancelled:
@@ -2084,7 +2102,8 @@ async def make_preview(sid: str, request: Request, wait: int = 1):
         from .render import cancel as _rcancel
         try:
             with _rcancel.scope(cancel_event or threading.Event(),
-                                deadline_s=_rcancel.preview_deadline_s(edl_snapshot.duration)):
+                                deadline_s=_rcancel.preview_deadline_s(edl_snapshot.duration)), \
+                    _rcancel.low_priority(low):
                 res = render_preview(edl_snapshot, session_dir_snapshot)
         except _rcancel.RenderTimedOut:
             raise RuntimeError("This preview took far longer than it should and was stopped.") from None
@@ -2402,12 +2421,17 @@ app.include_router(_prompt_routes.router)
 _prompt_running_response = _prompt_routes.prompt_running_response
 
 # Instant-preview routes (wave D, INSTANT_PREVIEW_SPEC §5.2): proxy index,
-# spans, FLAC chunks, clip sources under cache/, and the read-only
-# preview.engine setting. Behind the same middleware (Host allowlist,
-# cross-site refusal); their own shared rate bucket (api/hardening.rate_bucket).
+# spans, FLAC chunks, the preview.engine setting, the reference frame map and
+# bakes. Behind the same middleware (Host allowlist, cross-site refusal);
+# media reads share one rate bucket (api/hardening.rate_bucket).
 from .api import preview_routes as _preview_routes
-_preview_routes.configure(resolve_store=_store)
+_preview_routes.configure(resolve_store=_store, preview_edl=_preview_edl)
 app.include_router(_preview_routes.router)
+
+# Speed-curve presets for the Inspector (wave D, lane S2): the one table
+# `edl/speed_presets.py` that set_speed and the agent tool also read.
+from .api.speed_routes import router as _speed_router
+app.include_router(_speed_router)
 
 
 @app.get("/api/sessions/{sid}/waveform")

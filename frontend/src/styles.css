@@ -45,6 +45,11 @@
      control reads as off at a glance, yet stays >= 4.5:1 on --bg-disabled. */
   --text-disabled: #8e8e98;
   --bg-disabled: #1d1d22;
+  /* An ICON-ONLY disabled button (the timeline toolbar): no text to keep
+     legible, so it dims well below --text-dim — a disabled Split / Freeze /
+     Delete must not look usable (review RD2; its name and tooltip still say
+     why, and WCAG exempts disabled controls from contrast). */
+  --icon-disabled: #5c5c66;
   /* Control rhythm: every top-bar control and every full-width panel button
      is one of these heights; icons are 16 px (components/Icon.tsx). */
   --control-h: 28px;
@@ -199,94 +204,112 @@ input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color:
 .app.right-collapsed { --rsplit-col: 0px; --right-col: var(--right-rail-w); }
 .app.left-collapsed .splitter-left, .app.right-collapsed .splitter-right { visibility: hidden; }
 
+/* ---- the top bar (LEFT_RAIL_SPEC §1.4, R3) ------------------------------
+   Three jobs in one grid: LEFT which project and what is running (brand mark ·
+   wordmark · project · Applying · activity), CENTRE the canvas (Ratio), RIGHT
+   getting it out (Save · Open · links · error · Export). The left column is
+   the only one that shrinks and only the project name truncates; the right is
+   at least max-content, so Export is never clipped; Ratio is exactly centred
+   whenever the right cluster fits in half the bar (M7). When content does not
+   fit, useTopBarFit steps up a density (.tb-d1 … .tb-d4) that hides WORDS,
+   never controls. This replaced QA-012's flex-shrink weights, the "⋯" menu
+   and the breakpoint-only hiding, which clipped the activity chip at 1024. */
 .topbar {
   grid-area: topbar;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
   align-items: center;
-  gap: 12px;
-  padding: 0 14px;
+  column-gap: 12px;
+  padding: 0;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
   overflow: hidden;
 }
-.topbar > * { flex-shrink: 0; }
+.tb-left { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; overflow: hidden; }
+.tb-left > * { flex-shrink: 0; }
+.tb-center { justify-self: center; display: flex; align-items: center; }
+.tb-right { justify-self: end; display: flex; align-items: center; gap: 8px; padding-right: 12px; }
+.tb-right > * { flex-shrink: 0; }
 /* Control rhythm (wave C): every control in the bar is --control-h tall with
    one font size, icon and words centred on one line; icon-only controls are
-   square. The bar used 24-34 px controls at 11-13 px before. */
-.topbar button, .topbar select {
+   square. The project chip keeps the pills' 11 px. */
+.topbar button, .topbar a {
   height: var(--control-h); font-size: 12px; line-height: 1;
 }
 .topbar button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; }
 .topbar button.icon-btn { width: var(--control-h); padding: 0; }
-.topbar .split-caret, .topbar .cc-caret { padding: 0 6px; gap: 2px; }
 .topbar .pill { line-height: 18px; }
+/* The brand mark sits exactly over the rail (same width, same --bg-0), so the
+   rail reads as one column from the top of the window to its foot. */
+.tb-mark {
+  display: flex; align-items: center; justify-content: center; align-self: stretch;
+  width: var(--rail-w); background: var(--bg-0); border-right: 1px solid var(--line); color: var(--accent);
+}
+.topbar h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+.tb-sr-only, .ratio-sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+/* The project chip: the ONE item that truncates (min 80 px, ellipsis). */
+.tb-left > .tb-project { position: relative; display: flex; flex-shrink: 1; min-width: 80px; }
+.topbar-session {
+  min-width: 0; max-width: 240px; padding: 0 10px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tb-project > .topbar-session { max-width: min(240px, 100%); font-size: 11px; }
 .topbar-session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The tools (Ratio ▾, Text, Captions, Help, Shortcuts, ⋯) — QA-012. This was
-   `.topbar-scroll`, an overflow-x strip whose scrollbar was 0 px tall: at 1440
-   wide Help and Shortcuts sat past its edge, at 1024 Text and Captions did too,
-   with nothing on screen to say so. Nothing scrolls now; the bar is budgeted
-   instead (see the width rules below) so every core control fits from 1024 up.
-   `min-width: 0` + clipping stay as a last resort for a transient extra (a
-   long "⋯ Applying" moment), which then clips the trailing version badge
-   first — never a control, and never .topbar-pinned. */
-.topbar-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow: hidden;
-  min-width: 0;
-  flex-shrink: 1;
+.tb-applying { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+/* The download links (.vae <a>, MP4 <button>) share one look: a 28 px text
+   control in --good, flagged --warn and struck through when outdated. */
+.topbar .tb-dl {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 4px; border: none; border-radius: 6px;
+  background: none; color: var(--good); text-decoration: none; cursor: pointer;
 }
-.topbar-tools > * { flex-shrink: 0; }
-.topbar-session { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* WHO GIVES WAY FIRST. When something extra lands in the bar (a long project
-   name, "↓ .vae", "↓ MP4", an export error chip) the DESCRIPTIVE items on the
-   left shrink with an ellipsis — brand, project name, canvas facts — and the
-   tools barely do: flex-shrink is weighted by size, so 0.01 against 1 leaves
-   the tools ~1 % of the squeeze until the left items reach their floor. Before
-   this, the tools absorbed it: at 1440 an export error hid Captions, Help and
-   Shortcuts (QA-012). Their full text stays in each item's title. */
-.topbar-tools { flex-shrink: 0.01; }
-.topbar > .topbar-brand,
-.topbar > .topbar-canvas { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.topbar > [data-session-picker] { flex-shrink: 1; min-width: 56px; display: flex; }
-.topbar > [data-session-picker] > .topbar-session { max-width: min(190px, 100%); }
-.topbar-narrow { display: none !important; }
-/* The width budget, widest-first: below 1440 the brand, the safe-zone picker
-   and the version badge give way (the last two move into "⋯"); below 1280 the
-   canvas pill does too (its facts head the Ratio menu); below 1100 the gaps
-   tighten and the project name narrows. */
-@media (max-width: 1439px) {
-  .topbar-brand, .topbar-wide { display: none !important; }
-  .topbar-narrow { display: inline-flex !important; }
+.topbar .tb-dl:hover:not(:disabled) { background: var(--bg-3); }
+.tb-stale-dot { display: none; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+/* A download link that no longer matches the current edit — kept but flagged. */
+.stale-dl { color: var(--warn) !important; text-decoration: line-through; opacity: 0.85; }
+.stale-dl:hover { opacity: 1; }
+/* The export error: the reason, capped per density, full text in its name
+   and tooltip; icon-only at density 3. */
+.topbar .topbar-export-error {
+  max-width: 220px; min-width: 0; padding: 0 4px; border: none; background: none;
+  color: var(--accent); overflow: hidden; cursor: pointer;
 }
-@media (max-width: 1279px) {
-  .topbar-canvas { display: none; }
-}
-/* An export error chip is the widest thing the pinned cluster can show; its
-   full text is in its title. Below 1280 it gets a laptop-sized share, or it
-   pushed Help and Shortcuts out of .topbar-tools at 1024 (QA-012). */
-.topbar-export-error { max-width: 220px; }
-@media (max-width: 1279px) {
-  .topbar-export-error { max-width: 120px; }
-}
-@media (max-width: 1099px) {
-  .topbar, .topbar-pinned { gap: 8px; }
-  .topbar > [data-session-picker] > .topbar-session { max-width: min(140px, 100%); }
-  /* 💾 / 📂 keep their icon, title and accessible name; the words go. */
-  .topbar-btn-label { display: none; }
-}
+.tb-err-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The rename field takes the chip's place and shrinks with it. */
+.tb-project > .topbar-session-rename { min-width: 0; max-width: 100%; }
 
-/* Ratio ▾ — the aspect ratios and platform presets in one menu. */
-.ratio-trigger { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+/* Density steps (useTopBarFit): cumulative classes on the header. */
+.topbar.tb-d1 .topbar-brand {                   /* still the page's h1 */
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+}
+.topbar.tb-d1 .ratio-facts { display: none; }
+.topbar.tb-d1 .topbar-export-error { max-width: 180px; }
+.topbar.tb-d2 .tb-stale-word { display: none; }
+.topbar.tb-d2 .tb-stale-dot { display: inline-block; }
+.topbar.tb-d2 .topbar-export-error { max-width: 140px; }
+.topbar.tb-d3 .topbar-btn-label,
+.topbar.tb-d3 .tb-err-text,
+.topbar.tb-d3 .tb-err-x,
+.topbar.tb-d3 .tb-applying-word { display: none; }
+.topbar.tb-d3 .tb-labelled,                    /* icon-only Save / Open: square */
+.topbar.tb-d3 .topbar-export-error { width: var(--control-h); padding: 0; }
+.topbar.tb-d3 .tb-applying { padding: 3px 6px; }
+.topbar.tb-d3 .tb-project > .topbar-session { max-width: min(160px, 100%); }
+.topbar.tb-d4 .act-word { display: none; }
+
+/* Ratio ▾ — aspect ratios, platform presets and the safe-zone overlay in one
+   menu (§2.10): three named groups, then the canvas facts. */
+.ratio-trigger { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-2); font-variant-numeric: tabular-nums; }
+.ratio-facts { color: var(--text-dim); }
 .ratio-trigger.is-open { border-color: var(--accent-2); }
 .ratio-glyph { display: inline-block; border: 1.5px solid currentColor; border-radius: 2px; opacity: 0.75; width: 9px; height: 13px; }
 .ratio-glyph[data-aspect="16:9"] { width: 14px; height: 8px; }
 .ratio-glyph[data-aspect="1:1"] { width: 11px; height: 11px; }
 .ratio-glyph[data-aspect="4:5"] { width: 10px; height: 12px; }
 .ratio-glyph[data-aspect="custom"] { width: 11px; height: 9px; border-style: dashed; }
-.ratio-menu, .topbar-more-menu {
+.ratio-menu {
   position: fixed; z-index: 1000; min-width: 230px; padding: 4px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
@@ -322,24 +345,7 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
 }
 .menu-item-icon:hover:not(:disabled), .menu-item-icon:focus-visible { color: var(--accent); background: var(--bg-3); }
 .menu-row { display: flex; align-items: center; gap: 2px; }
-.topbar-more-menu { min-width: 200px; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
-.topbar-more-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-dim); }
-.topbar-more-version { font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-/* The pinned cluster is never a flex-shrink target and always renders after
-   .topbar-tools, so Export — its last child — is always the toolbar's
-   right-most, always-on-screen element. */
-.topbar-pinned {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-.topbar h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-.topbar .grow { flex: 1; }
 .topbar .pill { background: var(--bg-3); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--text-dim); }
-/* A download link that no longer matches the current edit — kept but flagged. */
-.stale-dl { color: var(--warn) !important; text-decoration: line-through; opacity: 0.85; }
-.stale-dl:hover { opacity: 1; }
 
 .sidebar {
   background: var(--bg-1);
@@ -668,6 +674,7 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
   color: var(--text-dim);
 }
 .timeline-toolbar .tb-icon:hover:not(:disabled) { color: var(--text); }
+.timeline-toolbar .tb-icon:disabled { color: var(--icon-disabled) !important; }
 /* A toggle shows its state, not just its hover (snapping, QA-050). */
 .timeline-toolbar .tb-toggle.is-on {
   color: var(--accent-2);
@@ -709,10 +716,13 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
 .timeline-pane { container-type: inline-size; }
 @container (max-width: 760px) { .timeline-toolbar .tb-clock-dur { display: none; } }
 @container (max-width: 640px) { .timeline-toolbar .tb-zoom { display: none; } }
-/* The toolbar's full content is 485 px; the R1 grid leaves the centre 484 px
-   at the 1024 default (it was 512 before the rail), so the zoom steps drop
-   below 490 px — before "Zoom to fit" would be pushed out of the bar. */
-@container (max-width: 490px) { .timeline-toolbar .tb-zoomstep { display: none; } }
+/* The toolbar's full content is 519 px since Freeze (wave D S2; 485 before);
+   the R1 grid leaves the centre 484 px at the 1024 default (it was 512 before
+   the rail), so the zoom steps drop below 522 px — before "Zoom to fit" would
+   be pushed out of the bar. Below 460 px (a 900-990 px window) the gaps
+   tighten too: without the steps the bar is 451 px, 417 at the tight gaps. */
+@container (max-width: 522px) { .timeline-toolbar .tb-zoomstep { display: none; } }
+@container (max-width: 460px) { .timeline-toolbar { gap: 4px; } .timeline-toolbar .tb-sep { margin: 0; } }
 
 .timeline-canvas-wrap {
   flex: 1;

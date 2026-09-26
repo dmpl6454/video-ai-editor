@@ -1,0 +1,132 @@
+/* The Captions tool panel (CaptionsPanel.tsx, LEFT_RAIL_SPEC §2.5): the old
+   CaptionsButton.css, renamed with the component it styles. Imported by the
+   component, not from styles.css. Colours come from the app's custom
+   properties; motion is transform/opacity only and stands still under
+   prefers-reduced-motion (QA-127; the busy mark is the app's lucide
+   LoaderCircle, .icon-spin in styles.css, which already does). */
+
+.captions-panel { display: flex; flex-direction: column; }
+
+/* The panel's primary action, filled with the blue accent pair. */
+.captions-panel .cc-generate {
+  background: var(--accent-2-fill);
+  border-color: var(--accent-2-fill);
+  color: var(--on-accent);
+  font-weight: 600;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.captions-panel .cc-generate:hover:not(:disabled) {
+  background: var(--accent-2-fill-hover);
+  border-color: var(--accent-2-fill-hover);
+}
+.captions-panel .cc-generate:active:not(:disabled) { transform: scale(0.98); }
+.captions-panel .cc-generate:disabled { background: var(--bg-disabled); border-color: var(--line); }
+
+.cc-panel-hint {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+/* --- running: spinner, percentage, ETA, bar, cancel --------------------- */
+
+.cc-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.cc-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.cc-busy-text {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 8px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cc-busy-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.cc-bar {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+/* The fill scales from the left (transform, not width: compositor-only). */
+.cc-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-2);
+  transform-origin: left center;
+  transition: transform 0.4s linear;
+}
+.captions-panel .cc-cancel { min-height: 26px; }
+
+/* --- language and speed: radios that keep every option's hint ----------- */
+
+.cc-opts {
+  min-width: 0;
+  margin: 16px 0 0;
+  padding: 0;
+  border: none;
+}
+/* A legend ignores its own top margin inside a fieldset: the fieldset carries
+   the section's spacing, the legend only the gap to its first option. */
+.cc-opts legend.tool-section-label { margin: 0 0 6px; padding: 0; }
+.cc-opt {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  align-items: start;
+  gap: 2px 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease;
+}
+.cc-opt:hover { background: var(--bg-2); }
+.cc-opt:has(input:checked) { background: var(--bg-2); }
+.cc-opts:disabled .cc-opt { cursor: not-allowed; }
+.cc-opts:disabled .cc-opt:hover { background: transparent; }
+.cc-opt input { grid-row: 1; margin: 2px 0 0; }
+.cc-opt-label { grid-column: 2; font-size: 12px; color: var(--text); }
+.cc-opt-hint {
+  grid-column: 2 / 4;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-faint);
+}
+.cc-opts:disabled .cc-opt-label { color: var(--text-disabled); }
+/* QA-065: an uncached caption model says how big its first download is. */
+.cc-opt-dl {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  padding: 1px 6px;
+  font-size: 10px;
+  white-space: nowrap;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: 999px;
+}
+
+.captions-panel .cc-style { margin-top: 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .captions-panel .cc-generate, .cc-bar-fill, .cc-opt { transition: none; }
+}

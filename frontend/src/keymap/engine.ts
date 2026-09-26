@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import { useStore } from '../store'
-import { COMMAND_BY_ID } from './commands'
+import { COMMAND_BY_ID, type CommandScope } from './commands'
 import { PRESETS, DEFAULT_PRESET, type KeyMap, type PresetId } from './presets'
 
 /**
@@ -58,19 +58,31 @@ const KEY_LABELS: Record<string, string> = {
   Delete: 'Del', Backspace: '⌫', Enter: '↵', Escape: 'Esc', Home: 'Home', End: 'End',
 }
 
-/** Human-readable chord, e.g. "⌘B", "Shift+Del", "=". */
-export function chordLabel(chord: string): string {
+/** Mac modifier glyphs in Apple's order (⌃ ⌥ ⇧ ⌘, as in every menu: ⇧⌘Z,
+ *  ⌥⌘K), whatever order the chord string stores them in. */
+const MAC_MOD_ORDER: Record<string, number> = { Ctrl: 0, Alt: 1, Shift: 2, Mod: 3 }
+
+/** Human-readable chord for a platform, e.g. "⌘B", "⌥⌘K", "Shift+Del", "=". */
+export function formatChord(chord: string, isMac: boolean): string {
   if (!chord) return ''
-  return chord.split('+').map((p) => {
-    if (p === 'Mod') return IS_MAC ? '⌘' : 'Ctrl'
-    if (p === 'Ctrl') return IS_MAC ? '⌃' : 'Ctrl'   // secondary modifier (mac only)
-    if (p === 'Meta') return IS_MAC ? '⌘' : 'Win'    // secondary modifier (win/linux only)
-    if (p === 'Alt') return IS_MAC ? '⌥' : 'Alt'
-    if (p === 'Shift') return IS_MAC ? '⇧' : 'Shift'
+  const parts = chord.split('+')
+  const key = parts.pop() as string
+  const mods = isMac ? [...parts].sort((a, b) => (MAC_MOD_ORDER[a] ?? 9) - (MAC_MOD_ORDER[b] ?? 9)) : parts
+  return [...mods, key].map((p) => {
+    if (p === 'Mod') return isMac ? '⌘' : 'Ctrl'
+    if (p === 'Ctrl') return isMac ? '⌃' : 'Ctrl'   // secondary modifier (mac only)
+    if (p === 'Meta') return isMac ? '⌘' : 'Win'    // secondary modifier (win/linux only)
+    if (p === 'Alt') return isMac ? '⌥' : 'Alt'
+    if (p === 'Shift') return isMac ? '⇧' : 'Shift'
     if (p.startsWith('Key')) return p.slice(3)
     if (p.startsWith('Digit')) return p.slice(5)
     return KEY_LABELS[p] ?? p
-  }).join(IS_MAC ? '' : '+')
+  }).join(isMac ? '' : '+')
+}
+
+/** Human-readable chord on this platform. */
+export function chordLabel(chord: string): string {
+  return formatChord(chord, IS_MAC)
 }
 
 // ---- persistence ----
@@ -166,6 +178,88 @@ const CONTROL_NAV_KEYS = new Set([
   'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown',
 ])
 
+/** A focused tab's own activation keys (WAI-ARIA APG tabs: Space and Enter
+ *  activate the focused tab). */
+const TAB_KEYS = new Set(['Space', 'Enter'])
+/** Keys a text field keeps even under ⌘: select all, copy, paste, cut, undo /
+ *  redo of the TEXT, and the caret/word moves. */
+const NATIVE_TEXT_KEYS = new Set([
+  'KeyA', 'KeyC', 'KeyV', 'KeyX', 'KeyZ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Backspace', 'Delete',
+])
+
+/** What {@link shouldRun} reads from the keydown's target: a DOM element in
+ *  the app, a plain object in tests. */
+export interface KeyTarget {
+  tagName?: string
+  type?: string
+  isContentEditable?: boolean
+  closest?(selector: string): unknown
+  getAttribute?(name: string): string | null
+}
+
+/** A field the user is typing in: it keeps every key. */
+export function isTextEntry(t: KeyTarget | null | undefined): boolean {
+  const tag = t?.tagName
+  return tag === 'TEXTAREA' || !!t?.isContentEditable ||
+    (tag === 'INPUT' && TEXT_INPUT_TYPES.has(t?.type || 'text'))
+}
+
+/**
+ * Whether a command bound to `chord` runs for a keydown on `target`
+ * (LEFT_RAIL_SPEC §4.2). The chord is resolved to a command FIRST, because
+ * the answer depends on the command's scope:
+ *
+ * 1. While a modal dialog is open (`modalOpen`, or the target is inside an
+ *    `aria-modal` one) nothing runs: the editor behind it is inert, and a
+ *    panel switch, F6 or ⌘E must not act behind the modal's back.
+ * 2. Text entry keeps every key, except for an `'anywhere'` command (F6),
+ *    a `'global'` command on a ⌘ chord (⌘E, ⌥⌘K: they type nothing) that is
+ *    not a native text chord (⌘A/C/V/X/Z, ⌘-arrows, ⌘⌫), and a command whose
+ *    `alsoInText` region holds the field (⌥9/⌥0 from the Chat box: a keyboard
+ *    user can go back to the Inspector without leaving the panel first).
+ * 3. A `[data-keymap-ignore]` scope (the AI panel's forms, the media rows,
+ *    the Prompt bar…) keeps its keys from `'default'`
+ *    commands; `'global'` ones (⌥1…⌥8, ⌘E…) still run there (critique H1).
+ *    Per-command scope rather than "the scope swallows only unmodified keys":
+ *    ⌘Z inside an AI form must not undo the timeline behind the user's back.
+ * 4. A focused non-text control keeps its navigation keys (arrows step a
+ *    slider, Home/End jump it). Everything else goes to the command, above
+ *    all Space → play/pause, so a quick slider tweak does not swallow it.
+ * 4b. A `[data-keymap-own="Delete Backspace"]` target keeps exactly the keys
+ *    it names, with any modifiers, from every command: a focused curve point
+ *    removes itself on Delete, and ripple delete never fires there, while ⌘Z,
+ *    Space, J/K/L and N still do (review RD2: an ignore scope silenced them).
+ * 5. A focused tab keeps Space and Enter: they activate the tab (APG). This
+ *    is what makes Space on the selected rail tab collapse / re-open the tool
+ *    panel (§2.4) while every other global shortcut — ⌘Z, J/K/L, N — still
+ *    works with focus on the rail (the review RD1 regression an ignore scope
+ *    on the rail caused). A mouse click does not focus a rail tab, so after
+ *    a click Space still plays.
+ */
+export function shouldRun(
+  scope: CommandScope | undefined,
+  chord: string,
+  target: KeyTarget | null | undefined,
+  ctx: { modalOpen?: boolean; alsoInText?: string } = {},
+): boolean {
+  if (ctx.modalOpen || target?.closest?.('[aria-modal="true"]')) return false
+  const s = scope ?? 'default'
+  const key = chord.slice(chord.lastIndexOf('+') + 1)
+  if (isTextEntry(target)) {
+    if (s === 'anywhere') return true
+    if (ctx.alsoInText && target?.closest?.(ctx.alsoInText)) return true
+    return s === 'global' && chord.split('+').includes('Mod') && !NATIVE_TEXT_KEYS.has(key)
+  }
+  if (s === 'default' && target?.closest?.('[data-keymap-ignore]')) return false
+  const owner = target?.closest?.('[data-keymap-own]') as KeyTarget | null | undefined
+  const owned = owner?.getAttribute?.('data-keymap-own')
+  if (owned && owned.split(/\s+/).includes(key)) return false
+  const tag = target?.tagName
+  if ((tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT') && CONTROL_NAV_KEYS.has(key)) return false
+  if (TAB_KEYS.has(chord) && target?.getAttribute?.('role') === 'tab') return false
+  return true
+}
+
 export function useKeymap() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -177,36 +271,18 @@ export function useKeymap() {
       // appends several markers at the exact same playhead position (issue
       // 25), and the same would apply to any other single-press shortcut.
       if (e.repeat) return
-      const tgt = e.target as HTMLElement | null
-      const tag = tgt?.tagName
-      const isTextEntry =
-        tag === 'TEXTAREA' ||
-        !!tgt?.isContentEditable ||
-        (tag === 'INPUT' && TEXT_INPUT_TYPES.has((tgt as HTMLInputElement).type || 'text'))
-      // Genuine text fields keep every key for typing.
-      if (isTextEntry) return
-      // An explicit opt-out scope. Generated forms (the AI panel) are dense
-      // with checkboxes and buttons that a keyboard user reaches by Tab and
-      // toggles with Space — the one key the transport shortcut below would
-      // otherwise take from them. Inside such a scope the control wins,
-      // exactly as a text field does; everywhere else the rule stays.
-      if (tgt?.closest?.('[data-keymap-ignore]')) return
-
-      // A focused non-text control (range slider, checkbox, button, select)
-      // still keeps its own navigation keys, but global shortcuts — above all
-      // Space → play/pause — must win so a quick slider tweak doesn't swallow
-      // them. Capture phase + preventDefault below stop the control from also
-      // reacting (e.g. a button "clicking" on Space).
-      const onFormControl =
-        tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT'
-      if (onFormControl && CONTROL_NAV_KEYS.has(e.code)) return
-
       const chord = chordFromEvent(e)
       if (!chord) return
       const cmdId = useKeymapStore.getState().chordToCommand()[chord]
       if (!cmdId) return
       const cmd = COMMAND_BY_ID[cmdId]
       if (!cmd) return
+      // Text fields, ignore scopes, a control's own keys and open modals: the
+      // scope rule above. Capture phase + preventDefault below stop the
+      // control from also reacting when the command does run (e.g. a button
+      // "clicking" on Space).
+      const modalOpen = !!document.querySelector('[aria-modal="true"]')
+      if (!shouldRun(cmd.scope, chord, e.target as HTMLElement | null, { modalOpen, alsoInText: cmd.alsoInText })) return
       // preventDefault suppresses the host's default for every interceptable
       // chord: page scroll on Space/arrows/Home/End, browser page-zoom on
       // Mod+=/Mod+-, bookmark dialog on Mod+D, history nav on Alt+←/→,

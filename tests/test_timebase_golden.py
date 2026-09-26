@@ -40,6 +40,24 @@ def _times(rng: random.Random) -> list[float]:
                     float((Fraction(k) + Fraction(1, 2)) / r)]
     out += [rng.uniform(0, 30) for _ in range(40)]
     out += [rng.uniform(0, 43200) for _ in range(12)]
+    out += _near_ties()
+    return out
+
+
+def _near_ties() -> list[float]:
+    """Times within a few ulp of a half-frame tie at the NTSC rates (review
+    RD2): the float product t·num/den can land on the other side of k + 0.5
+    from the exact one, which only the TS port's TIE_MARGIN escape to exact
+    arithmetic gets right (a TIE_MARGIN of 0 used to pass every case)."""
+    out: list[float] = []
+    for r in (Fraction(30000, 1001), Fraction(60000, 1001), Fraction(24000, 1001)):
+        for k in (0, 1, 2, 7, 29, 59, 1000, 1001, 4095, 30000, 107891, 2 ** 20 + 3):
+            t = float((Fraction(k) + Fraction(1, 2)) / r)
+            lo = hi = t
+            for _ in range(4):
+                lo = math.nextafter(lo, -math.inf)
+                hi = math.nextafter(hi, math.inf)
+                out += [lo, hi]
     return out
 
 

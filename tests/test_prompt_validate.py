@@ -81,7 +81,9 @@ def test_unknown_tool_and_the_hook_stack_are_where_the_spec_says(facts):
 
 def test_unknown_arg_required_arg_type_and_enum(facts):
     rejected(plan(step("add_music", src="bed.wav", gain_db=3)), facts, "unknown args ['gain_db']")
-    rejected(plan(step("set_speed", clip_id="$v1_all")), facts, "missing required arg 'factor'")
+    # Wave D S2: set_speed takes a factor, a curve OR a preset — one is needed.
+    rejected(plan(step("set_speed", clip_id="$v1_all")), facts, "needs one of factor, curve or preset")
+    rejected(plan(step("trim_clip", **{"in": 1.0})), facts, "missing required arg 'clip_id'")
     rejected(plan(step("set_speed", clip_id="$v1_all", factor="fast")), facts, "must be number")
     rejected(plan(step("set_speed", clip_id="$v1_all", factor=True)), facts, "must be number")
     rejected(plan(step("set_clip_fit", clip_id="$v1_all", fit="stretch")), facts, "must be one of")

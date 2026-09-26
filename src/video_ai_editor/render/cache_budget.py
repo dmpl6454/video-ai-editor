@@ -14,6 +14,7 @@ functions of the EDL and can always be rendered again:
     cache/videos/video_*.mp4            video-only previews (audio remux path)
     cache/chunks/chunk_*.mp4, seg_*.mp4 per-clip chunks and their segments
     cache/reversed/rev_*                reversed-clip intermediates (QA-037)
+    cache/speed_audio/sa_*              speed-curve sound intermediates (Wave D S1)
     cache/verify/verify_*.mp4           prompt-verifier renders
 
 Everything else under cache/ is NOT a render cache and is never touched here:
@@ -50,6 +51,7 @@ CACHE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("cache/chunks", "chunk_*.mp4"),
     ("cache/chunks", "seg_*.mp4"),
     ("cache/reversed", "rev_*"),
+    ("cache/speed_audio", "sa_*"),
     ("cache/verify", "verify_*.mp4"),
 )
 

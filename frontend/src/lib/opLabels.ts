@@ -37,7 +37,7 @@ export const TOOL_TITLES: Record<string, string> = {
   set_clip_fit: 'Fit', set_clip_muted: 'Mute', set_clip_reverse: 'Reverse', set_clip_timing: 'Timing', set_clip_transform: 'Transform',
   set_clip_z: 'Layer order', set_duck: 'Ducking', set_loudness_target: 'Loudness', set_pip_framing: 'Framing',
   set_property: 'Edit', set_speed: 'Speed', set_track_locked: 'Lock track', set_track_muted: 'Mute track',
-  set_track_solo: 'Solo track', detach_audio: 'Detach audio',
+  set_track_solo: 'Solo track', detach_audio: 'Detach audio', freeze_frame: 'Freeze frame',
   set_video_fade: 'Fade', set_volume: 'Volume', smooth_slow_motion: 'Smooth slow motion',
   split_at: 'Split', stabilize: 'Stabilize', transcribe: 'Transcribe', translate_captions: 'Translate captions',
   trim_clip: 'Trim', tts_voiceover: 'Voiceover', undo: 'Undo', upscale: 'AI upscale', vocal_isolate: 'Isolate vocals',

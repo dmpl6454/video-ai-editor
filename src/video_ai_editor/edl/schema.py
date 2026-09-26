@@ -7,6 +7,8 @@ from typing import Any, Literal, Union
 from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from . import speed_curve as _speed_curve
+
 # 3 (QA-076): `TextStyle.font` is nullable (None = the role's own font) and a
 #   text clip's scalar x/y is always where it renders. v2 overloaded values as
 #   "unset" sentinels: font "Inter-Black" (so Inter Black could not be picked)
@@ -85,7 +87,14 @@ EDL_VERSION = 3
 # 16: (Wave D frame-map goldens) xfade inputs share a 1/R clock instead of
 #     AVTB, so a seam whose left side had been through µs roundings no longer
 #     starts one frame late (the picture ran a frame longer than the sound).
-RENDER_BEHAVIOR_VERSION = 16
+# 17: (Wave D, lane S1) a speed CURVE renders (it rendered at 1x and filled
+#     its source length of timeline) and `Clip.freeze` holds one frame: a
+#     cached chunk or preview of a curve clip shows the wrong frames.
+# 18: (Wave D, review RD2) keyframed transform/opacity on a v1 clip are
+#     evaluated at clip-local TIMELINE seconds (the clip's retime of the
+#     chain's `t`), not `t - start`: a clip not at 0, or retimed, animates
+#     differently.
+RENDER_BEHAVIOR_VERSION = 18
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -311,8 +320,24 @@ class Clip(_EDLModel):
     out: float = 0.0
     start: float = 0.0
     transform: Transform = Field(default_factory=Transform)
-    speed: float | dict | None = None  # number or curve {"curve":[[t,r],...]}
+    # A number (constant speed), None (1x), or a CURVE {"curve": [[x, r], ...]}
+    # — x a position over the clip's OUTPUT, 0..1, r the speed there
+    # (0.1-10x), piecewise linear (`edl/speed_curve.py`, normalised on
+    # validation). The clip's timeline footprint is the curve's integral.
+    speed: float | dict | None = None
     reverse: bool = False
+    # FREEZE FRAME (CapCut "Freeze"): when set, the clip is a STILL — it holds
+    # ONE frame of `src` for `freeze` timeline seconds, and its sound is
+    # silence. The held frame is the one a 1x clip starting at `in` shows
+    # first (`render/frame_map.freeze_frame`), so the preview draws it from
+    # the source's own proxy, index for index, with no new image file. `out`
+    # is not read by any render (keep it `in` + one frame); `speed` and
+    # `reverse` do not apply and are cleared. None (the default, omitted from
+    # the JSON) = an ordinary clip.
+    # Omitted from the JSON while unset (`exclude_if`, pydantic >= 2.11 — the
+    # lock pins 2.13), so an EDL written before the field existed serialises,
+    # hashes and renders exactly as it did.
+    freeze: float | None = Field(None, exclude_if=lambda v: v is None)
     # Visual fade-from/to-black on the clip's VIDEO, in clip-local TIMELINE
     # seconds (same time convention as audio.fade_in/out since QA-038 — a 1s
     # fade on a 2x clip lasts 1s on screen). Deliberately TOP-LEVEL fields,
@@ -371,11 +396,36 @@ class Clip(_EDLModel):
     @field_validator("speed")
     @classmethod
     def _check_speed(cls, v: float | dict | None) -> float | dict | None:
-        if v is None or isinstance(v, dict):
+        if v is None:
             return v
+        if isinstance(v, dict):
+            # A curve is normalised (sorted, clamped, ends pinned); a dict
+            # with no usable curve means 1x — what it always rendered as.
+            return _speed_curve.normalize_curve(v)
         f = _finite(float(v), "speed")
         # <= 0 has always meant "normal speed" (speed_factor); store it as such.
         return None if f <= 0 else min(SPEED_RANGE[1], max(SPEED_RANGE[0], f))
+
+    @field_validator("freeze")
+    @classmethod
+    def _check_freeze(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
+        f = _finite(float(v), "freeze")
+        return None if f <= 0 else min(TIME_RANGE[1], f)
+
+    @model_validator(mode="after")
+    def _freeze_is_a_still(self) -> "Clip":
+        # A still has no speed and no direction. Cleared here (not rejected)
+        # so every consumer — render, program map, UI — sees one meaning.
+        # object.__setattr__: this runs on assignment too, and must not
+        # re-enter validation.
+        if self.freeze is not None:
+            if self.speed is not None:
+                object.__setattr__(self, "speed", None)
+            if self.reverse:
+                object.__setattr__(self, "reverse", False)
+        return self
 
     @property
     def duration(self) -> float:
@@ -384,12 +434,26 @@ class Clip(_EDLModel):
         return max(0.0, self.out - self.in_)
 
     @property
+    def speed_curve(self) -> list[tuple[float, float]] | None:
+        """The curve's points when `speed` is a curve, else None."""
+        return _speed_curve.curve_points(self.speed)
+
+    @property
     def speed_factor(self) -> float:
-        """Scalar speed, 1.0 for unset/curve dicts (curves render as 1.0
-        today; when the compositor learns curves this stays the timeline-
-        footprint contract point)."""
+        """MEAN speed: source seconds per timeline second. The scalar for a
+        constant speed, 1.0 unset; a curve's mean (its footprint is
+        `duration / mean`); a freeze's `duration / freeze` (1.0 when it
+        consumes no source). Linear callers (`agent/timemap`, trim/split math)
+        are therefore exact at a curve clip's EDGES only — inside one, use
+        `source_offset_at` / `timeline_offset_at`."""
+        if self.freeze is not None:
+            d = self.duration
+            return d / self.freeze if d > 0 else 1.0
         if isinstance(self.speed, (int, float)) and self.speed > 0:
             return float(self.speed)
+        pts = self.speed_curve
+        if pts is not None:
+            return _speed_curve.mean_speed(pts)
         return 1.0
 
     @property
@@ -398,8 +462,38 @@ class Clip(_EDLModel):
         A 10s source at 2x fills 5s of timeline — this is what
         recompute_duration, ripple math, and the timeline draw must use;
         `duration` alone silently assumed speed=1 everywhere (so speeding a
-        clip never changed the transport total or clip widths)."""
+        clip never changed the transport total or clip widths). A curve fills
+        its integral (`duration / mean speed`, edl/speed_curve.py); a freeze
+        fills `freeze` seconds. The frame count is `frame_of` of this, like
+        any speed (`compositor.clip_frames`)."""
+        if self.freeze is not None:
+            return float(self.freeze)
+        pts = self.speed_curve
+        if pts is not None:
+            return self.duration / _speed_curve.mean_speed(pts)
         return self.duration / self.speed_factor
+
+    def source_offset_at(self, t: float) -> float:
+        """Source seconds past `in` shown at clip-local TIMELINE seconds `t`
+        (exact for a curve: its integral; 0 for a freeze)."""
+        if self.freeze is not None:
+            return 0.0
+        pts = self.speed_curve
+        if pts is not None:
+            cm = _speed_curve.curve_map(pts, self.duration)
+            return _speed_curve.source_seconds(cm, t) if cm else 0.0
+        return max(0.0, t) * self.speed_factor
+
+    def timeline_offset_at(self, s: float) -> float:
+        """Clip-local TIMELINE seconds at which source second `in + s`
+        plays (the inverse of `source_offset_at`; 0 for a freeze)."""
+        if self.freeze is not None:
+            return 0.0
+        pts = self.speed_curve
+        if pts is not None:
+            cm = _speed_curve.curve_map(pts, self.duration)
+            return _speed_curve.out_seconds(cm, max(0.0, s)) if cm else 0.0
+        return max(0.0, s) / self.speed_factor
 
 
 class TextStyle(_EDLModel):

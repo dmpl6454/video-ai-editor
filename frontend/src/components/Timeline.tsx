@@ -14,6 +14,8 @@ import {
 } from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 import { splitTimeFor } from '../lib/splitTargets'
+import { freezeAtPlayhead, planFreeze } from '../lib/freezeFrame'
+import { useSpeedCatalog } from '../lib/speed/speedCatalog'
 import { v1CutPoints } from '../lib/cutPoints'
 import { chordLabel, IS_MAC, useKeymapStore } from '../keymap/engine'
 import { undoTitle } from '../lib/undoHorizon'
@@ -623,8 +625,14 @@ export function Timeline() {
         // testing the drawn values flagged every transition as broken data.
         const rawStartT = c.start
         const rawEndT = c.start + clipDuration(c)
+        // Less than HALF A FRAME is not an overlap: every clip renders whole
+        // frames (`clip_frames` rounds its footprint) and the v1 ripple puts
+        // each start on the nearest frame, so a retimed clip (1.5x, a speed
+        // curve, wave D S2) routinely "ends" a fraction of a frame past its
+        // neighbour's start — it was drawn dashed as corrupt data.
+        const overlapTol = 0.5 / (Number(edl?.canvas?.fps) || 30)
         const overlapsPrior = seenRanges.some(
-          ([s, e]) => rawStartT < e - 1e-9 && rawEndT > s + 1e-9)
+          ([s, e]) => rawStartT < e - overlapTol && rawEndT > s + overlapTol)
         seenRanges.push([rawStartT, rawEndT])
         const x = labelWidth + start * zoom
         const w = Math.max(2, dur * zoom)
@@ -2133,6 +2141,11 @@ export function Timeline() {
 
   const laneW = Math.max(0, size.w - labelWidth)
   const hasClips = (edl?.tracks ?? []).some((t) => t.clips.length > 0)
+  // Freeze frame (wave D S2, lib/freezeFrame): enabled only where it would
+  // land; the disabled title says why. The hold is the server's default.
+  const freezePlan = planFreeze(edl, selection, playhead)
+  const speedCat = useSpeedCatalog()
+  const freezeHold = speedCat.status === 'ready' ? ` for ${speedCat.catalog.freeze_default} s` : ''
   // Zoom from the toolbar: anchored on the playhead / view centre (above).
   function zoomTo(z: number) { setZoomStore(z) }
   function zoomBy(factor: number) { setZoomStore(zoom * factor) }
@@ -2391,6 +2404,12 @@ export function Timeline() {
           disabled={!hasClips}
           title={`Split at playhead (${chordLabel('Mod+KeyB')})`} aria-label="Split at playhead">
           <TimelineIcon name="split" /></button>
+        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.freezeFrame.run(useStore.getState())}
+          disabled={freezePlan.kind !== 'freeze'}
+          title={freezePlan.kind === 'freeze'
+            ? `Freeze frame — hold the frame at the playhead${freezeHold}`
+            : `Freeze frame — ${freezePlan.message}`}
+          aria-label="Freeze frame"><TimelineIcon name="freeze" /></button>
         <button className="tb-icon" onClick={() => void COMMAND_BY_ID.rippleDelete.run(useStore.getState())}
           disabled={!selection && multiSelection.length === 0}
           title={`Delete selection${rippleKeys ? ` (${rippleKeys})` : ''} — Main video closes the gap; other lanes keep their times`}
@@ -2547,6 +2566,11 @@ export function Timeline() {
               // time and the playhead is render time — same path as ⌘B.
               action: () => useStore.getState().splitTrackAt(
                 contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead)) },
+            ...(contextMenu.trackId === 'v1' && menuClip && isMediaClip(menuClip)
+              ? [{ label: 'Freeze frame',
+                   title: `Hold the frame at the playhead${freezeHold}; the rest of the clip follows it`,
+                   action: () => { void freezeAtPlayhead(useStore.getState(), toast.info, contextMenu.clipId) } }]
+              : []),
             { label: 'Duplicate',
               title: `Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`,
               action: () => dispatch('duplicate_clip', { clip_id: contextMenu.clipId }) },

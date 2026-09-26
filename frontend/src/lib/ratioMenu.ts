@@ -8,6 +8,7 @@
 // clicking Reels nothing on screen said the canvas was now 1080×1920.
 
 import { PLATFORM_SPECS } from './exportOptions'
+import { formatFps } from './frameStep'
 
 export interface CanvasLike {
   w: number
@@ -63,4 +64,25 @@ export function presetActive(p: PlatformPreset, c: CanvasLike | null | undefined
 export function ratioLabel(c: CanvasLike | null | undefined): string {
   if (!c) return 'Ratio'
   return activeAspect(c) ?? `${c.w}×${c.h}`
+}
+
+/** The trigger's visible value (LEFT_RAIL_SPEC §2.10): the platform preset in
+ *  effect when exactly ONE is (Shorts, IG 4:5 …), else the aspect or raw size.
+ *  Reels and TikTok are one spec, so a canvas carrying it names neither — the
+ *  aspect is the honest answer there, and the menu checks both. */
+export function ratioValue(c: CanvasLike | null | undefined): string {
+  const on = PLATFORM_PRESETS.filter((p) => presetActive(p, c))
+  return on.length === 1 ? on[0].label : ratioLabel(c)
+}
+
+/** The trigger's accessible name: "Canvas ratio: 9:16, 1080 by 1920, 30 fps".
+ *  It always carries the facts, which the trigger shows only at density 0. */
+export function ratioTriggerName(c: CanvasLike | null | undefined): string {
+  if (!c) return 'Canvas ratio'
+  return `Canvas ratio: ${ratioValue(c)}, ${c.w} by ${c.h}, ${formatFps(c.fps)} fps`
+}
+
+/** The facts the trigger adds at density 0: "1080×1920 · 30 fps". */
+export function ratioFacts(c: CanvasLike): string {
+  return `${c.w}×${c.h} · ${formatFps(c.fps)} fps`
 }

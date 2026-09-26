@@ -359,8 +359,10 @@ def _set_field(page, label: str, value: str):
 def test_one_timing_model_start_moves_end_and_duration_trim(browser, base_url, media):
     sid = _session(base_url, media, "c2 timing", clips=2)
     page = _open(browser, base_url, sid)
-    # A new text clip is selected at once (T Text): Start / End / Duration.
-    page.get_by_role("button", name="Text", exact=True).click()
+    # A new text clip is selected at once (the Text panel's "Add text at
+    # playhead", LEFT_RAIL_SPEC R2): Start / End / Duration.
+    page.get_by_role("tab", name="Text", exact=True).click()
+    page.get_by_role("button", name="Add text at playhead").click()
     page.locator(".props").get_by_role("textbox", name="Duration", exact=True).wait_for()
 
     def text_clip():

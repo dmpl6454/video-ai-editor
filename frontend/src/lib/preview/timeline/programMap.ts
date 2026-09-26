@@ -5,7 +5,8 @@
 // per-clip memo so an edit recomputes only the clips whose timing changed,
 // a diff → dirty ranges, and the RLE form `GET /frame_map` returns (§8).
 
-import { planView, type EdlClip, type EdlLike, type PlanSeam } from './framePlan'
+import { freezeOf, planView, type EdlClip, type EdlLike, type PlanSeam } from './framePlan'
+import { curvePoints, meanSpeed } from './speedCurve'
 import {
   clipFrameList, reverseSegmentFrames, reversedFrameCount, sourceFromJson, ticksPerFrame,
   type SourceInfo, type SourceInfoJson,
@@ -68,8 +69,10 @@ function srcJsonKey(s: SourceInfo): string {
 /** The timing hash of §4.1: every field frame selection reads. */
 export function clipTimingKey(c: EdlClip, src: SourceInfo, fps: FpsLike): string {
   const r = rateOf(fps)
-  const sp = typeof c.speed === 'number' ? c.speed : null
-  return `${c.src}|${c.in ?? 0}|${c.out ?? 0}|${sp}|${c.reverse ? 1 : 0}|${r.num}/${r.den}|${srcJsonKey(src)}`
+  const curve = curvePoints(c.speed)
+  const sp = typeof c.speed === 'number' ? c.speed : curve ? JSON.stringify(curve) : null
+  const fz = freezeOf(c)
+  return `${c.src}|${c.in ?? 0}|${c.out ?? 0}|${sp}|${c.reverse ? 1 : 0}|${fz ?? ''}|${r.num}/${r.den}|${srcJsonKey(src)}`
 }
 
 function memoFrames(c: EdlClip, src: SourceInfo, fps: FpsLike): Int32Array {
@@ -225,8 +228,11 @@ export interface AudioPlacement {
   n: number
   /** First source sample of the clip at 1x (48 kHz source timeline). */
   src0: number
+  /** Constant speed; a curve's MEAN speed; 0 for a freeze. */
   rate: number
-  mode: 'exact' | 'varispeed' | 'tempo' | 'reverse'
+  /** `curve`: source position follows the speed curve (speedCurve.ts
+   *  `sourceSeconds`), no runs; `silence`: a freeze. */
+  mode: 'exact' | 'varispeed' | 'tempo' | 'reverse' | 'curve' | 'silence'
   runs: AudioRun[]
   /** Samples at the head/tail mixed with the neighbour by acrossfade. */
   fadeIn: number
@@ -281,20 +287,31 @@ export function audioPlacements(pm: ProgramMap, lookup?: SourceLookup): AudioPla
     if (seg.kind === 'clip') {
       const c = pm.clips[seg.clip]
       const sp = typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 ? c.speed : null
+      const curve = curvePoints(c.speed)
       let mode: AudioPlacement['mode']
       let runs: AudioRun[]
       const src0 = clipSample0(c.in ?? 0, pm.R)
+      if (freezeOf(c) !== null) {
+        out.push({ clip: seg.clip, out0: start, n: m, src0, rate: 0, mode: 'silence', runs: [], fadeIn: ov, fadeOut: 0 })
+        last = out.length - 1
+        cursor = start + m
+        continue
+      }
       if (c.reverse) {
         mode = 'reverse'
-        let src: SourceInfo | null = null
+        let src: SourceInfo | null
         try { src = lookup ? lookup(c.src) : null } catch { src = null }
-        runs = sp === null ? reversedRuns(c, src, pm.R, m) : []
+        runs = sp === null && curve === null ? reversedRuns(c, src, pm.R, m) : []
+      } else if (curve) {
+        mode = 'curve'
+        runs = []
       } else {
         mode = sp === null ? 'exact' : (c.audio?.keep_pitch ?? true) ? 'tempo' : 'varispeed'
         // Retimed sound is a resample: source position src0 + i·rate, no runs.
         runs = sp === null ? [[0, m, src0, 1]] : []
       }
-      out.push({ clip: seg.clip, out0: start, n: m, src0, rate: sp ?? 1, mode, runs, fadeIn: ov, fadeOut: 0 })
+      const rate = curve ? meanSpeed(curve) : sp ?? 1
+      out.push({ clip: seg.clip, out0: start, n: m, src0, rate, mode, runs, fadeIn: ov, fadeOut: 0 })
       last = out.length - 1
     } else {
       last = -1

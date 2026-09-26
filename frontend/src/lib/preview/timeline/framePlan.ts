@@ -12,6 +12,7 @@
 import {
   floorToFrame, frameOf, timeOf, type FpsLike,
 } from './timebase'
+import { curvePoints, meanSpeed } from './speedCurve'
 
 /** A v1 media clip as the EDL JSON carries it (`GET /edl`, dispatch). */
 export interface EdlClip {
@@ -20,9 +21,12 @@ export interface EdlClip {
   in?: number
   out?: number
   start?: number
-  /** A number, or a curve dict (renders at 1x — `Clip.speed_factor`). */
+  /** A number, or a curve `{curve: [[x, r], ...]}` (speedCurve.ts). */
   speed?: number | Record<string, unknown> | null
   reverse?: boolean
+  /** A freeze frame: hold ONE frame of `src` for this many seconds
+   *  (`Clip.freeze`; absent/null = an ordinary clip). */
+  freeze?: number | null
   audio?: { keep_pitch?: boolean; [k: string]: unknown } | null
   [k: string]: unknown
 }
@@ -55,13 +59,37 @@ export const clipIn = (c: EdlClip): number => c.in ?? 0
 export const clipOut = (c: EdlClip): number => c.out ?? 0
 export const clipStart = (c: EdlClip): number => c.start ?? 0
 
-/** `Clip.speed_factor`: the scalar speed, 1 for unset / <= 0 / curve dicts. */
+/** `Clip.speed_factor` of a speed value: the scalar speed, a curve's MEAN
+ *  speed, 1 for unset / <= 0. (A freeze's factor needs the clip:
+ *  `clipSpeedFactor`.) */
 export function speedFactor(speed: EdlClip['speed']): number {
-  return typeof speed === 'number' && speed > 0 ? speed : 1
+  if (typeof speed === 'number') return speed > 0 ? speed : 1
+  const pts = curvePoints(speed)
+  return pts ? meanSpeed(pts) : 1
 }
 
-/** `Clip.effective_duration`: timeline seconds, (out − in) / speed. */
+/** A freeze clip's hold (seconds), or null. */
+export function freezeOf(c: EdlClip): number | null {
+  return typeof c.freeze === 'number' && c.freeze > 0 ? c.freeze : null
+}
+
+/** `Clip.speed_factor`: source seconds per timeline second (mean). */
+export function clipSpeedFactor(c: EdlClip): number {
+  const fz = freezeOf(c)
+  if (fz !== null) {
+    const d = Math.max(0, clipOut(c) - clipIn(c))
+    return d > 0 ? d / fz : 1
+  }
+  return speedFactor(c.speed)
+}
+
+/** `Clip.effective_duration`: timeline seconds — (out − in) / speed, a
+ *  curve's integral ((out − in) / mean), or a freeze's hold. */
 export function effectiveDuration(c: EdlClip): number {
+  const fz = freezeOf(c)
+  if (fz !== null) return fz
+  const pts = curvePoints(c.speed)
+  if (pts) return Math.max(0, clipOut(c) - clipIn(c)) / meanSpeed(pts)
   return Math.max(0, clipOut(c) - clipIn(c)) / speedFactor(c.speed)
 }
 

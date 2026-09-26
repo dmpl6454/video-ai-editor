@@ -9,7 +9,7 @@ import {
   boxFromStickerGeom, hitsBody, stickerGeom, toLocal, unsentinel,
   getTextBoxes, publishTextBoxes, getOverlayDrag, setOverlayDrag, paintOrder,
   keyframeTimes, dropSettled, resolveLiveOverride, clampOverlayCentre, pipGeom,
-  liveCssTransform, liveCssFilter, colorGradeOf,
+  liveCssTransform, liveCssFilter, colorGradeOf, committedPoseAt, committedGradeOf,
   liveVideoCssApplies, mergeLivePipScale,
   type OverlayBox, type StickerClip, type LiveDrag,
 } from './overlay'
@@ -626,5 +626,33 @@ describe('mergeLivePipScale', () => {
     // `??` not `||` — a falsy-but-present scale must survive.
     expect(mergeLivePipScale(undefined, 0)).toEqual({ scale: 0 })
     expect(mergeLivePipScale({ scale: 0 }, 1.8)).toEqual({ scale: 0 })
+  })
+})
+
+describe('committedPoseAt / committedGradeOf (one copy for both previews, review RD2)', () => {
+  const edl = {
+    duration: 4, canvas: { w: 640, h: 360, fps: 30 },
+    tracks: [{ id: 'v1', type: 'video', transitions: [], clips: [
+      { id: 'a', src: 's', in: 0, out: 2, start: 0, transform: {}, effects: [] },
+      { id: 'b', src: 's', in: 0, out: 2, start: 2, effects: [{ type: 'color', params: { brightness: 0.2, contrast: 1.1, saturation: 0.9 } }],
+        transform: { scale: { keyframes: [[0, 1], [1, 2]], interp: 'linear' }, rotation: 10, opacity: { keyframes: [[0, 1], [2, 0]] } } },
+    ] }],
+  } as unknown as Parameters<typeof committedPoseAt>[0]
+
+  it('samples the committed pose at CLIP-LOCAL time from where the clip plays', () => {
+    const p = committedPoseAt(edl, 'b', 2.5)
+    expect(p.scale).toBeCloseTo(1.5, 9)
+    expect(p.rotation).toBe(10)
+    expect(p.opacity).toBeCloseTo(0.75, 9)
+  })
+  it('is the identity for no clip, an unknown clip or no EDL', () => {
+    const id = { scale: 1, rotation: 0, opacity: 1 }
+    expect(committedPoseAt(edl, null, 1)).toEqual(id)
+    expect(committedPoseAt(edl, 'zz', 1)).toEqual(id)
+    expect(committedPoseAt(null, 'b', 1)).toEqual(id)
+  })
+  it('reads the committed colour grade, neutral when the clip is gone', () => {
+    expect(committedGradeOf(edl, 'b')).toEqual({ brightness: 0.2, contrast: 1.1, saturation: 0.9 })
+    expect(committedGradeOf(edl, 'zz')).toEqual({ brightness: 0, contrast: 1, saturation: 1 })
   })
 })

@@ -13,7 +13,9 @@
 // * `fps` rounds each pts half-away-from-zero into output slots and shows, in
 //   slot s, the latest frame whose slot is <= s; at EOF it flushes up to the
 //   rounded end timestamp, and tpad clones the last frame (a "freeze").
-// * a reversed clip plays an intermediate built segment by segment.
+// * a reversed clip plays an intermediate built segment by segment;
+// * a speed CURVE retimes with its closed-form setpts (speedCurve.ts), then
+//   the same fps=R rule; a FREEZE holds the first frame of a 1x chain at `in`.
 //
 // Normative definition: tests/goldens/frame_map/*.json (real ffmpeg renders).
 
@@ -21,7 +23,8 @@ import {
   ffmpegMicros, frameDuration, frameOf, rateOf, rescale, seekPreroll, ticksPerFrame, timeOf,
   type FpsLike, type Rational,
 } from './timebase'
-import { clipFrames, clipIn, clipOut, reversedFrameCount, reversedView, type EdlClip } from './framePlan'
+import { clipFrames, clipIn, clipOut, freezeOf, reversedFrameCount, reversedView, type EdlClip } from './framePlan'
+import { curveMap, curvePoints, curveRetimer, type CurveMap } from './speedCurve'
 
 /** What the program map needs to know about one source (see frame_map.py). */
 export interface SourceInfo {
@@ -93,10 +96,11 @@ function firstAtOrAfter(src: SourceInfo, ticks: number): number {
   return i
 }
 
-/** `select_frames`: the source frame shown in each of `n` output slots. */
+/** `select_frames`: the source frame shown in each of `n` output slots.
+ *  `curve` (a speed curve laid over the clip) replaces the constant retime. */
 export function selectFrames(
   src: SourceInfo,
-  opts: { seekUs: number | null; durUs: number; n: number; fps: FpsLike; speed?: EdlClip['speed'] },
+  opts: { seekUs: number | null; durUs: number; n: number; fps: FpsLike; speed?: EdlClip['speed']; curve?: CurveMap | null },
 ): Int32Array {
   const { seekUs, durUs, n, fps } = opts
   const out = new Int32Array(Math.max(0, n))
@@ -116,7 +120,9 @@ export function selectFrames(
   let qlast = 0
   while (f0 + qlast + 1 <= last && ptsOf(src, f0 + qlast + 1) - base < durTb) qlast++
   const div = speedDivisor(opts.speed)
-  const retime = (x: number) => (div !== null ? Math.trunc(x / div) : x)
+  const retime = opts.curve
+    ? curveRetimer(opts.curve, src.tb)
+    : (x: number) => (div !== null ? Math.trunc(x / div) : x)
   const slotOf = (q: number) => rescale(retime(ptsOf(src, f0 + q) - base), src.tb, outTb)
   const eof = slotOf(qlast + 1)
   let q = 0
@@ -132,6 +138,13 @@ export function selectFrames(
   return out
 }
 
+/** `speed_curve_map`: the curve a clip chain retimes by, laid over
+ *  `out − in` source seconds (null for a constant speed). */
+export function speedCurveMap(speed: EdlClip['speed'], inS: number, outS: number): CurveMap | null {
+  const pts = curvePoints(speed)
+  return pts ? curveMap(pts, Math.max(0, outS - inS)) : null
+}
+
 /** `forward_clip_frames`: the clip chain opened with `clip_input_args`. */
 export function forwardClipFrames(
   src: SourceInfo, c: { in: number; out: number; speed?: EdlClip['speed'] }, n: number, fps: FpsLike,
@@ -141,7 +154,36 @@ export function forwardClipFrames(
   const end = c.out + 2 * frameDuration(fps)
   const seekUs = seek > 0 ? ffmpegMicros(seek) : null
   const durUs = ffmpegMicros(end) - (seekUs ?? 0)
-  return selectFrames(src, { seekUs, durUs, n, fps, speed: c.speed })
+  return selectFrames(src, { seekUs, durUs, n, fps, speed: c.speed, curve: speedCurveMap(c.speed, c.in, c.out) })
+}
+
+/** `compositor.freeze_input_span`: a freeze's (seek, end). */
+export function freezeInputSpan(inS: number, fps: FpsLike): [number, number] {
+  const pre = seekPreroll(inS, fps)
+  return [Math.max(0, inS - pre), inS + (1 + 2) * frameDuration(fps)]
+}
+
+/** `freeze_frame`: the source frame a freeze clip holds — the first output
+ *  frame of a 1x chain opened at `in`. */
+export function freezeFrame(src: SourceInfo, inS: number, fps: FpsLike): number {
+  const [seek, end] = freezeInputSpan(inS, fps)
+  const seekUs = seek > 0 ? ffmpegMicros(seek) : null
+  const durUs = ffmpegMicros(end) - (seekUs ?? 0)
+  return selectFrames(src, { seekUs, durUs, n: 1, fps })[0]
+}
+
+/** `freeze_in_for`: an `in` whose freeze holds source frame `frame` (checked
+ *  with `freezeFrame`, never assumed) — what a freeze-frame op writes. */
+export function freezeInFor(src: SourceInfo, frame: number, fps: FpsLike): number {
+  const f = Math.max(0, Math.min(Math.trunc(frame), Math.max(0, src.frames - 1)))
+  const base = ((ptsOf(src, f) - src.startTicks) * src.tb.num) / src.tb.den
+  const fd = src.rate.den / src.rate.num
+  const round6 = (t: number) => Math.round(t * 1e6) / 1e6
+  for (const frac of [0, 0.25, 0.5, 0.75, -0.25, 0.1, 0.9]) {
+    const t = round6(Math.max(0, base + frac * fd))
+    if (freezeFrame(src, t, fps) === f) return t
+  }
+  return round6(Math.max(0, base))
 }
 
 /** `render/reverse.py` `_segment_frames`. */
@@ -178,6 +220,7 @@ export function intermediateSource(m: number, fps: FpsLike): SourceInfo {
 /** `clip_frame_list`: source frame for each clip-local output frame of an
  *  ORIGINAL v1 clip (reversed or not). */
 export function clipFrameList(c: EdlClip, src: SourceInfo, fps: FpsLike): Int32Array {
+  if (freezeOf(c) !== null) return new Int32Array(clipFrames(c, fps)).fill(freezeFrame(src, clipIn(c), fps))
   if (c.reverse) {
     const inter = reversedIntermediate(src, clipIn(c), clipOut(c), fps)
     const view = reversedView(c, fps)

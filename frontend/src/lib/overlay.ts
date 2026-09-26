@@ -12,6 +12,9 @@
 // lets the layer that OWNS a clip's draw math publish its measured box to the
 // layer that owns interaction.
 
+import { renderSpanOf } from './timelineLayout'
+import type { EDL } from '../types'
+
 export interface KFSpec { keyframes: [number, number][]; interp?: string }
 export type KFNum = number | KFSpec
 
@@ -565,6 +568,41 @@ export function colorGradeOf(
  * just-committed values stay visible, which only holds if the comparison is
  * against what is on screen rather than against those same new values.
  */
+/** The COMMITTED scale / rotation / opacity of clip `clipId` at program time
+ *  `t` — the base a live-drag CSS stand-in multiplies. Clip-local time runs
+ *  from where the clip PLAYS (its render span), the origin the export keys
+ *  at: a keyframed v1 clip after a 1 s overlap sampled 1 s early otherwise.
+ *  One copy for the server preview (Preview.tsx) and the engine's
+ *  (ClientPreview.tsx) (review RD2: it was duplicated line for line). */
+export function committedPoseAt(
+  edl: EDL | null | undefined, clipId: string | null | undefined, t: number,
+): { scale: number; rotation: number; opacity: number } {
+  if (clipId && edl) {
+    for (const tk of edl.tracks) {
+      const found = tk.clips.find((k) => (k as { id?: string }).id === clipId)
+      if (!found) continue
+      const tx = (found as unknown as { transform?: { scale?: KFNum; rotation?: KFNum; opacity?: KFNum } }).transform
+      const localT = t - renderSpanOf(edl, tk.id, found).start
+      return { scale: sampleKF(tx?.scale, localT, 1), rotation: sampleKF(tx?.rotation, localT, 0),
+               opacity: sampleKF(tx?.opacity, localT, 1) }
+    }
+  }
+  return { scale: 1, rotation: 0, opacity: 1 }
+}
+
+/** The committed colour grade of clip `clipId` (neutral when it is gone). */
+export function committedGradeOf(
+  edl: EDL | null | undefined, clipId: string | null | undefined,
+): { brightness: number; contrast: number; saturation: number } {
+  if (clipId && edl) {
+    for (const tk of edl.tracks) {
+      const found = tk.clips.find((k) => (k as { id?: string }).id === clipId)
+      if (found) return colorGradeOf(found)
+    }
+  }
+  return { brightness: 0, contrast: 1, saturation: 1 }
+}
+
 export function liveCssFilter(
   live: { brightness?: number; contrast?: number; saturation?: number },
   baked: { brightness: number; contrast: number; saturation: number },

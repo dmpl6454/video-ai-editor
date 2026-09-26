@@ -74,8 +74,10 @@ export function RightPanel() {
       onBlur={rescue.onBlur}
     >
       <div className="right-head" hidden={!rightOpen}>
-        {/* data-keymap-ignore: ←/→ and Space belong to the tabs here. */}
-        <div className="right-tabs" role="tablist" aria-label="Right panel" data-keymap-ignore onKeyDown={onTabKey}>
+        {/* ←/→ belong to the tabs (keymap rule 4: a focused button keeps its
+            arrows) and Space/Enter to the focused tab (rule 5), like the
+            rail's; ⌘Z, J/K/L and N still work here (review RD2). */}
+        <div className="right-tabs" role="tablist" aria-label="Right panel" onKeyDown={onTabKey}>
           <button type="button" role="tab" id={TAB_ID.inspect} aria-controls="right-panel-inspect"
                   aria-selected={rightTab === 'inspect'} tabIndex={rightTab === 'inspect' ? 0 : -1}
                   aria-keyshortcuts={inspectKey.aria || undefined}

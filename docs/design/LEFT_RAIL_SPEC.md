@@ -392,27 +392,30 @@ Nothing is lost. The only deletions are:
 |---|---|---|---|
 | `panelMedia` … `panelAI` (8) | ⌥1 … ⌥8 | global | Show that panel, opening it if collapsed. **Its own chord again collapses it.** Focus is **not** moved, except by the focus-rescue rule (§5.3). |
 | `toggleToolPanel` | ⌥\ | global | Collapse / expand the tool panel |
-| `showInspector` / `showChat` | ⌥9 / ⌥0 | global | Expand the right panel on that tab; Chat focuses its input |
+| `showInspector` / `showChat` | ⌥9 / ⌥0 | global (+ text fields in `#right-panel`) | Expand the right panel on that tab; Chat focuses its input. As built (RD2): they also run from a text field inside the right panel, so ⌥0 then ⌥9 goes Chat → Inspector (focus lands on the Inspector tab) |
 | `openShortcuts` | ⌥⌘K | global | Opens ShortcutsSettings (Premiere's Keyboard Shortcuts chord) |
 | `exportVideo` | ⌘E | global | Opens the Export dialog (CapCut and Final Cut use ⌘E) |
 | `addText` | ⌥T | global | Adds a text clip with the default style at the playhead, selected (same path as the button) |
-| `cycleRegion` / `cycleRegionBack` | F6 / ⇧F6 | anywhere | Focus the next / previous region: top bar → rail (the selected tab) → tool panel → centre → right panel → rail foot |
+| `cycleRegion` / `cycleRegionBack` | F6 / ⇧F6 | anywhere | Focus the next / previous region: top bar → rail (the selected tab) → tool panel → Prompt bar → timeline (the timeline canvas) → right panel → rail foot. As built (RD2): the centre is two stops; as one it always landed in the Prompt textarea and never reached the timeline |
 
 - **Collision check against `presets.ts`:**
   - CapCut has Mod+Backslash = zoom to fit, and Premiere has bare Backslash = zoom to fit. Both are distinct chords from ⌥\.
   - CapCut and FCP have Mod+KeyK = focus Prompt, distinct from ⌥⌘K.
   - The existing Alt chords are only ⌥[ / ⌥] and ⌥← / ⌥→.
   - None of the new chords is bound today. `commands.lock.test.ts` is unaffected.
-- **Code-based matching.** Chords match on `KeyboardEvent.code`, so ⌥1 works on every layout, even though ⌥1 types "¡" in text. In text fields the engine leaves the key to typing, as it does today.
+- **Code-based matching.** Chords match on `KeyboardEvent.code`, so ⌥1 works on every layout, even though ⌥1 types "¡" in text. In text fields the engine leaves the key to typing, as it does today — except (as built, RD2) a `global` command on a ⌘ chord that types nothing and is not a native text chord (⌘E, ⌥⌘K run from the Prompt bar; ⌘A/C/V/X/Z, ⌘-arrows and ⌘⌫ stay the field's), and ⌥9/⌥0 inside the right panel. **Esc in an empty Prompt bar or Chat box** (after its own clarify / busy / clear-text handling) hands focus back to the timeline canvas.
 - **Unchanged:** `?` (Help), ⌘, (Settings), `/` and ⌘K (Prompt), and every transport and editing chord.
 
 ### 4.2 Engine change (H1)
 
 - **New field:** `Command.scope?: 'default' | 'global' | 'anywhere'`.
-- **Order of checks in `engine.ts` `onKey`:**
-  1. Text entry returns early, unless the command is `'anywhere'`.
+- **Order of checks in `engine.ts` `onKey`** (as built; R4 and review RD2):
+  0. An open `aria-modal` dialog: nothing runs.
+  1. Text entry returns early, unless the command is `'anywhere'`, or a `'global'` ⌘ chord that is not a native text chord, or the field is inside the command's `alsoInText` region.
   2. `[data-keymap-ignore]` returns early, unless the command is `'global'` or `'anywhere'`.
-  3. The `CONTROL_NAV_KEYS` guard is unchanged.
+  3. A `[data-keymap-own="…"]` target keeps exactly the keys it names, with any modifiers (a focused speed-curve point keeps Delete/Backspace, so ripple delete never fires there).
+  4. The `CONTROL_NAV_KEYS` guard is unchanged (a focused button, input or select keeps its arrows, Home/End, PageUp/PageDown).
+  5. A focused `role="tab"` keeps unmodified Space and Enter (APG).
 - **Consequence:** the chord must be resolved to a command *before* the scope checks. Split this out as a pure `shouldRun(cmd, target)` so it can be unit-tested (§8.2).
 - **Why not "the ignore scope swallows only unmodified chords":** ⌘Z inside an AI form would then undo the timeline behind the user's back. Explicit per-command scope is the smaller behaviour change.
 
@@ -421,7 +424,7 @@ Nothing is lost. The only deletions are:
 | Where | Keys |
 |---|---|
 | Rail | ↑/↓/Home/End move and activate; Enter/Space on the active tab toggles; Tab goes into the panel; Shift+Tab from the panel returns to the selected tab |
-| Right tabs | ←/→/Home/End (unchanged) |
+| Right tabs | ←/→/Home/End (unchanged; step 4 of §4.2, not an ignore scope since RD2); Space/Enter activate the focused tab (step 5) |
 | Ratio menu | ↑/↓/Home/End, Enter/Space picks, Esc closes and returns focus, Tab closes |
 | Tooltip | Esc hides it |
 | Activity chip | Standard buttons |
@@ -687,6 +690,78 @@ R2 and R3 both edit `TopBar.tsx`, so they are sequential. R4 and R5 are independ
 3. **The AI dot** lights while a Prompt-bar run holds the session lock (`lib/promptStore`: planning/running/verifying) **or** an AI tool card's job runs (`lib/aiRuns`). Its sr-only description is `hidden` (still the `aria-describedby` target), so it is not read in the Tools nav when idle.
 4. **Transition tile artwork** (`lib/transitionPreview.ts` wave polygon, `transitionsPanel.css` clock still frame at `animation-delay: -0.375s`) changed so the QA-119 "every tile's still frame is distinct" check still holds at the wider R1 panel: with the old artwork at the R1 panel width the two closest pairs measured 1.5 and 3.97 mean-pixel difference, under the test's threshold of 4 (`test_c2_panels_ui.py`). Neither file is in the R1 ownership row, and §2.5 says "TransitionsPanel, unchanged"; this is a visual change to the still frames only, recorded here rather than moved.
 5. **Timeline toolbar.** The narrower centre column (484 at 1024, was 512) needs the zoom steps to drop below 490 px instead of 440 px, or "Zoom to fit" is clipped between ~941 and 1024 px (`styles.css`, outside the grid block).
+
+### 10.2 R2–R5 as built
+
+The phases landed out of order (R4 first, then R2, R3, R5); their records are below in phase order, followed by the review RD2 fixes that changed R4's rules. Each phase's "manual pass in the packaged app" (VoiceOver names; ⌘E and ⌥⌘K in the packaged app) is still owed.
+
+#### 10.2.1 R2 as built (Text, Captions, activity)
+
+The rail shows all eight items. `TextTool.tsx` and `CaptionsButton.tsx` are deleted; `CaptionsButton.css` became `components/panels/captionsPanel.css`. The Text and Captions flows were walked in Chromium and Playwright WebKit before and after the change against a real backend: every `add_text` / `apply_text_template` request body, the resulting clips, the consent dialog, the cancel request sequence, the "was cancelled" toast and the success toast are identical (`qa-fix/R2-text-captions/walk-*.json`).
+
+1. **Files outside the R2 row.** `rail/ToolPanel.tsx` mounts the two panels (`CaptionsPanel` gets `active` and re-reads `/api/downloads` each time it shows, as the old menu did on open). `rail/ToolRail.tsx` takes the Audio (`rec`, "Recording in progress") and Captions (`busy`, "Captions are being generated") dots from `lib/activityStore`. `lib/icons.ts` gains `stop: Square`: §2.2 lists `Square` among R1's icons, but R1 did not add it.
+2. **TopBar.** Removing the two components left two separators side by side; one is removed with them. Nothing else in the bar changed (R3 owns it).
+3. **One live region.** The Captions panel's progress card is not a live region: the chip's throttled region is the one that speaks (§2.8), and a second, per-second region would chatter. The chip's region also says "Stopping captions" when Cancel is pressed and "Captions failed" when a run fails, so a failure is never announced as "Captions done".
+4. **Choices during a run.** The language and speed radios are disabled while a run is live. The old menu could not be opened during a run at all, and the radios describe the job on screen, whose language cannot change.
+5. **Chip clock.** The captions chip reads "Captions 42% · 0:31 left" once an honest ETA exists and "Captions · 5s" (elapsed) before; the mock's bare "· 0:31" could not tell the two apart. While cancelling it reads "Captions Stopping…" and "Cancel captions" stays named but disabled.
+6. **Labels kept from the product, not the mock.** The download badge keeps the existing `downloadBadge()` text ("Downloads 1.6 GB first"), and the Text field has a visible label "Text, #hashtag or @handle" (the mock had a placeholder only) with the old placeholder.
+7. **Not yet.** The AI deep-link rows in Text and Captions are R5; the chip's density step 4 is R3.
+8. **WKWebView.** `tests/wk/test_wk_activity.py` runs the real chip, rail and tool panel in a real WKWebView over a stubbed fetch and the native voiceover bridge: the take survives its panel hiding and stops from the chip, focus returns to "Generate captions" after the consent dialog, and Cancel shows "Stopping…" until the job acknowledges. The manual pass in the packaged app is still the exit criterion.
+
+#### 10.2.2 R3 as built (top-bar diet)
+
+The top bar is the §1.4 grid: `.tb-left` (brand mark over the rail, the `h1` wordmark, the project chip, "Applying", the activity chip), `.tb-center` (Ratio) and `.tb-right.topbar-pinned` (Save, Open, the .vae and MP4 links, the export error, Export). Help, Customize keyboard shortcuts and Settings are `RailFoot` (`nav.rail-foot`, "Help and settings"), mounted by `App.tsx` last in the DOM; the iPhone action is the Media panel's header action. `TopBarMore.tsx` and `SafeZoneToggle` are deleted; the safe zones are the Ratio menu's third group. `tests/test_wave_d_topbar_ui.py` measures §8.3 cases 3 and 9 in Chromium and Playwright WebKit, and `tests/wk/test_wk_topbar.py` measures the worst case in real WKWebView.
+
+Measured worst case (a 67-character name, recording, captions at 42 %, "Applying", both links outdated and a long export error; real WKWebView): 1440 → step 1, 1280 → 2, 1024 → 4, 900 → 4, Export's right edge at width − 12 each time, nothing clipped, and back at 1440 → step 1 again. At 1440 that error makes the right cluster wider than half the bar, so Ratio shifts left (its centre at 695) instead of anything clipping, as §1.4 allows.
+
+1. **Every step is CSS on the header's classes only.** The first build rendered the ratio facts only while React's density was 0; a re-fit that started from a denser step then measured a narrower centre than it went on to render and settled on a step that overflowed (Chromium, measured: 657 px of content in a 599 px left group at 1440). The facts span is now always rendered and `.tb-d1` hides it. `topBarFit.test.ts` checks that every `display: none` in a density rule targets words only.
+2. **Baseline from the bar's width.** `useTopBarFit` takes its baseline from the header's own width, which is the viewport width in the app (the bar stays 900 px below the 900 px floor, where `#root` scrolls). This lets the WKWebView page host the bar in a 1440, 1280, 1024 or 900 px box inside the harness's 800 px web view.
+3. **Re-fit triggers.** A layout effect keyed on the bar's content (name, pending ops, activity, stale flags, error, exporting, canvas) re-fits before paint. A `ResizeObserver` on the bar, the activity chip and the right cluster re-fits one frame later for widths that change with no React input in TopBar (the recording clock gaining a digit, the Export button's elapsed counter). Doing this inside the observer callback would resize observed elements during delivery.
+4. **Names keep what a step hides.** The .vae link is named "Download the saved .vae project" and adds "(outdated)" when stale. The MP4 button is "Save exported MP4 (outdated)". The error chip keeps "Export failed: ‹message›. Dismiss". The Ratio trigger is "Canvas ratio: 9:16, 1080 by 1920, 30 fps". Its visible value is the one preset in effect (Shorts, IG 4:5…), or the aspect when none is in effect or the spec is shared: Reels and TikTok are one spec, so naming either would be a guess.
+5. **Safe-zone items.** They are named "Safe zones Off" and "TikTok safe zone" etc. On a canvas that is not 9:16, the visible "9:16 only" hint is `aria-hidden` and said as the item's description (`aria-describedby`), so the name stays exactly "TikTok safe zone" on every canvas. The items keep a native `title` for their detail, because the shell tooltip opens below top-bar controls, where it would cover the next menu item.
+6. **From iPhone.** The flag moved from TopBar to `rail/phonePairing.ts`: one `/api/version` question per page, answered strictly (only a literal `true` is on). `PhonePanel` is lazy-imported on the first open, so with the flag off no pairing code is fetched and nothing reaches `/api/pair/*` (Playwright checks both request logs).
+7. **Files outside the R3 row.** `App.tsx` mounts `RailFoot` (one line; the foot must be its own grid item, last in the DOM). `rail/rail.css` holds the foot and header-action styles, next to the rail's own. `lib/icons.ts` gains `brand: Clapperboard`: §3 names the mark, but R1 did not add it. `lib/ratioMenu.ts` gains the trigger's pure helpers. `rail/railModel.ts` `ariaKeyshortcuts` names punctuation by key value, because the foot's Settings chord was "Meta+Comma" and must be "Meta+,". `safeZones.css` loses the dead `<select>` styles. Beyond §8.1, R3 also broke and updated two tests: R4's F6 test (the foot is now the sixth region) and `test_no_emoji_or_text_glyph_used_as_an_icon` (it opened the deleted "⋯" menu).
+8. **Not yet.** The manual pass in the packaged app is still the exit criterion: VoiceOver on the foot and the Ratio groups.
+
+#### 10.2.3 R4 as built (keyboard)
+
+Deviations 1 and 2 of §10.1 are closed: the rail's tooltips, panel header and `aria-keyshortcuts` show ⌥1…⌥8 in every preset, and Space toggles the focused rail tab again.
+
+1. **Space and Enter on a rail tab** come from a fifth step in `engine.ts` `shouldRun`, not from an ignore scope on the rail: *a focused `role="tab"` keeps unmodified Space and Enter* (the APG tab keys). Every other chord (⌘Z, J/K/L, N, ⌥1…⌥8) still runs with focus on a rail tab. The rule first applied only to the rail (the right panel's tabs and the Transitions family tabs sat inside `[data-keymap-ignore]`); since RD2 the right panel's tabs use it too (§10.2.5).
+2. **A click on a rail tab while keyboard focus is on another rail tab** moves focus to the clicked tab (`ToolRail.tsx`). Otherwise focus stays on a tab that is no longer selected and the next Space activates *that* tab. A click from anywhere else still does not focus the tab, so Space keeps playing.
+3. **Modal dialogs.** No command runs while an `aria-modal` dialog is open, whatever its scope (the §4.2 order gains a step 0). Without it a `global` chord (⌥5, ⌘E, F6) acted behind the Export or Settings dialog.
+4. **Groups.** "Panels" holds the eight panel commands, ⌥\, ⌥9/⌥0 and F6/⇧F6. `openShortcuts` (⌥⌘K) and `exportVideo` (⌘E) are listed under Navigation beside Open Settings, and `addText` (⌥T) under Editing.
+5. **⌘E, ⌥⌘K and ⌥T press the existing control** (`keymap/uiTargets.ts`: `.topbar-pinned button.primary`, the button named "Customize keyboard shortcuts", the first button of `div[data-text-presets]`). This is the "same path as the button" of §4.1, so the Export trigger's disabled rule and focus return are the button's own. A disabled Export says why in a toast (its tooltip).
+6. **Panel commands come from `RAIL_ITEMS`**, so a panel the rail does not show has no command and Help lists no dead key. `presets.ts` `PANEL_KEYS` binds all eight chords in all three presets.
+7. **Mac key caps** use Apple's modifier order (⌥⌘K, ⇧⌘Z; `engine.ts` `formatChord`), which the backend's "Redo with ⇧⌘Z" already used. Before R4 the caps followed the chord string (⌘⇧Z).
+8. **WKWebView.** `tests/wk/test_wk_keymap.py` sends native NSEvents to a real WKWebView running the real engine and command registry: ⌘ chords through `performKeyEquivalent:` and the rest through `keyDown:`. WebKit takes ⌘E, ⌥⌘K and ⌘Z, and the page resolves and handles each chord. A static check reads the installed pywebview: its main menu (⌘Q/H/⌥H/⌃⌘F/X/C/V/A) and `WebKitHost.keyDown_` (⌘X/C/V/A/Z/Q/W) claim neither ⌘E nor ⌥⌘K, so risk 3's fallback chords are not needed. The manual pass in the packaged app is still the R4 exit criterion.
+
+#### 10.2.4 R5 as built (deep links)
+
+The rows are `rail/DeepLinkRow.tsx` (`DeepLinks`, `DeepLinkRow`, `DeepLinkGroupLink`, `AiBackChip`) over the pure `rail/deepLinks.ts` (the per-panel table, counts, status, return point). Media (Find & search, last in the panel), Audio (AI audio), Text (AI text & brand), Effects (Cutout & effects (AI), mounted under `EffectsPanel` by `ToolPanel.tsx`) and Captions (Captions & speech (AI)) carry 17 rows and 4 "All ‹group› tools (n)" links. `AiPanel.tsx` consumes `aiJump` in a layout effect: it clears the search, presses the card's own toggle (the same path as a click, so the form seeds from the playhead then), scrolls the card to 6 px under the sticky search head and focuses the toggle. `tests/test_wave_d_deeplinks_ui.py` (Chromium and Playwright WebKit) runs case 8 and all 21 jumps and back, and runs at least one landed card per panel against the real backend (Find b-roll, Reduce noise, Hook overlay, Lower third, Brand kit, Chroma key, Import subtitles → Export .srt); `tests/wk/test_wk_deeplinks.py` runs every jump in real WKWebView.
+
+1. **The back chip's name.** It shows "‹ Captions" (a `ChevronLeft` and the panel name) and is named "Back to Captions": the words "Back to" are sr-only. A bare "Captions" button would be a second control with a rail tab's exact name.
+2. **Where the chip sits.** In the AI panel's sticky head, above the search box, so it stays on screen while the landed card scrolls.
+3. **Status.** A row mirrors the card's own words from the same sources (`lib/aiRuns`, `featureCopy`, `downloadBadge`): "Running 42%", "Stopping…", "Failed", "Cancelled", "Done", "Not installed" / "Not set up", "Downloads 1.1 GB first" (the product's badge, not the mock's "Needs a 1.1 GB model"), and "Not available" for a tool the backend does not advertise. The status is the row's description (`aria-describedby`), never part of its name, and it sits under the label: beside it, "Translate captions" truncated at 220 px.
+4. **Catalogue loading.** A panel with rows loads the AI catalogue (`/api/tools`, `/api/features`, `/api/downloads`) the first time it is shown, so its rows can say what the card says. The Media panel shows at launch, so its rows wait for pointer or focus instead of adding the ~2 s feature probe to every start.
+5. **Group links and unknown tools.** "All ‹group› tools (n)" lands on the group's `h3` (`tabindex="-1"`, script focus only). A row whose tool this backend does not advertise lands on its group's heading too.
+6. **Landing near the end of the list.** A card that cannot scroll up to the head lands fully scrolled and on screen. The card's form renders one update after the toggle's click, so the landing aligns once more before that frame paints, and again while the feature reports grow the cards above it, as long as focus is still on the landed toggle.
+7. **Returning.** The back chip commits the tab switch with `flushSync`, focuses the originating row with `preventScroll` and restores the origin panel's scroll. WKWebView still revealed a partly hidden row in the next rendering update after a panel was `display: none`, so the scroll is put back once more in the next frame (measured in `test_wk_deeplinks.py`).
+8. **Tests file.** The R5 end-to-end tests live in `tests/test_wave_d_deeplinks_ui.py` rather than growing `tests/test_wave_d_rail_ui.py` (§7.1), because other rail phases edited that file concurrently. It reuses `test_frontend_a11y`'s harness.
+9. **Carried from R1.** The stale `LeftPane` mentions in `AiPanel.tsx`, `AiToolForm.tsx` and `lib/aiRuns.ts` now name the tool panel.
+10. **Not yet.** The manual pass in the packaged app (VoiceOver name of the chip and of a row with a status).
+
+#### 10.2.5 Review RD2 (milestone 2 fixer)
+
+Measured in Chromium and Playwright WebKit (`tests/test_wave_d_rail_keys_ui.py`, `tests/test_wave_d2_fixer_ui.py`) against a real backend with no API key:
+
+1. **⌘Z, J/K/L and N work with focus in the Inspector's Speed section and on the Inspector tab.** The two Speed radiogroups, the speed-curve editor and the right panel's tablist were `[data-keymap-ignore]` scopes, which drop every `default` command: picking a preset with the mouse left focus on its radio (Chromium), and ⌘Z then did not undo it (undo depth 36 → 37 → 37). The scopes are gone. The radios' arrows are theirs by step 4; Space plays from a radio as from any button and Enter (bound to nothing) chooses it; a curve point claims Delete/Backspace with `data-keymap-own`; the Inspector tab keeps Space/Enter by step 5. Both "global shortcuts work with focus anywhere" cases gain `speed-preset` and `inspector-tab`, and a test presses ⌘Z right after picking a preset (it fails with the old scope, measured).
+2. **Text fields no longer trap the panel chords** (§4.1 as built): ⌘E and ⌥⌘K from the Prompt bar, ⌥0 → ⌥9 from the Chat box, and Esc in an empty Prompt bar or Chat box returns to the timeline.
+3. **F6 reaches the timeline** (§4.1 as built): seven stops, the timeline stop focusing the timeline canvas.
+4. **A stale clarify question** (it survives a reload) no longer swallows a new sentence: Enter with a different, non-empty text drops the question and runs the text (`lib/promptFocus.supersedesClarify`); the same text still sends the user to the card.
+5. **A disabled icon-only toolbar button looks disabled.** Split, Freeze frame, Delete and Duplicate in an empty project measured 1.17:1 luminance against an enabled icon; they now use `--icon-disabled` (#5c5c66), ≥ 2:1 dimmer than an enabled icon in both engines. WCAG exempts disabled controls; the name and tooltip still say why.
+6. **The Normal speed slider on a curve clip** starts at the curve's mean speed (0.93× for a curve that read 1.00×), so the first nudge keeps the clip's length near the curve's.
+7. **The key-free Prompt bar** reads "add a hero speed ramp" as the Hero curve (it committed a constant 1.25×), "freeze frame at 5 seconds" as a freeze (it became a title question) and "split at 3 seconds" as a split (it was not understood). A ramp with no name asks which curve. New grammar intents `freeze` and `split`; the `speed` recipe gains a `preset` slot.
 
 ---
 

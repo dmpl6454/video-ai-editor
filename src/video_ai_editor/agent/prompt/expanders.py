@@ -29,6 +29,7 @@ from .presets import bed_for_mood, edit_templates, transition_entry, transition_
 from .recipes import (_PLATFORMS, _RATIOS, FILLERS_STRICT, RECIPE_SLOTS, Context, Expansion, Intent, ask,
                       download, normalize_slots, pc, placeholder, step)
 from .live import MIN_TRANSITION_NEIGHBOUR_S, seams_from_boundaries, smpte
+from ...edl.speed_presets import PRESET_BY_ID as _SPEED_PRESET_BY_ID, PRESETS as _SPEED_PRESETS
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
                          WORD_EDGE_TOLERANCE_S, beat_split_times, heuristic_hook)
@@ -508,9 +509,24 @@ def _x_loudness(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 
 def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    clip = it.get("clip_ref") or "$v1_all"
+    preset = it.get("preset")
+    if preset:
+        # a named speed curve (wave D): the preset itself, checked by name
+        label = _SPEED_PRESET_BY_ID[preset].label
+        return Expansion(
+            steps=(step("set_speed", STAGE_CUTS, f"play the {label} speed curve", clip_id=clip, preset=preset),),
+            postconditions=(pc("speed_equals", f"the clip plays the {label} curve", clip_id=clip, preset=preset),))
+    if it.get("_curve") and not it.get("factor"):
+        # "a speed ramp" with no name: ASK which curve (a pause, no default) —
+        # never a constant factor (RD2). The check is bound from the answered
+        # step by validate_plan (speed_equals preset=$arg:preset).
+        opts = [(p.id, p.label, p.hint) for p in _SPEED_PRESETS if p.menu]
+        return Expansion(
+            questions=(ask("preset", "Which speed curve?", options=opts),),
+            steps=(step("set_speed", STAGE_CUTS, "play the chosen speed curve", clip_id=clip, preset=placeholder("preset")),))
     factor = float(it.get("factor") or 1.25)
     factor = min(4.0, max(0.25, factor))
-    clip = it.get("clip_ref") or "$v1_all"
     steps = [step("set_speed", STAGE_CUTS, f"play at {factor:g}×", clip_id=clip, factor=factor)]
     if factor < 1.0 and it.get("_smooth"):
         steps.append(step("smooth_slow_motion", STAGE_CUTS, "interpolate frames for smooth slow motion",
@@ -519,6 +535,39 @@ def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     if clip == "$v1_all":
         pcs.append(pc("duration_between", "the duration matches", factor=factor, tol_ratio=0.05))
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs))
+
+
+def _moment(it: Intent, f: TimelineFacts) -> float | None:
+    """The moment a freeze or a split is at: the one the prompt names, else
+    the playhead."""
+    at = it.get("at")
+    if at is None:
+        at = f.playhead
+    return None if at is None else round(float(at), 3)
+
+
+def _x_freeze(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """CapCut's Freeze (wave D, freeze_frame): hold the frame at a moment."""
+    at = _moment(it, f)
+    if at is None or at >= f.duration:
+        return Expansion(notes=(f"say when to freeze — the video is {f.duration:.1f}s long" if at is not None
+                                else "say when to freeze, like 'freeze frame at 3 seconds'",))
+    dur = it.get("duration_s")
+    args: dict[str, Any] = {"time": at}
+    if dur is not None:
+        args["duration"] = float(dur)
+    return Expansion(
+        steps=(step("freeze_frame", STAGE_CUTS, f"hold the frame at {at:g}s", **args),),
+        postconditions=(pc("freeze_held", "the frame is held", **({"duration": float(dur)} if dur is not None else {})),))
+
+
+def _x_split(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    at = _moment(it, f)
+    if at is None or not 0 < at < f.duration:
+        return Expansion(notes=("say where to split, like 'split at 3 seconds'" if at is None
+                                else f"{at:g}s is not inside the video ({f.duration:.1f}s)",))
+    return Expansion(steps=(step("split_at", STAGE_CUTS, f"split at {at:g}s", track="v1", time=at),),
+                     postconditions=(pc("tool_ok", "the split was made", tool="split_at"),))
 
 
 def _x_reverse(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1112,7 +1161,7 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     "remove_silences": _x_remove_silences, "remove_fillers": _x_remove_fillers, "tighten": _x_tighten,
     "shorts": _x_shorts, "reframe": _x_reframe, "music": _x_music, "duck": _x_duck, "beat_sync": _x_beat_sync,
     "hook": _x_hook, "color_look": _x_color_look, "clean_audio": _x_clean_audio, "loudness": _x_loudness,
-    "speed": _x_speed, "reverse": _x_reverse, "trim": _x_trim, "title": _x_title, "brand": _x_brand, "end_card": _x_end_card,
+    "speed": _x_speed, "freeze": _x_freeze, "split": _x_split, "reverse": _x_reverse, "trim": _x_trim, "title": _x_title, "brand": _x_brand, "end_card": _x_end_card,
     "transitions": _x_transitions, "export_preset": _x_export_preset, "voiceover": _x_voiceover,
     "stabilize": _x_stabilize, "upscale": _x_upscale, "ask": _x_ask,
     "fade": _x_fade, "volume": _x_volume, "mute": _x_mute, "fit_music": _x_fit_music, "preview": _x_preview,

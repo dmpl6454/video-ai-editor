@@ -1,4 +1,6 @@
-// Safe-zone overlay for the preview, plus the top-bar control that drives it.
+// Safe-zone overlay for the preview. The control that drives it is the Ratio
+// menu's "Safe-zone overlay" group (RatioMenu.tsx, LEFT_RAIL_SPEC §2.10); both
+// read and write lib/safeZonesStore.
 //
 // Two kinds of rectangle get drawn over the picture, both in the 0..1 canvas
 // space of lib/safeZones.ts:
@@ -17,14 +19,10 @@
 // `playhead`: re-rendering a div stack every frame is exactly the churn the
 // canvas layers exist to avoid.
 import { memo } from 'react'
-import { useStore } from '../store'
 import type { Canvas } from '../types'
 import { useSafeZones } from '../lib/safeZonesStore'
 import { useGuideRects } from '../lib/guideRects'
-import {
-  SAFE_ZONES, SAFE_ZONE_MODES, NOT_916_HINT,
-  isSafeZoneMode, isVertical916, zonesFor, toPx, type SafeZoneMode,
-} from '../lib/safeZones'
+import { SAFE_ZONES, zonesFor, toPx } from '../lib/safeZones'
 import './safeZones.css'
 
 interface Props {
@@ -80,48 +78,3 @@ export const SafeZones = memo(function SafeZones({ canvas, width, height }: Prop
     </div>
   )
 })
-
-const BASE_TITLE = 'Overlay where TikTok / Reels / Shorts draw their own UI over a 9:16 video, '
-  + 'so captions and lower-thirds land clear of it (approximate guides)'
-
-function optionLabel(mode: SafeZoneMode, nonVertical: boolean): string {
-  if (mode === 'off') return 'Safe zones: off'
-  return `Safe zones: ${SAFE_ZONES[mode].label}${nonVertical ? ' (9:16 only)' : ''}`
-}
-
-/**
- * The top-bar control. A NATIVE <select>: `.topbar` is `overflow: hidden`, so
- * a custom popup would be clipped (CaptionsButton has to portal its menu to
- * escape the same rule), and a native one needs no portal. Fully restyled in
- * safeZones.css — styles.css has no `select` rule, and a UA-default control
- * next to the aspect buttons would look like nothing else in the toolbar.
- *
- * Keyboard note: the keymap engine deliberately lets Space through to
- * play/pause even on a focused select (keymap/engine.ts), matching every
- * other toolbar control; Enter and the arrow keys still operate it natively.
- */
-export function SafeZoneToggle() {
-  const mode = useSafeZones((s) => s.mode)
-  const setMode = useSafeZones((s) => s.setMode)
-  // Primitive selectors, not `s.edl?.canvas`: the canvas object is replaced on
-  // every EDL refresh, which would re-render this control after every edit.
-  const canvasW = useStore((s) => s.edl?.canvas.w ?? 0)
-  const canvasH = useStore((s) => s.edl?.canvas.h ?? 0)
-  const hasCanvas = canvasW > 0 && canvasH > 0
-  const nonVertical = hasCanvas && !isVertical916({ w: canvasW, h: canvasH })
-  const title = nonVertical ? `${NOT_916_HINT} (approximate guides)` : BASE_TITLE
-
-  return (
-    <select
-      className={`safe-zone-select${mode !== 'off' ? ' is-on' : ''}`}
-      aria-label="Safe zones overlay"
-      title={title}
-      value={mode}
-      onChange={(e) => { if (isSafeZoneMode(e.target.value)) setMode(e.target.value) }}
-    >
-      {SAFE_ZONE_MODES.map((m) => (
-        <option key={m} value={m}>{optionLabel(m, nonVertical)}</option>
-      ))}
-    </select>
-  )
-}

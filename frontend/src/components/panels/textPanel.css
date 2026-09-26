@@ -1,0 +1,88 @@
+/* The Text tool panel (TextPanel.tsx, LEFT_RAIL_SPEC §2.5). Imported by the
+   component, not from styles.css. Tokens only; motion is colour, transform
+   and opacity, and stands still under prefers-reduced-motion. The style chips
+   reuse styles.css' .text-style-grid / .text-style-chip / .text-style-sample
+   (the gallery the old popover drew); here they become square tiles. */
+
+.text-panel { display: flex; flex-direction: column; }
+
+/* The panel's one primary action, filled with the blue accent pair (white on
+   --accent-2 itself fails contrast; the -fill token is the filled face). */
+.text-panel .text-panel-add {
+  position: relative;
+  background: var(--accent-2-fill);
+  border-color: var(--accent-2-fill);
+  color: var(--on-accent);
+  font-weight: 600;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.text-panel .text-panel-add:hover:not(:disabled) {
+  background: var(--accent-2-fill-hover);
+  border-color: var(--accent-2-fill-hover);
+}
+.text-panel .text-panel-add:active:not(:disabled) { transform: scale(0.98); }
+/* The chord sits at the right edge without pulling the label off centre. */
+.text-panel-kbd {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  font: 10.5px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  color: var(--on-accent);
+}
+
+.text-panel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.text-panel-field-label { font-size: 11px; color: var(--text-dim); }
+.text-panel-field input { width: 100%; min-width: 0; font-size: 12px; }
+
+/* Styles: tiles three across at every default panel width (196 px of
+   content at 1024 wide, 296 at 1920). */
+.text-panel .text-style-grid {
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 6px;
+}
+.text-panel .text-style-chip {
+  min-height: 72px;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease,
+              transform var(--dur-fast) var(--ease-out-expo);
+}
+.text-panel .text-style-chip:hover:not(:disabled) {
+  background: var(--bg-2);
+  border-color: var(--accent-2);
+  transform: translateY(-1px);
+}
+.text-panel .text-style-chip:active:not(:disabled) { transform: scale(0.97); }
+.text-panel .text-style-sample { font-size: 17px; }
+
+/* Templates: a wrapping row of chips. */
+.text-template-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.text-template-row button { font-size: 11px; padding: 5px 9px; }
+
+.text-panel-hint {
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+/* A narrow panel drops the key cap rather than crowd the label; the chord is
+   still in the button's aria-keyshortcuts and in the rail tooltip. */
+@container toolpanel (max-width: 239px) {
+  .text-panel-kbd { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-panel .text-panel-add, .text-panel .text-style-chip { transition: none; }
+  .text-panel .text-style-chip:hover:not(:disabled) { transform: none; }
+}

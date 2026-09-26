@@ -51,7 +51,7 @@ def _sources(case: dict) -> tuple[dict[str, SourceInfo], dict[str, int]]:
 
 def test_goldens_cover_the_matrix():
     groups = {c["group"] for c in GOLDENS}
-    assert groups == {"rates", "structure", "transitions", "segments", "fuzz"}
+    assert groups == {"rates", "structure", "transitions", "segments", "fuzz", "speed"}
     rates = {c["name"] for c in GOLDENS if c["group"] == "rates"}
     for r in lib.PROJECT_RATES:
         for s in lib.PROJECT_RATES:
@@ -66,6 +66,44 @@ def test_goldens_cover_the_matrix():
     frz = rle_frames(BY_NAME["freeze_p30"]["model"]["runs"])
     assert sum(1 for f in frz if f["src"] == "short30" and f["frame"] == 14) >= 12
     assert any("d" in r.get("a", {}) for r in runs)                    # non-linear conform
+
+
+def test_speed_goldens_pin_curves_and_freezes_from_the_decoded_render():
+    """Wave D S1: speed curves and freeze frames at the five rates, and what
+    the DECODED renders show (not the model): a freeze holds exactly the
+    frame it was taken from — the split point's (middle), a clip's first
+    (start) and last (end), across two seams, and a reversed clip's — and a
+    curve clip's source frames speed up and slow down as its curve does."""
+    from video_ai_editor.edl.speed_curve import curve_points
+    speed = {c["name"]: c for c in GOLDENS if c["group"] == "speed"}
+    assert set(speed) == {f"speed_{kind}_p{r}" for kind in ("curves", "freeze")
+                          for r in ("23.976", "25", "29.97", "30", "59.94")}
+    for name, case in speed.items():
+        edl = _edl(case)
+        infos, _ = _sources(case)
+        pm = build_program_map(edl, infos)
+        top = lib.expand_measured(case["measured"])["top"]
+        ids = [c.id for c in pm.clips]
+        span = {cid: (pm.clip_start[i], pm.clip_start[i] + pm.clip_len[i]) for i, cid in enumerate(ids)}
+        solo = lambda cid: [top[k] for k in range(*span[cid]) if pm.kind[k] == 0]  # noqa: E731
+        if "freeze" in name:
+            held = {cid: set(solo(cid)) for cid in ids if cid.startswith("fz_")}
+            assert all(len(v) == 1 for v in held.values()), (name, held)
+            assert held["fz_mid"] == {solo("a2")[0]}
+            assert held["fz_start"] == {solo("b")[0]}
+            assert held["fz_end"] == {solo("b")[-1]}
+            assert held["fz_rev"] == {solo("e")[10]}
+            # c's last frame sits inside the fade into the freeze (side A).
+            assert held["fz_seam"] == {top[span["c"][1] - 1]}
+            assert pm.kind[span["c"][1] - 1] == KIND_BLEND
+            assert case["model"]["audio"][ids.index("fz_mid")]["mode"] == "silence"
+        else:
+            # A ramp up: the source step between consecutive output frames grows.
+            ru = [t & 0xFFF for t in solo("ru")]
+            steps = [b - a for a, b in zip(ru, ru[1:])]
+            assert sum(steps[: len(steps) // 3]) < sum(steps[-len(steps) // 3:]), (name, steps)
+            ex = pm.clips[ids.index("ex")]
+            assert curve_points(ex.speed) and case["model"]["audio"][ids.index("ex")]["mode"] == "curve"
 
 
 def test_every_golden_was_identical_through_preview_and_export():

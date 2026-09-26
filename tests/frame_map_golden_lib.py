@@ -186,6 +186,7 @@ class ClipSpec:
     # fixed by audio_mix.ATEMPO_RESTAMP, pinned by test_keep_pitch_export.py.)
     keep_pitch: bool = False
     id: str = ""
+    freeze: float | None = None     # a freeze frame (Clip.freeze): hold seconds
 
 
 @dataclass
@@ -216,6 +217,8 @@ def build_edl(case: CaseSpec, src_path: dict[str, str] | None = None) -> EDL:
         clip.in_ = c.in_
         clip.out = c.out
         clip.audio.keep_pitch = c.keep_pitch
+        if c.freeze is not None:
+            clip.freeze = c.freeze
         v1.clips.append(clip)
     for at, d in case.transitions:
         v1.transitions.append(Transition(at=at, type="fade", duration=d))
@@ -267,6 +270,11 @@ def compare(measured: dict, expected: dict, *, check_p: bool = True) -> list[str
             errs.append(f"k={k}: rendered {_fmt(mt[k])}/{_fmt(mb[k])}, "
                         f"expected {_fmt(et[k])}/{_fmt(eb[k])}")
         pe = expected["p"][k] if check_p and expected.get("p") else None
+        # A blend whose two sides show the SAME frame (a clip fading into a
+        # freeze of its own last frame) is pixel-identical at every progress:
+        # the golden records no progress there (-1), and there is none to see.
+        if pe is not None and measured["p"][k] < 0 and mt[k] == mb[k]:
+            pe = None
         if pe is not None and abs(measured["p"][k] - pe[0] / pe[1]) > P_TOL:
             errs.append(f"k={k}: progress rendered {measured['p'][k]}, model {pe[0]}/{pe[1]}")
     return errs
@@ -322,7 +330,10 @@ def rate_matrix_case(R: Fraction, S: Fraction) -> CaseSpec:
     """Every per-clip selection rule, back to back, for one (project, source)
     rate pair: in-points on the grid and ±0.3/±0.5 frame off it, in=0 and
     in < half a frame (no ``-ss``), off-grid outs, speeds 0.25-4, a speed
-    curve (renders at 1x), reverse at 1x and 2x."""
+    curve, reverse at 1x and 2x. (Starts are laid out as if every clip ran
+    at its scalar speed — the curve row, which rendered at 1x before speed
+    curves existed, now fills its integral and leaves a gap after it; every
+    other row is where it always was.)"""
     src = _src_for(S)
     rows: list[tuple[float, Fraction, float, Any, bool]] = [
         # (in near this many seconds, + this many project frames, source
@@ -508,9 +519,135 @@ def fuzz_cases(count: int = 24, seed: int = 20260926) -> list[CaseSpec]:
     return out
 
 
+#: The rates the speed-curve / freeze group covers (the task's five).
+SPEED_RATES: tuple[Fraction, ...] = (
+    Fraction(24000, 1001), Fraction(25), Fraction(30000, 1001), Fraction(30), Fraction(60000, 1001),
+)
+
+
+def _spec_info(key: str) -> SourceInfo:
+    """The SourceInfo a generated bar source probes as (CFR, the muxer's
+    default time base; `gen_frame_map_goldens.ensure_sources` asserts it)."""
+    spec = next(s for s in source_specs() if s.key == key)
+    return SourceInfo.cfr(spec.rate, spec.frames, width=W, height=H)
+
+
+def _planned_clip(c: ClipSpec) -> Clip:
+    clip = Clip(src=c.src, start=c.start, speed=c.speed, reverse=c.reverse, id=c.id or "x")
+    clip.in_, clip.out = c.in_, c.out
+    if c.freeze is not None:
+        clip.freeze = c.freeze
+    return clip
+
+
+def _frames_of(c: ClipSpec, R: Fraction) -> list[int]:
+    from video_ai_editor.render.frame_map import clip_frame_list
+    return clip_frame_list(_planned_clip(c), _spec_info(c.src), R)
+
+
+def _freeze_holding(src: str, frame: int, R: Fraction, hold: float, start: float, id_: str) -> ClipSpec:
+    """A freeze clip that holds ``frame`` of ``src`` (what lane S2's
+    freeze-frame op writes: ``freeze_in_for``), ``in`` + one frame as out."""
+    from video_ai_editor.render.frame_map import freeze_in_for
+    in_ = freeze_in_for(_spec_info(src), frame, R)
+    return ClipSpec(src, in_, in_ + tb.frame_duration(R), start, freeze=hold, id=id_)
+
+
+def _fit(c: ClipSpec, R: Fraction) -> ClipSpec:
+    """Trim ``c``'s ``out`` (a freeze: its hold) so its footprint is a WHOLE
+    number of frames — for a curve, ``S = n/R · mean``. ``seam_table_for``
+    charges a seam only where the next clip starts within 1 ms of the
+    footprint's end, so a fitted clip's end is a seam a transition can sit on."""
+    pc = _planned_clip(c)
+    n = max(1, tb.frame_of(pc.effective_duration, R))
+    if c.freeze is not None:
+        c.freeze = tb.time_of(n, R)
+    else:
+        c.out = c.in_ + tb.time_of(n, R) * pc.speed_factor
+    return c
+
+
+def _lay(clips: list[ClipSpec], R: Fraction) -> list[ClipSpec]:
+    """Place ``clips`` back to back on the frame grid (each at the frame the
+    previous one's footprint ends on)."""
+    from video_ai_editor.render.compositor import clip_frames
+    cursor = 0
+    for c in clips:
+        c.start = tb.time_of(cursor, R)
+        cursor += clip_frames(_planned_clip(c), R)
+    return clips
+
+
+def speed_cases() -> list[CaseSpec]:
+    """Speed CURVES and FREEZE frames (Wave D lane S1) at 23.976, 25,
+    29.97, 30 and 59.94: ramp up/down, bullet, hero, montage, flash and jump
+    curves on on-grid and off-grid in-points, a mismatched source rate, a
+    reversed curve clip and curves under seams; freezes at the start, middle
+    and end of a clip, between two seams and on a reversed clip."""
+    from video_ai_editor.edl.speed_curve import CURVE_PRESETS as P
+    out: list[CaseSpec] = []
+    for R in SPEED_RATES:
+        s = _src_for(R)
+        other = _src_for(Fraction(25) if R != Fraction(25) else Fraction(30))
+        f = lambda n: _t(n, R)  # noqa: E731
+        rn = rate_name(R)
+        cv = lambda name: {"curve": P[name], "name": name}  # noqa: E731
+        clips = [
+            ClipSpec(s, f(12), f(12) + 1.6, 0, speed=cv("ramp_up"), id="ru"),
+            ClipSpec(s, f(80) + f(Fraction(3, 10)), f(80) + 1.5, 0, speed=cv("ramp_down"), id="rd"),
+            ClipSpec(other, 3.0, 5.2, 0, speed=cv("bullet"), keep_pitch=True, id="bu"),
+            ClipSpec(s, f(200) - f(Fraction(1, 2)), f(200) + 1.2, 0, speed=cv("hero"), id="he"),
+            ClipSpec(other, 7.1, 9.0, 0, speed=cv("montage"), id="mo"),
+            ClipSpec(s, f(320), f(320) + 1.1, 0, speed=cv("flash_in"), reverse=True, id="fi"),
+            ClipSpec(s, 12.0, 13.4, 0, speed=cv("jump_cut"), keep_pitch=True, id="jc"),
+            ClipSpec(other, 13.5, 14.3, 0,
+                     speed={"curve": [[0, 0.1], [0.5, 10.0], [1, 0.1]]}, id="ex"),
+        ]
+        # Whole-frame footprints (seams) for all but the last, whose curve
+        # footprint stays off the grid.
+        clips = _lay([_fit(c, R) for c in clips[:-1]] + clips[-1:], R)
+        # Seams: a fade into the bullet clip and one out of the montage.
+        bu, mo_end = clips[2], clips[5].start
+        out.append(CaseSpec(name=f"speed_curves_p{rn}", group="speed", fps=R, clips=clips,
+                            transitions=[(bu.start, 0.3), (mo_end, 0.25)],
+                            live=R in (Fraction(30000, 1001), Fraction(25))))
+
+        # Freezes. A: split at its 15th frame with a 0.5 s freeze of the
+        # frame there (CapCut's freeze at the playhead); B with its first
+        # frame frozen before it and its last after it; C faded into a freeze
+        # of its last frame that fades into D; E reversed with its 10th output
+        # frame frozen after it.
+        a1 = _fit(ClipSpec(s, f(10), f(25), 0, id="a1"), R)
+        a2 = _fit(ClipSpec(s, f(25), f(50), 0, id="a2"), R)
+        fa = _fit(_freeze_holding(s, _frames_of(a2, R)[0], R, 0.5, 0, "fz_mid"), R)
+        b = _fit(ClipSpec(other, 2.0 + f(Fraction(3, 10)), 3.2, 0, id="b"), R)
+        bf = _frames_of(b, R)
+        fb0 = _fit(_freeze_holding(other, bf[0], R, 0.4, 0, "fz_start"), R)
+        fb1 = _fit(_freeze_holding(other, bf[-1], R, 0.6, 0, "fz_end"), R)
+        c = _fit(ClipSpec(s, f(150), f(150) + 1.0, 0, id="c"), R)
+        fc = _fit(_freeze_holding(s, _frames_of(c, R)[-1], R, 1.0, 0, "fz_seam"), R)
+        d = _fit(ClipSpec(other, 6.0, 7.0, 0, id="d"), R)
+        e = _fit(ClipSpec(s, f(260), f(260) + 1.2, 0, reverse=True, id="e"), R)
+        # The last freeze keeps an off-grid hold.
+        fe = _freeze_holding(s, _frames_of(e, R)[10], R, 0.7, 0, "fz_rev")
+        clips = _lay([a1, fa, a2, fb0, b, fb1, c, fc, d, e, fe], R)
+        end_c = clips[7].start
+        end_fc = clips[8].start
+        out.append(CaseSpec(name=f"speed_freeze_p{rn}", group="speed", fps=R, clips=clips,
+                            transitions=[(end_c, 0.3), (end_fc, 0.4)],
+                            live=R in (Fraction(30), Fraction(60000, 1001))))
+    return out
+
+
 def all_cases() -> list[CaseSpec]:
     cases = [rate_matrix_case(R, S) for R in PROJECT_RATES for S in PROJECT_RATES]
-    return cases + structure_cases() + transition_cases() + segment_cases() + fuzz_cases()
+    cases = (cases + structure_cases() + transition_cases() + segment_cases() + fuzz_cases()
+             + speed_cases())
+    # The generator keys renders by name across groups: a clash would write
+    # one group's render into the other's golden.
+    names = [c.name for c in cases]
+    assert len(names) == len(set(names)), sorted({n for n in names if names.count(n) > 1})
+    return cases
 
 
 # ---------------------------------------------------------------- golden I/O

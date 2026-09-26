@@ -1,0 +1,74 @@
+/* The top bar's activity chip (ActivityChip.tsx, LEFT_RAIL_SPEC §2.8).
+   Imported by the component, not from styles.css (whose top-bar block is R3's).
+   The same 28 px / 12 px control rhythm as every other top-bar button
+   (test_top_bar_controls_share_one_height_and_type_size). Tokens only. */
+
+.activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.activity-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.act {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: var(--control-h);
+  overflow: hidden;
+  background: var(--bg-2);
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.topbar .act > button,
+.act > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h);
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.act > button:hover:not(:disabled) { background: var(--bg-3); }
+.act > button:focus-visible { outline-offset: -2px; }
+.topbar .act > button.act-stop,
+.act > button.act-stop {
+  justify-content: center;
+  width: var(--control-h);
+  padding: 0;
+  color: var(--text-dim);
+  border-left: 1px solid var(--line);
+}
+.act > button.act-stop:hover:not(:disabled) { color: var(--text); }
+
+/* A static dot, never a pulse: the chip is a status, not an alarm. */
+.act-rec-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.act-dim { color: var(--text-dim); }
+.act-num { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .act > button { transition: none; }
+}

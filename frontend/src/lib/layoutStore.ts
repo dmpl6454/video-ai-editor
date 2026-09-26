@@ -105,6 +105,8 @@ export interface LayoutState {
    *  rail tab. Any other id selects it and opens the panel. */
   showTab(id: RailId, opts?: { toggle?: boolean }): void
   setLeftOpen(open: boolean): void
+  /** Collapse / re-open the tool panel (⌥\, the toggleToolPanel command). */
+  toggleLeftOpen(): void
   /** Store a dragged width (clamped; returns what was stored), or null to go
    *  back to the CSS default. */
   setPanelWidth(side: PanelSide, px: number | null): number | null
@@ -158,6 +160,7 @@ export function layoutStateCreator(kv: KV | null, viewport: () => number): State
         write(kv, LEFT_OPEN_KEY, String(open))
         set({ leftOpen: open })
       },
+      toggleLeftOpen: () => get().setLeftOpen(!get().leftOpen),
       setPanelWidth: (side, px) => {
         const key = side === 'left' ? LEFT_W_KEY : RIGHT_W_KEY
         const field = side === 'left' ? 'leftW' : 'rightW'

@@ -104,6 +104,11 @@ describe('gateFor', () => {
     expect(gateFor(entry('add_hook_overlay'), null)).toEqual({ ok: true, checking: false })
   })
 
+  it('treats a malformed report (no `unavailable` list) as unknown, never throws', () => {
+    const malformed = {} as unknown as Parameters<typeof gateFor>[1]
+    expect(gateFor(entry('upscale'), malformed)).toEqual({ ok: true, checking: true })
+  })
+
   it('never lets gpu_transcribe (a speed tier) block auto_caption', () => {
     expect(gateFor(entry('auto_caption'), report(['gpu_transcribe']))).toEqual({ ok: true, checking: false })
   })

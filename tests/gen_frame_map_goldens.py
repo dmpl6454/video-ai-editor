@@ -1,6 +1,6 @@
 """Regenerate ``tests/goldens/frame_map/*.json`` through the real compositor.
 
-    .venv/bin/python tests/gen_frame_map_goldens.py [--only NAME_SUBSTR] [--jobs 4]
+    .venv/bin/python tests/gen_frame_map_goldens.py [--only NAME_SUBSTR] [--groups rates,speed] [--jobs 4]
         [--work DIR] [--check]
 
 Every case is rendered twice (``render_preview`` and the export's single
@@ -66,6 +66,10 @@ def ensure_sources(work: Path) -> tuple[dict[str, str], dict, dict[str, int]]:
         infos[spec.key] = lib.probe_source(p)
         sids[spec.key] = spec.sid
         assert infos[spec.key].frames == spec.frames, (spec.key, infos[spec.key].frames)
+        if spec.key.startswith("bar") and spec.timescale is None:
+            # The speed group picks freeze in-points from the CFR info the
+            # source is expected to probe as (lib._spec_info).
+            assert infos[spec.key].to_json() == lib._spec_info(spec.key).to_json(), spec.key
     return paths, infos, sids
 
 
@@ -101,13 +105,18 @@ def main() -> int:
     ap.add_argument("--no-write", action="store_true")
     ap.add_argument("--rederive", action="store_true",
                     help="keep the measured frames, recompute only the stored model JSON")
+    ap.add_argument("--groups", default="",
+                    help="comma-separated groups to render AND write (the others' files are "
+                         "left byte-identical); default: every group")
     args = ap.parse_args()
     if args.rederive:
         return rederive()
     work = Path(args.work) if args.work else Path(tempfile.mkdtemp(prefix="fmgold_"))
     work.mkdir(parents=True, exist_ok=True)
     paths, infos, sids = ensure_sources(work)
-    cases = [c for c in lib.all_cases() if args.only in c.name]
+    groups_only = {g for g in args.groups.split(",") if g}
+    cases = [c for c in lib.all_cases() if args.only in c.name
+             and (not groups_only or c.group in groups_only)]
     print(f"{len(cases)} cases, work dir {work}", flush=True)
 
     results: dict[str, dict] = {}

@@ -26,6 +26,9 @@ import {
 interface Props {
   edl: EDL
   videoEl: HTMLVideoElement | null
+  /** The client engine's presented-frame clock (spec §3.5); when absent the
+   *  time is `videoEl.currentTime` (server mode), else the store playhead. */
+  clock?: { now(): number } | null
   // The element rect to draw within (matches the <video> on screen)
   width: number
   height: number
@@ -361,7 +364,7 @@ function stripEmoji(s: string): string {
   return tokenize(s).filter((t) => !t.emoji).map((t) => t.s).join('').trim()
 }
 
-export function TextLayer({ edl, videoEl, width, height }: Props) {
+export function TextLayer({ edl, videoEl, clock, width, height }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // `ctx.font = '"Anton"'` does NOT trigger the browser to actually fetch the
   // @font-face file — the canvas just silently falls back to system sans
@@ -483,7 +486,9 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
       // imperative read, not a subscription, so it needs no extra prop and
       // cannot go stale inside this self-perpetuating rAF closure the way a
       // captured prop value would.
-      const t = videoEl ? videoEl.currentTime : useStore.getState().playhead
+      // Client engine: the PRESENTED frame's time (spec §3.5), so text is
+      // frame-locked to the picture actually on screen.
+      const t = clock ? clock.now() : videoEl ? videoEl.currentTime : useStore.getState().playhead
       const drag = getOverlayDrag()
       // Only redraw when the playhead actually advanced (or first frame) — but
       // ALWAYS redraw while a drag is live, or the text would sit frozen at its
@@ -746,7 +751,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
     // which forces an immediate redraw) once the real bundled fonts finish
     // loading — otherwise a frame already drawn with the system-font
     // fallback would linger until the next playhead move.
-  }, [edl, videoEl, width, height, fontsReady])
+  }, [edl, videoEl, clock, width, height, fontsReady])
 
   return (
     <canvas

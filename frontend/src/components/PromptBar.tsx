@@ -21,7 +21,8 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useStore } from '../store'
 import { usePromptStore, isBusy } from '../lib/promptStore'
 import { runProgress, terminalAnnouncement } from '../lib/promptEvents'
-import { canSubmitPrompt, shouldClearPromptText, shouldRefocusPrompt } from '../lib/promptFocus'
+import { canSubmitPrompt, shouldClearPromptText, shouldRefocusPrompt, supersedesClarify } from '../lib/promptFocus'
+import { focusTimeline } from '../keymap/regions'
 import { promptLengthNote } from '../lib/promptLimit'
 import { BrainBadge } from './BrainBadge'
 import { ClarifyCard } from './ClarifyCard'
@@ -179,6 +180,13 @@ export function PromptBar() {
   }, [status, clarify?.token])
 
   const submit = () => {
+    if (!disabled && supersedesClarify(status, text, usePromptStore.getState().prompt)) {
+      const t = text.trim()
+      setHistIdx(-1)
+      setDraft('')
+      void dropClarify().then(() => run(t))
+      return
+    }
     if (!canSubmitPrompt(status, { disabled, text })) {
       // A card is waiting: Enter here means "answer it", so send the user there
       // instead of re-planning the sentence over the open question.
@@ -199,7 +207,10 @@ export function PromptBar() {
       if (busy) { setAskCancel(true); return }
       if (status === 'clarify') { void dropClarify(); return }
       if (text) { setText(''); setHistIdx(-1); return }
-      if (logOpen) usePromptStore.getState().setLogOpen(false)
+      if (logOpen) { usePromptStore.getState().setLogOpen(false); return }
+      // an empty bar: Esc hands the keyboard back to the timeline, so
+      // Space, J/K/L and ⌥9 work again without F6 (review RD2)
+      focusTimeline()
       return
     }
     const atStart = el.selectionStart === 0 && el.selectionEnd === 0

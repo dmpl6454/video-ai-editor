@@ -1,0 +1,77 @@
+/* Client-mode preview pane (wave D instant preview; components/preview/
+   ClientPreview.tsx). The engine owns its canvas; this file only places the
+   box, the corner spinner and the error chip. Tokens come from styles.css. */
+
+.client-preview {
+  --cp-spinner-size: 18px;
+  --cp-spinner-track: rgba(255, 255, 255, 0.18);
+  --cp-well: rgba(0, 0, 0, 0.55);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.client-preview-box {
+  position: relative;
+  background: #000;
+  overflow: hidden;
+}
+
+.client-preview-engine {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 50%;
+}
+
+/* One small ring in the top-right corner: the last good frame is on screen
+   and something better is on its way (§7). The colour says what: pending
+   frames and buffering in the neutral text tone, a bake in the accent. */
+.client-preview-spinner {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: calc(var(--cp-spinner-size) + 8px);
+  height: calc(var(--cp-spinner-size) + 8px);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--cp-well);
+  pointer-events: none;
+  animation: cp-fade-in var(--dur-fast, 120ms) ease-out;
+}
+
+.client-preview-ring {
+  width: var(--cp-spinner-size);
+  height: var(--cp-spinner-size);
+  border-radius: 50%;
+  border: 2px solid var(--cp-spinner-track);
+  border-top-color: var(--text-dim);
+  animation: cp-spin 0.8s linear infinite;
+}
+
+.client-preview-spinner[data-wait='baking'] .client-preview-ring { border-top-color: var(--accent-2); }
+.client-preview-spinner[data-wait='buffering'] .client-preview-ring { border-top-color: var(--text); }
+
+.client-preview-error {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  max-width: 80%;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+@keyframes cp-spin { to { transform: rotate(360deg); } }
+@keyframes cp-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  /* a still ring: the state is still shown, nothing moves */
+  .client-preview-ring { animation: none; border-color: var(--text-dim); }
+  .client-preview-spinner[data-wait='baking'] .client-preview-ring { border-color: var(--accent-2); }
+  .client-preview-spinner { animation: none; }
+}

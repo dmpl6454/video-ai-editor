@@ -20,7 +20,11 @@ numbers the compositor prints into its ffmpeg command lines:
 * ``-to`` (``-t`` for the reversed intermediate) becomes a trim DURATION
   measured from the first kept frame;
 * ``setpts=PTS-STARTPTS`` rebases to 0, ``setpts=PTS/speed`` divides in
-  double and truncates (``D2TS``);
+  double and truncates (``D2TS``); a speed CURVE is the closed-form
+  ``setpts`` of ``edl/speed_curve.py``, evaluated here with the same double
+  operations (``speed_curve.out_seconds``) and truncated the same way;
+* a FREEZE (``Clip.freeze``) is the first output frame of a 1x chain opened
+  at ``in`` (``compositor.freeze_input_span``), cloned for the whole hold;
 * ``fps=R`` (round=near) rounds every pts half-away-from-zero into output
   slots and shows, in slot ``s``, the latest frame whose slot is ``<= s``;
   at EOF it flushes up to the rounded end timestamp;
@@ -52,6 +56,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Callable, Iterable, Mapping, Sequence
 
+from ..edl import speed_curve as _sc
 from ..edl import timebase as _tb
 from ..edl.schema import EDL, Clip, seam_matching, seam_table_for
 
@@ -212,8 +217,8 @@ SourceLookup = Callable[[str], SourceInfo]
 
 def _speed_divisor(speed) -> float | None:
     """The double ``setpts=PTS/{speed}`` divides by, or None when the chain
-    has no retime (1x, unset, <= 0, or a curve dict — curves render at 1x;
-    ``Clip.speed_factor``)."""
+    has no CONSTANT retime (1x, unset, <= 0, or a curve dict — a curve is
+    ``speed_curve_map``'s own setpts)."""
     if isinstance(speed, bool) or not isinstance(speed, (int, float)):
         return None
     if not speed or speed <= 0 or speed == 1.0:
@@ -221,14 +226,28 @@ def _speed_divisor(speed) -> float | None:
     return float(speed)
 
 
+def curve_retimer(curve: "_sc.CurveMap", time_base: Fraction) -> Callable[[int], int]:
+    """The ``setpts`` of a speed curve on a stream in ``time_base``: rebased
+    input ticks → output ticks, as ffmpeg computes it — ``T = PTS·TB`` in
+    double (``TB = av_q2d(tb)``), the curve expression, ``/TB``, truncated
+    (``D2TS``)."""
+    TB = time_base.numerator / time_base.denominator
+
+    def retime(x: int) -> int:
+        return int(_sc.out_seconds(curve, float(x) * TB) / TB)
+    return retime
+
+
 def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
-                  n: int, fps, speed=None) -> list[int]:
+                  n: int, fps, speed=None, curve: "_sc.CurveMap | None" = None) -> list[int]:
     """Source frame index shown in each of ``n`` output slots of one clip
     chain: ``[-ss seek] -t/-to … setpts=PTS-STARTPTS[,setpts=PTS/speed],
     fps=R,tpad=stop_mode=clone,trim=end_frame=n``.
 
     ``seek_us`` is the parsed ``-ss`` (None when the chain has no ``-ss``);
-    ``dur_us`` is the recording time (``-t``, or ``-to`` minus ``-ss``)."""
+    ``dur_us`` is the recording time (``-t``, or ``-to`` minus ``-ss``).
+    ``curve`` (a speed curve laid over the clip) replaces the constant
+    ``speed`` retime with the curve's ``setpts``."""
     if n <= 0:
         return []
     tb = src.time_base
@@ -256,9 +275,11 @@ def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
     while f0 + qlast + 1 <= last and src.pts(f0 + qlast + 1) - base < dur_tb:
         qlast += 1
     div = _speed_divisor(speed)
-
-    def retime(x: int) -> int:
-        return int(x / div) if div is not None else x
+    if curve is not None:
+        retime = curve_retimer(curve, tb)
+    else:
+        def retime(x: int) -> int:
+            return int(x / div) if div is not None else x
 
     slots = [rescale(retime(src.pts(f0 + q) - base), tb, out_tb) for q in range(qlast + 1)]
     eof = rescale(retime(src.pts(f0 + qlast + 1) - base), tb, out_tb)
@@ -283,6 +304,16 @@ def _first_at_or_after(src: SourceInfo, ticks: int) -> int:
     return i
 
 
+def speed_curve_map(speed, in_: float, out: float) -> "_sc.CurveMap | None":
+    """The curve a clip chain retimes by (``compositor._curve_setpts``):
+    the speed's points laid over ``out - in`` source seconds; None for a
+    constant speed."""
+    pts = _sc.curve_points(speed)
+    if pts is None:
+        return None
+    return _sc.curve_map(pts, max(0.0, float(out) - float(in_)))
+
+
 def forward_clip_frames(src: SourceInfo, *, in_: float, out: float, speed,
                         n: int, fps) -> list[int]:
     """``_build_clip_video_chain`` opened with ``clip_input_args``."""
@@ -291,7 +322,38 @@ def forward_clip_frames(src: SourceInfo, *, in_: float, out: float, speed,
     end = float(out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
     seek_us = ffmpeg_us(seek) if seek > 0 else None
     dur_us = ffmpeg_us(end) - (seek_us or 0)
-    return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=n, fps=fps, speed=speed)
+    return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=n, fps=fps, speed=speed,
+                         curve=speed_curve_map(speed, in_, out))
+
+
+def freeze_frame(src: SourceInfo, *, in_: float, fps) -> int:
+    """The source frame a FREEZE clip holds (``Clip.freeze``): the first
+    output frame of a 1x chain opened at ``in`` (``compositor.
+    freeze_input_span`` — the same seek, a decode of a few frames)."""
+    from .compositor import freeze_input_span
+    seek, end = freeze_input_span(in_, fps)
+    seek_us = ffmpeg_us(seek) if seek > 0 else None
+    dur_us = ffmpeg_us(end) - (seek_us or 0)
+    return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=1, fps=fps)[0]
+
+
+def freeze_in_for(src: SourceInfo, frame: int, fps) -> float:
+    """An ``in`` whose freeze holds source frame ``frame`` exactly: what a
+    freeze-frame op writes (lane S2), so the still is the frame under the
+    playhead. Tries the frame's own start, then nudges within it; every
+    candidate is checked with ``freeze_frame``, never assumed. A frame no 1x
+    chain ever shows (frame 0 of a source over twice the project rate: slot
+    0 already holds frame 1) cannot be under a playhead either; its
+    neighbour is held."""
+    frame = max(0, min(int(frame), max(0, src.frames - 1)))
+    base = float((src.pts(frame) - src.start_ticks) * src.time_base)
+    fd = float(1 / src.rate)
+    for frac in (0.0, 0.25, 0.5, 0.75, -0.25, 0.1, 0.9):
+        t = max(0.0, base + frac * fd)
+        t = round(t, 6)
+        if freeze_frame(src, in_=t, fps=fps) == frame:
+            return t
+    return round(max(0.0, base), 6)
 
 
 def reversed_frames(c: Clip, fps) -> int:
@@ -332,8 +394,10 @@ def intermediate_source(m: int, fps) -> SourceInfo:
 
 def clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
     """Source frame for each clip-local output frame of v1 clip ``c`` (the
-    ORIGINAL clip, reversed or not)."""
+    ORIGINAL clip, reversed or not, a freeze or not)."""
     from .compositor import clip_frames
+    if getattr(c, "freeze", None) is not None:
+        return [freeze_frame(src, in_=c.in_, fps=fps)] * clip_frames(c, fps)
     if getattr(c, "reverse", False):
         inter = reversed_intermediate(src, in_=c.in_, out=c.out, fps=fps)
         view = _reversed_view(c, fps)
@@ -549,7 +613,11 @@ class AudioPlacement:
     ``mode``: ``"exact"`` (1x), ``"reverse"`` (sample-exact reversed; a
     retimed reversed clip has no runs), ``"varispeed"`` (asetrate resample:
     output ``i`` is source ``src0 + i·rate`` within half a sample, no runs),
-    ``"tempo"`` (atempo / WSOLA: approximate, same nominal mapping)."""
+    ``"tempo"`` (atempo / WSOLA: approximate, same nominal mapping),
+    ``"curve"`` (a speed curve: output ``i`` plays source ``src0 + 48000 ·
+    speed_curve.source_seconds(i / 48000)``, resampled or time-stretched by
+    ``render/speed_audio.py`` — no runs; ``rate`` is the mean speed),
+    ``"silence"`` (a freeze: nothing; ``rate`` 0)."""
     clip: int
     out0: int
     n: int
@@ -622,6 +690,15 @@ def audio_placements(edl: EDL, pm: ProgramMap, fps=None,
             c = pm.clips[ci]
             div = _speed_divisor(c.speed)
             rate = div or 1.0
+            curve = _sc.curve_points(c.speed)
+            if getattr(c, "freeze", None) is not None:
+                out.append(AudioPlacement(clip=ci, out0=start, n=m, src0=_clip_sample0(c.in_, fps),
+                                          rate=0.0, mode="silence", runs=(), fade_in=ov))
+                last = len(out) - 1
+                cursor = start + m
+                continue
+            if curve is not None:
+                rate = _sc.mean_speed(curve)
             if getattr(c, "reverse", False):
                 mode = "reverse"
                 src = None
@@ -632,7 +709,9 @@ def audio_placements(edl: EDL, pm: ProgramMap, fps=None,
                         src = None
                 # A retimed reversed clip resamples the reversed intermediate:
                 # no sample-exact runs (the client plays it approximately).
-                runs = _reversed_runs(c, src, fps, m) if div is None else ()
+                runs = _reversed_runs(c, src, fps, m) if div is None and curve is None else ()
+            elif curve is not None:
+                mode, runs = "curve", ()
             else:
                 mode = "exact" if div is None else (
                     "tempo" if getattr(c.audio, "keep_pitch", True) else "varispeed")
@@ -793,6 +872,7 @@ __all__ = [
     "SourceInfo", "ProgramMap", "AudioPlacement",
     "round_half_away", "rescale", "ffmpeg_us", "ticks_per_frame", "default_time_base",
     "select_frames", "forward_clip_frames", "reversed_intermediate", "clip_frame_list",
+    "curve_retimer", "speed_curve_map", "freeze_frame", "freeze_in_for",
     "build_program_map", "audio_placements", "audio_total_samples", "to_rle", "rle_frames",
     "frame_map_json",
 ]

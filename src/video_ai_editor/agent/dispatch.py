@@ -25,6 +25,7 @@ from ..show.templates import (
     ShowSnapshot,
 )
 from .tools import list_tools as _list_tools
+from . import speed_edit as _speed_edit
 from .timemap import (
     source_range_to_timeline,
     map_segments_to_timeline,
@@ -1382,6 +1383,25 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         if c_end <= start or c_start >= end:
             new_clips.append(c)
             continue
+        # Clip-local timeline seconds → source offsets. A speed CURVE's
+        # source position is its integral and each kept piece keeps its part
+        # of the shape; a FREEZE keeps its frame and only loses hold (lane
+        # S2, `agent/speed_edit`). `sf` stays exact for a constant speed.
+        curve = c.speed_curve is not None
+        frozen = c.freeze is not None
+
+        def cut_at(local: float, c=c, sf=sf) -> float:
+            if curve:
+                return _speed_edit.source_cut(c, local, lambda v: _q(store.edl, v))
+            return _q(store.edl, c.in_ + local * sf)
+
+        def retime(piece, t0: float, t1: float, c=c) -> None:
+            if frozen:
+                piece.freeze = max(_tb.frame_duration(store.edl.canvas.fps),
+                                   _speed_edit.freeze_piece(c, t0, t1))
+            elif curve:
+                piece.speed = _speed_edit.piece_speed(c, t0, t1)
+        span = c_end - c_start
         # Trim or split
         if c_start < start and c_end > end:
             # Split into two: [c_start..start] and [end..c_end]
@@ -1390,7 +1410,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
             # split_at: the cut edge is interior to the original shot, so
             # only the outer edges keep their fade (otherwise remove_silences
             # on a faded clip strobes to black at every removed silence).
-            left = _clone_clip(c, out=_q(store.edl, c.in_ + left_dur * sf),
+            left = _clone_clip(c, out=c.out if frozen else cut_at(left_dur),
                                start=c_start,
                                video_fade_out=0.0)
             right = _clone_clip(
@@ -1398,11 +1418,13 @@ def cut_range(store: EDLStore, args: dict) -> dict:
                 # Unique suffix — a literal 'b' collides with an earlier
                 # cut/split sibling of the same clip (same bug as split_at).
                 id=f"c_{c.id[2:]}_{uuid4().hex[:6]}",
-                in_=_q(store.edl, c.in_ + (end - c_start) * sf),
+                in_=c.in_ if frozen else cut_at(end - c_start),
                 out=c.out,
                 start=start,  # will be ripple-adjusted
                 video_fade_in=0.0,
             )
+            retime(left, 0.0, left_dur)
+            retime(right, end - c_start, span)
             # The SOUND fades partition the same way: copied to both pieces,
             # speech faded in again after every removed silence.
             left.audio.fade_out, right.audio.fade_in = 0.0, 0.0
@@ -1412,12 +1434,27 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         elif c_start < start:
             # Trim right side
             new_dur = start - c_start
-            c.out = _q(store.edl, c.in_ + new_dur * sf)
+            if frozen:
+                retime(c, 0.0, new_dur)
+            else:
+                # Both from the ORIGINAL curve and span, then assigned.
+                new_out = cut_at(new_dur)
+                piece = _speed_edit.piece_speed(c, 0.0, new_dur) if curve else None
+                c.out = new_out
+                if curve:
+                    c.speed = piece
             new_clips.append(c)
         elif c_end > end:
             # Trim left side
             shift = end - c_start
-            c.in_ = _q(store.edl, c.in_ + shift * sf)
+            if frozen:
+                retime(c, shift, span)
+            else:
+                new_in = cut_at(shift)
+                piece = _speed_edit.piece_speed(c, shift, span) if curve else None
+                c.in_ = new_in
+                if curve:
+                    c.speed = piece
             new_clips.append(c)
         # else: fully inside → drop
     track.clips = new_clips
@@ -1449,13 +1486,26 @@ def split_at(store: EDLStore, args: dict) -> dict:
             new_clips.append(c)
             continue
         c_start, c_end = c.start, c.start + c.effective_duration
+        if c_start < t < c_end and c.freeze is not None:
+            # A FREEZE splits into two holds of the same frame (lane S2):
+            # it consumes no source, so there is no source cut to make.
+            left = _clone_clip(c, video_fade_out=0.0)
+            right = _clone_clip(c, id=f"c_{c.id[2:]}_{uuid4().hex[:6]}", start=t,
+                                video_fade_in=0.0)
+            left.freeze, right.freeze = t - c_start, c_end - t
+            new_clips.extend((left, right))
+            halves[c.id] = right.id
+            split_count += 1
+            continue
         if c_start < t < c_end:
             # Timeline seconds → SOURCE seconds: a 2x clip covers 2 source-
             # seconds per timeline second, so the cut lands speed× deeper
-            # into the source than the timeline offset suggests.
+            # into the source than the timeline offset suggests; a speed
+            # CURVE's source position is its integral (lane S2,
+            # `agent/speed_edit`), and each half keeps its part of the shape.
             # Snapped (QA-002): at 1x this is already on the grid; on a
             # retimed clip speed× a whole frame is not.
-            cut_src = _q(store.edl, c.in_ + (t - c_start) * c.speed_factor)
+            cut_src = _speed_edit.source_cut(c, t - c_start, lambda v: _q(store.edl, v))
             if not (c.in_ < cut_src < c.out):
                 # Within a frame of the clip's edge once snapped: there is no
                 # frame to put on one side, so this is not a split.
@@ -1480,6 +1530,11 @@ def split_at(store: EDLStore, args: dict) -> dict:
                 video_fade_in=0.0,
             )
             left.audio.fade_out, right.audio.fade_in = 0.0, 0.0   # sound fades too
+            if c.speed_curve is not None:
+                # Assigned, not passed to _clone_clip: assignment validates
+                # (normalises the curve); model_copy(update=…) does not.
+                left.speed = _speed_edit.piece_speed(c, 0.0, t - c_start)
+                right.speed = _speed_edit.piece_speed(c, t - c_start, c_end - c_start)
             if c.audio.gain_env is not None:
                 # Volume automation is keyed in clip-local timeline seconds:
                 # the right half re-bases to its own zero (QA-086).
@@ -1508,6 +1563,8 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("trim_clip only supports media clips")
+    if c.freeze is not None:
+        return _trim_freeze(store, track, c, args)
     old_start, old_in, old_duration = c.start, c.in_, c.duration
     new_in = _num(args, "in", c.in_, min=0.0)
     new_out = _num(args, "out", c.out, min=0.0)
@@ -1582,6 +1639,38 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "duration": c.duration}
 
 
+def _trim_freeze(store: EDLStore, track: Track, c: Clip, args: dict) -> dict:
+    """`trim_clip` on a FREEZE (lane S2): an edge drag changes how long the
+    still is held, never which frame. A timeline edge drag arrives in source
+    seconds scaled by `speed_factor` (= one frame / hold), so the requested
+    span over the stored one is exactly the new hold over the old; it is
+    read here BEFORE the frame-grid snap that would round a sub-frame source
+    span back to one frame. The held frame (`in`) never moves."""
+    fps = store.edl.canvas.fps
+    raw_in = _num(args, "in", c.in_, min=0.0)
+    raw_out = _num(args, "out", c.out, min=0.0)
+    if raw_out <= raw_in:
+        raise ValueError(f"out ({raw_out:.3f}) must be greater than in ({raw_in:.3f})")
+    span = c.duration
+    old = float(c.freeze)
+    new = old * (raw_out - raw_in) / span if span > 0 else old
+    new = max(_tb.frame_duration(fps), _tb.quantize(new, fps))
+    c.freeze = new
+    end_old = c.start + old
+    if track.id == MAIN_LANE_ID and abs(new - old) > 1e-9:
+        _ripple_close_gap(track, fps)
+        if new < old:
+            _ripple_overlays(store.edl, c.start + new, end_old)
+        else:
+            _shift_overlays_after(store.edl, end_old, new - old)
+        for tr in track.transitions:
+            if tr.at > end_old - 1e-9:
+                tr.at += new - old
+    summary = f"Freeze {c.id} held {new:.2f}s"
+    store.commit("trim_clip", args, summary)
+    return {"summary": summary, "duration": c.duration, "freeze": new}
+
+
 def move_clip(store: EDLStore, args: dict) -> dict:
     res = store.edl.get_clip(args["clip_id"])
     if not res:
@@ -1600,11 +1689,14 @@ def move_clip(store: EDLStore, args: dict) -> dict:
         # atempo, and PIP applies no setpts on v2) — its effective_duration
         # would lie about the timeline geometry. Same contract as set_speed's
         # lane guards, enforced at the second ingress.
-        if (isinstance(c, Clip) and c.speed_factor != 1.0
+        # A curve whose MEAN is 1 and a freeze are retimed too (lane S2).
+        if (isinstance(c, Clip) and _speed_edit.is_retimed(c)
                 and (new_t.type in _AUDIO_LANE_TYPES or
                      (new_t.type == "video" and new_t.id != "v1"))):
+            what = ("is a freeze frame" if c.freeze is not None
+                    else f"has speed {c.speed_factor:g}x")
             raise ValueError(
-                f"clip {c.id} has speed {c.speed_factor:g}x — reset speed to 1 "
+                f"clip {c.id} {what} — reset speed to 1 "
                 f"before moving it off v1 ('{new_t.id}' renders at native speed)")
         # Second ingress for the same contract add_clip enforces: dragging an
         # audio-only clip up from the music lane onto v1 would otherwise break
@@ -4232,7 +4324,7 @@ def detach_audio(store: EDLStore, args: dict) -> dict:
     from ..render.compositor import source_has_audio
     if not source_has_audio(str(c.src)):
         raise ValueError(f"clip {cid}'s source has no sound to detach")
-    if abs(c.speed_factor - 1.0) > 1e-9:
+    if _speed_edit.is_retimed(c):
         raise ValueError("detach_audio needs a 1x clip — audio lanes play at native speed")
     start, end = c.start, c.start + c.effective_duration
     if args.get("track"):
@@ -4258,10 +4350,16 @@ def detach_audio(store: EDLStore, args: dict) -> dict:
 
 
 def set_speed(store: EDLStore, args: dict) -> dict:
-    """Set playback-speed factor on a clip (1.0 = normal) and RETIME the
-    timeline (CapCut semantics): a 2x clip's footprint halves, later clips on
-    the track ripple to stay adjacent, and overlays over the shifted region
-    follow. Scalar only; full speed-curve support comes later."""
+    """Set a clip's playback speed and RETIME the timeline (CapCut
+    semantics): a 2x clip's footprint halves, later clips on the track ripple
+    to stay adjacent, and overlays over the shifted region follow.
+
+    One of three shapes (wave D, lane S2): `factor` (constant, 0.1-100x),
+    `curve` ([[position, speed], …] over the clip's output, 0.1-10x,
+    piecewise linear — `edl/speed_curve.py`) or `preset` (a CapCut curve by
+    name — `edl/speed_presets.py`, the one table the UI and the agent read).
+    A curve's footprint is its integral, so the ripple below is the same."""
+    from ..edl import speed_presets as _sp
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
     if not res:
@@ -4269,6 +4367,9 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("set_speed only supports media clips")
+    if c.freeze is not None:
+        raise ValueError(f"clip {cid} is a freeze frame — a still has no speed "
+                         "(change its length instead)")
     # Audio lanes (QA-086): audio_mix retimes a music/vo/audio clip with the
     # v1 rule (`audio_mix.speed_filters`) and places it by its
     # effective_duration, so a speed here is heard exactly as drawn.
@@ -4281,12 +4382,12 @@ def set_speed(store: EDLStore, args: dict) -> dict:
             "speed is only supported on the main video track (v1) — "
             "PIP clips render at native speed"
         )
-    factor = float(args["factor"])
-    if factor <= 0:
-        raise ValueError("speed factor must be > 0")
+    # A factor of exactly 1 (the Inspector's Normal reset) also clears a curve.
+    value = _sp.resolve_speed(factor=args.get("factor"), curve=args.get("curve"),
+                              preset=args.get("preset"))
 
     old_fp = c.effective_duration
-    c.speed = factor
+    c.speed = value
     if args.get("keep_pitch") is not None:
         # QA-039 residual: False = varispeed (sample-exact, pitch follows).
         c.audio.keep_pitch = bool(args["keep_pitch"])
@@ -4305,18 +4406,204 @@ def set_speed(store: EDLStore, args: dict) -> dict:
                              removed_start=c.start + new_fp,
                              removed_end=c.start + old_fp)
         else:
-            shift = new_fp - old_fp
-            boundary = c.start + old_fp
-            for t in store.edl.tracks:
-                if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
-                    continue  # a locked lane never follows a ripple (QA-023)
-                for oc in t.clips:
-                    if getattr(oc, "start", 0.0) >= boundary - 1e-9:
-                        oc.start += shift
-                        oc.end += shift
-    summary = f"Speed {cid} → {factor:.2f}× (now {new_fp:.2f}s on timeline)"
+            _shift_overlays_after(store.edl, c.start + old_fp, new_fp - old_fp)
+    summary = (f"Speed {cid} → {_sp.describe(c.speed)} "
+               f"(now {new_fp:.2f}s on timeline)")
     store.commit("set_speed", args, summary)
-    return {"summary": summary}
+    return {"summary": summary, "duration": new_fp,
+            "speed": c.speed if isinstance(c.speed, dict) else c.speed_factor}
+
+
+def _shift_overlays_after(edl: EDL, boundary: float, shift: float) -> None:
+    """INSERTED main-lane timeline (a slow-down, a freeze): every unlocked
+    overlay that starts at or after `boundary` moves right by `shift`.
+    `_ripple_overlays` is the removal twin; a locked lane never follows a
+    ripple (QA-023)."""
+    for t in edl.tracks:
+        if t.type not in _OVERLAY_TRACK_TYPES or t.locked:
+            continue
+        for oc in t.clips:
+            if getattr(oc, "start", 0.0) >= boundary - 1e-9 and hasattr(oc, "end"):
+                oc.start += shift
+                oc.end += shift
+
+
+def _freeze_source_frame(c: Clip, local_t: float, fps) -> float | None:
+    """An `in` whose freeze holds EXACTLY the source frame `c` shows at
+    clip-local timeline seconds `local_t` in the export: the frame the
+    program map names for that output frame (`render/frame_map`, the model
+    the export goldens pin), mapped back to an `in` by `freeze_in_for`,
+    which checks its answer against the freeze model itself.
+
+    The source's pts table comes from its preview proxy's `source.json`
+    when one exists, else one ffprobe packet scan. None when the source
+    cannot be probed (the caller falls back to the split point)."""
+    from ..ingest import proxy as _proxy
+    from ..render import frame_map as _fm
+    from ..render.compositor import clip_frames
+    try:
+        real = str(Path(c.src).resolve())
+        key = _proxy.proxy_key(real)
+        info = _proxy.load_source(key) if _proxy.proxy_dir(key).is_dir() else None
+        if info is None:
+            info = _proxy.probe_source(real, key)
+        if not getattr(info, "has_video", True) or not info.pts:
+            return None
+        src = _fm.SourceInfo.from_proxy(info)
+        frames = _fm.clip_frame_list(c, src, fps)
+    except Exception as e:  # noqa: BLE001 — an unprobeable source is a fallback, not a failure
+        import logging
+        logging.getLogger(__name__).info(
+            "freeze_frame: no frame table for %s (%s); holding the split point", c.src, e)
+        return None
+    if not frames:
+        return None
+    j = min(max(0, _tb.frame_of(local_t, fps)), min(len(frames), clip_frames(c, fps)) - 1)
+    return _fm.freeze_in_for(src, frames[j], fps)
+
+
+def _resolve_freeze_target(edl, args: dict) -> tuple[Track, Clip, float, float]:
+    """`freeze_frame`'s arguments, checked: (main lane, the clip under the
+    moment, that moment on the frame grid, the hold on the grid)."""
+    from ..edl import speed_presets as _sp
+    fps = edl.canvas.fps
+    main = _v_track(edl, MAIN_LANE_ID)
+    lo, hi = _sp.FREEZE_RANGE
+    hold = _num(args, "duration", _sp.FREEZE_DEFAULT_SECONDS)
+    if not lo <= hold <= hi:
+        raise ValueError(f"a freeze frame lasts {lo:g}-{hi:g} s, got {hold:g}")
+    hold = max(_tb.frame_duration(fps), _tb.quantize(hold, fps))
+    media = sorted((c for c in main.clips if isinstance(c, Clip)), key=lambda c: c.start)
+    cid = args.get("clip_id")
+    target: Clip | None = None
+    if cid is not None:
+        res = edl.get_clip(str(cid))
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        if res[0].id != MAIN_LANE_ID or not isinstance(res[1], Clip):
+            raise ValueError("freeze frame works on the main video track (v1) — "
+                             "picture-in-picture clips render at native speed")
+        target = res[1]
+    if args.get("time") is None:
+        if target is None:
+            raise ValueError("freeze_frame needs the playhead `time` or a `clip_id`")
+        t = _q(edl, target.start)
+    else:
+        t = _q(edl, _num(args, "time", 0.0, min=0.0))
+
+    def spans(c: Clip) -> bool:
+        return c.start - 1e-9 <= t < c.start + c.effective_duration - 1e-9
+
+    if target is None:
+        target = next((c for c in media if spans(c)), None)
+        if target is None:
+            raise ValueError(f"no clip on the main video track at {t:.2f}s — "
+                             "move the playhead over a clip to freeze its frame")
+    elif not spans(target):
+        end = target.start + target.effective_duration
+        raise ValueError(f"the playhead ({t:.2f}s) is not over clip {target.id} "
+                         f"({target.start:.2f}–{end:.2f}s) — move it onto the frame to freeze")
+    return main, target, t, hold
+
+
+def _extend_freeze(store: EDLStore, main: Track, target: Clip, hold: float, args: dict) -> dict:
+    """Freeze over a still: the same frame, held `hold` longer (one undo step)."""
+    edl = store.edl
+    old = target.freeze
+    with store.batch():
+        target.freeze = old + hold
+        _ripple_close_gap(main, edl.canvas.fps)
+        _shift_overlays_after(edl, target.start + old, hold)
+        for tr in main.transitions:
+            if tr.at > target.start + old - 1e-9:
+                tr.at += hold
+    summary = f"Freeze {target.id} held {old + hold:.2f}s (+{hold:.2f}s)"
+    store.commit("freeze_frame", args, summary)      # after the batch closes
+    return {"summary": summary, "clip_id": target.id, "duration": target.freeze, "at": target.start}
+
+
+def _make_still(target: Clip, freeze_in: float, hold: float, seam: float, local_t: float, fps) -> Clip:
+    """The still: a copy of the clip (transform, effects, fit, colour — a
+    freeze is "cloned on the project grid before geometry and effects", so it
+    keeps the look) holding one frame, silent, with no fades of its own. A
+    keyframed property is pinned to its pose at the playhead: clip-local key
+    times mean nothing on a still."""
+    from ..edl.keyframes import is_keyframed, sample
+    still = _clone_clip(target, id=f"c_{uuid4().hex[:8]}", start=seam,
+                        video_fade_in=0.0, video_fade_out=0.0)
+    still.in_ = float(freeze_in)
+    still.out = float(freeze_in) + _tb.frame_duration(fps)
+    still.freeze = hold            # assignment validates: clears speed/reverse
+    still.audio.fade_in, still.audio.fade_out = 0.0, 0.0
+    still.audio.gain_env = None
+    for prop in ("x", "y", "scale", "rotation", "opacity"):
+        v = getattr(still.transform, prop, None)
+        if is_keyframed(v):
+            setattr(still.transform, prop, sample(v, local_t))
+    return still
+
+
+def _shift_main_lane_after(edl, main: Track, seam: float, hold: float, keep_id: str | None) -> None:
+    """Open `hold` seconds at `seam` on the magnetic main lane: every later
+    clip (but `keep_id`, the left half ending there), the unlocked overlays
+    and the transitions over that picture move right (`paste_clips` rule)."""
+    for x in main.clips:
+        if isinstance(x, Clip) and x.id != keep_id and x.start >= seam - 1e-9:
+            x.start = _q(edl, x.start + hold)
+    _shift_overlays_after(edl, seam, hold)
+    for tr in main.transitions:
+        if tr.at > seam + 1e-9:
+            tr.at += hold
+
+
+def freeze_frame(store: EDLStore, args: dict) -> dict:
+    """CapCut's Freeze: hold the frame under the playhead for `duration`
+    seconds (default 3), on the main video lane.
+
+    The clip under `time` (layout seconds, on the frame grid) — or `clip_id`,
+    which must then be under `time`; with no `time`, its first frame — is
+    split there and a FREEZE clip (`Clip.freeze`: one held frame, silent) is
+    inserted in the gap. Everything after it moves right by the hold, like
+    CapCut's magnetic main track: later clips, the unlocked overlays and the
+    transitions over that picture (the `paste_clips` insert rule). A freeze
+    under the playhead just gets longer. One gesture, one undo step.
+
+    The held frame is the one the EXPORT shows at the playhead, computed
+    from the program map — not `in + t·speed`, which is a frame off on a
+    retimed clip or a source at another rate."""
+    edl = store.edl
+    fps = edl.canvas.fps
+    main, target, t, hold = _resolve_freeze_target(edl, args)
+    if target.freeze is not None:
+        return _extend_freeze(store, main, target, hold, args)
+    local_t = t - target.start
+    freeze_in = _freeze_source_frame(target, local_t, fps)
+    end = target.start + target.effective_duration
+    with store.batch():
+        # The seam is where the RIGHT half starts, never re-derived from the
+        # left half's end: on a retimed clip the split snaps its SOURCE cut to
+        # the grid (QA-002), so the left half can end a fraction of a frame
+        # past `t`, and `_open_main_lane_at` would then read `t` as "inside"
+        # it and put the still after the whole clip (measured: 1.5x, t=1.3 →
+        # the freeze landed at 4.0 s).
+        halves = split_at(store, {"track": main.id, "time": t}).get("halves") or {}
+        right = edl.get_clip(halves[target.id]) if target.id in halves else None
+        if right is not None:
+            seam = right[1].start
+        else:   # within a frame of an edge: split_at declines; the nearer edge
+            seam = target.start if local_t <= end - t else _q(edl, end)
+        if freeze_in is None:
+            freeze_in = target.in_ + target.source_offset_at(seam - target.start)
+        still = _make_still(target, freeze_in, hold, seam, local_t, fps)
+        _shift_main_lane_after(edl, main, seam, hold, target.id if right is not None else None)
+        main.clips.append(still)
+        _ripple_close_gap(main, fps)
+        main.clips.sort(key=lambda x: getattr(x, "start", 0))
+    summary = f"Freeze frame at {seam:.2f}s for {hold:.2f}s ({still.id})"
+    # After the batch closes: a commit inside it is folded away (snapshot.
+    # batch), so the split and the insert land as this ONE op.
+    store.commit("freeze_frame", args, summary)
+    return {"summary": summary, "clip_id": still.id, "duration": hold, "at": seam}
 
 
 def _push_lane_after(track: Track, c: Clip, fps) -> None:
@@ -6917,6 +7204,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_track_solo": set_track_solo,
     "detach_audio": detach_audio,
     "set_speed": set_speed,
+    "freeze_frame": freeze_frame,
     "set_clip_transform": set_clip_transform,
     "set_clip_fit": set_clip_fit,
     "set_clip_timing": set_clip_timing,
@@ -7018,6 +7306,7 @@ _LOCK_EXEMPT = frozenset({
 _V1_DEFAULT_TOOLS = frozenset({
     "split_at", "remove_silences", "remove_fillers", "auto_cut_to_beats",
     "add_transition", "remove_transition", "auto_reframe", "multicam",
+    "freeze_frame",
 })
 
 

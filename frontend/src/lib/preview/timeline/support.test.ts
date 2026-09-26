@@ -26,20 +26,48 @@ const clip = (e: EdlLike, i: number) => v1(e).clips[i] as Record<string, unknown
 describe('support.classify (§7)', () => {
   const gaps = byName('structure', 'gaps_p30')
 
-  it('plain cuts, gaps, speed and reverse are EXACT in phase 1', () => {
+  it('plain cuts, gaps, speed, curves and reverse are EXACT in phase 1', () => {
     const { edl, pm } = mapOf(byName('rates', 'rates_p30_s30'))
     const s = classify(pm, edl, { phase: 1 })
     expect(s.engine).toEqual({ ok: true })
     // Varispeed clips (keep_pitch false in the goldens) are sample-exact;
-    // only the reversed 2x clip's sound (a resampled intermediate) is not.
-    const rev2 = pm.clips.findIndex((c) => c.reverse && c.speed === 2)
-    const [a, b] = [pm.clipStart[rev2], pm.clipStart[rev2] + pm.clipLen[rev2]]
+    // only the speed curve's sound (a warped intermediate) and the reversed
+    // 2x clip's (a resampled intermediate) are not. Their PICTURES are exact.
+    const span = (i: number) => [pm.clipStart[i], pm.clipStart[i] + pm.clipLen[i]]
+    const [c0, c1] = span(pm.clips.findIndex((c) => typeof c.speed === 'object' && c.speed !== null))
+    const [a, b] = span(pm.clips.findIndex((c) => c.reverse && c.speed === 2))
+    expect(c1 < a).toBe(true)
     expect(s.ranges).toEqual([
-      { k0: 0, k1: a, mode: MODE_EXACT, reasons: [] },
+      { k0: 0, k1: c0, mode: MODE_EXACT, reasons: [] },
+      { k0: c0, k1: c1, mode: MODE_APPROX, reasons: ['audio:curve'] },
+      { k0: c1, k1: a, mode: MODE_EXACT, reasons: [] },
       { k0: a, k1: b, mode: MODE_APPROX, reasons: ['audio:reverse-speed'] },
       { k0: b, k1: pm.total, mode: MODE_EXACT, reasons: [] },
     ])
     expect(classify(mapOf(gaps).pm, mapOf(gaps).edl, { phase: 1 }).ranges.every((r) => r.mode === MODE_EXACT)).toBe(true)
+  })
+
+  it('a freeze is EXACT (one proxy frame, silence); curve sound is APPROX in every phase', () => {
+    const { edl, pm } = mapOf(byName('speed', 'speed_freeze_p30'))
+    const s = classify(pm, edl, { phase: 1 })
+    expect(s.ranges.every((r) => r.mode === MODE_EXACT || r.reasons.every((x) => x.startsWith('transition')))).toBe(true)
+    const fz = pm.clips.findIndex((c) => c.id === 'fz_mid')
+    expect(s.mode[pm.clipStart[fz]]).toBe(MODE_EXACT)
+    const cv = mapOf(byName('speed', 'speed_curves_p30'))
+    for (const phase of [1, 2, 3, 4, 5] as Phase[]) {
+      const cs = classify(cv.pm, cv.edl, { phase })
+      const ru = cv.pm.clips.findIndex((c) => c.id === 'ru')
+      expect(cs.mode[cv.pm.clipStart[ru]]).toBe(MODE_APPROX)
+      expect(cs.ranges.find((r) => r.k0 <= cv.pm.clipStart[ru] && cv.pm.clipStart[ru] < r.k1)!.reasons).toEqual(['audio:curve'])
+    }
+    // A curve on a music lane: its sound is APPROX over its footprint.
+    const lane = mapOf(gaps, (e) => {
+      e.tracks!.find((t) => t.id === 'music')!.clips = [{
+        id: 'mc', src: 'bar30', in: 0, out: 2, start: 0.5, speed: { curve: [[0, 0.5], [1, 2]] },
+      }]
+    })
+    const ls = classify(lane.pm, lane.edl, { phase: 4 })
+    expect(ls.ranges.some((r) => r.reasons.includes('audio:curve'))).toBe(true)
   })
 
   it('colour is BAKED in P1 and EXACT from P2; flips are geometry', () => {

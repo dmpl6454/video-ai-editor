@@ -430,10 +430,25 @@ def clip_frames(c: Clip, fps) -> int:
     return max(1, _tb.frame_of(c.effective_duration, fps))
 
 
+def freeze_input_span(in_: float, fps) -> tuple[float, float]:
+    """`(seek, end)` a FREEZE clip's input is opened with: the ordinary
+    half-frame pre-roll seek at `in`, and a decode of one frame plus the
+    usual slack — the held frame is the first one a 1x chain would show
+    (`frame_map.freeze_frame`), so nothing past it is read."""
+    pre = _tb.seek_preroll(in_, fps)
+    seek = max(0.0, float(in_) - pre)
+    end = float(in_) + (1 + _DECODE_SLACK_FRAMES) * _tb.frame_duration(fps)
+    return seek, end
+
+
 def clip_input_args(c: Clip, fps) -> list[str]:
     """`-ss/-to/-i` for clip `c`: seek half a frame early, decode a little past
     `out`. Precision is µs, not the old `%.3f` (which alone could land a seek
     after the frame it meant to keep)."""
+    if getattr(c, "freeze", None) is not None:
+        seek, end = freeze_input_span(c.in_, fps)
+        from .audio_mix import input_seek
+        return [*input_seek(seek), "-to", f"{end:.6f}", "-i", str(c.src)]
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
     end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
@@ -536,6 +551,15 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # Rebase first: the half-frame seek pre-roll leaves the first kept
         # frame at PTS ≈ half a frame, and every retime below assumes 0.
         input_label = f"{input_label}setpts=PTS-STARTPTS,"
+        if getattr(c, "freeze", None) is not None:
+            # FREEZE: the first frame a 1x chain shows at `in` (the project-
+            # grid `fps` picks it exactly as for any clip), cloned on the grid
+            # for the whole hold BEFORE geometry/effects/fades — so a
+            # keyframe or a fade animates over the still like over footage.
+            hold = clip_frames(c, fps)
+            input_label += (f"fps={_tb.ffmpeg_rate(fps)},trim=end_frame=1,"
+                            + (f"tpad=stop={hold - 1}:stop_mode=clone," if hold > 1 else "")
+                            + "setpts=PTS-STARTPTS,")
     tx = c.transform
     rot_static = float(tx.rotation) if isinstance(tx.rotation, (int, float)) else 0.0
     sc_static = float(tx.scale) if isinstance(tx.scale, (int, float)) else 1.0
@@ -547,7 +571,12 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # handled entirely by the animated branch below.
     x_static = 0.0 if x_animated else float(tx.x) if isinstance(tx.x, (int, float)) else 0.0
     y_static = 0.0 if y_animated else float(tx.y) if isinstance(tx.y, (int, float)) else 0.0
-    tvar = f"(t-{c.start:.4f})"
+    # Keyframes are authored in clip-local TIMELINE seconds (the Properties
+    # panel's clipLocalTime); the transform filters below run BEFORE the
+    # speed retime, on source-local `t`, so `t` goes through the clip's retime
+    # first. It used to be `(t - start)`: a clip not at 0 animated late or
+    # not at all, and a retimed one at the source's pace (review RD2).
+    tvar = _kf_time_expr(c, "t")
 
     # `fit` decides what happens when the source aspect doesn't match the canvas:
     #   contain (default) — scale DOWN to fit, pad the remainder black. Letterbox.
@@ -738,7 +767,7 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # — a whole-graph failure, i.e. the render fails outright rather than
         # animating wrong. `rotate` above legitimately uses `t`, which is why
         # reusing tvar here looks right and is not.
-        oe = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{c.start:.4f})")
+        oe = to_ffmpeg_expr(tx.opacity, time_var=_kf_time_expr(c, "T"))
         v_chain += (f",format=gbrp,geq=r='r(X\\,Y)*({oe})'"
                     f":g='g(X\\,Y)*({oe})':b='b(X\\,Y)*({oe})',format=yuv420p")
     elif opa_static < 0.999:
@@ -762,6 +791,13 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
 
     if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         v_chain += f",setpts=PTS/{float(c.speed)}"
+    else:
+        curve = _curve_setpts(c)
+        if curve:
+            # A speed CURVE: the closed-form integral as `setpts` (edl/
+            # speed_curve.py) — the SAME frame-selection rule as a constant
+            # speed follows (fps=R below), so frame_map models it exactly.
+            v_chain += f",setpts={curve}"
 
     # Visual fade from/to black (clip.video_fade_in/out). st/d are clip-local
     # TIMELINE seconds: this sits AFTER the speed setpts, so a 1 s fade on a
@@ -799,6 +835,33 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
+def _kf_time_expr(c: Clip, var: str) -> str:
+    """Clip-local TIMELINE seconds of the source frame a pre-retime filter
+    sees at source-local seconds `var` (`t` for rotate/scale/crop, `T` for
+    geq): the clip's retime applied to it — `var/speed`, a speed curve's
+    `out_seconds`, or `var` itself at 1x. geometry.ts's `kfTimeOf` mirrors
+    it with the same double operations."""
+    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
+        return f"({var}/{float(c.speed)})"
+    from ..edl import speed_curve as _sc
+    pts = _sc.curve_points(c.speed)
+    cm = _sc.curve_map(pts, c.duration) if pts is not None else None
+    if cm is not None:
+        return f"({_sc.out_seconds_expr(cm, f'({var})')})"
+    return var
+
+
+def _curve_setpts(c: Clip) -> str:
+    """The `setpts` value retiming clip `c` by its speed curve, or "" when
+    its speed is not a curve (or it consumes no source)."""
+    from ..edl import speed_curve as _sc
+    pts = _sc.curve_points(c.speed)
+    if pts is None:
+        return ""
+    cm = _sc.curve_map(pts, c.duration)
+    return _sc.setpts_expr(cm) if cm is not None else ""
+
+
 def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
                             fps=None) -> str:
     """Per-clip audio chain: resample + atempo for speed + gain/fade/mute.
@@ -815,17 +878,37 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
     A source with no audio stream at all gets silence of that length
     (QA-040) instead of failing the whole graph on `[i:a]`.
     """
-    if fps is not None and not source_has_audio(str(c.src)):
-        input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
-    a_chain = (f"{input_label}aresample=async=1:first_pts=0,"
-               f"aformat=channel_layouts=stereo:sample_rates=48000")
-    pre = _clip_preroll(c, fps)
-    if pre > 1e-9:
-        a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
-    # Speed: varispeed (keep_pitch False, sample-exact) or atempo centred by
-    # its lag — the one rule, shared with the audio lanes (QA-086).
-    from .audio_mix import speed_filters
-    a_chain += speed_filters(c)
+    from . import speed_audio as _speed_audio
+    if getattr(c, "freeze", None) is not None:
+        # A FREEZE is a still: its sound is digital silence of its exact
+        # length (the source input stays open for the picture only).
+        a_chain = ("anullsrc=channel_layout=stereo:sample_rate=48000,"
+                   "aformat=channel_layouts=stereo:sample_rates=48000")
+        if fps is not None:
+            m = _tb.samples_for_frames(clip_frames(c, fps), fps)
+            a_chain += f",atrim=end_sample={m}"
+        else:
+            a_chain += f",atrim=end_sample={max(1, int(round(c.effective_duration * 48000)))}"
+        return a_chain + label_out
+    curve_src = _speed_audio.chain_source(c, fps) if _speed_audio.has_curve(c) else None
+    if curve_src is not None:
+        # A speed CURVE's sound is a cached intermediate that already follows
+        # the curve (render/speed_audio.py: varispeed or pitch-kept), read in
+        # the graph from clip-local 0 — no pre-roll, no retime here.
+        a_chain = (f"{curve_src}aresample=async=1:first_pts=0,"
+                   f"aformat=channel_layouts=stereo:sample_rates=48000")
+    else:
+        if fps is not None and not source_has_audio(str(c.src)):
+            input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
+        a_chain = (f"{input_label}aresample=async=1:first_pts=0,"
+                   f"aformat=channel_layouts=stereo:sample_rates=48000")
+        pre = _clip_preroll(c, fps)
+        if pre > 1e-9:
+            a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
+        # Speed: varispeed (keep_pitch False, sample-exact) or atempo centred by
+        # its lag — the one rule, shared with the audio lanes (QA-086).
+        from .audio_mix import speed_filters
+        a_chain += speed_filters(c)
     a_chain += _audio_props_filters(c)
     if fps is not None:
         m = _tb.samples_for_frames(clip_frames(c, fps), fps)
@@ -1264,6 +1347,10 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # of the EDL, and only when something is reversed.
     from .reverse import with_reversed_sources
     edl = with_reversed_sources(edl, cache_dir, fps)
+    # Speed-curve sound intermediates (render/speed_audio.py), built once
+    # into the render cache before the graph names them.
+    from .speed_audio import prepare as _prepare_curve_audio
+    _prepare_curve_audio(edl, cache_dir, fps)
 
     clips = _video_clips(edl)
     # The v1 base always spans the WHOLE timeline (see `_v1_segments`): gaps and
@@ -2037,6 +2124,8 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     edl = apply_solo(edl)
     from .reverse import with_reversed_sources      # QA-037, as _render_locked
     edl = with_reversed_sources(edl, cache_dir, fps)
+    from .speed_audio import prepare as _prepare_curve_audio
+    _prepare_curve_audio(edl, cache_dir, fps)
     tmp = _part_path(dst)
     # idx 0 = the video-only file. Preview-only, so loudnorm stays off.
     a_inputs, fc, final_audio_label = _audio_only_graph(
@@ -2083,6 +2172,8 @@ def measure_mix_loudness(edl: EDL, *, fps, cache_dir: Path | None) -> float | No
     from .audio_mix import apply_solo, export_measure_scope
     from .reverse import with_reversed_sources
     edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
+    from .speed_audio import prepare as _prepare_curve_audio
+    _prepare_curve_audio(edl, cache_dir, fps)
     with export_measure_scope():
         a_inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
                                                 apply_loudnorm=True)
@@ -2427,6 +2518,8 @@ def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,
     gain = _export_mastering_gain(edl, fps=fps, cache_dir=cache_dir,
                                   cancel_event=cancel_event)
     edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
+    from .speed_audio import prepare as _prepare_curve_audio
+    _prepare_curve_audio(edl, cache_dir, fps)
     with export_gain_scope(gain):
         inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
                                               apply_loudnorm=True)

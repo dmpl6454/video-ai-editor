@@ -1,15 +1,19 @@
-import { forwardRef, type ReactNode } from 'react'
+import { forwardRef, lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { useLayoutStore } from '../../lib/layoutStore'
 import { Icon } from '../Icon'
 import { MediaBin } from '../MediaBin'
 import { AudioPanel } from '../panels/AudioPanel'
+import { TextPanel } from '../panels/TextPanel'
+import { CaptionsPanel } from '../panels/CaptionsPanel'
 import { StickerPanel } from '../StickerPanel'
 import { EffectsPanel } from '../EffectsPanel'
 import { TransitionsPanel } from '../TransitionsPanel'
 import { AiPanel } from '../AiPanel'
+import { DeepLinks } from './DeepLinkRow'
 import { RAIL_ITEMS, railItem, railPanelId, railTabId, type RailId } from './railModel'
 import { useFocusRescue } from './focusRescue'
 import { useRailChord } from './useRailChord'
+import { loadPhonePairing, usePhonePairing } from './phonePairing'
 import '../aiPanel.css'
 import './rail.css'
 
@@ -27,15 +31,50 @@ import './rail.css'
 //
 // `active` (= open AND selected) is how a hidden-but-mounted panel learns it is
 // off screen: AiPanel takes its guide rectangles off the preview, and the
-// Stickers / Effects / Transitions panels defer their first fetch until shown.
+// Stickers / Effects / Transitions panels defer their first fetch until shown,
+// and Captions re-reads which caption models are on disk each time it shows.
+
+// The pairing panel's code loads on the first open only: with the flag off it
+// is never fetched, so nothing of the LAN feature reaches the page (R3).
+const PhonePanel = lazy(() => import('../PhonePanel').then((m) => ({ default: m.PhonePanel })))
+
+/** The Media panel's header action (§2.5, R3), rendered ONLY while this build
+ *  reports `phone_pairing: true` — absent from the markup otherwise, not
+ *  hidden. The panel shows a live credential, so it is mounted only while
+ *  open (a merely hidden one is one stylesheet mistake from a code on screen).
+ *  Its word hides when the tool panel is under 260 px (@container). */
+function FromIPhone() {
+  const enabled = usePhonePairing((s) => s.enabled)
+  const [open, setOpen] = useState(false)
+  useEffect(() => { void loadPhonePairing() }, [])
+  if (!enabled) return null
+  return (
+    <>
+      <button
+        type="button"
+        className="tool-panel-act"
+        aria-label="From iPhone"
+        data-tip="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
+        onClick={() => setOpen(true)}
+      >
+        <Icon name="phone" /><span className="tool-panel-act-word" aria-hidden="true">From iPhone</span>
+      </button>
+      {open && <Suspense fallback={null}><PhonePanel onClose={() => setOpen(false)} /></Suspense>}
+    </>
+  )
+}
 
 function panelContent(id: RailId, active: boolean): ReactNode {
   switch (id) {
     case 'media': return <MediaBin />
-    case 'audio': return <AudioPanel />
+    case 'audio': return <AudioPanel active={active} />
+    case 'text': return <TextPanel active={active} />
     case 'stickers': return <StickerPanel active={active} />
-    case 'effects': return <EffectsPanel active={active} />
+    // The Cutout & effects (AI) deep links sit under EffectsPanel here, not
+    // inside it (EffectsPanel.tsx belongs to instant preview Phase 2; R5).
+    case 'effects': return <><EffectsPanel active={active} /><DeepLinks from="effects" active={active} /></>
     case 'transitions': return <TransitionsPanel active={active} />
+    case 'captions': return <CaptionsPanel active={active} />
     case 'ai': return <AiPanel active={active} />
     default: return null
   }
@@ -72,6 +111,7 @@ export const ToolPanel = forwardRef<HTMLElement>(function ToolPanel(_props, ref)
         <h2 id="tool-panel-title">{item.label}</h2>
         {chord.label && <span className="tool-panel-kbd" aria-hidden="true">{chord.label}</span>}
         <span className="tool-panel-grow" />
+        {leftTab === 'media' && <FromIPhone />}
         <button
           type="button"
           className="tool-panel-collapse"

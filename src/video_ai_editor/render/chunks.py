@@ -109,6 +109,10 @@ def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
         "in": float(c.in_),
         "out": float(c.out),
         "speed": _canonical(c.speed),
+        # A freeze holds one frame for `freeze` seconds (Wave D S1): the same
+        # in/out render a different chunk with and without it. Only present
+        # when set, so every existing chunk key is unchanged.
+        **({"freeze": float(c.freeze)} if getattr(c, "freeze", None) is not None else {}),
         # The chunk bakes gain/fade/mute (build_audio_chain runs at chunk
         # render time), so audio props are part of the chunk's identity —
         # omitting them served stale audio on every volume/fade edit.

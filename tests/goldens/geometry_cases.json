@@ -1,0 +1,5859 @@
+{
+ "version": 1,
+ "grey": 128,
+ "markers": {
+  "red": [
+   0.25,
+   0.25
+  ],
+  "green": [
+   0.75,
+   0.25
+  ],
+  "blue": [
+   0.25,
+   0.75
+  ],
+  "yellow": [
+   0.75,
+   0.75
+  ],
+  "white": [
+   0.5,
+   0.5
+  ]
+ },
+ "marker_size": {
+  "land": 48,
+  "port": 48,
+  "odd": 46,
+  "wide": 46,
+  "sq": 66,
+  "land25": 48,
+  "odd25": 36
+ },
+ "cases": [
+  {
+   "name": "identity",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       269.972
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.001,
+       180.063
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_portrait",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       268.822,
+       90.134
+      ],
+      "green": [
+       371.17,
+       89.701
+      ],
+      "blue": [
+       268.737,
+       270.008
+      ],
+      "yellow": [
+       370.267,
+       270.072
+      ],
+      "white": [
+       319.474,
+       180.051
+      ]
+     },
+     "bbox": [
+      218,
+      0,
+      420,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_portrait",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.01,
+       181.075
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_odd",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "odd",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "odd": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 702,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       269.371,
+       90.03
+      ],
+      "green": [
+       367.685,
+       89.98
+      ],
+      "blue": [
+       269.468,
+       269.966
+      ],
+      "yellow": [
+       367.707,
+       270.074
+      ],
+      "white": [
+       318.566,
+       180.04
+      ]
+     },
+     "bbox": [
+      220,
+      0,
+      416,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_odd",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "odd",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "odd": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 702,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.047,
+       179.529
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_wide",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "wide",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "wide": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 706
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.075,
+       90.112
+      ],
+      "green": [
+       480.041,
+       89.868
+      ],
+      "blue": [
+       160.018,
+       267.042
+      ],
+      "yellow": [
+       479.961,
+       267.089
+      ],
+      "white": [
+       320.002,
+       178.481
+      ]
+     },
+     "bbox": [
+      0,
+      2,
+      640,
+      354
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_wide",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "wide",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "wide": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 706
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       157.19,
+       89.832
+      ],
+      "green": [
+       483.992,
+       90.006
+      ],
+      "blue": [
+       157.353,
+       270.267
+      ],
+      "yellow": [
+       483.733,
+       270.344
+      ],
+      "white": [
+       320.505,
+       180.001
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_square",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "sq",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "sq": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1000,
+     "h": 1000
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       230.088,
+       89.995
+      ],
+      "green": [
+       410.136,
+       90.449
+      ],
+      "blue": [
+       229.903,
+       270.028
+      ],
+      "yellow": [
+       409.973,
+       269.977
+      ],
+      "white": [
+       320.011,
+       180.054
+      ]
+     },
+     "bbox": [
+      140,
+      0,
+      500,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_odd_25fps",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "odd25",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "odd25": {
+     "rate": [
+      25,
+      1
+     ],
+     "tb": [
+      1,
+      12800
+     ],
+     "frames": 75,
+     "start_ticks": 0,
+     "w": 962,
+     "h": 540
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       159.713,
+       90.015
+      ],
+      "green": [
+       480.683,
+       89.966
+      ],
+      "blue": [
+       159.658,
+       269.265
+      ],
+      "yellow": [
+       480.376,
+       269.258
+      ],
+      "white": [
+       320.0,
+       179.539
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      358
+     ]
+    },
+    {
+     "k": 11,
+     "markers": {
+      "red": [
+       159.623,
+       89.88
+      ],
+      "green": [
+       480.683,
+       89.966
+      ],
+      "blue": [
+       159.651,
+       269.258
+      ],
+      "yellow": [
+       480.376,
+       269.258
+      ],
+      "white": [
+       320.0,
+       179.55
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      358
+     ]
+    }
+   ]
+  },
+  {
+   "name": "contain_land_in_portrait",
+   "canvas": [
+    360,
+    640
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 360,
+     "h": 640,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       90.125,
+       268.827
+      ],
+      "green": [
+       270.336,
+       268.765
+      ],
+      "blue": [
+       90.048,
+       370.326
+      ],
+      "yellow": [
+       270.077,
+       370.267
+      ],
+      "white": [
+       180.038,
+       319.471
+      ]
+     },
+     "bbox": [
+      0,
+      218,
+      360,
+      420
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_land_in_portrait",
+   "canvas": [
+    360,
+    640
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 360,
+     "h": 640,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       181.013,
+       320.006
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      360,
+      640
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_pan",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 30.0,
+         "y": -500.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": [
+       159.969,
+       75.521
+      ],
+      "yellow": [
+       480.054,
+       75.44
+      ],
+      "white": null
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_pan_zoom",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 30.0,
+         "y": -50.0,
+         "scale": 1.3,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       350.01,
+       129.498
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cover_pan_land_in_portrait",
+   "canvas": [
+    360,
+    640
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 360,
+     "h": 640,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": -120.0,
+         "y": 3.0,
+         "scale": 1.15,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       59.944,
+       324.002
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      360,
+      640
+     ]
+    }
+   ]
+  },
+  {
+   "name": "rotate_20",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 20.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       200.375,
+       40.671
+      ],
+      "green": [
+       501.214,
+       150.296
+      ],
+      "blue": [
+       138.889,
+       209.876
+      ],
+      "yellow": [
+       439.621,
+       319.332
+      ],
+      "white": [
+       319.986,
+       180.1
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "rotate_neg35_contain_portrait",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": -35.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       226.489,
+       135.665
+      ],
+      "green": [
+       309.889,
+       77.736
+      ],
+      "blue": [
+       329.668,
+       283.18
+      ],
+      "yellow": [
+       412.998,
+       225.069
+      ],
+      "white": [
+       319.615,
+       180.396
+      ]
+     },
+     "bbox": [
+      133,
+      0,
+      506,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "scale_05",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 0.5,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       294.343,
+       134.996
+      ],
+      "green": [
+       345.253,
+       135.203
+      ],
+      "blue": [
+       294.284,
+       224.967
+      ],
+      "yellow": [
+       345.128,
+       224.961
+      ],
+      "white": [
+       319.693,
+       180.038
+      ]
+     },
+     "bbox": [
+      269,
+      90,
+      370,
+      270
+     ]
+    }
+   ]
+  },
+  {
+   "name": "scale_073_pan",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": -33.4,
+         "y": 12.6,
+         "scale": 0.73,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       170.535,
+       127.368
+      ],
+      "green": [
+       403.4,
+       127.519
+      ],
+      "blue": [
+       170.45,
+       258.512
+      ],
+      "yellow": [
+       403.549,
+       258.526
+      ],
+      "white": [
+       287.056,
+       193.002
+      ]
+     },
+     "bbox": [
+      54,
+      62,
+      520,
+      324
+     ]
+    }
+   ]
+  },
+  {
+   "name": "zoom_137_pan",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 21.0,
+         "y": 0.0,
+         "scale": 1.37,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       122.972,
+       57.021
+      ],
+      "green": [
+       560.618,
+       56.88
+      ],
+      "blue": [
+       122.992,
+       302.969
+      ],
+      "yellow": [
+       561.063,
+       302.986
+      ],
+      "white": [
+       342.025,
+       179.942
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "pan_only",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 100.0,
+         "y": 40.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       260.098,
+       129.975
+      ],
+      "green": [
+       579.833,
+       130.768
+      ],
+      "blue": [
+       259.959,
+       310.043
+      ],
+      "yellow": [
+       580.003,
+       310.016
+      ],
+      "white": [
+       420.066,
+       220.032
+      ]
+     },
+     "bbox": [
+      100,
+      40,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "pan_half_pixels",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 12.5,
+         "y": -7.5,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       172.0,
+       82.0
+      ],
+      "green": [
+       492.047,
+       82.66
+      ],
+      "blue": [
+       172.047,
+       262.052
+      ],
+      "yellow": [
+       491.997,
+       262.016
+      ],
+      "white": [
+       331.965,
+       172.07
+      ]
+     },
+     "bbox": [
+      12,
+      0,
+      640,
+      352
+     ]
+    }
+   ]
+  },
+  {
+   "name": "zoom_cover_rotate",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "odd",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.2,
+         "rotation": 7.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "odd": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 702,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.148,
+       179.425
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_x_zoom",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": {
+          "keyframes": [
+           [
+            0.0,
+            0.0
+           ],
+           [
+            1.0,
+            200.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "y": 0.0,
+         "scale": 1.5,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       79.944,
+       44.976
+      ],
+      "green": [
+       560.175,
+       45.303
+      ],
+      "blue": [
+       80.037,
+       314.987
+      ],
+      "yellow": [
+       560.06,
+       314.998
+      ],
+      "white": [
+       319.989,
+       179.989
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 7,
+     "markers": {
+      "red": [
+       34.045,
+       44.976
+      ],
+      "green": [
+       514.115,
+       45.053
+      ],
+      "blue": [
+       34.016,
+       315.018
+      ],
+      "yellow": [
+       513.983,
+       314.994
+      ],
+      "white": [
+       273.989,
+       179.992
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 15,
+     "markers": {
+      "red": null,
+      "green": [
+       460.21,
+       44.957
+      ],
+      "blue": null,
+      "yellow": [
+       460.05,
+       314.989
+      ],
+      "white": [
+       219.997,
+       179.99
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 22,
+     "markers": {
+      "red": null,
+      "green": [
+       414.488,
+       44.969
+      ],
+      "blue": null,
+      "yellow": [
+       414.047,
+       314.971
+      ],
+      "white": [
+       174.005,
+       179.993
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 29,
+     "markers": {
+      "red": null,
+      "green": [
+       400.129,
+       45.203
+      ],
+      "blue": null,
+      "yellow": [
+       400.06,
+       314.998
+      ],
+      "white": [
+       159.989,
+       179.989
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_scale",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 30.0,
+         "y": 0.0,
+         "scale": {
+          "keyframes": [
+           [
+            0.0,
+            1.0
+           ],
+           [
+            1.0,
+            2.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       269.972
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.001,
+       180.063
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 10,
+     "markers": {
+      "red": [
+       183.342,
+       120.103
+      ],
+      "green": [
+       609.789,
+       120.238
+      ],
+      "blue": null,
+      "yellow": null,
+      "white": [
+       396.508,
+       240.025
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 20,
+     "markers": {
+      "red": [
+       236.425,
+       150.058
+      ],
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       502.951,
+       299.987
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 29,
+     "markers": {
+      "red": [
+       284.589,
+       177.063
+      ],
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": null
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_scale_below_one",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": {
+          "keyframes": [
+           [
+            0.0,
+            0.5
+           ],
+           [
+            1.0,
+            0.8
+           ]
+          ],
+          "interp": "linear"
+         },
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       269.972
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.001,
+       180.063
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 15,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       270.003
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.0,
+       180.006
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_start_offset",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 3.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       },
+       {
+        "id": "c1",
+        "src": "land",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 1.0,
+        "transform": {
+         "x": {
+          "keyframes": [
+           [
+            0.0,
+            0.0
+           ],
+           [
+            2.0,
+            300.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "y": 0.0,
+         "scale": 2.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 30,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       319.967,
+       180.037
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 45,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       246.009,
+       180.039
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 60,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       169.986,
+       180.112
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 75,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       96.085,
+       180.081
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 89,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": null
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_speed2",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 0.0,
+        "transform": {
+         "x": {
+          "keyframes": [
+           [
+            0.0,
+            0.0
+           ],
+           [
+            2.0,
+            200.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "y": 0.0,
+         "scale": 2.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": 2.0,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.033,
+       180.099
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 10,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       288.041,
+       180.104
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 20,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       254.058,
+       180.034
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 29,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       223.981,
+       180.072
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_rotation",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": {
+          "keyframes": [
+           [
+            0.0,
+            0.0
+           ],
+           [
+            1.0,
+            90.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       269.972
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.001,
+       180.063
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 10,
+     "markers": {
+      "red": [
+       226.545,
+       22.059
+      ],
+      "green": [
+       503.572,
+       182.214
+      ],
+      "blue": [
+       136.342,
+       177.934
+      ],
+      "yellow": [
+       413.589,
+       337.997
+      ],
+      "white": [
+       320.011,
+       179.967
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 20,
+     "markers": {
+      "red": null,
+      "green": [
+       477.722,
+       273.467
+      ],
+      "blue": [
+       162.024,
+       86.465
+      ],
+      "yellow": null,
+      "white": [
+       320.044,
+       180.028
+      ]
+     },
+     "bbox": [
+      7,
+      0,
+      632,
+      360
+     ]
+    },
+    {
+     "k": 29,
+     "markers": {
+      "red": null,
+      "green": [
+       418.549,
+       334.938
+      ],
+      "blue": [
+       221.682,
+       24.988
+      ],
+      "yellow": null,
+      "white": [
+       319.988,
+       180.049
+      ]
+     },
+     "bbox": [
+      129,
+      0,
+      510,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_single_key_ignored",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": {
+          "keyframes": [
+           [
+            0.0,
+            300.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": {
+          "keyframes": [
+           [
+            0.0,
+            45.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       160.02,
+       90.041
+      ],
+      "green": [
+       480.084,
+       90.415
+      ],
+      "blue": [
+       159.999,
+       269.972
+      ],
+      "yellow": [
+       480.0,
+       270.009
+      ],
+      "white": [
+       320.001,
+       180.063
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_ease_in_out",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": {
+          "keyframes": [
+           [
+            0.0,
+            -100.0
+           ],
+           [
+            1.0,
+            100.0
+           ]
+          ],
+          "interp": "ease-in-out"
+         },
+         "scale": 1.8,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       32.146,
+       118.059
+      ],
+      "green": [
+       608.008,
+       118.138
+      ],
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.043,
+       279.971
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 8,
+     "markers": {
+      "red": [
+       32.063,
+       84.041
+      ],
+      "green": [
+       608.061,
+       84.137
+      ],
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.028,
+       246.029
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 15,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": null,
+      "yellow": null,
+      "white": [
+       320.024,
+       180.045
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 23,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": [
+       32.03,
+       270.025
+      ],
+      "yellow": [
+       608.034,
+       270.001
+      ],
+      "white": [
+       320.027,
+       108.026
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 29,
+     "markers": {
+      "red": null,
+      "green": null,
+      "blue": [
+       32.032,
+       244.056
+      ],
+      "yellow": [
+       608.026,
+       244.063
+      ],
+      "white": [
+       320.03,
+       82.064
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "kf_25fps_source",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 2.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land25",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 0.0,
+        "transform": {
+         "x": {
+          "keyframes": [
+           [
+            0.0,
+            0.0
+           ],
+           [
+            2.0,
+            240.0
+           ]
+          ],
+          "interp": "linear"
+         },
+         "y": 0.0,
+         "scale": 1.6,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land25": {
+     "rate": [
+      25,
+      1
+     ],
+     "tb": [
+      1,
+      12800
+     ],
+     "frames": 75,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       63.955,
+       36.042
+      ],
+      "green": [
+       576.015,
+       35.759
+      ],
+      "blue": [
+       63.997,
+       324.038
+      ],
+      "yellow": [
+       576.028,
+       323.969
+      ],
+      "white": [
+       320.045,
+       180.036
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 13,
+     "markers": {
+      "red": null,
+      "green": [
+       524.505,
+       35.702
+      ],
+      "blue": null,
+      "yellow": [
+       524.027,
+       323.962
+      ],
+      "white": [
+       268.046,
+       180.037
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 31,
+     "markers": {
+      "red": null,
+      "green": [
+       452.132,
+       36.009
+      ],
+      "blue": null,
+      "yellow": [
+       452.037,
+       323.97
+      ],
+      "white": [
+       196.032,
+       180.032
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 59,
+     "markers": {
+      "red": null,
+      "green": [
+       384.162,
+       35.87
+      ],
+      "blue": null,
+      "yellow": [
+       384.028,
+       323.969
+      ],
+      "white": [
+       128.046,
+       180.037
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "hflip_pan",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 100.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [
+         {
+          "type": "hflip",
+          "params": {}
+         }
+        ],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       379.938,
+       90.032
+      ],
+      "green": [
+       60.085,
+       90.22
+      ],
+      "blue": [
+       379.999,
+       269.973
+      ],
+      "yellow": [
+       59.999,
+       270.011
+      ],
+      "white": [
+       220.0,
+       180.094
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      540,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "vflip_rotate",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 15.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [
+         {
+          "type": "vflip",
+          "params": {}
+         }
+        ],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       188.832,
+       308.278
+      ],
+      "green": [
+       497.716,
+       226.192
+      ],
+      "blue": [
+       142.162,
+       134.53
+      ],
+      "yellow": [
+       451.248,
+       51.647
+      ],
+      "white": [
+       320.109,
+       180.034
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "hvflip_contain_portrait",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "port",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [
+         {
+          "type": "hflip",
+          "params": {}
+         },
+         {
+          "type": "vflip",
+          "params": {}
+         }
+        ],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "port": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 720,
+     "h": 1280
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       371.482,
+       270.052
+      ],
+      "green": [
+       269.77,
+       269.802
+      ],
+      "blue": [
+       371.199,
+       89.949
+      ],
+      "yellow": [
+       269.7,
+       89.998
+      ],
+      "white": [
+       320.486,
+       179.999
+      ]
+     },
+     "bbox": [
+      220,
+      0,
+      422,
+      360
+     ]
+    }
+   ]
+  },
+  {
+   "name": "opacity_05",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 0.5
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 0.5078
+    }
+   ]
+  },
+  {
+   "name": "opacity_kf",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": {
+          "keyframes": [
+           [
+            0.0,
+            1.0
+           ],
+           [
+            1.0,
+            0.0
+           ]
+          ],
+          "interp": "linear"
+         }
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 1.0
+    },
+    {
+     "k": 10,
+     "gain": 0.6719
+    },
+    {
+     "k": 20,
+     "gain": 0.3281
+    },
+    {
+     "k": 29,
+     "gain": 0.0182
+    }
+   ]
+  },
+  {
+   "name": "fades_speed2",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": 2.0,
+        "reverse": false,
+        "video_fade_in": 0.5,
+        "video_fade_out": 0.5,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 0.0
+    },
+    {
+     "k": 1,
+     "gain": 0.0625
+    },
+    {
+     "k": 2,
+     "gain": 0.125
+    },
+    {
+     "k": 3,
+     "gain": 0.2031
+    },
+    {
+     "k": 4,
+     "gain": 0.2578
+    },
+    {
+     "k": 5,
+     "gain": 0.3359
+    },
+    {
+     "k": 6,
+     "gain": 0.3984
+    },
+    {
+     "k": 7,
+     "gain": 0.4609
+    },
+    {
+     "k": 8,
+     "gain": 0.5391
+    },
+    {
+     "k": 9,
+     "gain": 0.6016
+    },
+    {
+     "k": 10,
+     "gain": 0.6719
+    },
+    {
+     "k": 11,
+     "gain": 0.7344
+    },
+    {
+     "k": 12,
+     "gain": 0.7969
+    },
+    {
+     "k": 13,
+     "gain": 0.8672
+    },
+    {
+     "k": 14,
+     "gain": 0.9375
+    },
+    {
+     "k": 15,
+     "gain": 1.0
+    },
+    {
+     "k": 16,
+     "gain": 0.9375
+    },
+    {
+     "k": 17,
+     "gain": 0.8672
+    },
+    {
+     "k": 18,
+     "gain": 0.7969
+    },
+    {
+     "k": 19,
+     "gain": 0.7344
+    },
+    {
+     "k": 20,
+     "gain": 0.6719
+    },
+    {
+     "k": 21,
+     "gain": 0.6016
+    },
+    {
+     "k": 22,
+     "gain": 0.5391
+    },
+    {
+     "k": 23,
+     "gain": 0.4609
+    },
+    {
+     "k": 24,
+     "gain": 0.3984
+    },
+    {
+     "k": 25,
+     "gain": 0.3359
+    },
+    {
+     "k": 26,
+     "gain": 0.2578
+    },
+    {
+     "k": 27,
+     "gain": 0.1953
+    },
+    {
+     "k": 28,
+     "gain": 0.1328
+    },
+    {
+     "k": 29,
+     "gain": 0.0625
+    }
+   ]
+  },
+  {
+   "name": "fades_25fps_in_30",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 2.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land25",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.4,
+        "video_fade_out": 0.7,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land25": {
+     "rate": [
+      25,
+      1
+     ],
+     "tb": [
+      1,
+      12800
+     ],
+     "frames": 75,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 0.0
+    },
+    {
+     "k": 3,
+     "gain": 0.2031
+    },
+    {
+     "k": 6,
+     "gain": 0.5
+    },
+    {
+     "k": 9,
+     "gain": 0.7031
+    },
+    {
+     "k": 12,
+     "gain": 1.0
+    },
+    {
+     "k": 15,
+     "gain": 1.0
+    },
+    {
+     "k": 18,
+     "gain": 1.0
+    },
+    {
+     "k": 21,
+     "gain": 1.0
+    },
+    {
+     "k": 24,
+     "gain": 1.0
+    },
+    {
+     "k": 27,
+     "gain": 1.0
+    },
+    {
+     "k": 30,
+     "gain": 1.0
+    },
+    {
+     "k": 33,
+     "gain": 1.0
+    },
+    {
+     "k": 36,
+     "gain": 1.0
+    },
+    {
+     "k": 39,
+     "gain": 1.0
+    },
+    {
+     "k": 42,
+     "gain": 0.8672
+    },
+    {
+     "k": 45,
+     "gain": 0.7422
+    },
+    {
+     "k": 48,
+     "gain": 0.5703
+    },
+    {
+     "k": 51,
+     "gain": 0.4453
+    },
+    {
+     "k": 54,
+     "gain": 0.2839
+    },
+    {
+     "k": 57,
+     "gain": 0.1667
+    }
+   ]
+  },
+  {
+   "name": "fade_longer_than_clip",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 0.5,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 0.5,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 3.0,
+        "video_fade_out": 0.0,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 0.0
+    },
+    {
+     "k": 1,
+     "gain": 0.0625
+    },
+    {
+     "k": 2,
+     "gain": 0.125
+    },
+    {
+     "k": 3,
+     "gain": 0.2031
+    },
+    {
+     "k": 4,
+     "gain": 0.2578
+    },
+    {
+     "k": 5,
+     "gain": 0.3359
+    },
+    {
+     "k": 6,
+     "gain": 0.3984
+    },
+    {
+     "k": 7,
+     "gain": 0.4609
+    },
+    {
+     "k": 8,
+     "gain": 0.5391
+    },
+    {
+     "k": 9,
+     "gain": 0.6016
+    },
+    {
+     "k": 10,
+     "gain": 0.6719
+    },
+    {
+     "k": 11,
+     "gain": 0.7344
+    },
+    {
+     "k": 12,
+     "gain": 0.7969
+    },
+    {
+     "k": 13,
+     "gain": 0.8672
+    },
+    {
+     "k": 14,
+     "gain": 0.9375
+    }
+   ]
+  },
+  {
+   "name": "fade_and_opacity",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": true,
+   "edl": {
+    "version": 3,
+    "duration": 1.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "land",
+        "in": 0.0,
+        "out": 1.0,
+        "start": 0.0,
+        "transform": {
+         "x": 0.0,
+         "y": 0.0,
+         "scale": 1.0,
+         "rotation": 0.0,
+         "opacity": 0.8
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.5,
+        "fit": "contain",
+        "framing": null,
+        "effects": [],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "land": {
+     "rate": [
+      30,
+      1
+     ],
+     "tb": [
+      1,
+      15360
+     ],
+     "frames": 90,
+     "start_ticks": 0,
+     "w": 1280,
+     "h": 720
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "gain": 0.7969
+    },
+    {
+     "k": 20,
+     "gain": 0.5391
+    },
+    {
+     "k": 25,
+     "gain": 0.2578
+    },
+    {
+     "k": 29,
+     "gain": 0.0417
+    }
+   ]
+  },
+  {
+   "name": "combined_25fps_odd",
+   "canvas": [
+    640,
+    360
+   ],
+   "gain_only": false,
+   "edl": {
+    "version": 3,
+    "duration": 2.0,
+    "canvas": {
+     "w": 640,
+     "h": 360,
+     "fps": 30,
+     "bg": "#000000",
+     "loudness_lufs": null,
+     "bitrate_kbps": null
+    },
+    "tracks": [
+     {
+      "id": "v1",
+      "type": "video",
+      "z": 0,
+      "clips": [
+       {
+        "id": "c0",
+        "src": "odd25",
+        "in": 0.0,
+        "out": 2.0,
+        "start": 0.0,
+        "transform": {
+         "x": -40.0,
+         "y": 25.0,
+         "scale": 1.2,
+         "rotation": -12.0,
+         "opacity": 1.0
+        },
+        "speed": null,
+        "reverse": false,
+        "video_fade_in": 0.0,
+        "video_fade_out": 0.0,
+        "fit": "cover",
+        "framing": null,
+        "effects": [
+         {
+          "type": "hflip",
+          "params": {}
+         }
+        ],
+        "mask": null,
+        "chromakey": null,
+        "audio": {
+         "gain_db": 0.0,
+         "mute": false,
+         "fade_in": 0.0,
+         "fade_out": 0.0,
+         "gain_env": null,
+         "keep_pitch": true,
+         "channels": "stereo"
+        },
+        "matte_src": null,
+        "track_to": null
+       }
+      ],
+      "duck": null,
+      "config": null,
+      "transitions": [],
+      "label": "Main video",
+      "muted": false,
+      "locked": false,
+      "solo": false
+     }
+    ],
+    "brand_kit": null,
+    "show_template": null,
+    "markers": []
+   },
+   "sources": {
+    "odd25": {
+     "rate": [
+      25,
+      1
+     ],
+     "tb": [
+      1,
+      12800
+     ],
+     "frames": 75,
+     "start_ticks": 0,
+     "w": 962,
+     "h": 540
+    }
+   },
+   "frames": [
+    {
+     "k": 0,
+     "markers": {
+      "red": [
+       564.039,
+       148.158
+      ],
+      "green": [
+       187.314,
+       68.05
+      ],
+      "blue": null,
+      "yellow": [
+       142.328,
+       279.284
+      ],
+      "white": [
+       353.283,
+       213.61
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    },
+    {
+     "k": 30,
+     "markers": {
+      "red": [
+       564.081,
+       148.109
+      ],
+      "green": [
+       187.185,
+       68.013
+      ],
+      "blue": null,
+      "yellow": [
+       142.356,
+       279.341
+      ],
+      "white": [
+       353.255,
+       213.63
+      ]
+     },
+     "bbox": [
+      0,
+      0,
+      640,
+      360
+     ]
+    }
+   ]
+  }
+ ]
+}

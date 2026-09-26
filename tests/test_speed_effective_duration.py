@@ -46,9 +46,11 @@ def test_effective_duration_property():
     assert c.effective_duration == 3.0
     c.speed = 0.5
     assert c.effective_duration == 12.0
-    # Curve dicts (schema-only today) fall back to source duration.
+    # A speed CURVE fills its integral (Wave D S1, edl/speed_curve.py): x is
+    # clamped to the clip's output 0..1, so this is a 1x→2x ramp, mean 1.5.
     c.speed = {"curve": [[0, 1.0], [3, 2.0]]}
-    assert c.effective_duration == 6.0
+    assert c.speed == {"curve": [[0.0, 1.0], [1.0, 2.0]]}
+    assert c.effective_duration == 4.0
 
 
 def test_set_speed_retimes_timeline(store: EDLStore):

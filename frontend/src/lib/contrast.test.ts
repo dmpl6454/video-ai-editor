@@ -101,3 +101,18 @@ describe('the one disabled state (wave C)', () => {
     expect(lum('var(--text-disabled)')).toBeLessThan(lum('var(--text)'))
   })
 })
+
+describe('an icon-only disabled toolbar button (review RD2)', () => {
+  // Split, Freeze frame, Delete and Duplicate in an empty project measured
+  // rgb(142,142,152) disabled against rgb(155,155,165) enabled: a 1.17
+  // luminance ratio, so they looked usable. An icon carries no text, and
+  // WCAG exempts disabled controls, so the icon dims to --icon-disabled.
+  it('is clearly dimmer than an enabled icon (luminance ratio >= 2)', () => {
+    const d = ruleDeclarations(STYLES, '.timeline-toolbar .tb-icon:disabled')
+    const on = ruleDeclarations(STYLES, '.timeline-toolbar .tb-icon')
+    const lum = (c: string) => contrastRatio(tok(c), '#000000')
+    expect(tok(d.color.replace(/\s*!important/, ''))).toBe(tok('var(--icon-disabled)'))
+    expect(lum(on.color) / lum('var(--icon-disabled)')).toBeGreaterThanOrEqual(2)
+  })
+})
+

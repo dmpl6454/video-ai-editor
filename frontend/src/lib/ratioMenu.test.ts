@@ -1,7 +1,7 @@
 // QA-012: the Ratio menu checks the canvas' current aspect / platform preset.
 // The old nine buttons carried no selected state at all.
 import { describe, expect, it } from 'vitest'
-import { PLATFORM_PRESETS, activeAspect, presetActive, ratioLabel } from './ratioMenu'
+import { PLATFORM_PRESETS, activeAspect, presetActive, ratioFacts, ratioLabel, ratioTriggerName, ratioValue } from './ratioMenu'
 
 const preset = (label: string) => PLATFORM_PRESETS.find((p) => p.label === label)!
 
@@ -53,5 +53,35 @@ describe('ratioLabel', () => {
     expect(ratioLabel({ w: 1920, h: 1080, fps: 30 })).toBe('16:9')
     expect(ratioLabel({ w: 1000, h: 700, fps: 30 })).toBe('1000×700')
     expect(ratioLabel(null)).toBe('Ratio')
+  })
+})
+
+// R3 (LEFT_RAIL_SPEC §2.10): the trigger shows the value, and its NAME always
+// carries the facts the trigger shows only at density 0.
+describe('the Ratio trigger (R3)', () => {
+  const applied = (w: number, h: number, bitrate_kbps: number, loudness_lufs: number, fps = 30) =>
+    ({ w, h, fps, bitrate_kbps, loudness_lufs })
+
+  it('names the canvas with its value and facts', () => {
+    expect(ratioTriggerName({ w: 1080, h: 1920, fps: 30 })).toBe('Canvas ratio: 9:16, 1080 by 1920, 30 fps')
+    expect(ratioTriggerName({ w: 1920, h: 1080, fps: 29.97 })).toBe('Canvas ratio: 16:9, 1920 by 1080, 29.97 fps')
+    expect(ratioTriggerName(null)).toBe('Canvas ratio')
+  })
+
+  it('shows the preset in effect when exactly one is', () => {
+    expect(ratioValue(applied(1080, 1920, 8000, -14))).toBe('Shorts')
+    expect(ratioValue(applied(1080, 1350, 6000, -16))).toBe('IG 4:5')
+    expect(ratioTriggerName(applied(1080, 1350, 6000, -16, 25))).toBe('Canvas ratio: IG 4:5, 1080 by 1350, 25 fps')
+  })
+
+  it('falls back to the aspect when the spec is shared (Reels = TikTok) or no preset is in effect', () => {
+    expect(ratioValue(applied(1080, 1920, 8000, -16))).toBe('9:16')
+    expect(ratioValue({ w: 1080, h: 1920, fps: 30 })).toBe('9:16')
+    expect(ratioValue({ w: 1000, h: 700, fps: 30 })).toBe('1000×700')
+  })
+
+  it('has the short facts line for density 0', () => {
+    expect(ratioFacts({ w: 1080, h: 1920, fps: 30 })).toBe('1080×1920 · 30 fps')
+    expect(ratioFacts({ w: 1920, h: 1080, fps: 23.976 })).toBe('1920×1080 · 23.976 fps')
   })
 })

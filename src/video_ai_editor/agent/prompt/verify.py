@@ -1181,6 +1181,19 @@ def c_clip_src_changed(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 def c_speed_equals(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     factor = _arg(pc, "factor")
+    preset = _arg(pc, "preset")
+    if factor is None and preset is not None:
+        # A curve by name (lane S2): the stored curve carries the preset id
+        # only while its points are exactly the preset's (speed_presets).
+        from ...edl.speed_presets import preset_id
+        want = preset_id(preset) or str(preset)
+        names = {cid: (res[1].speed.get("name") if isinstance(res[1].speed, dict) else None)
+                 for cid in _clip_targets(ctx, _arg(pc, "clip_id"))
+                 if (res := ctx.edl.get_clip(cid)) and isinstance(res[1], Clip)}
+        if not names:
+            return _ok(pc, False, None, want, detail="clip not found")
+        shown = next(iter(names.values())) if len(set(names.values())) == 1 else names
+        return _ok(pc, all(v == want for v in names.values()), shown, want)
     if factor is None:
         return _ok(pc, None, None, None, detail="no factor given")
     targets = _clip_targets(ctx, _arg(pc, "clip_id"))
@@ -1191,6 +1204,22 @@ def c_speed_equals(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     passed = all(abs(v - float(factor)) < 1e-6 for v in speeds.values())
     shown = next(iter(speeds.values())) if len(set(speeds.values())) == 1 else speeds
     return _ok(pc, passed, shown, float(factor), unit="×")
+
+
+def c_freeze_held(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """A freeze frame on the main lane (lane S2): the longest hold, or the
+    named clip's, is at least `duration` (default: any hold at all)."""
+    want = _arg(pc, "duration")
+    tol = float(_arg(pc, "tol") or 0.05)
+    cid = _arg(pc, "clip_id")
+    holds = [float(c.freeze) for c in v1_clips(ctx.edl)
+             if getattr(c, "freeze", None) is not None and (not cid or cid in CLIP_SENTINELS or c.id == cid)]
+    if not holds:
+        return _ok(pc, False, 0.0, want if want is not None else "> 0", unit="s", detail="no freeze frame")
+    longest = max(holds)
+    if want is None:
+        return _ok(pc, True, longest, "> 0", unit="s")
+    return _ok(pc, longest >= float(want) - tol, longest, float(want), unit="s")
 
 
 def c_transitions_count_geq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:

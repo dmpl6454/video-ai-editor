@@ -67,7 +67,9 @@ def test_every_golden_matches_in_javascriptcore(parity_run):
     assert r["mismatches"] == [], "\n".join(r["mismatches"])
     assert r["checks"]["timebase"] > 5000
     assert r["checks"]["frames"] > 20000
-    assert r["checks"]["models"] >= 126
+    assert r["checks"]["models"] >= 136
+    # Wave D S1: speed curves (sqrt setpts) and freezes at five rates.
+    assert r["checks"]["speedFrames"] > 2000
     assert r["checks"]["plans"] == 500
     assert parity_run.errors == []
 

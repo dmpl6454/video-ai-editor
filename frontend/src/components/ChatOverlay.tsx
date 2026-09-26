@@ -24,6 +24,7 @@ import { brainLabel, readSseStream, type ClarifyEvent, type Plan, type PromptEve
 import type { Answers } from '../lib/clarifyDefaults'
 import { ClarifyCard } from './ClarifyCard'
 import { Icon } from './Icon'
+import { focusTimeline } from '../keymap/regions'
 import { parseInlineMarkdown } from '../lib/inlineMarkdown'
 import { cleanSummary, toolTitle } from '../lib/opLabels'
 
@@ -180,7 +181,11 @@ export function ChatOverlay({ onClose }: { onClose: () => void }) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       void send()
+      return
     }
+    // an empty chat box: Esc hands the keyboard back to the timeline, so
+    // Space, J/K/L and ⌥1…⌥9 act again without F6 (review RD2)
+    if (e.key === 'Escape' && !e.currentTarget.value.trim()) focusTimeline()
   }
 
   const placeholder = busy ? 'Working…'

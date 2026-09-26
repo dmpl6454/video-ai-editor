@@ -10,14 +10,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // store.ts (pulled in by the panels) reads persisted sizes at import time and
 // Node's `localStorage` global is a stub without getItem (see TopBar.test).
 vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} })
-const { ToolRail } = await import('./ToolRail')
+const { ToolRail, RailFoot } = await import('./ToolRail')
 const { ToolPanel } = await import('./ToolPanel')
 const { RightPanel } = await import('../RightPanel')
 const { useLayoutStore } = await import('../../lib/layoutStore')
 const { useKeymapStore } = await import('../../keymap/engine')
 const { useAiRuns } = await import('../../lib/aiRuns')
 const { usePromptStore } = await import('../../lib/promptStore')
+const { useActivityStore } = await import('../../lib/activityStore')
+const { useCaptionRun } = await import('../../lib/captionRun')
 const { RAIL_ITEMS } = await import('./railModel')
+const { usePhonePairing } = await import('./phonePairing')
 
 const html = (c: Parameters<typeof createElement>[0]) => renderToStaticMarkup(createElement(c))
 /** Every opening tag with role=tab, as attribute maps. */
@@ -38,6 +41,9 @@ beforeEach(() => {
   seed(useKeymapStore, { overrides: {} })
   seed(useAiRuns, { runs: {} })
   seed(usePromptStore, { status: 'idle' })
+  seed(useActivityStore, { recording: null, captions: null, liveMessage: '' })
+  seed(usePhonePairing, { enabled: false })
+  seed(useCaptionRun, { busy: false, progress: 0, elapsed: 0, cancelling: false, jobId: null, consent: null, downloads: null })
 })
 
 describe('ToolRail', () => {
@@ -84,10 +90,20 @@ describe('ToolRail', () => {
     expect(m).not.toMatch(/[⌨✨🎵]/u)
   })
 
-  it('names no chord while the keymap binds none (R1): no aria-keyshortcuts, no data-kbd', () => {
-    const m = html(ToolRail)
-    expect(m).not.toContain('aria-keyshortcuts')
-    expect(m).not.toContain('data-kbd')
+  it('carries the preset chords (R4): aria-keyshortcuts Alt+n and a ⌥n key cap per tab', () => {
+    const want: Record<string, string> = { media: '1', audio: '2', text: '3', stickers: '4', effects: '5', transitions: '6', captions: '7', ai: '8' }
+    for (const t of tabs(html(ToolRail))) {
+      const id = t.id.replace('rail-tab-', '')
+      expect(t['aria-keyshortcuts'], id).toBe(`Alt+${want[id]}`)
+      expect(t['data-kbd'], id).toMatch(new RegExp(`^(⌥|Alt\\+)${want[id]}$`))
+    }
+  })
+
+  it('names no chord for a command the keymap does not bind (a user unbinds it)', () => {
+    seed(useKeymapStore, { overrides: { panelMedia: [] } })
+    const media = tabs(html(ToolRail)).find((t) => t.id === 'rail-tab-media')!
+    expect(media['aria-keyshortcuts']).toBeUndefined()
+    expect(media['data-kbd']).toBeUndefined()
   })
 
   it('shows a chord the moment the live keymap binds one (R4, or a user rebind)', () => {
@@ -131,6 +147,33 @@ describe('ToolRail', () => {
       seed(usePromptStore, { status } as never)
       expect(html(ToolRail)).not.toContain('rail-dot')
     })
+
+  // R2, carried from R1: the Audio dot while a voiceover records, the
+  // Captions dot while captions transcribe — both from lib/activityStore, the
+  // run the top-bar activity chip shows (§2.3, §2.8).
+  it('wears the recording dot on Audio while a take records, described not named', () => {
+    const idle = html(ToolRail)
+    expect(tabs(idle).find((t) => t.id === 'rail-tab-audio')!['aria-describedby']).toBeUndefined()
+    expect(idle).toMatch(/<span id="rail-desc-audio"[^>]*\shidden=""[^>]*>Recording in progress<\/span>/)
+    seed(useActivityStore, { recording: { startedAt: 0, stop: () => {} } })
+    const m = html(ToolRail)
+    const audio = tabs(m).find((t) => t.id === 'rail-tab-audio')!
+    expect(audio['aria-describedby']).toBe('rail-desc-audio')
+    expect(m).toContain('rail-dot rail-dot-rec')
+    expect(m).not.toContain('rail-dot-busy')
+    // The name stays exactly the label.
+    const inner = m.slice(m.indexOf('id="rail-tab-audio"'))
+    expect(inner.slice(inner.indexOf('>') + 1, inner.indexOf('</button>')).replace(/<svg[\s\S]*?<\/svg>/g, '').replace(/<[^>]+>/g, '')).toBe('Audio')
+  })
+
+  it('wears the busy dot on Captions while captions transcribe', () => {
+    seed(useActivityStore, { captions: { progress: 0.4, etaS: 30, elapsedS: 20, cancelling: false, cancel: () => {} } })
+    const m = html(ToolRail)
+    expect(tabs(m).find((t) => t.id === 'rail-tab-captions')!['aria-describedby']).toBe('rail-desc-captions')
+    expect(m).toMatch(/id="rail-desc-captions"[^>]*>Captions are being generated</)
+    expect(m).toContain('rail-dot rail-dot-busy')
+    expect(tabs(m).find((t) => t.id === 'rail-tab-audio')!['aria-describedby']).toBeUndefined()
+  })
 })
 
 describe('ToolPanel', () => {
@@ -174,8 +217,111 @@ describe('ToolPanel', () => {
     expect(m).toContain('Filters · LUT looks')
   })
 
-  it('carries no phone or pairing wording (the feature is gated off)', () => {
-    expect(html(ToolPanel)).not.toMatch(/phone|pair|\bQR\b/i)
+  // R3 (LEFT_RAIL_SPEC §2.5, §8.1: "no phone wording" moved here from
+  // TopBar.test): with the flag off the header action is absent from the
+  // markup — not hidden — and nothing names the phone.
+  it('carries no phone or pairing wording while phone_pairing is off', () => {
+    const m = html(ToolPanel)
+    expect(m).not.toMatch(/phone|pair|\bQR\b/i)
+    expect(m).not.toContain('tool-panel-act')
+  })
+
+  it('shows "From iPhone" in the Media header, before the collapse button, when phone_pairing is on', () => {
+    seed(usePhonePairing, { enabled: true })
+    const m = html(ToolPanel)
+    const head = m.slice(m.indexOf('tool-panel-head'), m.indexOf('role="tabpanel"'))
+    expect(head).toMatch(/<button type="button" class="tool-panel-act" aria-label="From iPhone"[^>]*><svg[^>]*data-icon="phone"/)
+    expect(head.indexOf('From iPhone')).toBeLessThan(head.indexOf('Hide the tool panel'))
+    // The pairing panel itself is mounted only once opened.
+    expect(m).not.toContain('phone-scrim')
+  })
+
+  it('keeps "From iPhone" to the Media panel', () => {
+    seed(usePhonePairing, { enabled: true })
+    seed(useLayoutStore, { leftTab: 'audio' })
+    expect(html(ToolPanel)).not.toContain('From iPhone')
+  })
+
+  // R2: the top bar's Text tool and CC Captions, inline in their panels.
+  const panel = (m: string, id: string) => {
+    const at = m.indexOf(`id="tool-panel-${id}"`)
+    return m.slice(at, m.indexOf('role="tabpanel"', at + 30))
+  }
+
+  it('Text: the add button leads [data-text-presets], then the field, 6 styles and 4 templates', () => {
+    seed(useLayoutStore, { leftTab: 'text' })
+    const t = panel(html(ToolPanel), 'text')
+    // The a11y suite's `[data-text-presets] > button` helper: the FIRST button.
+    const wrap = t.slice(t.indexOf('data-text-presets'))
+    expect(wrap.slice(wrap.indexOf('<button'), wrap.indexOf('</button>'))).toMatch(/data-icon="plus"[\s\S]*Add text at playhead/)
+    expect(t).toMatch(/<label[^>]*>[\s\S]*Text, #hashtag or @handle[\s\S]*<input type="text"/)
+    const group = (name: string) => {
+      const g = t.slice(t.indexOf(`aria-label="${name}"`))
+      return g.slice(0, g.indexOf('</div>'))
+    }
+    const labels = (g: string) => [...g.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)]
+      .map((x) => ({ attrs: x[1], text: x[2].replace(/<[^>]+>/g, '').trim() }))
+    expect(labels(group('Text styles')).map((b) => b.text)).toEqual(
+      ['AaTitle box', 'AaSubtitle band', 'AaYellow pop', 'AaSide label', 'AaQuote', 'AaNeon'])
+    const tpl = labels(group('Text templates'))
+    expect(tpl.map((b) => b.text)).toEqual(['3 · 2 · 1', 'Callout →', '#Hashtag', '@Handle'])
+    // needsField: #Hashtag and @Handle wait for text; the others never do.
+    expect(tpl.map((b) => /\sdisabled=""/.test(b.attrs))).toEqual([false, false, true, true])
+    expect(tpl[2].attrs).toContain('title="Chunky hashtag near the bottom — type the hashtag above first"')
+    // The ⌥T chord is named only while the live keymap binds addText.
+    seed(useKeymapStore, { overrides: { addText: [] } })
+    expect(panel(html(ToolPanel), 'text')).not.toMatch(/aria-keyshortcuts=|text-panel-kbd/)
+    seed(useKeymapStore, { overrides: { addText: ['Alt+KeyT'] } })
+    expect(panel(html(ToolPanel), 'text')).toMatch(/aria-keyshortcuts="Alt\+T"/)
+  })
+
+  it('Captions: Generate, the language and speed radios with hints, Caption style…', () => {
+    seed(useLayoutStore, { leftTab: 'captions' })
+    const c = panel(html(ToolPanel), 'captions')
+    // No footage on v1 → disabled, and the reason is on screen, not only in a title.
+    expect(c).toMatch(/<button[^>]*class="panel-btn cc-generate"[^>]*disabled=""[^>]*>[\s\S]*Generate captions/)
+    expect(c).toContain('captions transcribe the main (v1) footage')
+    const attrs = (tag: string) => Object.fromEntries([...tag.matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]]))
+    const radios = [...c.matchAll(/<input type="radio"[^>]*>/g)].map((m) => attrs(m[0]))
+    expect(radios.map((r) => `${r.name}:${r.value}`)).toEqual([
+      'cc-target:as-spoken', 'cc-target:en', 'cc-target:hi', 'cc-target:hinglish', 'cc-target:es',
+      'cc-speed:quality', 'cc-speed:fast'])
+    // Each radio is NAMED by its label alone; the hint describes it.
+    const nameOf = (id: string) => c.match(new RegExp(`id="${id}" class="cc-opt-label">([^<]+)<`))![1]
+    expect(radios.map((r) => nameOf(r['aria-labelledby']))).toEqual(
+      ['As spoken', 'English', 'हिंदी Hindi', 'Hinglish', 'Español', 'Best quality', 'Fastest'])
+    expect(c).toMatch(/aria-describedby="cc-target-en-hint"/)
+    expect(c).toContain('Translate to English (works from any language)')
+    expect(c).toContain('Caption style…')
+    expect(c).not.toContain('cc-progress')
+  })
+
+  it('Captions: Fastest wears its download size while its model is missing', () => {
+    seed(useLayoutStore, { leftTab: 'captions' })
+    seed(useCaptionRun, { downloads: {
+      'captions:large-v3': { what: 'the accurate caption model', bytes: 3.1e9, cached: true },
+      'captions:large-v3-turbo': { what: 'the fast caption model', bytes: 1.6e9, cached: false },
+    } })
+    const c = panel(html(ToolPanel), 'captions')
+    expect(c).toMatch(/id="cc-speed-fast-dl" class="cc-opt-dl">Downloads 1.6 GB first</)
+    expect(c).not.toContain('cc-speed-quality-dl')
+    expect(c).toMatch(/aria-describedby="cc-speed-fast-hint cc-speed-fast-dl"/)
+  })
+
+  it('Captions: a live run shows %, ETA and Cancel; cancelling shows "Stopping…" and no Cancel', () => {
+    seed(useLayoutStore, { leftTab: 'captions' })
+    seed(useCaptionRun, { busy: true, progress: 0.42, elapsed: 21, jobId: 'j1' })
+    let c = panel(html(ToolPanel), 'captions')
+    expect(c).toMatch(/class="cc-progress"/)
+    expect(c).toContain('Transcribing… 42%')
+    expect(c).toContain('29s left')                 // 21 s for 42 % → 29 s more
+    expect(c).toMatch(/<button[^>]*class="panel-btn cc-cancel"[^>]*>Cancel<\/button>/)
+    expect(c).toMatch(/<fieldset class="cc-opts" disabled="">/)
+    seed(useCaptionRun, { cancelling: true })
+    c = panel(html(ToolPanel), 'captions')
+    expect(c).toContain('Stopping…')
+    expect(c).toContain('finishing the current chunk · 21s')
+    expect(c).not.toContain('cc-cancel')
   })
 })
 
@@ -202,5 +348,44 @@ describe('RightPanel', () => {
     expect(rail).toMatch(/aria-label="Show the Inspector and Chat panel" aria-expanded="false"/)
     expect(m).toMatch(/id="right-panel-inspect"[^>]*hidden=""/)
     expect(m).toMatch(/id="right-panel-chat"[^>]*hidden=""/)
+  })
+})
+
+// R3 (LEFT_RAIL_SPEC §2.2, §8.1): Help, Customize shortcuts and Settings left
+// the top bar for the rail foot — its own nav, the same names, lucide icons.
+describe('RailFoot', () => {
+  const buttons = (m: string) => [...m.matchAll(/<button[^>]*>/g)].map((b) =>
+    Object.fromEntries([...b[0].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])))
+
+  it('is the nav "Help and settings" with the three buttons in order, named as before', () => {
+    const m = html(RailFoot)
+    expect(m).toMatch(/^<nav class="rail-foot" aria-label="Help and settings">/)
+    expect(buttons(m).map((b) => b['aria-label'])).toEqual(['Keyboard shortcuts', 'Customize keyboard shortcuts', 'Settings'])
+  })
+
+  it('draws the lucide help and keyboard icons, never the ⌨ glyph (moved from TopBar.test)', () => {
+    const m = html(RailFoot)
+    expect(m).toMatch(/aria-label="Keyboard shortcuts"[^>]*><svg[^>]*class="lucide[^"]*"[^>]*data-icon="help"/)
+    expect(m).toMatch(/aria-label="Customize keyboard shortcuts"[^>]*><svg[^>]*class="lucide lucide-keyboard icon"/)
+    expect(m).toMatch(/aria-label="Settings"[^>]*><svg[^>]*data-icon="settings"/)
+    expect(m).not.toContain('⌨')
+  })
+
+  it('carries each live chord in aria-keyshortcuts and the tooltip, with no title', () => {
+    const [help, custom, settings] = buttons(html(RailFoot))
+    expect(help['aria-keyshortcuts']).toBe('?')
+    expect(help['data-kbd']).toBe('?')
+    expect(help['data-tip']).toBe('Help and keyboard shortcuts')
+    expect(custom['aria-keyshortcuts']).toMatch(/^(Meta|Control)\+Alt\+K$/)
+    expect(custom['data-kbd']).toBeTruthy()
+    expect(settings['aria-keyshortcuts']).toMatch(/^(Meta|Control)\+,$/)
+    for (const b of [help, custom, settings]) expect(b.title).toBeUndefined()
+  })
+
+  it('names no chord once the user unbinds it', () => {
+    seed(useKeymapStore, { overrides: { openShortcuts: [] } })
+    const [, custom] = buttons(html(RailFoot))
+    expect(custom['aria-keyshortcuts']).toBeUndefined()
+    expect(custom['data-kbd']).toBeUndefined()
   })
 })

@@ -5,19 +5,21 @@ import { formatDb } from '../../lib/dbFormat'
 import { useSliderCommit } from '../../lib/useSliderCommit'
 import { Icon } from '../Icon'
 import { VoRecorder } from '../VoRecorder'
+import { DeepLinks } from '../rail/DeepLinkRow'
 import './panels.css'
 
 // The Audio tool panel (docs/design/LEFT_RAIL_SPEC.md §2.5): music, voiceover
 // and the mix, moved out of the Media panel in R1 with their behaviour
 // unchanged — "Add music…" (upload + onto the Music lane, or library only),
 // VoRecorder (Record voiceover / Import audio file as voiceover) and the music
-// on the timeline (per-clip volume, Duck under speech). The AI audio rows
-// (Reduce noise, Isolate vocals, …) arrive with the deep links in R5.
+// on the timeline (per-clip volume, Duck under speech). Then the AI audio
+// deep links (R5): Reduce noise, Isolate vocals, Isolate instrumental and AI
+// voiceover, each opening its card in the AI panel.
 //
 // VoRecorder owns a live MediaRecorder: ToolPanel keeps this panel mounted
 // while hidden, so switching panels mid-recording never orphans a take.
 
-export function AudioPanel() {
+export function AudioPanel({ active = false }: { active?: boolean }) {
   const uploadAudio = useStore((s) => s.uploadAudio)
   const addToTimeline = useStore((s) => s.importAddToTimeline)
   const audioRef = useRef<HTMLInputElement>(null)
@@ -48,6 +50,7 @@ export function AudioPanel() {
       <MusicPanel />
       <h3 className="section-label tool-section-label">Voiceover</h3>
       <VoRecorder />
+      <DeepLinks from="audio" active={active} />
     </div>
   )
 }

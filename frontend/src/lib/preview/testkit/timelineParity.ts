@@ -93,7 +93,9 @@ export async function runParity(goldens: string): Promise<ParityResult> {
   }
 
   // ---- frame map goldens (real renders) ----
-  for (const group of ['rates', 'structure', 'transitions', 'segments', 'fuzz']) {
+  // `speed`: speed curves (their setpts is sqrt-based — JSC's Math.sqrt must
+  // be correctly rounded, as IEEE 754 requires) and freeze frames.
+  for (const group of ['rates', 'structure', 'transitions', 'segments', 'fuzz', 'speed']) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const doc = await getJson(`${goldens}/frame_map/${group}.json`) as any
     for (const c of doc.cases) {
@@ -105,6 +107,7 @@ export async function runParity(goldens: string): Promise<ParityResult> {
       if (pm.total !== top.length) { bad(`${c.name}: total ${pm.total} ≠ ${top.length}`); continue }
       for (let k = 0; k < pm.total; k++) {
         count('frames')
+        if (group === 'speed') count('speedFrames')
         let t = 0
         let b = 0
         if (pm.kind[k] !== KIND_GAP) {

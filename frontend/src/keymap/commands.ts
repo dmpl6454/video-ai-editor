@@ -5,8 +5,13 @@ import { frameDuration, stepFrames, toFrameGrid } from '../lib/frameStep'
 import { fitZoom, timelineView } from '../lib/timelineZoom'
 import { planLift, planTrimToPlayhead, type EditPlan, type TrimSide } from '../lib/trimToPlayhead'
 import { toast } from '../toast'
+import { freezeAtPlayhead } from '../lib/freezeFrame'
 import { chordLabel, useKeymapStore } from './engine'
 import { openSettings } from '../lib/settingsOpen'
+import { useLayoutStore } from '../lib/layoutStore'
+import { RAIL_ITEMS } from '../components/rail/railModel'
+import { cycleRegion } from './regions'
+import { pressControl, type UiTarget } from './uiTargets'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -19,10 +24,25 @@ import { openSettings } from '../lib/settingsOpen'
  */
 export type Store = ReturnType<typeof useStore.getState>
 
+/** Where a command's chord runs (LEFT_RAIL_SPEC §4.2; the rule is
+ *  engine.ts `shouldRun`):
+ *  - 'default': not in a text field, not inside `[data-keymap-ignore]`;
+ *  - 'global': inside `[data-keymap-ignore]` too (a panel chord from an AI
+ *    form or a media row); in a text field only on a ⌘ chord that types
+ *    nothing and is not a native text chord (⌘E, ⌥⌘K);
+ *  - 'anywhere': in text fields as well (F6 region cycling only).
+ *  No command runs while a modal dialog is open. */
+export type CommandScope = 'default' | 'global' | 'anywhere'
+
 export interface Command {
   id: string
   label: string
-  category: 'Transport' | 'Editing' | 'Marks' | 'Navigation' | 'View' | 'Selection' | 'History'
+  category: 'Transport' | 'Editing' | 'Marks' | 'Navigation' | 'View' | 'Selection' | 'History' | 'Panels'
+  /** Omitted = 'default'. */
+  scope?: CommandScope
+  /** A region (CSS selector) whose text fields also run this command, e.g.
+   *  ⌥9 / ⌥0 from the Chat box inside `#right-panel`. */
+  alsoInText?: string
   // Promise<unknown>: store.dispatch now returns the response payload, and
   // commands hand its promise straight back — the engine ignores the value.
   run: (s: Store) => void | Promise<unknown>
@@ -50,6 +70,31 @@ const trimToPlayhead = (s: Store, side: TrimSide) =>
 function rippleChord(): string {
   const chords = useKeymapStore.getState().effectiveMap().rippleDelete ?? []
   return chords.slice(0, 1).map(chordLabel).join('')
+}
+
+/** Press the control a command stands for (keymap/uiTargets). A disabled one
+ *  says why in a toast — its tooltip, e.g. "Nothing to export yet" — rather
+ *  than the key silently doing nothing. */
+function press(target: UiTarget): void {
+  const r = pressControl(target)
+  if (r.kind === 'disabled' && r.reason) toast.info(r.reason)
+  else if (r.kind === 'missing') console.warn(`[keymap] no control on screen for ${target}`)
+}
+
+/** Open the right panel on a tab; Chat also takes focus in its message box
+ *  after the commit that shows it (as RightPanel's "Show the Chat" does). */
+function showRightPanel(tab: 'inspect' | 'chat'): void {
+  // ⌥9 from the Chat box: the box is about to hide, so focus goes to the
+  // Inspector tab rather than into a hidden field
+  const fromChat = !!document.activeElement?.closest?.('#right-panel-chat')
+  useLayoutStore.getState().showRight(tab)
+  if (tab !== 'chat') {
+    if (fromChat) requestAnimationFrame(() => document.getElementById('right-tab-inspect')?.focus())
+    return
+  }
+  requestAnimationFrame(() => {
+    document.querySelector<HTMLElement>('#right-panel-chat textarea, #right-panel-chat input')?.focus()
+  })
 }
 
 export const COMMANDS: Command[] = [
@@ -92,6 +137,7 @@ export const COMMANDS: Command[] = [
   // ---------- Editing ----------
   { id: 'split', label: 'Split / Blade at playhead', category: 'Editing',
     run: (s) => s.splitAtPlayhead() },
+  { id: 'freezeFrame', label: 'Freeze frame at playhead', category: 'Editing', run: (s) => freezeAtPlayhead(s, toast.info) },
   { id: 'rippleDelete', label: 'Ripple delete selection', category: 'Editing',
     run: async (s) => {
       const ids = selectedIds(s)
@@ -126,6 +172,10 @@ export const COMMANDS: Command[] = [
     run: (s) => s.nudgeSelection(-frameDuration(fpsOf(s))) },
   { id: 'nudgeRight', label: 'Nudge clip right 1 frame', category: 'Editing',
     run: (s) => s.nudgeSelection(frameDuration(fpsOf(s))) },
+  // ⌥T: the Text tool's own "add text" button (the default style at the
+  // playhead, selected). 'global' like the panel chords.
+  { id: 'addText', label: 'Add text at the playhead', category: 'Editing', scope: 'global',
+    run: () => press('addText') },
 
   // ---------- Marks ----------
   { id: 'markIn', label: 'Mark in', category: 'Marks', run: (s) => s.setInMark(s.playhead) },
@@ -170,14 +220,45 @@ export const COMMANDS: Command[] = [
   // ⌘, / Ctrl+, — the platform's Settings shortcut (QA-063-SETTINGS).
   { id: 'openSettings', label: 'Open Settings', category: 'Navigation',
     run: () => openSettings() },
+  // ⌥⌘K (Premiere's Keyboard Shortcuts chord) and ⌘E (CapCut / Final Cut
+  // Export): the "Customize keyboard shortcuts" button and the Export button.
+  { id: 'openShortcuts', label: 'Customize keyboard shortcuts', category: 'Navigation', scope: 'global',
+    run: () => press('shortcutsDialog') },
+  { id: 'exportVideo', label: 'Export the video', category: 'Navigation', scope: 'global',
+    run: () => press('exportDialog') },
 
   // ---------- History ----------
   { id: 'undo', label: 'Undo', category: 'History', run: (s) => s.dispatch('undo') },
   { id: 'redo', label: 'Redo', category: 'History', run: (s) => s.dispatch('redo') },
+
+  // ---------- Panels (LEFT_RAIL_SPEC §4.1) ----------
+  // One command per rail item, from the rail's own list (railModel), so a
+  // panel the rail does not show has no command and Help lists no dead key.
+  // The chord shows its panel (opening a collapsed one); the same chord again
+  // collapses it, like a click on the active tab. Focus stays where it is
+  // unless it was inside the part that hid (focus rescue, §5.3). 'global': a
+  // chord still switches from a media row or an AI form (critique H1).
+  ...RAIL_ITEMS.map((r): Command => ({
+    id: r.command, label: `Show or hide the ${r.label} panel`, category: 'Panels', scope: 'global',
+    run: () => useLayoutStore.getState().showTab(r.id, { toggle: true }),
+  })),
+  { id: 'toggleToolPanel', label: 'Show or hide the tool panel', category: 'Panels', scope: 'global',
+    run: () => useLayoutStore.getState().toggleLeftOpen() },
+  // alsoInText: ⌥0 puts focus in the Chat box, and ⌥9 from there must bring
+  // the Inspector back (review RD2).
+  { id: 'showInspector', label: 'Show the Inspector', category: 'Panels', scope: 'global', alsoInText: '#right-panel',
+    run: () => showRightPanel('inspect') },
+  { id: 'showChat', label: 'Show the Chat', category: 'Panels', scope: 'global', alsoInText: '#right-panel',
+    run: () => showRightPanel('chat') },
+  // F6 / ⇧F6: 'anywhere', so they also leave the Prompt bar or a chat box.
+  { id: 'cycleRegion', label: 'Focus the next region', category: 'Panels', scope: 'anywhere',
+    run: () => { cycleRegion(1) } },
+  { id: 'cycleRegionBack', label: 'Focus the previous region', category: 'Panels', scope: 'anywhere',
+    run: () => { cycleRegion(-1) } },
 ]
 
 export const COMMAND_BY_ID: Record<string, Command> =
   Object.fromEntries(COMMANDS.map((c) => [c.id, c]))
 
 export const CATEGORIES: Command['category'][] =
-  ['Transport', 'Editing', 'Marks', 'Navigation', 'View', 'Selection', 'History']
+  ['Transport', 'Editing', 'Marks', 'Navigation', 'Panels', 'View', 'Selection', 'History']

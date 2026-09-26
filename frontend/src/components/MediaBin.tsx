@@ -10,11 +10,13 @@ import { batchLabel, etaLabel, uploadEtaSeconds, uploadStageLabel, type UploadIt
 import { Icon } from './Icon'
 import { insertAtPlayhead } from '../lib/mediaInsert'
 import { ConfirmDialog } from './ConfirmDialog'
+import { DeepLinks } from './rail/DeepLinkRow'
 
 // The Media tool panel (docs/design/LEFT_RAIL_SPEC.md §2.5): the dropzone, the
 // import switch, imports in flight and the project's media library. Music,
 // voiceover and the mix moved to the Audio panel, stickers and effects to
 // their own panels (rail R1); the panel header (ToolPanel) is its heading.
+// Last, Find & search (R5): deep links to the AI panel's footage search cards.
 export function MediaBin() {
   const upload = useStore((s) => s.upload)
   const uploadAudio = useStore((s) => s.uploadAudio)
@@ -167,6 +169,8 @@ export function MediaBin() {
                   onInsert={() => insertRow(row)}
                   onRelinked={() => setLibraryTick((n) => n + 1)} />
       ))}
+
+      <DeepLinks from="media" />
 
       {confirmRemove && (
         <ConfirmDialog

@@ -1,8 +1,13 @@
 """ffprobe wrapper — read duration, streams, codec, fps, etc."""
 from __future__ import annotations
 import json
+import os
 import subprocess
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 from pydantic import BaseModel
 
 from .. import platformutil as _pu
@@ -51,7 +56,61 @@ class ProbeResult(BaseModel):
         return None
 
 
+# ---------------------------------------------------------------- the cache
+#
+# Every committed edit that validates against its source (trim_clip clamps to
+# the picture's length: probe() + video_frame_extent()) ran ffprobe twice,
+# ~25 ms each — most of a client-mode trim's 80 ms edit-to-picture budget
+# (instant preview §11.1). The answers only change when the file does, so they
+# are kept per file IDENTITY: (realpath, size, mtime_ns). A failed probe is
+# never kept (the next call asks again), and probe() hands every caller its
+# own copy, so no caller can change another's answer.
+
+_CACHE_MAX = 512
+_cache: OrderedDict[tuple, object] = OrderedDict()
+_cache_lock = threading.Lock()
+_T = TypeVar("_T")
+
+
+def clear_cache() -> None:
+    """Forget every cached answer (tests)."""
+    with _cache_lock:
+        _cache.clear()
+
+
+def _identity(path: Path) -> tuple | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+
+
+def _cached(kind: str, path: Path, compute: Callable[[], _T], keep: Callable[[_T], bool]) -> _T:
+    ident = _identity(path)
+    if ident is None:
+        return compute()
+    key = (kind, *ident)
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return _cache[key]  # type: ignore[return-value]
+    value = compute()
+    if keep(value):
+        with _cache_lock:
+            _cache[key] = value
+            while len(_cache) > _CACHE_MAX:
+                _cache.popitem(last=False)
+    return value
+
+
 def probe(path: Path) -> ProbeResult:
+    """ffprobe's format and streams of ``path`` (cached per file identity;
+    raises like ffprobe on a file it cannot read)."""
+    return _cached("probe", path, lambda: _probe(path), lambda r: True).model_copy(deep=True)
+
+
+def _probe(path: Path) -> ProbeResult:
     out = subprocess.run(
         [
             _pu.FFPROBE, "-v", "error",
@@ -87,6 +146,11 @@ def probe(path: Path) -> ProbeResult:
 
 
 def video_frame_extent(path: Path) -> float | None:
+    """Cached per file identity; see ``_video_frame_extent``."""
+    return _cached("extent", path, lambda: _video_frame_extent(path), lambda v: v is not None)
+
+
+def _video_frame_extent(path: Path) -> float | None:
     """Seconds of PICTURE in ``path``'s first video stream, frame-exact:
     ``nb_frames / avg_frame_rate`` when the container counts its frames,
     else the video stream's own duration. None when there is no video.

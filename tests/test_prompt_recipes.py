@@ -514,3 +514,65 @@ def test_an_empty_answer_is_refused_once_then_the_step_is_dropped_never_asked_fo
     while plan.blocking_questions:
         plan, rounds = P.apply_answers(plan, {"text": ""}, F16), rounds + 1
     assert rounds == 2
+
+
+# ------------------------------------------------ wave D speed curves, freeze, split
+# Review RD2 (key-free Prompt bar): "add a hero speed ramp" committed a constant
+# 1.25x, "freeze frame at 5 seconds" was read as a title, and "split at 3
+# seconds" was not understood. A named curve is the preset; a curve with no
+# name is a question, never a constant factor.
+
+@pytest.mark.parametrize("prompt,preset", [
+    ("add a hero speed ramp", "hero"),
+    ("give it the montage speed curve", "montage"),
+    ("use the bullet speed ramp on the first clip", "bullet"),
+    ("apply a flash in speed curve", "flash_in"),
+    ("jump cut speed ramp", "jump_cut"),
+])
+def test_a_named_speed_curve_is_its_preset_never_a_constant(prompt, preset):
+    p = P.plan(prompt, F16)
+    s = _step(p, "set_speed")
+    assert s.args.get("preset") == preset and "factor" not in s.args, s.args
+    assert any(c.check == "speed_equals" and c.args.get("preset") == preset for c in p.postconditions)
+    assert _step(V.validate_plan(p, F16), "set_speed").args["preset"] == preset   # the boundary accepts it
+
+
+def test_a_speed_ramp_with_no_name_asks_which_curve():
+    p = P.plan("add a speed ramp", F16)
+    s = _step(p, "set_speed")
+    assert "factor" not in s.args
+    q = next(q for q in p.needs_input if q.key == "preset")
+    assert q.pauses                                           # a real question, not a silent default
+    assert {o.value for o in q.options} >= {"montage", "hero", "bullet"}
+    done = P.apply_answers(p, {"preset": "bullet"}, F16)
+    assert _step(done, "set_speed").args == {"clip_id": "$v1_all", "preset": "bullet"}
+    assert any(c.check == "speed_equals" and c.args.get("preset") == "bullet" for c in done.postconditions)
+
+
+def test_a_plain_speed_change_is_still_a_constant():
+    p = P.plan("speed it up 2x", F16)
+    assert _step(p, "set_speed").args == {"clip_id": "$v1_all", "factor": 2.0}
+
+
+@pytest.mark.parametrize("prompt,at,dur", [
+    ("freeze frame at 5 seconds", 5.0, None),
+    ("freeze the frame at 0:02 for 2 seconds", 2.0, 2.0),
+    ("hold the frame at 1.5s", 1.5, None),
+])
+def test_freeze_frame_is_a_freeze_not_a_title(prompt, at, dur):
+    p = P.plan(prompt, F16)
+    assert "add_text" not in _tools(p) and "add_title" not in _tools(p)
+    s = _step(p, "freeze_frame")
+    assert s.args["time"] == at
+    assert s.args.get("duration") == dur
+    assert any(c.check == "freeze_held" for c in p.postconditions)
+    assert _step(V.validate_plan(p, F16), "freeze_frame").args["time"] == at
+
+
+@pytest.mark.parametrize("prompt,at", [("split at 3 seconds", 3.0), ("split the clip at 3 seconds", 3.0),
+                                       ("split it at 0:25", 25.0)])
+def test_split_at_a_time_is_split_at(prompt, at):
+    p = P.plan(prompt, F16)
+    assert _tools(p) == ["split_at"]
+    assert _step(p, "split_at").args == {"track": "v1", "time": at}
+    assert _step(V.validate_plan(p, F16), "split_at").args["time"] == at   # the boundary accepts it

@@ -68,11 +68,12 @@ function BboxField({ id, tool, label, value, disabled, errId, onChange }: {
 }) {
   const arr = Array.isArray(value) ? value.map((x) => String(x ?? '')) : ['', '', '', '']
   const key = arr.join(',')
-  // LeftPane HIDES the AI tab rather than unmounting it, so the unmount
-  // cleanup below never ran on a switch to Media and the rectangle stayed
-  // drawn over the footage with no form anywhere to explain it — the exact
-  // state that is worse than no box at all. The panel's visibility is part
-  // of the effect: hidden → cleared, shown again → republished as-is.
+  // The tool panel (rail/ToolPanel) HIDES the AI panel rather than
+  // unmounting it, so the unmount cleanup below never runs on a switch to
+  // another panel, and the rectangle used to stay drawn over the footage
+  // with no form anywhere to explain it — the exact state that is worse than
+  // no box at all. The panel's visibility is part of the effect: hidden →
+  // cleared, shown again → republished as-is.
   const visible = useAiRuns((s) => s.panelVisible)
   useEffect(() => {
     const parts = key.split(',')

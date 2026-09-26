@@ -41,6 +41,8 @@ INTENTS: tuple[str, ...] = (
     "fade", "volume", "mute", "fit_music", "audit", "preview", "remove_music",
     # QA-037: play a clip backwards (or forwards again).
     "reverse",
+    # Wave D (review RD2): a freeze frame, and a split at a named moment.
+    "freeze", "split",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -392,8 +394,21 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                     (r"\bnoisy\b|\bhiss\b|\bhum\b|\bmuffled\b|\baudio\b", SYNONYM)),
     "loudness": ((r"\bnormali[sz]e\b|\bnormali[sz]ation\b|\blufs\b|\bloudness\b|\bset (?:the )?(?:volume|level|loudness) (?:to|at)\b|\b(?:broadcast|platform|youtube|spotify|streaming) (?:loudness|levels?|standard)\b|\bmake (?:it|the audio|the volume) (?:louder|consistent|even|level|uniform)\b|\bvolume (?:consistent|even|level)\b|\blevel (?:the|out the) (?:audio|volume|sound)\b", EXACT),
                  (r"\btoo quiet\b|\btoo loud\b|\bvolume\b|\blouder\b|\bquieter\b", SYNONYM)),
-    "speed": ((r"\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
+    # Wave D speed curves (review RD2): a curve by NAME ("hero speed ramp",
+    # "the montage curve") or "speed ramp/curve" is this intent too; the
+    # planner reads the name into the preset slot (never a constant factor).
+    "speed": ((r"\b(?:montage|hero|bullet|jump[- ]?cut|flash[- ]?(?:in|out)|ramp[- ]?(?:up|down))\s+(?:speed\s+)?(?:ramp|curve|preset)\b"
+               r"|\bspeed[- ]?(?:ramp|curve)s?\b|\bspeed[- ]?ramp(?:ing|ed)?\b", EXACT),
+              (r"\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
               (r"\bspeed\b|\bquick(?:er)?\b|\btempo of the video\b", SYNONYM)),
+    # CapCut's Freeze (wave D): hold the frame at a moment. "freeze frame"
+    # used to reach the on-device model and come back as a title (RD2).
+    "freeze": ((r"\bfreeze(?:[- ]?frames?|s|d)?\b(?!\s+(?:up|out)\b)|\bhold (?:the|this|that) (?:frame|shot|picture|image)\b"
+                r"|\bstill frame\b", EXACT),),
+    # A split at a named time ("split at 3 seconds", "split the clip at 1:05");
+    # "split it into 3 shorts" is the shorts intent.
+    "split": ((r"\bsplit\s+(?:it\s+|this\s+|that\s+|here\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot|timeline)\s+)?(?:at|@)\s+(?:\d|the playhead\b)"
+               r"|\bsplit (?:it |the clip )?(?:at|on) the playhead\b|\bcut (?:it|the clip) in (?:two|half) at\b", EXACT),),
     "trim": ((rf"\b(?:trim|cut|remove|delete|drop|chop|lose|take (?:off|out)|get rid of|skip|shave)\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?:first|last|opening|closing|intro|outro)?\s*(?=.*{_HAS_RANGE})|\btrim (?:it|this|the (?:start|end|beginning|intro|outro|clip|video))\b|\bstart (?:it |the video )?(?:at|from)\s+\d|\bend (?:it |the video )?at\s+\d|\bkeep (?:only )?(?:the )?(?:first|last)\b|\bremove the (?:intro|outro|beginning|ending)\b|\bcut (?:the )?(?:intro|outro|beginning|ending|start|end)\b", EXACT),
              (r"\btrim\b|\bshorter\b|\bchop\b", SYNONYM)),
     "title": ((r"\blower[- ]?third\b|\bname (?:tag|plate|card|strap|title|banner)\b|\bnameplate\b|\bstrap(?:line)?\b|\b(?:add|put|show|display|write|overlay)\s+(?:a\s+|the\s+|some\s+|my\s+)?(?:title|text|caption text|label|heading|headline|super|on[- ]screen text|text overlay|name)\b|\btitle (?:card|it|this)\b|\bintroduce (?:me|him|her|them|the speaker|the guest)\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b", EXACT),

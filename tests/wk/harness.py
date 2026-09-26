@@ -81,6 +81,8 @@ class _Mailbox:
     results: dict[str, bytes] = field(default_factory=dict)
     errors: dict[str, list[str]] = field(default_factory=dict)
     done_files: dict[str, Path] = field(default_factory=dict)
+    #: token -> the child's window-control file (POST /__window/<token>/hide|show)
+    control_files: dict[str, Path] = field(default_factory=dict)
     cond: threading.Condition = field(default_factory=threading.Condition)
 
 
@@ -120,6 +122,8 @@ class PageServer:
             def do_POST(self):  # noqa: N802 - http.server API
                 n = int(self.headers.get("content-length", 0) or 0)
                 body = self.rfile.read(n)
+                if window_command(server.box, self.path):
+                    return self._send(204)
                 m = re.match(r"^/__(result|error)/([^/?]+)", self.path)
                 if not m or not _TOKEN.match(m.group(2)):
                     return self._send(404)
@@ -167,6 +171,22 @@ class PageServer:
         self.httpd.server_close()
 
 
+def window_command(box: _Mailbox, path: str) -> bool:
+    """POST /__window/<token>/hide|show|occlude|reveal: tell that page's
+    WebKit child to order its window out (the page becomes hidden, as when
+    the user switches Space or minimises) or back in; or to cover it with an
+    opaque window of its own (occluded, as under another app's window) and
+    take that cover away. True when `path` was such a command."""
+    m = re.match(r"^/__window/([^/?]+)/(hide|show|occlude|reveal)$", path)
+    if not m or not _TOKEN.match(m.group(1)):
+        return False
+    with box.cond:
+        ctl = box.control_files.get(m.group(1))
+    if ctl is not None:
+        ctl.write_text(m.group(2))
+    return True
+
+
 # ------------------------------------------------------------------ harness
 
 class WKPageError(AssertionError):
@@ -194,13 +214,15 @@ class WKHarness:
     def run(self, path: str, query: dict[str, object] | None = None, timeout: float = 60.0) -> WKRun:
         token = secrets.token_hex(8)
         done = self.work_dir / f"{token}.done"
+        control = self.work_dir / f"{token}.ctl"
         with self.server.box.cond:
             self.server.box.done_files[token] = done
+            self.server.box.control_files[token] = control
         url = self.server.url(path, {**(query or {}), "token": token})
         t0 = time.monotonic()
         proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "--url", url, "--done", str(done),
-             "--timeout", str(timeout)],
+             "--timeout", str(timeout), "--control", str(control)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
         )
         self._procs.append(proc)
@@ -216,6 +238,7 @@ class WKHarness:
             body = self.server.box.results.pop(token, None)
             errors = self.server.box.errors.pop(token, [])
             self.server.box.done_files.pop(token, None)
+            self.server.box.control_files.pop(token, None)
         if body is None:
             raise WKPageError(
                 f"{path} posted no result within {timeout:.0f}s (exit {proc.returncode}); "
@@ -234,7 +257,8 @@ class WKHarness:
 
 # ------------------------------------------------- the WebKit child process
 
-def _webview_main(url: str, done: Path, timeout: float) -> int:  # pragma: no cover - runs in the child
+def _webview_main(url: str, done: Path, timeout: float,
+                  control: Path | None = None) -> int:  # pragma: no cover - runs in the child
     import AppKit  # noqa: PLC0415
     import Foundation  # noqa: PLC0415
     import WebKit  # noqa: PLC0415
@@ -287,9 +311,46 @@ def _webview_main(url: str, done: Path, timeout: float) -> int:  # pragma: no co
     _say(f"window {int(f.size.width)}x{int(f.size.height)} at {int(f.origin.x)},{int(f.origin.y)}")
     wv.loadRequest_(Foundation.NSURLRequest.requestWithURL_(Foundation.NSURL.URLWithString_(url)))
 
+    cover: list = []
+
+    def occlude():
+        # An opaque borderless window one level above ours, exactly over it:
+        # the window server then reports ours occluded (the page is hidden
+        # and WebKit pauses muted media, as under another app's window).
+        c = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            win.frame(), AppKit.NSWindowStyleMaskBorderless, AppKit.NSBackingStoreBuffered, False)
+        c.setReleasedWhenClosed_(False)
+        c.setOpaque_(True)
+        c.setBackgroundColor_(AppKit.NSColor.blackColor())
+        c.setLevel_(AppKit.NSStatusWindowLevel + 1)
+        c.setCollectionBehavior_(win.collectionBehavior())
+        c.orderFrontRegardless()
+        cover.append(c)
+
+    def reveal():
+        while cover:
+            c = cover.pop()
+            c.orderOut_(None)
+            c.close()
+
     def tick():
+        if control is not None and control.exists():
+            # hide/show on the page's request: an ordered-out window makes
+            # WKWebView report the page hidden (WebKit then pauses muted media)
+            cmd = control.read_text().strip()
+            control.unlink(missing_ok=True)
+            if cmd == "hide":
+                win.orderOut_(None)
+            elif cmd == "show":
+                win.orderFrontRegardless()
+            elif cmd == "occlude":
+                occlude()
+            elif cmd == "reveal":
+                reveal()
+            _say(f"window {cmd} occlusion={int(win.occlusionState())}")
         orphaned = os.getppid() != parent          # pytest was killed: reparented
         if done.exists() or time.time() > deadline or orphaned:
+            reveal()
             wv.stopLoading_(None)
             win.orderOut_(None)
             win.close()
@@ -323,5 +384,6 @@ if __name__ == "__main__":  # pragma: no cover - child entry point
     ap.add_argument("--url", required=True)
     ap.add_argument("--done", required=True, type=Path)
     ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--control", type=Path, default=None)
     ns = ap.parse_args()
-    sys.exit(_webview_main(ns.url, ns.done, ns.timeout))
+    sys.exit(_webview_main(ns.url, ns.done, ns.timeout, ns.control))

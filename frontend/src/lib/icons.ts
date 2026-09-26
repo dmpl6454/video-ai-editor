@@ -19,6 +19,8 @@ import {
   Settings, KeyRound, HardDrive, Brain, RefreshCw, Pencil, TextAlignStart, TextAlignCenter, TextAlignEnd,
   Volume2, VolumeX, Headphones,
   SquareSplitHorizontal, WandSparkles, PanelLeftClose, SlidersHorizontal, MessageSquare,
+  Square, Clapperboard,
+  Snowflake, Spline, Gauge,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -106,6 +108,14 @@ export const ICONS = {
   panelLeftClose: PanelLeftClose,
   inspector: SlidersHorizontal,
   chat: MessageSquare,
+  // R2: the activity chip's Stop recording (§2.8)
+  stop: Square,
+  // R3: the brand mark over the rail, in the top bar's left group (§3)
+  brand: Clapperboard,
+  // Wave D S2: Freeze frame, and the Inspector's Speed modes (Normal | Curve)
+  freeze: Snowflake,
+  speedNormal: Gauge,
+  speedCurve: Spline,
 } satisfies Record<string, LucideIcon>
 
 export type IconName = keyof typeof ICONS

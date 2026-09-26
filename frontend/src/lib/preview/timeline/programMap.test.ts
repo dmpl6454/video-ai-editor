@@ -78,7 +78,10 @@ describe.each(CASES.map((c) => [`${c.group}/${c.name}`, c] as const))('%s', (_la
     for (let k = 0; k < mt.length; k++) {
       if (top[k] !== mt[k] || bot[k] !== mb[k]) bad.push(`k=${k} model ${top[k]}/${bot[k]} render ${mt[k]}/${mb[k]}`)
       const pk = p[k]
-      if (pk !== null && c.measured.p && Math.abs(c.measured.p[k] / 1000 - pk) > 0.02) {
+      // A blend whose sides show the same frame (a fade into a freeze of the
+      // clip's own last frame) has no observable progress: the golden holds -1.
+      const unobservable = c.measured.p !== undefined && c.measured.p[k] < 0 && mt[k] === mb[k]
+      if (pk !== null && c.measured.p && !unobservable && Math.abs(c.measured.p[k] / 1000 - pk) > 0.02) {
         bad.push(`k=${k} progress model ${pk} render ${c.measured.p[k] / 1000}`)
       }
     }

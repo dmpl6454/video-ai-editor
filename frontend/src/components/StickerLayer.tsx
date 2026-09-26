@@ -66,6 +66,9 @@ import {
 interface Props {
   edl: EDL
   videoEl: HTMLVideoElement | null
+  /** The client engine's presented-frame clock (spec §3.5); when absent the
+   *  time is `videoEl.currentTime` (server mode), else the store playhead. */
+  clock?: { now(): number } | null
   width: number
   height: number
 }
@@ -153,7 +156,7 @@ type Drag =
   | { id: string; kind: 'video'; mode: 'move'; startMx: number; startMy: number
       x0: number; y0: number; live: { x: number; y: number } }
 
-export function StickerLayer({ edl, videoEl, width, height }: Props) {
+export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
@@ -266,7 +269,9 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
     if (!cv) return
     const ctx = cv.getContext('2d')!
 
-    const now = () => (videoEl ? videoEl.currentTime : useStore.getState().playhead)
+    // Client engine: the PRESENTED frame's time (spec §3.5) — stickers and
+    // the PiP it syncs are frame-locked to the picture on screen.
+    const now = () => (clock ? clock.now() : videoEl ? videoEl.currentTime : useStore.getState().playhead)
 
     // All stickers active at time t, top-most (last drawn / hit first) last.
     // Sorted (track_z, clip_z, start) — identical to the server's compositing
@@ -1163,7 +1168,7 @@ export function StickerLayer({ edl, videoEl, width, height }: Props) {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
     }
-  }, [videoEl, dispatch, setSelection])
+  }, [videoEl, clock, dispatch, setSelection])
 
   return <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0 }} />
 }

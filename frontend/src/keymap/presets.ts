@@ -13,6 +13,36 @@
  */
 export type KeyMap = Record<string, string[]>
 
+/**
+ * The rail, panel and region chords (LEFT_RAIL_SPEC §4.1), the SAME in every
+ * preset. ⌥1…⌥8 follow the rail's order (§2.2). The panel commands are made
+ * from the rail's own list (commands.ts), so a chord for an item the rail
+ * does not show has no command: it does nothing and is listed nowhere.
+ * Collision check: CapCut's ⌘\ and Premiere's \ (zoom to fit) are other
+ * chords than ⌥\; ⌘K (focus the Prompt / Premiere's Add Edit) is not ⌥⌘K;
+ * the only other Alt chords are ⌥[ ⌥] and ⌥← ⌥→.
+ * Matching is by KeyboardEvent.code, so ⌥1 works on every layout even though
+ * it types "¡" in a text field (where the engine leaves it to typing).
+ */
+export const PANEL_KEYS: KeyMap = {
+  panelMedia: ['Alt+Digit1'],
+  panelAudio: ['Alt+Digit2'],
+  panelText: ['Alt+Digit3'],
+  panelStickers: ['Alt+Digit4'],
+  panelEffects: ['Alt+Digit5'],
+  panelTransitions: ['Alt+Digit6'],
+  panelCaptions: ['Alt+Digit7'],
+  panelAI: ['Alt+Digit8'],
+  toggleToolPanel: ['Alt+Backslash'],
+  showInspector: ['Alt+Digit9'],
+  showChat: ['Alt+Digit0'],
+  openShortcuts: ['Mod+Alt+KeyK'],   // Premiere's Keyboard Shortcuts chord
+  exportVideo: ['Mod+KeyE'],         // CapCut and Final Cut export
+  addText: ['Alt+KeyT'],
+  cycleRegion: ['F6'],
+  cycleRegionBack: ['Shift+F6'],
+}
+
 export const PRESETS = {
   capcut: {
     label: 'CapCut',
@@ -67,6 +97,7 @@ export const PRESETS = {
       // still opens Help.
       focusPrompt: ['Slash', 'Mod+KeyK'],
       openSettings: ['Mod+Comma'],
+      ...PANEL_KEYS,
     } as KeyMap,
   },
 
@@ -113,6 +144,7 @@ export const PRESETS = {
       // silently steal split. Rebind in Settings if you want ⌘K anyway.
       focusPrompt: ['Slash'],
       openSettings: ['Mod+Comma'],
+      ...PANEL_KEYS,
     } as KeyMap,
   },
 
@@ -153,6 +185,7 @@ export const PRESETS = {
       redo: ['Mod+Shift+KeyZ'],
       focusPrompt: ['Slash', 'Mod+KeyK'],
       openSettings: ['Mod+Comma'],
+      ...PANEL_KEYS,
     } as KeyMap,
   },
 } as const

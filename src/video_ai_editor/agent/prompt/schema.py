@@ -353,7 +353,7 @@ TOOL_STAGE: dict[str, int] = {
     "transcribe": 1, "name_speakers": 1,
     # 2 — cuts (change the v1 timeline; everything later measures the result)
     "cut_range": 2, "ripple_delete": 2, "remove_silences": 2, "remove_fillers": 2,
-    "set_speed": 2, "set_clip_reverse": 2, "smooth_slow_motion": 2, "stabilize": 2, "upscale": 2,
+    "set_speed": 2, "freeze_frame": 2, "set_clip_reverse": 2, "smooth_slow_motion": 2, "stabilize": 2, "upscale": 2,
     "trim_clip": 2, "split_at": 2, "set_clip_timing": 2, "move_clip": 2,
     "reorder_clips": 2, "bulk_delete": 2, "bulk_duplicate": 2, "duplicate_clip": 2,
     "detach_audio": 2,
@@ -466,7 +466,10 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     # effects / clips
     _spec("effect_present", "the effect is applied", type=None, track="v1", all=True),
     _spec("clip_src_changed", "the clip was re-rendered", clip_id=None),
-    _spec("speed_equals", "the speed matches", clip_id=None, factor=None),
+    # `factor` (a constant) or `preset` (a curve by id, wave D lane S2).
+    _spec("speed_equals", "the speed matches", clip_id=None, factor=None, preset=None),
+    # A freeze of at least `duration` seconds (default: any) on the main lane.
+    _spec("freeze_held", "the frame is held", clip_id=None, duration=None, tol=0.05),
     # QA-037: the reverse flag the renderer reads, on the clip(s) named.
     _spec("clip_reversed", "the clip plays backwards", clip_id=None, reverse=True),
     _spec("transitions_count_geq", "transitions were added", n=1, type=None),
@@ -521,7 +524,9 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "cut_range": [_pc("duration_between", "the cut range is gone",
                       start=f"{ARG_REF}start", end=f"{ARG_REF}end", tol=0.1)],
     "set_speed": [_pc("speed_equals", "the speed matches",
-                      clip_id=f"{ARG_REF}clip_id", factor=f"{ARG_REF}factor")],
+                      clip_id=f"{ARG_REF}clip_id", factor=f"{ARG_REF}factor",
+                      preset=f"{ARG_REF}preset")],
+    "freeze_frame": [_pc("freeze_held", "the frame is held", duration=f"{ARG_REF}duration")],
     "set_clip_reverse": [_pc("clip_reversed", "the clip plays backwards",
                              clip_id=f"{ARG_REF}clip_id", reverse=f"{ARG_REF}reverse")],
     "add_transition": [_pc("transitions_count_geq", "transitions were added", n=1)],

@@ -28,6 +28,18 @@ def _effect_names() -> list[str]:
     return sorted(EFFECT_BUILDERS.keys())
 
 
+def _speed_preset_ids() -> list[str]:
+    """The `set_speed.preset` enum, from the ONE preset table
+    (`edl/speed_presets.py`), which the Inspector also reads."""
+    from ..edl.speed_presets import PRESET_IDS
+    return list(PRESET_IDS)
+
+
+def _speed_preset_list() -> str:
+    from ..edl.speed_presets import PRESETS
+    return ", ".join(f"{p.id} ({p.label}: {p.hint.lower()})" for p in PRESETS)
+
+
 def _t(name: str, description: str, category: str, properties: dict, required: list[str] | None = None) -> ToolSchema:
     return {
         "name": name,
@@ -119,15 +131,42 @@ EDIT_TOOLS = [
        "edit",
        {"clip_id": {"type": "string"}}, ["clip_id"]),
     _t("set_speed",
-       "Set a media clip's playback speed factor (1.0 = normal, 2.0 = double, "
-       "0.5 = half). Constant speed only — no per-clip speed curves yet. "
+       "Set a media clip's playback speed — give exactly ONE of: `factor`, a constant "
+       "speed (1.0 = normal, 2.0 = double, 0.5 = half; 0.1-100x); `preset`, a CapCut "
+       "speed curve by name (" + _speed_preset_list() + "); or `curve`, a custom speed "
+       "curve as [[position, speed], ...] where position is 0-1 across the clip as it "
+       "plays and speed is 0.1-10x, linear between points (2-32 points, e.g. "
+       "[[0,1],[0.5,0.25],[1,1]] slows to quarter speed in the middle). The clip's "
+       "length on the timeline follows the speed and later clips ripple. "
        "`keep_pitch` (default true) time-stretches the sound at its own pitch; "
-       "false is varispeed — sample-exact timing, pitch follows the speed like tape.",
+       "false is varispeed — sample-exact timing, pitch follows the speed like tape. "
+       "Main video track (v1) and audio tracks only.",
        "edit",
-       {"clip_id": {"type": "string"}, "factor": {"type": "number"},
+       {"clip_id": {"type": "string"},
+        "factor": {"type": "number", "description": "Constant speed, 0.1-100x"},
+        "preset": {"type": "string", "enum": _speed_preset_ids(),
+                   # The handler also takes "Jump Cut" / "flash-in" and names
+                   # the presets in its refusal (edl/speed_presets.preset_id).
+                   "x-validated-by-handler": True,
+                   "description": "A speed-curve preset (CapCut's Curve menu)"},
+        "curve": {"type": "array", "items": {"type": "array", "items": {"type": "number"}},
+                  "description": "Custom curve: [[position 0-1, speed 0.1-10], ...]"},
         "keep_pitch": {"type": "boolean",
                        "description": "Omit to keep the clip's current setting"}},
-       ["clip_id", "factor"]),
+       ["clip_id"]),
+    _t("freeze_frame",
+       "Freeze frame (CapCut's Freeze): hold the frame at `time` (the playhead, "
+       "timeline seconds) for `duration` seconds (default 3) on the main video "
+       "track. The clip there is split and a still of that exact frame is "
+       "inserted; later clips, overlays and transitions move right by the hold. "
+       "Give `clip_id` to require a particular clip (it must be under `time`; "
+       "without `time`, its first frame is held). Freezing a freeze holds it longer. "
+       "The still is silent.",
+       "edit",
+       {"time": {"type": "number", "description": "Timeline seconds of the frame to hold"},
+        "clip_id": {"type": "string"},
+        "duration": {"type": "number", "description": "Seconds to hold (default 3)"}},
+       []),
     _t("set_clip_fit",
        "Choose how a clip reconciles its aspect ratio with the canvas. 'cover' scales "
        "the source UP and crops the overflow so it FILLS the frame with no black bars — "
@@ -1161,6 +1200,7 @@ _ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("set_duck", "to_db"): (-96.0, 0.0),
     ("set_loudness_target", "lufs"): (-70.0, -5.0),
     ("set_speed", "factor"): (0.1, 100.0),
+    ("freeze_frame", "duration"): (0.1, 60.0),
     ("color_grade", "brightness"): (-1.0, 1.0),
     ("color_grade", "contrast"): (0.0, 4.0),
     ("color_grade", "saturation"): (0.0, 3.0),

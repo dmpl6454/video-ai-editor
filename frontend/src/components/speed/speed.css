@@ -1,0 +1,94 @@
+/* The Inspector's Speed section (wave D, lane S2): Normal | Curve, the curve
+   preset menu and the editable curve graph. Tokens only (styles.css :root);
+   motion only when the viewer allows it. */
+
+.speed-section { display: flex; flex-direction: column; gap: 8px; }
+
+.speed-modes {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+}
+.speed-modes button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 24px; padding: 0 8px; font-size: 12px; border: none; border-radius: 4px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.speed-modes button:hover { color: var(--text); }
+.speed-modes button[aria-checked="true"] { background: var(--bg-3); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent-2); }
+.speed-modes button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.speed-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.speed-preset {
+  display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0;
+  padding: 6px 2px 5px; font-size: 10.5px; line-height: 1.2; color: var(--text-dim);
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+}
+.speed-preset span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.speed-preset:hover { color: var(--text); background: var(--bg-2); }
+.speed-preset[aria-checked="true"] { color: var(--text); border-color: var(--accent-2); background: var(--bg-2); }
+.speed-preset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* The preset's curve: a mask (SpeedSection thumbMask) over the text colour. */
+.speed-thumb {
+  display: block; width: 40px; height: 20px; background-color: currentColor;
+  mask-size: 100% 100%; -webkit-mask-size: 100% 100%; mask-repeat: no-repeat; -webkit-mask-repeat: no-repeat;
+}
+.speed-preset[aria-checked="true"] .speed-thumb { background-color: var(--accent-2); }
+
+.speed-editor { display: flex; flex-direction: column; gap: 6px; }
+.speed-graph {
+  position: relative; aspect-ratio: 2 / 1; width: 100%;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+/* The plot: a left gutter for the axis labels, room for a point's dot at
+   every edge (PLOT_TOP in SpeedCurveEditor is the vertical inset). */
+.speed-plot { position: absolute; top: 10px; bottom: 10px; left: 34px; right: 10px; }
+.speed-graph-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.speed-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.speed-grid-one { stroke: var(--text-faint); stroke-dasharray: 3 3; }
+.speed-curve-line { fill: none; stroke: var(--accent-2); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.speed-curve-area { fill: var(--accent-2); fill-opacity: 0.1; stroke: none; }
+.speed-playhead { stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.speed-axis {
+  position: absolute; left: 0; width: 28px; text-align: right; transform: translateY(-50%);
+  font-size: 9.5px; line-height: 1; color: var(--text-faint); pointer-events: none; font-variant-numeric: tabular-nums;
+}
+
+/* A 20 px hit target around a 10 px dot. */
+.speed-point {
+  position: absolute; width: 20px; height: 20px; margin: 0; padding: 0;
+  transform: translate(-50%, -50%); border: none; background: transparent; cursor: grab;
+  border-radius: 50%;
+}
+.speed-point::after {
+  content: ''; position: absolute; left: 5px; top: 5px; width: 10px; height: 10px; box-sizing: border-box;
+  border-radius: 50%; border: 2px solid var(--accent-2); background: var(--bg-0);
+}
+.speed-point:hover::after { background: var(--bg-3); }
+.speed-point[aria-pressed="true"]::after { background: var(--accent-2); border-color: var(--text); }
+.speed-point:active { cursor: grabbing; }
+.speed-point:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+
+.speed-hint { margin: 0; font-size: 10.5px; line-height: 1.4; color: var(--text-faint); }
+.speed-editor-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.speed-readout { flex: 1 1 100%; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.speed-tool {
+  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
+  font-size: 11px; color: var(--text); background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; cursor: pointer;
+}
+.speed-tool:hover:not(:disabled) { background: var(--bg-3); }
+.speed-tool:disabled { color: var(--text-disabled); background: var(--bg-disabled); cursor: default; }
+.speed-tool .icon, .speed-modes .icon { flex: none; }
+
+.speed-duration { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-dim); }
+.speed-duration-value { display: inline-flex; align-items: center; gap: 2px; color: var(--text); font-variant-numeric: tabular-nums; }
+.speed-pitch { font-size: 11px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; }
+.speed-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--text-dim); }
+.speed-note .icon { vertical-align: -3px; margin-right: 2px; }
+.speed-error { color: var(--error-text); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .speed-preset, .speed-modes button, .speed-tool { transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease; }
+  .speed-point::after { transition: background-color var(--dur-fast) ease; }
+}

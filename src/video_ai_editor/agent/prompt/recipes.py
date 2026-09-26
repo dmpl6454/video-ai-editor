@@ -34,6 +34,7 @@ from typing import Any
 from . import slots as S
 from .facts import FIRST_USE_BYTES, TimelineFacts, VOICE_IDS, WHISPER_MODELS
 from .presets import transition_catalog
+from ...edl.speed_presets import PRESET_IDS as _SPEED_PRESETS
 from .schema import (CHECK_SPECS, DownloadNeeded, IntentDraft, NeedsInput, NeedsInputOption, Plan,
                      Postcondition, Step)
 
@@ -135,7 +136,10 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("color_look", "Apply a colour look.", look=_LOOKS, intensity="number"),
     _card("clean_audio", "Reduce noise and normalise loudness.", strength="number", lufs="number"),
     _card("loudness", "Set the loudness target.", lufs="number"),
-    _card("speed", "Change playback speed.", factor="number", clip_ref="text"),
+    _card("speed", "Change playback speed: a constant factor, or a named speed curve (preset).",
+          factor="number", preset=_SPEED_PRESETS, clip_ref="text"),
+    _card("freeze", "Hold the frame at a moment for a few seconds (a freeze frame).", at="number", duration_s="number"),
+    _card("split", "Split the clip in two at a moment.", at="number"),
     _card("reverse", "Play a clip backwards (reverse=no plays it forwards again).",
           clip_ref="text", reverse=_YES_NO),
     _card("trim", "Cut a time range out.", range="text"),

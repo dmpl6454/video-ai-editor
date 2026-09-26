@@ -3,27 +3,35 @@ import { createPortal } from 'react-dom'
 import { useStore, errorMessage } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
-import { openHelp } from './Help'
-import { openShortcuts } from './ShortcutsSettings'
-import { PhonePanel } from './PhonePanel'
-import { TextTool } from './TextTool'
-import { CaptionsButton } from './CaptionsButton'
-import { SafeZoneToggle } from './SafeZones'
+import { ActivityChip } from './topbar/ActivityChip'
+import { densityClass, useTopBarFit } from './topbar/useTopBarFit'
 import { RatioMenu } from './RatioMenu'
-import { TopBarMore } from './TopBarMore'
-import { parseVersionInfo, VERSION_UNKNOWN, type VersionInfo } from '../lib/versionInfo'
 import { claimClickForNativeSave } from '../lib/nativeSave'
 import { isSavedProjectStale, savedProject, visibleSavedProject, type SavedProject } from '../lib/savedProject'
 import { exportKind, exportLinkView } from '../lib/exportLink'
-import { canvasFacts } from '../lib/frameStep'
+import { useActivityStore } from '../lib/activityStore'
 import { ExportButton } from './ExportDialog'
 import { useMenuA11y } from '../lib/useMenuA11y'
 import { editedLabel, projectLabel } from '../lib/projectName'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Icon } from './Icon'
 import { ProjectPoster } from './ProjectPoster'
-import { openSettings } from '../lib/settingsOpen'
-import { chordLabel, useKeymapStore } from '../keymap/engine'
+
+// The top bar (docs/design/LEFT_RAIL_SPEC.md §0, §1.4, R3): three jobs in a
+// `minmax(0,1fr) auto minmax(max-content,1fr)` grid —
+//   left    which project I'm in and what is running: the brand mark over the
+//           rail, the wordmark (the page's h1), the project chip, "Applying",
+//           the activity chip (recording Stop, captions Cancel);
+//   centre  what canvas I'm making: the Ratio menu (aspect, platform presets,
+//           the safe-zone overlay), exactly centred while the right fits;
+//   right   getting it out: Save · Open · the .vae / MP4 links · the export
+//           error · Export, always the right-most control (QA-012).
+// Everything that ADDS content lives in the left tool rail; Help, Customize
+// shortcuts and Settings sit at the rail's foot (ToolRail.tsx RailFoot); the
+// iPhone affordance is the Media panel's header action (ToolPanel.tsx). There
+// is no "⋯" menu, no separator and no flex-shrink budget any more: when the
+// window is narrow the bar steps up a DENSITY (useTopBarFit) that hides words,
+// never controls, and only the project name truncates.
 
 interface SessionRow { id: string; name: string; modified_at?: number; poster?: string | null }
 
@@ -54,6 +62,14 @@ export function TopBar() {
   const exportView = exportLinkView(exportLinks, sid, edlHash)
   const savedStale = !!savedHere && isSavedProjectStale(savedHere, opsLen)
   const importRef = useRef<HTMLInputElement>(null)
+  const barRef = useRef<HTMLElement>(null)
+  const leftRef = useRef<HTMLDivElement>(null)
+  // The activity chip's width inputs (lib/activityStore), for the fit key.
+  const recordingOn = useActivityStore((s) => !!s.recording)
+  const captionsKey = useActivityStore((s) => (s.captions
+    ? `${s.captions.cancelling ? 'stop' : 'run'}:${s.captions.progress != null}:${s.captions.etaS != null}`
+    : ''))
+  const ratioKey = edl ? `${edl.canvas.w}x${edl.canvas.h}@${edl.canvas.fps}` : ''
   const [sessions, setSessions] = useState<SessionRow[]>([])
   const [sessionsListed, setSessionsListed] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -63,24 +79,10 @@ export function TopBar() {
   const [confirmDelete, setConfirmDelete] = useState<SessionRow | null>(null)
   const renameCommitted = useRef(false)
   const shownName = projectLabel(name, sid)
-  // The live binding (rebindable; ⌘, / Ctrl+, by default) for the gear's tooltip.
-  const settingsChord = useKeymapStore((s) => s.effectiveMap)().openSettings?.[0] ?? null
-  // One object from the single GET /api/version below, replaced wholesale (never
-  // mutated): the semantic version, the git short-sha / baked BUILD_ID shown next
-  // to it so a bug report identifies the exact bits (which "v0.3.7" did not), and
-  // `phonePairing` — whether this build has the iPhone affordance at all.
-  // Starts at VERSION_UNKNOWN, whose phonePairing is false, so the phone button
-  // cannot flash in and out while the request is in flight.
-  const [appInfo, setAppInfo] = useState<VersionInfo>(VERSION_UNKNOWN)
-  const versionText = appInfo.version ? `v${appInfo.version}${appInfo.build ? ` · ${appInfo.build}` : ''}` : null
-  // The phone-pairing panel. Closed by default and mounted only while open:
-  // it shows a live credential, and a panel that is merely hidden is one
-  // stylesheet mistake away from being a code left on screen.
-  const [phoneOpen, setPhoneOpen] = useState(false)
   // The session-picker dropdown is rendered via a portal to document.body
   // (positioned from this ref's rect) instead of as a normal absolutely-
   // positioned child of .topbar. .topbar clips overflow on both axes to keep
-  // the toolbar on one line (see .topbar-tools/.topbar-pinned), so a child
+  // the toolbar on one line (its left group clips too, see useTopBarFit), so a child
   // positioned `top:100%` — below the 44px toolbar row — was always cut off
   // by that same clip (issue 11, "dropdown is half-cut when clicked").
   const pickerBtnRef = useRef<HTMLButtonElement>(null)
@@ -98,23 +100,6 @@ export function TopBar() {
     open: pickerOpen, ready: !!pickerPos && sessionsListed, mode: 'menu',
     menuRef: pickerMenuRef, triggerRef: pickerBtnRef, onClose: () => setPickerOpen(false),
   })
-
-  useEffect(() => {
-    // `res.ok` matters: without it a 4xx/5xx body goes to .json(), throws, and
-    // the badge silently vanishes with no clue why. Log instead of swallowing.
-    fetch('/api/version')
-      .then((r) => {
-        if (!r.ok) throw new Error(`/api/version -> HTTP ${r.status}`)
-        return r.json()
-      })
-      // This ONE request answers two questions — the version badge and whether
-      // the phone affordance exists (`phone_pairing`). Deliberately not a second
-      // probe against /api/pair/*: that route is a 404 in the shipped build, and
-      // deciding UI from a 404 makes the button appear and then disappear.
-      .then((d) => setAppInfo(parseVersionInfo(d)))
-      .catch((e) => console.warn('[TopBar] version fetch failed:', e))
-  }, [])
-
 
   const onSaveProject = async () => {
     if (!sid) return
@@ -255,10 +240,26 @@ export function TopBar() {
     await useStore.getState().renameSession(next)
   }
 
+  // What can change the bar's width, as one key: a change re-fits the density
+  // before paint (useTopBarFit). Ticking widths (the recording clock, the
+  // Export button's elapsed seconds) are caught by the hook's ResizeObserver.
+  const fitKey = [
+    shownName, renaming, saving, pendingOps > 0, recordingOn, captionsKey, savedHere?.url ?? '', savedStale,
+    exportView && !exporting ? exportView.label : '', exporting, exportError ?? '', ratioKey,
+  ].join('|')
+  const density = useTopBarFit(barRef, leftRef, fitKey)
+  const densityCls = densityClass(density)
+  const errorText = exportError ? exportError.replace(/^\w*Error:\s*/, '') : ''
+
   return (
-    <header className="topbar">
+    <header ref={barRef} className={densityCls ? `topbar ${densityCls}` : 'topbar'} aria-label="Project" data-density={density}>
+      <div ref={leftRef} className="tb-left">
+      {/* The mark sits exactly over the rail, so the rail reads as one column
+          from top to bottom; the wordmark stays the page's h1 and is only
+          visually hidden from density 1 on (never display:none). */}
+      <span className="tb-mark" aria-hidden="true"><Icon name="brand" /></span>
       <h1 className="topbar-brand">Video AI Editor</h1>
-      <div data-session-picker style={{ position: 'relative' }}>
+      <div data-session-picker className="tb-project">
         {renaming ? (
           <input
             className="topbar-session-rename"
@@ -278,12 +279,11 @@ export function TopBar() {
         <button
           ref={pickerBtnRef}
           className="pill topbar-session"
-          title={`${shownName} — switch project (double-click to rename)`}
+          data-tip={`${shownName} — switch project (double-click to rename)`}
           aria-haspopup="menu"
           aria-expanded={pickerOpen}
           onClick={() => setPickerOpen((o) => !o)}
           onDoubleClick={(e) => { e.preventDefault(); startRename() }}
-          style={{ cursor: 'pointer', padding: '3px 10px', fontSize: 11 }}
         >
           <span className="topbar-session-name">{shownName}</span><Icon name="chevronDown" />
         </button>
@@ -378,114 +378,56 @@ export function TopBar() {
         )}
       </div>
       {pendingOps > 0 && (
-        <span className="pill" title="An edit is being applied" style={{ color: 'var(--text-dim)' }}>
-          <Icon name="more" /> Applying
+        // A spinner plus words; at density 3 the words give way and the
+        // sr-only sentence stays the status text.
+        <span className="pill tb-applying" role="status" data-tip="An edit is being applied">
+          <Icon name="loading" className="icon-spin" />
+          <span className="tb-applying-word" aria-hidden="true">Applying</span>
+          <span className="tb-sr-only">An edit is being applied</span>
         </span>
       )}
-      {edl && (
-        // Hidden below 1280 px (styles.css) — the same facts head the Ratio menu.
-        <span className="pill topbar-canvas">
-          {canvasFacts(edl.canvas, edl.duration)}
-        </span>
-      )}
-      <div className="grow" />
-      {/* The tools: every core action is VISIBLE at every supported width
-          (1024–1920; QA-012). This used to be `.topbar-scroll`, an overflow-x
-          strip with a 0 px scrollbar and no fade: at 1440 wide TikTok, the
-          IG presets, Help and Shortcuts sat past its edge, and at 1024 so did
-          Text and Captions — reachable only by a sideways scroll nobody could
-          see. Now the four aspect buttons and five platform presets are ONE
-          "Ratio ▾" menu that checks the canvas' current choice, the safe-zone
-          picker and the version badge move into "⋯" below 1440 px, and the
-          brand / canvas pills give way first (styles.css). Nothing here
-          scrolls, and .topbar-pinned (Save/Open/Export) still never moves. */}
-      <div className="topbar-tools">
-        {/* Undo/Redo MOVED to the timeline toolbar (Timeline.tsx): the app's
-            two most-used buttons must never be the ones a narrow bar hides. */}
-        <RatioMenu />
-        <span className="topbar-wide"><SafeZoneToggle /></span>
-        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
-        <TextTool />
-        <CaptionsButton />
-        <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
-        {/* Glyph buttons carry a NAME (QA-102): screen readers announced "?" and "⌨". */}
-        <button className="icon-btn" onClick={openHelp} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-keyshortcuts="?">
-          <Icon name="help" />
-        </button>
-        <button className="icon-btn" onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" aria-label="Customize keyboard shortcuts">
-          <Icon name="keyboard" />
-        </button>
-        {/* Settings (QA-063-SETTINGS): the Anthropic key, brains, models, render cache. */}
-        <button className="icon-btn" onClick={openSettings}
-                title={`Settings${settingsChord ? ` (${chordLabel(settingsChord)})` : ''}`} aria-label="Settings">
-          <Icon name="settings" />
-        </button>
-        {/* The iPhone-pairing affordance, rendered ONLY when this build reports
-            `phone_pairing: true` on /api/version.
-
-            WHY it is gated rather than deleted: the desktop editor ships as a
-            normal standalone editor, so the local-network pairing feature is
-            TEMPORARILY off behind one reversible flag — `VAE_PHONE_PAIRING` /
-            `PHONE_PAIRING_ENABLED` in api/pairing.py. With it off there must be
-            no button, no panel and no phone wording anywhere in the UI; with it
-            on, this is exactly the old behaviour. PhonePanel.tsx and
-            phonePanel.css stay in the tree for the release that flips it back.
-
-            Both the button and the panel live in .topbar-tools rather than
-            .topbar-pinned: the pinned cluster's invariant is that Export is the
-            right-most, always-visible control, and pairing a phone is a
-            once-a-month action that has no business competing with it. The
-            button is the only element in this fragment that occupies layout —
-            PhonePanel portals to document.body — so when the flag is off the
-            toolbar simply closes up, with no gap and no stray separator (the
-            nearest separators sit further left, before TextTool). */}
-        {appInfo.phonePairing && (
-          <>
-            <button
-              onClick={() => setPhoneOpen(true)}
-              title="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
-            ><Icon name="phone" /> Phone</button>
-            {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
-          </>
-        )}
-        <TopBarMore version={versionText} />
-        {appInfo.version && (
-          <span className="topbar-wide" title={appInfo.build ? `App version ${appInfo.version} · build ${appInfo.build}` : 'App version'}
-                style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-            {/* The version only; the build id is in its title and in "⋯" (QA-101). */}
-            {`v${appInfo.version}`}
-          </span>
-        )}
+      {/* What is running (LEFT_RAIL_SPEC §2.8): recording Stop and captions
+          Cancel, whatever tool panel shows. Always rendered — its live region
+          must exist before the first message. Its words hide at density 4. */}
+      <ActivityChip />
       </div>
-      {/* Pinned right-side cluster: never moves, regardless of how much is in
-          .topbar-tools above. Export is always the right-most, always-visible
-          element. */}
-      <div className="topbar-pinned">
+      {/* The canvas: aspect ratios, platform presets and the safe-zone overlay
+          in one menu (§2.10). The facts ride on the trigger at density 0 only;
+          they are always in its name, its tooltip and the menu's footer. */}
+      <div className="tb-center">
+        <RatioMenu />
+      </div>
+      {/* Pinned right cluster: its column is at least max-content wide, so
+          nothing here ever clips, and Export is its last child — always the
+          toolbar's right-most, always-visible control (QA-012). */}
+      <div className="tb-right topbar-pinned">
         <button
+          className="tb-labelled"
           onClick={onSaveProject}
           disabled={saving || !edl?.duration}
           aria-label={saving ? 'Saving…' : 'Save'}
-          title={!edl?.duration
+          data-tip={!edl?.duration
             ? 'Nothing to save yet — add a video to the timeline first'
             : saving
               ? 'Saving the project file…'
               : 'Save an editable project file (.vae) you can reopen later'}
         >
-          {/* Below 1100 px the words give way and the icon stays (styles.css
-              .topbar-btn-label), so the tools keep their room (QA-012). */}
-          {saving ? 'Saving…' : <><Icon name="save" /><span className="topbar-btn-label"> Save</span></>}
+          {/* At density 3 the words give way; the icon, name and tooltip stay. */}
+          {saving ? 'Saving…' : <><Icon name="save" /><span className="topbar-btn-label">Save</span></>}
         </button>
-        <button onClick={() => importRef.current?.click()} title="Open a saved .vae project" aria-label="Open">
-          <Icon name="open" /><span className="topbar-btn-label"> Open</span>
+        <button className="tb-labelled" onClick={() => importRef.current?.click()} data-tip="Open a saved .vae project" aria-label="Open">
+          <Icon name="open" /><span className="topbar-btn-label">Open</span>
         </button>
         <input ref={importRef} type="file" accept=".vae,.zip" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
         {savedHere && (
+          // "(outdated)" is in the NAME at every density; from density 2 the
+          // visible words become a warn dot.
           <a href={savedHere.url} download={savedHere.filename} onClick={onSavedLinkClick(savedHere)}
-            className={savedStale ? 'stale-dl' : ''}
-            title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
-            style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
-            <Icon name="download" /> .vae{savedStale ? ' (outdated)' : ''}
+            className={savedStale ? 'tb-dl stale-dl' : 'tb-dl'}
+            aria-label={`Download the saved .vae project${savedStale ? ' (outdated)' : ''}`}
+            data-tip={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}>
+            <Icon name="download" /> .vae{savedStale && <StaleMark />}
           </a>
         )}
         {/* The export's result — its download link, or why it failed — sits
@@ -502,42 +444,44 @@ export function TopBar() {
           <button
             type="button"
             onClick={() => downloadExport()}
-            className={exportView.stale ? 'stale-dl' : ''}
-            title={exportView.stale ? 'This render is not the timeline you have now — re-export for an up-to-date file' : `Save exported ${exportKind(exportView.link)}`}
-            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: exportView.stale ? undefined : 'var(--good)', fontSize: 12 }}>
-            <Icon name="download" /> {exportView.label}
+            className={exportView.stale ? 'tb-dl stale-dl' : 'tb-dl'}
+            aria-label={`Save exported ${exportKind(exportView.link)}${exportView.stale ? ' (outdated)' : ''}`}
+            data-tip={exportView.stale ? 'This render is not the timeline you have now — re-export for an up-to-date file' : `Save exported ${exportKind(exportView.link)}`}>
+            <Icon name="download" /> {exportKind(exportView.link)}{exportView.stale && <StaleMark />}
           </button>
         )}
         {exportError && (
-          // Show the REASON, not just "failed". The backend now maps ffmpeg
-          // stderr through _render_failure_message, so this is a sentence a
-          // user can act on ("…an audio-only file on the video track. Move
-          // that clip to the Music lane") — it used to be reachable only by
-          // hovering for a 2000-char raw ffmpeg dump. Strip the RuntimeError:
-          // prefix jobs.py adds, and cap the width so a long tail (an
-          // unmapped ffmpeg error) can't blow out the toolbar.
+          // Show the REASON, not just "failed". The backend maps ffmpeg stderr
+          // through _render_failure_message, so this is a sentence a user can
+          // act on ("…an audio-only file on the video track. Move that clip to
+          // the Music lane"). The RuntimeError: prefix jobs.py adds is
+          // stripped; the text is capped per density (220 / 180 / 140 px) and
+          // icon-only at density 3 — the whole message is always in the name
+          // and the tooltip. A <button>, so the keyboard can dismiss it (QA-102).
           <button
-            // Width capped per breakpoint in styles.css (.topbar-export-error):
-            // at 1024 px a 340 px chip pushed Help and Shortcuts out of the
-            // bar (QA-012). The title has the whole message. A <button>, not a
-            // clickable <span>, so the keyboard can dismiss it too (QA-102).
             type="button"
             className="topbar-export-error"
-            style={{
-              color: 'var(--accent)', fontSize: 12, cursor: 'pointer',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              background: 'none', border: 'none', padding: 0,
-            }}
-            title={`${exportError} (click to dismiss)`}
-            aria-label={`Export failed: ${exportError.replace(/^\w*Error:\s*/, '')}. Dismiss`}
+            data-tip={`${errorText} (click to dismiss)`}
+            aria-label={`Export failed: ${errorText}. Dismiss`}
             onClick={() => clearExportError()}
           >
-            <Icon name="warning" /> {exportError.replace(/^\w*Error:\s*/, '')} <Icon name="close" />
+            <Icon name="warning" /><span className="tb-err-text">{errorText}</span><Icon name="close" className="tb-err-x" />
           </button>
         )}
         {/* The right-most pinned control (QA-012): Export ▾ → the dialog. */}
         <ExportButton />
       </div>
     </header>
+  )
+}
+
+/** A stale link's marker: the words " (outdated)" through density 1, a 6 px
+ *  warn dot from density 2. Both decorative — the link's name says it. */
+function StaleMark() {
+  return (
+    <>
+      <span className="tb-stale-dot" aria-hidden="true" />
+      <span className="tb-stale-word" aria-hidden="true"> (outdated)</span>
+    </>
   )
 }

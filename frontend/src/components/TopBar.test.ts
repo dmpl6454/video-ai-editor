@@ -42,35 +42,62 @@ describe('the TopBar at boot, before /api/version answers', () => {
     expect(pinned.lastIndexOf('Export')).toBeGreaterThan(pinned.indexOf('Save'))
   })
 
-  // No empty gap and no orphaned separator where the button was: the two 1px
-  // separators in .topbar-tools are the ones before TextTool and before Help,
-  // and both still sit between real controls.
-  it('leaves no trailing separator at the end of the tools section', () => {
+  // R3 (LEFT_RAIL_SPEC §8.1): the separators are gone with the tools that
+  // stood between them — the bar is three groups, not a strip with dividers.
+  it('has no separators left', () => {
+    expect(boot()).not.toMatch(/width:1px/)
+  })
+
+  // LEFT_RAIL_SPEC §2.8: the activity chip is ALWAYS rendered, so its polite
+  // live region exists before its first message — in the left group, after
+  // the project chip and before the centre (Ratio).
+  it('renders the activity chip\'s live region at boot, with nothing running', () => {
     const html = boot()
-    const scroll = html.slice(html.indexOf('topbar-tools'), html.lastIndexOf('topbar-pinned'))
-    // The last thing in the tools section is a button (⌨ / ⋯), not a
-    // separator span left behind by a removed neighbour.
-    expect(scroll.lastIndexOf('</button>')).toBeGreaterThan(scroll.lastIndexOf('width:1px'))
+    const at = html.indexOf('data-activity')
+    expect(at).toBeGreaterThan(html.indexOf('topbar-session'))
+    expect(at).toBeGreaterThan(html.indexOf('class="tb-left"'))
+    expect(at).toBeLessThan(html.indexOf('class="tb-center"'))
+    expect(html).toMatch(/<div class="activity" data-activity="true"><span class="activity-sr-only" role="status" aria-live="polite"><\/span><\/div>/)
   })
 })
 
 // QA-012: every core control is IN the bar — none behind a sideways scroller.
-// Which of them is visible at 1024/1280/1440/1920 is measured in a real browser
-// (qa-fix/A7-panels live_check.py); this pins the structure that makes it so.
-describe('the TopBar tools', () => {
-  const tools = () => {
+// R3 (LEFT_RAIL_SPEC §1.4): the bar is a three-group grid; which words show at
+// 900/1024/1280/1440 is measured in a real browser (test_wave_d_topbar_ui.py);
+// this pins the structure that makes it so.
+describe('the TopBar groups', () => {
+  const group = (cls: string) => {
     const html = boot()
-    return html.slice(html.indexOf('topbar-tools'), html.lastIndexOf('topbar-pinned'))
+    const at = html.indexOf(`class="${cls}`)
+    const ends = ['class="tb-left', 'class="tb-center', 'class="tb-right'].map((c) => html.indexOf(c)).filter((i) => i > at)
+    return html.slice(at, ends.length ? Math.min(...ends) : undefined)
   }
+
+  it('is a header named "Project" holding left, centre and right, in that order', () => {
+    const html = boot()
+    expect(html).toMatch(/^<header[^>]*class="topbar[^"]*"[^>]*aria-label="Project"/)
+    const [l, c, r] = ['class="tb-left"', 'class="tb-center"', 'class="tb-right topbar-pinned"'].map((x) => html.indexOf(x))
+    expect(l).toBeGreaterThan(-1)
+    expect(c).toBeGreaterThan(l)
+    expect(r).toBeGreaterThan(c)
+    expect(html).toMatch(/data-density="\d"/)
+  })
+
+  it('opens with the aria-hidden brand mark, then the h1 wordmark and the project chip', () => {
+    const left = group('tb-left')
+    expect(left).toMatch(/^class="tb-left"><span class="tb-mark" aria-hidden="true"><svg[^>]*data-icon="brand"/)
+    expect(left.indexOf('<h1 class="topbar-brand">Video AI Editor</h1>')).toBeLessThan(left.indexOf('topbar-session'))
+  })
 
   it('has no horizontally scrolling strip', () => {
     expect(boot()).not.toContain('topbar-scroll')
   })
 
-  it('holds one Ratio menu instead of nine loose aspect/preset buttons', () => {
-    const t = tools()
+  it('centres one Ratio menu instead of nine loose aspect/preset buttons', () => {
+    const t = group('tb-center')
     expect(t).toContain('ratio-trigger')
     expect(t).toMatch(/aria-haspopup="menu"/)
+    expect(t).toMatch(/aria-label="Canvas ratio"/)
     const buttonTexts = [...t.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)]
       .map((m) => m[1].replace(/<[^>]+>/g, '').trim())
     for (const label of ['Reels', 'Shorts', 'TikTok', 'IG 1:1', 'IG 4:5', '9:16', '16:9', '1:1', '4:5']) {
@@ -78,17 +105,25 @@ describe('the TopBar tools', () => {
     }
   })
 
-  it('keeps Text, Captions, Help and Shortcuts inline', () => {
-    const t = tools()
-    // The lucide Type icon, not a bold "T" glyph (QA-125).
-    expect(t).toMatch(/data-icon="text"[^>]*>(?:<path[^>]*><\/path>)+<\/svg> Text/)
-    expect(t).toContain('Captions')
-    // Glyph buttons carry a name; the glyph itself is aria-hidden (QA-102).
-    expect(t).toMatch(/aria-label="Keyboard shortcuts"[^>]*><svg[^>]*class="lucide[^"]*"[^>]*data-icon="help"/)
-    // One monochrome icon set (wave-B review): the shortcuts button is the
-    // keyboard ICON, never the '⌨' glyph.
-    expect(t).not.toContain('⌨')
-    expect(t).toMatch(/aria-label="Customize keyboard shortcuts"[^>]*><svg[^>]*class="lucide lucide-keyboard icon"/)
+  // R2 (LEFT_RAIL_SPEC §8.1): Text and Captions moved to the left rail's
+  // panels; the bar keeps only what is RUNNING (the activity chip).
+  it('holds no Text or Captions tool any more', () => {
+    const html = boot()
+    expect(html).not.toContain('data-icon="text"')
+    expect(html).not.toContain('data-text-presets')
+    expect(html).not.toMatch(/cc-main|cc-caret|Text presets|>\s*Captions\s*</)
+  })
+
+  // R3 (LEFT_RAIL_SPEC §8.1, inverted): Help, Customize shortcuts and Settings
+  // live at the rail foot (ToolRail.test.ts); the safe-zone <select>, the "⋯"
+  // menu, the canvas facts pill and the version badge are gone from the bar.
+  it('holds no Help, Shortcuts, Settings, safe-zone picker, "⋯" menu or version', () => {
+    const html = boot()
+    expect(html).not.toMatch(/Keyboard shortcuts|Customize keyboard|aria-label="Settings"/)
+    expect(html).not.toMatch(/data-icon="(help|keyboard|settings|more)"/)
+    expect(html).not.toContain('⌨')
+    expect(html).not.toMatch(/<select|data-topbar-more|topbar-canvas|topbar-tools|topbar-wide/)
+    expect(html).not.toMatch(/\bv\d+\.\d+/)
   })
 })
 
@@ -101,13 +136,13 @@ describe('the TopBar tools', () => {
 const EXPORT_LABEL = 'Export<svg'
 
 describe('the pinned cluster with an export link and an export error', () => {
-  const seeded = async () => {
+  const seeded = async (edlHash = 'aaaaaaaaaaaaaaa1') => {
     vi.resetModules()
     const { useStore } = await import('../store')
     // SSR reads the store's INITIAL state (zustand's server snapshot), so the
     // finished-export state is seeded there — the real component, the real store.
     Object.assign(useStore.getInitialState(), {
-      sessionId: 'A', sessionName: 'A', edlHash: 'aaaaaaaaaaaaaaa1',
+      sessionId: 'A', sessionName: 'A', edlHash,
       edl: { canvas: { w: 1080, h: 1920, fps: 30, bg: '#000' }, duration: 4, tracks: [] },
       exportLinks: { A: { sid: 'A', url: '/api/sessions/A/files/exports/export_aaaaaaaaaaaaaaa1.mp4',
                           filename: 'export_aaaaaaaaaaaaaaa1.mp4', edlHash: 'aaaaaaaaaaaaaaa1' } },
@@ -132,5 +167,27 @@ describe('the pinned cluster with an export link and an export error', () => {
     const pinned = await seeded()
     const tail = pinned.slice(pinned.indexOf(EXPORT_LABEL))
     expect(tail).not.toMatch(/<button|<a\b|⚠/)
+  })
+
+  // R3 density step 2: "(outdated)" becomes a warn dot — so the words must
+  // live in the NAME, where no step can hide them.
+  it('names a stale MP4 "(outdated)" and carries both the words and the dot', async () => {
+    const pinned = await seeded('bbbbbbbbbbbbbbb2')
+    expect(pinned).toMatch(/<button[^>]*class="tb-dl stale-dl"[^>]*aria-label="Save exported MP4 \(outdated\)"/)
+    expect(pinned).toMatch(/ MP4<span class="tb-stale-dot" aria-hidden="true"><\/span><span class="tb-stale-word" aria-hidden="true"> \(outdated\)<\/span>/)
+  })
+
+  it('keeps a fresh MP4 unflagged', async () => {
+    const pinned = await seeded()
+    expect(pinned).toMatch(/<button[^>]*class="tb-dl"[^>]*aria-label="Save exported MP4"/)
+    expect(pinned).not.toContain('tb-stale')
+  })
+
+  // Step 3 shows the error chip icon-only: the whole message stays its name.
+  it('names the export error with the whole message, prefix stripped', async () => {
+    const pinned = await seeded()
+    expect(pinned).toMatch(/aria-label="Export failed: the encoder ran out of disk\. Dismiss"/)
+    expect(pinned).toContain('<span class="tb-err-text">the encoder ran out of disk</span>')
+    expect(pinned).not.toContain('RuntimeError')
   })
 })

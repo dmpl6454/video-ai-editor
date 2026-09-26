@@ -1,8 +1,10 @@
 import React from 'react'
 import { useStore } from '../store'
-import { isMediaClip, type AnyClip } from '../types'
+import {
+  NORMAL_SPEED_RANGE, clipDuration, clipFreeze, clipSpeedFactor, isMediaClip, normalSpeedOf, type AnyClip,
+} from '../types'
 import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
-import { clipLocalTime } from '../lib/timelineLayout'
+import { clipLocalTime, renderSpanOf } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
 import { CommandKey } from './CommandKey'
 import { setLivePipFraming } from '../lib/pipDraw'
@@ -12,7 +14,6 @@ import { MediaName } from './MediaName'
 import { SliderScope, useSliderCommit } from '../lib/useSliderCommit'
 import { formatDb } from '../lib/dbFormat'
 import { levelAt, VOLUME_RANGE, volumeCommit, volumeKeyAt, volumeKeyTimes, volumeKeyToggle, type ClipAudioProps } from '../lib/audioLevel'
-import { KEEP_PITCH_TITLE } from '../lib/audioChannels'
 import { ChannelModeField } from './ChannelModeField'
 import { textRoleLabel } from '../lib/opLabels'
 import { laneName } from '../lib/timelineLanes'
@@ -20,6 +21,7 @@ import { TEXT_AXIS_SENTINEL, offAxisSentinel, roleAnchorY } from '../lib/textLay
 import { ColorField } from './ColorField'
 import { openCaptionStyle } from '../lib/captionStyleOpen'
 import { Icon } from './Icon'
+import { SpeedSection } from './speed/SpeedSection'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -284,8 +286,15 @@ function PropertiesPanel() {
   // sections' commits were silent no-ops (tester issue 10). The backend
   // rejects them too (dispatch.py _reject_audio_lane_clip).
   const isAudioLane = ['audio', 'music', 'vo'].includes(clip.t.type)
-  const speedRaw = (c as unknown as { speed?: number | null }).speed
-  const speed = typeof speedRaw === 'number' ? speedRaw : 1.0
+  const speedRaw = (c as unknown as { speed?: number | object | null }).speed
+  // The CONSTANT speed the Normal slider shows: a curve clip starts at its
+  // MEAN speed, so the first nudge keeps its length (review RD2).
+  const speed = normalSpeedOf(c)
+  // Wave D S2: a curve's footprint is its integral and a freeze's is its
+  // hold (types.ts mirrors Clip.effective_duration / speed_factor).
+  const clipLen = clipDuration(c)
+  const meanSpeed = clipSpeedFactor(c)
+  const freeze = clipFreeze(c)
   // QA-037: `reverse` is a top-level Clip field types.ts doesn't declare.
   const reversed = (c as unknown as { reverse?: boolean }).reverse === true
   const audio = (c as unknown as { audio?: ClipAudioProps }).audio
@@ -414,7 +423,7 @@ function PropertiesPanel() {
     // key={c.id} is the belt to NumberField's braces: ANY selection change
     // unmounts this whole subtree, so no field — present or future — can carry
     // one clip's value across to another clip.
-    <div className="props" key={c.id}>
+    <div className="props" key={c.id} data-clip-id={c.id}>
       <h2>Properties</h2>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · <MediaName src={c.src} />
@@ -423,37 +432,41 @@ function PropertiesPanel() {
           server-side); a 2x clip ends halfway through its source length. */}
       <ClipWindowNotice
         start={clipStart}
-        end={clipStart + (Math.max(0, ((c as unknown as { out?: number }).out ?? 0)
-          - ((c as unknown as { in?: number }).in ?? 0)) / (speed > 0 ? speed : 1))}
+        end={clipStart + clipLen}
       />
 
       {/* ONE timing model for every clip (QA-048, components/TimingSection):
           Start moves, End and Duration trim; plus the source In / Out. */}
       <Section label="Timing">
-        <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed }} send={dispatch} />
+        <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed: meanSpeed }} send={dispatch} />
       </Section>
 
       {/* Audio lanes too (QA-086, wave C): the audio mix retimes a music/VO
           clip with the v1 rule, so the control is real on every lane. */}
-        <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
-          <Slider label="Speed" min={0.25} max={4} step={0.05} value={speed}
-            format={(v) => `${v.toFixed(2)}×`}
-            onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
-          {Math.abs(speed - 1) > 1e-6 && (
-            // QA-039 residual: time-stretching (keep pitch) moves transients by
-            // up to ±12 ms (no rubberband in the render binary — documented
-            // limitation); varispeed is sample-exact and lets the pitch follow.
-            <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
-              title={KEEP_PITCH_TITLE}>
-              <input type="checkbox" checked={audio?.keep_pitch !== false}
-                onChange={(e) => dispatch('set_speed', { clip_id: c.id, factor: speed, keep_pitch: e.target.checked })}
-                style={{ marginRight: 4 }} />
-              Keep pitch
-            </label>
-          )}
+        <Section label="Speed" onReset={freeze === null ? () => dispatch('set_speed', { clip_id: c.id, factor: 1 }) : undefined}>
+          {/* Wave D S2 (components/speed): Normal | Curve, the CapCut curve
+              presets, an editable curve, the resulting length and Keep pitch
+              (QA-039 residual: time-stretching moves transients by up to
+              ±12 ms; varispeed is sample-exact and lets the pitch follow). */}
+          <SpeedSection clipId={c.id} speed={speedRaw} freeze={freeze}
+            sourceSeconds={Math.max(0, c.out - c.in)} keepPitch={audio?.keep_pitch !== false}
+            curveAllowed={clip.t.id === 'v1'}
+            playheadFrac={(() => {
+              // Unclamped (localT is clamped to the clip): outside it, no line.
+              const sp = renderSpanOf(edl, clip.t.id, c as AnyClip)
+              const f = sp.end > sp.start ? (playhead - sp.start) / (sp.end - sp.start) : -1
+              return f >= 0 && f <= 1 ? f : null
+            })()}
+            send={dispatch}
+            normalControl={
+              <Slider label="Speed" min={NORMAL_SPEED_RANGE[0]} max={NORMAL_SPEED_RANGE[1]} step={0.05} value={speed}
+                format={(v) => `${v.toFixed(2)}×`}
+                onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
+            } />
           {/* QA-037: the field existed and rendered nothing; now the renderer
-              plays the clip backwards (render/reverse.py), picture and sound. */}
-          {!isAudioLane && (
+              plays the clip backwards (render/reverse.py), picture and sound.
+              A freeze is a still: it has no direction. */}
+          {!isAudioLane && freeze === null && (
           <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
             title="Play this clip backwards — picture and sound.">
             <input type="checkbox" checked={reversed} aria-label="Play backwards"
@@ -515,8 +528,7 @@ function PropertiesPanel() {
               happened ("Fade out isn't working"). Spelling out the seconds
               turns that into something checkable. */}
           {(videoFadeIn > 0 || videoFadeOut > 0) && (() => {
-            const cEnd = clipStart + Math.max(0, ((c as unknown as { out?: number }).out ?? 0)
-              - ((c as unknown as { in?: number }).in ?? 0)) / (speed > 0 ? speed : 1)
+            const cEnd = clipStart + clipLen
             return (
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.6 }}>
                 {videoFadeIn > 0 && (

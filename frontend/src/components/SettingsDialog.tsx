@@ -23,6 +23,7 @@ import { projectLabel } from '../lib/projectName'
 import { bannerSentence, mediaToolsProblem, type MediaToolsProblem } from '../lib/mediaTools'
 import { useModelDownload } from '../lib/useModelDownload'
 import { registerSettingsOpener } from '../lib/settingsOpen'
+import { INSTANT_PREVIEW_HELP, PREVIEW_ENGINE_CHOICES, previewEngineNote } from '../lib/previewEngineSetting'
 import { cacheLine, canSaveKey, freedMessage, keyInputProblem, keyStatusLine, modelConsentText,
          weightRows, type KeyStatus } from '../lib/settingsModel'
 import { BRAINS_HEADING, BRAINS_HELP, BrainRows, CHECK_AGAIN } from './BrainRows'
@@ -45,6 +46,7 @@ export function SettingsDialog() {
       <BrainsSection />
       <ModelsSection />
       <MediaToolsSection />
+      <InstantPreviewSection />
       <StorageSection />
     </Dialog>
   )
@@ -331,6 +333,48 @@ function MediaToolsSection() {
       <div className="settings-actions">
         <button type="button" disabled={checking} onClick={check}>{checking ? 'Checking…' : CHECK_AGAIN}</button>
       </div>
+    </Section>
+  )
+}
+
+// ------------------------------------------------------- instant preview
+
+/** "Instant preview (beta)": Auto / Always / Off (wave D, spec §1 G6, §12).
+ *  Off is the default and is today's rendered preview. */
+function InstantPreviewSection() {
+  const settings = useStore((s) => s.previewSettings)
+  const mode = useStore((s) => s.previewEngine)
+  const reason = useStore((s) => s.previewEngineReason)
+  const choose = useStore((s) => s.setPreviewEngineSetting)
+  const resolve = useStore((s) => s.resolvePreviewEngine)
+  const loopback = isLoopbackOrigin()
+  const [busy, setBusy] = useState(false)
+  const labelId = useId()
+  useEffect(() => { if (!settings) void resolve() }, [settings, resolve])
+  const current = settings?.engine ?? 'server'
+  const locked = !loopback || settings?.source === 'env' || busy
+  const note = settings ? previewEngineNote(settings, { mode, reason }) : null
+  const pick = async (engine: typeof current) => {
+    if (engine === current || locked) return
+    setBusy(true)
+    try { await choose(engine) } finally { setBusy(false) }
+  }
+  return (
+    <Section icon="fast" title="Instant preview (beta)">
+      <p className="settings-help">{INSTANT_PREVIEW_HELP}</p>
+      <div className="settings-actions">
+        <span className="settings-visually-hidden" id={labelId}>Instant preview</span>
+        <div className="export-dialog-seg" role="radiogroup" aria-labelledby={labelId} aria-disabled={locked || undefined}>
+          {PREVIEW_ENGINE_CHOICES.map((c) => (
+            <button key={c.engine} type="button" role="radio" aria-checked={current === c.engine}
+                    disabled={locked && current !== c.engine} onClick={() => void pick(c.engine)}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {!loopback && <p className="settings-status" data-tone="muted">{DESKTOP_ONLY}</p>}
+      {note && <p className="settings-status" data-tone={mode === 'client' ? 'ok' : 'muted'} aria-live="polite">{note}</p>}
     </Section>
   )
 }

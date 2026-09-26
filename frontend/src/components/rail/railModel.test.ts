@@ -7,9 +7,13 @@ import {
 } from './railModel'
 
 describe('the rail model (LEFT_RAIL_SPEC §2.2)', () => {
-  it('holds R1\'s six items in CapCut order', () => {
-    expect(RAIL_ITEMS.map((r) => r.id)).toEqual(['media', 'audio', 'stickers', 'effects', 'transitions', 'ai'])
-    expect(RAIL_ITEMS.map((r) => r.label)).toEqual(['Media', 'Audio', 'Stickers', 'Effects', 'Transitions', 'AI'])
+  it('holds the eight items in CapCut order (Text and Captions joined in R2)', () => {
+    expect(RAIL_ITEMS.map((r) => r.id)).toEqual(
+      ['media', 'audio', 'text', 'stickers', 'effects', 'transitions', 'captions', 'ai'])
+    expect(RAIL_ITEMS.map((r) => r.label)).toEqual(
+      ['Media', 'Audio', 'Text', 'Stickers', 'Effects', 'Transitions', 'Captions', 'AI'])
+    expect(railItem('text').tip).toBe('Titles, styles and templates')
+    expect(railItem('captions').tip).toBe('Auto captions and subtitles')
   })
   it('has unique ids, labels and commands', () => {
     for (const k of ['id', 'label', 'command'] as const) {
@@ -28,10 +32,11 @@ describe('the rail model (LEFT_RAIL_SPEC §2.2)', () => {
   it('counts the AI tools from the catalogue, not a hard-coded number', () => {
     expect(railItem('ai').tip).toBe(`Every AI tool (${AI_CATALOG.length})`)
   })
-  it('binds no chord yet: the panel commands arrive with the keymap phase (R4)', () => {
+  it('binds ⌥1…⌥8 by rail id in every preset (R4, §2.2): one unique chord per item', () => {
+    const digit: Record<string, number> = { media: 1, audio: 2, text: 3, stickers: 4, effects: 5, transitions: 6, captions: 7, ai: 8 }
     for (const preset of Object.values(PRESETS)) {
       const map = preset.map as Record<string, string[]>
-      for (const r of RAIL_ITEMS) expect(map[r.command], `${r.command}`).toBeUndefined()
+      for (const r of RAIL_ITEMS) expect(map[r.command], `${r.command}`).toEqual([`Alt+Digit${digit[r.id]}`])
     }
   })
   it('ties each tab to its panel by id', () => {
@@ -40,9 +45,11 @@ describe('the rail model (LEFT_RAIL_SPEC §2.2)', () => {
   })
   it('accepts only ids the rail shows', () => {
     expect(asRailId('effects')).toBe('effects')
-    expect(asRailId('captions')).toBeNull()
+    expect(asRailId('captions')).toBe('captions')
+    expect(asRailId('text')).toBe('text')
+    expect(asRailId('phone')).toBeNull()
     expect(asRailId(undefined)).toBeNull()
-    expect(railItem('captions').id).toBe('media')
+    expect(railItem('bogus' as never).id).toBe('media')
   })
 })
 
@@ -70,5 +77,9 @@ describe('ariaKeyshortcuts: keymap chords in ARIA syntax', () => {
     expect(ariaKeyshortcuts('Mod+Alt+KeyK', false)).toBe('Control+Alt+K')
     expect(ariaKeyshortcuts('Alt+Backslash', true)).toBe('Alt+\\')
     expect(ariaKeyshortcuts('', true)).toBe('')
+  })
+  it('names punctuation by its key value, not its code (R3: ⌘, on the rail foot\'s Settings)', () => {
+    expect(ariaKeyshortcuts('Mod+Comma', true)).toBe('Meta+,')
+    expect(ariaKeyshortcuts('Alt+BracketLeft', true)).toBe('Alt+[')
   })
 })

@@ -28,3 +28,37 @@ def assert_drops_bounded(trace: dict) -> None:
     frames = int(trace.get("frames") or 0)
     assert len(missing) <= max_drops(frames), (
         f"{len(missing)} of {frames} presented frames missing (bound {max_drops(frames)}): {missing}")
+
+
+# ------------------------------------------------------------ timing budgets
+#
+# Latency budgets (spec §11) are measured, and asserted at their spec value,
+# on a QUIET machine (the gate runs the WK suites alone). When other work
+# loads the machine, WebKit, uvicorn and ffmpeg share its cores and every
+# round trip stretches: the bound then scales with the load (never below the
+# spec value, at most 4x), and the test prints the measured number next to
+# the load so a quiet re-run can confirm the spec figure. Only TIMING goes
+# through this: which frame, which sample and which pixel are never relaxed.
+
+import os as _os
+
+QUIET_LOAD_PER_CORE = 0.35
+
+
+def load_per_core() -> float:
+    try:
+        return _os.getloadavg()[0] / max(1, _os.cpu_count() or 1)
+    except OSError:
+        return 0.0
+
+
+def machine_is_quiet() -> bool:
+    return load_per_core() <= QUIET_LOAD_PER_CORE
+
+
+def timing_budget(spec_ms: float) -> float:
+    """The spec budget on a quiet machine; scaled with the load otherwise."""
+    lpc = load_per_core()
+    if lpc <= QUIET_LOAD_PER_CORE:
+        return spec_ms
+    return spec_ms * min(4.0, 1.0 + 3.0 * (lpc - QUIET_LOAD_PER_CORE) / (1.0 - QUIET_LOAD_PER_CORE))

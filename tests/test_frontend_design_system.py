@@ -103,7 +103,9 @@ def _surfaces(page):
     yield "clip inspector"
     if _select_new_text_clip(page):
         yield "text inspector"
-    for tab in ("Audio", "Transitions", "AI"):
+    # The Text and Captions panels hold the old Text presets popover and CC
+    # menu since R2 (LEFT_RAIL_SPEC §8.1).
+    for tab in ("Audio", "Text", "Transitions", "Captions", "AI"):
         page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(400)
         yield f"{tab} tab"
@@ -115,8 +117,6 @@ def _surfaces(page):
     for trigger, name in ((".topbar-pinned button.primary", "export dialog"),
                           ("button[aria-label='Keyboard shortcuts']", "help"),
                           ("button.topbar-session", "project menu"),
-                          ("button[aria-label='Text presets']", "text presets"),
-                          ("button.cc-caret", "captions menu"),
                           ("button.ratio-trigger", "ratio menu")):
         page.locator(trigger).click()
         page.wait_for_timeout(400)
@@ -200,10 +200,8 @@ def test_no_emoji_or_text_glyph_used_as_an_icon(browser, base_url, sessions):  #
         page = _open(browser, base_url, sessions["full"], width, height)
         for where in _surfaces(page):
             problems += [(width, where, p) for p in page.evaluate(GLYPHS_JS)]
-        if width < 1440:
-            page.locator("button[aria-label^='More']").click()
-            page.wait_for_timeout(300)
-            problems += [(width, "more menu", p) for p in page.evaluate(GLYPHS_JS)]
+        # The "⋯" menu is gone (R3): its safe-zone picker is the Ratio menu's
+        # third group, a surface _surfaces already opens at both widths.
         page.context.close()
     page = _open(browser, base_url, sessions["empty"])
     problems += [("empty", p) for p in page.evaluate(GLYPHS_JS)]
@@ -273,9 +271,13 @@ def test_reduced_motion_is_honoured_everywhere(browser, base_url, sessions, moti
 
 DISABLED_JS = r"""
 () => {
-  const want = getComputedStyle(document.documentElement).getPropertyValue('--text-disabled').trim()
-  const probe = document.createElement('span'); probe.style.color = want; document.body.appendChild(probe)
-  const rgb = getComputedStyle(probe).color; probe.remove()
+  const colorOf = (token) => {
+    const probe = document.createElement('span')
+    probe.style.color = getComputedStyle(document.documentElement).getPropertyValue(token).trim()
+    document.body.appendChild(probe); const c = getComputedStyle(probe).color; probe.remove(); return c }
+  const rgb = colorOf('--text-disabled')
+  // An icon-only toolbar button dims further (review RD2): --icon-disabled.
+  const rgbIcon = colorOf('--icon-disabled')
   const accents = ['--accent', '--accent-fill', '--accent-2', '--accent-2-fill'].map(v => {
     const p = document.createElement('span'); p.style.color = getComputedStyle(document.documentElement).getPropertyValue(v).trim()
     document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c })
@@ -284,7 +286,8 @@ DISABLED_JS = r"""
     .filter(el => el.getBoundingClientRect().width && el.type !== 'range' && el.type !== 'checkbox' && el.type !== 'radio')
     .map(el => { const cs = getComputedStyle(el)
       return { what: (el.getAttribute('aria-label') || el.textContent || el.tagName).trim().slice(0, 30),
-               opacity: eff(el), color: cs.color, want: rgb, accentBg: accents.includes(cs.backgroundColor) } })
+               opacity: eff(el), color: cs.color, want: el.matches('.timeline-toolbar .tb-icon') ? rgbIcon : rgb,
+               accentBg: accents.includes(cs.backgroundColor) } })
 }
 """
 
@@ -295,17 +298,39 @@ def test_every_disabled_control_is_one_neutral_state(browser, base_url, sessions
         page = _open(browser, base_url, sid)
         found += page.evaluate(DISABLED_JS)
         page.context.close()
-    assert len(found) >= 3, found   # Save, Export, Captions … on the empty project
+    assert len(found) >= 3, found   # Save, Export, Undo … on the empty project
     bad = [d for d in found if abs(d["opacity"] - 1) > 1e-3 or d["color"] != d["want"] or d["accentBg"]]
     assert bad == [], bad
 
 
 # ---------------------------------------------------------- control rhythm ----
 
+# The packaged app records through desktop.py's native bridge; this stand-in
+# lets the activity chip's recording buttons appear in any browser.
+FAKE_VO_BRIDGE = """window.pywebview = { api: {
+  vo_start: async () => ({ ok: true }), vo_stop: async () => ({ ok: true, clip_id: null }) } };"""
+
+
 def test_top_bar_controls_share_one_height_and_type_size(browser, base_url, sessions):  # noqa: F811
-    for width, height in ((1440, 900), (1024, 768)):
-        page = _open(browser, base_url, sessions["full"], width, height)
-        rows = page.evaluate("""() => [...document.querySelectorAll('.topbar button, .topbar select')]
+    """R3 (LEFT_RAIL_SPEC §8.1): at 900, 1024, 1280 and 1440 — every density
+    step — with the recording chip seeded (its body and Stop are top-bar
+    buttons) and a saved .vae link (an <a>), every control is 28 px tall at
+    one 12 px size; the project chip keeps the pills' 11 px."""
+    for width, height in ((1440, 900), (1280, 800), (1024, 768), (900, 724)):
+        ctx = browser.new_context(viewport={"width": width, "height": height})
+        ctx.add_init_script(FAKE_VO_BRIDGE)
+        ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sessions['full']!r}); localStorage.setItem('vai.rightTab', 'inspect') }} catch (e) {{}}")
+        page = ctx.new_page()
+        page.goto(base_url + "/")
+        page.get_by_role("tab", name="Media", exact=True).wait_for()
+        page.locator(".timeline-canvas-wrap canvas").first.wait_for()
+        page.wait_for_timeout(800)
+        page.get_by_role("button", name="Save", exact=True).click()
+        page.locator(".topbar a.tb-dl").wait_for(timeout=30_000)
+        page.get_by_role("tab", name="Audio", exact=True).click()
+        page.get_by_role("button", name="Record voiceover").click()
+        page.get_by_role("button", name="Stop recording").wait_for(timeout=10_000)
+        rows = page.evaluate("""() => [...document.querySelectorAll('.topbar button, .topbar select, .topbar a')]
           .filter(e => e.getBoundingClientRect().width).map(e => ({
             name: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 20),
             h: Math.round(e.getBoundingClientRect().height * 10) / 10,
@@ -313,12 +338,18 @@ def test_top_bar_controls_share_one_height_and_type_size(browser, base_url, sess
             pill: e.classList.contains('pill'),
             icon: e.classList.contains('icon-btn') ? Math.round(e.getBoundingClientRect().width) : null }))""")
         page.screenshot(path=str(SHOTS / f"design_topbar_{width}.png"), clip={"x": 0, "y": 0, "width": width, "height": 44})
-        page.context.close()
-        assert len(rows) >= 8, rows
-        assert {r["h"] for r in rows} == {28.0}, rows
+        page.get_by_role("button", name="Stop recording").click()
+        ctx.close()
+        names = {r["name"] for r in rows}
+        # Project, Ratio, Save, Open, Export — plus the seeded chip and link.
+        assert len(rows) >= 5, rows
+        assert {"Save", "Open", "Stop recording"} <= names, rows
+        assert any(n.startswith("Canvas ratio") for n in names), rows
+        assert any(n.startswith("Download the saved .vae") for n in names), rows
+        assert {r["h"] for r in rows} == {28.0}, (width, rows)
         # One type size for the controls; the project-name pill keeps the pills' 11 px.
-        assert {r["fs"] for r in rows if not r["pill"]} == {"12px"}, rows
-        assert {r["icon"] for r in rows if r["icon"] is not None} <= {28}, rows
+        assert {r["fs"] for r in rows if not r["pill"]} == {"12px"}, (width, rows)
+        assert {r["icon"] for r in rows if r["icon"] is not None} <= {28}, (width, rows)
 
 
 # ----------------------------------------------------------- font licences ----

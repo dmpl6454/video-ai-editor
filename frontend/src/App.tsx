@@ -3,7 +3,7 @@ import { useStore, startSessionWatch } from './store'
 import { ConnectionBanner } from './components/ConnectionBanner'
 import { MediaToolsBanner } from './components/MediaToolsBanner'
 import { TopBar } from './components/TopBar'
-import { ToolRail } from './components/rail/ToolRail'
+import { RailFoot, ToolRail } from './components/rail/ToolRail'
 import { ToolPanel } from './components/rail/ToolPanel'
 import { RailTooltip } from './components/rail/RailTooltip'
 import { RightPanel } from './components/RightPanel'
@@ -151,6 +151,9 @@ export default function App() {
         disabled={!rightOpen}
       />
       <RightPanel />
+      {/* The rail foot (Help, Shortcuts, Settings): its own grid item, LAST in
+          the DOM so it is last in the focus order (LEFT_RAIL_SPEC §2.1, R3). */}
+      <RailFoot />
       <Help />
       <ShortcutsSettings />
       <SettingsDialog />

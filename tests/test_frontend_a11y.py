@@ -272,7 +272,11 @@ def _unnamed(page) -> list:
 
 
 def _add_text_clip(page):
-    """Adds a text clip at the playhead through the Text tool; it is selected."""
+    """Adds a text clip at the playhead through the Text panel's first button
+    ("Add text at playhead", LEFT_RAIL_SPEC R2); it is selected."""
+    text_tab = page.get_by_role("tab", name="Text", exact=True)
+    if text_tab.get_attribute("aria-selected") != "true" or text_tab.get_attribute("aria-expanded") != "true":
+        text_tab.click()
     page.locator("[data-text-presets] > button").first.click()
     page.get_by_role("slider", name="Opacity").first.wait_for(timeout=10_000)
 
@@ -283,14 +287,14 @@ def test_every_control_has_an_accessible_name(browser, base_url, sessions):
     page = _open(browser, base_url, sessions["full"])
     problems = []
     problems += [("default",) + b for b in _unnamed(page)]
-    # Every rail panel (LEFT_RAIL_SPEC §8.1; Text and Captions join in R2).
-    for tab in ("Audio", "Stickers", "Effects", "Transitions", "AI", "Media"):
+    # Every rail panel (LEFT_RAIL_SPEC §8.1): all eight since R2.
+    for tab in ("Audio", "Text", "Stickers", "Effects", "Transitions", "Captions", "AI", "Media"):
         page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(500)
         problems += [(tab,) + b for b in _unnamed(page)]
     _add_text_clip(page)
     problems += [("text selected",) + b for b in _unnamed(page)]
-    for trigger in (EXPORT_TRIGGER, "button[aria-label='Text presets']"):
+    for trigger in (EXPORT_TRIGGER,):
         page.locator(trigger).click()
         page.wait_for_timeout(300)
         problems += [(trigger + " open",) + b for b in _unnamed(page)]
@@ -319,8 +323,10 @@ def test_dropzone_is_reachable_by_tab_and_opens_the_picker_from_the_keyboard(bro
 @pytest.mark.parametrize("trigger, mode", [
     ("button.topbar-session", "menu"),
     (EXPORT_TRIGGER, "dialog"),
-    ("button[aria-label='Text presets']", "dialog"),
-    ("button.cc-caret", "menu"),
+    # The Text presets and caption-language popovers are inline panels since
+    # R2 (LEFT_RAIL_SPEC §8.1); the Ratio menu (aspect, presets, safe zones)
+    # joined in R3.
+    ("button.ratio-trigger", "menu"),
 ])
 def test_popovers_open_move_and_close_from_the_keyboard(browser, base_url, sessions, trigger, mode):
     page = _open(browser, base_url, sessions["full"])
@@ -386,16 +392,24 @@ def test_timeline_context_menu_is_a_keyboard_menu(browser, base_url, sessions):
     page.context.close()
 
 
-def test_more_menu_at_laptop_width(browser, base_url, sessions):
+def test_ratio_menu_groups_at_laptop_width(browser, base_url, sessions):
+    """R3 (LEFT_RAIL_SPEC §2.10, §8.1): the "⋯" menu is gone; the safe-zone
+    overlay is the Ratio menu's third named group."""
     page = _open(browser, base_url, sessions["full"], width=1280, height=800)
-    trig = page.locator("[data-topbar-more] > button")
+    trig = page.locator("button.ratio-trigger")
     trig.focus()
     page.keyboard.press("Enter")
     page.wait_for_timeout(200)
-    assert _active(page)["menu"] == "More options"
+    assert _active(page)["menu"] == "Canvas ratio"
+    menu = page.get_by_role("menu", name="Canvas ratio")
+    for group in ("Aspect ratio", "Platform presets", "Safe-zone overlay"):
+        assert menu.get_by_role("group", name=group, exact=True).count() == 1, group
+    assert page.get_by_role("menuitemradio", name="TikTok safe zone", exact=True).count() == 1
+    assert page.locator("[data-topbar-more]").count() == 0
     page.keyboard.press("Escape")
     page.wait_for_timeout(150)
-    assert page.evaluate("() => document.activeElement === document.querySelector('[data-topbar-more] > button')")
+    assert menu.count() == 0
+    assert page.evaluate("() => document.activeElement === document.querySelector('button.ratio-trigger')")
     page.context.close()
 
 
@@ -404,8 +418,9 @@ def test_more_menu_at_laptop_width(browser, base_url, sessions):
 def test_rendered_text_meets_aa_contrast(browser, base_url, sessions):
     page = _open(browser, base_url, sessions["full"])
     fails = [("default", f) for f in page.evaluate(CONTRAST_JS)]
-    # Every rail panel (§5.2; Text and Captions join in R2).
-    for tab, settle in (("Audio", 600), ("Stickers", 800), ("Effects", 1000), ("Transitions", 600), ("AI", 1500)):
+    # Every rail panel (§5.2): all eight since R2.
+    for tab, settle in (("Audio", 600), ("Text", 600), ("Stickers", 800), ("Effects", 1000), ("Transitions", 600),
+                        ("Captions", 800), ("AI", 1500)):
         page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(settle)
         fails += [(tab, f) for f in page.evaluate(CONTRAST_JS)]

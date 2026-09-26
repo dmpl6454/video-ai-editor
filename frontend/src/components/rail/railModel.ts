@@ -2,9 +2,9 @@
 // entry drives the rail tab, its tooltip, the tool panel's title and (from R4)
 // its keyboard command. Nothing else in the app spells a rail label or id.
 //
-// R1 ships six items. Text and Captions join in R2 (they are still in the top
-// bar until then); the ids are already part of `RailId` so a stored value or a
-// later phase never needs a migration.
+// R1 shipped six items; Text and Captions joined in R2 (out of the top bar),
+// which completes CapCut's order. A stored `vai.leftTab` of any of the eight
+// ids is valid, so no phase ever needed a migration.
 import type { IconName } from '../../lib/icons'
 import { AI_CATALOG } from '../../lib/aiCatalog'
 
@@ -27,9 +27,11 @@ export interface RailItem {
 export const RAIL_ITEMS: readonly RailItem[] = [
   { id: 'media', label: 'Media', icon: 'film', tip: 'Footage, photos and the project bin', command: 'panelMedia' },
   { id: 'audio', label: 'Audio', icon: 'music', tip: 'Music, voiceover and the mix', command: 'panelAudio' },
+  { id: 'text', label: 'Text', icon: 'text', tip: 'Titles, styles and templates', command: 'panelText' },
   { id: 'stickers', label: 'Stickers', icon: 'sticker', tip: 'Emoji and stickers', command: 'panelStickers' },
   { id: 'effects', label: 'Effects', icon: 'effects', tip: 'Filters, LUT looks and effects', command: 'panelEffects' },
   { id: 'transitions', label: 'Transitions', icon: 'transitions', tip: 'Transitions for a cut', command: 'panelTransitions' },
+  { id: 'captions', label: 'Captions', icon: 'captions', tip: 'Auto captions and subtitles', command: 'panelCaptions' },
   { id: 'ai', label: 'AI', icon: 'ai', tip: `Every AI tool (${AI_CATALOG.length})`, command: 'panelAI' },
 ]
 
@@ -71,7 +73,13 @@ export function ariaKeyshortcuts(chord: string, isMac: boolean): string {
     if (p === 'Ctrl') return 'Control'
     if (p.startsWith('Key')) return p.slice(3)
     if (p.startsWith('Digit')) return p.slice(5)
-    if (p === 'Backslash') return '\\'
-    return p
+    return PUNCTUATION[p] ?? p
   }).join('+')
+}
+
+/** Punctuation `code`s as the key VALUE aria-keyshortcuts names ("Meta+,"
+ *  for ⌘, — "Comma" is not a key value; R3's rail foot carries Settings). */
+const PUNCTUATION: Record<string, string> = {
+  Backslash: '\\', Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'",
+  BracketLeft: '[', BracketRight: ']', Minus: '-', Equal: '=', Backquote: '`',
 }

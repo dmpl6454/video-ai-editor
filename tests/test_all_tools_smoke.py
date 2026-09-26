@@ -151,6 +151,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "paste_clips": {"clips": [{"track": "v1", "clip": {"src": src, "in": 0.0, "out": 1.0,
                                                            "start": 0.0}}], "at": 1.0},
         "set_speed": {"clip_id": "c1", "factor": 1.5},
+        "freeze_frame": {"time": 1.0, "duration": 1.0},
         "bulk_delete": {"clip_ids": ["t1"]},
         "bulk_duplicate": {"clip_ids": ["c1"]},
         # Transform / keyframes

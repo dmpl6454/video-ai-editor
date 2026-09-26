@@ -77,7 +77,7 @@ Rejected:
 | Fact | Source |
 |---|---|
 | MediaSource, ManagedMediaSource, `changeType`, rVFC all present | C probe `mse_wk.json` |
-| Two same-size x264 all-intra `stitchable=1` encodes have an identical `avcC` | C probe |
+| Two same-size x264 all-intra `stitchable=1` encodes have an identical `avcC` **at the same source rate** (x264 writes the rate into the SPS VUI: a 25 fps and a 30 fps proxy of one size differ; measured in 1a) | C probe; milestone 1 |
 | 42/42 mid-frame paused seeks `(k+0.5)/fps` exact at `seeked`, 1 to 2 ms | C probe |
 | Exact-boundary seeks `k/fps`: 2 of 3 did **not** repaint | C probe; same family as QA-077 |
 | Playback of 210 frames: 0 mismatches, 0 missing | C probe |
@@ -164,10 +164,10 @@ So:
 Because every frame is independently decodable, MSE never has a dependency to break.
 
 ### 3.2 laneA (MSE) invariants
-- One `MediaSource`, one `SourceBuffer('video/mp4; codecs="avc1.64001F"')` (level from the recipe), `mode = 'segments'`, `timestampOffset = 0`.
+- One `MediaSource`, one `SourceBuffer('video/mp4; codecs="<codec>"')`, `mode = 'segments'`, `timestampOffset = 0`. The codec string is **read from the init segment** (`parseInitSegment` in `media/fmp4Writer.ts`; the real proxies measure `avc1.641029`), never hard-coded; with no codec known yet, laneA skips the append rather than guess.
 - `laneA.currentTime` **is render-clock seconds**, so `k = round(mediaTime · R)` with `R = rate_of(canvas.fps)`.
 - **The buffered range is always contiguous** from `playhead − 10 s` to `playhead + 30 s`, clamped to `[0, total)`. A gap stalls WebKit, so gaps in the *timeline* get **filler samples**: the previous appended sample's bytes (the first clip's frame when the timeline starts with a gap). The compositor draws black for them because `programMap[k].kind == gap`.
-- **Init switching.** The writer tracks `lastInitKey` and appends an init segment before any fragment whose proxy size class differs. The size class is (W×H, recipe), and one class shares one `avcC`. **Its key is defined once, on both sides: the `avcC` bytes as lowercase hex** (`index.json` `init_key` from `ingest/proxy.py`, `parseInitSegment().initKey` in `media/fmp4Writer.ts`; the avcC's SPS pins the size, and x264 writes the source rate into the VUI, so a 25 fps and a 30 fps proxy of one size are two classes — measured in 1a). The WK real-proxy suite asserts the two are equal (review RD1).
+- **Init switching.** The writer tracks `lastInitKey` and appends an init segment before any fragment whose init class differs. The class is the **full `avcC`**, not (W×H, recipe): one size can carry two classes (the source rate is in the SPS VUI). **Its key is defined once, on both sides: the `avcC` bytes as lowercase hex** (`index.json` `init_key` from `ingest/proxy.py`, `parseInitSegment().initKey` in `media/fmp4Writer.ts`; the avcC's SPS pins the size, and x264 writes the source rate into the VUI, so a 25 fps and a 30 fps proxy of one size are two classes — measured in 1a). The WK real-proxy suite asserts the two are equal (review RD1).
 - **Fragments** are 1 to 30 frames. Appends are queued strictly one at a time (`updateend`). Order: frames at the playhead first (1 to 5 while paused; from `playhead + 150 ms` while playing), then outward in 1 s fragments.
 - **Shrinking.** `remove(a, b)` is issued outside the window and whenever the timeline got shorter. `mediaSource.duration` is set to `total/R` after any required `remove()`. `endOfStream()` is never called, so the source stays editable.
 - **Quota.** On `QuotaExceededError`: remove behind the playhead down to `playhead − 2 s`, halve the look-ahead, retry once, then raise `status: degraded` with telemetry.
@@ -185,21 +185,21 @@ Because every frame is independently decodable, MSE never has a dependency to br
 ### 3.4 Compositor (WebGL2, one canvas)
 - Canvas size is the display box × DPR, capped at a 1080 short edge. `premultipliedAlpha: false`, `preserveDrawingBuffer: false`.
 - Sources:
-  - laneA via `texImage2D(video)` on each rVFC. Frame dimensions come from rVFC `metadata.width/height`, never from the element.
+  - laneA via `texImage2D(video)` on each rVFC. Frame dimensions come from the program map's source (the proxy `index.json` w×h), never from the element; rVFC `metadata.width/height` is only a cross-check (it lagged one frame after an init switch in 1/17 runs, milestone 1). A texture is uploaded only at a completed paused `'seeked'` or in rVFC while playing — never between an append that overwrote the paused frame and its re-seek (WebKit returns black there).
   - laneB via `texImage2D(VideoFrame)`.
   - LUTs as 3D textures.
 - Pass order mirrors `_build_clip_video_chain` exactly:
   1. fit (contain: scale-down plus black pad; cover: scale-up plus crop)
   2. rotate in place with black corners
   3. crop-zoom and pan
-  4. transform and keyframes (evaluated with `lib/overlay.ts`)
+  4. transform and keyframes (evaluated with `lib/overlay.ts` at the clip-local TIMELINE seconds of the displayed source frame — the retime of the chain's `t`, `render/geometry.kfTimeOf`, the export's `compositor._kf_time_expr`; as built, review RD2)
   5. colour (P2)
   6. effects (P4)
   7. opacity
   8. video fades (multiply toward black)
   9. transition blend (P3)
 - Colour maths run in **BT.709 limited-range YUV** (§6 R12).
-- **"Last good frame".** The engine draws only when every texture for `k` is ready; otherwise it leaves the canvas as it is. On pause, a snapshot is copied to a 2D backing canvas (≤ 2 ms) so `webglcontextlost` never shows black. On `webglcontextrestored` the programs and textures are rebuilt. If restore takes longer than 2 s, the engine falls back to server mode (§7).
+- **"Last good frame".** The engine draws only when every texture for `k` is ready; otherwise it leaves the canvas as it is. On pause, a snapshot is copied to a 2D backing canvas (≤ 2 ms) so `webglcontextlost` never shows black. On `webglcontextrestored` the programs and textures are rebuilt. If restore takes longer than 2 s, the engine falls back to server mode (§7). As built (review RD2): the snapshot is shown only while it holds `presentedK`. A loss **while playing** is an external pause (`cause: 'context'`): picture and sound stop together at `presentedK`, the snapshot (the last PAUSE's frame) is replaced by black with the spinner, and on restore both resume from a fresh anchor if the user's intent was play.
 
 ### 3.5 Clock and transport (A's presented-time idea, C's measured clock)
 - **Timeline authority while playing: the presented frame.** In the laneA rVFC callback, `presentedK = round(metadata.mediaTime · R)`. `presentedClock.now()` returns `presentedK / R`, interpolated by `(performance.now() − expectedDisplayTime)` only for the rAF-driven overlay layers between video frames.
@@ -218,6 +218,11 @@ Because every frame is independently decodable, MSE never has a dependency to br
   - When `getOutputTimestamp()` returns zeros (device change), the engine uses `ac.currentTime + outputLatency + baseLatency` until it recovers.
 - **Buffering.** If laneA's `waiting` fires while playing (span not yet fetched or encoded), the engine pauses audio at the same `k`, shows the buffering spinner, and resumes both together from a new anchor.
 - **Visibility.** On `visibilitychange` hidden or window occluded (PyWebView `on_minimized`), the engine pauses decode, appends and proxy prefetch.
+- **As built (1c, D2-integration; measured in WKWebView, macOS 27):**
+  - With a MediaSource-fed `<video>`, rVFC `expectedDisplayTime`/`presentationTime` are on another clock (≈ −70.3e6 ms against a callback `now` of ~700 ms); a file-backed `<video>` reports them sanely. The engine moves them onto `performance.now()` by the smallest `now − expectedDisplayTime` seen since the last play (`clock/presentedClock.DisplayTimeBase`; the two clocks differ by a constant, and a callback never runs before its frame).
+  - `getOutputTimestamp()` returns the RENDERED time (`contextTime = currentTime − 1 quantum`, `performanceTime = now`), without `outputLatency` (15.6 ms). `AudioEngine.ctxTimeAt` subtracts it once it has seen such a timestamp (sticky per context).
+  - The anchor is checked at the first presented frame and again at the 8th (display-time estimate settled), both at 4 ms; the drift monitor re-anchors above **8 ms** (not 20: under load the output clock lost up to 14 ms over 15 s).
+  - A pause WebKit makes (page hidden, window occluded; it pauses the muted `<video>` itself) or an interrupted AudioContext is an external pause: picture and sound stop together at the presented k. On return, if the user's last intent was play, both resume from a fresh anchor after the page has stayed visible 250 ms (an occluded window flips hidden/visible every ~10 ms for a while) **and** the context clock is seen advancing (`AudioSink.whenRunning`: after a hidden page WebKit reports `running` up to ~1.8 s before it renders); otherwise it stays paused.
 
 ### 3.6 Audio graph
 ```
@@ -232,7 +237,7 @@ master:    → loudnessGain (preview_loudness gain) → limiter (P1: DynamicsCom
 - Scheduling window: `playhead` to `+4 s`, refilled every 1 s. Each clip's chunks are chained at integer-sample times, `when = anchorCtx + (s − anchorSample)/48000`.
 - A structural edit while playing stops the affected sources with a 5 ms ramp and reschedules them from `presentedK + 6` frames (≈ 200 ms).
 - A parameter-only edit (gain, fade, mute) rewrites automation with `cancelAndHoldAtTime` plus new ramps. It is audible at the next render quantum, well under 100 ms.
-- Speed ≠ 1: `playbackRate = speed` (varispeed), marked APPROX where export uses pitch-preserving `atempo`. Phase 4 adds server tempo sidecars.
+- Speed ≠ 1: `playbackRate = speed` (varispeed), marked APPROX where export uses pitch-preserving `atempo`. Phase 4 adds server tempo sidecars. A speed CURVE's sound is APPROX on the client too: the export reads a cached numpy intermediate (`render/speed_audio.py`, varispeed or WSOLA; lane S1), and a FREEZE is digital silence.
 
 ---
 
@@ -318,14 +323,15 @@ ffmpeg -nostdin -threads 2 [-noaccurate_seek -seek_timestamp 1 -ss <keyframe pts
 | `POST /api/sessions/{sid}/dispatch?include=edl` | adds `edl`, `edl_hash`, `render_hash` | CHANGED. Default response unchanged for old clients |
 | `GET /api/sessions/{sid}/media` | rows gain `fps {num,den}`, `frames`, `pix_fmt`, `has_audio`, `proxy {key, state, w, h}` | CHANGED |
 | `GET /api/proxies/{key}/index.json` · `init.mp4` · `v/{n}.bin` · `a/{n}.flac` | proxy data | `v/` and `a/` encode on demand, blocking ≤ 2 s, else `202` + `Retry-After: 0.2`; `a/{n}` answers as soon as chunk `n` itself is on disk (not the whole source's audio) and carries `X-Audio-Gain`. Keys must be referenced by a live session (containment check as in `/files`). GET/HEAD of `init.mp4`, `v/*.bin` and `a/*.flac` are exempt from the per-path 60 rps bucket, with a global cap of 400 rps; `index.json` and every other method keep the per-path bucket. No preview route serves a session's `cache/` (§14 risk 16) |
-| `GET /api/sessions/{sid}/frame_map?h=<render_hash>` | reference program map, RLE (§8) | cached per hash |
-| `GET /api/sessions/{sid}/bake/{render_hash}/init.mp4` · `v/{n}.bin` | bake spans (§5.3) | 404 until `preview.mp4` for that hash exists |
+| `GET /api/sessions/{sid}/frame_map?h=<render_hash>` | reference program map, RLE (§8), plus `sources` {src: SourceInfo} it was built from | cached per (hash, source file identities). As built (D2): `409 stale_render_hash` + the current hash when `h` is not current; `202` + Retry-After while an edit holds the session or a source is probing; `422 source_unavailable` when a source cannot be probed |
+| `GET /api/sessions/{sid}/bake/{render_hash}/init.mp4` · `v/{n}.bin` · `index.json[?ranges=k0-k1,…]` | bake spans (§5.3) | 404 until `preview.mp4` for that hash exists. As built (D2): `index.json` names the bake's `init_key` class and queues only the spans the BAKED `ranges` touch; media GETs share the preview-media bucket |
+| `PUT /api/settings/preview` | `{engine: auto\|client\|server}` → the GET body | As built (D2): JSON only, loopback and same origin; stored in settings.json under the settings lock; `VAI_PREVIEW_ENGINE` still wins |
 | `GET /api/sessions/{sid}/duck_curve?h=` (P2) | `{lanes: {trackId: {rate_hz: 100, db: float32 base64}}}` | from the `duck_probe` stem |
 | `GET /api/sessions/{sid}/preview_loudness?h=` (P2) | `{gain_db}` | |
 | `GET /api/sessions/{sid}/luts/{name}.cube` (P2) | LUT file | contained to the LUT dirs |
 
 ### 5.3 Bakes (`render/bake.py`, NEW)
-- **Phase 1.** A bake of `render_hash h` is simply a proxy of `previews/h.mp4`, using the same recipe at the preview's own size. Bake frame `k` is output frame `k`, because `render_preview` renders the render clock from 0 at project fps. The preview **already excludes text, stickers and PiP** (see `Preview.tsx:456-481`, pixel-ownership rule), so the client overlays never double-draw. The client maps BAKED ranges to `{src: 'bake:'+h, srcFrame: k}`.
+- **Phase 1.** A bake of `render_hash h` is simply a proxy of `previews/h.mp4`, using the same recipe at the preview's own size. As built (D2): its key is `sha256(realpath, size, recipe)` — not mtime, because the render cache touches a reused preview — it lives in `WORKDIR/proxies/` in the proxies LRU class (orphaned when the preview is evicted), and a session's newer hash cancels the older bake's span jobs. Bake frame `k` is output frame `k`, because `render_preview` renders the render clock from 0 at project fps. The preview **already excludes text, stickers and PiP** (see `Preview.tsx:456-481`, pixel-ownership rule), so the client overlays never double-draw. The client maps BAKED ranges to `{src: 'bake:'+h, srcFrame: k}`.
 - **Phase 2: clip-keyed reuse.** A bake frame is also indexed as `(clipChainHash, localFrame)`, where `clipChainHash` = the hash of every field in `_build_clip_video_chain` plus `src`, `in` and `speed`. After a move, the client asks `bake/{oldHash}` for the frames of an unchanged clip at their old `k`, so no new render is needed. Transition overlaps are excluded from reuse.
 
 ---
@@ -333,7 +339,7 @@ ffmpeg -nostdin -threads 2 [-noaccurate_seek -seek_timestamp 1 -ss <keyframe pts
 ## 6. Frame-accuracy and A/V-sync rules (normative, tied to `edl/timebase.py`)
 
 - **R1. Output grid.** `R = rate_of(canvas.fps)` as a rational. Output frame `k` spans `[k, k+1)/R`. MSE ticks: `tick(k) = k · T`, `T = 240000·R.den/R.num` (an integer for all `STANDARD_RATES`). If `rate_of` yields a non-standard rate and `T` is not an integer, the engine refuses and uses server mode.
-- **R2. One timebase in two languages.** `timeline/timebase.ts` ports `rate_of`, `fps_float`, `frame_duration`, `frame_of` (including the `−1e-6` tolerance), `time_of`, `quantize`, `frames_between`, `source_rate`, `floor_to_frame`, `ceil_to_frame`, `samples_for_frames` and `seek_preroll`, rational-exact with integer `{num, den}` and no float accumulation. `frameStep.ts` re-exports from it, `overlayGate.ts` uses it, and the frontend keeps exactly one copy. Golden: `tests/test_timebase_golden.py` writes `frontend/src/lib/__fixtures__/timebase_cases.json` over `t ∈` a grid including exact multiples ± 1e-7, times all `STANDARD_RATES` plus off-standard inputs. Vitest asserts 100%.
+- **R2. One timebase in two languages.** `timeline/timebase.ts` ports `rate_of`, `fps_float`, `frame_duration`, `frame_of` (exact: round half to even on the exact rational `t·R`; the TS port takes a float fast path only when the product is more than 1e-6 from a half-frame tie), `time_of`, `quantize`, `frames_between`, `source_rate`, `floor_to_frame`, `ceil_to_frame`, `samples_for_frames` and `seek_preroll`, rational-exact with integer `{num, den}` and no float accumulation. `frameStep.ts` re-exports from it, `overlayGate.ts` uses it, and the frontend keeps exactly one copy. Golden: `tests/test_timebase_golden.py` writes `tests/goldens/timebase_cases.json` over `t ∈` a grid including exact multiples ± 1e-7, exact half-frame ties and their ±4-ulp neighbours at the NTSC rates (review RD2), times all `STANDARD_RATES` plus off-standard inputs. Vitest asserts 100%.
 - **R3. V1 frame plan.** `framePlan.ts` ports `_v1_frame_plan` (`compositor.py:478`): a clip starts at `frame_of(start)`, occupies `clip_frames(c) = max(1, frame_of(effective_duration))`, gaps are whole frames, overlaps pack with `max(cursor, start)`, and the tail gap runs to `frame_of(total_duration)`. Seams come from a port of `seam_table_for(clips, transitions, fps)` (`edl/schema.py:909`) **with the whole-frame rounding**. `timelineLayout.seamTable` gains an `fps` argument so the timeline UI and the engine share it. Golden: `frame_plan_cases.json`, generated from the fuzz corpus of `test_b8_fuzz_sweep.py` plus hand cases (overlaps, sub-frame gaps, transitions longer than a side).
 - **R4. Output frame to source frame.** For clip-local output frame `j ∈ [0, clip_frames)`, the source frame is what the export chain picks:
   - `clip_input_args` seeks to `in − seek_preroll(in)`;
@@ -341,6 +347,8 @@ ffmpeg -nostdin -threads 2 [-noaccurate_seek -seek_timestamp 1 -ss <keyframe pts
   - then `fps=R` (round=near);
   - then `tpad=stop_mode=clone`, `trim=end_frame=clip_frames`;
   - with reverse and freeze per `render/reverse.py` and the freeze rules.
+
+  As built (Wave D lane S1): a speed curve `{"curve": [[x, r], …]}` has `x` over the clip's OUTPUT (0..1) and piecewise-linear speed `r` (0.1–10x); its footprint is `S / mean(r)` and its `setpts` is the closed-form root `t_i + 2q/(r_i + sqrt(r_i² + k_i q))` with every constant printed in `repr`, so `edl/speed_curve.py`, `frame_map.py` and `timeline/speedCurve.ts` reproduce ffmpeg's ticks bit for bit (sqrt is correctly rounded in C, Python and JS). A freeze (`Clip.freeze` = hold seconds) holds the first frame a 1x chain opened at `in` shows, cloned on the grid; its sound is silence. Curve sound is a cached numpy intermediate (`render/speed_audio.py`: varispeed or WSOLA) read with `amovie`: APPROX on the client. Goldens: `tests/goldens/frame_map/speed.json`.
 
   The **normative definition is the golden table**, not this prose. `tests/test_frame_map_golden.py` renders bar-coded counter sources through the real compositor (`render_preview` on one-clip EDLs) across:
   - source rates 23.976/25/29.97/30/50/59.94/60, each in 24/25/29.97/30/60 projects;
@@ -352,7 +360,7 @@ ffmpeg -nostdin -threads 2 [-noaccurate_seek -seek_timestamp 1 -ss <keyframe pts
 - **R6. Non-v1 lanes.** Text, stickers, PiP and captions keep their placement through `renderSpanOf`, `renderWindow`, `layoutTime` and `enable_window`, evaluated at `clock.now() = presentedK/R`.
 - **R7. Seeks.** laneA paused seeks go to `(k + 0.5)/R`. The degraded `<video>` tier seeks to `pts(src frame) + PAUSED_SEEK_BIAS_S` (1 ms) and confirms with rVFC `mediaTime`, re-seeking once on mismatch. Never seek to an exact boundary.
 - **R8. Presented frame.** `presentedK = round(mediaTime·R)`, taken from rVFC only. `currentTime` is never used to pick a frame in client mode.
-- **R9. Audio placement.** Output frame `k` begins at output sample `S(k) = samples_for_frames(k, R)` (48 kHz). A clip whose plan starts at `k0` and spans `n` frames occupies output samples `[S(k0), S(k0+n))`. That matches the server's `atrim=end_sample=M`. The source sample offset for the clip start mirrors the export's audio seek (`clip_input_args` preroll, `audio_mix.input_seek`, then `atrim`), pinned by `audio_map_cases.json`, rendered from click-track sources through `_audio_only_graph`.
+- **R9. Audio placement.** Output frame `k` begins at output sample `S(k) = samples_for_frames(k, R)` (48 kHz). A clip whose plan starts at `k0` and spans `n` frames occupies output samples `[S(k0), S(k0+n))`: its length is the running-sum difference `S(k0+n) − S(k0)`, **not** `samples_for_frames(n)` (they differ by a sample at NTSC rates; milestone 1). That matches the server's `atrim=end_sample=M`. The source sample offset for the clip start mirrors the export's audio seek (`clip_input_args` preroll, `audio_mix.input_seek`, then `atrim`), pinned by `audio_map_cases.json`, rendered from click-track sources through `_audio_only_graph`.
 - **R10. Seams in audio.** `acrossfade` overlaps by the seam table's exact seconds, per the `seam_table_for` docstring. Curve shapes (`afade` tri/qsin/esin and so on, and the `acrossfade` default) are evaluated by `audio/curves.ts` and pinned by `audio_curve_cases.json`, sampled from ffmpeg at 1 ms.
 - **R11. A/V sync.** The sample `S(k)` is heard when frame `k` is displayed. Steady state `|offset| ≤ 10 ms` p95 and ≤ 20 ms max. At play start the offset must be ≤ 1 frame within 100 ms. Measured with the WK tap test (§13).
 - **R12. Colour.** Proxies are tagged BT.709 limited. WebKit decodes them within ≤ 2 levels of ffmpeg `in_color_matrix=bt709:in_range=tv`. Shaders convert RGB to BT.709 limited YUV for `eq` and `colorbalance`, apply ffmpeg's formulas in the order of `_build_clip_video_chain`, and convert back. `lut3d` is applied in the RGB domain of the chain with trilinear sampling (ffmpeg's default `interp=tetrahedral` is ported in the shader in Phase 2). Phase 2 also makes the **server** force `in_color_matrix=bt709:in_range=tv` wherever swscale converts untagged sources. That change is guarded by an export colour golden test, because it changes export pixels on untagged sources.
@@ -374,7 +382,7 @@ Every output range carries one mode. `support.ts` decides it from a per-phase ca
 
 **Per-range ladder:** EXACT → APPROX → BAKED → PENDING (last good frame). "Last good frame" is literal: the canvas is simply not redrawn.
 
-**Degraded source tier (A).** Used when a source's proxy is `failed`, or the degraded path is forced. That source's ranges are drawn from one paused `<video>` on the normalized master:
+**Degraded source tier (A).** Used when a source's proxy is `failed`, or the degraded path is forced. As built (review RD2): `failed` is only a 410 or `index.json` `failed: true`. A transient open failure (5xx, 429, a network error, an init still pending) is retried five times (250 ms doubling, ≈ 7.75 s) before the engine hears of it; the source is then degraded until a later open of that key succeeds (the engine retries after 10 s and at every edit), which makes it readable again. One 500 used to degrade a source for the engine's whole life. That source's ranges are drawn from one paused `<video>` on the normalized master:
 - seeked with the +1 ms bias and confirmed by rVFC, for paused frames;
 - its texture goes into the same compositor;
 - while playing, the range is BAKED.
@@ -384,9 +392,9 @@ At most 1 such element exists. 10-bit or 4:4:4 masters are fine here because `<v
 **Engine-level fallback to server mode** (today's `preview.mp4` `<video>` path, kept intact) triggers on any of:
 - `!('MediaSource' in window || 'ManagedMediaSource' in window)`, or no WebGL2;
 - the non-standard-rate refusal (R1);
-- ≥ 3 SourceBuffer `error` events or decode errors within 60 s;
+- ≥ 3 SourceBuffer `error` events or decode errors within 60 s (each event counted once — as built, review RD2: the awaiting append also counted it, so 2 events were fatal);
 - `webglcontextlost` not restored within 2 s;
-- a frame-map mismatch rate above 5% of edits in a session;
+- a frame-map mismatch rate above 5% of edits in a session. As built (`verify/divergence.ts`): only once ≥ 20 edits were checked **and** ≥ 2 mismatched (`fallbackMinChecks`, `fallbackMinMismatches`) — a small sample says little about a rate, and every mismatched range is already BAKED (R14), so correctness holds meanwhile; e.g. 5 mismatches in 10 edits do not fall back;
 - user setting `preview.engine = server`.
 
 The switch is logged, and a one-line toast appears in debug builds only.
@@ -620,6 +628,46 @@ Internal milestones (not separately shipped): 1a server contracts and goldens �
 
 Ships when the Phase 1 acceptance suite passes on macOS 26 and 27. Result: every structural edit is instant; effect-bearing ranges behave exactly as today, but without blocking the rest of the timeline.
 
+
+#### Phase 1 as built (milestones 1 and 2)
+
+Where this subsection and older text above disagree, this subsection wins (the lines that were simply wrong have been corrected in place). Every item was measured; the WK numbers are real WKWebView (macOS 27) unless marked.
+
+**Milestone 1 (1a/1b foundation, commit f3cceea), normative:**
+1. **Codec string** from `parseInitSegment` (the real proxies: `avc1.641029`), never hard-coded (§3.2). Since review RD2 laneA skips an append whose codec is unknown instead of falling back to a literal.
+2. **Init class = the full `avcC`** (`index.json` `init_key`): a 25 fps and a 30 fps proxy of one size are two classes (x264 writes the rate into the VUI). Not (W×H, recipe).
+3. **No laneA texture upload between an overwrite at the paused playhead and its re-seek**: WebKit returns black there. Uploads happen only after `'seeked'` (paused) or in rVFC (playing).
+4. **Frame size from the program map's source** (the proxy index); rVFC `width/height` only as a cross-check (it lagged one frame after an init switch in 1/17 runs).
+5. The span-pack parser lives in `media/spanPack.ts`.
+6. **Proxies:** crf 24 (§15.1 measurements), never upscaled below 720, colour tags via a `setparams` filter.
+7. **Audio segment lengths** are `samples_for_frames` running sums per segment (R9), not `samples_for_frames(n)`.
+8. **Nested blends are BAKED.**
+9. **Eager proxy builds** run only when `preview.engine != server`.
+10. **External pauses** (product requirement found in milestone 1): WebKit pauses a muted `<video>` by itself when the page is hidden or the window occluded (visibility hidden, `paused` true, no event from the engine). The engine treats any pause it did not issue as a transport pause: sound stops in lockstep at the same `k` (5 ms ramp), `presentedK` is kept, the state shows paused, and on return picture and sound resume together from a fresh anchor, or stay paused, per the user's last intent (§3.5 as built).
+
+**Milestone 2, by lane:**
+- **D2-video (engine picture).** Appends are HELD from the paused re-seek until the frame is uploaded at `'seeked'` (without the hold 6/200 paused seeks uploaded an older or a black picture; an rVFC confirmation was tried first and rVFC did not fire for about half of paused seeks). Rotation samples bilinearly over the F1 (canvas-size) grid with an explicit mip level, matching `vf_rotate`'s second resample (rotate 34.74 → 36.44 dB, keyframed rotation 34.61 → 36.63 dB Y-PSNR against the export). Keyframe time: see RD2 below (it first mirrored the export's `t − start` bug).
+- **D2-audio.** P1-A1 is ± 1 sample at NTSC rates (§13 corrected); the P1-A2 reference for AAC sources is the server's render over lossless PCM twins of the masters (ffmpeg's decode of the whole file), because an AAC decode differs at chunk seams.
+- **D2-server.** The bake key is `sha256(realpath of previews/<h>.mp4, size, recipe)`, without the mtime the proxy key has: the render cache touches a preview on every reuse. There is no separate `BAKES` cancel scope: a bake is a proxy of the preview file and rides the `PROXIES` scope, with latest-wins by cancelling the previous hash's jobs. `POST /preview?priority=low` renders niced.
+- **D2-integration.** rVFC display times moved onto `performance.now()` by `DisplayTimeBase`; `getOutputTimestamp()` is the RENDERED time (output latency subtracted); drift threshold 8 ms; second anchor check at the 8th frame; external-pause resume after 250 ms of visibility and `AudioSink.whenRunning` (§3.5 as built).
+- **S1 (speed render).** A speed curve is `{"curve": [[x, r], …]}`, `x` over the clip's OUTPUT, piecewise-linear `r` in 0.1–10x, footprint `S / mean(r)`, closed-form `setpts` (R4 as built). A freeze holds the first frame a 1x chain opened at `in` shows, silent. Curve sound is a cached numpy intermediate (`render/speed_audio.py`: band-limited varispeed, or WSOLA with keep-pitch, ≤ 7 ms transient error from 0.2x to 2x) read with `amovie`, because ffmpeg has no time-varying stretcher (constant-speed pieces click at every join; `asendcmd`-driven `atempo` drifts along a ramp). `FRAME_MAP_VERSION` stays 1.
+- **S2 (speed edits and UI).** The presets are S1's `CURVE_PRESETS` shapes plus a label table (`edl/speed_presets.py`), served at `GET /api/speed/presets`; the browser keeps no copy (since RD2 the curve editor's range and point budget come from there too). The Inspector's menu is CapCut's six plus None and Custom; `ramp_up`/`ramp_down` are agent and Prompt-bar names. A curve clip's source cut is rounded to 1 µs, not snapped to the frame grid (snapping made a split 25 fps Montage clip 145 frames for 144).
+- **Divergence fallback gates** (§7 as built): ≥ 20 edits checked and ≥ 2 mismatched before the 5% rate counts.
+
+**Review RD2 fixes (milestone 2 fixer), with the measurement each rests on:**
+- **Paused seeks can no longer wedge.** Two `currentTime` assignments of the same time in one task (seek(K) → seek(K+1) → seek(K) while laneA is busy, or a seek then `setTimeline` in the same task) fire ONE `'seeking'`; the stale-`'seeked'` guard's counters then stayed one apart and no paused seek showed again until the Preview remounted. Now only the latest paused seek assigns, an identical pending assignment is not repeated, and the seek timeout re-syncs the counters (`engineSeek.ts`). WK: 160/160 and 60/60 exact with the counters in step (before: every row failed, lag 5 and 9).
+- **A paused seek re-checks that its frame is still buffered when it assigns.** A `'behind'` trim of the window already in flight could remove the frame between the readiness check and laneA going idle; the seek then went into a hole WebKit never completes, with appends held — a 2 s stall until the timeout (measured twice in 160 flip-flop seeks; now 0, 0 seek timeouts).
+- **Sound restarts at the new position after a seek while playing.** WebKit presents frames of the OLD position after `currentTime` is set; the restart anchored on one (7 of 24 seeks restarted 100–400 frames away). The restart now waits for a frame within (frames elapsed since the seek + 2) of the target, at most 500 ms (`PlayingSeekGate`): 0 of 24.
+- **Context loss while playing** stops and resumes both (§3.4 as built). Before: sound ran on for up to 2 s over a frozen picture, and the snapshot showed the last pause's frame (k = 60 while k = 110 was on screen).
+- **Proxy open failures** (§7 as built): one 500 on `index.json` no longer degrades a source for the engine's life (WK: frame 0 exact after one retry).
+- **SourceBuffer `error` events** count once (2 events were fatal).
+- **Keyframe time.** The export evaluated a v1 clip's keyframed transform and opacity at `t − start` on the chain's SOURCE-local `t`: a clip not at 0 animated late or not at all, and a retimed clip at the source's pace. Both sides now evaluate at clip-local TIMELINE seconds (the chain `t` through the clip's retime: `t/speed`, a curve's `out_seconds`, or `t`), which is what the Properties panel authors keys at. Goldens `kf_start_offset` and `kf_speed2` regenerated from real renders (the other 39 geometry cases unchanged); `RENDER_BEHAVIOR_VERSION` 17 → 18.
+- **Not fixed — a split on a CURVE clip is not frame-identical to the unsplit clip.** Reference model (it matches the export frame for frame): Hero on 20 s at 30 fps split at 10 s shifts 103 of 759 frames by +1 source frame, at 12 s 236 frames by −1, at 5 s and 7.3 s none. No choice of the right half's `in` removes it (searched ±1.33 source frames in 1/40-frame steps: at best still 103), because the chain rebases at the first kept source frame, not at `in`. An exact split needs the render chain to rebase at `in` (or carry a curve offset); tracked as a follow-up.
+- **`TIE_MARGIN = 0` in `timebase.frameOf` is an equivalent mutant**, measured: for every half-frame tie with k < 3,000,000 at 24000/30000/60000/120000 over 1001, and ±4 ulp around it, the float product never lands strictly on the wrong side of k + 0.5; the products that are exactly k + 0.5 in float take the exact path for 0 and 1e-6 alike. The near-tie cases are in the golden anyway.
+- `textureLocked` removed (it never changed an upload: uploads only happen at a completed `'seeked'` or in rVFC). `engineCore.ts` split into `engineSeek`, `engineExternal`, `engineBake`, `engineDraw`, `engineLoop` (795 lines).
+
+**Acceptance numbers, fixer's full WK run** (75 WK tests green; the machine was not quiet: load 0.52–0.64 per core on 14 cores, from background system processes and the suite's own backends — a quiet re-run belongs to the gate): P1-F1 200/200, seek p95 8 ms; P1-F2 599 frames, 0 mismatches, 0 missing; paused edits 40/40, p95 2 ms; P1-F3 p95 split 10, trim 16, move 14, delete 16, ripple 14, undo 16 ms (budget 60/80); P1-F4 no stale frame, no stall; P1-F5 spinner at 81 ms, frame at 994 ms under a 1 s span delay; P1-A3 |offset| p95 4.33 ms, max 4.33 ms, 35/35 clicks paired; P1-S1 200/200; P1-B1 render 505 ms, splice 238 ms; P1-E1 1 element; rVFC handler at 1080p p50 0, p95 1, p99 3, max 7 ms (budget p99 4; the review measured 2 and 5 ms on two loaded runs).
+
 ### Phase 2: instant sound and colour
 Scope:
 - `/duck_curve` per render_hash with `setValueCurveAtTime` (EXACT after it lands);
@@ -700,7 +748,7 @@ Browser (Chromium PR + WK nightly):
 - **P1-F3 edit latency** (WK normative). A test backend session (a real FastAPI in a thread, fixture sources) runs 50 each of split, trim, move, delete, ripple, undo while paused. Time from dispatch start to correct bar: p95 within §11.1.
 - **P1-F4 edit while playing.** An edit at `presentedK + 30`. No frame at or after `presentedK_at_edit + 5` shows old content (WK); no `waiting` stall.
 - **P1-F5 last good frame.** The span route is delayed by 1 s. Canvas pixel hash is unchanged until the correct frame; the spinner is visible from 80 ms; recovery after the delay.
-- **P1-A1 sample placement** (Chromium + WK, OfflineAudioContext). Offline render of the fixture timeline: each click at output sample `S(k)` ± 0; clip boundaries exactly at `samples_for_frames`.
+- **P1-A1 sample placement** (Chromium + WK, OfflineAudioContext). Offline render of the fixture timeline: each click at output sample `S(k)` ± 0 at an integer samples-per-frame rate (30 fps: exact), ± 1 at NTSC rates, where the source's frame starts and the program's frame starts round independently (as built, D2-audio); the client equals the server's render sample for sample, and clip boundaries sit exactly on the `samples_for_frames` running sums.
 - **P1-A2 mix parity.** Offline client render vs the server `_audio_only_graph` render of the same EDL: per-50 ms RMS within 0.25 dB (EXACT features), xcorr lag 0 ± 1 sample.
 - **P1-A3 live A/V sync** (WK only). An AudioWorklet tap records the master output with `currentFrame`. White flash frames coincide with clicks at 20 cuts. Offset = `ctxAt(expectedDisplayTime(flash)) − ctxTime(click)`: **p95 ≤ 10 ms, max ≤ 20 ms**, and ≤ 1 frame within 100 ms of play start.
 - **P1-S1 structural agreement.** For each of 200 edits, the client map equals `/frame_map` (0 mismatches).

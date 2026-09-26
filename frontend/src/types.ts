@@ -1,5 +1,9 @@
 // EDL types — match backend pydantic schema (camelCase fields preserved as snake_case to mirror Python)
 
+import {
+  clipSpeedFactor as planSpeedFactor, effectiveDuration as planDuration, type EdlClip,
+} from './lib/preview/timeline/framePlan'
+
 export interface Canvas {
   w: number
   h: number
@@ -143,20 +147,49 @@ export function isTextClip(c: AnyClip): c is TextClip {
   return 'text' in c && 'end' in c
 }
 
-/** Scalar playback speed of a media clip (1 for unset/curve dicts) —
- * mirrors backend Clip.speed_factor. `speed` isn't declared on the frontend
- * Clip interface (M1 mirror), so read it via a cast like Properties does. */
-export function clipSpeedFactor(c: AnyClip): number {
-  const sp = (c as unknown as { speed?: number | object | null }).speed
-  return typeof sp === 'number' && sp > 0 ? sp : 1
+/** A media clip's FREEZE hold in timeline seconds (`Clip.freeze`), or null. */
+export function clipFreeze(c: AnyClip): number | null {
+  const f = (c as unknown as { freeze?: number | null }).freeze
+  return typeof f === 'number' && f > 0 ? f : null
 }
 
-/** TIMELINE seconds a clip occupies — (out-in)/speed for media, mirroring
- * backend Clip.effective_duration. Using raw out-in drew a 2x clip at its
- * source length, overlapping the neighbours the backend had rippled left. */
+/** MEAN playback speed of a media clip — source seconds per timeline
+ * second, backend Clip.speed_factor: the scalar for a constant speed, 1
+ * unset, a speed CURVE's mean (wave D; its footprint is `(out-in)/mean`), a
+ * FREEZE's `(out-in)/freeze` (1 when it consumes no source). Trim math
+ * converts timeline deltas with it, so the server's `trim_clip` reads a
+ * freeze's edge drag back as a hold. ONE implementation (review RD2): the
+ * golden-pinned framePlan port; this only guards a non-media clip and a
+ * degenerate value. */
+export function clipSpeedFactor(c: AnyClip): number {
+  if (!isMediaClip(c)) return 1
+  const f = planSpeedFactor(c as unknown as EdlClip)
+  return Number.isFinite(f) && f > 0 ? f : 1
+}
+
+/** TIMELINE seconds a clip occupies — backend Clip.effective_duration via
+ * framePlan (a constant speed's `(out-in)/speed`, a curve's integral, a
+ * freeze's hold). Using raw out-in drew a 2x clip at its source length,
+ * overlapping the neighbours the backend had rippled left. */
 export function clipDuration(c: AnyClip): number {
-  if (isMediaClip(c)) return (c.out - c.in) / clipSpeedFactor(c)
+  if (isMediaClip(c)) {
+    const d = planDuration(c as unknown as EdlClip)
+    return Number.isFinite(d) ? d : c.out - c.in
+  }
   return c.end - c.start
+}
+
+/** The Normal speed slider's range (Properties). */
+export const NORMAL_SPEED_RANGE: readonly [number, number] = [0.25, 4]
+
+/** Where the Inspector's Normal speed slider starts: the constant speed, or
+ * a curve clip's MEAN speed — so the first nudge replaces the curve with a
+ * constant that keeps the clip's length near the curve's (review RD2: it
+ * started at 1.00x whatever the curve). */
+export function normalSpeedOf(c: AnyClip): number {
+  const sp = (c as unknown as { speed?: unknown }).speed
+  const v = typeof sp === 'number' ? (sp > 0 ? sp : 1) : clipFreeze(c) !== null ? 1 : clipSpeedFactor(c)
+  return Math.min(NORMAL_SPEED_RANGE[1], Math.max(NORMAL_SPEED_RANGE[0], v))
 }
 
 export function clipEnd(c: AnyClip): number {

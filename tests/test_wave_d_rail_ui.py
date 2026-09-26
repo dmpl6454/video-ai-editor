@@ -17,6 +17,10 @@ per-state column variables. What each case pins:
     exactly what a keyboard chord (R4) will do.
 7.  Tooltip (H4): 400 ms delay, right of the rail, Esc hides it, hoverable,
     and it names a chord only once the live keymap binds one (R4 binds them).
+4.  Activity (R2, §2.8): the top bar's activity chip keeps a voiceover's Stop
+    and the captions' Cancel reachable with another panel showing AND the tool
+    panel collapsed; its polite live region exists before anything runs and
+    speaks state changes only; the rail's Audio / Captions dots follow the run.
 10. Tab order: Media tab → Hide the tool panel → the dropzone.
 
 Plus the rail's roving tabindex (↑/↓/Home/End, Space toggles) and reference
@@ -34,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -43,7 +48,7 @@ from test_frontend_a11y import base_url, sessions  # noqa: F401  (fixtures)
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not on PATH")
 SHOTS = Path(os.environ.get("VAE_RAIL_SHOTS", "/tmp"))
 
-RAIL = ["Media", "Audio", "Stickers", "Effects", "Transitions", "AI"]
+RAIL = ["Media", "Audio", "Text", "Stickers", "Effects", "Transitions", "Captions", "AI"]
 TIPS = {
     "Media": "Footage, photos and the project bin",
     "Stickers": "Emoji and stickers",
@@ -145,7 +150,7 @@ def test_rail_is_one_tab_stop_with_arrow_keys(engine, base_url, sessions):  # no
         assert _active(page)["id"] == f"rail-tab-{want.lower()}", (key, _active(page))
         assert page.locator(f"#tool-panel-{want.lower()}").is_visible()
     # Enter on the active tab collapses the panel and opens it again (Space
-    # stays the global play/pause until R4's Command.scope, review RD1).
+    # too from R4: test_wave_d_rail_keys_ui).
     page.keyboard.press("Enter")
     assert _tab(page, "Media").get_attribute("aria-expanded") == "false"
     assert not page.locator("#tool-panel").is_visible()
@@ -192,17 +197,20 @@ def test_a_clicked_rail_tab_leaves_every_global_shortcut_working(engine, base_ur
 
 def test_keyboard_focus_on_the_rail_keeps_undo_and_playback(engine, base_url, sessions):  # noqa: F811
     """Review RD1: a keyboard user arrowing through the rail keeps the global
-    shortcuts (Space plays, N snaps) — the rail is not an ignore scope."""
+    shortcuts (N snaps; ⌘Z, J/K/L in test_wave_d_rail_keys_ui) — the rail is
+    not an ignore scope. From R4, Space on the focused tab is the tab's own
+    key (§2.4: it collapses / re-opens the panel) and does not play."""
     page = _open(engine, base_url, sessions["full"], 1280, 800)
     _tab(page, "Media").focus()
     page.keyboard.press("ArrowDown")
     assert _active(page)["id"] == "rail-tab-audio"
     page.keyboard.press("Space")
     page.wait_for_timeout(250)
-    assert _playing(page), "Space on a focused rail tab did not play"
-    assert page.locator("#tool-panel").is_visible()
+    assert not _playing(page), "Space on a focused rail tab played"
+    assert not page.locator("#tool-panel").is_visible(), "Space on a focused rail tab did not collapse"
     page.keyboard.press("Space")
     page.wait_for_timeout(150)
+    assert page.locator("#tool-panel").is_visible()
     before = _snap(page)
     page.keyboard.press("n")
     page.wait_for_timeout(150)
@@ -375,9 +383,9 @@ def test_tooltip_delay_placement_escape_and_hover(engine, base_url, sessions):  
     box = tip.bounding_box()
     assert box["x"] >= rail_right, (box, rail_right)  # right of the rail, never clipped by it
     assert tip.inner_text().startswith("Stickers — " + TIPS["Stickers"])
-    # R1 binds no panel chords, so the tip names none (a dead key would lie).
-    assert tip.locator("kbd").count() == 0
-    assert _tab(page, "Stickers").get_attribute("aria-keyshortcuts") is None
+    # R4 binds ⌥4 in every preset: the tip carries it and the tab names it.
+    assert tip.locator("kbd").inner_text() in ("⌥4", "Alt+4")
+    assert _tab(page, "Stickers").get_attribute("aria-keyshortcuts") == "Alt+4"
     page.keyboard.press("Escape")
     assert not tip.is_visible()
     # Hoverable (WCAG 1.4.13): the pointer can travel onto the tip.
@@ -395,17 +403,287 @@ def test_tooltip_delay_placement_escape_and_hover(engine, base_url, sessions):  
 
 
 def test_tooltip_carries_the_chord_once_the_keymap_binds_one(engine, base_url, sessions):  # noqa: F811
-    keymap = {"presetId": "capcut", "overrides": {"panelStickers": ["Alt+Digit4"]}}
+    # A user override replaces the preset chord (⌥4 since R4) and the tip follows.
+    keymap = {"presetId": "capcut", "overrides": {"panelStickers": ["Alt+Shift+Digit4"]}}
     page = _open(engine, base_url, sessions["full"], 1440, 900, {"vae.keymap.v1": json.dumps(keymap)})
     tab = _tab(page, "Stickers")
-    assert tab.get_attribute("aria-keyshortcuts") == "Alt+4"
+    assert tab.get_attribute("aria-keyshortcuts") == "Alt+Shift+4"
     tab.hover()
     page.wait_for_timeout(450)
     kbd = page.locator(".rail-tip kbd")
-    assert kbd.count() == 1 and kbd.inner_text() in ("⌥4", "Alt+4")
+    assert kbd.count() == 1 and kbd.inner_text() in ("⌥⇧4", "Alt+Shift+4")
     # The name is still exactly the label.
     assert _tab(page, "Stickers").count() == 1
     page.context.close()
+
+
+# ---------------------------------------------------------------- case 4 ----
+
+# The packaged app records through desktop.py's native bridge (WKWebView has no
+# usable getUserMedia there); this stands in for it and logs every call, so the
+# chip's Stop is proven to reach the SAME stop the panel's button uses.
+FAKE_VO_BRIDGE = """
+window.__vo = [];
+window.pywebview = { api: {
+  vo_start: async (sid) => { window.__vo.push(['start', sid]); return { ok: true } },
+  vo_stop: async (sid, start, gain) => { window.__vo.push(['stop', sid]); return { ok: true, clip_id: null } },
+} };
+"""
+
+# Every message the chip's live region ever says, in order (the region must
+# speak state changes and 25/50/75 % only, never a clock tick).
+LIVE_LOG = """
+window.__live = [];
+new MutationObserver(() => {
+  const r = document.querySelector('[data-activity] [role=status]')
+  const t = r && r.textContent
+  if (t && window.__live[window.__live.length - 1] !== t) window.__live.push(t)
+}).observe(document, { subtree: true, childList: true, characterData: true });
+"""
+
+
+def _open_with(browser, base_url, sid, script, width=1280, height=800):  # noqa: F811
+    ctx = browser.new_context(viewport={"width": width, "height": height})
+    ctx.add_init_script(script)
+    ctx.add_init_script("try { " + " ".join(
+        f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});"
+        for k, v in {"vai.sessionId": sid, "vai.rightTab": "inspect"}.items()) + " } catch (e) {}")
+    page = ctx.new_page()
+    page.goto(base_url + "/")
+    page.get_by_role("tab", name="Media", exact=True).wait_for()
+    page.locator(".timeline-canvas-wrap canvas").first.wait_for()
+    page.wait_for_timeout(1200)
+    return page
+
+
+def _inside_viewport(page, locator) -> bool:
+    b = locator.bounding_box()
+    vw = page.viewport_size["width"]
+    return b is not None and b["x"] >= 0 and b["x"] + b["width"] <= vw and b["y"] >= 0 and b["width"] > 0
+
+
+def _collapse_on_media(page):
+    """Media selected AND the tool panel collapsed: neither Audio nor Captions shows."""
+    _js_click(_tab(page, "Media"))
+    page.get_by_role("button", name="Hide the tool panel").click()
+    page.wait_for_timeout(200)
+    assert not page.locator("#tool-panel").is_visible()
+    assert _tab(page, "Media").get_attribute("aria-selected") == "true"
+
+
+def test_activity_region_exists_before_anything_runs(engine, base_url, sessions):  # noqa: F811
+    page = _open(engine, base_url, sessions["full"])
+    region = page.locator(".topbar [data-activity] [role=status]")
+    assert region.count() == 1
+    assert region.get_attribute("aria-live") == "polite"
+    assert region.inner_text() == ""
+    assert page.get_by_role("button", name="Stop recording").count() == 0
+    assert page.get_by_role("button", name="Cancel captions").count() == 0
+    # Text and Captions left the top bar for the rail (R2).
+    assert page.locator(".topbar [data-text-presets], .topbar .cc-caret, .topbar .cc-main").count() == 0
+    page.context.close()
+
+
+def test_stop_recording_from_the_chip_with_the_panel_collapsed(engine, base_url, sessions):  # noqa: F811
+    page = _open_with(engine, base_url, sessions["full"], FAKE_VO_BRIDGE + LIVE_LOG)
+    _tab(page, "Audio").click()
+    page.get_by_role("button", name="Record voiceover").click()
+    stop = page.get_by_role("button", name="Stop recording")
+    stop.wait_for(timeout=8000)                      # after the 3-2-1 count-in
+    assert page.evaluate("window.__vo.map(c => c[0])") == ["start"]
+    _collapse_on_media(page)
+    assert stop.is_visible() and _inside_viewport(page, stop)
+    body = page.locator(".act-rec .act-body")
+    assert re.fullmatch(r"Recording voiceover, 0:0\d\. Open the Audio panel", body.get_attribute("aria-label"))
+    # The rail's Audio dot is the secondary cue, described not named.
+    assert _tab(page, "Audio").get_attribute("aria-describedby") == "rail-desc-audio"
+    assert page.locator("#rail-tab-audio .rail-dot-rec").is_visible()
+    assert _tab(page, "Audio").count() == 1
+    page.wait_for_timeout(1300)                      # a clock tick must not reach the live region
+    page.screenshot(path=str(SHOTS / f"rail-r2-{engine.engine_name}-recording-collapsed.png"))
+    stop.click()
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__vo.map(c => c[0])") == ["start", "stop"]
+    assert stop.count() == 0
+    assert _tab(page, "Audio").get_attribute("aria-describedby") is None
+    assert page.evaluate("window.__live") == ["Recording a voiceover", "Recording stopped"]
+    # The panel's recorder is back to idle too: one take, one stop.
+    _js_click(_tab(page, "Audio"))
+    page.get_by_role("button", name="Record voiceover").wait_for(timeout=3000)
+    page.context.close()
+
+
+def test_chip_body_opens_the_panel_that_owns_the_activity(engine, base_url, sessions):  # noqa: F811
+    page = _open_with(engine, base_url, sessions["full"], FAKE_VO_BRIDGE)
+    _tab(page, "Audio").click()
+    page.get_by_role("button", name="Record voiceover").click()
+    page.get_by_role("button", name="Stop recording").wait_for(timeout=8000)
+    _collapse_on_media(page)
+    page.locator(".act-rec .act-body").click()
+    page.wait_for_timeout(200)
+    assert _tab(page, "Audio").get_attribute("aria-selected") == "true"
+    assert page.locator("#tool-panel-audio").is_visible()
+    page.get_by_role("button", name="Stop recording").click()
+    page.context.close()
+
+
+def _stub_caption_job(page, ack_after_s=1.5):
+    """A captions job the test drives: 42 % until Cancel, then (like the real
+    decoder, which stops only between 30 s windows) `cancelled` a little later."""
+    state = {"cancel_at": None, "polls": 0, "cancels": 0}
+
+    def downloads(route):
+        route.fulfill(json={"downloads": {
+            "captions:large-v3": {"what": "the accurate caption model", "bytes": 3_100_000_000, "cached": True},
+            "captions:large-v3-turbo": {"what": "the fast caption model", "bytes": 1_600_000_000, "cached": False}}})
+
+    def dispatch(route):
+        body = route.request.post_data_json or {}
+        if body.get("tool") != "auto_caption":
+            return route.continue_()
+        route.fulfill(json={"job_id": "job-cc", "status": "running", "status_url": "/api/jobs/job-cc"})
+
+    def job(route):
+        if route.request.url.endswith("/cancel"):
+            state["cancels"] += 1
+            state["cancel_at"] = time.monotonic()
+            return route.fulfill(json={"id": "job-cc", "status": "running", "progress": 0.42})
+        state["polls"] += 1
+        done = state["cancel_at"] is not None and time.monotonic() - state["cancel_at"] > ack_after_s
+        route.fulfill(json={"id": "job-cc", "kind": "dispatch", "status": "cancelled" if done else "running",
+                            "progress": 0.42, "result": None, "error": None})
+
+    page.route(re.compile(r".*/api/downloads$"), downloads)
+    page.route(re.compile(r".*/api/sessions/[^/]+/dispatch\?wait=0$"), dispatch)
+    page.route(re.compile(r".*/api/jobs/job-cc(/cancel)?$"), job)
+    return state
+
+
+def test_cancel_captions_from_the_chip_shows_stopping(engine, base_url, sessions):  # noqa: F811
+    page = _open_with(engine, base_url, sessions["full"], LIVE_LOG)
+    state = _stub_caption_job(page)
+    _tab(page, "Captions").click()
+    page.get_by_role("button", name="Generate captions").click()
+    cancel = page.get_by_role("button", name="Cancel captions")
+    cancel.wait_for(timeout=5000)
+    page.wait_for_function("document.querySelector('.act-cc .act-body').textContent.includes('42%')", timeout=5000)
+    # The panel shows the SAME run: %, and its own Cancel.
+    assert "42%" in page.locator("#tool-panel-captions .cc-progress").inner_text()
+    assert _tab(page, "Captions").get_attribute("aria-describedby") == "rail-desc-captions"
+    _collapse_on_media(page)
+    assert cancel.is_visible() and _inside_viewport(page, cancel)
+    page.screenshot(path=str(SHOTS / f"rail-r2-{engine.engine_name}-captions-collapsed.png"))
+    cancel.click()
+    page.wait_for_function("document.querySelector('.act-cc .act-body').textContent.includes('Stopping…')", timeout=3000)
+    assert state["cancels"] == 1
+    assert cancel.is_disabled()                      # one cancel per run: the job is already stopping
+    # The panel agrees (one run, never two Cancel paths).
+    _js_click(_tab(page, "Captions"))
+    page.wait_for_timeout(150)
+    assert "Stopping…" in page.locator("#tool-panel-captions .cc-progress").inner_text()
+    assert page.locator("#tool-panel-captions .cc-cancel").count() == 0
+    # The job acknowledges: the chip goes, the rail dot goes, the toast says so.
+    cancel.wait_for(state="detached", timeout=8000)
+    page.wait_for_timeout(300)
+    assert _tab(page, "Captions").get_attribute("aria-describedby") is None
+    assert "Auto captions was cancelled" in page.locator(".toast-host").inner_text()
+    live = page.evaluate("window.__live")
+    assert live == ["Captions started", "Captions 25%", "Stopping captions", "Captions cancelled"], live
+    assert page.get_by_role("button", name="Generate captions").is_enabled()
+    page.context.close()
+
+
+def test_the_panel_cancel_is_the_chip_cancel(engine, base_url, sessions):  # noqa: F811
+    page = _open_with(engine, base_url, sessions["full"], "")
+    state = _stub_caption_job(page, ack_after_s=0.5)
+    _tab(page, "Captions").click()
+    page.get_by_role("button", name="Generate captions").click()
+    page.locator("#tool-panel-captions .cc-cancel").click(timeout=5000)
+    page.wait_for_function("document.querySelector('.act-cc .act-body')?.textContent.includes('Stopping…')", timeout=3000)
+    assert state["cancels"] == 1
+    assert page.get_by_role("button", name="Cancel captions").is_disabled()
+    page.get_by_role("button", name="Cancel captions").wait_for(state="detached", timeout=8000)
+    page.context.close()
+
+
+def test_fastest_asks_before_downloading_and_sends_nothing_on_cancel(engine, base_url, sessions):  # noqa: F811
+    page = _open_with(engine, base_url, sessions["full"], "")
+    _stub_caption_job(page)
+    sent = []
+    page.on("request", lambda r: sent.append(r.post_data) if "/dispatch" in r.url else None)
+    _tab(page, "Captions").click()
+    page.wait_for_timeout(400)
+    assert page.locator("#cc-speed-fast-dl").inner_text() == "Downloads 1.6 GB first"
+    assert page.locator("#cc-speed-quality-dl").count() == 0
+    page.get_by_role("radio", name="Fastest", exact=True).check()
+    assert page.evaluate("localStorage.getItem('vai.captionSpeed')") == "fast"
+    page.get_by_role("button", name="Generate captions").click()
+    dlg = page.get_by_role("dialog", name="Download the caption model?")
+    dlg.wait_for(timeout=3000)
+    assert dlg.locator(".dialog-text").inner_text() == (
+        "The first run downloads the fast caption model (1.6 GB, once). It stays on this Mac for next time. "
+        "Captions start when it finishes.")
+    dlg.get_by_role("button", name="Cancel", exact=True).click()
+    page.wait_for_timeout(300)
+    assert not dlg.is_visible()
+    assert page.evaluate("document.activeElement.textContent.trim()") == "Generate captions"
+    assert not [b for b in sent if b and "auto_caption" in b]
+    assert page.get_by_role("button", name="Cancel captions").count() == 0
+    page.context.close()
+
+
+@pytest.fixture(scope="module")
+def fake_mic_chromium(pw):
+    try:
+        b = pw.chromium.launch(args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f"no Playwright chromium: {e}")
+    b.engine_name = "chromium"
+    yield b
+    b.close()
+
+
+def test_real_mediarecorder_take_stops_from_the_chip(fake_mic_chromium, base_url, sessions):  # noqa: F811
+    """The browser path end to end (Chromium's fake mic): the chip's Stop ends a
+    real MediaRecorder take, which uploads to /vo_record and lands a clip on
+    the voiceover track of the real backend."""
+    import httpx
+    sid = sessions["full"]
+
+    def vo_clips():
+        edl = httpx.get(f"{base_url}/api/sessions/{sid}/edl", timeout=30).json()
+        edl = edl.get("edl", edl)
+        return [c["id"] for t in edl["tracks"] if t["id"] == "vo" for c in t["clips"]]
+
+    before = vo_clips()
+    page = _open(fake_mic_chromium, base_url, sid)
+    _tab(page, "Audio").click()
+    page.get_by_role("button", name="Record voiceover").click()
+    stop = page.get_by_role("button", name="Stop recording")
+    stop.wait_for(timeout=10_000)
+    _collapse_on_media(page)
+    page.wait_for_timeout(1500)                       # ≥ 1 s of fake-mic audio
+    stop.click()
+    page.locator(".toast-host").get_by_text("Voiceover recorded").wait_for(timeout=30_000)
+    after = vo_clips()
+    assert len(after) == len(before) + 1, (before, after)
+    assert stop.count() == 0
+    page.context.close()
+
+
+@pytest.mark.parametrize("size", list(GRID))
+def test_r2_reference_screenshots(engine, base_url, sessions, size):  # noqa: F811
+    """The Text and Captions panels at the four spec sizes, beside the mock."""
+    for label in ("Text", "Captions"):
+        page = _open(engine, base_url, sessions["full"], *size)
+        _tab(page, label).click()
+        page.wait_for_timeout(500)
+        assert page.evaluate("document.documentElement.scrollWidth") <= size[0]
+        panel = page.locator(f"#tool-panel-{label.lower()}")
+        sw, cw = panel.evaluate("el => [el.scrollWidth, el.clientWidth]")
+        assert sw <= cw, (label, size, sw, cw)       # nothing in the panel overflows sideways
+        page.screenshot(path=str(SHOTS / f"rail-r2-{engine.engine_name}-{label.lower()}-{size[0]}x{size[1]}.png"))
+        page.context.close()
 
 
 # --------------------------------------------------------------- case 10 ----

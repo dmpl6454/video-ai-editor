@@ -26,11 +26,11 @@ describe('the remembered tool panel (vai.leftTab)', () => {
     for (const v of ['media', 'transitions', 'ai']) expect(readLeftTab(kv({ [LEFT_TAB_KEY]: v }))).toBe(v)
   })
   it('loads the panels the rail added', () => {
-    for (const v of ['audio', 'stickers', 'effects']) expect(readLeftTab(kv({ [LEFT_TAB_KEY]: v }))).toBe(v)
+    for (const v of ['audio', 'stickers', 'effects', 'text', 'captions']) expect(readLeftTab(kv({ [LEFT_TAB_KEY]: v }))).toBe(v)
   })
-  it('falls back to Media for an unknown value, one the rail does not show yet, or nothing', () => {
+  it('falls back to Media for an unknown value, an id the rail never shows, or nothing', () => {
     expect(readLeftTab(kv({ [LEFT_TAB_KEY]: 'bogus' }))).toBe('media')
-    expect(readLeftTab(kv({ [LEFT_TAB_KEY]: 'text' }))).toBe('media')   // R2 adds Text to the rail
+    expect(readLeftTab(kv({ [LEFT_TAB_KEY]: 'phone' }))).toBe('media')
     expect(readLeftTab(kv())).toBe('media')
     expect(readLeftTab(null)).toBe('media')
   })
@@ -69,7 +69,7 @@ describe('showTab: another id opens it, the same id toggles', () => {
   })
   it('ignores an id the rail does not show', () => {
     const { store } = make()
-    store.getState().showTab('captions')
+    store.getState().showTab('phone' as never)
     expect(store.getState().leftTab).toBe('media')
   })
   it('vai.leftOpen defaults to open and reads only true/false', () => {
@@ -158,5 +158,17 @@ describe('AI deep links (consumed in R5)', () => {
     expect(store.getState().aiJump?.nonce).toBe(2)
     store.getState().clearAiJump()
     expect(store.getState().aiJump).toBeNull()
+  })
+})
+
+describe('toggleLeftOpen (⌥\\, LEFT_RAIL_SPEC §4.1)', () => {
+  it('collapses and re-opens the tool panel, keeps the tab, and persists the state', () => {
+    const { s, store } = make({ [LEFT_TAB_KEY]: 'effects' })
+    store.getState().toggleLeftOpen()
+    expect(store.getState()).toMatchObject({ leftTab: 'effects', leftOpen: false })
+    expect(s.map.get(LEFT_OPEN_KEY)).toBe('false')
+    store.getState().toggleLeftOpen()
+    expect(store.getState()).toMatchObject({ leftTab: 'effects', leftOpen: true })
+    expect(s.map.get(LEFT_OPEN_KEY)).toBe('true')
   })
 })

@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} })
-const { canSubmitPrompt, shouldRefocusPrompt } = await import('./promptFocus')
+const { canSubmitPrompt, shouldRefocusPrompt, supersedesClarify } = await import('./promptFocus')
 const { clarifyEnterAction } = await import('./clarifyKeys')
 
 describe('shouldRefocusPrompt', () => {
@@ -54,5 +54,16 @@ describe('clarifyEnterAction', () => {
 
   it('keeps Enter as a newline in a multi-line field', () => {
     expect(clarifyEnterAction({ tagName: 'textarea' })).toBe('ignore')
+  })
+})
+
+describe('supersedesClarify: a NEW sentence over a waiting question (review RD2)', () => {
+  it('a different, non-empty text drops the stale question and runs', () => {
+    expect(supersedesClarify('clarify', 'speed up 2x', 'split at 3 seconds')).toBe(true)
+  })
+  it('the same sentence, an empty field or no card: the card keeps focus', () => {
+    expect(supersedesClarify('clarify', ' split at 3 seconds ', 'split at 3 seconds')).toBe(false)
+    expect(supersedesClarify('clarify', '   ', 'split at 3 seconds')).toBe(false)
+    expect(supersedesClarify('idle', 'speed up 2x', 'split at 3 seconds')).toBe(false)
   })
 })

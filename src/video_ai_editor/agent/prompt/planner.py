@@ -148,7 +148,15 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> d
     if r in ("clean_audio", "loudness"):
         return {"lufs": lufs, "_platform": platform}
     if r == "speed":
-        return {"factor": c.speed or w.speed, "clip_ref": c.clip_ref, "_smooth": c.smooth}
+        # Review RD2: a named curve is its preset; "speed ramp/curve" with no
+        # name asks which (`_curve`) — never a constant factor.
+        preset = _speed_preset_in(hit.clause)
+        return {"factor": None if preset else (c.speed or w.speed), "preset": preset, "clip_ref": c.clip_ref,
+                "_smooth": c.smooth, "_curve": bool(_CURVE_WORD_RE.search(hit.clause))}
+    if r == "freeze":
+        return {"at": _at_seconds(hit.clause), "duration_s": c.duration_s}
+    if r == "split":
+        return {"at": _at_seconds(hit.clause)}
     if r == "reverse":
         return {"clip_ref": c.clip_ref, "reverse": not G.reverse_off(hit.clause)}
     if r == "trim":
@@ -190,6 +198,31 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> d
                 # and then dropped on the floor — no trim, no check, no note.
                 "_duration_s": c.duration_s or w.duration_s}
     return {}
+
+
+#: A speed curve's preset by any spelling ("jump cut", "flash-in", "Hero").
+_SPEED_PRESET_RE = re.compile(
+    r"\b(montage|hero|bullet|jump[- _]?cut|flash[- _]?in|flash[- _]?out|ramp[- _]?up|ramp[- _]?down)\b")
+_CURVE_WORD_RE = re.compile(r"\b(?:ramp|curve)s?\b|\bramping\b")
+#: "at 3 seconds", "at 0:05", "at 1.5s" (the moment a freeze or a split is at).
+_AT_TIME_RE = re.compile(r"\b(?:at|@)\s+(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b)")
+
+
+def _speed_preset_in(clause: str) -> str | None:
+    from ...edl.speed_presets import preset_id
+    m = _SPEED_PRESET_RE.search(clause)
+    if not m or not _CURVE_WORD_RE.search(clause[m.end():m.end() + 24] + " " + clause):
+        return None
+    return preset_id(m.group(1).replace("-", " ").replace("_", " "))
+
+
+def _at_seconds(clause: str) -> float | None:
+    m = _AT_TIME_RE.search(clause)
+    if not m:
+        return None
+    if m.group(1) is not None:
+        return round(int(m.group(1)) * 60 + float(m.group(2)), 3)
+    return round(float(m.group(3)), 3)
 
 
 _MUSIC_WORD_RE = re.compile(r"\b(?:music|song|track|bed|bgm|soundtrack|tune|score)\b")

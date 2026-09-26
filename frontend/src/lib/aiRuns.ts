@@ -1,7 +1,7 @@
 // Per-tool run state for the AI panel plus the catalog fetch, as a module-level
 // Zustand store (the toast.ts pattern). Out of the component file so that
 // react-refresh/only-export-components and HMR stay happy, and so a card's
-// running/done state survives the Media↔AI tab switch and a card collapse.
+// running/done state survives a tool-panel switch and a card collapse.
 import { create } from 'zustand'
 import { api, type FeatureReport, type ToolSchema } from '../api'
 import { errorMessage } from '../store'
@@ -28,11 +28,11 @@ interface AiRunsState {
   featuresError: string | null          // /api/features failed — gates unknown, tools still runnable
   loading: boolean
   loadCatalog(opts?: { refresh?: boolean }): Promise<void>
-  // Whether the AI tab is the one on screen. LeftPane keeps both tab panels
-  // MOUNTED (the Media one hosts a live recorder) and merely hides the
-  // inactive one, so "unmount" never fires — anything the panel projects
-  // outside itself (the bbox guide rectangles on the preview) has to watch
-  // this flag instead.
+  // Whether the AI panel is the one on screen. The tool panel (rail/
+  // ToolPanel) keeps every panel MOUNTED (the Audio one hosts a live
+  // recorder) and merely hides the inactive ones, so "unmount" never fires —
+  // anything the panel projects outside itself (the bbox guide rectangles on
+  // the preview) has to watch this flag instead.
   panelVisible: boolean
   setPanelVisible(visible: boolean): void
   // QA-065: which tools download model weights on their next run (GET
@@ -71,7 +71,7 @@ export const useAiRuns = create<AiRunsState>((set, get) => ({
   // Tools and features are fetched INDEPENDENTLY: cards render the moment the
   // schemas land, and the gates apply when the (slower, ~2s cold) feature
   // probe answers. Fetched once per app load — the guard on `tools` means a
-  // Media↔AI tab switch never refetches; only Refresh/Retry passes `refresh`.
+  // tool-panel switch never refetches; only Refresh/Retry passes `refresh`.
   loadCatalog: async (opts) => {
     const { tools, loading } = get()
     if (loading) return
