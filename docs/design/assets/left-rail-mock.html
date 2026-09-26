@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tool Rail Chrome</title>
+<!--
+  Wave D mock-up, v2 (final spec): the CapCut-style left tool rail that replaces
+  the overflowing top bar. It is built to LEFT_RAIL_SPEC.md, which is the source of truth.
+  Token values are copied verbatim from frontend/src/styles.css :root. The block
+  marked PROPOSED is the only new vocabulary. Icons are lucide-react 1.48.0 path
+  data (the version pinned in package.json), 16 px, stroke 1.75, currentColor,
+  exactly as components/Icon.tsx draws them.
+
+  v2 applies the critique: one portal tooltip (aria-hidden, 400 ms, Esc, hoverable);
+  grid columns driven by per-state variables (no dead hole when both panels close);
+  focus moves to the rail tab when the panel it sits in hides; a global activity
+  chip in the top bar (recording Stop, captions Cancel); a 1fr auto 1fr top bar that
+  never clips Export down to 900 px; real Text / Captions content; a valid, grouped
+  Ratio menu; one card per deep-link row with a back chip.
+
+  Try: click the rail items; press Alt+1 to Alt+8 (again to collapse), Alt+\, Alt+9,
+  Alt+0, F6; use the arrow keys inside the rail; hover a rail item for 400 ms (Esc
+  hides the tooltip); open "9:16"; click a deep-link row, then the back chip.
+  Stress states:  #worst  (every top-bar item at once)   #collapsed  (both side panels closed)
+-->
+<style>
+* { box-sizing: border-box; }
+/* The hidden attribute always wins over a component's own display (the React build relies on it too). */
+[hidden] { display: none !important; }
+:root {
+  /* ---- verbatim from frontend/src/styles.css ---- */
+  --bg-0: #0e0e10;
+  --bg-1: #16161a;
+  --bg-2: #1d1d22;
+  --bg-3: #25252c;
+  --line: #2c2c34;
+  --text: #e6e6eb;
+  --text-dim: #9b9ba5;
+  --text-faint: #8e8e98;
+  --accent: #ff4d6d;
+  --accent-fill: #d9254a;
+  --accent-fill-hover: #c81e41;
+  --accent-2: #5b8dff;
+  --accent-2-fill: #3566d6;
+  --accent-2-fill-hover: #2f5fcc;
+  --on-accent: #ffffff;
+  --focus-ring: #5b8dff;
+  --good: #4ade80;
+  --warn: #fbbf24;
+  --track-v: #5b8dff;
+  --track-a: #4ade80;
+  --track-music: #a78bfa;
+  --track-text: #fbbf24;
+  --track-captions: #f472b6;
+  --selection: #ffffff;
+  --error-text: #ffb3bd;
+  --error-bg: #2a1216;
+  --error-line: #5a2a32;
+  --text-disabled: #8e8e98;
+  --bg-disabled: #1d1d22;
+  --control-h: 28px;
+  --panel-btn-h: 30px;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
+
+  /* ---- PROPOSED (wave D): rail + layout budget + motion ---- */
+  --rail-w: 64px;             /* icon over label; 48 px icon-only below 1280 */
+  --rail-item-h: 52px;        /* 44 px below 1280 */
+  --rail-foot-btn: 36px;
+  --left-w: 280px;            /* first-run default by width; an inline --left-w (a dragged width) wins */
+  --right-w: 280px;
+  --left-min: 180px;
+  --center-min: 440px;        /* the picture and timeline never go below this */
+  --right-min: 220px;
+  --right-rail-w: 36px;       /* the collapsed right panel */
+  --topbar-h: 44px;
+  --panel-head-h: 36px;
+  --dur-fast: 120ms;
+  --dur-normal: 220ms;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+@media (max-width: 1279px) { :root { --rail-w: 48px; --rail-item-h: 44px; --left-w: 220px; --right-w: 260px; } }
+@media (min-width: 1280px) and (max-width: 1439px) { :root { --left-w: 240px; } }
+@media (min-width: 1920px) { :root { --left-w: 320px; --right-w: 320px; } }
+@media (prefers-reduced-motion: reduce) { :root { --dur-fast: 0ms; --dur-normal: 0ms; } }
+
+html { color-scheme: dark; }
+html, body { height: 100%; margin: 0; background: var(--bg-0); color: var(--text); font-family: var(--font-ui); font-size: 13px; -webkit-font-smoothing: antialiased; }
+body { overflow-x: auto; }
+button { font: inherit; color: inherit; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+button:hover:not(:disabled) { background: #2f2f37; }
+button.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+button:disabled { color: var(--text-disabled); cursor: not-allowed; background: var(--bg-disabled); }
+:where(button, a, input, select, textarea, [role="tab"], [role="menuitemradio"], [tabindex]):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+input, textarea, select { font: inherit; color: inherit; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-2); }
+svg.icon { display: inline-block; vertical-align: -3px; flex-shrink: 0; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.icon-spin { animation: icon-spin 0.8s linear infinite; }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .icon-spin { animation: none; } }
+.section-label { font-size: 10px; font-weight: 600; line-height: 1.4; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin: 14px 0 6px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+kbd { font: 10.5px/1 var(--font-ui); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* ================= THE GRID =================
+   Each state changes ONLY its own column variables (critique H3). Two whole
+   templates of equal specificity let the later one win and brought a blank
+   226 px column back when both panels were closed. */
+.app {
+  --rail-col: var(--rail-w);
+  --left-col: minmax(var(--left-min), var(--left-w));
+  --lsplit-col: 6px;
+  --rsplit-col: 6px;
+  --right-col: minmax(var(--right-min), var(--right-w));
+  display: grid;
+  height: 100vh;
+  min-width: 900px;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) auto;
+  grid-template-columns: var(--rail-col) var(--left-col) var(--lsplit-col) minmax(var(--center-min), 1fr) var(--rsplit-col) var(--right-col);
+  grid-template-areas:
+    "topbar topbar topbar  topbar topbar topbar"
+    "rail   left   lsplit  center rsplit right"
+    "foot   left   lsplit  center rsplit right";
+}
+.app > * { min-width: 0; }
+.app.left-collapsed  { --left-col: 0px; --lsplit-col: 0px; }
+.app.right-collapsed { --rsplit-col: 0px; --right-col: var(--right-rail-w); }
+.app.left-collapsed .splitter.l, .app.right-collapsed .splitter.r { visibility: hidden; }
+
+/* ================= TOP BAR =================
+   minmax(0,1fr) auto minmax(max-content,1fr): the Ratio trigger is centred
+   whenever the right cluster fits in half the bar (critique M7), the left group
+   is the only thing that ever shrinks, and Export is never clipped (H6). */
+.topbar {
+  grid-area: topbar; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
+  align-items: center; column-gap: 12px; padding: 0;
+  background: var(--bg-1); border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.tb-left { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; height: 100%; }
+.tb-center { justify-self: center; }
+.tb-right { justify-self: end; display: flex; align-items: center; gap: 8px; padding-right: 12px; }
+.topbar button { height: var(--control-h); font-size: 12px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; flex-shrink: 0; }
+.topbar button.icon-btn { width: var(--control-h); padding: 0; }
+/* The mark sits exactly over the rail so the rail reads as one column from top to bottom. */
+.brand { width: var(--rail-w); height: 100%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: var(--bg-0); border-right: 1px solid var(--line); color: var(--accent); }
+.brand-word { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; margin: 0; flex-shrink: 0; }
+.project-chip { background: transparent !important; border-color: transparent !important; min-width: 80px; max-width: 240px; flex-shrink: 1 !important; padding: 0 8px !important; font-weight: 600; font-size: 11px !important; }
+.project-chip:hover { background: var(--bg-3) !important; }
+.project-chip .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.project-chip .icon { color: var(--text-dim); }
+.pill { background: var(--bg-3); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--text-dim); line-height: 18px; display: inline-flex; gap: 6px; align-items: center; flex-shrink: 0; }
+/* Global activity (critique H5): the recording's Stop and the captions' Cancel are
+   reachable from anywhere, whatever tab is showing or whether the panel is open. */
+.activity { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.act { display: inline-flex; align-items: center; background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line); border-radius: 999px; height: var(--control-h); overflow: hidden; }
+/* Same 28 px / 12 px control rhythm as every other top-bar button (test_top_bar_controls_share_one_height). */
+.act > button { border: none; background: transparent; border-radius: 0; padding: 0 8px !important; font-variant-numeric: tabular-nums; color: var(--text); }
+.act > button:hover:not(:disabled) { background: var(--bg-3); }
+.act > button.act-stop { width: 28px; padding: 0 !important; border-left: 1px solid var(--line); color: var(--text-dim); }
+.act > button.act-stop:hover:not(:disabled) { color: var(--text); }
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.act .act-dim { color: var(--text-dim); }
+.ratio-trigger { background: var(--bg-2) !important; font-variant-numeric: tabular-nums; }
+.ratio-trigger[aria-expanded="true"] { border-color: var(--accent-2) !important; }
+.ratio-glyph { display: inline-block; border: 1.5px solid currentColor; border-radius: 2px; width: 9px; height: 13px; opacity: .75; }
+.ratio-facts { color: var(--text-dim); }
+.dl-link { color: var(--good); font-size: 12px; text-decoration: none; display: inline-flex; gap: 4px; align-items: center; padding: 0 4px !important; height: var(--control-h); border-radius: 6px; background: none !important; border: none !important; flex-shrink: 0; }
+.dl-link:hover { background: var(--bg-3) !important; }
+.dl-link.stale { color: var(--text-dim); }
+.stale-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); display: none; }
+.export-error { color: var(--accent) !important; background: none !important; border: none !important; padding: 0 4px !important; max-width: 220px; overflow: hidden; }
+.export-error .err-text { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.export-btn { padding: 0 12px !important; font-weight: 600; }
+/* The width budget: density steps, applied in order until the left group stops
+   clipping (useTopBarFit). The viewport sets the starting step (>=1440: 0,
+   1280-1439: 1, 1100-1279: 2, <1100: 3); live content (a long name, both
+   activities, stale links, an error) can push it further. Only the project name
+   ever truncates. Export and the activity Stop/Cancel are never clipped (H5, H6). */
+.topbar.tb-d1 .ratio-facts { display: none; }
+/* The wordmark stays the page's h1 for assistive tech; it is only visually hidden. */
+.topbar.tb-d1 .brand-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.topbar.tb-d2 .stale-word { display: none; }
+.topbar.tb-d2 .stale .stale-dot { display: inline-block; }
+.topbar.tb-d2 .export-error { max-width: 140px; }
+.topbar.tb-d3 .btn-label, .topbar.tb-d3 .err-text, .topbar.tb-d3 .err-x, .topbar.tb-d3 .applying-word { display: none; }
+.topbar.tb-d3 .project-chip { max-width: 160px; }
+.topbar.tb-d3 .export-error { width: var(--control-h); justify-content: center; }
+.topbar.tb-d3 .applying { padding: 3px 6px; }
+.topbar.tb-d4 .act-word { display: none; }
+
+/* ================= RAIL ================= */
+.rail {
+  grid-area: rail; display: flex; flex-direction: column; background: var(--bg-0);
+  border-right: 1px solid var(--line); overflow-y: auto; overflow-x: hidden; padding: 6px 0 0; min-height: 0;
+}
+.rail-tabs { position: relative; display: flex; flex-direction: column; }
+.rail-item {
+  position: relative; height: var(--rail-item-h); width: 100%; padding: 0; margin: 0; flex-shrink: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  background: transparent; border: none; border-radius: 0; color: var(--text-dim);
+  transition: color var(--dur-fast) ease;
+}
+.rail-item .rail-label { font-size: 10.5px; line-height: 1; font-weight: 500; letter-spacing: 0.01em; }
+.rail-item .rail-chip {
+  width: 32px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.rail-item:hover:not(:disabled) { background: transparent; color: var(--text); }
+.rail-item:hover .rail-chip { background: var(--bg-2); }
+.rail-item:active .rail-chip { transform: scale(0.94); }
+.rail-item[aria-selected="true"] { color: var(--text); }
+.rail-item[aria-selected="true"] .rail-chip { background: var(--bg-3); }
+/* Selected but collapsed: an outline chip; the indicator stays full strength (3:1 non-text contrast). */
+.rail-item[aria-selected="true"][aria-expanded="false"] .rail-chip { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.rail-item:focus-visible { outline: none; }
+.rail-item:focus-visible .rail-chip { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* ONE indicator that slides (transform only) to the selected item. */
+.rail-indicator {
+  position: absolute; left: 0; top: 0; width: 3px; height: 28px; margin-top: calc((var(--rail-item-h) - 28px) / 2);
+  background: var(--accent-2); border-radius: 0 3px 3px 0; pointer-events: none;
+  transform: translateY(calc(var(--sel, 0) * var(--rail-item-h)));
+  transition: transform var(--dur-normal) var(--ease-out-expo);
+}
+/* Live-state dot: a secondary cue only; the activity chip is the primary one. */
+.rail-dot { position: absolute; top: calc(50% - 20px); right: calc(50% - 20px); width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-0); }
+.rail-dot.busy { background: var(--accent-2); }
+@media (max-width: 1279px) {
+  .rail-dot { top: calc(50% - 15px); }
+  .rail-item .rail-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+/* The foot is its OWN grid item, last in DOM order: Tab from a rail tab goes into its panel (APG), the utilities come last. */
+.rail-foot { grid-area: foot; background: var(--bg-0); border-right: 1px solid var(--line); border-top: 1px solid var(--line); padding: 6px 0 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.rail-foot button { width: var(--rail-foot-btn); height: var(--rail-foot-btn); padding: 0; border: none; background: transparent; color: var(--text-dim); display: grid; place-items: center; border-radius: 7px; }
+.rail-foot button:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
+
+/* ONE tooltip, portalled to <body> (critique H4): never clipped by the rail's
+   overflow, never part of an accessible name (aria-hidden, no ::after on a role),
+   400 ms delay, dismissed by Esc, and hoverable (WCAG 1.4.13). */
+.tip {
+  position: fixed; z-index: 2000; max-width: 280px; background: var(--bg-3); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 11px; line-height: 1.35;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5); white-space: nowrap;
+  animation: tip-in var(--dur-fast) var(--ease-out-expo);
+}
+.tip[hidden] { display: none; }
+.tip kbd { margin-left: 8px; }
+@keyframes tip-in { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+
+/* ================= LEFT PANEL ================= */
+.panel { grid-area: left; background: var(--bg-1); display: flex; flex-direction: column; min-height: 0; overflow: hidden; container: toolpanel / inline-size; }
+@container toolpanel (max-width: 259px) { .panel-head .head-word { display: none; } }
+.panel[hidden] { display: none; }
+.panel-head {
+  height: var(--panel-head-h); flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+  padding: 0 6px 0 14px; border-bottom: 1px solid var(--line);
+}
+.panel-head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+.panel-head .kbd-hint { color: var(--text-faint); font-size: 10.5px; }
+.panel-head .grow { flex: 1; }
+.panel-head .head-act { height: 26px; padding: 0 8px; font-size: 11px; background: transparent; border-color: transparent; color: var(--text-dim); display: inline-flex; gap: 6px; align-items: center; }
+.panel-head .head-act:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.panel-head .collapse { width: 26px; height: 26px; padding: 0; border: none; background: transparent; color: var(--text-dim); display: grid; place-items: center; }
+.panel-head .collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.panel-body { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+.tabpanel[hidden] { display: none; }
+.tabpanel { animation: panel-in var(--dur-normal) var(--ease-out-expo); }
+@keyframes panel-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .tabpanel, .tip, .menu { animation: none !important; } }
+
+.panel-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: var(--panel-btn-h); padding: 0 10px; font-size: 11px; }
+.panel-btn.lead { justify-content: flex-start; }
+.panel-btn.go { background: var(--accent-2-fill); border-color: var(--accent-2-fill); color: var(--on-accent); font-weight: 600; }
+.panel-btn.go:hover:not(:disabled) { background: var(--accent-2-fill-hover); border-color: var(--accent-2-fill-hover); }
+.stack > * + * { margin-top: 6px; }
+.dropzone {
+  width: 100%; border: 1px dashed #3a3a44; background: var(--bg-2); border-radius: 8px; padding: 18px 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--text-dim); font-size: 12px;
+}
+.dropzone:hover:not(:disabled) { border-color: var(--accent-2); color: var(--text); background: var(--bg-2); }
+.dropzone svg.icon.big { width: 28px; height: 28px; stroke-width: 1.5; color: var(--text-dim); }
+.check { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--text-dim); margin: 8px 0; }
+.media-row { display: grid; grid-template-columns: 56px 1fr auto; gap: 8px; align-items: center; padding: 6px; border-radius: 6px; }
+.media-row:hover { background: var(--bg-2); }
+.thumb { width: 56px; height: 32px; border-radius: 4px; background: linear-gradient(135deg, #3a2a52, #1d3b5c); position: relative; overflow: hidden; }
+.thumb.b { background: linear-gradient(135deg, #4b2b2b, #2b3f4b); }
+.thumb.a { background: var(--bg-3); display: grid; place-items: center; color: var(--track-music); }
+.thumb span { position: absolute; right: 3px; bottom: 2px; font-size: 9px; color: #fff; text-shadow: 0 1px 2px #000; font-variant-numeric: tabular-nums; }
+.media-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-meta { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.mini { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; background: transparent; border-color: transparent; color: var(--text-dim); }
+.mini:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row .label { font-size: 11px; color: var(--text-dim); width: 54px; flex-shrink: 0; }
+.row input[type=range] { flex: 1; min-width: 0; }
+.rec-live { display: flex; align-items: center; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.rec-live .grow { flex: 1; }
+/* Deep-link rows: ONE target card each (critique M5), with its install / run status mirrored. */
+.deep-link { display: flex; align-items: center; gap: 8px; width: 100%; background: transparent; border: 1px solid var(--line); padding: 7px 10px; font-size: 11.5px; text-align: left; border-radius: 6px; }
+.deep-link + .deep-link { margin-top: 4px; }
+.deep-link .dl-ico { color: var(--accent-2); }
+.deep-link .dl-status { margin-left: auto; font-size: 10.5px; color: var(--text-faint); }
+.deep-link .chev { color: var(--text-faint); }
+.deep-link:not(:has(.dl-status)) .chev { margin-left: auto; }
+.group-link { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 4px 2px; background: none; border: none; font-size: 11px; color: var(--accent-2); }
+.group-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; }
+.tile {
+  aspect-ratio: 1 / 1; border-radius: 8px; background: var(--bg-2); border: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 4px; font-size: 10.5px; color: var(--text-dim); text-align: center;
+  transition: border-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.tile:hover:not(:disabled) { border-color: var(--accent-2); color: var(--text); background: var(--bg-2); transform: translateY(-1px); }
+.tile.txt { font-size: 15px; color: var(--text); font-weight: 700; }
+.tile.txt small { font-size: 10px; font-weight: 400; color: var(--text-dim); }
+.chipset { display: flex; flex-wrap: wrap; gap: 6px; }
+.chipset button { font-size: 11px; padding: 5px 9px; }
+.hint-line { font-size: 10.5px; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
+.emoji { font-size: 22px; aspect-ratio: 1; display: grid; place-items: center; border-radius: 6px; background: transparent; border: none; padding: 0; }
+.emoji:hover:not(:disabled) { background: var(--bg-3); }
+.grid-emoji { display: grid; grid-template-columns: repeat(auto-fill, minmax(34px, 1fr)); gap: 2px; }
+.search { position: relative; }
+.search input { width: 100%; padding-left: 30px; }
+.search .icon { position: absolute; left: 9px; top: 8px; color: var(--text-faint); }
+.target-line { font-size: 11px; color: var(--text-dim); background: var(--bg-2); border-radius: 6px; padding: 6px 8px; display: flex; gap: 6px; align-items: center; }
+.target-line b { color: var(--text); font-weight: 600; }
+/* Caption options: radios keep every option's hint (critique H8). */
+.opt-list { border: none; margin: 0; padding: 0; }
+.opt-list legend { padding: 0; }
+.opt { display: grid; grid-template-columns: 16px 1fr auto; gap: 2px 8px; align-items: start; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.opt:hover { background: var(--bg-2); }
+.opt input { margin: 2px 0 0; }
+.opt .t { font-size: 12px; }
+.opt .h { grid-column: 2 / 4; font-size: 10.5px; color: var(--text-faint); line-height: 1.35; }
+.badge { font-size: 10px; color: var(--warn); border: 1px solid #5a4a20; border-radius: 999px; padding: 1px 6px; white-space: nowrap; }
+.progress { height: 4px; border-radius: 2px; background: var(--bg-3); overflow: hidden; margin: 8px 0 4px; }
+.progress > span { display: block; height: 100%; width: 42%; background: var(--accent-2); }
+.ai-card { display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: start; padding: 8px; border-radius: 6px; scroll-margin-top: 8px; }
+.ai-card:hover { background: var(--bg-2); }
+.ai-card.target { background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--accent-2); }
+.ai-card .ico { width: 28px; height: 28px; border-radius: 6px; background: var(--bg-3); display: grid; place-items: center; color: var(--accent-2); }
+.ai-card .t { font-size: 12px; background: none; border: none; padding: 0; text-align: left; }
+.ai-card .d { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
+.ai-card .form { display: none; margin-top: 8px; }
+.ai-card.expanded .form { display: block; }
+.back-chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; margin-bottom: 8px; font-size: 11px; background: var(--bg-2); border-radius: 999px; color: var(--text-dim); }
+.back-chip[hidden] { display: none; }
+
+/* ================= CENTER ================= */
+.splitter { background: var(--line); position: relative; }
+.splitter.l { grid-area: lsplit; cursor: col-resize; }
+.splitter.r { grid-area: rsplit; cursor: col-resize; }
+.center { grid-area: center; container: center / inline-size; display: grid; grid-template-rows: auto minmax(120px, 1fr) 6px minmax(0, 280px); background: var(--bg-0); overflow: hidden; }
+.prompt { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.prompt textarea { flex: 1; min-width: 0; resize: none; height: 30px; padding: 6px 10px; white-space: nowrap; overflow: hidden; }
+@container center (max-width: 620px) { .prompt .brain .brain-word { display: none; } .corner-status .cs-word { display: none; } }
+.prompt .brain { height: 30px; padding: 0 8px; display: inline-flex; gap: 6px; align-items: center; font-size: 11px; color: var(--text-dim); background: var(--bg-2); }
+.prompt .run { height: 30px; padding: 0 10px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center; background: var(--accent-2-fill); border-color: var(--accent-2-fill); color: var(--on-accent); }
+.preview { position: relative; display: grid; place-items: center; overflow: hidden; }
+.frame {
+  height: calc(100% - 28px); aspect-ratio: 9 / 16; border-radius: 2px; position: relative; overflow: hidden;
+  background:
+    radial-gradient(120% 70% at 30% 20%, #6b4a8f 0%, transparent 60%),
+    radial-gradient(90% 60% at 80% 85%, #a14d3a 0%, transparent 60%),
+    linear-gradient(180deg, #221a2e, #0f1a24);
+  box-shadow: 0 0 0 1px #000, 0 20px 60px rgba(0,0,0,.55);
+}
+.frame .cap { position: absolute; left: 8%; right: 8%; bottom: 20%; text-align: center; font-weight: 800; font-size: 17px; line-height: 1.15; color: #fff; text-shadow: 0 2px 0 #000, 0 0 12px rgba(0,0,0,.6); }
+.frame .cap em { font-style: normal; color: var(--track-text); }
+.safe { position: absolute; inset: 9% 14% 20% 6%; border: 1px dashed rgba(255,255,255,.35); border-radius: 2px; }
+/* Owned by instant preview Phase 1 (Preview.tsx), shown here for context only. */
+.corner-status { position: absolute; top: 10px; right: 10px; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); background: rgba(14,14,16,.78); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px 3px 6px; }
+.tl { display: grid; grid-template-rows: 32px 1fr; background: var(--bg-1); min-height: 0; container: tlbar / inline-size; }
+@container tlbar (max-width: 759px) { .tc span { display: none; } }
+@container tlbar (max-width: 639px) { .tl-bar input[type=range] { display: none; } }
+.tl-bar { display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--bg-2); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.tl-bar button { width: 28px; height: 26px; padding: 0; border: none; background: transparent; color: var(--text-dim); display: grid; place-items: center; }
+.tl-bar button:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.tl-bar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 6px; }
+.tl-bar .grow { flex: 1; }
+.tc { font-variant-numeric: tabular-nums; font-size: 12px; padding: 0 6px; }
+.tc span { color: var(--text-faint); }
+.lanes { position: relative; padding: 18px 0 0 64px; overflow: hidden; }
+.ruler { position: absolute; top: 0; left: 64px; right: 0; height: 18px; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 48px); }
+.lane { height: 34px; margin: 6px 0; position: relative; }
+.lane .lbl { position: absolute; left: -58px; top: 9px; font-size: 10.5px; color: var(--text-faint); }
+.clip { position: absolute; top: 0; bottom: 0; border-radius: 4px; font-size: 10.5px; padding: 3px 6px; overflow: hidden; white-space: nowrap; color: #0e0e10; font-weight: 600; }
+.clip.v { background: var(--track-v); }
+.clip.v.sel { box-shadow: 0 0 0 2px var(--selection); }
+.clip.t { background: var(--track-text); }
+.clip.c { background: var(--track-captions); }
+.clip.m { background: var(--track-music); }
+.playhead { position: absolute; top: 0; bottom: 0; left: 38%; width: 1px; background: var(--accent); }
+
+/* ================= RIGHT ================= */
+.right { grid-area: right; background: var(--bg-1); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.right-head { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; height: var(--panel-head-h); border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.right-tabs { flex: 1; display: flex; gap: 2px; padding: 2px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.right-tabs [role=tab] { flex: 1; min-width: 0; padding: 3px 8px; font-size: 11px; background: transparent; border: none; border-radius: 4px; color: var(--text-dim); display: inline-flex; gap: 6px; justify-content: center; align-items: center; }
+.right-tabs [role=tab][aria-selected=true] { background: var(--bg-3); color: var(--text); font-weight: 600; }
+.right-head > button { width: 26px; height: 26px; padding: 0; background: transparent; border-color: transparent; color: var(--text-dim); display: grid; place-items: center; flex-shrink: 0; }
+.right-body { flex: 1; overflow-y: auto; padding: 4px 12px 16px; }
+.right-body[hidden] { display: none; }
+.prop { display: grid; grid-template-columns: 70px minmax(0, 1fr) 40px; gap: 8px; align-items: center; margin: 7px 0; font-size: 11.5px; color: var(--text-dim); }
+.prop input[type=range] { min-width: 0; width: 100%; }
+.prop output { font-variant-numeric: tabular-nums; color: var(--text); text-align: right; font-size: 11px; }
+.chat-log { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.chat-log p { margin: 8px 0; }
+.chat-input { width: 100%; margin-top: 8px; }
+.right-rail { display: none; flex-direction: column; align-items: center; gap: 4px; padding-top: 6px; }
+.app.right-collapsed .right-head, .app.right-collapsed .right-body { display: none; }
+.app.right-collapsed .right-rail { display: flex; }
+.right-rail button { width: 28px; height: 28px; padding: 0; background: transparent; border-color: transparent; color: var(--text-dim); display: grid; place-items: center; }
+.right-rail button:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.right-rail .rr-sep { width: 18px; height: 1px; background: var(--line); margin: 2px 0; }
+
+/* ================= RATIO MENU ================= */
+.menu {
+  position: fixed; z-index: 1000; min-width: 250px; padding: 4px; background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  transform-origin: top center; animation: menu-in var(--dur-fast) var(--ease-out-expo);
+}
+.menu[hidden] { display: none; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+.menu .head { padding: 6px 10px 3px; margin: 0; }
+.menu [role=menuitemradio] { display: flex; align-items: baseline; gap: 8px; width: 100%; background: transparent; border: none; border-radius: 4px; padding: 5px 10px; font-size: 12px; text-align: left; }
+.menu [role=menuitemradio]:hover, .menu [role=menuitemradio]:focus-visible { background: var(--bg-3); outline-offset: -2px; }
+.menu [role=menuitemradio] .chk { width: 16px; flex: 0 0 16px; line-height: 0; visibility: hidden; }
+.menu [role=menuitemradio][aria-checked=true] .chk { visibility: visible; }
+.menu [role=menuitemradio][aria-checked=true] { font-weight: 600; }
+.menu .hint { margin-left: auto; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.menu [role=separator] { height: 1px; margin: 4px 6px; background: var(--line); }
+.menu .foot { padding: 6px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--bg-3); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-size: 12px; z-index: 3000; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.toast[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ======================= TOP BAR ======================= -->
+  <header class="topbar" aria-label="Project">
+    <div class="tb-left">
+      <div class="brand" aria-hidden="true"><svg class="icon" data-i="clapperboard"></svg></div>
+      <h1 class="brand-word">Video AI Editor</h1>
+      <button class="project-chip topbar-session" aria-haspopup="menu" aria-expanded="false" id="project-chip">
+        <span class="name" id="project-name">talk short 2</span><svg class="icon" data-i="chevron-down"></svg>
+      </button>
+      <span class="pill applying" role="status" id="applying" title="An edit is being applied"><svg class="icon icon-spin" data-i="loader-circle"></svg><span class="applying-word">Applying</span><span class="sr-only">An edit is being applied</span></span>
+      <!-- Always rendered: the live region must exist before its first message. -->
+      <div class="activity" id="activity">
+        <span class="sr-only" role="status" aria-live="polite" id="activity-live"></span>
+        <span class="act" id="act-rec">
+          <button type="button" data-tip="Recording a voiceover. Open Audio" data-goto="audio" aria-label="Recording voiceover, 0:12. Open the Audio panel"><span class="rec-dot" aria-hidden="true"></span><span class="act-word">Rec</span> <span id="rec-time">0:12</span></button>
+          <button type="button" class="act-stop" aria-label="Stop recording" data-tip="Stop recording"><svg class="icon" data-i="square"></svg></button>
+        </span>
+        <span class="act" id="act-cc" hidden>
+          <button type="button" data-tip="Transcribing captions. Open Captions" data-goto="captions" aria-label="Captions 42%, about 31 seconds left. Open the Captions panel"><svg class="icon icon-spin" data-i="loader-circle"></svg><span class="act-word">Captions</span> 42%<span class="act-word act-dim"> · 0:31</span></button>
+          <button type="button" class="act-stop" aria-label="Cancel captions" data-tip="Stop transcribing"><svg class="icon" data-i="x"></svg></button>
+        </span>
+      </div>
+    </div>
+
+    <div class="tb-center">
+      <button class="ratio-trigger" id="ratio-trigger" aria-haspopup="menu" aria-expanded="false" aria-controls="ratio-menu"
+              aria-label="Canvas ratio: 9:16, 1080 by 1920, 30 fps" data-tip="Canvas 1080×1920 · 30 fps · 0:42">
+        <span class="ratio-glyph" aria-hidden="true"></span> 9:16 <span class="ratio-facts">· 1080×1920 · 30 fps</span> <svg class="icon" data-i="chevron-down"></svg>
+      </button>
+    </div>
+
+    <div class="tb-right topbar-pinned">
+      <button aria-label="Save" data-tip="Save the project (.vae)"><svg class="icon" data-i="save"></svg><span class="btn-label">Save</span></button>
+      <button aria-label="Open" data-tip="Open a saved .vae project"><svg class="icon" data-i="folder-open"></svg><span class="btn-label">Open</span></button>
+      <!-- .vae stays an <a download> routed through onSavedLinkClick, exactly as today. -->
+      <a class="dl-link" href="#" id="vae-link" aria-label="Download saved project" data-tip="Download saved project"><svg class="icon" data-i="download"></svg> .vae<span class="stale-dot" aria-hidden="true"></span><span class="stale-word" hidden> (outdated)</span></a>
+      <!-- MP4 stays a <button> that calls downloadExport(): an <a download> navigates WKWebView to a trap (critique M3). -->
+      <button type="button" class="dl-link" id="mp4-link" aria-label="Save exported MP4" data-tip="Save exported MP4"><svg class="icon" data-i="download"></svg> MP4<span class="stale-dot" aria-hidden="true"></span><span class="stale-word" hidden> (outdated)</span></button>
+      <button type="button" class="export-error topbar-export-error" id="export-error" hidden aria-label="Export failed: the encoder ran out of disk. Dismiss" data-tip="the encoder ran out of disk (click to dismiss)"><svg class="icon" data-i="triangle-alert"></svg><span class="err-text">the encoder ran out of disk</span><svg class="icon err-x" data-i="x"></svg></button>
+      <button class="primary export-btn" aria-haspopup="dialog" aria-keyshortcuts="Meta+E" data-tip="Export  ⌘E">Export<svg class="icon" data-i="chevron-down"></svg></button>
+    </div>
+  </header>
+
+  <!-- ======================= RAIL ======================= -->
+  <nav class="rail" aria-label="Tools">
+    <div class="rail-tabs" id="rail-tabs" role="tablist" aria-orientation="vertical" aria-label="Tool panels">
+      <span class="rail-indicator" aria-hidden="true"></span>
+      <!-- items are generated from RAIL below: the same list the React component maps -->
+    </div>
+    <span class="sr-only" id="desc-audio">Recording in progress</span>
+    <span class="sr-only" id="desc-captions">Captions are being generated</span>
+  </nav>
+
+  <!-- ======================= TOOL PANEL ======================= -->
+  <section class="panel" id="tool-panel" aria-labelledby="panel-title">
+    <div class="panel-head">
+      <h2 id="panel-title">Media</h2><span class="kbd-hint" id="panel-kbd" aria-hidden="true">⌥1</span>
+      <span class="grow"></span>
+      <button class="head-act" id="from-iphone" aria-label="From iPhone" data-tip="Connect an iPhone to this Mac (shown only when phone pairing is on)"><svg class="icon" data-i="smartphone"></svg><span class="head-word">From iPhone</span></button>
+      <button class="collapse" id="collapse" aria-label="Hide the tool panel" aria-controls="tool-panel" aria-keyshortcuts="Alt+\" data-tip="Hide the tool panel  ⌥\"><svg class="icon" data-i="panel-left-close"></svg></button>
+    </div>
+    <div class="panel-body" id="panel-body">
+
+      <!-- MEDIA -->
+      <div class="tabpanel" role="tabpanel" id="tp-media" aria-labelledby="rt-media" tabindex="-1">
+        <button class="dropzone"><svg class="icon big" data-i="upload"></svg><span><b style="color:var(--text)">Import media</b></span><span>Drop video, audio or photos · or click</span></button>
+        <label class="check"><input type="checkbox" checked> Add imports to the timeline</label>
+        <div class="section-label">In this project · 3</div>
+        <div data-keymap-ignore>
+          <div class="media-row" data-media-row><div class="thumb"><span>0:31</span></div><div><div class="media-name">talk_take3.mov</div><div class="media-meta">1920×1080 · 29.97</div></div><button class="mini" aria-label="Add talk_take3.mov to the timeline"><svg class="icon" data-i="list-plus"></svg></button></div>
+          <div class="media-row" data-media-row><div class="thumb b"><span>0:08</span></div><div><div class="media-name">broll_street.mp4</div><div class="media-meta">3840×2160 · 25</div></div><button class="mini" aria-label="Add broll_street.mp4 to the timeline"><svg class="icon" data-i="list-plus"></svg></button></div>
+          <div class="media-row" data-media-row><div class="thumb a"><svg class="icon" data-i="music"></svg></div><div><div class="media-name">lofi_bed.m4a</div><div class="media-meta">2:14 · stereo</div></div><button class="mini" aria-label="Add lofi_bed.m4a to the timeline"><svg class="icon" data-i="list-plus"></svg></button></div>
+        </div>
+        <div class="section-label">Find &amp; search</div>
+        <button class="deep-link" data-tool="search_media" data-from="media"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Search footage<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="find_broll" data-from="media"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Find b-roll<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="group-link" data-group="Find &amp; search" data-from="media">All Find &amp; search tools (5) <svg class="icon" data-i="chevron-right"></svg></button>
+      </div>
+
+      <!-- AUDIO -->
+      <div class="tabpanel" role="tabpanel" id="tp-audio" aria-labelledby="rt-audio" tabindex="-1" hidden>
+        <div class="stack">
+          <button class="panel-btn lead"><svg class="icon" data-i="music"></svg> Add music…</button>
+          <!-- VoRecorder: stays mounted while hidden; its Stop is ALSO in the top-bar activity chip. -->
+          <div class="card rec-live" aria-label="Voiceover recorder" role="group">
+            <span class="rec-dot" aria-hidden="true"></span><span>Recording</span><span id="rec-time-2">0:12</span><span class="grow"></span>
+            <button class="panel-btn" style="width:auto">Stop</button>
+          </div>
+          <button class="panel-btn lead" disabled><svg class="icon" data-i="audio-lines"></svg> Import audio file as voiceover</button>
+        </div>
+        <div class="section-label">Music on the timeline</div>
+        <div class="card">
+          <div class="row" style="margin-bottom:8px"><span style="color:var(--track-music)"><svg class="icon" data-i="music"></svg></span><span style="font-size:12px">lofi_bed.m4a</span></div>
+          <div class="row"><span class="label">Vol</span><input type="range" value="62" aria-label="lofi_bed.m4a volume"><kbd>−6 dB</kbd></div>
+          <label class="check" style="margin-bottom:0"><input type="checkbox" checked> Duck under speech</label>
+        </div>
+        <div class="section-label">AI audio</div>
+        <button class="deep-link" data-tool="noise_reduce" data-from="audio"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Reduce noise<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="vocal_isolate" data-from="audio"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Isolate vocals<span class="dl-status">Needs a 1.1 GB model</span><svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="instrumental_isolate" data-from="audio"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Isolate instrumental<span class="dl-status">Needs a 1.1 GB model</span><svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="tts_voiceover" data-from="audio"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>AI voiceover<svg class="icon chev" data-i="chevron-right"></svg></button>
+      </div>
+
+      <!-- TEXT: the real TextTool content (textStyles.ts, TextTool.tsx PRESETS) -->
+      <div class="tabpanel" role="tabpanel" id="tp-text" aria-labelledby="rt-text" tabindex="-1" hidden>
+        <div data-text-presets>
+          <button class="panel-btn go" id="add-text" aria-keyshortcuts="Alt+T"><svg class="icon" data-i="plus"></svg> Add text at playhead</button>
+        </div>
+        <input type="text" placeholder="Text, #hashtag or @handle" aria-label="Text to add" id="text-field" style="width:100%;margin-top:8px">
+        <div class="section-label">Styles</div>
+        <div class="grid3">
+          <button class="tile txt"><span style="background:#fff;color:#000;padding:0 5px;border-radius:3px">Aa</span><small>Title box</small></button>
+          <button class="tile txt"><span style="background:rgba(0,0,0,.7);padding:0 8px">Aa</span><small>Subtitle band</small></button>
+          <button class="tile txt" style="color:#ffd400;-webkit-text-stroke:1px #000">Aa<small>Yellow pop</small></button>
+          <button class="tile txt"><span style="border-left:3px solid var(--accent);padding-left:5px">Aa</span><small>Side label</small></button>
+          <button class="tile txt" style="font-style:italic;font-family:Georgia,serif">“Aa”<small>Quote</small></button>
+          <button class="tile txt" style="color:#7df9ff;text-shadow:0 0 8px #7df9ff">Aa<small>Neon</small></button>
+        </div>
+        <div class="section-label">Templates</div>
+        <div class="chipset">
+          <button title="Center-screen countdown (pop in, fade out)">3 · 2 · 1</button>
+          <button title="Arrow callout label (uses the text above, or → alone)">Callout →</button>
+          <button disabled title="Chunky hashtag near the bottom — type the hashtag above first">#Hashtag</button>
+          <button disabled title="Corner watermark — type your handle above first">@Handle</button>
+        </div>
+        <div class="hint-line">#Hashtag and @Handle use the text above: type it first.</div>
+        <div class="section-label">AI text &amp; brand</div>
+        <button class="deep-link" data-tool="add_hook_overlay" data-from="text"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Hook overlay<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="generate_hook" data-from="text"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Suggest hooks<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="add_lower_third" data-from="text"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Lower third<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="apply_brand_kit" data-from="text"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Brand kit<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="group-link" data-group="Text &amp; brand" data-from="text">All Text &amp; brand tools (7) <svg class="icon" data-i="chevron-right"></svg></button>
+      </div>
+
+      <!-- STICKERS -->
+      <div class="tabpanel" role="tabpanel" id="tp-stickers" aria-labelledby="rt-stickers" tabindex="-1" hidden>
+        <div class="sticker-picker">
+          <div class="search"><svg class="icon" data-i="search"></svg><input type="search" placeholder="Search stickers" aria-label="Search stickers"></div>
+          <div class="section-label">Recent</div>
+          <div class="grid-emoji">
+            <button class="emoji" aria-label="fire">🔥</button><button class="emoji" aria-label="sparkles">✨</button><button class="emoji" aria-label="eyes">👀</button><button class="emoji" aria-label="hundred points">💯</button><button class="emoji" aria-label="rocket">🚀</button>
+          </div>
+          <div class="section-label">Smileys &amp; people</div>
+          <div class="grid-emoji">
+            <button class="emoji" aria-label="grinning face">😀</button><button class="emoji" aria-label="face with tears of joy">😂</button><button class="emoji" aria-label="smiling face with heart-eyes">😍</button><button class="emoji" aria-label="thinking face">🤔</button><button class="emoji" aria-label="exploding head">🤯</button><button class="emoji" aria-label="smiling face with sunglasses">😎</button><button class="emoji" aria-label="clapping hands">👏</button><button class="emoji" aria-label="thumbs up">👍</button><button class="emoji" aria-label="backhand index pointing right">👉</button><button class="emoji" aria-label="raising hands">🙌</button><button class="emoji" aria-label="partying face">🥳</button><button class="emoji" aria-label="face screaming in fear">😱</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- EFFECTS: the real EffectsPanel list; LUT names come from list_luts (these three are samples). -->
+      <div class="tabpanel" role="tabpanel" id="tp-effects" aria-labelledby="rt-effects" tabindex="-1" hidden>
+        <div class="target-line"><svg class="icon" data-i="film"></svg> Applies to <b>talk_take3.mov</b> (selected)</div>
+        <div class="section-label">Filters · LUT looks</div>
+        <div class="grid3">
+          <button class="tile" style="background:linear-gradient(135deg,#6b4a2f,#2a3a4a)">sample_a.cube</button>
+          <button class="tile" style="background:linear-gradient(135deg,#2f4a6b,#1a2a2a)">sample_b.cube</button>
+          <button class="tile" style="background:linear-gradient(135deg,#444,#222)">sample_c.cube</button>
+        </div>
+        <div class="row" style="margin-top:8px"><span class="label">Intensity</span><input type="range" value="80" aria-label="Look intensity"><kbd>80%</kbd></div>
+        <div class="section-label">Effects</div>
+        <div class="grid3" id="fx-grid"></div>
+        <div class="section-label">Cutout &amp; effects (AI)</div>
+        <button class="deep-link" data-tool="remove_background" data-from="effects"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Remove background<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="chroma_key" data-from="effects"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Chroma key<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="group-link" data-group="Cutout &amp; effects" data-from="effects">All Cutout &amp; effects tools (4) <svg class="icon" data-i="chevron-right"></svg></button>
+      </div>
+
+      <!-- TRANSITIONS: TransitionsPanel unchanged (families come from the server catalogue). -->
+      <div class="tabpanel" role="tabpanel" id="tp-transitions" aria-labelledby="rt-transitions" tabindex="-1" hidden>
+        <div class="hint-line" style="margin:0 0 10px">TransitionsPanel moves here unchanged: family chips, hover previews, click to apply to the selected cut.</div>
+        <div class="grid3">
+          <button class="tile">Fade</button><button class="tile">Dissolve</button><button class="tile">Slide</button>
+          <button class="tile">Wipe</button><button class="tile">Zoom</button><button class="tile">Circle</button>
+        </div>
+      </div>
+
+      <!-- CAPTIONS: the real CaptionsButton options (TARGETS, SPEEDS), with hints -->
+      <div class="tabpanel" role="tabpanel" id="tp-captions" aria-labelledby="rt-captions" tabindex="-1" hidden>
+        <button class="panel-btn go" id="gen-captions"><svg class="icon" data-i="captions"></svg> Generate captions</button>
+        <div class="card" style="margin-top:8px" id="cc-progress" hidden>
+          <div class="row" style="font-size:12px"><svg class="icon icon-spin" data-i="loader-circle"></svg> Transcribing… 42% <span style="margin-left:auto;color:var(--text-faint);font-variant-numeric:tabular-nums">0:31 left</span></div>
+          <div class="progress" aria-hidden="true"><span></span></div>
+          <button class="panel-btn" style="margin-top:6px">Cancel</button>
+        </div>
+        <fieldset class="opt-list">
+          <legend class="section-label">Language</legend>
+          <label class="opt"><input type="radio" name="cc-lang" checked><span class="t">As spoken</span><span></span><span class="h">Caption in whatever language the video is in</span></label>
+          <label class="opt"><input type="radio" name="cc-lang"><span class="t">English</span><span></span><span class="h">Translate to English (works from any language)</span></label>
+          <label class="opt"><input type="radio" name="cc-lang"><span class="t">हिंदी Hindi</span><span></span><span class="h">Hindi in Devanagari script</span></label>
+          <label class="opt"><input type="radio" name="cc-lang"><span class="t">Hinglish</span><span></span><span class="h">Hindi written in Latin letters</span></label>
+          <label class="opt"><input type="radio" name="cc-lang"><span class="t">Español</span><span></span><span class="h">Translate to Spanish (works from any language)</span></label>
+        </fieldset>
+        <fieldset class="opt-list">
+          <legend class="section-label">Speed</legend>
+          <label class="opt"><input type="radio" name="cc-speed" checked><span class="t">Best quality</span><span></span><span class="h">The most accurate caption model</span></label>
+          <label class="opt"><input type="radio" name="cc-speed"><span class="t">Fastest</span><span class="badge">1.6 GB download</span><span class="h">About 4× faster. Asks before downloading its model.</span></label>
+        </fieldset>
+        <button class="panel-btn" style="margin-top:8px">Caption style…</button>
+        <div class="section-label">Captions &amp; speech (AI)</div>
+        <button class="deep-link" data-tool="translate_captions" data-from="captions"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Translate captions<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="diarize" data-from="captions"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Detect speakers<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="name_speakers" data-from="captions"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Name speakers<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="import_srt" data-from="captions"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Import subtitles<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="deep-link" data-tool="export_srt" data-from="captions"><svg class="icon dl-ico" data-i="wand-sparkles"></svg>Export .srt<svg class="icon chev" data-i="chevron-right"></svg></button>
+        <button class="group-link" data-group="Captions &amp; speech" data-from="captions">All Captions &amp; speech tools (10) <svg class="icon" data-i="chevron-right"></svg></button>
+      </div>
+
+      <!-- AI: AiPanel unchanged (the complete catalogue, 42 tools in 8 groups) -->
+      <div class="tabpanel" role="tabpanel" id="tp-ai" aria-labelledby="rt-ai" tabindex="-1" hidden data-keymap-ignore>
+        <button class="back-chip" id="back-chip" hidden><svg class="icon" data-i="chevron-left"></svg><span id="back-label">Captions</span></button>
+        <div class="search"><svg class="icon" data-i="search"></svg><input type="search" id="ai-search" placeholder="Search 42 AI tools" aria-label="Search AI tools"></div>
+        <div id="ai-list"></div>
+      </div>
+    </div>
+  </section>
+  <div class="splitter l" role="separator" aria-orientation="vertical" aria-label="Resize the tool panel"></div>
+
+  <!-- ======================= CENTER ======================= -->
+  <main class="center">
+    <form class="prompt" aria-label="Prompt editor" onsubmit="return false" data-keymap-ignore>
+      <textarea rows="1" aria-label="Describe an edit" placeholder="Describe an edit  ( / or ⌘K )"></textarea>
+      <button type="button" class="brain"><svg class="icon" data-i="brain"></svg><span class="brain-word">Claude</span></button>
+      <button type="submit" class="run">Run <svg class="icon" data-i="corner-down-left"></svg></button>
+    </form>
+    <div class="preview">
+      <div class="frame" role="img" aria-label="Preview at 00:00:14:08">
+        <div class="safe" aria-hidden="true"></div>
+        <div class="cap">THIS is the part <em>nobody</em> tells you</div>
+      </div>
+      <span class="corner-status" role="status"><svg class="icon icon-spin" data-i="loader-circle"></svg><span class="cs-word">Updating effects</span></span>
+    </div>
+    <div class="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize the timeline" style="cursor:row-resize"></div>
+    <section class="tl" aria-label="Timeline">
+      <div class="tl-bar" role="toolbar" aria-label="Timeline tools">
+        <button aria-label="Undo"><svg class="icon" data-i="undo-2"></svg></button><button aria-label="Redo"><svg class="icon" data-i="redo-2"></svg></button><span class="sep"></span>
+        <button aria-label="Play"><svg class="icon" data-i="play"></svg></button>
+        <span class="tc">00:00:14:08 <span>/ 00:00:42:00</span></span><span class="sep"></span>
+        <button aria-label="Split"><svg class="icon" data-i="scissors"></svg></button><button aria-label="Delete"><svg class="icon" data-i="trash"></svg></button><button aria-label="Duplicate"><svg class="icon" data-i="copy"></svg></button><span class="sep"></span>
+        <button aria-label="Snap" aria-pressed="true" style="color:var(--accent-2)"><svg class="icon" data-i="magnet"></svg></button>
+        <span class="grow"></span>
+        <button aria-label="Zoom out"><svg class="icon" data-i="zoom-out"></svg></button><input type="range" aria-label="Zoom" style="width:90px"><button aria-label="Zoom in"><svg class="icon" data-i="zoom-in"></svg></button><button aria-label="Zoom to fit"><svg class="icon" data-i="expand"></svg></button>
+      </div>
+      <div class="lanes">
+        <div class="ruler"></div>
+        <div class="lane"><span class="lbl">Captions</span><div class="clip c" style="left:2%;width:30%">THIS is the part…</div><div class="clip c" style="left:33%;width:26%">…and here's why</div></div>
+        <div class="lane"><span class="lbl">Text</span><div class="clip t" style="left:4%;width:18%">Hook</div></div>
+        <div class="lane"><span class="lbl">Main</span><div class="clip v sel" style="left:0;width:44%">talk_take3.mov</div><div class="clip v" style="left:44.2%;width:22%">broll_street.mp4</div><div class="clip v" style="left:66.4%;width:25%">talk_take3.mov</div></div>
+        <div class="lane"><span class="lbl">Music</span><div class="clip m" style="left:0;width:92%">lofi_bed.m4a · ducked</div></div>
+        <div class="playhead"></div>
+      </div>
+    </section>
+  </main>
+  <div class="splitter r" role="separator" aria-orientation="vertical" aria-label="Resize the Inspector"></div>
+
+  <!-- ======================= RIGHT ======================= -->
+  <aside class="right" id="right-panel" aria-label="Inspector and Chat">
+    <div class="right-head">
+      <div class="right-tabs" role="tablist" aria-label="Right panel" data-keymap-ignore>
+        <button role="tab" id="right-tab-inspect" aria-controls="right-panel-inspect" aria-selected="true" tabindex="0" aria-keyshortcuts="Alt+9"><svg class="icon" data-i="sliders-horizontal"></svg> Inspector</button>
+        <button role="tab" id="right-tab-chat" aria-controls="right-panel-chat" aria-selected="false" tabindex="-1" aria-keyshortcuts="Alt+0"><svg class="icon" data-i="message-square"></svg> Chat</button>
+      </div>
+      <button id="right-toggle" class="right-panel-toggle" aria-label="Hide the Inspector and Chat panel" aria-expanded="true" aria-controls="right-panel" data-tip="Hide the Inspector and Chat"><svg class="icon" data-i="chevron-right"></svg></button>
+    </div>
+    <div class="right-body" role="tabpanel" id="right-panel-inspect" aria-labelledby="right-tab-inspect">
+      <div class="section-label">Timing</div>
+      <div class="prop"><span>Start</span><input value="00:00:00:00" aria-label="Start" style="font-variant-numeric:tabular-nums;font-size:11px;padding:4px 6px"><span></span></div>
+      <div class="prop"><span>Duration</span><input value="00:00:18:14" aria-label="Duration" style="font-variant-numeric:tabular-nums;font-size:11px;padding:4px 6px"><span></span></div>
+      <div class="section-label">Color</div>
+      <div class="prop"><span>Brightness</span><input type="range" aria-label="Brightness"><output>0</output></div>
+      <div class="prop"><span>Contrast</span><input type="range" aria-label="Contrast"><output>+8</output></div>
+      <div class="prop"><span>Saturation</span><input type="range" aria-label="Saturation"><output>+12</output></div>
+      <div class="section-label">Audio</div>
+      <div class="prop"><span>Volume</span><input type="range" aria-label="Volume"><output>0 dB</output></div>
+      <div class="prop"><span>Fade in</span><input type="range" aria-label="Audio fade in"><output>0.3 s</output></div>
+      <div class="section-label">History</div>
+      <div style="font-size:11px;color:var(--text-dim);line-height:1.8">Split at 00:00:18:14<br>Add captions (42 cues)<br>Duck music under speech</div>
+    </div>
+    <div class="right-body" role="tabpanel" id="right-panel-chat" aria-labelledby="right-tab-chat" hidden>
+      <div class="chat-log"><p>Ask for an edit in plain words. Chat shares the session lock with the Prompt bar.</p></div>
+      <input type="text" class="chat-input" id="chat-input" aria-label="Message Claude" placeholder="Message Claude">
+    </div>
+    <div class="right-rail">
+      <!-- The first control keeps the old name (critique M2). -->
+      <button aria-label="Show the Inspector and Chat panel" id="rr-expand" aria-expanded="false" aria-controls="right-panel" data-tip="Show the Inspector and Chat"><svg class="icon" data-i="chevron-left"></svg></button>
+      <span class="rr-sep" aria-hidden="true"></span>
+      <button aria-label="Show the Inspector" id="rr-inspect" aria-keyshortcuts="Alt+9" data-tip="Inspector  ⌥9"><svg class="icon" data-i="sliders-horizontal"></svg></button>
+      <button aria-label="Show the Chat" id="rr-chat" aria-keyshortcuts="Alt+0" data-tip="Chat  ⌥0"><svg class="icon" data-i="message-square"></svg></button>
+    </div>
+  </aside>
+
+  <!-- ======================= RAIL FOOT (last in DOM and focus order) ======================= -->
+  <nav class="rail-foot" aria-label="Help and settings">
+    <!-- Name kept as "Keyboard shortcuts": it opens the dialog of that title (critique M1). -->
+    <button aria-label="Keyboard shortcuts" aria-keyshortcuts="?" data-tip="Help and keyboard shortcuts  ?"><svg class="icon" data-i="circle-question-mark"></svg></button>
+    <button aria-label="Customize keyboard shortcuts" aria-keyshortcuts="Meta+Alt+K" data-tip="Customize keyboard shortcuts  ⌥⌘K"><svg class="icon" data-i="keyboard"></svg></button>
+    <button aria-label="Settings" aria-keyshortcuts="Meta+," data-tip="Settings  ⌘,"><svg class="icon" data-i="settings"></svg></button>
+  </nav>
+</div>
+
+<!-- ======================= RATIO MENU (portal): one group per section (critique M6) ======================= -->
+<div class="menu" id="ratio-menu" role="menu" aria-label="Canvas ratio" hidden>
+  <div role="group" aria-label="Aspect ratio" data-group="ratio">
+    <div class="section-label head" aria-hidden="true">Aspect ratio</div>
+    <button role="menuitemradio" aria-checked="true"><span class="chk"><svg class="icon" data-i="check"></svg></span>9:16<span class="hint">Vertical</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>16:9<span class="hint">Landscape</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>1:1<span class="hint">Square</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>4:5<span class="hint">Portrait</span></button>
+  </div>
+  <div role="separator"></div>
+  <div role="group" aria-label="Platform presets" data-group="ratio">
+    <div class="section-label head" aria-hidden="true">Platform presets</div>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>Reels<span class="hint">1080×1920</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>Shorts<span class="hint">1080×1920</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>TikTok<span class="hint">1080×1920</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>IG 1:1<span class="hint">1080×1080</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>IG 4:5<span class="hint">1080×1350</span></button>
+  </div>
+  <div role="separator"></div>
+  <div role="group" aria-label="Safe-zone overlay" data-group="safe">
+    <div class="section-label head" aria-hidden="true">Safe-zone overlay</div>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>Off</button>
+    <button role="menuitemradio" aria-checked="true"><span class="chk"><svg class="icon" data-i="check"></svg></span>TikTok<span class="sr-only"> safe zone</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>Reels<span class="sr-only"> safe zone</span></button>
+    <button role="menuitemradio" aria-checked="false"><span class="chk"><svg class="icon" data-i="check"></svg></span>Shorts<span class="sr-only"> safe zone</span></button>
+  </div>
+  <div class="foot" aria-hidden="true">1080×1920 · 30 fps · 0:42</div>
+</div>
+
+<div class="tip" id="tip" aria-hidden="true" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>window.__ICONS = {"clapperboard":"<path d=\"m12.296 3.464 3.02 3.956\"/><path d=\"M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z\"/><path d=\"M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z\"/><path d=\"m6.18 5.276 3.1 3.899\"/>","film":"<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M7 3v18\"/><path d=\"M3 7.5h4\"/><path d=\"M3 12h18\"/><path d=\"M3 16.5h4\"/><path d=\"M17 3v18\"/><path d=\"M17 7.5h4\"/><path d=\"M17 16.5h4\"/>","music":"<path d=\"M9 18V5l12-2v13\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"18\" cy=\"16\" r=\"3\"/>","type":"<path d=\"M12 4v16\"/><path d=\"M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2\"/><path d=\"M9 20h6\"/>","sticker":"<path d=\"M21 9a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z\"/><path d=\"M15 3v5a1 1 0 0 0 1 1h5\"/><path d=\"M8 13h.01\"/><path d=\"M16 13h.01\"/><path d=\"M10 16s.8 1 2 1c1.3 0 2-1 2-1\"/>","sparkles":"<path d=\"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z\"/><path d=\"M20 2v4\"/><path d=\"M22 4h-4\"/><circle cx=\"4\" cy=\"20\" r=\"2\"/>","wand-sparkles":"<path d=\"m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72\"/><path d=\"m14 7 3 3\"/><path d=\"M5 6v4\"/><path d=\"M19 14v4\"/><path d=\"M10 2v2\"/><path d=\"M7 8H3\"/><path d=\"M21 16h-4\"/><path d=\"M11 3H9\"/>","square-split-horizontal":"<path d=\"M12 2v20\"/><path d=\"M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3\"/><path d=\"M8 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3\"/>","captions":"<rect width=\"18\" height=\"14\" x=\"3\" y=\"5\" rx=\"2\" ry=\"2\"/><path d=\"M7 15h4M15 15h2M7 11h2M13 11h4\"/>","circle-question-mark":"<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3\"/><path d=\"M12 17h.01\"/>","keyboard":"<path d=\"M10 8h.01\"/><path d=\"M12 12h.01\"/><path d=\"M14 8h.01\"/><path d=\"M16 12h.01\"/><path d=\"M18 8h.01\"/><path d=\"M6 8h.01\"/><path d=\"M7 16h10\"/><path d=\"M8 12h.01\"/><rect width=\"20\" height=\"16\" x=\"2\" y=\"4\" rx=\"2\"/>","settings":"<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/>","panel-left-close":"<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M9 3v18\"/><path d=\"m16 15-3-3 3-3\"/>","panel-left-open":"<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M9 3v18\"/><path d=\"m14 9 3 3-3 3\"/>","message-square":"<path d=\"M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z\"/>","sliders-horizontal":"<path d=\"M10 5H3\"/><path d=\"M12 19H3\"/><path d=\"M14 3v4\"/><path d=\"M16 17v4\"/><path d=\"M21 12h-9\"/><path d=\"M21 19h-5\"/><path d=\"M21 5h-7\"/><path d=\"M8 10v4\"/><path d=\"M8 12H3\"/>","save":"<path d=\"M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z\"/><path d=\"M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7\"/><path d=\"M7 3v4a1 1 0 0 0 1 1h7\"/>","folder-open":"<path d=\"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2\"/>","download":"<path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/>","chevron-down":"<path d=\"m6 9 6 6 6-6\"/>","chevron-left":"<path d=\"m15 18-6-6 6-6\"/>","chevron-right":"<path d=\"m9 18 6-6-6-6\"/>","upload":"<path d=\"M12 3v12\"/><path d=\"m17 8-5-5-5 5\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/>","mic":"<path d=\"M12 19v3\"/><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"/><rect x=\"9\" y=\"2\" width=\"6\" height=\"13\" rx=\"3\"/>","check":"<path d=\"M20 6 9 17l-5-5\"/>","search":"<path d=\"m21 21-4.34-4.34\"/><circle cx=\"11\" cy=\"11\" r=\"8\"/>","plus":"<path d=\"M5 12h14\"/><path d=\"M12 5v14\"/>","loader-circle":"<path d=\"M21 12a9 9 0 1 1-6.219-8.56\"/>","audio-lines":"<path d=\"M2 10v3\"/><path d=\"M6 6v11\"/><path d=\"M10 3v18\"/><path d=\"M14 8v7\"/><path d=\"M18 5v13\"/><path d=\"M22 10v3\"/>","list-plus":"<path d=\"M16 5H3\"/><path d=\"M11 12H3\"/><path d=\"M16 19H3\"/><path d=\"M18 9v6\"/><path d=\"M21 12h-6\"/>","trash":"<path d=\"M10 11v6\"/><path d=\"M14 11v6\"/><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\"/><path d=\"M3 6h18\"/><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\"/>","play":"<path d=\"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z\"/>","scissors":"<circle cx=\"6\" cy=\"6\" r=\"3\"/><path d=\"M8.12 8.12 12 12\"/><path d=\"M20 4 8.12 15.88\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><path d=\"M14.8 14.8 20 20\"/>","undo-2":"<path d=\"M9 14 4 9l5-5\"/><path d=\"M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11\"/>","redo-2":"<path d=\"m15 14 5-5-5-5\"/><path d=\"M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13\"/>","copy":"<rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"/><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"/>","magnet":"<path d=\"m12 15 4 4\"/><path d=\"M2.352 10.648a1.205 1.205 0 0 0 0 1.704l2.296 2.296a1.205 1.205 0 0 0 1.704 0l6.029-6.029a1 1 0 1 1 3 3l-6.029 6.029a1.205 1.205 0 0 0 0 1.704l2.296 2.296a1.205 1.205 0 0 0 1.704 0l6.365-6.367A1 1 0 0 0 8.716 4.282z\"/><path d=\"m5 8 4 4\"/>","zoom-in":"<circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" x2=\"16.65\" y1=\"21\" y2=\"16.65\"/><line x1=\"11\" x2=\"11\" y1=\"8\" y2=\"14\"/><line x1=\"8\" x2=\"14\" y1=\"11\" y2=\"11\"/>","zoom-out":"<circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" x2=\"16.65\" y1=\"21\" y2=\"16.65\"/><line x1=\"8\" x2=\"14\" y1=\"11\" y2=\"11\"/>","expand":"<path d=\"m15 15 6 6\"/><path d=\"m15 9 6-6\"/><path d=\"M21 16v5h-5\"/><path d=\"M21 8V3h-5\"/><path d=\"M3 16v5h5\"/><path d=\"m3 21 6-6\"/><path d=\"M3 8V3h5\"/><path d=\"M9 9 3 3\"/>","corner-down-left":"<path d=\"M20 4v7a4 4 0 0 1-4 4H4\"/><path d=\"m9 10-5 5 5 5\"/>","brain":"<path d=\"M12 18V5\"/><path d=\"M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4\"/><path d=\"M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5\"/><path d=\"M17.997 5.125a4 4 0 0 1 2.526 5.77\"/><path d=\"M18 18a4 4 0 0 0 2-7.464\"/><path d=\"M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517\"/><path d=\"M6 18a4 4 0 0 1-2-7.464\"/><path d=\"M6.003 5.125a4 4 0 0 0-2.526 5.77\"/>","x":"<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>","triangle-alert":"<path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/>","square":"<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/>","smartphone":"<rect width=\"14\" height=\"20\" x=\"5\" y=\"2\" rx=\"2\" ry=\"2\"/><path d=\"M12 18h.01\"/>","arrow-left":"<path d=\"m12 19-7-7 7-7\"/><path d=\"M19 12H5\"/>","circle-alert":"<circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"12\" x2=\"12\" y1=\"8\" y2=\"12\"/><line x1=\"12\" x2=\"12.01\" y1=\"16\" y2=\"16\"/>"}</script>
+<script>
+// ---- Icons: lucide 1.48 path data into every <svg data-i> ----
+const ICONS = window.__ICONS
+for (const s of document.querySelectorAll('svg[data-i]')) {
+  s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true'); s.setAttribute('focusable', 'false')
+  s.classList.add('icon'); s.innerHTML = ICONS[s.dataset.i] || ''
+}
+const svg = (n, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[n]}</svg>`
+
+// ---- Rail model: ONE list drives the tabs, the shortcuts and the panel title (railModel.ts). ----
+const RAIL = [
+  { id: 'media',       label: 'Media',       icon: 'film',                    tip: 'Footage, photos and the project bin' },
+  { id: 'audio',       label: 'Audio',       icon: 'music',                   tip: 'Music, voiceover and the mix' },
+  { id: 'text',        label: 'Text',        icon: 'type',                    tip: 'Titles, styles and templates' },
+  { id: 'stickers',    label: 'Stickers',    icon: 'sticker',                 tip: 'Emoji and stickers' },
+  { id: 'effects',     label: 'Effects',     icon: 'sparkles',                tip: 'Filters, LUT looks and effects' },
+  { id: 'transitions', label: 'Transitions', icon: 'square-split-horizontal', tip: 'Transitions for a cut' },
+  { id: 'captions',    label: 'Captions',    icon: 'captions',                tip: 'Auto captions and subtitles' },
+  { id: 'ai',          label: 'AI',          icon: 'wand-sparkles',           tip: 'Every AI tool (42)' },
+]
+const EFFECTS = ['Blur', 'Sharpen', 'Vignette', 'Grain', 'Vintage', 'VHS', 'Glow', 'RGB Split', 'Flip H', 'Flip V']
+document.getElementById('fx-grid').innerHTML = EFFECTS.map((e) => `<button class="tile">${svg('sparkles')}${e}</button>`).join('')
+// The real catalogue (lib/aiCatalog.ts): 42 tools in 8 groups.
+const AI = {
+  'Auto edit': [['remove_silences','Remove silences'],['remove_fillers','Remove filler words'],['auto_cut_to_beats','Cut to the beat'],['auto_reframe','Auto-reframe'],['make_shorts','Find shorts'],['cut_range','Cut range'],['multicam','Multicam switch']],
+  'Captions & speech': [['auto_caption','Auto captions'],['add_caption_track','Captions from transcript'],['translate_captions','Translate captions'],['diarize','Detect speakers'],['assign_caption_speakers','Colour captions by speaker'],['name_speakers','Name speakers'],['import_srt','Import subtitles'],['export_srt','Export .srt'],['export_vtt','Export .vtt'],['export_ass','Export .ass']],
+  'Audio': [['noise_reduce','Reduce noise'],['vocal_isolate','Isolate vocals'],['instrumental_isolate','Isolate instrumental'],['tts_voiceover','AI voiceover']],
+  'Enhance': [['upscale','AI upscale'],['stabilize','Stabilize'],['smooth_slow_motion','Smooth slow-mo']],
+  'Cutout & effects': [['remove_background','Remove background'],['chroma_key','Chroma key'],['object_erase','Erase object'],['motion_track','Motion-track an overlay']],
+  'Text & brand': [['add_hook_overlay','Hook overlay'],['add_super_text','Super text'],['add_lower_third','Lower third'],['generate_hook','Suggest hooks'],['apply_brand_kit','Brand kit'],['apply_template','Show template'],['apply_show_template','Saved show template']],
+  'Find & search': [['find_moments','Find moments'],['search_media','Search footage'],['find_broll','Find b-roll'],['match_style','Match a reference'],['audit_aesthetic','Style audit']],
+  'Export': [['apply_export_preset','Platform preset'],['set_loudness_target','Export loudness']],
+}
+const slug = (g) => 'aig-' + g.toLowerCase().replace(/[^a-z]+/g, '-')
+document.getElementById('ai-list').innerHTML = Object.entries(AI).map(([g, tools]) =>
+  `<div class="section-label" id="${slug(g)}" tabindex="-1">${g.replace('&', '&amp;')}</div>` + tools.map(([id, label]) =>
+    `<div class="ai-card" id="card-${id}" data-label="${label}"><span class="ico">${svg('wand-sparkles')}</span><div><button class="t" aria-expanded="false">${label}</button><div class="form"><button class="panel-btn go">Run ${label}</button></div></div></div>`).join('')).join('')
+for (const b of document.querySelectorAll('.ai-card .t')) b.addEventListener('click', () => {
+  const c = b.closest('.ai-card'); c.classList.toggle('expanded'); b.setAttribute('aria-expanded', c.classList.contains('expanded'))
+})
+
+const app = document.getElementById('app')
+const tabs = document.getElementById('rail-tabs')
+const panel = document.getElementById('tool-panel')
+const state = { sel: 0, open: true, rightOpen: true, rightTab: 'inspect', live: { audio: 'rec', captions: null, ai: null } }
+
+RAIL.forEach((r, i) => {
+  const b = document.createElement('button')
+  b.type = 'button'; b.className = 'rail-item'; b.id = 'rt-' + r.id
+  b.setAttribute('role', 'tab'); b.setAttribute('aria-controls', 'tp-' + r.id)
+  b.setAttribute('aria-keyshortcuts', 'Alt+' + (i + 1))
+  b.dataset.tip = `${r.label} — ${r.tip}`; b.dataset.kbd = '⌥' + (i + 1)
+  b.innerHTML = `<span class="rail-chip">${svg(r.icon)}</span><span class="rail-label">${r.label}</span>`
+  b.addEventListener('click', () => choose(i, { toggle: true }))
+  tabs.appendChild(b)
+})
+const items = [...tabs.querySelectorAll('[role=tab]')]
+
+function renderLive() {
+  const dot = (id, kind) => {
+    const b = document.getElementById('rt-' + id); let d = b.querySelector('.rail-dot')
+    if (!kind) { d?.remove(); b.removeAttribute('aria-describedby'); return }
+    if (!d) { d = document.createElement('span'); d.className = 'rail-dot'; d.setAttribute('aria-hidden', 'true'); b.appendChild(d) }
+    d.classList.toggle('busy', kind === 'busy'); b.setAttribute('aria-describedby', 'desc-' + id)
+  }
+  dot('audio', state.live.audio && 'rec'); dot('captions', state.live.captions && 'busy'); dot('ai', state.live.ai && 'busy')
+  document.getElementById('act-rec').hidden = !state.live.audio
+  document.getElementById('act-cc').hidden = !state.live.captions
+  document.getElementById('cc-progress').hidden = !state.live.captions
+}
+
+function render() {
+  items.forEach((b, i) => {
+    const on = i === state.sel
+    b.setAttribute('aria-selected', on); b.tabIndex = on ? 0 : -1
+    if (on) b.setAttribute('aria-expanded', state.open); else b.removeAttribute('aria-expanded')
+  })
+  RAIL.forEach((r, i) => { document.getElementById('tp-' + r.id).hidden = i !== state.sel })
+  document.getElementById('panel-title').textContent = RAIL[state.sel].label
+  document.getElementById('panel-kbd').textContent = '⌥' + (state.sel + 1)
+  document.getElementById('from-iphone').hidden = RAIL[state.sel].id !== 'media'
+  tabs.style.setProperty('--sel', state.sel)
+  panel.hidden = !state.open
+  app.classList.toggle('left-collapsed', !state.open)
+  app.classList.toggle('right-collapsed', !state.rightOpen)
+  document.getElementById('right-toggle').setAttribute('aria-expanded', state.rightOpen)
+  document.getElementById('rr-expand').setAttribute('aria-expanded', state.rightOpen)
+  for (const id of ['inspect', 'chat']) {
+    const b = document.getElementById('right-tab-' + id), on = id === state.rightTab
+    b.setAttribute('aria-selected', on); b.tabIndex = on ? 0 : -1
+    document.getElementById('right-panel-' + id).hidden = !on
+  }
+}
+
+// Focus rule (critique H2): if focus sits inside a region that is about to hide,
+// move it to the control that owns that region BEFORE hiding it. Otherwise leave
+// focus alone: Alt+1…8 from the timeline keep you on the timeline.
+function withFocusRescue(region, target, mutate) {
+  const inside = region.contains(document.activeElement)
+  mutate(); render()
+  if (!inside) return
+  const a = document.activeElement
+  if (!a || a === document.body || !region.contains(a) || a.closest('[hidden]') || a.getClientRects().length === 0) target().focus()
+}
+// Click the ACTIVE item (or press its Alt key) = collapse/expand; another item = switch and open.
+function choose(i, { toggle = false, focusTab = false } = {}) {
+  hideTip()
+  withFocusRescue(panel, () => items[state.sel], () => {
+    if (toggle && i === state.sel) state.open = !state.open
+    else { state.sel = i; state.open = true }
+  })
+  if (focusTab) items[i].focus()
+}
+function setOpen(open) { hideTip(); withFocusRescue(panel, () => items[state.sel], () => { state.open = open }) }
+function setRight(open, tab) {
+  hideTip()
+  const aside = document.getElementById('right-panel')
+  withFocusRescue(aside, () => document.getElementById('rr-expand'), () => {
+    state.rightOpen = open; if (tab) state.rightTab = tab
+  })
+}
+
+tabs.addEventListener('keydown', (e) => {
+  const n = items.length
+  const k = { ArrowDown: state.sel + 1, ArrowUp: state.sel - 1 + n, Home: 0, End: n - 1 }[e.key]
+  if (k === undefined) return
+  e.preventDefault(); choose(k % n, { focusTab: true })
+})
+document.getElementById('collapse').addEventListener('click', () => { setOpen(false); items[state.sel].focus() })
+document.getElementById('right-tab-inspect').onclick = () => setRight(true, 'inspect')
+document.getElementById('right-tab-chat').onclick = () => setRight(true, 'chat')
+document.querySelector('.right-tabs').addEventListener('keydown', (e) => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
+  e.preventDefault()
+  const t = e.key === 'Home' ? 'inspect' : e.key === 'End' ? 'chat' : state.rightTab === 'chat' ? 'inspect' : 'chat'
+  setRight(true, t); document.getElementById('right-tab-' + t).focus()
+})
+document.getElementById('rr-expand').onclick = () => { setRight(true); document.getElementById('right-tab-' + state.rightTab).focus() }
+document.getElementById('rr-inspect').onclick = () => { setRight(true, 'inspect'); document.getElementById('right-tab-inspect').focus() }
+document.getElementById('rr-chat').onclick = () => { setRight(true, 'chat'); document.getElementById('chat-input').focus() }
+document.getElementById('right-toggle').onclick = () => { setRight(false); document.getElementById('rr-expand').focus() }
+for (const b of document.querySelectorAll('[data-goto]')) b.addEventListener('click', () => choose(RAIL.findIndex((r) => r.id === b.dataset.goto)))
+
+// ---- Deep links (critique M5): one target card; clear the search; back chip returns. ----
+let backTo = null
+function jumpToAI(from, cardId, groupName) {
+  backTo = { from, row: document.activeElement }
+  const q = document.getElementById('ai-search'); q.value = ''
+  choose(RAIL.findIndex((r) => r.id === 'ai'))
+  document.querySelectorAll('.ai-card.target').forEach((c) => c.classList.remove('target'))
+  document.getElementById('back-label').textContent = RAIL.find((r) => r.id === from).label
+  document.getElementById('back-chip').hidden = false
+  const target = cardId ? document.getElementById('card-' + cardId) : document.getElementById(slug(groupName))
+  if (cardId) { target.classList.add('target', 'expanded'); target.querySelector('.t').setAttribute('aria-expanded', 'true') }
+  target.scrollIntoView({ block: 'start' })
+  ;(cardId ? target.querySelector('.t') : target).focus({ preventScroll: true })
+}
+for (const b of document.querySelectorAll('.deep-link')) b.addEventListener('click', () => jumpToAI(b.dataset.from, b.dataset.tool))
+for (const b of document.querySelectorAll('.group-link')) b.addEventListener('click', () => jumpToAI(b.dataset.from, null, b.dataset.group))
+document.getElementById('back-chip').addEventListener('click', () => {
+  if (!backTo) return
+  const { from, row } = backTo; backTo = null
+  document.getElementById('back-chip').hidden = true
+  choose(RAIL.findIndex((r) => r.id === from)); row?.focus()
+})
+
+// ---- The keymap (mirrors keymap/engine.ts after R2): text entry keeps every key; the
+//      data-keymap-ignore scope only swallows chords WITHOUT Alt or Meta (critique H1). ----
+const TEXT_TYPES = new Set(['text', 'search', 'email', 'url', 'password', 'tel', 'number'])
+const REGIONS = () => [document.querySelector('.topbar'), tabs, panel, document.querySelector('.center'), document.getElementById('right-panel'), document.querySelector('.rail-foot')]
+function cycleRegion(dir) {
+  const list = REGIONS().filter((r) => !r.hidden && r.offsetParent !== null)
+  const cur = list.findIndex((r) => r.contains(document.activeElement))
+  const next = list[(cur + dir + list.length) % list.length]
+  const f = next === tabs ? items[state.sel] : next.querySelector('button:not([disabled]):not([hidden]), [tabindex="0"], input, textarea')
+  f?.focus()
+}
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return
+  const t = e.target, tag = t.tagName
+  const textEntry = tag === 'TEXTAREA' || t.isContentEditable || (tag === 'INPUT' && TEXT_TYPES.has(t.type || 'text'))
+  if (e.key === 'Escape') hideTip()
+  if (textEntry) return
+  if (t.closest?.('[data-keymap-ignore]') && !(e.altKey || e.metaKey)) return
+  let handled = true
+  if (e.altKey && !e.metaKey && /^Digit[1-8]$/.test(e.code)) choose(+e.code.slice(5) - 1, { toggle: true })
+  else if (e.altKey && !e.metaKey && e.code === 'Backslash') setOpen(!state.open)
+  else if (e.altKey && !e.metaKey && e.code === 'Digit9') { setRight(true, 'inspect') }
+  else if (e.altKey && !e.metaKey && e.code === 'Digit0') { setRight(true, 'chat'); document.getElementById('chat-input').focus() }
+  else if (e.altKey && !e.metaKey && e.code === 'KeyT') toast('Added text at the playhead')
+  else if (e.metaKey && e.altKey && e.code === 'KeyK') toast('Customize keyboard shortcuts')
+  else if (e.metaKey && !e.altKey && e.code === 'KeyE') toast('Export dialog')
+  else if (e.code === 'F6') cycleRegion(e.shiftKey ? -1 : 1)
+  else handled = false
+  if (handled) { e.preventDefault(); e.stopPropagation() }
+}, true)
+let toastT
+function toast(msg) { const el = document.getElementById('toast'); el.textContent = msg; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true }, 1400) }
+
+// ---- One portal tooltip (critique H4) ----
+const tip = document.getElementById('tip')
+let tipTimer = 0, tipHideTimer = 0, tipFor = null
+function showTip(el) {
+  tipFor = el
+  tip.innerHTML = ''; tip.append(el.dataset.tip)
+  if (el.dataset.kbd) { const k = document.createElement('kbd'); k.textContent = el.dataset.kbd; tip.append(k) }
+  tip.hidden = false
+  const r = el.getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight
+  const inRail = el.closest('.rail, .rail-foot')
+  let x = inRail ? r.right + 8 : r.left + r.width / 2 - tw / 2
+  let y = inRail ? r.top + r.height / 2 - th / 2 : r.bottom + 6
+  x = Math.max(8, Math.min(innerWidth - tw - 8, x)); y = Math.max(8, Math.min(innerHeight - th - 8, y))
+  tip.style.left = x + 'px'; tip.style.top = y + 'px'
+}
+function hideTip() { clearTimeout(tipTimer); clearTimeout(tipHideTimer); tip.hidden = true; tipFor = null }
+function armTip(el) { clearTimeout(tipTimer); clearTimeout(tipHideTimer); if (tipFor === el) return; tipTimer = setTimeout(() => showTip(el), 400) }
+function softHide() { clearTimeout(tipTimer); tipHideTimer = setTimeout(hideTip, 120) }
+document.addEventListener('pointerover', (e) => { const el = e.target.closest?.('[data-tip]'); if (el) armTip(el) })
+document.addEventListener('pointerout', (e) => { const el = e.target.closest?.('[data-tip]'); if (el && !el.contains(e.relatedTarget) && !tip.contains(e.relatedTarget)) softHide() })
+tip.addEventListener('pointerenter', () => clearTimeout(tipHideTimer))      // hoverable
+tip.addEventListener('pointerleave', softHide)
+document.addEventListener('focusin', (e) => { const el = e.target.closest?.('[data-tip]'); if (el && el.matches(':focus-visible')) armTip(el); else hideTip() })
+document.addEventListener('pointerdown', hideTip, true)
+document.addEventListener('scroll', hideTip, true)
+
+// ---- Ratio menu: roving focus; every pick closes it; Escape returns to the trigger ----
+const trig = document.getElementById('ratio-trigger'), menu = document.getElementById('ratio-menu')
+const mItems = () => [...menu.querySelectorAll('[role=menuitemradio]')]
+function openMenu() {
+  hideTip()
+  const r = trig.getBoundingClientRect()
+  menu.hidden = false
+  menu.style.top = (r.bottom + 6) + 'px'
+  menu.style.left = Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, r.left + r.width / 2 - menu.offsetWidth / 2)) + 'px'
+  trig.setAttribute('aria-expanded', 'true')
+  ;(mItems().find((m) => m.getAttribute('aria-checked') === 'true') || mItems()[0]).focus()
+}
+function closeMenu(refocus) { menu.hidden = true; trig.setAttribute('aria-expanded', 'false'); if (refocus) trig.focus() }
+trig.addEventListener('click', () => (menu.hidden ? openMenu() : closeMenu(true)))
+menu.addEventListener('keydown', (e) => {
+  const list = mItems(), i = list.indexOf(document.activeElement)
+  if (e.key === 'Escape') { e.preventDefault(); closeMenu(true) }
+  if (e.key === 'ArrowDown') { e.preventDefault(); list[(i + 1) % list.length].focus() }
+  if (e.key === 'ArrowUp') { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus() }
+  if (e.key === 'Home') { e.preventDefault(); list[0].focus() }
+  if (e.key === 'End') { e.preventDefault(); list[list.length - 1].focus() }
+  if (e.key === 'Tab') closeMenu(false)
+})
+menu.addEventListener('click', (e) => {
+  const b = e.target.closest('[role=menuitemradio]'); if (!b) return
+  const g = b.closest('[data-group]').dataset.group
+  menu.querySelectorAll(`[data-group="${g}"] [role=menuitemradio]`).forEach((m) => m.setAttribute('aria-checked', m === b))
+  closeMenu(true)
+})
+document.addEventListener('mousedown', (e) => { if (!menu.hidden && !menu.contains(e.target) && !trig.contains(e.target)) closeMenu(false) })
+
+// ---- Recording timer + a throttled live message (announce state changes, not every tick) ----
+let recS = 12
+setInterval(() => {
+  if (!state.live.audio) return
+  recS++; const t = `${Math.floor(recS / 60)}:${String(recS % 60).padStart(2, '0')}`
+  document.getElementById('rec-time').textContent = t; document.getElementById('rec-time-2').textContent = t
+  document.querySelector('#act-rec > button').setAttribute('aria-label', `Recording voiceover, ${t}. Open the Audio panel`)
+}, 1000)
+setTimeout(() => { document.getElementById('activity-live').textContent = 'Recording a voiceover' }, 300)
+
+// ---- useTopBarFit: step the density until nothing but the project name gives way ----
+const topbar = document.querySelector('.topbar'), tbLeft = document.querySelector('.tb-left')
+function fitTopbar() {
+  const w = innerWidth, base = w >= 1440 ? 0 : w >= 1280 ? 1 : w >= 1100 ? 2 : 3
+  for (let d = base; d <= 4; d++) {
+    for (let k = 1; k <= 4; k++) topbar.classList.toggle('tb-d' + k, k <= d)
+    topbar.dataset.density = d
+    if (tbLeft.scrollWidth <= tbLeft.clientWidth + 0.5 && topbar.scrollWidth <= topbar.clientWidth + 0.5) break
+  }
+}
+addEventListener('resize', fitTopbar)
+
+// ---- Stress states for the screenshots ----
+function applyHash() {
+  const h = location.hash
+  if (h.includes('worst')) {
+    document.getElementById('project-name').textContent = 'Episode 14 — the part nobody tells you about pricing (final cut v3)'
+    for (const w of document.querySelectorAll('.stale-word')) w.hidden = false
+    for (const l of document.querySelectorAll('.dl-link')) { l.classList.add('stale'); l.setAttribute('aria-label', l.getAttribute('aria-label') + ' (outdated)') }
+    document.getElementById('export-error').hidden = false
+    state.live.captions = 'busy'; state.live.ai = 'busy'
+  }
+  if (h.includes('collapsed')) { state.open = false; state.rightOpen = false }
+  const m = h.match(/tab=(\w+)/); if (m) state.sel = Math.max(0, RAIL.findIndex((r) => r.id === m[1]))
+  renderLive(); render(); fitTopbar()
+}
+applyHash()
+</script>
+</body>
+</html>
