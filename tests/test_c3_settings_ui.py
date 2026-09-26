@@ -164,7 +164,34 @@ def _keychain_has(service: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _drop_test_item(service: str) -> None:
+    if service and service != "Video AI Editor":
+        subprocess.run([SECURITY, "delete-generic-password", "-s", service, "-a", "anthropic_api_key"],
+                       capture_output=True)
+
+
+# This test WRITES a Keychain item. Against an external server it must know
+# which throwaway item that server uses (VAI_KEYCHAIN_SERVICE, never the
+# owner's "Video AI Editor"): run against a QA backend without it, Save wrote a
+# fake key into the owner's login Keychain and a mid-test failure left it there
+# (wave D2). keychain.py now also namespaces any server with its own WORKDIR;
+# this is the test-side half. Decided at collection, before any fixture runs.
+_EXTERNAL_WITHOUT_TEST_ITEM = bool(os.environ.get("VAE_SETTINGS_UI_BASE_URL")) and \
+    os.environ.get("VAI_KEYCHAIN_SERVICE", "") in ("", "Video AI Editor")
+
+
+@pytest.mark.skipif(_EXTERNAL_WITHOUT_TEST_ITEM,
+                    reason="external server without a throwaway VAI_KEYCHAIN_SERVICE: Save would write the owner's Keychain")
 def test_settings_saves_the_key_to_the_keychain_and_never_shows_it(browser, server, projects, tmp_path):
+    if not server["service"] or server["service"] == "Video AI Editor":
+        pytest.skip("external server without a throwaway VAI_KEYCHAIN_SERVICE: Save would write the owner's Keychain")
+    try:
+        _save_and_remove_key(browser, server, projects, tmp_path)
+    finally:
+        _drop_test_item(server["service"])
+
+
+def _save_and_remove_key(browser, server, projects, tmp_path):
     from playwright.sync_api import expect
     key = "sk-ant-api03-UItest" + uuid.uuid4().hex + uuid.uuid4().hex
     page = _open(browser, server["url"], projects["full"])
@@ -183,16 +210,14 @@ def test_settings_saves_the_key_to_the_keychain_and_never_shows_it(browser, serv
     expect(dlg.locator(".settings-status[data-tone=ok]")).to_have_text(f"Saved in your Keychain (sk-ant-…{key[-4:]}).")
     expect(dlg.locator(".settings-result")).to_contain_text("rejected")      # the stubbed probe's 401
     expect(field).to_have_value("")
-    if server["service"]:
-        assert _keychain_has(server["service"])
+    assert _keychain_has(server["service"])
     expect(dlg.locator(".brain-list-row", has_text="Claude")).to_contain_text("Key added")
     page.screenshot(path=str(tmp_path / "settings_saved.png"))
 
     dlg.get_by_role("button", name="Remove key").click()
     page.get_by_role("alertdialog", name="Remove your Anthropic key?").get_by_role("button", name="Remove key").click()
     expect(dlg.locator(".settings-status").first).to_contain_text("Not set up")
-    if server["service"]:
-        assert not _keychain_has(server["service"])
+    assert not _keychain_has(server["service"])
 
     assert key not in page.content() and key[20:50] not in page.content()
     assert not any(key in r or key[20:50] in r for r in responses)

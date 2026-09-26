@@ -36,19 +36,45 @@ to set ANTHROPIC_API_KEY instead — an honest limitation, not a silent no-op.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from . import platformutil as _pu
 
+#: The owner's real item: what the packaged app and ./run.sh use.
+REAL_SERVICE = "Video AI Editor"
+
+
+def _service_for(env: Mapping[str, str]) -> str:
+    """The Keychain item this process owns.
+
+    An explicit VAI_KEYCHAIN_SERVICE always wins. Otherwise a process that chose
+    its own WORKDIR (every QA, lane and test server; the packaged app and
+    ./run.sh never set it) gets an item namespaced by that folder, never the
+    owner's. WHY: a QA backend started with a scratch WORKDIR but no
+    VAI_KEYCHAIN_SERVICE fell back to the real item, and a UI test's Save wrote
+    a fake key into the owner's login Keychain (wave D2; no real key existed
+    yet). A scratch server must neither spend the owner's key nor overwrite it.
+    """
+    explicit = env.get("VAI_KEYCHAIN_SERVICE")
+    if explicit:
+        return explicit
+    workdir = env.get("WORKDIR")
+    if workdir:
+        tag = hashlib.sha256(os.path.abspath(workdir).encode()).hexdigest()[:12]
+        return f"{REAL_SERVICE} (scratch {tag})"
+    return REAL_SERVICE
+
+
 #: The Keychain item the app owns. Tests point this at a throwaway service
-#: (tests/conftest.py) so no test can read or write the owner's real item, and
-#: a QA server started with VAI_KEYCHAIN_SERVICE does the same for a live run.
-SERVICE = os.environ.get("VAI_KEYCHAIN_SERVICE") or "Video AI Editor"
+#: (tests/conftest.py) so no test can read or write the owner's real item.
+SERVICE = _service_for(os.environ)
 ACCOUNT = "anthropic_api_key"
 
 #: An Anthropic key: `sk-ant-` then URL-safe base64 characters. Real keys are
