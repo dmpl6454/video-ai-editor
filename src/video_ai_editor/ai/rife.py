@@ -103,15 +103,18 @@ def smooth_slow_motion(src: Path, cache_dir: Path, *, factor: int = 2,
 def _slow_atempo_chain(factor: int) -> str:
     """atempo stages for 1/factor (each stage is limited to [0.5, 2]), each
     preceded by the compositor's WSOLA lag compensation so the stretched
-    sound sits on the interpolated picture (see compositor._ATEMPO_LAG)."""
+    sound sits on the interpolated picture (see compositor._ATEMPO_LAG), and
+    restamped after each stage (audio_mix.ATEMPO_RESTAMP: ffmpeg 8.1's
+    adelay+atempo emits NOPTS-based timestamps)."""
+    from ..render.audio_mix import ATEMPO_RESTAMP
     from ..render.compositor import _ATEMPO_LAG
     stages = []
     remaining = 1.0 / float(factor)
     while remaining < 0.5:
-        stages.append(f"{_ATEMPO_LAG},atempo=0.5")
+        stages.append(f"{_ATEMPO_LAG},atempo=0.5,{ATEMPO_RESTAMP}")
         remaining /= 0.5
     if abs(remaining - 1.0) > 0.001:
-        stages.append(f"{_ATEMPO_LAG},atempo={remaining:.6f}")
+        stages.append(f"{_ATEMPO_LAG},atempo={remaining:.6f},{ATEMPO_RESTAMP}")
     return ",".join(stages) or "anull"
 
 

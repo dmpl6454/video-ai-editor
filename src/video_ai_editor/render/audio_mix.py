@@ -283,6 +283,14 @@ def varispeed_filter(speed: float) -> str:
 #: `speed_filters`.
 ATEMPO_LAG = "adelay=delays=960S:all=1"
 
+#: Restamp after every atempo stage. With ffmpeg 8.1, `adelay` + `atempo` emits
+#: frames whose pts derive from AV_NOPTS_VALUE, and the v1 `concat` then fails
+#: the whole export ("Invalid data found when processing input"): a 29.97
+#: project with a 0.3x clip and two 0.8x clips in a row could not be exported
+#: (tests/test_keep_pitch_export.py). WSOLA output is contiguous, so numbering
+#: the samples changes no sample, only the timestamps downstream filters read.
+ATEMPO_RESTAMP = "asetpts=N/SR/TB"
+
 
 #: The keep-pitch (atempo/WSOLA) timing bound this build can promise, in ms:
 #: what the Keep pitch tooltip (`lib/audioChannels.KEEP_PITCH_TITLE`) and
@@ -322,13 +330,13 @@ def speed_filters(clip: Clip) -> str:
     out = ""
     remaining = float(sp)
     while remaining > 2.0:
-        out += f",{ATEMPO_LAG},atempo=2.0"
+        out += f",{ATEMPO_LAG},atempo=2.0,{ATEMPO_RESTAMP}"
         remaining /= 2.0
     while remaining < 0.5:
-        out += f",{ATEMPO_LAG},atempo=0.5"
+        out += f",{ATEMPO_LAG},atempo=0.5,{ATEMPO_RESTAMP}"
         remaining /= 0.5
     if abs(remaining - 1.0) > 0.001:
-        out += f",{ATEMPO_LAG},atempo={remaining:.4f}"
+        out += f",{ATEMPO_LAG},atempo={remaining:.4f},{ATEMPO_RESTAMP}"
     return out
 
 

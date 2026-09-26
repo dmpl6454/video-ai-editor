@@ -180,10 +180,10 @@ class ClipSpec:
     start: float
     speed: Any = None
     reverse: bool = False
-    # Varispeed, not atempo: with ffmpeg 8.1.1 `adelay,atempo` (ATEMPO_LAG)
-    # emits NOPTS-based audio pts and the export's concat can then fail
-    # outright ("Invalid data found", measured at 29.97). Sound does not
-    # change frame selection, so the goldens sidestep it.
+    # Varispeed, not atempo: sound does not change frame selection, and
+    # varispeed is the sample-exact mode. (With ffmpeg 8.1.1 `adelay,atempo`
+    # used to emit NOPTS-based pts that failed the export's concat at 29.97;
+    # fixed by audio_mix.ATEMPO_RESTAMP, pinned by test_keep_pitch_export.py.)
     keep_pitch: bool = False
     id: str = ""
 
