@@ -98,7 +98,7 @@ These are first-run defaults from CSS media queries. A width the user has dragge
 | 1440×900 | 64 | 280 | 6 | **804** | 6 | 280 | icon + label |
 | 1920×1080 | 64 | 320 | 6 | **1204** | 6 | 320 | icon + label |
 
-- Tool panel collapsed at 1024: 48 · 0 · 0 · **714** · 6 · 260.
+- Tool panel collapsed at 1024: 48 · 0 · 0 · **710** · 6 · 260 (1024 − 48 − 6 − 260; measured in Chromium and WebKit, review RD1).
 - Both panels collapsed at 1024: 48 · 0 · 0 · **940** · 0 · 36.
 - The panel default grows with width because Stickers, Effects and Transitions are now tile grids rather than disclosures. At 280 px the grid holds three tiles of at least 72 px.
 
@@ -622,7 +622,7 @@ interface ActivityState {
 ### 8.3 New end-to-end tests (`tests/test_wave_d_rail_ui.py`, Playwright; mirrors `rail-mock-probe*.py`)
 
 1. **Names.** Each of the 8 tabs matches exactly one element with `exact=True`, and the tooltip text is not part of any name.
-2. **Grid.** At 1024 the columns are `48 220 6 484 6 260`. With the left collapsed they are `48 0 0 714 6 260`. With both collapsed they are `48 0 0 940 0 36` (**no hole**). The same check runs at 1280, 1440 and 1920 against §1.2.
+2. **Grid.** At 1024 the columns are `48 220 6 484 6 260`. With the left collapsed they are `48 0 0 710 6 260`. With both collapsed they are `48 0 0 940 0 36` (**no hole**). The same check runs at 1280, 1440 and 1920 against §1.2.
 3. **Top bar worst case.** Seed a long name, the stale links, an export error (route stubs), a fake recording (Chromium `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`) and a captions job (a `page.route` stub of the job poll). Then, at 900, 1024, 1280 and 1440:
    - `.topbar` has `scrollWidth == clientWidth`;
    - Export's bounding box is fully inside the viewport;
@@ -679,6 +679,14 @@ Instant preview (IP) works in `lib/preview/**`, `store.ts`, `Preview.tsx`, the l
 | **R6 Cleanup** | `store.ts` (the dead panel fields), `index.css`, `App.css` | **After IP Phase 1 has merged** (`store.ts`) | `rg "leftW\|rightPanelOpen" frontend/src/store.ts` finds nothing, and the build and tests are green |
 
 R2 and R3 both edit `TopBar.tsx`, so they are sequential. R4 and R5 are independent of R2 and R3 and can run in parallel with them, provided the gates hold.
+
+### 10.1 R1 as built: recorded deviations (review RD1)
+
+1. **Space on the rail.** §4.1 says Enter/Space on the active tab toggles the panel. In R1 the rail is *not* a `[data-keymap-ignore]` scope: that scope made every global shortcut (⌘Z, J/K/L, N, Space play) dead while a rail tab had focus, which the LeftPane tabs never did. So until R4's `Command.scope` lands, **Enter** toggles and **Space** stays the global play/pause, as it was on LeftPane. A mouse click on a tab does not move focus onto it (mousedown `preventDefault`), so the next Space plays instead of collapsing the panel (measured in Chromium and WebKit, `test_wave_d_rail_ui.py`). R4 restores Space-toggles with the scope rule.
+2. **Chords.** The rail shows a chord only while the live keymap binds one; R1 binds none, R4 lights them up.
+3. **The AI dot** lights while a Prompt-bar run holds the session lock (`lib/promptStore`: planning/running/verifying) **or** an AI tool card's job runs (`lib/aiRuns`). Its sr-only description is `hidden` (still the `aria-describedby` target), so it is not read in the Tools nav when idle.
+4. **Transition tile artwork** (`lib/transitionPreview.ts` wave polygon, `transitionsPanel.css` clock still frame at `animation-delay: -0.375s`) changed so the QA-119 "every tile's still frame is distinct" check still holds at the wider R1 panel: with the old artwork at the R1 panel width the two closest pairs measured 1.5 and 3.97 mean-pixel difference, under the test's threshold of 4 (`test_c2_panels_ui.py`). Neither file is in the R1 ownership row, and §2.5 says "TransitionsPanel, unchanged"; this is a visual change to the still frames only, recorded here rather than moved.
+5. **Timeline toolbar.** The narrower centre column (484 at 1024, was 512) needs the zoom steps to drop below 490 px instead of 440 px, or "Zoom to fit" is clipped between ~941 and 1024 px (`styles.css`, outside the grid block).
 
 ---
 

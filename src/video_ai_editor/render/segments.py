@@ -29,9 +29,13 @@ takes the old whole-clip path, unchanged.
 from __future__ import annotations
 
 import contextvars
+import json
 import os
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -87,6 +91,32 @@ def _on_grid(t: float, fps) -> bool:
     return abs(_tb.quantize(t, fps) - float(t)) < 1e-6
 
 
+@lru_cache(maxsize=256)
+def _source_rate_cached(src: str, mtime_ns: int, size: int) -> Fraction | None:
+    try:
+        out = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=avg_frame_rate,r_frame_rate", "-of", "json", src],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, **_pu.SUBPROCESS_FLAGS).stdout
+        st = (json.loads(out or "{}").get("streams") or [None])[0]
+    except Exception:
+        return None
+    if not st:
+        return None
+    return _tb.source_rate(st.get("avg_frame_rate"), st.get("r_frame_rate"))
+
+
+def source_rate(src: str) -> Fraction | None:
+    """The frame rate of ``src``'s picture (cached on path, mtime, size), or
+    None when it cannot be probed."""
+    try:
+        st = os.stat(src)
+    except OSError:
+        return None
+    return _source_rate_cached(str(src), st.st_mtime_ns, st.st_size)
+
+
 def segment_bounds(c: Clip, fps, segment_s: float | None = None) -> list[tuple[float, float]] | None:
     """The [in, out] source spans clip `c` is rendered from, or None when the
     clip must be rendered whole (ineligible, or too short to be worth it).
@@ -113,6 +143,16 @@ def segment_bounds(c: Clip, fps, segment_s: float | None = None) -> list[tuple[f
         return None
     a, b = float(c.in_), float(c.out)
     if not (_on_grid(a, fps) and _on_grid(b, fps)):
+        return None
+    # The SOURCE must run at the project rate. Each segment is decoded with
+    # its own seek and its own `fps=` phase; when the rates differ (25 fps in
+    # a 29.97 project) that phase restarts at every segment boundary and the
+    # preview picked a neighbouring source frame on about one output frame in
+    # six past the first boundary — frames the export (one pass over the
+    # whole clip) never shows (Wave D frame-map goldens, segments_* cases).
+    # At the project rate every boundary sits on a source frame, the phase is
+    # the whole clip's, and the segments are frame-identical to it.
+    if source_rate(str(c.src)) != _tb.rate_of(fps):
         return None
     step = max(1, _tb.frame_of(seg, fps))
     fa, fb = _tb.frame_of(a, fps), _tb.frame_of(b, fps)

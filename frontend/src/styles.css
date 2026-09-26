@@ -50,7 +50,33 @@
   --control-h: 28px;
   --panel-btn-h: 30px;
   --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
+  /* The editor shell (wave D, LEFT_RAIL_SPEC §1): the tool rail, the side
+     panels' width budget and the shell's motion. --left-w / --right-w are the
+     first-run widths by viewport (the media queries below); a width the user
+     dragged is written inline on .app and wins. */
+  --rail-w: 64px;
+  --rail-item-h: 52px;
+  --rail-foot-btn: 36px;
+  --left-w: 280px;
+  --right-w: 280px;
+  --left-min: 180px;
+  --center-min: 440px;
+  --right-min: 220px;
+  --right-rail-w: 36px;
+  --topbar-h: 44px;
+  --panel-head-h: 36px;
+  --dur-fast: 120ms;
+  --dur-normal: 220ms;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 }
+/* Column widths by breakpoint (§1.2): 48 px icon-only rail below 1280. */
+@media (max-width: 1279px) { :root { --rail-w: 48px; --rail-item-h: 44px; --left-w: 220px; --right-w: 260px; } }
+@media (min-width: 1280px) and (max-width: 1439px) { :root { --left-w: 240px; } }
+@media (min-width: 1920px) { :root { --left-w: 320px; --right-w: 320px; } }
+@media (prefers-reduced-motion: reduce) { :root { --dur-fast: 0ms; --dur-normal: 0ms; } }
+/* `hidden` always wins: a component's own `display` (flex, grid) silently
+   overrode it in three places, drawing panels that were meant to be gone. */
+[hidden] { display: none !important; }
 /* The whole app is dark: native controls (select pop-ups, scrollbars, date
    pickers) follow it even when the system appearance is light. It used to be
    set on .dialog only, so every <select> in Properties rendered white (QA-100
@@ -124,13 +150,12 @@ button.emoji-group-toggle {
   padding: 3px 0; background: none; border: none;
 }
 button.emoji-group-toggle:hover:not(:disabled) { background: none; color: var(--text); }
-/* Full-width panel buttons (Add music, Record voiceover, Stickers, Effects):
-   one height, icon + words centred, 11 px like the rest of the left pane. */
-.panel-btn, .vo-btn, .panel-disclosure {
+/* Full-width panel buttons (Add music, Record voiceover, Import audio):
+   one height, icon + words centred, 11 px like the rest of the tool panels. */
+.panel-btn, .vo-btn {
   display: flex; align-items: center; justify-content: center; gap: 6px;
   width: 100%; min-height: var(--panel-btn-h); padding: 0 10px; font-size: 11px;
 }
-.panel-disclosure { justify-content: flex-start; }
 .vo-import { margin-top: 6px; }
 .music-panel-head { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
 .music-panel-head .icon { margin-right: 0; }
@@ -138,16 +163,28 @@ button.emoji-group-toggle:hover:not(:disabled) { background: none; color: var(--
 input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-2); }
 
 .app {
+  /* Each state changes ONLY its own column variables (critique H3): two
+     whole templates of equal specificity let the later one win, and with
+     both panels collapsed the tool panel's column came back as an empty hole.
+     minmax(min, var) + minmax(--center-min, 1fr): the grid's "maximize
+     tracks" step measures free space with the fr track at its 440 px base,
+     so the centre never drops below 440 — a CSS guarantee, not JS math.
+     Dedicated 6px columns for the drag handles (Task 9) sit between the
+     panes as real grid tracks — not a gap — so Splitter.tsx's <div> is a
+     normal grid child. The rail foot (R3) is its own row-3 item. */
+  --rail-col: var(--rail-w);
+  --left-col: minmax(var(--left-min), var(--left-w));
+  --lsplit-col: 6px;
+  --rsplit-col: 6px;
+  --right-col: minmax(var(--right-min), var(--right-w));
   display: grid;
-  grid-template-rows: 44px 1fr;
-  /* Dedicated 6px columns for the left/right drag handles (Task 9) sit
-     between the panes as real grid tracks — not a gap — so Splitter.tsx's
-     <div> can be a normal grid child instead of an absolutely-positioned
-     overlay. Matches the widened .splitter-vertical hit target below. */
-  grid-template-columns: var(--left-w, 220px) 6px 1fr 6px var(--right-w, 280px);
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) auto;
+  grid-template-columns: var(--rail-col) var(--left-col) var(--lsplit-col)
+                         minmax(var(--center-min), 1fr) var(--rsplit-col) var(--right-col);
   grid-template-areas:
-    "topbar   topbar   topbar  topbar    topbar"
-    "left     lsplit   center  rsplit    right";
+    "topbar topbar topbar  topbar topbar topbar"
+    "rail   left   lsplit  center rsplit right"
+    "foot   left   lsplit  center rsplit right";
   height: 100vh;
   width: 100%;
   /* A pro 3-pane editor needs width. Rather than collapsing on narrow windows,
@@ -158,6 +195,9 @@ input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color:
 /* Let every grid child shrink to the 900px floor instead of forcing it wider
    (the panes' intrinsic min-content would otherwise push it to ~1292px). */
 .app > * { min-width: 0; }
+.app.left-collapsed { --left-col: 0px; --lsplit-col: 0px; }
+.app.right-collapsed { --rsplit-col: 0px; --right-col: var(--right-rail-w); }
+.app.left-collapsed .splitter-left, .app.right-collapsed .splitter-right { visibility: hidden; }
 
 .topbar {
   grid-area: topbar;
@@ -310,37 +350,10 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
   padding: 10px;
 }
 .sidebar.right { border-right: none; border-left: 1px solid var(--line); position: relative; }
+/* The right panel's header, collapsed rail and tab bodies:
+   components/rail/rail.css (RightPanel.tsx). */
 
-/* Right-panel collapse toggle (QA-129): an icon button at the right end of
-   the Inspector / Chat tab strip — it was a full-width 22 px bar with a tiny
-   chevron that read as an empty panel. Collapsed, it is the only thing on the
-   28 px rail. */
-.right-panel-toggle {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--text-dim);
-  z-index: 2;
-}
-.right-panel-toggle:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
-.right-panel-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.sidebar.right:not(.collapsed) .right-tabs { margin-right: 32px; }
-/* Collapsed: the sidebar itself shrinks to a thin rail (--right-w is driven
-   down to RIGHT_RAIL_W by App.tsx); hide the Properties/OpsLog content via
-   display:none (not just visibility) so it doesn't render uselessly while
-   invisible, and let the toggle fill the rail as the sole visible thing. */
-.sidebar.right.collapsed { padding: 10px 2px; }
-.sidebar.right.collapsed .right-panel-content { display: none; }
-.sidebar.right.collapsed .right-panel-toggle { position: static; width: 24px; height: 24px; }
-
-/* A disabled splitter (Task 4b: the right splitter while the panel is
+/* A disabled splitter (Task 4b: a splitter while its panel is
    collapsed) keeps its seam but drops the resize cursor/hover affordance —
    dragging it is a deliberate no-op; only the explicit toggle re-expands. */
 .splitter-disabled { cursor: default; }
@@ -696,8 +709,10 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
 .timeline-pane { container-type: inline-size; }
 @container (max-width: 760px) { .timeline-toolbar .tb-clock-dur { display: none; } }
 @container (max-width: 640px) { .timeline-toolbar .tb-zoom { display: none; } }
-/* Undo/Redo are icons now, so the zoom steps fit a 512 px pane (1024 window). */
-@container (max-width: 440px) { .timeline-toolbar .tb-zoomstep { display: none; } }
+/* The toolbar's full content is 485 px; the R1 grid leaves the centre 484 px
+   at the 1024 default (it was 512 before the rail), so the zoom steps drop
+   below 490 px — before "Zoom to fit" would be pushed out of the bar. */
+@container (max-width: 490px) { .timeline-toolbar .tb-zoomstep { display: none; } }
 
 .timeline-canvas-wrap {
   flex: 1;
@@ -944,15 +959,13 @@ button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--tex
 
 /* Chat is DOCKED in the right sidebar as a tab (QA-061) — it used to be a
    position:fixed 360px panel over the timeline's right-hand tracks and the
-   History list, open on every load. With the Chat tab active the sidebar
-   becomes a column and the pane fills it; its body scrolls, never the page. */
+   History list, open on every load. The right panel is a column (rail.css)
+   and the chat pane fills it; its body scrolls, never the page. */
 .right-tabs { display: flex; gap: 2px; padding: 2px; margin-bottom: 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; }
 .right-tabs [role="tab"] { flex: 1; padding: 4px 8px; font-size: 11px; background: transparent; border: none; border-radius: 4px; color: var(--text-dim); }
 .right-tabs [role="tab"]:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
 .right-tabs [role="tab"][aria-selected="true"] { background: var(--bg-3); color: var(--text); font-weight: 600; }
 .right-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
-.sidebar.right.is-chat:not(.collapsed) { display: flex; flex-direction: column; overflow: hidden; }
-.sidebar.right.is-chat:not(.collapsed) .right-panel-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .right-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .right-chat[hidden] { display: none; }
 .chat-pane {

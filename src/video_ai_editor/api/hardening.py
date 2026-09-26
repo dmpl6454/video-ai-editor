@@ -28,6 +28,7 @@ written.
 from __future__ import annotations
 import json
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict, defaultdict, deque
@@ -223,6 +224,27 @@ def rps_for_path(path: str) -> float | None:
     return None
 
 
+#: Wave D preview media (api/preview_routes.py, spec §5.2): proxy init
+#: segments, span packs and FLAC chunks. A playing timeline fetches several of
+#: them a second, each on its OWN path, so the per-(IP, path) bucket above is
+#: the wrong shape twice over — it never limits them and it grows one key per
+#: span. READS of them (GET/HEAD) are exempt from it and share ONE bucket per
+#: client instead, capped at PREVIEW_MEDIA_RPS across all of them. index.json,
+#: any other path and any other method keep the per-path bucket.
+PREVIEW_MEDIA_RPS = 400.0
+PREVIEW_MEDIA_BUCKET = "preview-media"
+_PREVIEW_MEDIA = re.compile(
+    r"^/api/proxies/[0-9a-f]{24}/(init\.mp4|v/\d{1,6}\.bin|a/\d{1,6}\.flac)$")
+_PREVIEW_MEDIA_METHODS = frozenset({"GET", "HEAD"})
+
+
+def rate_bucket(path: str, method: str = "GET") -> tuple[str, float | None]:
+    """(bucket name, allowance) of a request for the rate limiter."""
+    if method.upper() in _PREVIEW_MEDIA_METHODS and _PREVIEW_MEDIA.match(path):
+        return PREVIEW_MEDIA_BUCKET, PREVIEW_MEDIA_RPS
+    return path, rps_for_path(path)
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 
@@ -236,8 +258,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         # Rate limit (skip /metrics, /healthz, /livez, /readyz)
         path = request.url.path
         if not path.startswith(("/metrics", "/healthz", "/livez", "/readyz")):
-            ip = (request.client.host if request.client else "unknown") + ":" + path
-            if not RATE.allow(ip, rps_for_path(path)):
+            bucket, rps = rate_bucket(path, request.method)
+            ip = (request.client.host if request.client else "unknown") + ":" + bucket
+            if not RATE.allow(ip, rps):
                 METRICS.counter("vai_http_rate_limited_total", {"path": path})
                 _logger.warning("rate-limited", extra={
                     "request_id": rid, "method": request.method, "path": path,

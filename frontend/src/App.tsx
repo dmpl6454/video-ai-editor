@@ -1,16 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore, startSessionWatch } from './store'
 import { ConnectionBanner } from './components/ConnectionBanner'
 import { MediaToolsBanner } from './components/MediaToolsBanner'
 import { TopBar } from './components/TopBar'
-import { LeftPane } from './components/LeftPane'
+import { ToolRail } from './components/rail/ToolRail'
+import { ToolPanel } from './components/rail/ToolPanel'
+import { RailTooltip } from './components/rail/RailTooltip'
+import { RightPanel } from './components/RightPanel'
 import { Preview } from './components/Preview'
 import { PromptBar } from './components/PromptBar'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Timeline } from './components/Timeline'
-import { Properties } from './components/Properties'
-import { OpsLog } from './components/OpsLog'
-import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
@@ -20,17 +20,12 @@ import { CaptionStylePanel } from './components/CaptionStylePanel'
 import { ToastHost } from './components/Toast'
 import { Splitter } from './components/Splitter'
 import { Icon } from './components/Icon'
-import { browserStorage, readRightTab, writeRightTab, type RightTab } from './lib/rightTab'
+import { useLayoutStore } from './lib/layoutStore'
 import { useKeymap } from './keymap/engine'
 
 // The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
 // horizontally below it; this banner nudges the user to a wider window.
 const MIN_EDITOR_WIDTH = 900
-
-// Width of the right sidebar's collapsed rail (Task 4b) — just enough for the
-// re-expand tab, so the center pane reclaims the rest without a jarring
-// reflow (the column shrinks to a fixed rail rather than to 0).
-const RIGHT_RAIL_W = 28
 
 export default function App() {
   const init = useStore((s) => s.init)
@@ -40,15 +35,25 @@ export default function App() {
   // light poll) and whether the engine is still there.
   useEffect(() => startSessionWatch(window), [])
 
-  // Resizable panel sizes (Task 9) — persisted in the store (localStorage-
-  // backed); drive them onto the .app/.center grids as CSS custom properties
-  // so styles.css's `var(--left-w, 220px)` etc. pick them up.
-  const leftW = useStore((s) => s.leftW)
-  const rightW = useStore((s) => s.rightW)
+  // The shell's layout (lib/layoutStore, LEFT_RAIL_SPEC §6.1): which tool
+  // panel shows, whether each side is open, and any DRAGGED side width. A
+  // width is written inline only once the user has dragged it (non-null);
+  // until then the media-query defaults in styles.css size the columns.
+  // The timeline height stays in store.ts.
+  const leftOpen = useLayoutStore((s) => s.leftOpen)
+  const leftW = useLayoutStore((s) => s.leftW)
+  const rightW = useLayoutStore((s) => s.rightW)
+  const rightOpen = useLayoutStore((s) => s.rightOpen)
+  const setPanelWidth = useLayoutStore((s) => s.setPanelWidth)
   const timelineH = useStore((s) => s.timelineH)
   const setPanelSize = useStore((s) => s.setPanelSize)
-  const rightPanelOpen = useStore((s) => s.rightPanelOpen)
-  const setRightPanelOpen = useStore((s) => s.setRightPanelOpen)
+  const toolPanelRef = useRef<HTMLElement>(null)
+  // A drag's running width, seeded at pointer-down from the DRAWN width (the
+  // stored one can be null or wider than the grid draws) and advanced by
+  // every delta — read live, never from this render's closure: a real drag
+  // fires many mousemoves per React commit, and a stale base loses all but
+  // the last-flushed delta.
+  const dragBase = useRef(0)
 
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === 'undefined' ? MIN_EDITOR_WIDTH : window.innerWidth)
@@ -60,25 +65,14 @@ export default function App() {
   }, [])
   const showNarrowWarning = viewportWidth < MIN_EDITOR_WIDTH && !narrowDismissed
 
-  // The right sidebar's tab: Inspector (default) or the docked Chat (QA-061).
-  // Remembered per browser, so closing Chat stays closed across reloads.
-  const [rightTab, setRightTabState] = useState<RightTab>(() => readRightTab(browserStorage()))
-  const setRightTab = (t: RightTab) => { setRightTabState(t); writeRightTab(browserStorage(), t) }
-  const onTabKey = (e: React.KeyboardEvent) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return
-    e.preventDefault()
-    const next: RightTab = e.key === 'Home' ? 'inspect' : e.key === 'End' ? 'chat' : rightTab === 'chat' ? 'inspect' : 'chat'
-    setRightTab(next)
-    document.getElementById(`right-tab-${next}`)?.focus()
-  }
-
   const appVars = {
-    '--left-w': `${leftW}px`,
-    // Collapsed: shrink the grid column to a thin rail instead of hiding it
-    // outright — avoids a reflow jump and leaves room for the re-expand tab.
-    '--right-w': rightPanelOpen ? `${rightW}px` : `${RIGHT_RAIL_W}px`,
+    ...(leftW !== null ? { '--left-w': `${leftW}px` } : {}),
+    ...(rightW !== null ? { '--right-w': `${rightW}px` } : {}),
     '--timeline-h': `${timelineH}px`,
   } as React.CSSProperties
+  const seedDrag = (el: HTMLElement | null) => {
+    dragBase.current = el?.getBoundingClientRect().width ?? 0
+  }
 
   return (
     <>
@@ -93,21 +87,22 @@ export default function App() {
           </button>
         </div>
       )}
-    <div className="app" style={appVars}>
+    <div className={`app${leftOpen ? '' : ' left-collapsed'}${rightOpen ? '' : ' right-collapsed'}`} style={appVars}>
       <TopBar />
-      <aside className="sidebar left">
-        <LeftPane />
-      </aside>
+      {/* DOM order is rail, tool panel, centre, right (LEFT_RAIL_SPEC §2.1):
+          Tab from a rail tab goes into its panel, as the APG tabs pattern
+          expects. */}
+      <ToolRail />
+      <ToolPanel ref={toolPanelRef} />
       <Splitter
         orientation="vertical"
+        className="splitter-left"
         style={{ gridArea: 'lsplit' }}
-        // Reads the live value via getState() rather than the `leftW` closed
-        // over by this render: a real drag fires many mousemove events per
-        // React commit, so every one of them would otherwise add its delta
-        // to the SAME stale base — losing all but the last-flushed delta
-        // (verified live: a 10-step 80px drag only moved the panel 8px, and
-        // a genuine Playwright mouse drag could even net-shrink the panel).
-        onDelta={(d) => setPanelSize('leftW', useStore.getState().leftW + d)}
+        disabled={!leftOpen}
+        onStart={() => seedDrag(toolPanelRef.current)}
+        // Verified live before the base was kept here: a 10-step 80px drag
+        // only moved the panel 8px when every delta re-read a stale width.
+        onDelta={(d) => { dragBase.current = setPanelWidth('left', dragBase.current + d) ?? dragBase.current }}
       />
       <main className="center">
         {/* One sentence → a verified, single-undo edit. Above the picture,
@@ -145,49 +140,17 @@ export default function App() {
       </main>
       <Splitter
         orientation="vertical"
+        className="splitter-right"
         style={{ gridArea: 'rsplit' }}
-        // Dragging right moves the mouse away from the right sidebar, which
-        // should shrink it — the delta sign is negated relative to leftW.
-        onDelta={(d) => setPanelSize('rightW', useStore.getState().rightW - d)}
-        // While collapsed the rail is only 28px — dragging it shouldn't
-        // silently un-collapse the panel; only the explicit tab does that.
-        disabled={!rightPanelOpen}
+        // Dragging right moves the mouse away from the right panel, which
+        // should shrink it — the delta sign is negated relative to the left.
+        onStart={() => seedDrag(document.getElementById('right-panel'))}
+        onDelta={(d) => { dragBase.current = setPanelWidth('right', dragBase.current - d) ?? dragBase.current }}
+        // Collapsed, the column is a 36 px rail with no splitter track;
+        // dragging never silently un-collapses the panel.
+        disabled={!rightOpen}
       />
-      <aside className={`sidebar right${rightPanelOpen ? '' : ' collapsed'}${rightTab === 'chat' ? ' is-chat' : ''}`}>
-        {/* An icon button at the end of the tab strip (QA-129) — it was a
-            full-width empty-looking 22 px bar with a tiny chevron. */}
-        <button
-          type="button"
-          className="right-panel-toggle"
-          onClick={() => setRightPanelOpen(!rightPanelOpen)}
-          title={rightPanelOpen ? 'Hide the Inspector and Chat' : 'Show the Inspector and Chat'}
-          aria-label={rightPanelOpen ? 'Hide the Inspector and Chat panel' : 'Show the Inspector and Chat panel'}
-          aria-expanded={rightPanelOpen}
-        >
-          <Icon name={rightPanelOpen ? 'chevronRight' : 'chevronLeft'} />
-        </button>
-        <div className="right-panel-content">
-          {/* Chat is DOCKED here as a tab (QA-061) — it used to float over the
-              timeline tracks and History, open on every load. */}
-          <div className="right-tabs" role="tablist" aria-label="Right panel" data-keymap-ignore onKeyDown={onTabKey}>
-            <button type="button" role="tab" id="right-tab-inspect" aria-controls="right-panel-inspect"
-                    aria-selected={rightTab === 'inspect'} tabIndex={rightTab === 'inspect' ? 0 : -1}
-                    onClick={() => setRightTab('inspect')}>Inspector</button>
-            <button type="button" role="tab" id="right-tab-chat" aria-controls="right-panel-chat"
-                    aria-selected={rightTab === 'chat'} tabIndex={rightTab === 'chat' ? 0 : -1}
-                    onClick={() => setRightTab('chat')}>Chat</button>
-          </div>
-          <div role="tabpanel" id="right-panel-inspect" aria-labelledby="right-tab-inspect" hidden={rightTab !== 'inspect'}>
-            <Properties />
-            <OpsLog />
-          </div>
-          {/* Kept mounted while hidden: a turn keeps streaming, and the
-              conversation is still there when the tab is reopened. */}
-          <div role="tabpanel" id="right-panel-chat" aria-labelledby="right-tab-chat" className="right-chat" hidden={rightTab !== 'chat'}>
-            <ChatOverlay onClose={() => setRightTab('inspect')} />
-          </div>
-        </div>
-      </aside>
+      <RightPanel />
       <Help />
       <ShortcutsSettings />
       <SettingsDialog />
@@ -197,6 +160,7 @@ export default function App() {
     <ExportModal />
     <CaptionStylePanel />
     <ToastHost />
+    <RailTooltip />
     </>
   )
 }

@@ -1,0 +1,28 @@
+{
+ "custom": [
+  "bars",
+  "blinds",
+  "boxin",
+  "boxopen",
+  "burn",
+  "checker",
+  "diamond",
+  "filmburn",
+  "glitch",
+  "luma",
+  "ripple",
+  "spin",
+  "spiral",
+  "stripes",
+  "swirl",
+  "venetian",
+  "wave"
+ ],
+ "post": [
+  "whip",
+  "whipdown",
+  "whippan",
+  "whipright",
+  "whipup"
+ ]
+}

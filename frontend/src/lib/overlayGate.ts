@@ -11,19 +11,24 @@
 // frame 90 cannot flip it, and a non-frame-aligned time lands on the nearest
 // frame exactly as the server quantises it. Keep the two in lockstep.
 
+//
+// The arithmetic is `preview/timeline/timebase.ts` (the exact port of
+// `edl/timebase.py`, spec R2): one copy of frame_of/enable_window in the
+// frontend, so a gate boundary can never sit a frame away from the server's.
+import {
+  enableWindow as tbEnableWindow, frameOf as tbFrameOf,
+} from './preview/timeline/timebase'
+
+const usableFps = (fps: number) => (fps > 0 && Number.isFinite(fps) ? fps : 30)
+
 /** Nearest frame index to `t` (non-negative), as `timebase.frame_of`. */
 export function frameOf(t: number, fps: number): number {
-  const f = fps > 0 && Number.isFinite(fps) ? fps : 30
-  return t <= 0 ? 0 : Math.round(t * f)
+  return tbFrameOf(t, usableFps(fps))
 }
 
 /** `[lo, hi)` gate bounds in seconds for an overlay shown over `[start, end)`. */
 export function enableWindow(start: number, end: number, fps: number): [number, number] {
-  const f = fps > 0 && Number.isFinite(fps) ? fps : 30
-  const half = 0.5 / f
-  const lo = frameOf(start, f) / f - half
-  const hi = frameOf(end, f) / f - half
-  return [lo, Math.max(lo, hi)]
+  return tbEnableWindow(start, end, usableFps(fps))
 }
 
 /** Is an overlay with window `[start, end)` on screen at instant `t`? */

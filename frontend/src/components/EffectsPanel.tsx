@@ -59,14 +59,16 @@ function chipLabel(e: EffectEntry): string {
   return EFFECT_LABELS[e.type] ?? e.type
 }
 
-export function EffectsPanel() {
+/** The Effects tool panel's content. Always open (the rail tab is the
+ *  disclosure now, LEFT_RAIL_SPEC §2.7); `active` is whether the panel is on
+ *  screen, and the look list is fetched on its first show. */
+export function EffectsPanel({ active = true }: { active?: boolean }) {
   const sid = useStore((s) => s.sessionId)
   const edl = useStore((s) => s.edl)
   const selection = useStore((s) => s.selection)
   const dispatch = useStore((s) => s.dispatch)
   const mediaNames = useMediaNameMap()      // the clip's name as the Media panel shows it
 
-  const [open, setOpen] = useState(false)
   const [luts, setLuts] = useState<string[] | null>(null)
   const [filters, setFilters] = useState<string[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
@@ -129,16 +131,16 @@ export function EffectsPanel() {
     if (!draggingIntensity.current) setLocalIntensity(appliedIntensity ?? 100)
   }, [appliedIntensity, selection])
 
-  // Fetch the bundled LUT list (and valid effect types) once, on first expand.
+  // Fetch the bundled LUT list (and valid effect types) once, on first show.
   // Read-only listings go through api.dispatch directly: store.dispatch never
   // returns the tool's result payload to its caller.
-  // One fetch per open/Retry, tracked by ref — NOT by `loading` in the deps:
+  // One fetch per first show/Retry, tracked by ref — NOT by `loading` in the deps:
   // setLoading(true) inside an effect that depends on `loading` re-fires the
   // effect, whose cleanup flipped `cancelled` on the in-flight fetch, so no
   // setState (including setLoading(false)) ever ran → "Loading…" forever.
   const fetchStartedRef = useRef(false)
   useEffect(() => {
-    if (!open || !sid || fetchStartedRef.current) return
+    if (!active || !sid || fetchStartedRef.current) return
     fetchStartedRef.current = true
     setLoading(true)
     Promise.all([
@@ -155,9 +157,9 @@ export function EffectsPanel() {
         setListError(e instanceof Error ? e.message : String(e))
       })
       .finally(() => setLoading(false))
-    // No cancellation: collapse doesn't unmount the panel, and a dep-change
+    // No cancellation: hiding doesn't unmount the panel, and a dep-change
     // cleanup here is exactly what wedged the original "Loading…" state.
-  }, [open, sid, listError])
+  }, [active, sid, listError])
 
   const presets = filters
     ? EFFECT_PRESETS.filter((p) => filters.includes(p.type))
@@ -195,108 +197,96 @@ export function EffectsPanel() {
   }
 
   return (
-    <div className="effects-panel" style={{ marginTop: 16 }}>
-      <button
-        className="panel-disclosure"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        title="Filters, effects & LUT looks"
-      >
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} /><Icon name="effects" /> Effects
-      </button>
-      {open && (
-        <div style={{ marginTop: 8 }}>
-          {disabled && (
-            <div className="fx-hint">
-              Add a video to the timeline first — looks and effects apply to a clip.
-            </div>
-          )}
-          {!disabled && (
-            <div className="fx-target" title={targetIsFallback
-              ? 'No clip selected — applying to the clip at the playhead. Click a clip to target it.'
-              : 'Applying to the selected clip.'}>
-              <Icon name="film" /> {effectsTargetLine(clip!.src, mediaNames, targetIsFallback)}
-            </div>
-          )}
-          {listError && (
-            <div className="fx-error">
-              <span>{listError}</span>
-              <button onClick={() => { fetchStartedRef.current = false; setListError(null) }}>Retry</button>
-            </div>
-          )}
+    <div className="effects-panel">
+      {disabled && (
+        <div className="fx-hint">
+          Add a video to the timeline first — looks and effects apply to a clip.
+        </div>
+      )}
+      {!disabled && (
+        <div className="fx-target" title={targetIsFallback
+          ? 'No clip selected — applying to the clip at the playhead. Click a clip to target it.'
+          : 'Applying to the selected clip.'}>
+          <Icon name="film" /> {effectsTargetLine(clip!.src, mediaNames, targetIsFallback)}
+        </div>
+      )}
+      {listError && (
+        <div className="fx-error">
+          <span>{listError}</span>
+          <button onClick={() => { fetchStartedRef.current = false; setListError(null) }}>Retry</button>
+        </div>
+      )}
 
-          <div className="fx-subhead section-label">Looks (LUTs)</div>
-          <div className="fx-slider-row">
-            <label>Intensity</label>
-            {/* Keyed by clip: a commit still waiting on its idle delay lands
-                on the clip it was made on (lib/useSliderCommit, QA-087). */}
-            <IntensityRange
-              key={clip?.id ?? ''}
-              value={localIntensity}
-              stored={appliedIntensity ?? 100}
+      <div className="fx-subhead section-label">Filters · LUT looks</div>
+      <div className="fx-slider-row">
+        <label>Intensity</label>
+        {/* Keyed by clip: a commit still waiting on its idle delay lands
+            on the clip it was made on (lib/useSliderCommit, QA-087). */}
+        <IntensityRange
+          key={clip?.id ?? ''}
+          value={localIntensity}
+          stored={appliedIntensity ?? 100}
+          disabled={disabled}
+          onLive={(v) => { draggingIntensity.current = true; setLocalIntensity(v) }}
+          onEnd={() => { draggingIntensity.current = false }}
+          onCommit={(v) => { draggingIntensity.current = false; void commitIntensity(v) }}
+        />
+        <span>{localIntensity}%</span>
+      </div>
+      {loading && <div className="fx-hint">Loading looks…</div>}
+      {(luts ?? []).map((name) => {
+        const appliedIdx = lutIndexByName.get(name)
+        const applied = appliedIdx !== undefined
+        return (
+          <div key={name} className={`fx-lut-row${applied ? ' applied' : ''}`}>
+            <span className="fx-lut-name" title={name}>
+              {applied && <Icon name="check" />}{lutDisplayName(name)}
+            </span>
+            <button
               disabled={disabled}
-              onLive={(v) => { draggingIntensity.current = true; setLocalIntensity(v) }}
-              onEnd={() => { draggingIntensity.current = false }}
-              onCommit={(v) => { draggingIntensity.current = false; void commitIntensity(v) }}
-            />
-            <span>{localIntensity}%</span>
+              onClick={() => {
+                if (appliedIdx !== undefined) void removeEffect(appliedIdx)
+                else void applyLut(name)
+              }}
+            >
+              {applied ? 'Remove' : 'Apply'}
+            </button>
           </div>
-          {loading && <div className="fx-hint">Loading looks…</div>}
-          {(luts ?? []).map((name) => {
-            const appliedIdx = lutIndexByName.get(name)
-            const applied = appliedIdx !== undefined
-            return (
-              <div key={name} className={`fx-lut-row${applied ? ' applied' : ''}`}>
-                <span className="fx-lut-name" title={name}>
-                  {applied && <Icon name="check" />}{lutDisplayName(name)}
-                </span>
-                <button
-                  disabled={disabled}
-                  onClick={() => {
-                    if (appliedIdx !== undefined) void removeEffect(appliedIdx)
-                    else void applyLut(name)
-                  }}
-                >
-                  {applied ? 'Remove' : 'Apply'}
-                </button>
-              </div>
-            )
-          })}
-          {luts !== null && luts.length === 0 && (
-            <div className="fx-hint">No bundled LUTs found.</div>
-          )}
+        )
+      })}
+      {luts !== null && luts.length === 0 && (
+        <div className="fx-hint">No bundled LUTs found.</div>
+      )}
 
-          <div className="fx-subhead section-label" style={{ marginTop: 10 }}>Effects</div>
-          <div className="fx-grid">
-            {presets.map((p) => (
-              <button
-                key={p.type}
-                className="fx-btn"
-                disabled={disabled}
-                title={`${p.hint} — effects stack; remove from the chips below.`}
-                onClick={() => void addEffect(p.type, p.params)}
-              >
-                <Icon name={p.icon} />{p.label}
-              </button>
+      <div className="fx-subhead section-label" style={{ marginTop: 10 }}>Effects</div>
+      <div className="fx-grid">
+        {presets.map((p) => (
+          <button
+            key={p.type}
+            className="fx-btn"
+            disabled={disabled}
+            title={`${p.hint} — effects stack; remove from the chips below.`}
+            onClick={() => void addEffect(p.type, p.params)}
+          >
+            <Icon name={p.icon} />{p.label}
+          </button>
+        ))}
+      </div>
+
+      {clip && effects.length > 0 && (
+        <>
+          <div className="fx-subhead section-label" style={{ marginTop: 10 }}>
+            {targetIsFallback ? 'On the clip at the playhead' : 'On the selected clip'}
+          </div>
+          <div className="fx-chips">
+            {effects.map((e, i) => (
+              <span key={`${e.type}-${i}`} className="fx-chip">
+                {chipLabel(e)}
+                <button title={`Remove ${chipLabel(e)}`} aria-label={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}><Icon name="close" /></button>
+              </span>
             ))}
           </div>
-
-          {clip && effects.length > 0 && (
-            <>
-              <div className="fx-subhead section-label" style={{ marginTop: 10 }}>
-                {targetIsFallback ? 'On the clip at the playhead' : 'On the selected clip'}
-              </div>
-              <div className="fx-chips">
-                {effects.map((e, i) => (
-                  <span key={`${e.type}-${i}`} className="fx-chip">
-                    {chipLabel(e)}
-                    <button title={`Remove ${chipLabel(e)}`} aria-label={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}><Icon name="close" /></button>
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+        </>
       )}
     </div>
   )

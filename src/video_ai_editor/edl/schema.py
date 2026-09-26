@@ -82,7 +82,10 @@ EDL_VERSION = 3
 #     per-run face (a Devanagari line in a Latin-dominant caption drew .notdef
 #     boxes; "Hello नमस्ते" was shaped as Latin), and the music duck key is
 #     gated on the raw key's absolute level (room tone ducked the bed's head).
-RENDER_BEHAVIOR_VERSION = 15
+# 16: (Wave D frame-map goldens) xfade inputs share a 1/R clock instead of
+#     AVTB, so a seam whose left side had been through µs roundings no longer
+#     starts one frame late (the picture ran a frame longer than the sound).
+RENDER_BEHAVIOR_VERSION = 16
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]

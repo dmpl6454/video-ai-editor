@@ -43,7 +43,7 @@ def _open(browser, base_url, sid, width=1440, height=900, reduced_motion=None): 
     ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sid!r}); localStorage.setItem('vai.rightTab', 'inspect') }} catch (e) {{}}")
     page = ctx.new_page()
     page.goto(base_url + "/")
-    page.get_by_role("tab", name="Media").wait_for()
+    page.get_by_role("tab", name="Media", exact=True).wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)
     return page
@@ -54,7 +54,7 @@ def _select_first_clip(page):
     bb = cv.bounding_box()
     # The main-video lane is the first lane under the ruler on this project.
     page.mouse.click(bb["x"] + 140, bb["y"] + 40)
-    page.get_by_role("tab", name="Inspector").click()
+    page.get_by_role("tab", name="Inspector", exact=True).click()
     page.wait_for_timeout(600)
 
 
@@ -79,16 +79,16 @@ def _select_new_text_clip(page) -> bool:
     }""")
     if not ok:
         return False
-    page.get_by_role("tab", name="Inspector").click()
+    page.get_by_role("tab", name="Inspector", exact=True).click()
     page.wait_for_timeout(600)
     return page.locator("[role=radiogroup][aria-label=Alignment]").count() == 1
 
 
 def _open_media_panels(page):
-    for title in ("Filters, effects & LUT looks", "Emoji & sticker picker"):   # the picker closes on an outside click
-        btn = page.locator(f".sidebar.left button[title='{title}']").first
-        if btn.get_attribute("aria-expanded") != "true":
-            btn.click()
+    # The rail's Effects and Stickers panels (LEFT_RAIL_SPEC R1). Stickers is
+    # last: _surfaces then fills its search box, which must be on screen.
+    for tab in ("Effects", "Stickers"):
+        page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(300)
 
 
@@ -103,15 +103,15 @@ def _surfaces(page):
     yield "clip inspector"
     if _select_new_text_clip(page):
         yield "text inspector"
-    for tab in ("Transitions", "AI"):
-        page.get_by_role("tab", name=tab).click()
+    for tab in ("Audio", "Transitions", "AI"):
+        page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(400)
         yield f"{tab} tab"
-    page.get_by_role("tab", name="Media").click()
-    page.get_by_role("tab", name="Chat").click()
+    page.get_by_role("tab", name="Media", exact=True).click()
+    page.get_by_role("tab", name="Chat", exact=True).click()
     page.wait_for_timeout(300)
     yield "chat"
-    page.get_by_role("tab", name="Inspector").click()
+    page.get_by_role("tab", name="Inspector", exact=True).click()
     for trigger, name in ((".topbar-pinned button.primary", "export dialog"),
                           ("button[aria-label='Keyboard shortcuts']", "help"),
                           ("button.topbar-session", "project menu"),
@@ -249,7 +249,7 @@ async () => {
 @pytest.mark.parametrize("motion", ["reduce", "no-preference"])
 def test_reduced_motion_is_honoured_everywhere(browser, base_url, sessions, motion):  # noqa: F811
     page = _open(browser, base_url, sessions["full"], reduced_motion=motion)
-    page.get_by_role("tab", name="Transitions").click()
+    page.get_by_role("tab", name="Transitions", exact=True).click()
     page.wait_for_timeout(300)
     page.locator(".trp-tile").first.hover()
     page.wait_for_timeout(150)

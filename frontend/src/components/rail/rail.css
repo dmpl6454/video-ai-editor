@@ -1,0 +1,289 @@
+/* The editor shell's tool rail, tool panel, right panel chrome and the one
+   portalled tooltip (docs/design/LEFT_RAIL_SPEC.md §1-§2). Imported by the
+   rail components — NOT from styles.css, which owns only the .app grid and
+   the tokens (--rail-w, --rail-item-h, --panel-head-h, --right-rail-w,
+   --dur-*, --ease-out-expo). Imports nothing. Colours are :root tokens only;
+   motion is colour, transform and opacity only, and the --dur-* tokens drop
+   to 0 under prefers-reduced-motion. */
+
+/* ---- the rail --------------------------------------------------------- */
+
+.rail {
+  grid-area: rail;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;          /* only if a very short window ever needs it */
+  background: var(--bg-0);
+  border-right: 1px solid var(--line);
+}
+.rail-tabs { position: relative; display: flex; flex-direction: column; }
+
+.rail-item {
+  position: relative;
+  flex-shrink: 0;
+  width: 100%;
+  height: var(--rail-item-h);
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-dim);
+  transition: color var(--dur-fast) ease;
+}
+.rail-chip {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 26px;
+  border-radius: 7px;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out-expo);
+}
+.rail-label { font-size: 10.5px; line-height: 1; font-weight: 500; letter-spacing: 0.01em; white-space: nowrap; }
+
+.rail-item:hover:not(:disabled) { background: transparent; color: var(--text); }
+.rail-item:hover .rail-chip { background: var(--bg-2); }
+.rail-item:active .rail-chip { transform: scale(0.94); }
+.rail-item[aria-selected="true"] { color: var(--text); }
+.rail-item[aria-selected="true"] .rail-chip { background: var(--bg-3); }
+/* Selected but collapsed: an outline chip. The indicator keeps full strength
+   (--accent-2 on --bg-0 is well above 3:1 non-text contrast). */
+.rail-item[aria-selected="true"][aria-expanded="false"] .rail-chip {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+/* The focus ring goes round the chip, not the full-width row. */
+.rail-item:focus-visible { outline: none; }
+.rail-item:focus-visible .rail-chip { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* ONE indicator that slides (transform only) to the selected item; --sel is
+   the selected index, set inline by ToolRail. */
+.rail-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 28px;
+  margin-top: calc((var(--rail-item-h) - 28px) / 2);
+  border-radius: 0 3px 3px 0;
+  background: var(--accent-2);
+  pointer-events: none;
+  transform: translateY(calc(var(--sel, 0) * var(--rail-item-h)));
+  transition: transform var(--dur-normal) var(--ease-out-expo);
+}
+
+/* Live-state dot: a static secondary cue at the chip's top-right. */
+.rail-dot {
+  position: absolute;
+  top: calc(50% - 20px);
+  right: calc(50% - 20px);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-0);
+}
+.rail-dot-busy { background: var(--accent-2); }
+
+.rail-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The compact rail (< 1280 px): icon only. The label stays in the DOM as the
+   tab's name, visually hidden; the tooltip shows it. */
+@media (max-width: 1279px) {
+  .rail-dot { top: calc(50% - 15px); }
+  .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+}
+
+/* ---- the tool panel --------------------------------------------------- */
+
+.tool-panel {
+  --tool-panel-pad-top: 10px;
+  --tool-panel-pad-x: 12px;
+  grid-area: left;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-1);
+  container: toolpanel / inline-size;
+}
+.tool-panel-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--panel-head-h);
+  padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.tool-panel-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-panel-kbd { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.tool-panel-grow { flex: 1; }
+.tool-panel-collapse {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.tool-panel-collapse:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.tool-panel-collapse:active:not(:disabled) { transform: scale(0.94); }
+
+/* Each tabpanel scrolls on its own, so a panel keeps its scroll position
+   across a switch (one shared scroller would carry the AI list's offset into
+   Media). */
+.tool-tabpanel {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--tool-panel-pad-top) var(--tool-panel-pad-x) 16px;
+  animation: tool-panel-in var(--dur-normal) var(--ease-out-expo);
+}
+@keyframes tool-panel-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* A section heading inside a tool panel (Audio's Music / Voiceover). */
+.tool-section-label { margin: 16px 0 8px; }
+.tool-tabpanel > :first-child > .tool-section-label:first-child { margin-top: 2px; }
+
+/* ---- the right panel -------------------------------------------------- */
+
+/* Its own column layout (header, then one scrolling tab panel); `.sidebar`
+   is kept on the element for the Inspector's .sidebar h2 headings. Its grid
+   area is explicit: the pre-rail layout auto-placed it into the last free
+   cell, which with the tool panel collapsed (display: none) is the tool
+   panel's own empty cell — a 1 px right panel under the centre. */
+.sidebar.right-panel {
+  grid-area: right;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.right-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--panel-head-h);
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.right-head .right-tabs { flex: 1; min-width: 0; margin: 0; }
+.right-head .right-tabs [role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+.right-head-btn,
+.right-rail button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.right-head-btn:hover:not(:disabled),
+.right-rail button:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.right-body {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 10px 16px;
+}
+.right-panel .right-chat { padding: 10px; }
+.right-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+}
+.right-rail-sep { width: 18px; height: 1px; margin: 2px 0; background: var(--line); }
+
+/* ---- the tooltip ------------------------------------------------------ */
+
+.rail-tip {
+  position: fixed;
+  z-index: 2000;
+  top: 0;
+  left: 0;
+  max-width: 280px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  animation: rail-tip-in var(--dur-fast) var(--ease-out-expo);
+}
+.rail-tip kbd {
+  margin-left: 8px;
+  font: 10.5px/1 var(--font-ui);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+@keyframes rail-tip-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-tabpanel, .rail-tip { animation: none; }
+  .rail-indicator, .rail-item, .rail-chip, .tool-panel-collapse,
+  .right-head-btn, .right-rail button { transition: none; }
+}

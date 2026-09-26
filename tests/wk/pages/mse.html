@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>wk mse acceptance</title>
+  <style>
+    body { margin: 0; background: #000; }
+    video { display: block; width: 320px; height: 180px; }
+  </style>
+</head>
+<body>
+  <!-- Uncaught errors are reported to the harness, so a broken page fails fast with a reason. -->
+  <script>
+    (function () {
+      var token = new URLSearchParams(location.search).get('token') || 'none'
+      function report(msg) { try { navigator.sendBeacon('/__error/' + token, msg) } catch (e) { /* ignore */ } }
+      window.addEventListener('error', function (e) { report(String(e.message) + ' @ ' + e.filename + ':' + e.lineno) })
+      window.addEventListener('unhandledrejection', function (e) { report('unhandled rejection: ' + String(e.reason && e.reason.stack || e.reason)) })
+    })()
+  </script>
+  <script type="module" src="/testkit/wkMsePage.js"></script>
+</body>
+</html>

@@ -5,18 +5,16 @@ import { toast } from '../toast'
 import type { MediaItem } from '../types'
 import { dropzoneHandlers, importFiles } from '../lib/fileDrop'
 import { binMeta, binRows, type BinRow } from '../lib/mediaLibrary'
-import { displayNameFor, itemsFor, nameBreaks, namesBySrc, useMediaNames } from '../lib/mediaNames'
+import { nameBreaks, useMediaNames } from '../lib/mediaNames'
 import { batchLabel, etaLabel, uploadEtaSeconds, uploadStageLabel, type UploadItem } from '../lib/uploadQueue'
-import { StickerPanel } from './StickerPanel'
-import { EffectsPanel } from './EffectsPanel'
-import { VoRecorder } from './VoRecorder'
-import { formatDb } from '../lib/dbFormat'
-import { useSliderCommit } from '../lib/useSliderCommit'
 import { Icon } from './Icon'
 import { insertAtPlayhead } from '../lib/mediaInsert'
 import { ConfirmDialog } from './ConfirmDialog'
 
-
+// The Media tool panel (docs/design/LEFT_RAIL_SPEC.md §2.5): the dropzone, the
+// import switch, imports in flight and the project's media library. Music,
+// voiceover and the mix moved to the Audio panel, stickers and effects to
+// their own panels (rail R1); the panel header (ToolPanel) is its heading.
 export function MediaBin() {
   const upload = useStore((s) => s.upload)
   const uploadAudio = useStore((s) => s.uploadAudio)
@@ -33,7 +31,6 @@ export function MediaBin() {
   const edl = useStore((s) => s.edl)
   const dispatch = useStore((s) => s.dispatch)
   const fileRef = useRef<HTMLInputElement>(null)
-  const audioRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
   const sid = useStore((s) => s.sessionId)
@@ -90,7 +87,6 @@ export function MediaBin() {
 
   return (
     <div className="media-bin">
-      <h2>Media</h2>
       {/* A <button> (QA-102): it was a clickable <div> with no tabindex, so Tab
           skipped it and there was no keyboard way to import video at all.
           Enter/Space open the same picker a click does. The file <input> sits
@@ -127,26 +123,6 @@ export function MediaBin() {
         <input type="checkbox" checked={addToTimeline} onChange={(e) => setAddToTimeline(e.target.checked)} />
         Add imports to the timeline
       </label>
-      <button
-        className="panel-btn"
-        style={{ marginBottom: 10 }}
-        onClick={() => audioRef.current?.click()}
-        title={addToTimeline
-          ? 'Pick an audio file — it lands on the Music track'
-          : 'Pick an audio file — it goes to this media list only'}
-      >
-        <Icon name="music" /> Add music…
-      </button>
-      <input
-        ref={audioRef}
-        type="file"
-        accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.mp4,.m4v,.mov"
-        hidden
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) void uploadAudio(f)
-        }}
-      />
 
       {uploadError && (
         <div style={{
@@ -192,10 +168,6 @@ export function MediaBin() {
                   onRelinked={() => setLibraryTick((n) => n + 1)} />
       ))}
 
-      <VoRecorder />
-      <MusicPanel />
-      <StickerPanel />
-      <EffectsPanel />
       {confirmRemove && (
         <ConfirmDialog
           title={`Remove “${confirmRemove.name}”?`}
@@ -359,97 +331,6 @@ function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
         aria-label={`Remove ${row.name}`}
         onClick={(e) => { e.stopPropagation(); onRemove() }}
       ><Icon name="close" /></button>
-    </div>
-  )
-}
-
-// QA-083: one row per music clip. The panel used to control only the FIRST
-// music clip while its slider set every music clip's gain (`target: 'music'`),
-// so a second song could not be adjusted or removed on its own. Ducking is a
-// lane setting and stays one checkbox for the lane.
-function MusicPanel() {
-  const edl = useStore((s) => s.edl)
-  const sid = useStore((s) => s.sessionId)
-  const dispatch = useStore((s) => s.dispatch)
-  const library = useMediaNames((s) => itemsFor(s, sid))
-  const music = edl?.tracks.find((t) => t.id === 'music')
-  const clips = (music?.clips ?? []).filter((c) => 'src' in c) as unknown as MusicClip[]
-  const ducking = !!(music as unknown as { duck?: unknown })?.duck
-  if (!clips.length) return null
-  const names = namesBySrc(library)
-  return (
-    <div className="item music-panel" style={{ background: 'var(--bg-3)', borderColor: 'var(--line)' }}>
-      <div className="music-panel-head section-label"><Icon name="music" /> Music</div>
-      {clips.map((clip) => (
-        <MusicClipRow key={clip.id} clip={clip} name={displayNameFor(clip.src, names)}
-                      onlyOne={clips.length === 1} />
-      ))}
-      <div className="row" style={{ marginTop: 6, gap: 6, alignItems: 'center' }}>
-        <label
-          style={{ fontSize: 11, color: 'var(--text-dim)' }}
-          title="Automatically lower the music whenever someone is speaking"
-        >
-          <input
-            type="checkbox" checked={ducking}
-            onChange={() => dispatch('set_duck', { track: 'music', enabled: !ducking })}
-            style={{ marginRight: 4 }}
-          />
-          Duck under speech
-        </label>
-      </div>
-    </div>
-  )
-}
-
-interface MusicClip { id: string; src: string; start: number; audio?: { gain_db?: number } }
-
-function MusicClipRow({ clip, name, onlyOne }: { clip: MusicClip; name: string; onlyOne: boolean }) {
-  const dispatch = useStore((s) => s.dispatch)
-  const gain = clip.audio?.gain_db ?? -12
-  // Commit-on-release, same pattern as Properties' sliders: the thumb +
-  // readout track the drag locally, but set_volume dispatches ONCE on
-  // pointer-up / key-release / blur. This used to dispatch (and kick a
-  // preview re-render) on every onChange tick of the drag.
-  const [localGain, setLocalGain] = useState(gain)
-  const draggingGain = useRef(false)
-  // Re-seed from the stored value when it changes from outside (undo, chat
-  // edits) — but never stomp the value mid-drag.
-  useEffect(() => { if (!draggingGain.current) setLocalGain(gain) }, [gain])
-  // One op per gesture — an arrow-key burst commits once idle (QA-087).
-  // This clip only (QA-083): the target is its id, not the whole lane.
-  const gainCommit = useSliderCommit(gain, (v) => {
-    draggingGain.current = false
-    void dispatch('set_volume', { target: clip.id, db: v })
-  })
-  const inputId = `music-gain-${clip.id}`
-  return (
-    <div className="music-clip" data-music-clip={clip.id}>
-      <div className="music-clip-name" title={name}>{name}</div>
-      {/* A real flex row that never wraps (QA-088): the old `.row` here had no
-          rule outside `.props`, so it was a block and the readout wrapped,
-          orphaning the '-' of "-12 dB" at the end of the line. */}
-      <div className="music-gain-row">
-        <label htmlFor={inputId}>Vol</label>
-        <input
-          id={inputId}
-          type="range" min={-30} max={6} step={0.5} value={localGain}
-          aria-valuetext={formatDb(localGain)}
-          onChange={(e) => { const v = Number(e.target.value); draggingGain.current = true; setLocalGain(v); gainCommit.change(v) }}
-          onPointerUp={(e) => { draggingGain.current = false; gainCommit.onPointerUp(e) }}
-          onPointerCancel={() => { draggingGain.current = false }}
-          onKeyUp={gainCommit.onKeyUp}
-          onBlur={() => { draggingGain.current = false; gainCommit.onBlur() }}
-        />
-        <output htmlFor={inputId}>{formatDb(localGain)}</output>
-      </div>
-      <button
-        style={{ marginTop: 6, width: '100%', fontSize: 11 }}
-        title="Remove this music from the timeline (the file stays uploaded)"
-        aria-label={`Remove ${name} from the timeline`}
-        onClick={() => dispatch('ripple_delete', { clip_id: clip.id })}
-      >
-        {onlyOne ? 'Remove music' : 'Remove'}
-      </button>
     </div>
   )
 }

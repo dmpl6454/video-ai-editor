@@ -152,7 +152,7 @@ def test_the_chat_and_prompt_routes_frame_identically(tmp_path: Path, monkeypatc
     monkeypatch.setattr(_storage, "WORKDIR", tmp_path)
     monkeypatch.setattr(_main, "WORKDIR", tmp_path)
     _main._STORES.clear()
-    sid = "s_sse"
+    sid = "s_ssecontract"
     store = F.make_store(tmp_path, name=sid)
     facts = F.facts_for(store)
     monkeypatch.setattr(service, "build_facts_for", lambda st, ui: facts)

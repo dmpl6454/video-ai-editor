@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>wk harness probe</title></head>
+<body style="margin:0">
+<script>
+// Harness self-test page. mode=echo posts engine facts; mode=never posts
+// nothing (the harness must time out and close the window); mode=throw
+// raises an uncaught error (reported to /__error) and then posts nothing.
+(function () {
+  var q = new URLSearchParams(location.search)
+  var token = q.get('token') || 'none'
+  var mode = q.get('mode') || 'echo'
+  window.addEventListener('error', function (e) { navigator.sendBeacon('/__error/' + token, String(e.message)) })
+  if (mode === 'never') return
+  if (mode === 'throw') { setTimeout(function () { throw new Error('boom from the page') }, 0); return }
+  var t0 = performance.now(), rafs = 0, timers = 0
+  function raf() { rafs++; if (performance.now() - t0 < 500) requestAnimationFrame(raf) }
+  requestAnimationFrame(raf)
+  function timer() { timers++; if (timers < 20) setTimeout(timer, 10) }
+  setTimeout(timer, 10)
+  setTimeout(function () {
+    var body = {
+      ua: navigator.userAgent,
+      visibility: document.visibilityState,
+      hidden: document.hidden,
+      rafsIn500ms: rafs,
+      timers: timers,
+      timerMs: performance.now() - t0,
+      MediaSource: 'MediaSource' in window,
+      ManagedMediaSource: 'ManagedMediaSource' in window,
+      webgl2: !!document.createElement('canvas').getContext('webgl2'),
+      rvfc: 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
+      chrome: 'chrome' in window,
+      echo: q.get('echo')
+    }
+    fetch('/__result/' + token, { method: 'POST', body: JSON.stringify(body) })
+  }, 700)
+})()
+</script>
+</body>
+</html>

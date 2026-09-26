@@ -71,6 +71,10 @@ from .api.uploads import (assert_room_for as _assert_room_for,
 async def _lifespan(_app: "FastAPI"):
     _validate_ai_config()
     yield
+    # Wave D: no proxy encode may outlive the app (they are niced background
+    # ffmpegs a daemon thread would otherwise orphan).
+    from .ingest.proxy_queue import MANAGER as _PROXIES
+    _PROXIES.shutdown()
 
 
 app = FastAPI(title="video-ai-editor", lifespan=_lifespan)
@@ -387,7 +391,10 @@ def _store(sid: str) -> EDLStore:
         # is not on disk stays the 404 it always was.
         if _is_path_shaped_sid(sid):
             raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
-        if not session_exists(sid):
+        # Only a well-formed session id names a session: WORKDIR also holds
+        # non-session directories (wave D's WORKDIR/proxies), which must
+        # never be adopted as a project and get a tree built inside them.
+        if not is_valid_session_id(sid) or not session_exists(sid):
             raise HTTPException(404, f"session {sid} not found")
         # OK to create the dir tree now (subdirs etc.); we already proved the
         # session was real.
@@ -1334,6 +1341,10 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
             return _handoff_audio_only(sid, dst, upload_dir, safe_name, display_name,
                                        res.probe.duration, add_to_timeline)
 
+        # Wave D: the instant-preview proxy of the new master, built in the
+        # background (niced) — only when the preview engine is on.
+        _queue_preview_proxy(sid, res.normalized)
+
         if add_to_timeline:
             with _session_lock(sid):
                 # Re-resolved under the lock: the LRU may have evicted and
@@ -1412,7 +1423,8 @@ ASYNC_DISPATCH_TOOLS = frozenset({
 
 
 @app.post("/api/sessions/{sid}/dispatch")
-def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
+def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1,
+                  include: str | None = Query(None, max_length=64)):
     """Run a tool.
 
     `wait=1` (default): blocks and returns the result — the long-standing
@@ -1421,7 +1433,12 @@ def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
     executor. The completed job's `result` is the same payload the sync path
     returns. Intended for ASYNC_DISPATCH_TOOLS; permitted for any tool so the
     UI never needs a second allowlist.
+    `include=edl` (wave D, INSTANT_PREVIEW_SPEC §4.1/§5.2): the answer also
+    carries the post-op `edl` and its `render_hash`, serialised under the same
+    session lock as the edit, so the instant-preview engine never needs a
+    second round trip. Without it the answer is byte-for-byte what it was.
     """
+    include_edl = _wants_edl(include)
     store = _store(sid)
     # A prompt run holds the session lock for as long as its longest step
     # (a caption pass can be minutes). Blocking a UI gesture behind it would
@@ -1435,13 +1452,37 @@ def dispatch_tool(sid: str, body: DispatchRequest, wait: int = 1):
         # The queued job re-checks under the lock; this answers a stale view
         # with the 409 right away instead of as a failed job.
         _refuse_stale_base(store, body)
-        return _dispatch_async(sid, store, body)
+        return _dispatch_async(sid, store, body, include_edl=include_edl)
     with _session_lock(sid):
         _refuse_stale_base(store, body)
-        return _dispatch_sync(sid, store, body)
+        return _dispatch_sync(sid, store, body, include_edl=include_edl)
 
 
-def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONResponse:
+#: Past this many bytes of EDL JSON a dispatch answer carries `edl_omitted`
+#: instead of the EDL (spec §14 risk 12); the client then GETs /edl.
+DISPATCH_EDL_MAX_BYTES = 1_000_000
+
+
+def _wants_edl(include: str | None) -> bool:
+    return "edl" in {p.strip().lower() for p in (include or "").split(",")}
+
+
+def _edl_payload(store: EDLStore) -> dict:
+    """`edl` + `render_hash` for a dispatch answer (called under the session
+    lock, so it is exactly the state the edit produced). `render_hash` is the
+    key a preview render of this state is stored under — offline-aware, the
+    same value `/preview` and `preview.mp4` use."""
+    text = store.edl.to_json()
+    out: dict = {"render_hash": _preview_edl(store).render_hash()}
+    if len(text.encode("utf-8")) > DISPATCH_EDL_MAX_BYTES:
+        out["edl_omitted"] = True
+    else:
+        out["edl"] = json.loads(text)
+    return out
+
+
+def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest, *,
+                    include_edl: bool = False) -> JSONResponse:
     from .api.jobs import JOB_MANAGER
 
     # Declaring these two parameters is what makes JobManager inject them (it
@@ -1459,7 +1500,8 @@ def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONRes
                 _refuse_stale_base(live, body)
                 return _dispatch_sync(sid, live, body,
                                       set_progress=set_progress,
-                                      cancel_event=cancel_event)
+                                      cancel_event=cancel_event,
+                                      include_edl=include_edl)
         except HTTPException as e:
             # JobManager records `f"{type(e).__name__}: {e}"`, and an
             # HTTPException stringifies to its repr — unreadable in the UI's
@@ -1478,7 +1520,8 @@ def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONRes
 
 
 def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
-                   set_progress=None, cancel_event=None) -> dict:
+                   set_progress=None, cancel_event=None,
+                   include_edl: bool = False) -> dict:
     ops_before = len(store.ops.ops)
     try:
         result = dispatch(store, body.tool, body.args,
@@ -1506,12 +1549,50 @@ def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
     # that was called (remove_silences loops cut_range), so a name check would
     # wrongly report "no change" for them.
     last_op = store.ops.last() if len(store.ops.ops) > ops_before else None
-    return {
+    out = {
         "result": result,
         "edl_hash": store.edl.hash(),
         "op": last_op.model_dump() if last_op else None,
         "undo_depth": store.undo_depth,  # QA-046
     }
+    if include_edl:
+        out.update(_edl_payload(store))
+    if last_op is not None:
+        _queue_timeline_proxies(sid, store)
+    return out
+
+
+def _queue_preview_proxy(sid: str, src) -> None:
+    """Queue the eager proxy build of one source (wave D, spec §4.4). A no-op
+    unless eager proxies are enabled (preview.engine != server by default),
+    and never an error for the caller: a proxy is a cache."""
+    from .preview_setting import eager_proxies_enabled
+    if not eager_proxies_enabled():
+        return
+    try:
+        from .ingest.proxy_queue import MANAGER as _PROXIES
+        _PROXIES.ensure(src, sid=sid)
+    except Exception:
+        get_logger().warning("preview proxy queue failed", exc_info=True)
+
+
+def _queue_timeline_proxies(sid: str, store: EDLStore) -> None:
+    """After an edit: queue proxies of every media source on the timeline
+    that has none yet — how AI outputs landing in cache/ (stabilize, upscale,
+    reframe, …) get theirs without each writer knowing about proxies."""
+    from .preview_setting import eager_proxies_enabled
+    if not eager_proxies_enabled():
+        return
+    seen: set[str] = set()
+    for t in store.edl.tracks:
+        if t.type not in ("video", "audio", "music", "vo"):
+            continue
+        for c in t.clips:
+            src = getattr(c, "src", None)
+            if src and src not in seen:
+                seen.add(src)
+                if Path(src).is_file():
+                    _queue_preview_proxy(sid, src)
 
 
 @app.get("/api/sessions/{sid}/edl")
@@ -1528,7 +1609,12 @@ def get_media(sid: str):
     each item. Deleting the last clip no longer removes the media from the bin."""
     from .media_library import list_media
     store = _store(sid)
-    return {"media": list_media(store.dir, store.edl)}
+    rows = list_media(store.dir, store.edl)
+    # Wave D (INSTANT_PREVIEW_SPEC §5.2): fps {num,den}, frames, pix_fmt,
+    # has_audio and proxy {key,state,w,h} per row, from what the proxy layer
+    # already knows — never a probe on this hot path.
+    from .api.preview_routes import media_row_fields
+    return {"media": [{**r, **media_row_fields(r.get("src"))} for r in rows]}
 
 
 @app.delete("/api/sessions/{sid}/media/{media_id}")
@@ -2142,6 +2228,14 @@ async def stream_preview(sid: str, request: Request, h: str | None = None):
     return FileResponse(p, media_type="video/mp4", filename="preview.mp4")
 
 
+def _proxy_export_in_progress():
+    """Eager preview-proxy encodes pause while an export renders (wave D,
+    INSTANT_PREVIEW_SPEC §5.1): an export is the one render the user is
+    watching a progress bar for."""
+    from .ingest.proxy_queue import export_in_progress
+    return export_in_progress()
+
+
 def _export_payload(sid: str, res, timeline_hash: str | None = None) -> dict:
     # `edl_hash` is the timeline the file was rendered from — what the UI's
     # "↓ MP4 (outdated)" check compares against GET /sessions/{sid}.edl_hash.
@@ -2176,11 +2270,12 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
         # for full-quality video masters (QA-089).
         audio_only = body.container in ("m4a", "wav")
         try:
-            res = render_export(store.edl if audio_only else _export_edl(store.edl, body.height),
-                                store.dir, height=body.height,
-                                fps=body.fps, crf=body.crf, container=body.container,
-                                bitrate_kbps=body.bitrate_kbps,
-                                project_name=read_meta(sid).get("name"))
+            with _proxy_export_in_progress():      # wave D: eager proxies pause
+                res = render_export(store.edl if audio_only else _export_edl(store.edl, body.height),
+                                    store.dir, height=body.height,
+                                    fps=body.fps, crf=body.crf, container=body.container,
+                                    bitrate_kbps=body.bitrate_kbps,
+                                    project_name=read_meta(sid).get("name"))
         except RENDER_ERRORS as e:
             msg = str(e)
             tail = msg[-400:]
@@ -2212,10 +2307,11 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
                                   on_progress=(lambda p: set_progress(0.3 * p)) if set_progress else None)
                 if set_progress:
                     render_progress = lambda p: set_progress(0.3 + 0.7 * p)  # noqa: E731
-            res = render_export(edl, session_dir_snapshot,
-                                height=height, fps=fps, crf=crf, container=container,
-                                on_progress=render_progress, cancel_event=cancel_event,
-                                bitrate_kbps=bitrate_kbps, project_name=project_name)
+            with _proxy_export_in_progress():      # wave D: eager proxies pause
+                res = render_export(edl, session_dir_snapshot,
+                                    height=height, fps=fps, crf=crf, container=container,
+                                    on_progress=render_progress, cancel_event=cancel_event,
+                                    bitrate_kbps=bitrate_kbps, project_name=project_name)
         except RENDER_ERRORS as e:
             # jobs.py stores `f"{type(e).__name__}: {e}"` as job.error and the
             # UI shows it verbatim — so raise something whose str() is already
@@ -2304,6 +2400,14 @@ from .api import prompt_routes as _prompt_routes
 _prompt_routes.configure(resolve_store=_store)
 app.include_router(_prompt_routes.router)
 _prompt_running_response = _prompt_routes.prompt_running_response
+
+# Instant-preview routes (wave D, INSTANT_PREVIEW_SPEC §5.2): proxy index,
+# spans, FLAC chunks, clip sources under cache/, and the read-only
+# preview.engine setting. Behind the same middleware (Host allowlist,
+# cross-site refusal); their own shared rate bucket (api/hardening.rate_bucket).
+from .api import preview_routes as _preview_routes
+_preview_routes.configure(resolve_store=_store)
+app.include_router(_preview_routes.router)
 
 
 @app.get("/api/sessions/{sid}/waveform")

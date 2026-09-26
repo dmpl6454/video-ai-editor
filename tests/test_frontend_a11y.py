@@ -283,8 +283,9 @@ def test_every_control_has_an_accessible_name(browser, base_url, sessions):
     page = _open(browser, base_url, sessions["full"])
     problems = []
     problems += [("default",) + b for b in _unnamed(page)]
-    for tab in ("Transitions", "AI", "Media"):
-        page.get_by_role("tab", name=tab).click()
+    # Every rail panel (LEFT_RAIL_SPEC §8.1; Text and Captions join in R2).
+    for tab in ("Audio", "Stickers", "Effects", "Transitions", "AI", "Media"):
+        page.get_by_role("tab", name=tab, exact=True).click()
         page.wait_for_timeout(500)
         problems += [(tab,) + b for b in _unnamed(page)]
     _add_text_clip(page)
@@ -403,13 +404,13 @@ def test_more_menu_at_laptop_width(browser, base_url, sessions):
 def test_rendered_text_meets_aa_contrast(browser, base_url, sessions):
     page = _open(browser, base_url, sessions["full"])
     fails = [("default", f) for f in page.evaluate(CONTRAST_JS)]
-    page.get_by_role("tab", name="Transitions").click()
-    page.wait_for_timeout(600)
-    fails += [("Transitions", f) for f in page.evaluate(CONTRAST_JS)]
-    page.get_by_role("tab", name="AI").click()
-    page.wait_for_timeout(1500)
-    fails += [("AI", f) for f in page.evaluate(CONTRAST_JS)]
-    page.get_by_role("tab", name="Media").click()
+    # Every rail panel (§5.2; Text and Captions join in R2).
+    for tab, settle in (("Audio", 600), ("Stickers", 800), ("Effects", 1000), ("Transitions", 600), ("AI", 1500)):
+        page.get_by_role("tab", name=tab, exact=True).click()
+        page.wait_for_timeout(settle)
+        fails += [(tab, f) for f in page.evaluate(CONTRAST_JS)]
+    page.get_by_role("tab", name="Media", exact=True).click()
+    page.wait_for_timeout(600)  # the tool-panel-in fade (--dur-normal) must finish
     _add_text_clip(page)
     fails += [("text selected", f) for f in page.evaluate(CONTRAST_JS)]
     page.locator(EXPORT_TRIGGER).click()

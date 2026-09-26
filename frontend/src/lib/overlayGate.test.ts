@@ -32,3 +32,25 @@ describe('overlay gate (QA-016)', () => {
     expect(activeOnFrames([], 0.5, 3.0, 3.0, 30)).toBe(false)
   })
 })
+
+describe('overlay gate cost (review RD1: it runs per overlay per rAF frame)', () => {
+  it('gates 600 caption cues at 29.97 in well under 0.5 ms per frame', () => {
+    const fps = 30000 / 1001
+    const cues = Array.from({ length: 600 }, (_, i) => [i * 2.3 + 0.137, i * 2.3 + 2.1] as const)
+    const frameAt = (n: number) => 700 + n / fps
+    const run = () => {
+      let shown = 0
+      for (let n = 0; n < 60; n++) {
+        const t = frameAt(n)
+        for (const [s, e] of cues) if (inEnableWindow(s, e, t, fps)) shown++
+      }
+      return shown
+    }
+    run()                                        // warm up the JIT
+    const t0 = performance.now()
+    const shown = run()
+    const perFrame = (performance.now() - t0) / 60
+    expect(shown).toBeGreaterThan(0)
+    expect(perFrame).toBeLessThan(0.5)
+  })
+})

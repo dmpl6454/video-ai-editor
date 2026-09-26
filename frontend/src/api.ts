@@ -4,6 +4,7 @@ import type { ImportAnswer } from './lib/importFollowUp'
 import type { DownloadReport } from './lib/modelDownloads'
 import type { MediaToolsStatus } from './lib/mediaTools'
 import type { KeyStatus } from './lib/settingsModel'
+import type { PreviewSettingsWire } from './lib/previewEngineSetting'
 import type { EDL, SessionInfo, Op, MediaItem } from './types'
 import {
   EngineOfflineError, isAbort, isGatewayFailure, reportEngineReachable, reportEngineUnreachable,
@@ -607,6 +608,9 @@ export const api = {
   removeAnthropicKey: () => http<KeyStatus & { removed: boolean }>('DELETE', '/settings/anthropic-key'),
   testAnthropicKey: () =>
     http<{ ok: boolean; message: string }>('POST', '/settings/anthropic-key/test', {}),
+  // Wave D: which preview engine runs (auto | client | server; default server).
+  // READ-ONLY here — it lives in settings.json / VAI_PREVIEW_ENGINE.
+  previewSettings: () => http<PreviewSettingsWire>('GET', '/settings/preview'),
 
   // This project's render caches against their byte budget, and Clear
   // (QA-106; render/cache_budget.py). Clear keeps the preview on screen.

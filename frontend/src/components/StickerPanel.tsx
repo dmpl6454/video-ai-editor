@@ -34,6 +34,25 @@ function toned(e: EmojiEntry, tone: number): string {
   return tone >= 0 && e.t ? e.t[tone] : e.c
 }
 
+/** A swatch's accessible name: the emoji's CLDR name ("grinning face"), with
+ *  the skin tone for a toned variant. The artwork's alt is the emoji itself,
+ *  which a screen reader may read but which says nothing to a name check —
+ *  and the swatch's title is an instruction, not a name. */
+let EMOJI_NAMES: Map<string, string> | null = null
+function emojiName(e: string): string {
+  if (!EMOJI_NAMES) {
+    const m = new Map<string, string>()
+    for (const g of EMOJI_CATALOG) {
+      for (const x of g.emojis) {
+        m.set(x.c, x.n)
+        x.t?.forEach((v, i) => m.set(v, `${x.n}, skin tone ${i + 1}`))
+      }
+    }
+    EMOJI_NAMES = m
+  }
+  return EMOJI_NAMES.get(e) ?? e
+}
+
 function loadTone(): number {
   const v = Number(localStorage.getItem(TONE_KEY))
   return Number.isInteger(v) && v >= -1 && v <= 4 ? v : -1
@@ -54,14 +73,21 @@ function pushRecent(e: string) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(cur.slice(0, MAX_RECENT)))
 }
 
-export function StickerPanel() {
+/** The Stickers tool panel's content. Always open (the rail tab is the
+ *  disclosure now, LEFT_RAIL_SPEC §2.7); `active` is whether the panel is on
+ *  screen — the artwork warm-up waits for the first show, and so does the
+ *  grid itself, so a hidden panel costs nothing at startup. */
+export function StickerPanel({ active = true }: { active?: boolean }) {
   const dispatch = useStore((s) => s.dispatch)
   const sid = useStore((s) => s.sessionId)
   const refresh = useStore((s) => s.refresh)
   const playhead = useStore((s) => s.playhead)
   const edl = useStore((s) => s.edl)
   const [recent, setRecent] = useState<string[]>(loadRecent())
-  const [open, setOpen] = useState(false)
+  // Once shown, the grid stays rendered (the search, the scroll and the open
+  // groups survive a panel switch); before the first show it is not built.
+  const [shown, setShown] = useState(active)
+  if (active && !shown) setShown(true)
   const [query, setQuery] = useState('')
   const [tone, setTone] = useState<number>(loadTone())
   // Only the first group starts expanded. Opening one renders its swatches;
@@ -69,7 +95,6 @@ export function StickerPanel() {
   const [openGroups, setOpenGroups] = useState<Set<string>>(
     () => new Set([EMOJI_CATALOG[0]?.name].filter(Boolean) as string[]))
   const fileRef = useRef<HTMLInputElement>(null)
-  const pickerRef = useRef<HTMLDivElement>(null)
   const [uploadErr, setUploadErr] = useState<string | null>(null)
 
   // DEBOUNCED, because the cost of a search is not the scan — it is painting an
@@ -89,14 +114,14 @@ export function StickerPanel() {
     () => (debounced.trim() ? searchEmoji(debounced, 96) : null),
     [debounced])
 
-  // Ask the server to warm the artwork cache the first time the picker opens.
+  // Ask the server to warm the artwork cache the first time the panel shows.
   // On a cold cache the browser's ~6-connection cap made a large group trickle
   // in over many seconds; this fetches the misses on a background pool so the
   // second look — and every later one — is instant. Fire-and-forget: if it
   // fails, every swatch still fetches on demand exactly as before.
   const warmed = useRef(false)
   useEffect(() => {
-    if (!open || warmed.current) return
+    if (!active || warmed.current) return
     warmed.current = true
     const all: string[] = []
     for (const g of EMOJI_CATALOG) {
@@ -110,27 +135,7 @@ export function StickerPanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emojis: all }),
     }).catch(() => {})
-  }, [open])
-
-  // Close the picker when clicking anywhere outside it. The ref wraps the
-  // toggle button too, so clicking the toggle to close it doesn't fall through
-  // here and immediately re-open.
-  //
-  // On CLICK, not mousedown (QA-126): closing on mousedown collapsed the grid
-  // under the pointer, the Effects button below jumped up before mouseup, and
-  // the click landed on nothing — "Effects" took two clicks. On click, the
-  // target's own handler has already run. composedPath() is the path at
-  // dispatch time, so a click on a node React removed in that same handler
-  // still counts as inside.
-  useEffect(() => {
-    if (!open) return
-    const onClick = (e: MouseEvent) => {
-      const el = pickerRef.current
-      if (el && !e.composedPath().includes(el)) setOpen(false)
-    }
-    document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
-  }, [open])
+  }, [active])
 
   const insert = async (emoji: string) => {
     const w = edl?.canvas.w ?? 1080
@@ -165,26 +170,14 @@ export function StickerPanel() {
   }
 
   return (
-    <div ref={pickerRef} className="sticker-picker" style={{ marginTop: 16 }}>
-      <button
-        className="panel-disclosure"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        title="Emoji & sticker picker"
-      >
-        {/* The header icon is artwork too. It labels the emoji feature and sits
-            directly above the grid, so an OS glyph here advertises one design
-            for a picker that hands you another — the same promise the swatches
-            broke, one line higher up. The chevron and the sticker mark are the
-            app's lucide icons (QA-125); only the grid below shows emoji. */}
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} /><Icon name="sticker" /> Stickers
-      </button>
-      {open && (
-        <div style={{ marginTop: 8 }}>
+    <div className="sticker-picker">
+      {shown && (
+        <div>
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={`Search ${EMOJI_COUNT} emoji…`}
+            aria-label={`Search ${EMOJI_COUNT} emoji`}
             style={{ width: '100%', fontSize: 11, padding: '4px 6px', marginBottom: 6,
                      background: 'var(--bg-2)', border: '1px solid var(--line)',
                      borderRadius: 4, color: 'inherit' }}
@@ -201,6 +194,8 @@ export function StickerPanel() {
                 <button
                   key={sw}
                   title={val < 0 ? 'Default' : `Skin tone ${val + 1}`}
+                  aria-label={val < 0 ? 'Default skin tone' : `Skin tone ${val + 1}`}
+                  aria-pressed={on}
                   onClick={() => { setTone(val); localStorage.setItem(TONE_KEY, String(val)) }}
                   style={{ flex: 1, padding: '2px 0', height: 22,
                            background: on ? 'var(--accent-fill)' : 'var(--bg-2)',
@@ -346,6 +341,7 @@ function EmojiRow({ label, emojis, onPick }: { label: string; emojis: string[]; 
           <button
             key={e}
             onClick={() => onPick(e)}
+            aria-label={emojiName(e)}
             draggable
             onDragStart={(ev) => {
               ev.dataTransfer.effectAllowed = 'copy'

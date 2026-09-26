@@ -429,7 +429,8 @@ export function Timeline() {
     const lc: LayoutClip[] = v1.clips.filter(isMediaClip).map((c) => ({
       id: c.id, start: c.start, duration: clipDuration(c),
     }))
-    const layout = v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration })))
+    const layout = v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration })),
+      edl?.canvas?.fps)
     return { ...layout, clips: lc, layout }
   }, [edl])
 

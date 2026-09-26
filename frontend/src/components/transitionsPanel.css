@@ -263,6 +263,18 @@
 .kind-crop .tp-b { animation-name: tp-clip-zoom; }
 .kind-iris-close .tp-a, .kind-doors-close .tp-a, .kind-curtain-close .tp-a { animation-name: tp-clip; }
 .kind-clock .tp-b { mask-image: conic-gradient(#000 var(--tp-angle), transparent 0); animation-name: tp-angle; }
+/* A clock's MIDPOINT is a 180° wedge: exactly Wipe Left's half-and-half at
+   rest (measured: a 1.5 mean-pixel difference, where distinct stills are
+   > 4). It went unnoticed while the 220 px panel drew 86.5 px tiles, whose
+   alternating 86/87 px screenshots the QA-119 check skipped as "different
+   sizes". Its still is the three-eighths mark instead — a clock hand part-way
+   round; hover still plays it from the start, like every tile. */
+.kind-clock .tp-b { animation-delay: calc(var(--tp-dur) * -0.375); }
+@media (prefers-reduced-motion: reduce) {
+  .trp-tile:hover .kind-clock .tp-b, .trp-tile:focus-visible .kind-clock .tp-b {
+    animation-delay: calc(var(--tp-dur) * -0.375);
+  }
+}
 .kind-slice .tp-b {
   mask-image: repeating-linear-gradient(var(--mask-angle, 90deg), #000 0 var(--tp-band), transparent var(--tp-band) 20%);
   animation-name: tp-band-in;

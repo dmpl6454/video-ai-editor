@@ -1,0 +1,13 @@
+/* Tool-panel content that lives only in the rail's panels (Audio, R1).
+   Imported by the panel components — not from styles.css. Tokens only. */
+
+/* The music already on the timeline: one card, one row per music clip
+   (QA-083), then the lane's Duck under speech. */
+.audio-panel .music-panel {
+  margin-top: 8px;
+  padding: 8px;
+  font-size: 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}

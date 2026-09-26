@@ -167,7 +167,7 @@ Because every frame is independently decodable, MSE never has a dependency to br
 - One `MediaSource`, one `SourceBuffer('video/mp4; codecs="avc1.64001F"')` (level from the recipe), `mode = 'segments'`, `timestampOffset = 0`.
 - `laneA.currentTime` **is render-clock seconds**, so `k = round(mediaTime · R)` with `R = rate_of(canvas.fps)`.
 - **The buffered range is always contiguous** from `playhead − 10 s` to `playhead + 30 s`, clamped to `[0, total)`. A gap stalls WebKit, so gaps in the *timeline* get **filler samples**: the previous appended sample's bytes (the first clip's frame when the timeline starts with a gap). The compositor draws black for them because `programMap[k].kind == gap`.
-- **Init switching.** The writer tracks `lastInitKey` and appends an init segment before any fragment whose proxy size class differs. The size class is (W×H, recipe), and one class shares one `avcC`.
+- **Init switching.** The writer tracks `lastInitKey` and appends an init segment before any fragment whose proxy size class differs. The size class is (W×H, recipe), and one class shares one `avcC`. **Its key is defined once, on both sides: the `avcC` bytes as lowercase hex** (`index.json` `init_key` from `ingest/proxy.py`, `parseInitSegment().initKey` in `media/fmp4Writer.ts`; the avcC's SPS pins the size, and x264 writes the source rate into the VUI, so a 25 fps and a 30 fps proxy of one size are two classes — measured in 1a). The WK real-proxy suite asserts the two are equal (review RD1).
 - **Fragments** are 1 to 30 frames. Appends are queued strictly one at a time (`updateend`). Order: frames at the playhead first (1 to 5 while paused; from `playhead + 150 ms` while playing), then outward in 1 s fragments.
 - **Shrinking.** `remove(a, b)` is issued outside the window and whenever the timeline got shorter. `mediaSource.duration` is set to `total/R` after any required `remove()`. `endOfStream()` is never called, so the source stays editable.
 - **Quota.** On `QuotaExceededError`: remove behind the playhead down to `playhead − 2 s`, halve the look-ahead, retry once, then raise `status: degraded` with telemetry.
@@ -286,14 +286,20 @@ The overlay layers draw on their own rAF from `clock.now()`. The window manager 
 
 **Video recipe (normative):**
 ```
-ffmpeg -nostdin -threads 2 [-ss <keyframe ≤ span start> for on-demand] -i <master> -map 0:v:0
-  -vf "<exact frame select for the span>,scale=<short edge 720, even, bicubic>,format=yuv420p"
+ffmpeg -nostdin -threads 2 [-noaccurate_seek -seek_timestamp 1 -ss <keyframe pts ≤ span start> for on-demand]
+  -copyts -i <master> -map 0:v:0
+  -vf "<exact frame select for the span>,scale=<short edge 720 of the DISPLAYED size, even, bicubic>
+       [:in_range=<pc|tv>:out_range=tv:in_color_matrix=<bt601|bt2020|…>:out_color_matrix=bt709
+        — only for a source tagged full range or a non-709 matrix],setsar=1,format=yuv420p,
+       setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
   -fps_mode passthrough
-  -c:v libx264 -preset veryfast -crf 23 -profile:v high -level:v 4.1
+  -c:v libx264 -preset veryfast -crf 24 -profile:v high -level:v 4.1
   -x264-params keyint=1:min-keyint=1:scenecut=0:bframes=0:stitchable=1
   -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv
   -f mp4 -movflags +empty_moov+default_base_moof+frag_keyframe  <tmp>  →  split into init.mp4 + span packs
 ```
+- **Seeks are absolute** (`-seek_timestamp 1`): the master pts table is absolute, and without it ffmpeg adds the container's `start_time` to `-ss`, so every on-demand span of a source that does not start at 0 (a camera MTS, `output_ts_offset`) came out empty and failed the proxy (review RD1, measured).
+- **Colour is converted, not relabelled** (R12): a full-range (`yuvj*`/`pc`) or BT.601/BT.2020-tagged master keeps its own levels through export, so its proxy converts to BT.709 limited in the scale step (0/255 → 16/235; BT.601 red Y81 U90 V240 → Y62 U102 V238, BT.709 red within 2 levels). Untagged and BT.709-limited sources get the plain scale, pixel for pixel. Anamorphic sources are sized to their displayed width (the probe reads ffprobe's `4:3` SAR) and every proxy is square-pixel (`setsar=1`, one SAR for every same-size SPS). `RECIPE_VERSION` 2.
 - **Frame identity.** Proxy frame `i` is master frame `i` in presentation order **after** the edit list: ffmpeg applies elst on decode, so the 2-frame elst and AAC priming traps cannot arise.
 - **Asserted.** The proxy frame count equals the master's decoded frame count, which is recorded once at ingest. On-demand spans select by the master pts table: `trim=start_pts:end_pts` in the stream timebase, then `setpts` rebased, then asserting that `count` and first pts match. A mismatch sets proxy state `failed`, and the source falls to the degraded tier (§7).
 - **Short edge.** 720 by default. Phase 4 adds a 1080 variant on demand for clips with `transform.scale > 1.5`, crop-zoom > 1.5, or a canvas display short edge > 900 device px.
@@ -302,8 +308,8 @@ ffmpeg -nostdin -threads 2 [-ss <keyframe ≤ span start> for on-demand] -i <mas
   - Niced (`nice 10`), at most 2 concurrent encodes, paused while an export runs.
   - Cancellable through a new `cancel.PROXIES` scope (latest-wins per source).
   - On-demand span requests jump the queue.
-- **Audio sidecar.** Decode the master's audio once (`aresample=48000, aformat=fltp:stereo`) to f32. Python slices it into exact 240000-sample chunks and encodes FLAC. Silent-track masters produce a `silent: true` flag and no chunks.
-- **Disk.** 720p all-intra at crf 23 comes to about 4 to 5 Mb/s, roughly 35 MB per source-minute. Proxies are registered with `render/cache_budget.py` in their own LRU class. Evicted spans are rebuilt on demand.
+- **Audio sidecar.** Decode the master's audio once (`aresample=48000, aformat=fltp:stereo`) to f32. Python slices it into exact 240000-sample chunks and encodes FLAC. Silent-track masters produce a `silent: true` flag and no chunks. **Headroom:** 24-bit FLAC would hard-clip samples above full scale, which the export's float mix keeps; a chunk whose decoded peak exceeds 1.0 is stored divided by the smallest power of two that brings it under (exact in float), index.json `audio.chunk_gain` maps `"n"` → that linear factor (sparse; absent = 1), `audio.gain_db` is the largest in dB, and the chunk route repeats it as `X-Audio-Gain`. The client multiplies the decoded chunk back by it (review RD1).
+- **Disk.** 720p all-intra at crf 24 comes to about 4 to 5 Mb/s: 35.9 MB of video per source-minute measured over the 82 workdir masters (crf 23 measured 40.0, exactly on the target; see §15.1). Proxies are registered with `render/cache_budget.py` in their own LRU class. Evicted spans are rebuilt on demand.
 
 ### 5.2 Routes (`api/preview_routes.py`, NEW; mounted from `main.py`)
 
@@ -311,7 +317,7 @@ ffmpeg -nostdin -threads 2 [-ss <keyframe ≤ span start> for on-demand] -i <mas
 |---|---|---|
 | `POST /api/sessions/{sid}/dispatch?include=edl` | adds `edl`, `edl_hash`, `render_hash` | CHANGED. Default response unchanged for old clients |
 | `GET /api/sessions/{sid}/media` | rows gain `fps {num,den}`, `frames`, `pix_fmt`, `has_audio`, `proxy {key, state, w, h}` | CHANGED |
-| `GET /api/proxies/{key}/index.json` · `init.mp4` · `v/{n}.bin` · `a/{n}.flac` | proxy data | `v/` and `a/` encode on demand, blocking ≤ 2 s, else `202` + `Retry-After: 0.2`. Keys must be referenced by a live session (containment check as in `/files`). Exempt from the per-path 60 rps bucket, with a global cap of 400 rps |
+| `GET /api/proxies/{key}/index.json` · `init.mp4` · `v/{n}.bin` · `a/{n}.flac` | proxy data | `v/` and `a/` encode on demand, blocking ≤ 2 s, else `202` + `Retry-After: 0.2`; `a/{n}` answers as soon as chunk `n` itself is on disk (not the whole source's audio) and carries `X-Audio-Gain`. Keys must be referenced by a live session (containment check as in `/files`). GET/HEAD of `init.mp4`, `v/*.bin` and `a/*.flac` are exempt from the per-path 60 rps bucket, with a global cap of 400 rps; `index.json` and every other method keep the per-path bucket. No preview route serves a session's `cache/` (§14 risk 16) |
 | `GET /api/sessions/{sid}/frame_map?h=<render_hash>` | reference program map, RLE (§8) | cached per hash |
 | `GET /api/sessions/{sid}/bake/{render_hash}/init.mp4` · `v/{n}.bin` | bake spans (§5.3) | 404 until `preview.mp4` for that hash exists |
 | `GET /api/sessions/{sid}/duck_curve?h=` (P2) | `{lanes: {trackId: {rate_hz: 100, db: float32 base64}}}` | from the `duck_probe` stem |
@@ -402,7 +408,7 @@ The switch is logged, and a one-line toast appears in debug builds only.
    - A failure demotes that feature class (for example `eq`) to BAKED for the session and sends telemetry.
 4. **Audio check (tests and opt-in idle).** The `OfflineAudioContext` render of `mixGraph` over a range is compared with the server's audio-only render of the same EDL range. Criteria: per-50 ms RMS within 0.25 dB for EXACT features and 1 dB for APPROX; cross-correlation lag 0 ± 1 sample.
 5. **Accepted, documented differences:**
-   - 720p proxy softness, and all-intra crf 23 artefacts;
+   - 720p proxy softness, and all-intra crf 24 artefacts (§15.1);
    - chroma-edge colour differences (≤ 35 levels at single edges, B probe);
    - the varispeed resampler;
    - APPROX effects;
@@ -763,6 +769,13 @@ Browser (Chromium PR + WK nightly):
 
 ## 15. Open decisions (to settle during Phase 1a)
 1. Proxy crf (23 vs 24) and 720p bitrate, once measured on the real workdir corpus (target ≤ 40 MB per source-minute).
+   **Settled in 1a: crf 24** (`ingest/proxy.py` `DEFAULT_CRF`; `VAI_PROXY_CRF` overrides; the crf is part of the proxy key). Measured 2026-09-26 on all 82 workdir masters (42.3 source-minutes; 2 encode threads, nice 10, on a machine with a load average of 8 to 15 from concurrent work):
+   - crf 23: video 40.0 MB per source-minute (66/82 sources ≤ 40, max 90.0), 11.5× realtime aggregate (median 13.2×).
+   - crf 24: video 35.9 MB per source-minute (67/82 ≤ 40, max 79.9), 12.3× realtime aggregate (median 14.1×).
+   - The misses are dense portrait 1080×1920 and 4K sources (720×1280 proxies average 50.7 MB/min at crf 24); the 4K masters also set the slowest build (4.1×, decode-bound). 1280×720 proxies average 30.8 MB/min at 16.5×.
+   - FLAC audio (24-bit stereo) adds about 8 MB per source-minute and decodes at about 160× realtime.
+   - On-demand span (2 s, one encode of two spans): p50 254 ms, p95 596 ms, max 1.8 s (4K sources) over 3 random spans per source; 1080p sources p95 about 300 ms.
+   - The §11.4 targets of ≥ 15× per source and ≤ 400 ms p95 per span are met for ≤ 1080p landscape sources and missed for 4K and dense portrait sources on this loaded machine.
 2. Whether `render_preview` should render at 720 short edge in client mode so bakes match proxy sharpness (costs about 1.8× pixels per bake).
 3. Whether ducking is ported to JS with a golden parity test (a deterministic dynaudnorm key is hard) or stays server-curve only. Default: server curve.
 4. Telemetry sink: local log file under the app cache (no network), surfaced in Settings > Diagnostics.

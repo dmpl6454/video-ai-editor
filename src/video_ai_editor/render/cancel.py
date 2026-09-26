@@ -203,6 +203,16 @@ class LatestPerSession:
             if cur[3] >= cur[2]:
                 ev.set()
 
+    def cancel(self, sid: str) -> bool:
+        """Cancel whatever is live under `sid` (every holder's event is set;
+        their later `end` calls are no-ops). True if something was live."""
+        with self._lock:
+            cur = self._live.pop(sid, None)
+        if cur is None:
+            return False
+        cur[1].set()
+        return True
+
     def end(self, sid: str, ev: threading.Event, *, abandoned: bool = False) -> None:
         with self._lock:
             cur = self._live.get(sid)
@@ -216,6 +226,13 @@ class LatestPerSession:
 
 
 PREVIEWS = LatestPerSession()
+
+#: Wave D preview proxies (ingest/proxy_queue.py): one live proxy build per
+#: SOURCE PATH, keyed by the proxy key (file identity). A source rewritten in
+#: place gets a new key, which supersedes — terminates — the build of the
+#: old bytes; the same key shares one event, so an on-demand span job and the
+#: eager build of the same file live and die together.
+PROXIES = LatestPerSession()
 
 
 def run(args, *, check: bool = False, capture_output: bool = False, **kwargs

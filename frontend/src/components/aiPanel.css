@@ -1,80 +1,22 @@
-/* Left-pane tab strip + the AI tools panel.
-   Imported by LeftPane.tsx / AiPanel.tsx — NOT from styles.css (owned
+/* The AI tools panel (the rail's AI tab).
+   Imported by AiPanel.tsx / rail/ToolPanel.tsx — NOT from styles.css (owned
    elsewhere). Colours come only from the :root tokens in styles.css; the
    two data-URI chevrons carry --text-dim's hex because an SVG background
    can't read a custom property. Motion is transform/opacity only. */
-
-/* ---- tab strip ------------------------------------------------------- */
-
-.left-pane {
-  --left-tabs-h: 34px;
-  min-width: 0;
-}
-
-/* Sticky against .sidebar's scroll; the -10px offsets its 10px padding so
-   the strip sits flush with the pane edge instead of floating 10px in. */
-.left-tabs {
-  position: sticky;
-  top: -10px;
-  z-index: 2;
-  height: var(--left-tabs-h);
-  margin: -10px -10px 8px;
-  padding: 6px 10px 0;
-  display: flex;
-  gap: 2px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--line);
-}
-
-.left-tab {
-  position: relative;
-  /* Content-sized with the slack shared: three labels ("TRANSITIONS" is the
-     long one) no longer fit as equal thirds at the 160px panel floor. */
-  flex: 1 1 auto;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  border-radius: 4px 4px 0 0;
-  padding: 6px 4px 8px;
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-  color: var(--text-dim);
-  transition: color 120ms ease;
-}
-.left-tab::after {
-  content: '';
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: -1px;
-  height: 2px;
-  background: var(--accent-2);
-  transform: scaleX(0);
-  transform-origin: center;
-  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.left-tab:hover:not(:disabled) { background: transparent; color: var(--text); }
-.left-tab[aria-selected="true"] { color: var(--text); }
-.left-tab[aria-selected="true"]::after { transform: scaleX(1); }
-.left-tab:active { transform: translateY(1px); }
-
-/* The strip is the heading — MediaBin's own <h2>Media</h2> would repeat it. */
-.left-pane .media-bin > h2 { display: none; }
 
 /* ---- panel chrome ---------------------------------------------------- */
 
 .ai-panel { min-width: 0; overflow-wrap: anywhere; }
 
-/* Second sticky row, parked just under the strip. */
+/* Sticky against its tabpanel's own scroll (rail.css .tool-tabpanel); the
+   negative top/margins offset the tabpanel's padding so the search row sits
+   flush with the panel edge instead of floating inside it. */
 .ai-panel-head {
   position: sticky;
-  top: calc(var(--left-tabs-h) - 10px);
+  top: calc(-1 * var(--tool-panel-pad-top, 10px));
   z-index: 2;
-  margin: 0 -10px;
-  padding: 0 10px 6px;
+  margin: calc(-1 * var(--tool-panel-pad-top, 10px)) calc(-1 * var(--tool-panel-pad-x, 12px)) 0;
+  padding: var(--tool-panel-pad-top, 10px) var(--tool-panel-pad-x, 12px) 6px;
   background: var(--bg-1);
 }
 
@@ -445,15 +387,13 @@
 /* ---- interaction states, shared ------------------------------------- */
 
 .ai-panel button:active:not(:disabled) { transform: translateY(1px); }
-.left-tab:focus-visible,
 .ai-panel :is(button, input, select, textarea, summary, pre[tabindex]):focus-visible {
   outline: 2px solid var(--accent-2);
   outline-offset: 2px;
 }
-.left-tab:focus-visible { outline-offset: -2px; }
 
 @media (prefers-reduced-motion: reduce) {
-  .left-tab::after, .ai-chevron, .ai-bar-fill, .ai-card, .ai-card::before { transition: none; }
+  .ai-chevron, .ai-bar-fill, .ai-card, .ai-card::before { transition: none; }
   .ai-bar.indeterminate .ai-bar-fill { animation: none; width: 100%; opacity: 0.45; }
 }
 

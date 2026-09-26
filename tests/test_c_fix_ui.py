@@ -155,7 +155,7 @@ def test_missing_ffmpeg_banner_sits_in_flow_and_can_be_hidden(browser, base_url,
     page.screenshot(path=str(SHOTS / f"cfix_banner_{width}.png"))
     assert page.evaluate("el => getComputedStyle(el).position", banner.element_handle()) != "fixed"
     covered = []
-    for sel in ("[role=tab]", ".sidebar.right", ".sidebar.left", "form[aria-label='Prompt editor'] button"):
+    for sel in ("[role=tab]", ".sidebar.right", "nav.rail", "#tool-panel", "form[aria-label='Prompt editor'] button"):
         for i in range(page.locator(sel).count()):
             el = page.locator(sel).nth(i)
             if not el.is_visible():
@@ -317,7 +317,7 @@ def test_project_menu_items_line_up_and_speak_plainly(browser, base_url, session
 
 def test_effects_panel_names_the_clip_like_the_media_panel(browser, base_url, sessions):  # noqa: F811
     page = _open(browser, base_url, sessions["full"])
-    page.locator(".sidebar.left button[title='Filters, effects & LUT looks']").first.click()
+    page.get_by_role("tab", name="Effects", exact=True).click()
     page.wait_for_timeout(500)
     tgt = page.locator(".fx-target")
     text = tgt.inner_text().strip()

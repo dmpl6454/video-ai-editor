@@ -118,6 +118,21 @@ export interface MediaItem {
   missing?: boolean
   /** QA-090: a photo — placed at a default length, extendable like any clip. */
   still?: boolean
+  /** Wave D (INSTANT_PREVIEW_SPEC §5.2): stream facts from the preview-proxy
+   *  probe. Absent until a proxy was asked for (never probed on /media). */
+  fps?: { num: number; den: number }
+  frames?: number
+  pix_fmt?: string
+  has_audio?: boolean
+  proxy?: MediaProxyState
+}
+
+/** A media item's instant-preview proxy (GET /sessions/:id/media `proxy`). */
+export interface MediaProxyState {
+  key: string | null
+  state: 'none' | 'pending' | 'partial' | 'ready' | 'failed' | 'offline'
+  w: number | null
+  h: number | null
 }
 
 export function isMediaClip(c: AnyClip): c is Clip {

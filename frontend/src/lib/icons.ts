@@ -18,6 +18,7 @@ import {
   Sparkles, Star, Sticker, Sun, Trash, Type, Undo2, Upload, X, Zap, ZoomIn, ZoomOut, Captions,
   Settings, KeyRound, HardDrive, Brain, RefreshCw, Pencil, TextAlignStart, TextAlignCenter, TextAlignEnd,
   Volume2, VolumeX, Headphones,
+  SquareSplitHorizontal, WandSparkles, PanelLeftClose, SlidersHorizontal, MessageSquare,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -99,6 +100,12 @@ export const ICONS = {
   laneAudible: Volume2,
   laneMuted: VolumeX,
   solo: Headphones,
+  // Wave D, left tool rail (docs/design/LEFT_RAIL_SPEC.md §2.2, R1)
+  transitions: SquareSplitHorizontal,
+  ai: WandSparkles,
+  panelLeftClose: PanelLeftClose,
+  inspector: SlidersHorizontal,
+  chat: MessageSquare,
 } satisfies Record<string, LucideIcon>
 
 export type IconName = keyof typeof ICONS

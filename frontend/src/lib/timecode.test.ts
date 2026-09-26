@@ -2,7 +2,11 @@
 // read decimal seconds ("2.0s" for both frame 60 and frame 61 at 30 fps) and
 // nothing could format or parse HH:MM:SS:FF.
 import { describe, expect, it } from 'vitest'
-import { formatTimecode, framesToTimecode, parseTimecode, rulerStepFrames, rulerTicks } from './timecode'
+import { frameOf as tbFrameOf, timeOf as tbTimeOf } from './preview/timeline/timebase'
+import { toFrameGrid } from './frameStep'
+import {
+  formatTimecode, frameIndex, framesToTimecode, parseTimecode, rulerStepFrames, rulerTicks,
+} from './timecode'
 
 const NTSC = 30000 / 1001
 const NTSC60 = 60000 / 1001
@@ -87,5 +91,28 @@ describe('ruler labels under the playhead chip (wave-B review)', () => {
     expect(hit.length).toBe(1)
     expect(hit[0].x).toBe(123)
     expect(rulerLabelsUnder(ticks, 120, 50, 30, measure, 2000, 2100)).toEqual([])
+  })
+})
+
+describe('one frame rule (review RD1: spec R2 keeps exactly one frame_of)', () => {
+  it('a half-frame time names the frame a step or snap lands on (ties to even)', () => {
+    // 0.75 s at 30 fps is exactly frame 22.5: the server's frame_of says 22.
+    expect(frameIndex(0.75, 30)).toBe(tbFrameOf(0.75, 30))
+    expect(frameIndex(0.75, 30)).toBe(22)
+    expect(formatTimecode(0.75, 30)).toBe('00:00:00:22')
+    expect(formatTimecode(0.75, 30)).toBe(formatTimecode(toFrameGrid(0.75, 30), 30))
+    // Every displaySeekTime-style (n + 0.5)/fps agrees with the step grid.
+    for (const fps of [30, 25, 24, 30000 / 1001, 60]) {
+      for (let n = 0; n < 300; n++) {
+        const t = (n + 0.5) / fps
+        expect(frameIndex(t, fps)).toBe(tbFrameOf(t, fps))
+      }
+    }
+  })
+
+  it('typed seconds and frame counts land on the timebase grid', () => {
+    expect(parseTimecode('0.75', 30)).toBe(toFrameGrid(0.75, 30))
+    expect(parseTimecode('90f', 30000 / 1001)).toBe(tbTimeOf(90, 30000 / 1001))
+    expect(parseTimecode('00:00:03:00', 30000 / 1001)).toBe(tbTimeOf(90, 30000 / 1001))
   })
 })

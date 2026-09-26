@@ -9,6 +9,14 @@
 // long run of steps never accumulates float drift.
 
 import { formatTimecode } from './timecode'
+import {
+  frameDuration as tbFrameDuration, frameOf as tbFrameOf, timeOf as tbTimeOf,
+} from './preview/timeline/timebase'
+
+// The seconds↔frames arithmetic itself lives in `preview/timeline/timebase.ts`
+// — the line-for-line port of `edl/timebase.py` (instant preview spec R2) —
+// so a step lands on exactly the frame the server's `quantize` names (ties to
+// even on the exact value of `t`, not `Math.round(t * fps)`).
 
 export const DEFAULT_FPS = 30
 
@@ -21,14 +29,14 @@ export function projectFps(fps: unknown): number {
 
 /** Seconds per frame at `fps`. */
 export function frameDuration(fps: unknown): number {
-  return 1 / projectFps(fps)
+  return tbFrameDuration(projectFps(fps))
 }
 
 /** The time `frames` frames away from `t` on the `fps` grid (never < 0). */
 export function stepFrames(t: number, frames: number, fps: unknown): number {
   const f = projectFps(fps)
-  const n = Math.round(Math.max(0, Number.isFinite(t) ? t : 0) * f) + frames
-  return Math.max(0, n) / f
+  const n = tbFrameOf(Math.max(0, Number.isFinite(t) ? t : 0), f) + frames
+  return tbTimeOf(Math.max(0, n), f)
 }
 
 /** `t` moved onto the nearest frame boundary of the `fps` grid (never < 0) —
@@ -44,7 +52,7 @@ export function toFrameGrid(t: number, fps: unknown): number {
  *  the PREVIOUS frame on every frame n ≡ 2 (mod 3) at 30 fps (QA-077). */
 export function displaySeekTime(t: number, fps: unknown): number {
   const f = projectFps(fps)
-  const n = Math.max(0, Math.round((Number.isFinite(t) ? t : 0) * f))
+  const n = tbFrameOf(Number.isFinite(t) ? t : 0, f)
   return (n + 0.5) / f
 }
 

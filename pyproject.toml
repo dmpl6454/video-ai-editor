@@ -90,6 +90,7 @@ markers = [
     "benchmark: end-to-end CapCut-parity benchmark on real media (opt in with -m benchmark)",
     "slow: slow-tier benchmark case (shorts, reframe, full pipeline, 12-minute clip)",
     "tts: needs a Hindi TTS voice (Piper hi_IN or macOS `say -v Lekha`) to synthesize its fixture",
+    "wk: runs in real WKWebView via tests/wk/harness.py (4 px on-screen window); auto-skipped off macOS, without a window server, or with VAI_WK=0",
 ]
 
 [dependency-groups]

@@ -8,10 +8,14 @@
 // (`edl.canvas.fps`, lib/frameStep's rule), drop-frame (HH:MM:SS;FF) at the two
 // NTSC rates that need it so a 29.97 timeline's hour still reads 01:00:00;00.
 //
-// Frames are counted exactly like lib/frameStep.stepFrames — `round(t · fps)` —
-// so the frame a label names is the frame a step lands on.
+// Frames are counted by THE frame rule, `preview/timeline/timebase.frameOf`
+// (the port of edl/timebase.frame_of: nearest frame, ties to EVEN on the exact
+// value of t), which lib/frameStep's steps and snaps use too — so the frame a
+// label names is the frame a step lands on, and the frame the server shows.
+// Spec R2: the frontend keeps exactly one copy of that rule.
 
 import { projectFps } from './frameStep'
+import { frameOf as tbFrameOf, timeOf as tbTimeOf } from './preview/timeline/timebase'
 
 /** Integer label rate: 24 for 23.976, 30 for 29.97, 60 for 59.94. */
 export function nominalRate(fps: unknown): number {
@@ -29,8 +33,7 @@ export function dropFrames(fps: unknown): number {
 
 /** The frame index of `t` seconds on the `fps` grid (never < 0). */
 export function frameIndex(t: number, fps: unknown): number {
-  const f = projectFps(fps)
-  return Math.max(0, Math.round((Number.isFinite(t) ? t : 0) * f))
+  return Math.max(0, tbFrameOf(Number.isFinite(t) ? t : 0, projectFps(fps)))
 }
 
 const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -86,9 +89,9 @@ export function parseTimecode(text: string, fps: unknown): number | null {
   const s = text.trim().toLowerCase()
   if (!s) return null
   const f = projectFps(fps)
-  const toGrid = (sec: number) => (Number.isFinite(sec) && sec >= 0 ? frameIndex(sec, f) / f : null)
+  const toGrid = (sec: number) => (Number.isFinite(sec) && sec >= 0 ? tbTimeOf(frameIndex(sec, f), f) : null)
   let m = /^(\d+)\s*f$/.exec(s)
-  if (m) return Number(m[1]) / f
+  if (m) return tbTimeOf(Number(m[1]), f)
   m = /^(\d+(?:\.\d*)?|\.\d+)\s*s?$/.exec(s)
   if (m) return toGrid(Number(m[1]))
   const parts = s.split(/[:;]/)
@@ -106,7 +109,7 @@ export function parseTimecode(text: string, fps: unknown): number | null {
   while (nums.length < 4) nums.unshift(0)
   const [hh, mm, ss, ff] = nums
   if (mm > 59 || ss > 59 || ff >= nominalRate(fps)) return null
-  return timecodeToFrames(hh, mm, ss, ff, fps) / f
+  return tbTimeOf(timecodeToFrames(hh, mm, ss, ff, fps), f)
 }
 
 /** One ruler tick: its time and whether it carries a label (major). */

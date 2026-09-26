@@ -37,9 +37,13 @@ function clipEndpoints(kind: TransitionPreview['kind'], dir: Direction | null): 
     case 'doors-close': return [FULL, 'inset(0 50% 0 50%)']
     case 'curtain': return ['inset(50% 0 50% 0)', FULL]
     case 'curtain-close': return [FULL, 'inset(50% 0 50% 0)']
+    // A ±12 % crest that rises from below the tile to above it: the still
+    // (midpoint) is a wave at 38-62 %, far enough from Wipe Up's straight
+    // edge to tell apart at rest (it was ±6 %, a 3.97 mean-pixel difference
+    // against the > 4 QA-119 bar), and the last frame is fully covered.
     case 'wave': return [
-      'polygon(0 100%, 25% 100%, 50% 100%, 75% 100%, 100% 100%, 100% 100%, 0 100%)',
-      'polygon(0 -12%, 25% 12%, 50% -12%, 75% 12%, 100% -12%, 100% 100%, 0 100%)',
+      'polygon(0 112%, 25% 136%, 50% 112%, 75% 136%, 100% 112%, 100% 140%, 0 140%)',
+      'polygon(0 -36%, 25% -12%, 50% -36%, 75% -12%, 100% -36%, 100% 100%, 0 100%)',
     ]
     default: return null
   }

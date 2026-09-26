@@ -147,7 +147,8 @@ _QUERY = "?wait=abc&since=x&t=nan&h=-5&peaks_per_sec=zz&src=%00&refresh=q"
 def _fill(path: str, sid: str) -> str:
     return (path.replace("{sid}", sid).replace("{job_id}", "nope").replace("{media_id}", "0123456789ab")
             .replace("{clip_id}", "nope").replace("{kind}", "uploads").replace("{name:path}", "..%2f..%2fetc")
-            .replace("{name}", "nope").replace("{seq}", "zz"))
+            .replace("{name}", "nope").replace("{seq}", "zz")
+            .replace("{key}", "0123456789abcdef01234567").replace("{n}", "zz"))
 
 
 def test_every_route_answers_fuzzed_requests_without_a_500(seeded):

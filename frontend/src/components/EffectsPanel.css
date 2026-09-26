@@ -1,4 +1,4 @@
-/* EffectsPanel — Filters / Effects / LUT looks section in the media bin.
+/* EffectsPanel — the Effects tool panel: filters / LUT looks and effects.
    Uses only the app's dark-theme tokens from styles.css (:root). */
 
 .effects-panel .fx-subhead { margin: 8px 0 4px; }

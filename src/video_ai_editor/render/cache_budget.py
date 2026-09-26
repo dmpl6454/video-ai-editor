@@ -233,3 +233,81 @@ def clear(session_dir: Path, *, protect: Iterable = (), protect_recent_s: float 
         if not e.path.exists():
             freed += e.size
     return freed
+
+
+# ---- wave D: preview proxies, their own LRU class (spec §5.1 "Disk") ---------
+#
+# Proxies live OUTSIDE the sessions (``WORKDIR/proxies/<key>/``, keyed on the
+# source file's identity, so two projects sharing a file share its proxy) and
+# are NOT counted against the render-cache budgets above: a proxy is rebuilt
+# span by span on demand, so the eviction unit is one span pack (v/*.bin) or
+# FLAC chunk (a/*.flac). The small per-proxy files (index/source/refs/init)
+# stay; a proxy whose source file no longer exists goes entirely.
+
+PROXY_PATTERNS: tuple[tuple[str, str], ...] = (("v", "*.bin"), ("a", "*.flac"))
+
+
+def proxy_budget_bytes() -> int:
+    """Byte cap of the proxies class (VAI_PROXY_CACHE_MB, default 10240 ≈ 250
+    source-minutes at the measured ~40 MB per source-minute)."""
+    return _env_mb("VAI_PROXY_CACHE_MB", 10240)
+
+
+def proxy_entries(root: Path) -> list[Entry]:
+    out: list[Entry] = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        for sub, pattern in PROXY_PATTERNS:
+            sd = d / sub
+            if not sd.is_dir():
+                continue
+            for p in sd.glob(pattern):
+                if p.name.startswith("."):
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                out.append(Entry(p, int(st.st_size), float(st.st_mtime)))
+    return out
+
+
+def _orphaned_proxy(d: Path) -> bool:
+    """A proxy dir whose recorded source file is gone (never re-requested)."""
+    import json as _json
+    try:
+        src = _json.loads((d / "source.json").read_text(encoding="utf-8")).get("src")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return bool(src) and not Path(src).exists()
+
+
+def enforce_proxies(root: Path, *, budget: int | None = None,
+                    protect: Iterable = ()) -> list[Path]:
+    """Trim the proxies class to its byte budget (LRU by mtime; files touched
+    in the last PROTECT_RECENT_S stay), after dropping proxies of deleted
+    sources. Never raises."""
+    removed: list[Path] = []
+    root = Path(root)
+    try:
+        if root.is_dir():
+            for d in root.iterdir():
+                if d.is_dir() and _orphaned_proxy(d):
+                    _pu.rmtree_with_retry(d)
+                    removed.append(d)
+        removed += _evict(proxy_entries(root),
+                          proxy_budget_bytes() if budget is None else budget,
+                          _resolved(protect), time.time())
+    except Exception:
+        pass
+    return removed
+
+
+def proxy_usage(root: Path) -> dict:
+    pool = proxy_entries(root)
+    return {"bytes": sum(e.size for e in pool), "files": len(pool),
+            "budget_bytes": proxy_budget_bytes()}

@@ -36,6 +36,28 @@ SUBPROCESS_FLAGS: dict = (
 )
 
 
+#: Spread instead of SUBPROCESS_FLAGS for BACKGROUND work that must yield the
+#: CPU to the interactive app (wave D preview proxies): Windows gets the
+#: below-normal priority class as well as the no-window flag; POSIX gets `{}`
+#: and is lowered through `low_priority_argv` instead.
+LOW_PRIORITY_SUBPROCESS_FLAGS: dict = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS}
+    if IS_WINDOWS else {}
+)
+
+
+def low_priority_argv(argv: list[str], niceness: int = 10) -> list[str]:
+    """`argv` run at a lower CPU priority. POSIX prefixes `nice -n <niceness>`
+    (which EXECs the command, so the child pid is the tool itself and killing
+    it needs nothing special); Windows returns `argv` unchanged and relies on
+    LOW_PRIORITY_SUBPROCESS_FLAGS. `preexec_fn=os.nice` is not used: it is
+    unsafe in a process with threads, and every caller of this runs on one."""
+    if IS_WINDOWS:
+        return list(argv)
+    nice = shutil.which("nice")
+    return [nice, "-n", str(int(niceness)), *argv] if nice else list(argv)
+
+
 def exe_name(name: str) -> str:
     """Append `.exe` on Windows for a bare binary name (idempotent)."""
     if IS_WINDOWS and not name.lower().endswith(".exe"):

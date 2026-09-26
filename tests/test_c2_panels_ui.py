@@ -284,7 +284,7 @@ def test_an_over_long_prompt_is_counted_refused_and_kept(browser, base_url, medi
 def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser, base_url, media):
     sid = _session(base_url, media, "c2 stickers", clips=1)
     page = _open(browser, base_url, sid)
-    page.get_by_role("button", name="Stickers", exact=True).click()
+    page.get_by_role("tab", name="Stickers", exact=True).click()
     emoji = page.locator(".sticker-picker button[draggable='true']").nth(2)
     emoji.wait_for()
     emoji.click()
@@ -292,12 +292,15 @@ def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser,
     page.locator(".props", has_text="Stickers").first.wait_for(timeout=5000)
     stickers = [c for t in _edl(base_url, sid)["tracks"] if t["id"] == "stickers" for c in t["clips"]]
     assert len(stickers) == 1
-    # QA-126: one click on Effects opens it, closing Stickers.
-    effects = page.get_by_role("button", name="Effects")
+    # QA-126: one click on Effects shows it, hiding Stickers. The rail keeps
+    # every panel mounted (LEFT_RAIL_SPEC §2.7), so the picker is hidden,
+    # not gone: assert visibility, not count.
+    effects = page.get_by_role("tab", name="Effects", exact=True)
     effects.click()
     page.wait_for_timeout(300)
-    assert effects.get_attribute("aria-expanded") == "true"
-    assert page.locator(".sticker-picker button[draggable='true']").count() == 0
+    assert effects.get_attribute("aria-selected") == "true"
+    assert page.locator(".effects-panel .fx-btn").first.is_visible()
+    assert not page.locator(".sticker-picker").is_visible()
     page.context.close()
 
 
@@ -313,6 +316,9 @@ def test_panel_chrome_icon_toggle_and_in_app_remove_confirm(browser, base_url, m
     assert box["width"] <= 32 and box["height"] <= 32, box      # an icon button, not a bar
     assert toggle.locator("svg").count() == 1
     toggle.click()
+    # Collapsed, the 36 px rail also jumps straight to either tab (§2.9).
+    assert page.get_by_role("button", name="Show the Inspector", exact=True).is_visible()
+    assert page.get_by_role("button", name="Show the Chat", exact=True).is_visible()
     page.get_by_role("button", name="Show the Inspector and Chat panel").click()
 
     page.locator("[data-media-row]").first.hover()

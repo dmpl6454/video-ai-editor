@@ -44,6 +44,8 @@
 
 import { clipDuration, clipEnd, isMediaClip, type AnyClip, type EDL } from '../types'
 import { inEnableWindow } from './overlayGate'
+import { seamCharges } from './preview/timeline/framePlan'
+import type { FpsLike } from './preview/timeline/timebase'
 
 export interface LayoutClip {
   id: string
@@ -77,11 +79,8 @@ export interface V1Layout {
   seams: SeamLayout[]
 }
 
-// Same 1ms tolerance as compositor._GAP_EPS, and the same 0.05s boundary
-// match the renderer and `transition_overlap()` use. Duplicated rather than
-// shared because this is the browser side of the same rule.
-const GAP_EPS = 0.001
-const SEAM_TOL = 0.05
+// The gap tolerance (compositor._GAP_EPS) and the 0.05 s boundary match
+// live in ONE place, framePlan.seamCharges (spec R3), which this table adapts.
 // "seam ≤ t" with float slack: a caption placed exactly on a seam by
 // `auto_caption` arrives as e.g. 13.730000000000002 against a boundary of
 // 13.73 (start + (out-in)/speed), and a strict compare would leave THAT one
@@ -94,47 +93,38 @@ const SEAM_EPS = 1e-6
  * (per-clip pull), `renderTime` (any lane) and `layoutTime` (the inverse)
  * are all derived from it, so they cannot disagree about which transitions
  * count.
+ *
+ * With `fps` (the project rate — what `v1SeamsOf`/`v1LayoutOf` pass) every
+ * cost is a WHOLE number of frames, exactly as `seam_table_for(fps=…)` charges
+ * it and the compositor xfades it (instant preview spec R3). Without it the
+ * raw clamped seconds are returned (the pre-Wave-D behaviour, kept for
+ * callers that have no EDL).
  */
 export function seamTable(
-  clips: LayoutClip[], transitions: LayoutTransition[],
+  clips: LayoutClip[],
+  transitions: ReadonlyArray<{ at: number; duration?: number }>,
+  fps?: FpsLike,
 ): SeamLayout[] {
-  const seams: SeamLayout[] = []
   const sorted = [...clips].sort((a, b) => a.start - b.start)
   let cum = 0
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const cur = sorted[i]
-    const nxt = sorted[i + 1]
-    const boundary = cur.start + cur.duration
-    let overlap = 0
-    // A positive GAP is what makes `_v1_segments` insert black filler, and the
-    // renderer leaves that seam a hard cut — so no transition applies and
-    // nothing is removed. An OVERLAP is not a gap: the renderer packs it with
-    // `max(cursor, start)` and the transition IS applied. Testing `abs()` here
-    // would wrongly skip a legacy overlapping pair the renderer does charge.
-    if (nxt.start - boundary <= GAP_EPS) {
-      // First match wins, as in `transition_overlap()`.
-      const m = transitions.find((tr) => Math.abs(tr.at - boundary) < SEAM_TOL)
-      if (m) {
-        // Never claim more than the shorter side can give — xfade cannot
-        // overlap further than a clip is long.
-        overlap = Math.max(0, Math.min(m.duration, cur.duration, nxt.duration))
-      }
-    }
-    cum += overlap
-    // The seam affordance sits at the MIDDLE of the overlap in output time;
-    // with no transition the two edges coincide and this is just the cut.
-    seams.push({ boundary, overlap, cum, outAt: boundary - cum + overlap / 2 })
-  }
-  return seams
+  // framePlan.seamCharges decides which seams count and what each costs (a
+  // gap is a hard cut, an overlap is not; first match wins; clamped to the
+  // shorter side, whole frames with fps). This adds the UI's running Σ and
+  // the affordance position: the MIDDLE of the overlap in output time (with
+  // no transition the two edges coincide and it is just the cut).
+  return seamCharges(sorted, transitions, fps).map(({ boundary, cost }) => {
+    cum += cost
+    return { boundary, overlap: cost, cum, outAt: boundary - cum + cost / 2 }
+  })
 }
 
 export function v1Layout(
-  clips: LayoutClip[], transitions: LayoutTransition[],
+  clips: LayoutClip[], transitions: LayoutTransition[], fps?: number,
 ): V1Layout {
   const shift = new Map<string, number>()
   const sorted = [...clips].sort((a, b) => a.start - b.start)
   if (sorted.length === 0) return { shift, seams: [] }
-  const seams = seamTable(sorted, transitions)
+  const seams = seamTable(sorted, transitions, fps)
   shift.set(sorted[0].id, 0)
   // The clip AFTER seam i is pulled by everything consumed through seam i.
   // Per-clip rather than `renderTime(start)` on purpose: a legacy pair whose
@@ -233,7 +223,7 @@ export function layoutTime(seams: SeamLayout[], r: number): number {
 export function v1SeamsOf(edl: EDL | null | undefined): SeamLayout[] {
   const v1 = v1InputsOf(edl)
   if (!v1 || !v1.transitions.length) return []
-  return seamTable(v1.clips, v1.transitions)
+  return seamTable(v1.clips, v1.transitions, edl?.canvas?.fps)
 }
 
 /**
@@ -246,7 +236,7 @@ export function v1SeamsOf(edl: EDL | null | undefined): SeamLayout[] {
 export function v1LayoutOf(edl: EDL | null | undefined): V1Layout {
   const v1 = v1InputsOf(edl)
   if (!v1 || !v1.transitions.length) return { shift: new Map<string, number>(), seams: [] }
-  return v1Layout(v1.clips, v1.transitions)
+  return v1Layout(v1.clips, v1.transitions, edl?.canvas?.fps)
 }
 
 /**

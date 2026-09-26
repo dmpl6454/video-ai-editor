@@ -351,7 +351,7 @@ def test_chat_route_streams_the_turn_and_saves_history_with_the_final_text(tmp_p
     monkeypatch.setattr(_storage, "WORKDIR", tmp_path)
     monkeypatch.setattr(_main, "WORKDIR", tmp_path)
     _main._STORES.clear()
-    sid = "s_chat_nokey"
+    sid = "s_chatnokey"
     store = F.make_store(tmp_path, name=sid)
     facts = F.facts_for(store)
     monkeypatch.setattr(service, "build_facts_for", lambda st, ui: facts)

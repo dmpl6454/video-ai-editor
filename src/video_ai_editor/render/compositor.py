@@ -1084,9 +1084,25 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
                 # the chain string — so changing the chain there would silently
                 # serve every already-cached chunk with the old timebase and no
                 # invalidation.
+                #
+                # The shared timebase is ONE PROJECT FRAME (1/R), not AVTB
+                # (Wave D frame-map goldens). In µs every frame pts is a
+                # rounded k/R, and the left side of a later seam carries the
+                # sum of several such roundings (concat offsets, the previous
+                # xfade's re-stamp), while `offset` is rounded on its own — so
+                # the frame that starts exactly at `offset` could land 1 µs
+                # early, xfade passed it through as pure A, and the seam began
+                # a frame late: the picture came out one frame longer than
+                # the plan and than the acrossfaded sound (measured: 30 fps
+                # seams at 44 and 50 frames, 23.976 at 56). On a 1/R clock
+                # every pts is an exact frame number and `offset`/`duration`
+                # round to the nearest frame, so a seam starts where
+                # `_v1_frame_plan` and `seam_table_for` put it.
+                frame_tb = _tb.rate_of(fps)
+                frame_tb = f"{frame_tb.denominator}/{frame_tb.numerator}"
                 ltb, rtb = f"[xtbl{i}]", f"[xtbr{i}]"
-                fc_parts.append(f"{cur_v}settb=AVTB{ltb}")
-                fc_parts.append(f"{seg_v[i]}settb=AVTB{rtb}")
+                fc_parts.append(f"{cur_v}settb={frame_tb}{ltb}")
+                fc_parts.append(f"{seg_v[i]}settb={frame_tb}{rtb}")
                 # A few transitions need a real filter on top of the blend,
                 # because an xfade expr can only pick between the two pixels at
                 # one coordinate — it cannot smear them. `whip` is a slide plus
