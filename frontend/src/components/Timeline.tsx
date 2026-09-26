@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { useStore } from '../store'
 import { api } from '../api'
@@ -15,13 +15,14 @@ import {
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 import { splitTimeFor } from '../lib/splitTargets'
 import { v1CutPoints } from '../lib/cutPoints'
-import { chordLabel } from '../keymap/engine'
+import { chordLabel, IS_MAC, useKeymapStore } from '../keymap/engine'
 import { undoTitle } from '../lib/undoHorizon'
 import { contentTransform, spanVisible, viewportCanvasSize, visibleColumns } from '../lib/timelineViewport'
 import { cssToken, uiFont } from '../lib/themeTokens'
 import { itemsFor, namesBySrc, offlineSrcs, useMediaNames } from '../lib/mediaNames'
-import { clipGainAt, columnPeak, waveColumn, type ClipAudio } from '../lib/waveformDraw'
-import { isHeard, MONITOR_BOX, monitorBoxes, monitorHit } from '../lib/trackMonitor'
+import { clipGainAt, waveColumn, type ClipAudio, type WaveData } from '../lib/waveformDraw'
+import { channelColumns, channelMode } from '../lib/audioChannels'
+import { isHeard, laneNameBaseline, monitorButtons, monitorLabels } from '../lib/trackMonitor'
 import { useMenuA11y } from '../lib/useMenuA11y'
 import { formatTimecode, rulerLabelsUnder, rulerTicks } from '../lib/timecode'
 import { projectFps as projectFpsOf, toFrameGrid } from '../lib/frameStep'
@@ -33,11 +34,19 @@ import {
 } from '../lib/timelineLanes'
 import { cursorFor, hitTest, type CutMark, type Hit, type HitBox } from '../lib/timelineHit'
 import { snapLabel, snapTargets, snapTo, type SnapKind, type SnapResult } from '../lib/snap'
-import { filmstripTiles, ThumbQueue } from '../lib/filmstrip'
+import { filmstripTiles, spriteSlot, spriteUrl, SPRITE_TILES, ThumbQueue, type TileSpec } from '../lib/filmstrip'
+import { createPreviewGate } from '../lib/previewGate'
+import { isMarqueeDrag, marqueeHits, marqueeRect } from '../lib/marquee'
+import { wheelAction } from '../lib/timelineWheel'
+import { drawnCuts, hoveredCut } from '../lib/cutHover'
+import { uploadGhosts } from '../lib/uploadGhosts'
+import { collides, fitLabel, LABEL_PLATE_ALPHA, labelPlate, laneTooltipHead, markerChips, stickyLabelX } from '../lib/timelineLabels'
 import { claimFileDrop, isFileDrag, setTimelineFileDragOver } from '../lib/fileDrop'
 import { dropFilesOnLane } from '../lib/laneDrop'
 import { COMMAND_BY_ID } from '../keymap/commands'
 import { TimelineIcon } from './TimelineIcons'
+import { drawIcon } from '../lib/icons'
+import { Icon } from './Icon'
 import { TimecodeField } from './TimecodeField'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
@@ -92,25 +101,35 @@ function firstFreeGap(
 
 // Per-source waveform cache: src path → peaks array. Fetched once, reused on
 // every redraw. The peaks themselves are independent of timeline placement.
-const WAVE_CACHE = new Map<string, { peaks: number[]; peaks_per_sec: number; duration: number }>()
+const WAVE_CACHE = new Map<string, WaveData>()
 const WAVE_INFLIGHT = new Map<string, Promise<void>>()
 
-// Filmstrip thumbnail cache: `${src}|${t}|${h}` → loaded image. `t` is SOURCE
-// time on lib/filmstrip's zoom-stable grid, so zooming can't mint unbounded
-// distinct URLs for the same footage. Requests go through THUMB_QUEUE (QA-059):
-// at most two in flight, visible tiles only, a failed key never retried
-// in-session. Backed by GET /api/sessions/{sid}/thumb (JPEG, 1h cache).
+// Filmstrip image cache. Tiles come out of SPRITES (QA-059): one
+// GET /api/sessions/{sid}/thumbstrip returns SPRITE_TILES frames of one source
+// on lib/filmstrip's zoom-stable grid, keyed `S|src|step|page|h` — a 12-min
+// clip's whole strip is one or two requests, not one ffmpeg spawn per tile.
+// A tile whose window holds no grid point (a clip shorter than one step at
+// this zoom) falls back to a single /thumb, keyed `T|src|t|h`. Requests go
+// through THUMB_QUEUE: at most two in flight, visible tiles only, a failed
+// key never retried in-session, and nothing at all until the preview has
+// loaded (lib/previewGate). JPEG, 1 h browser cache.
 const THUMB_H = 72          // 2× the 36px row height for retina; server caps at 270
 const THUMB_CACHE = new Map<string, HTMLImageElement>()
+// key → the source it shows and how many tiles wide the image is.
+const THUMB_META = new Map<string, { src: string; tiles: number }>()
 let thumbRepaint: (() => void) | null = null
+// Once the preview has loaded in this page, later mounts never wait again.
+let previewGateOpened = false
 const THUMB_QUEUE = new ThumbQueue((key, url, done) => {
   const img = new Image()
   img.decoding = 'async'
   ;(img as unknown as { fetchPriority?: string }).fetchPriority = 'low'
   img.onload = () => {
     THUMB_CACHE.set(key, img)
-    const src = key.slice(0, key.indexOf('|'))
-    if (!THUMB_ASPECT.has(src) && img.height > 0) THUMB_ASPECT.set(src, img.width / img.height)
+    const meta = THUMB_META.get(key)
+    if (meta && !THUMB_ASPECT.has(meta.src) && img.height > 0) {
+      THUMB_ASPECT.set(meta.src, img.width / meta.tiles / img.height)
+    }
     done(true)
     thumbRepaint?.()
   }
@@ -291,6 +310,14 @@ export function Timeline() {
   const [scrollY, setScrollY] = useState(0)
   // Hover state for the cursor and the edge-handle highlight (QA-052).
   const hoverRef = useRef<Hit | null>(null)
+  // The empty cut (its `at`) whose bowtie shows because the pointer is near
+  // it (lib/cutHover, QA-051), or null.
+  const cutHoverRef = useRef<number | null>(null)
+  // A box selection in progress (lib/marquee, QA-116): the press point, the
+  // live corner, whether it has become a box yet, and whether it adds.
+  const marqueeRef = useRef<null | { ax: number; ay: number; bx: number; by: number; active: boolean; additive: boolean }>(null)
+  // Queued imports, drawn as ghost clips (QA-044).
+  const uploads = useStore((s) => s.uploads)
   // The time to keep under a viewport x across the next zoom change (QA-055).
   const zoomAnchorRef = useRef<{ t: number; viewX: number } | null>(null)
   const fps = edl?.canvas?.fps
@@ -427,12 +454,38 @@ export function Timeline() {
     thumbRepaint = () => setThumbTick((n) => n + 1)
     return () => { thumbRepaint = null }
   }, [])
-  function thumbImage(src: string, tSec: number): HTMLImageElement | null {
+  // Hold filmstrip requests until the preview <video> has data (QA-059): on
+  // a cold open they raced the player for the engine and the connections.
+  useEffect(() => {
+    if (previewGateOpened || typeof document === 'undefined') return
+    THUMB_QUEUE.hold(true)
+    const gate = createPreviewGate({
+      doc: document,
+      onOpen: () => { previewGateOpened = true; THUMB_QUEUE.hold(false) },
+    })
+    if (gate.isOpen()) { previewGateOpened = true; THUMB_QUEUE.hold(false) }
+    // Unmount keeps the hold: releasing here pumped the queued tiles at once
+    // (a StrictMode/remount cycle opened the gate before the preview loaded);
+    // the next mount's gate releases it.
+    return () => gate.dispose()
+  }, [])
+  /** The image and source rectangle for one filmstrip tile, or null while it
+   *  loads (the caller keeps the flat fill). */
+  function thumbImage(src: string, tile: TileSpec, srcIn: number, srcOut: number):
+      { img: HTMLImageElement; sx: number; sw: number } | null {
     if (!sid) return null
-    const key = `${src}|${tSec}|${THUMB_H}`
-    const cached = THUMB_CACHE.get(key)
-    if (cached) return cached
-    THUMB_QUEUE.want(key, `/api/sessions/${sid}/thumb?src=${encodeURIComponent(src)}&t=${tSec}&h=${THUMB_H}`)
+    const slot = spriteSlot(tile, srcIn, srcOut)
+    const key = slot ? `S|${src}|${slot.step}|${slot.page}|${THUMB_H}` : `T|${src}|${tile.ts}|${THUMB_H}`
+    const img = THUMB_CACHE.get(key)
+    if (img) {
+      if (!slot) return { img, sx: 0, sw: img.width }
+      const sw = img.width / SPRITE_TILES
+      return { img, sx: slot.index * sw, sw }
+    }
+    if (!THUMB_META.has(key)) THUMB_META.set(key, { src, tiles: slot ? SPRITE_TILES : 1 })
+    THUMB_QUEUE.want(key, slot
+      ? spriteUrl(sid, src, slot, THUMB_H)
+      : `/api/sessions/${sid}/thumb?src=${encodeURIComponent(src)}&t=${tile.ts}&h=${THUMB_H}`)
     return null
   }
 
@@ -483,6 +536,10 @@ export function Timeline() {
       })
     }
   }
+
+  // The latest hit list for window-level handlers bound once per zoom/lanes.
+  const hitsRef = useRef<HitClip[]>(hits)
+  hitsRef.current = hits
 
   // Draw
   useEffect(() => {
@@ -586,7 +643,6 @@ export function Timeline() {
         // only the visible ones, each showing the SOURCE time under its own
         // centre — NOT timeline time. Unloaded/errored tiles fall through to
         // the flat fill above; everything is clipped to the clip's rect.
-        let drewThumbs = false
         // Not for an offline file (QA-095): its thumbnails can only fail.
         if (t.type === 'video' && isMediaClip(c) && w > 24 && sid && mediaLibrary.length
             && !offline.has(c.src)) {
@@ -600,10 +656,9 @@ export function Timeline() {
             srcIn: c.in, srcOut: c.out, viewL, viewR,
           })
           for (const tile of tiles) {
-            const img = thumbImage(c.src, tile.ts)
-            if (!img) continue
-            ctx.drawImage(img, tile.x, y + 4, tile.w, clipH)
-            drewThumbs = true
+            const th = thumbImage(c.src, tile, c.in, c.out)
+            if (!th) continue
+            ctx.drawImage(th.img, th.sx, 0, th.sw, th.img.height, tile.x, y + 4, tile.w, clipH)
           }
           ctx.globalAlpha = 1
           ctx.restore()
@@ -632,6 +687,7 @@ export function Timeline() {
             const waveFill = 'rgba(0,0,0,0.55)'
             const clipFill = cssToken('--accent', '#ff4d6d')
             const effDur = clipDuration(c)
+            const chMode = channelMode(audio)
             if (waveMuted) ctx.globalAlpha = 0.35
             // Only the columns on screen: a 12-min clip at 600 px/s is 432k
             // columns, redrawn on every scroll frame otherwise.
@@ -639,11 +695,17 @@ export function Timeline() {
             for (let px = px0; px < px1; px++) {
               const t0 = startSampleSec + (px / cols) * sampleDur
               const t1 = startSampleSec + ((px + 1) / cols) * sampleDur
-              const p = columnPeak(wave, t0, t1)
+              // Top half = what the render puts on the LEFT, bottom = the
+              // RIGHT, under the clip's channel mode (QA-122): a one-sided
+              // recording shows as half a waveform until its mode fills it.
+              const side = channelColumns(wave, t0, t1, chMode)
               const g = waveMuted ? 1 : clipGainAt(audio, (px / cols) * effDur, effDur)
-              const col = waveColumn(p, g, halfH)
-              ctx.fillStyle = col.clipped ? clipFill : waveFill
-              ctx.fillRect(x + px, baseY - col.h, 1, col.h * 2)
+              const top = waveColumn(side.top, g, halfH)
+              const bot = waveColumn(side.bottom, g, halfH)
+              ctx.fillStyle = top.clipped ? clipFill : waveFill
+              ctx.fillRect(x + px, baseY - top.h, 1, top.h)
+              ctx.fillStyle = bot.clipped ? clipFill : waveFill
+              ctx.fillRect(x + px, baseY, 1, bot.h)
             }
             ctx.globalAlpha = 1
             ctx.restore()
@@ -684,24 +746,29 @@ export function Timeline() {
           ctx.restore()
         }
         const label = isOffline ? `Offline · ${clipLabel(c, mediaNames)}` : clipLabel(c, mediaNames)
-        const txt = label.slice(0, Math.max(0, Math.floor(w / 6)))
-        if (txt && drewThumbs) {
+        // Measured and ellipsized, not sliced at a guessed 6 px a glyph, and
+        // pinned to the visible start of a clip scrolled off the left (QA-118).
+        let lx = Math.min(stickyLabelX(x, viewL + labelWidth), x + w)
+        // Clear of a transition bowtie sitting on this clip's head.
+        if (t.id === 'v1' && cutMarks.some((cm) => cm.hasTransition && Math.abs(cm.cx - x) < 9)) {
+          lx = Math.min(Math.max(lx, x + 13), x + w)
+        }
+        const txt = fitLabel(label, x + w - lx - 8, (s) => ctx.measureText(s).width)
+        if (txt) {
+          // A plate behind the name, always (QA-118 remainder): over a
+          // filmstrip, a dark waveform or the bare clip colour alike.
+          const plate = labelPlate(lx, ctx.measureText(txt).width, y, trackHeight)
           ctx.save()
           roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
           ctx.clip()
-          const scrimW = Math.min(w, txt.length * 6 + 18)
-          const grad = ctx.createLinearGradient(x, 0, x + scrimW, 0)
-          grad.addColorStop(0, 'rgba(0,0,0,0.65)')
-          grad.addColorStop(1, 'rgba(0,0,0,0)')
-          ctx.fillStyle = grad
-          ctx.fillRect(x, y + 4, scrimW, trackHeight - 8)
+          ctx.globalAlpha = LABEL_PLATE_ALPHA
+          ctx.fillStyle = cssToken('--bg-0', '#0e0e10')
+          roundRect(ctx, plate.x, plate.y, plate.w, plate.h, 3)
+          ctx.fill()
           ctx.restore()
-          ctx.fillStyle = '#e6e6eb'
-        } else {
-          ctx.fillStyle = t.type === 'video' ? '#0e0e10' : 'rgba(0,0,0,0.85)'
         }
-        if (isOffline) ctx.fillStyle = cssToken('--warn', '#fbbf24')
-        if (txt) ctx.fillText(txt, x + 6, y + trackHeight / 2 + 3)
+        ctx.fillStyle = isOffline ? cssToken('--warn', '#fbbf24') : cssToken('--text', '#e6e6eb')
+        if (txt) ctx.fillText(txt, lx, y + trackHeight / 2 + 3)
         // selection ring — 2px white so it stays unmistakable over bright
         // filmstrip frames and on tiny (w≈2px min) clips
         if (isSel) {
@@ -782,40 +849,14 @@ export function Timeline() {
       }
 
       // Transition affordances at v1 cut points: a small circle with a bowtie
-      // glyph centered on each boundary between temporally-adjacent clips.
-      // Accent-filled when a transition exists at that cut, hollow otherwise.
-      // Drawn after this track's clips so it sits on top of both neighbors.
-      // Only `cutMarks` — the SAME list lib/timelineHit tests — so a cut too
-      // cramped to show one has no invisible target either (QA-051).
+      // glyph on the boundary between temporally-adjacent clips. Here only the
+      // cuts that HAVE a transition (accent-filled); an empty cut's hollow
+      // bowtie is drawn on the overlay while the pointer is near it
+      // (lib/cutHover, QA-051) — drawn on every cut they buried the clips and
+      // their trim zones. Hit-testing still uses all of `cutMarks`: the hover
+      // radius is twice the hit radius, so a clickable bowtie is always shown.
       if (t.id === 'v1') {
-        for (const cut of cutMarks) {
-          const { cx, cy } = cut
-          ctx.save()
-          ctx.beginPath()
-          ctx.arc(cx, cy, 7, 0, Math.PI * 2)
-          if (cut.tr) {
-            ctx.fillStyle = '#5b8dff'
-            ctx.fill()
-            ctx.strokeStyle = '#fff'
-            ctx.lineWidth = 1
-            ctx.stroke()
-          } else {
-            ctx.fillStyle = '#16161a'
-            ctx.fill()
-            ctx.strokeStyle = cssToken('--text-dim', '#9b9ba5')
-            ctx.lineWidth = 1.25
-            ctx.stroke()
-          }
-          const glyph = cut.tr ? cssToken('--selection', '#ffffff') : cssToken('--text-dim', '#9b9ba5')
-          ctx.fillStyle = glyph
-          ctx.beginPath()
-          ctx.moveTo(cx - 4, cy - 3); ctx.lineTo(cx - 1, cy); ctx.lineTo(cx - 4, cy + 3)
-          ctx.closePath(); ctx.fill()
-          ctx.beginPath()
-          ctx.moveTo(cx + 4, cy - 3); ctx.lineTo(cx + 1, cy); ctx.lineTo(cx + 4, cy + 3)
-          ctx.closePath(); ctx.fill()
-          ctx.restore()
-        }
+        for (const cut of drawnCuts(cutMarks, null)) drawBowtie(ctx, cut.cx, cut.cy, true)
       }
     }
 
@@ -879,13 +920,20 @@ export function Timeline() {
     const rTop = scrollY
     ctx.fillStyle = cssToken('--bg-2', '#1d1d22')
     ctx.fillRect(Math.max(labelWidth, viewL), rTop, vs.cssW, headerHeight)
+    // Marker labels are chips on the ruler row, and a tick label a chip would
+    // cover is not drawn — they printed into each other ("5.0smarker", QA-118).
+    ctx.font = uiFont(9)
+    const chips = markerChips(markers
+      .map((m) => ({ x: labelWidth + renderTime(v1Seams, m.time) * zoom, label: m.label ?? '', color: m.color }))
+      .filter((m) => m.x >= labelWidth && m.x <= contentW), (s) => ctx.measureText(s).width)
     ctx.font = uiFont(10)
     ctx.fillStyle = cssToken('--text-dim', '#9b9ba5')
     for (const tk of rulerTicks(viewL, viewR, labelWidth, zoom, fps, dur + 30)) {
       const x = labelWidth + tk.t * zoom
       if (tk.major) {
         ctx.fillRect(x, rTop + headerHeight - 6, 1, 6)
-        ctx.fillText(formatTimecode(tk.t, fps), x + 3, rTop + headerHeight - 9)
+        const tl = formatTimecode(tk.t, fps)
+        if (!collides(x + 3, ctx.measureText(tl).width, chips)) ctx.fillText(tl, x + 3, rTop + headerHeight - 9)
       } else {
         ctx.fillRect(x, rTop + headerHeight - 3, 1, 3)
       }
@@ -907,9 +955,15 @@ export function Timeline() {
       ctx.lineTo(mx - 4, rTop + headerHeight)
       ctx.closePath()
       ctx.fill()
-      ctx.font = uiFont(9)
-      ctx.fillText(m.label ? m.label.slice(0, 12) : 'Marker', mx + 6, rTop + 9)
       ctx.restore()
+    }
+    ctx.font = uiFont(9)
+    for (const chip of chips) {
+      ctx.fillStyle = cssToken('--bg-0', '#0e0e10')
+      roundRect(ctx, chip.x, rTop + 3, chip.w, 13, 3)
+      ctx.fill()
+      ctx.fillStyle = chip.color ?? cssToken('--warn', '#fbbf24')
+      ctx.fillText(chip.text, chip.x + 4, rTop + 13)
     }
     THUMB_QUEUE.pump()
 
@@ -928,6 +982,7 @@ export function Timeline() {
   // it stays pinned to the visible left edge while the main canvas scrolls
   // underneath/behind it.
   const labelCanvasRef = useRef<HTMLCanvasElement>(null)
+  const monitorLayerRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const cv = labelCanvasRef.current
     if (!cv) return
@@ -959,26 +1014,13 @@ export function Timeline() {
       const sound = laneHasSound(t)
       ctx.fillStyle = t.muted || locked ? cssToken('--text-faint', '#8e8e98') : cssToken('--text-dim', '#9b9ba5')
       ctx.font = uiFont(11)
-      // Silent lanes (text, stickers, captions) have no mute box (QA-014), so
-      // their name starts at the column's edge.
-      ctx.fillText(laneName(t), sound ? 22 : 8, y + trackHeight / 2 + 4, labelWidth - (sound ? 26 : 12) - (locked ? 12 : 0))
+      // A sound lane's name sits on the line above its Mute / Solo buttons
+      // (DOM <button>s over this canvas — .lane-monitors); a silent lane
+      // (text, stickers, captions — QA-014) has none, so its name is centred.
+      ctx.fillText(laneName(t), 8, sound ? laneNameBaseline(y) : y + trackHeight / 2 + 4,
+                   labelWidth - 12 - (locked ? 12 : 0))
       // Locked-state cue: a small monochrome padlock in the corner.
-      if (locked) drawPadlock(ctx, labelWidth - 13, y + 5, cssToken('--text-faint', '#8e8e98'))
-      if (!sound) continue
-      // M (mute) above S (solo) — QA-086. A lane soloed out is drawn like
-      // a muted one in the clip area (its waveform greys), not here.
-      const box = monitorBoxes(y, trackHeight)
-      const bx = MONITOR_BOX.x
-      const bs = MONITOR_BOX.size
-      ctx.fillStyle = t.muted ? cssToken('--accent', '#ff4d6d') : cssToken('--bg-3', '#25252c')
-      ctx.fillRect(bx, box.mute, bs, bs)
-      ctx.fillStyle = t.muted ? cssToken('--on-accent', '#ffffff') : cssToken('--text-dim', '#9b9ba5')
-      ctx.font = uiFont(9, 'bold')
-      ctx.fillText('M', bx + 3, box.mute + 9)
-      ctx.fillStyle = t.solo ? cssToken('--warn', '#fbbf24') : cssToken('--bg-3', '#25252c')
-      ctx.fillRect(bx, box.solo, bs, bs)
-      ctx.fillStyle = t.solo ? cssToken('--bg-0', '#0e0e10') : cssToken('--text-dim', '#9b9ba5')
-      ctx.fillText('S', bx + 3.5, box.solo + 9)
+      if (locked) drawIcon(ctx, 'lock', labelWidth - 14, y + 4, 11, cssToken('--text-faint', '#8e8e98'))
     }
     // Ruler-row corner, at the pinned ruler's visible top (matches the main
     // canvas's ruler background so the seam between the canvases is invisible).
@@ -1006,6 +1048,14 @@ export function Timeline() {
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, cv.width, cv.height)
     ctx.setTransform(...contentTransform(dpr, scrollX))
+    // Imports in flight, as ghost clips where they will land (QA-044).
+    drawUploadGhosts(ctx)
+    // The hovered empty cut's transition bowtie (QA-051: hover-only).
+    const hc = cutHoverRef.current
+    if (hc !== null && !dragRef.current) {
+      const cut = cutMarks.find((c) => !c.hasTransition && Math.abs(c.at - hc) < 1e-6)
+      if (cut) drawBowtie(ctx, cut.cx, cut.cy, false)
+    }
     const ph = labelWidth + playhead * zoom
     ctx.strokeStyle = cssToken('--accent', '#ff4d6d')
     ctx.lineWidth = 1.5
@@ -1054,7 +1104,47 @@ export function Timeline() {
       ctx.fillStyle = cssToken('--selection', '#ffffff')
       ctx.fillRect(hx, b.y + 5, 4, b.h - 10)
     }
-  }, [playhead, zoom, contentW, contentH, dpr, dragTick, size, scrollX, scrollY, fps, edlDuration])
+  // `edl`/`tracks`: the cut marks and lane ends the ghosts and the hovered
+  // bowtie are placed by; `uploads`: each progress step repaints its ghost.
+  }, [playhead, zoom, contentW, contentH, dpr, dragTick, size, scrollX, scrollY, fps, edlDuration, edl, tracks, uploads])
+
+  // One dashed, non-interactive rect per queued import that lands on the
+  // timeline (lib/uploadGhosts), with its stage and a progress fill.
+  function drawUploadGhosts(ctx: CanvasRenderingContext2D) {
+    if (!uploads.length) return
+    const laneEndX = (laneId: string) => hits.reduce(
+      (m, h) => (h.trackId === laneId ? Math.max(m, h.x + h.w) : m), labelWidth)
+    const xAt = (laneId: string, t: number) =>
+      labelWidth + (laneId === 'v1' ? t : renderTime(v1Seams, t)) * zoom
+    const ghosts = uploadGhosts(uploads, tracks.filter((t) => !isGhostLane(t)), laneEndX, xAt)
+    if (!ghosts.length) return
+    ctx.save()
+    ctx.font = uiFont(10)
+    for (const g of ghosts) {
+      const row = tracks.findIndex((t) => t.id === g.laneId)
+      if (row < 0) continue
+      const gy = trackY(row) + 4
+      const gh = trackHeight - 8
+      const u = uploads.find((x) => x.id === g.id)
+      ctx.globalAlpha = 0.7
+      ctx.fillStyle = cssToken('--bg-3', '#25252c')
+      roundRect(ctx, g.x, gy, g.w, gh, 4); ctx.fill()
+      if (u && (u.stage === 'uploading' || u.stage === 'processing')) {
+        ctx.fillStyle = cssToken('--accent-2-fill', '#3566d6')
+        ctx.fillRect(g.x, gy + gh - 3, g.w * Math.min(1, Math.max(0, u.progress)), 3)
+      }
+      ctx.globalAlpha = 1
+      ctx.setLineDash([4, 3])
+      ctx.strokeStyle = cssToken('--text-dim', '#9b9ba5')
+      ctx.lineWidth = 1
+      roundRect(ctx, g.x + 0.5, gy + 0.5, g.w - 1, gh - 1, 4); ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = cssToken('--text', '#e6e6eb')
+      const txt = fitLabel(g.label, g.w - 12, (s) => ctx.measureText(s).width)
+      if (txt) ctx.fillText(txt, g.x + 6, gy + gh / 2 + 3)
+    }
+    ctx.restore()
+  }
 
   // Live drag chrome — drawn on the SAME overlay canvas as the playhead (which
   // this effect runs after, so drag chrome layers on top), gated on an active
@@ -1066,6 +1156,26 @@ export function Timeline() {
     const dnd = dndOverRef.current
     const cv = playheadCanvasRef.current
     if (!cv) return
+    const mq = marqueeRef.current
+    if (mq?.active) {
+      // Box selection (QA-116): the box, and an outline on every clip it
+      // touches — exactly the set the release will select.
+      const c3 = cv.getContext('2d')!
+      c3.save(); c3.setTransform(...contentTransform(dpr, scrollX))
+      const r = marqueeRect(mq.ax, mq.ay, mq.bx, mq.by)
+      const touched = new Set(marqueeHits(r, marqueeBoxes(), 4))
+      c3.strokeStyle = cssToken('--accent-2', '#5b8dff')
+      c3.lineWidth = 2
+      for (const h of hits) if (touched.has(h.clip.id)) c3.strokeRect(h.x + 1, h.y + 5, h.w - 2, h.h - 10)
+      c3.globalAlpha = 0.12
+      c3.fillStyle = cssToken('--accent-2', '#5b8dff')
+      c3.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0)
+      c3.globalAlpha = 1
+      c3.lineWidth = 1
+      c3.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0, r.y1 - r.y0)
+      c3.restore()
+      return
+    }
     if (dnd && (!drag || drag.kind === 'playhead')) {
       // Native panel drag: target-row wash + insertion line, plus a caption
       // saying where the drop will actually land ("PIP overlay", "Music", or
@@ -1226,6 +1336,11 @@ export function Timeline() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return
+      if (marqueeRef.current) {        // Escape drops a box selection too
+        marqueeRef.current = null
+        setDragTick((n) => n + 1)
+        return
+      }
       const drag = dragRef.current
       if (!drag || drag.kind === 'playhead') return
       dragRef.current = null
@@ -1235,6 +1350,11 @@ export function Timeline() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  // The clip rects a box selection tests (lib/marquee): every drawn clip.
+  function marqueeBoxes() {
+    return hitsRef.current.map((h) => ({ clipId: h.clip.id, x: h.x, y: h.y, w: h.w, h: h.h }))
+  }
 
   // mouse → seek / select / drag
   // What is under a content point — ONE answer for the gesture below and the
@@ -1305,9 +1425,11 @@ export function Timeline() {
     if (hit.kind === 'move' || hit.kind === 'trim-l' || hit.kind === 'trim-r') {
       const hc = hits.find((h) => h.clip.id === hit.box.clipId)
       if (!hc) return
-      if (e.shiftKey) {
+      // Shift-click and ⌘-click (Ctrl on Windows) add or remove a clip, as in
+      // every NLE — ⌘-click used to REPLACE the selection (QA-116).
+      if (isAdditive(e)) {
         toggleSelection(hc.clip.id)
-        return  // shift-click only toggles, doesn't start a drag
+        return  // a modifier-click only toggles, doesn't start a drag
       }
       setSelection(hc.clip.id)
       // QA-023: a clip on a LOCKED lane is selectable (Properties shows it)
@@ -1354,9 +1476,16 @@ export function Timeline() {
       return
     }
 
-    // Empty lane area: deselect and seek there (CapCut/Premiere), on the grid.
-    setSelection(null)
-    setPlayhead(playheadAtX(x))
+    // Empty lane area: a press that travels becomes a box selection
+    // (QA-116); one that does not is a click — deselect and seek there
+    // (CapCut/Premiere), on the grid. Decided on release (window listener).
+    marqueeRef.current = { ax: x, ay: y, bx: x, by: y, active: false, additive: isAdditive(e) }
+  }
+
+  // Shift, ⌘ (mac) or Ctrl (elsewhere): add to the selection. Mac Ctrl-click
+  // is the context-menu click, so it is not a selection modifier there.
+  function isAdditive(e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }): boolean {
+    return e.shiftKey || (IS_MAC ? e.metaKey : e.ctrlKey)
   }
 
   // A press in the pane BELOW the last lane (the canvas is only as tall as
@@ -1381,18 +1510,27 @@ export function Timeline() {
       return
     }
     const rect = contentRect()
-    const hit = hitAt(e.clientX - rect.left, e.clientY - rect.top)
+    const px = e.clientX - rect.left
+    const py = e.clientY - rect.top
+    const hit = hitAt(px, py)
     const cursor = cursorFor(hit)
     if (cv.style.cursor !== cursor) cv.style.cursor = cursor
     const prev = hoverRef.current
     const key = (h: Hit | null) => (h && (h.kind === 'trim-l' || h.kind === 'trim-r') ? `${h.kind}:${h.box.clipId}` : '')
     hoverRef.current = hit
-    if (key(prev) !== key(hit)) setDragTick((n) => n + 1)
+    // An empty cut shows its transition bowtie only while the pointer is
+    // near it on the Main video row (QA-051).
+    const near = v1Row >= 0 && !marqueeRef.current ? hoveredCut(px, py, cutMarks, trackY(v1Row), trackHeight) : null
+    const nearAt = near ? near.at : null
+    const cutChanged = nearAt !== cutHoverRef.current
+    cutHoverRef.current = nearAt
+    if (key(prev) !== key(hit) || cutChanged) setDragTick((n) => n + 1)
   }
 
   function onMouseLeave() {
-    if (hoverRef.current && !dragRef.current) {
+    if ((hoverRef.current || cutHoverRef.current !== null) && !dragRef.current) {
       hoverRef.current = null
+      cutHoverRef.current = null
       setDragTick((n) => n + 1)
     }
   }
@@ -1404,6 +1542,20 @@ export function Timeline() {
   // AND lets playhead scrubbing live-update as the pointer moves.
   useEffect(() => {
     function onWindowMouseMove(e: MouseEvent) {
+      const mq = marqueeRef.current
+      if (mq && canvasRef.current) {
+        const rect = contentRect()
+        mq.bx = e.clientX - rect.left
+        mq.by = e.clientY - rect.top
+        if (!mq.active && isMarqueeDrag(mq.ax, mq.ay, mq.bx, mq.by)) mq.active = true
+        if (mq.active && dragRafRef.current == null) {
+          dragRafRef.current = requestAnimationFrame(() => {
+            dragRafRef.current = null
+            setDragTick((n) => n + 1)
+          })
+        }
+        return
+      }
       const drag = dragRef.current
       if (!drag || !canvasRef.current) return
       const rect = contentRect()
@@ -1429,6 +1581,19 @@ export function Timeline() {
       }
     }
     function onWindowMouseUp(e: MouseEvent) {
+      const mq = marqueeRef.current
+      if (mq) {
+        marqueeRef.current = null
+        if (mq.active) {
+          useStore.getState().selectClips(
+            marqueeHits(marqueeRect(mq.ax, mq.ay, mq.bx, mq.by), marqueeBoxes(), 4), mq.additive)
+          setDragTick((n) => n + 1)   // clear the box
+        } else {
+          if (!mq.additive) setSelection(null)
+          setPlayhead(playheadAtX(mq.ax))
+        }
+        return
+      }
       if (dragRef.current?.kind === 'playhead') {
         dragRef.current = null
         return
@@ -1655,8 +1820,13 @@ export function Timeline() {
         // the clip's speed and let resolveMediaTrim convert to source space.
         const r = dragResolve.resolveMediaTrim(
           { in: drag.origIn, out: drag.origOut }, side, edgeDelta, trimSpeed)
-        if (side === 'l') await dispatch('trim_clip', { clip_id: drag.clipId, in: r.in })
-        else await dispatch('trim_clip', { clip_id: drag.clipId, out: r.out })
+        // Off the magnetic Main video lane a head trim keeps the kept frames
+        // where they play (`move_start`); without it the edge snapped back and
+        // the clip's content slid earlier by the trimmed length.
+        if (side === 'l') {
+          await dispatch('trim_clip', { clip_id: drag.clipId, in: r.in,
+                                        ...(drag.trackId !== 'v1' ? { move_start: true } : {}) })
+        } else await dispatch('trim_clip', { clip_id: drag.clipId, out: r.out })
       }
     }
   }
@@ -1919,39 +2089,18 @@ export function Timeline() {
     if (!cv) return
     function handleWheel(e: WheelEvent) {
       const wrap = wrapRef.current
-      // ⌘/Ctrl+wheel always zooms, regardless of vertical overflow — anchored
-      // on the POINTER (QA-055): the time under the cursor stays under it.
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault()
-        if (wrap) {
-          const viewX = e.clientX - wrap.getBoundingClientRect().left
-          zoomAnchorRef.current = { t: Math.max(0, (wrap.scrollLeft + viewX - labelWidth) / zoom), viewX }
-        }
-        setZoomStore(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15))
-        return
-      }
       if (!wrap) return
-      // Shift+wheel is an explicit "pan horizontally" gesture — always honor
-      // it, even when rows overflow vertically (matches every NLE's
-      // shift-scrub convention).
-      if (e.shiftKey) {
-        e.preventDefault()
-        wrap.scrollLeft += e.deltaY || e.deltaX
-        return
-      }
-      // When the wrap genuinely overflows vertically AND the gesture is
-      // vertical-dominant, let the browser's native vertical scroll happen
-      // (no preventDefault) so rows below the fold stay reachable. Otherwise
-      // map vertical wheel → horizontal pan, every timeline editor's
-      // convention when there is nothing below the fold to scroll to.
-      const canScrollV = wrap.scrollHeight > wrap.clientHeight
-      if (canScrollV && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
-        return // native vertical scroll — do not preventDefault
-      }
-      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-        e.preventDefault()
-        wrap.scrollLeft += e.deltaY
-      }
+      // ONE rule (lib/timelineWheel, QA-117), stated in Help: ⌘/Ctrl-wheel
+      // or a pinch zooms, Shift-wheel pans, a sideways swipe pans natively,
+      // a plain wheel scrolls the tracks (or pans when every track fits).
+      const act = wheelAction(e, wrap.scrollHeight > wrap.clientHeight)
+      if (act.kind === 'native') return        // the browser's own scroll
+      e.preventDefault()
+      if (act.kind === 'pan') { wrap.scrollLeft += act.dx; return }
+      // Zoom anchored on the POINTER (QA-055): the time under it stays there.
+      const viewX = e.clientX - wrap.getBoundingClientRect().left
+      zoomAnchorRef.current = { t: Math.max(0, (wrap.scrollLeft + viewX - labelWidth) / zoom), viewX }
+      setZoomStore(zoom * act.factor)
     }
     cv.addEventListener('wheel', handleWheel, { passive: false })
     return () => cv.removeEventListener('wheel', handleWheel)
@@ -2048,11 +2197,36 @@ export function Timeline() {
     const wrap = wrapRef.current
     const label = labelCanvasRef.current
     if (!wrap || !label) return
-    const onScroll = () => { label.style.transform = `translateX(${wrap.scrollLeft}px)` }
+    const onScroll = () => {
+      label.style.transform = `translateX(${wrap.scrollLeft}px)`
+      if (monitorLayerRef.current) monitorLayerRef.current.style.transform = `translateX(${wrap.scrollLeft}px)`
+    }
     onScroll()
     wrap.addEventListener('scroll', onScroll)
     return () => wrap.removeEventListener('scroll', onScroll)
   }, [contentW])
+
+  // A new import's ghost clip is scrolled into view once (QA-044): at fit
+  // zoom the end of Main video is the pane's right edge, so the ghost that
+  // says "your file is coming" sat just out of sight.
+  const ghostSeenRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || !uploads.length) return
+    const fresh = uploads.filter((u) => !ghostSeenRef.current.has(u.id))
+    if (!fresh.length) return
+    for (const u of fresh) ghostSeenRef.current.add(u.id)
+    const laneEndX = (laneId: string) => hitsRef.current.reduce(
+      (m, h) => (h.trackId === laneId ? Math.max(m, h.x + h.w) : m), labelWidth)
+    const xAt = (laneId: string, t: number) =>
+      labelWidth + (laneId === 'v1' ? t : renderTime(v1Seams, t)) * zoom
+    const g = uploadGhosts(fresh, tracks.filter((t) => !isGhostLane(t)), laneEndX, xAt)[0]
+    if (!g) return
+    const right = g.x + g.w + 16
+    if (right > wrap.scrollLeft + wrap.clientWidth) wrap.scrollLeft = right - wrap.clientWidth
+    else if (g.x < wrap.scrollLeft + labelWidth) wrap.scrollLeft = Math.max(0, g.x - labelWidth - 16)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploads])
 
   // A newly selected clip — a fresh text, sticker or voiceover included —
   // is scrolled into view vertically (QA-014): new lanes used to land below
@@ -2099,38 +2273,15 @@ export function Timeline() {
     }
   }, [playhead, labelWidth])
 
-  // Mute-toggle click on the sticky label canvas. Coordinates here are
-  // already relative to the label canvas's own (unscrolled) origin, so no
-  // scrollLeft adjustment is needed — unlike the main canvas's onMouseDown.
-  function onLabelMouseDown(e: React.MouseEvent) {
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    for (let i = 0; i < tracks.length; i++) {
-      const hit = monitorHit(x, y, trackY(i), trackHeight)
-      if (!hit) continue
-      // Silent lanes draw no M/S boxes, so there is nothing to click there.
-      if (isGhostLane(tracks[i]) || !laneHasSound(tracks[i])) return
-      if (hit === 'mute') {
-        void dispatch('set_track_muted', { track: tracks[i].id, muted: !tracks[i].muted })
-      } else {
-        void dispatch('set_track_solo', { track: tracks[i].id, solo: !tracks[i].solo })
-      }
-      return
-    }
-  }
 
   // Hover feedback for the label column: a <canvas> can't give each row its
   // own `title`, so set the canvas's title to the hovered track's purpose +
-  // state (and flip the cursor to a pointer over the M mute box). Runs only
-  // while the mouse is over the 80px label strip.
+  // state. Runs only while the mouse is over the 80px label strip.
   function onLabelMouseMove(e: React.MouseEvent) {
     const cv = e.currentTarget as HTMLCanvasElement
     const rect = cv.getBoundingClientRect()
-    const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     let tip = ''
-    let overMute = false
     for (let i = 0; i < tracks.length; i++) {
       const ty = trackY(i)
       if (y >= ty && y <= ty + trackHeight) {
@@ -2139,18 +2290,20 @@ export function Timeline() {
         const state = [t.muted ? 'muted' : '', t.solo ? 'soloed' : '', isTrackLocked(t) ? 'locked' : '']
           .filter(Boolean).join(' · ')
         const sound = laneHasSound(t)
-        tip = `${laneName(t)} — ${trackPurpose(t)}${state ? `\n(${state})` : ''}${sound ? '\nM mutes this track; S solos it (only soloed tracks are heard)' : ''}`
-        overMute = sound && monitorHit(x, y, ty, trackHeight) !== null
+        tip = `${laneTooltipHead(laneName(t), trackPurpose(t))}${state ? `\n(${state})` : ''}${sound ? '\nMute silences this track; Solo plays only soloed tracks' : ''}`
         break
       }
     }
     if (cv.title !== tip) cv.title = tip
-    cv.style.cursor = overMute ? 'pointer' : 'default'
   }
 
   // Track under the open context menu — drives the Mute/Unmute + Lock/Unlock
   // item labels so the menu states the action's direction, not a blind toggle.
   const menuTrack = contextMenu ? tracks.find((t) => t.id === contextMenu.trackId) : undefined
+  // The active keymap's ripple-delete key, for the Delete tooltips (it is
+  // Shift+Delete in the Premiere preset, where Delete lifts — QA-115).
+  const rippleKeys = useKeymapStore((st) => (st.overrides.rippleDelete ?? st.effectiveMap().rippleDelete ?? [])
+    .slice(0, 1).map(chordLabel).join(''))
   // Mute only means something on a track that actually carries audio. Text,
   // sticker, effect and caption tracks have no audio field at all — showing
   // "Mute clip"/"Mute track" there wasn't just confusing, "Mute clip" was
@@ -2239,7 +2392,8 @@ export function Timeline() {
           <TimelineIcon name="split" /></button>
         <button className="tb-icon" onClick={() => void COMMAND_BY_ID.rippleDelete.run(useStore.getState())}
           disabled={!selection && multiSelection.length === 0}
-          title="Delete selection (⌫)" aria-label="Delete selection"><TimelineIcon name="delete" /></button>
+          title={`Delete selection${rippleKeys ? ` (${rippleKeys})` : ''} — Main video closes the gap; other lanes keep their times`}
+          aria-label="Delete selection"><TimelineIcon name="delete" /></button>
         <button className="tb-icon" onClick={() => void COMMAND_BY_ID.duplicate.run(useStore.getState())}
           disabled={!selection && multiSelection.length === 0}
           title={`Duplicate selection (${chordLabel('Mod+KeyD')})`} aria-label="Duplicate selection">
@@ -2310,10 +2464,37 @@ export function Timeline() {
         <canvas
           ref={labelCanvasRef}
           aria-hidden="true"
-          onMouseDown={onLabelMouseDown}
           onMouseMove={onLabelMouseMove}
           style={{ position: 'absolute', top: 0, left: 0, display: 'block', zIndex: 1, cursor: 'default' }}
         />
+        {/* Mute / Solo per sound lane (QA-086; wave C review): real buttons
+            over the label canvas — keyboard-reachable, aria-pressed, lucide
+            icons — where 12 px canvas boxes with 9 px "M"/"S" used to be.
+            Translated with the label canvas on horizontal scroll. */}
+        <div ref={monitorLayerRef} className="lane-monitors"
+             style={{ width: labelWidth, height: contentH }}>
+          {tracks.map((t, i) => {
+            if (isGhostLane(t) || !laneHasSound(t)) return null
+            const b = monitorButtons(trackY(i), trackHeight)
+            const names = monitorLabels(laneName(t))
+            return (
+              <Fragment key={t.id}>
+                <button type="button" className="lane-monitor" data-monitor="mute" aria-pressed={!!t.muted}
+                  aria-label={names.mute} title={t.muted ? `Unmute ${laneName(t)}` : names.mute}
+                  style={{ left: b.mute.x, top: b.mute.y, width: b.mute.w, height: b.mute.h }}
+                  onClick={() => void dispatch('set_track_muted', { track: t.id, muted: !t.muted })}>
+                  <Icon name={t.muted ? 'laneMuted' : 'laneAudible'} />
+                </button>
+                <button type="button" className="lane-monitor" data-monitor="solo" aria-pressed={!!t.solo}
+                  aria-label={names.solo} title={t.solo ? `Stop soloing ${laneName(t)}` : `${names.solo} — hear only soloed tracks`}
+                  style={{ left: b.solo.x, top: b.solo.y, width: b.solo.w, height: b.solo.h }}
+                  onClick={() => void dispatch('set_track_solo', { track: t.id, solo: !t.solo })}>
+                  <Icon name="solo" />
+                </button>
+              </Fragment>
+            )
+          })}
+        </div>
       </div>
       {transPopover && sid && (
         <TransitionPopover
@@ -2369,7 +2550,9 @@ export function Timeline() {
               title: `Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`,
               action: () => dispatch('duplicate_clip', { clip_id: contextMenu.clipId }) },
             { label: 'Delete',
-              title: 'Remove this clip and close the gap (⌫)',
+              title: contextMenu.trackId === 'v1'
+                ? `Remove this clip and close the gap${rippleKeys ? ` (${rippleKeys})` : ''}`
+                : `Remove this clip — the clips around it keep their times${rippleKeys ? ` (${rippleKeys})` : ''}`,
               action: () => dispatch('ripple_delete', { clip_id: contextMenu.clipId }) },
             ...(menuTrackHasAudio
               ? [
@@ -2396,7 +2579,7 @@ export function Timeline() {
                 ]
               : [{ sep: true }]),
             { label: menuTrack && isTrackLocked(menuTrack) ? 'Unlock track' : 'Lock track',
-              title: 'Mark the track locked — a 🔒 appears on its label',
+              title: 'Mark the track locked — a padlock appears on its label',
               action: () => dispatch('set_track_locked', { track: contextMenu.trackId }) },
             ...(multiSelection.length || (selection && selection !== contextMenu.clipId)
               ? [
@@ -2453,6 +2636,28 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath()
 }
 
+// The transition affordance on a cut (QA-051): accent-filled with a white
+// glyph when the cut has a transition, hollow with a dim glyph when it can
+// take one. Colours are the theme tokens, like every other canvas glyph.
+function drawBowtie(ctx: CanvasRenderingContext2D, cx: number, cy: number, hasTransition: boolean) {
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(cx, cy, 7, 0, Math.PI * 2)
+  ctx.fillStyle = hasTransition ? cssToken('--accent-2', '#5b8dff') : cssToken('--bg-1', '#16161a')
+  ctx.fill()
+  ctx.strokeStyle = hasTransition ? cssToken('--selection', '#ffffff') : cssToken('--text-dim', '#9b9ba5')
+  ctx.lineWidth = hasTransition ? 1 : 1.25
+  ctx.stroke()
+  ctx.fillStyle = hasTransition ? cssToken('--selection', '#ffffff') : cssToken('--text-dim', '#9b9ba5')
+  ctx.beginPath()
+  ctx.moveTo(cx - 4, cy - 3); ctx.lineTo(cx - 1, cy); ctx.lineTo(cx - 4, cy + 3)
+  ctx.closePath(); ctx.fill()
+  ctx.beginPath()
+  ctx.moveTo(cx + 4, cy - 3); ctx.lineTo(cx + 1, cy); ctx.lineTo(cx + 4, cy + 3)
+  ctx.closePath(); ctx.fill()
+  ctx.restore()
+}
+
 // A small dark caption chip on the drag overlay (landing time, snap target,
 // refusal reason), clamped so it never starts left of the lane area.
 function drawCaption(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string) {
@@ -2467,16 +2672,3 @@ function drawCaption(ctx: CanvasRenderingContext2D, text: string, x: number, y: 
   ctx.restore()
 }
 
-// A 9×10 monochrome padlock (the lane label's locked cue) — drawn, not an
-// emoji, so it takes the label's colour like every other glyph.
-function drawPadlock(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
-  ctx.save()
-  ctx.strokeStyle = color
-  ctx.fillStyle = color
-  ctx.lineWidth = 1.2
-  ctx.beginPath()
-  ctx.arc(x + 4.5, y + 4, 2.6, Math.PI, 0)
-  ctx.stroke()
-  ctx.fillRect(x + 1, y + 4, 7, 6)
-  ctx.restore()
-}

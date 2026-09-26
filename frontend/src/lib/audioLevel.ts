@@ -20,6 +20,8 @@ export interface ClipAudioProps {
   fade_in?: number
   fade_out?: number
   keep_pitch?: boolean
+  /** QA-122: 'stereo' | 'left' | 'right' | 'mono' (lib/audioChannels). */
+  channels?: string
 }
 
 export function hasVolumeKeys(a: ClipAudioProps | undefined): boolean {

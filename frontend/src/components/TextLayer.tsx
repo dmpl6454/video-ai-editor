@@ -20,6 +20,7 @@ import {
   WRAP_WIDTH_RATIO, baselineFor, fontFamilyList, isAnimated, lineCenters, outlineLineWidth, pickScript,
   rgbaCss, roleAnchorY, roleStyle, scaleRotationAt, staticValue, LINE_HEIGHT_RATIO, type RGBA,
   BG_PAD_X_RATIO, backgroundRect, captionAnchorY, lineX, type TextAlign,
+  letterSpacingOf, trackedUnits, trackedWidth,
 } from '../lib/textLayout'
 
 interface Props {
@@ -101,10 +102,28 @@ function tokenize(s: string): Seg[] {
   return out
 }
 
-function lineWidth(ctx: CanvasRenderingContext2D, line: string, box: number): number {
+function lineWidth(ctx: CanvasRenderingContext2D, line: string, box: number, spacing = 0): number {
+  if (spacing && !baseIsRtl(line)) {
+    const units = spacedUnits(ctx, line, box)
+    return trackedWidth(units.map((u) => u.w), units.map((u) => u.tracked), spacing)
+  }
   let w = 0
   for (const seg of tokenize(line)) w += seg.emoji ? box : ctx.measureText(seg.s).width
   return w
+}
+
+/** Rule 8 (QA-078): the line as letter-spacing units — every emoji and every
+ *  grapheme of a simple-script run is its own tracked unit, measured alone
+ *  (the export shapes each alone too); a complex-script run is one untracked
+ *  unit. `trackedWidth` then adds the spacing BETWEEN tracked units. */
+type SpacedUnit = { emoji: boolean; s: string; w: number; tracked: boolean }
+function spacedUnits(ctx: CanvasRenderingContext2D, line: string, box: number): SpacedUnit[] {
+  const out: SpacedUnit[] = []
+  for (const seg of tokenize(line)) {
+    if (seg.emoji) { out.push({ emoji: true, s: seg.s, w: box, tracked: true }); continue }
+    for (const [s, tracked] of trackedUnits(seg.s)) out.push({ emoji: false, s, w: ctx.measureText(s).width, tracked })
+  }
+  return out
 }
 
 // Emoji artwork (fetch + cache + the arrival counter) lives in lib/emojiArt.
@@ -180,13 +199,16 @@ function resolveAnchor(
 }
 
 /** Rule 7 inputs from TextClip.style (QA-078) — text_overlay.resolve_block_overrides. */
-function blockStyle(c: TextClip): { background: RGBA | null; align: TextAlign; spacing: number; shadow: boolean | null } {
-  const st = (c.style ?? {}) as { background?: string | null; align?: string; line_spacing?: number; shadow_on?: boolean | null }
+function blockStyle(c: TextClip): { background: RGBA | null; align: TextAlign; spacing: number; shadow: boolean | null;
+                                    letterSpacing: number } {
+  const st = (c.style ?? {}) as { background?: string | null; align?: string; line_spacing?: number; shadow_on?: boolean | null
+                                  letter_spacing?: number }
   const align: TextAlign = st.align === 'left' || st.align === 'right' ? st.align : 'center'
   const spacing = typeof st.line_spacing === 'number' && Number.isFinite(st.line_spacing)
     ? Math.min(3, Math.max(0.5, st.line_spacing)) : 1
   return { background: parseHex(st.background ?? null), align, spacing,
-           shadow: typeof st.shadow_on === 'boolean' ? st.shadow_on : null }
+           shadow: typeof st.shadow_on === 'boolean' ? st.shadow_on : null,
+           letterSpacing: letterSpacingOf(st.letter_spacing) }
 }
 
 function roleFontMatches(role: string, ttf: string): boolean {
@@ -210,7 +232,7 @@ function cssFont(ttf: string): { family: string; weight: string } | null {
 // clip's RENDER window (the same clock `renderWindow` gates activity with).
 
 function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number,
-              box = 0): string[] {
+              box = 0, spacing = 0): string[] {
   const out: string[] = []
   for (const para of text.split('\n')) {
     // Each emoji is its own wrap-word: the text font measures it at ~0px, so
@@ -225,7 +247,7 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number,
     for (let i = 1; i < words.length; i++) {
       const [glued, word] = words[i]
       const trial = `${cur}${glued ? '' : ' '}${word}`
-      const w = box ? lineWidth(ctx, trial, box) : ctx.measureText(trial).width
+      const w = box || spacing ? lineWidth(ctx, trial, box, spacing) : ctx.measureText(trial).width
       if (w <= maxW) cur = trial
       else { out.push(cur); cur = word }
     }
@@ -258,7 +280,11 @@ function wrapUnits(para: string): (readonly [boolean, string])[] {
  *  the shared model); emoji squares centre on `center` itself, exactly where
  *  render_text_png pastes them. `paint` picks the pass. */
 function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, center: number,
-                  baseline: number, box: number, paint: 'stroke' | 'fill'): void {
+                  baseline: number, box: number, paint: 'stroke' | 'fill', spacing = 0): void {
+  if (spacing && !baseIsRtl(line)) {
+    drawSpacedLine(ctx, line, cx, center, baseline, box, paint, spacing)
+    return
+  }
   const segs = tokenize(line)
   let x = cx - lineWidth(ctx, line, box) / 2
   const prevAlign = ctx.textAlign
@@ -284,6 +310,30 @@ function drawLine(ctx: CanvasRenderingContext2D, line: string, cx: number, cente
     if (paint === 'stroke') ctx.strokeText(seg.s, x, baseline)
     else ctx.fillText(seg.s, x, baseline)
     x += ctx.measureText(seg.s).width
+  }
+  ctx.textAlign = prevAlign
+  ctx.direction = prevDir
+}
+
+/** drawLine with letter spacing (rule 8): unit by unit, left to right. */
+function drawSpacedLine(ctx: CanvasRenderingContext2D, line: string, cx: number, center: number,
+                        baseline: number, box: number, paint: 'stroke' | 'fill', spacing: number): void {
+  const units = spacedUnits(ctx, line, box)
+  let x = cx - trackedWidth(units.map((u) => u.w), units.map((u) => u.tracked), spacing) / 2
+  const prevAlign = ctx.textAlign
+  const prevDir = ctx.direction
+  ctx.textAlign = 'left'
+  ctx.direction = 'ltr'
+  for (const u of units) {
+    if (u.emoji) {
+      if (paint === 'fill') {
+        const im = emojiImage(u.s)
+        const ink = box * EMOJI_INK_RATIO
+        if (im) ctx.drawImage(im, x + (box - ink) / 2, center - ink / 2, ink, ink)
+      }
+    } else if (paint === 'stroke') ctx.strokeText(u.s, x, baseline)
+    else ctx.fillText(u.s, x, baseline)
+    x += u.w + (u.tracked ? spacing : 0)
   }
   ctx.textAlign = prevAlign
   ctx.direction = prevDir
@@ -553,12 +603,14 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
         offA.font = fontSpec
         const emojiBox = fontPx * EMOJI_BOX_RATIO
         const maxW = edl.canvas.w * WRAP_WIDTH_RATIO * k * fx
-        const lines = wrap(offB, text, maxW, emojiBox)
-        // Rule 7 (QA-078): alignment inside the block, line spacing, a box.
+        // Rule 7 (QA-078): alignment inside the block, line spacing, a box;
+        // rule 8: letter spacing in canvas px × the transform scale.
         const blk = blockStyle(c)
+        const trackPx = blk.letterSpacing * k * fy
+        const lines = wrap(offB, text, maxW, emojiBox, trackPx)
         const lineH = fontPx * LINE_HEIGHT_RATIO * blk.spacing
         const totalH = lineH * lines.length
-        const widths = lines.map((l) => lineWidth(offB, l, emojiBox))
+        const widths = lines.map((l) => lineWidth(offB, l, emojiBox, trackPx))
         const blockW = widths.reduce((m, w) => Math.max(m, w), 0)
         // The cap band of THIS font, measured here — the server measures 'H'
         // in Pillow; only the measured band is common ground (rule 3).
@@ -625,7 +677,7 @@ export function TextLayer({ edl, videoEl, width, height }: Props) {
           lines.forEach((ln, i) => {
             // drawLine centres a line on its x: the aligned left edge + w/2.
             drawLine(g, ln, lineX(blk.align, 0, blockW, widths[i]) + widths[i] / 2, centers[i],
-                     baselineFor(centers[i], capAsc, capDesc), emojiBox, paint)
+                     baselineFor(centers[i], capAsc, capDesc), emojiBox, paint, trackPx)
           })
         }
         clearDevice(offB)

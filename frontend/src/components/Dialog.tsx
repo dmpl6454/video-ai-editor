@@ -16,6 +16,7 @@
 import { useEffect, useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { useMenuA11y } from '../lib/useMenuA11y'
+import { Icon } from './Icon'
 
 interface Props {
   open: boolean
@@ -108,7 +109,7 @@ export function Dialog({
             top-right by CSS. */}
         {showClose && (
           <button type="button" className="dialog-x" aria-label="Close" onClick={() => a11y.close(true)}>
-            <span aria-hidden="true">×</span>
+            <Icon name="close" />
           </button>
         )}
       </div>

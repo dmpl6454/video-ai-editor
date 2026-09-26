@@ -240,12 +240,16 @@ def test_stem_separation_does_not_shell_out_to_the_demucs_cli():
     import inspect
     from video_ai_editor.ai import separate
 
-    fn = ast.parse(inspect.getsource(separate._demucs_separate)).body[0]
-    # Strip the docstring: it EXPLAINS the CLI we no longer use, so a plain
-    # substring search over the source matches the comment and fails on prose.
-    body = fn.body[1:] if (isinstance(fn.body[0], ast.Expr)
-                           and isinstance(fn.body[0].value, ast.Constant)) else fn.body
-    code = "\n".join(ast.dump(n) for n in body)
+    # QA-066 (wave C) moved the apply_model call into `_run_model` so demucs
+    # runs through a cancel/progress-aware pool; inspect both functions.
+    code = ""
+    for f in (separate._demucs_separate, separate._run_model):
+        fn = ast.parse(inspect.getsource(f)).body[0]
+        # Strip the docstring: it EXPLAINS the CLI we no longer use, so a plain
+        # substring search over the source matches the comment and fails on prose.
+        body = fn.body[1:] if (isinstance(fn.body[0], ast.Expr)
+                               and isinstance(fn.body[0].value, ast.Constant)) else fn.body
+        code += "\n".join(ast.dump(n) for n in body) + "\n"
     assert "demucs.separate" not in code, "back on the torchcodec-dependent CLI"
     assert "subprocess" not in code, "stem separation must not shell out"
     assert "apply_model" in code

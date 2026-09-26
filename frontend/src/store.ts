@@ -9,11 +9,12 @@ import { type EDL, type Op } from './types'
 import { splitTargets } from './lib/splitTargets'
 import { deletedLabel } from './lib/deletedLabel'
 import { editorValidationMessage, isCancelMessage, stripExceptionPrefix } from './lib/dispatchErrors'
-import { toolTitle } from './lib/opLabels'
+import { editorProse, toolTitle } from './lib/opLabels'
 import { firePromptRunning, fireSessionSwitch, promptRunningFromError, PROMPT_RUNNING_MESSAGE } from './lib/promptEvents'
 import { nativeSave } from './lib/nativeSave'
 import { exportFor, exportLink, withExport, withoutExport, type ExportLinks } from './lib/exportLink'
 import { planNudge } from './lib/nudge'
+import { isTrackLocked } from './lib/trackLock'
 import { frameDuration } from './lib/frameStep'
 import { clampZoom } from './lib/timelineZoom'
 import { undoDepthOf, undoRefusedMessage } from './lib/undoHorizon'
@@ -355,6 +356,8 @@ interface State {
   zoomTimeline(factor: number): void   // multiply zoom (in/out)
   toggleSnap(): void
   selectAll(): void
+  /** Select exactly `ids` (or add them, `additive`) — box selection. */
+  selectClips(ids: string[], additive?: boolean): void
   copySelection(): void
   pasteClipboard(): Promise<void>
   goToStart(): void
@@ -396,7 +399,7 @@ interface State {
   renderPreview(): Promise<string>
   // `saveAs` (QA-100): the Export dialog's File name — the name the file is
   // saved under; `fps` (QA-009) only when it differs from the project rate.
-  doExport(opts?: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number; saveAs?: string }): Promise<void>
+  doExport(opts?: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' | 'm4a' | 'wav'; bitrate_kbps?: number; saveAs?: string }): Promise<void>
   // Save the last finished export to disk. In the packaged app this drives the
   // native Save-As dialog (via the pywebview bridge); in a browser it falls
   // back to an `<a download>` click. Wired to the green download-arrow link so
@@ -603,9 +606,27 @@ export const useStore = create<State>((set, get) => ({
   selectAll: () => {
     const edl = get().edl
     if (!edl) return
+    // EVERY clip — text included (QA-116: the old `'src' in c` filter kept
+    // media and stickers only, so ⌘A then ⌫ left titles over black) — on
+    // every lane that can be edited; a locked lane's clips cannot be deleted
+    // or moved, so selecting them would only make the next edit refuse.
     const ids: string[] = []
-    for (const t of edl.tracks) for (const c of t.clips) if ('src' in c) ids.push(c.id)
+    for (const t of edl.tracks) {
+      if (isTrackLocked(t)) continue
+      for (const c of t.clips) ids.push(c.id)
+    }
     set({ selection: ids[0] ?? null, multiSelection: ids.slice(1) })
+  },
+  selectClips: (ids, additive = false) => {
+    // The timeline's box selection (QA-116). Additive (Shift/⌘) keeps what
+    // was selected and adds the boxed clips; otherwise the box replaces it.
+    const s = get()
+    const base = additive ? [s.selection, ...s.multiSelection].filter((x): x is string => !!x) : []
+    const next = Array.from(new Set([...base, ...ids]))
+    set({
+      selection: next[0] ?? null, multiSelection: next.slice(1),
+      framing: s.framing && s.framing.clipId === next[0] ? s.framing : null,
+    })
   },
   copySelection: () => {
     const s = get()
@@ -878,7 +899,9 @@ export const useStore = create<State>((set, get) => ({
         await get().refresh().catch((err) => console.warn('[store] refresh after stale edit failed:', err))
         return null
       }
-      const msg = errorMessage(e)
+      // In editor words (QA-101 sweep): a refusal from the engine names tool
+      // ids and clip ids ("set_clip_timing is for overlays; use trim_clip…").
+      const msg = editorProse(errorMessage(e))
       opts?.onError?.(msg)
       if (isCancelMessage(msg)) toast.info(msg)   // the user asked for this — not red
       else toast.error(msg)
@@ -1201,7 +1224,9 @@ function enqueueImport(file: File, kind: 'video' | 'audio', opts?: ImportOptions
   const addToTimeline = place ? false : (opts?.addToTimeline ?? st.importAddToTimeline)
   const id = `up_${++importSeq}`
   const item: UploadItem = { id, name: file.name, kind, stage: 'queued', progress: 0,
-                             stageStartedAt: Date.now(), addToTimeline: addToTimeline || !!place }
+                             stageStartedAt: Date.now(), addToTimeline: addToTimeline || !!place,
+                             // Where the timeline's ghost clip sits (QA-044).
+                             lane: place?.track ?? null, laneStart: place ? place.cursor.next : null }
   const batch = st.uploads.length ? st.uploadBatch : { total: 0, done: 0 }
   useStore.setState({ uploads: [...st.uploads, item], uploadBatch: { ...batch, total: batch.total + 1 },
                       uploading: true, uploadError: null })

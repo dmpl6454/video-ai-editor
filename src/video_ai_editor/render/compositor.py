@@ -23,6 +23,9 @@ from ..edl import EDL
 from ..edl.schema import Clip, Track
 from .text_overlay import build_overlay_chain
 from .audio_mix import build_audio_mix
+# atempo's centring lag — the rule lives in audio_mix.speed_filters; ai/rife.py
+# stretches smooth-slow-mo sound with the same lag.
+from .audio_mix import ATEMPO_LAG as _ATEMPO_LAG  # noqa: F401
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
 from .pip import (build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index,
                   pip_audio_chain, pip_frames, pip_input_args)
@@ -434,7 +437,10 @@ def clip_input_args(c: Clip, fps) -> list[str]:
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
     end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
-    return ["-ss", f"{seek:.6f}", "-to", f"{end:.6f}", "-i", str(c.src)]
+    # No `-ss` at all from the file's start: `-ss 0` garbles an AAC source's
+    # first 21 ms (audio_mix.input_seek, QA-120).
+    from .audio_mix import input_seek
+    return [*input_seek(seek), "-to", f"{end:.6f}", "-i", str(c.src)]
 
 
 def _clip_preroll(c: Clip, fps) -> float:
@@ -793,10 +799,6 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
-#: See the atempo loop in `_build_clip_audio_chain` (960 samples = 20 ms @ 48k).
-_ATEMPO_LAG = "adelay=delays=960S:all=1"
-
-
 def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
                             fps=None) -> str:
     """Per-clip audio chain: resample + atempo for speed + gain/fade/mute.
@@ -820,29 +822,10 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
     pre = _clip_preroll(c, fps)
     if pre > 1e-9:
         a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
-    if (isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0
-            and not getattr(c.audio, "keep_pitch", True)):
-        # Varispeed (QA-039 residual): re-clocked, sample-exact, pitch moves.
-        from .audio_mix import varispeed_filter
-        a_chain += "," + varispeed_filter(float(c.speed))
-    elif isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
-        remaining = float(c.speed)
-        # Every atempo stage is preceded by `_ATEMPO_LAG` of silence: ffmpeg's
-        # WSOLA emits content ~20 ms of ITS INPUT early (measured on a 57-click
-        # track: -42.4 ms at 0.5x, -24.0 at 0.75x, -15.6 at 1.25x, -12.4 at
-        # 1.5x — a constant 18-21 ms of source time, divided by the tempo).
-        # Delaying the stage's input by that much centres transients on the
-        # retimed picture at every tempo (QA-039), leaving only WSOLA's own
-        # ±12 ms jitter, at the cost of that sliver of silence at the head of
-        # a retimed clip. The tail is cut back by the exact-length atrim.
-        while remaining > 2.0:
-            a_chain += f",{_ATEMPO_LAG},atempo=2.0"
-            remaining /= 2.0
-        while remaining < 0.5:
-            a_chain += f",{_ATEMPO_LAG},atempo=0.5"
-            remaining /= 0.5
-        if abs(remaining - 1.0) > 0.001:
-            a_chain += f",{_ATEMPO_LAG},atempo={remaining:.4f}"
+    # Speed: varispeed (keep_pitch False, sample-exact) or atempo centred by
+    # its lag — the one rule, shared with the audio lanes (QA-086).
+    from .audio_mix import speed_filters
+    a_chain += speed_filters(c)
     a_chain += _audio_props_filters(c)
     if fps is not None:
         m = _tb.samples_for_frames(clip_frames(c, fps), fps)
@@ -859,6 +842,9 @@ def _audio_props_filters(c: Clip) -> str:
     """
     frag = ""
     if c.audio:
+        # QA-122: the clip's channel mode (left/right to both, mono mix).
+        from .audio_mix import channel_filter
+        frag += channel_filter(c.audio)
         if abs(c.audio.gain_db) > 0.01:
             frag += f",volume={c.audio.gain_db:.2f}dB"
         # Volume automation (QA-086), keyed in this same clip-local time.
@@ -1149,6 +1135,14 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
 # always receives a layout it supports. The /vo_record transcode in main.py
 # already does this; the render pipeline now matches.
 _AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+#: What a DELIVERED file (mp4/mov/m4a export) is encoded with (QA-121). The
+#: native coder's perceptual noise substitution re-synthesises noisy bands
+#: (hats, cymbals, breath) as random-phase noise of the same energy, which is
+#: where most of its inter-sample overshoot came from: on a −1.5 dBTP master,
+#: 192k read −0.9 (bench bed) and +0.1 (noise hats) dBTP; PNS off at 256k
+#: −1.5 and −1.3. Whatever overshoot remains is caught after the encode by
+#: `_hold_delivery_true_peak`. Previews keep `_AAC_OUT` (speed, not spec).
+_AAC_DELIVERY_OUT = ["-c:a", "aac", "-b:a", "256k", "-aac_pns", "0", "-ar", "48000", "-ac", "2"]
 
 
 @lru_cache(maxsize=1)
@@ -1505,7 +1499,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             "-map", v_label, "-map", final_audio_label,
             "-r", _tb.ffmpeg_rate(fps),
             *enc_args,
-            *_AAC_OUT,
+            *(_AAC_OUT if preview else _AAC_DELIVERY_OUT),
             "-movflags", "+faststart",
             str(tmp)]
     # Export streams progress (and can be cancelled); preview keeps the plain
@@ -1753,7 +1747,8 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
     # 674 — a cache key describing a height that never existed. Identity for
     # every preset that works today (960, 540, 540).
     height = max(2, int(height) // 2 * 2)
-    h = edl.hash()
+    # The RENDER key (QA-131): a marker edit is not a re-render.
+    h = edl.render_hash()
     out_dir = session_dir / "previews"
     out_dir.mkdir(parents=True, exist_ok=True)
     dst = out_dir / f"{h}.mp4"
@@ -1923,62 +1918,44 @@ def _assemble_v1_audio(fc_parts: list[str], clips: list[Clip], a_labels: list[st
     fc_parts.append(f"{cur}anull{out_label}")
 
 
-def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
-                          *, fps: int, cache_dir: Path) -> None:
-    """Take a cached video-only mp4 and mux a fresh audio mix onto it.
+def _audio_only_graph(edl: EDL, *, fps, first_input: int,
+                      apply_loudnorm: bool) -> tuple[list[str], str, str]:
+    """The timeline's SOUND as its own ffmpeg graph: `(inputs, filter_complex,
+    final_label)`, input indices starting at `first_input`.
 
-    The audio mix is built the same way the main renderer does it (V1 source
-    audio + music ducking + voiceover) but only the audio is encoded.
-    Video is `-c:v copy` so this is essentially I/O bound.
+    Built exactly the way `_render_locked` builds the audio half of a full
+    render — the same per-clip chains, the v1 ASSEMBLY (`_assemble_v1_audio`:
+    gap filler and an `acrossfade` at every seam the picture was `xfade`d
+    at), the v1 lane mute, the PIP fold and `build_audio_mix` — so what it
+    yields is the render's sound, sample for sample. Three callers: the
+    preview's audio-only remux, the export's loudness measurement (QA-121)
+    and the audio-only export (QA-100). `edl` must already be solo-applied
+    and reverse-substituted (`apply_solo`, `with_reversed_sources`).
 
-    Track solo (QA-086) is applied here too — a solo toggle is audio-only, so
-    it arrives on this path.
-
-    "The same way" includes the v1 ASSEMBLY: gap filler and an `acrossfade`
-    at every seam the cached video was `xfade`d at (`_assemble_v1_audio`).
-    This path used to plain-`concat` the per-clip audio, so on a timeline
-    with transitions a music-only edit served a preview whose speech ran
-    late by the accumulated overlap against a picture that did not — the
-    render-clock drift, re-created on the fast path alone.
+    A timeline with no v1 clips is one silent filler as long as the timeline
+    (the `_render_locked` rule), which the other lanes mix onto — the remux
+    used to special-case it to plain silence, dropping a music-only
+    timeline's music.
     """
-    from .audio_mix import apply_solo
-    edl = apply_solo(edl)
-    from .reverse import with_reversed_sources      # QA-037, as _render_locked
-    edl = with_reversed_sources(edl, cache_dir, fps)
     clips = _video_clips(edl)
-    tmp = _part_path(dst)
-    if not clips:
-        # No V1 audio source to feed the mixer — copy video, generate silence.
-        try:
-            subprocess.run([
-                _pu.FFMPEG, "-y", "-i", str(video_only),
-                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-                "-c:v", "copy", *_AAC_OUT, "-shortest",
-                "-movflags", "+faststart", str(tmp),
-            ], capture_output=True, check=True, **_pu.SUBPROCESS_FLAGS)
-        except Exception:
-            _pu.unlink_with_retry(tmp)
-            raise
-        _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
-        return
-
-    # Build per-clip audio chains with the same input order as the main render.
-    inputs: list[str] = ["-i", str(video_only)]  # idx 0 = video-only file
+    inputs: list[str] = []
     fc_parts: list[str] = []
     a_labels: list[str] = []
     for i, c in enumerate(clips):
-        idx = i + 1  # +1 because video_only is input 0
+        idx = first_input + i
         inputs += clip_input_args(c, fps)
         fc_parts.append(_build_clip_audio_chain(
             c, input_label=f"[{idx}:a]", label_out=f"[a{i}]", fps=fps,
         ))
         a_labels.append(f"[a{i}]")
     seams = clock.seam_table(edl)
-    # Layout end, not `edl.duration` — the cached video was padded to the
-    # layout end (see `_render_locked`), and audio a total overlap shorter
-    # than its picture would truncate the file on `-shortest`.
-    _assemble_v1_audio(fc_parts, clips, a_labels,
-                       total_duration=max(0.0, edl.duration + sum(d for _s, d in seams)),
+    # Layout end, not `edl.duration` — the picture is padded to the layout
+    # end (see `_render_locked`), and audio a total overlap shorter than its
+    # picture would truncate the file on `-shortest`.
+    total = max(0.0, edl.duration + sum(d for _s, d in seams))
+    if not clips:
+        total = max(1.0, total)          # never a 0-length render
+    _assemble_v1_audio(fc_parts, clips, a_labels, total_duration=total,
                        seams=seams, out_label="[aout]", fps=fps)
 
     # Track-level v1 mute — mirror of the main render path (audio-only).
@@ -1988,12 +1965,10 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         fc_parts.append(f"{a_main}volume=0[aout_m]")
         a_main = "[aout_m]"
 
-    # Fold V2/PIP audio the same way the full render does (aresample +
-    # per-clip gain/fade/mute + adelay + amix). Skipping this dropped every
-    # PIP clip's audio from the remuxed preview.
-    next_idx = 1 + len(clips)
-    # Same placement rule as pip.py: render window, and a PIP the seams
-    # consumed entirely is not an input at all.
+    # Fold V2/PIP audio the same way the full render does. Same placement
+    # rule as pip.py: render window, and a PIP the seams consumed entirely is
+    # not an input at all.
+    next_idx = first_input + len(clips)
     pip_clips = [(c, win) for _tid, c in collect_pip_clips(edl)
                  if (win := clock.render_window(seams, c.start, c.start + c.duration)) is not None]
     if pip_clips:
@@ -2014,17 +1989,43 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         a_main = "[a_with_pip]"
         next_idx += len(pip_clips)
 
-    # Mix in music + vo on top of the folded main audio. _remux_with_new_audio
-    # is only called from the preview fast-path, so loudnorm stays off here.
-    audio_chain, audio_inputs, final_audio_label = build_audio_mix(
+    audio_chain, audio_inputs, final_label = build_audio_mix(
         edl, main_audio_label=a_main, first_input_index=next_idx,
-        apply_loudnorm=False,
+        apply_loudnorm=apply_loudnorm,
     )
     fc = ";".join(fc_parts)
     if audio_chain:
         fc = fc + ";" + audio_chain
+    return inputs + audio_inputs, fc, final_label
 
-    args = [_pu.FFMPEG, "-y", *inputs, *audio_inputs,
+
+def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
+                          *, fps: int, cache_dir: Path) -> None:
+    """Take a cached video-only mp4 and mux a fresh audio mix onto it.
+
+    The audio mix is built the same way the main renderer does it (V1 source
+    audio + music ducking + voiceover — `_audio_only_graph`) but only the
+    audio is encoded. Video is `-c:v copy` so this is essentially I/O bound.
+
+    Track solo (QA-086) is applied here too — a solo toggle is audio-only, so
+    it arrives on this path.
+
+    "The same way" includes the v1 ASSEMBLY: gap filler and an `acrossfade`
+    at every seam the cached video was `xfade`d at (`_assemble_v1_audio`).
+    This path used to plain-`concat` the per-clip audio, so on a timeline
+    with transitions a music-only edit served a preview whose speech ran
+    late by the accumulated overlap against a picture that did not — the
+    render-clock drift, re-created on the fast path alone.
+    """
+    from .audio_mix import apply_solo
+    edl = apply_solo(edl)
+    from .reverse import with_reversed_sources      # QA-037, as _render_locked
+    edl = with_reversed_sources(edl, cache_dir, fps)
+    tmp = _part_path(dst)
+    # idx 0 = the video-only file. Preview-only, so loudnorm stays off.
+    a_inputs, fc, final_audio_label = _audio_only_graph(
+        edl, fps=fps, first_input=1, apply_loudnorm=False)
+    args = [_pu.FFMPEG, "-y", "-i", str(video_only), *a_inputs,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
             "-c:v", "copy",
@@ -2044,6 +2045,42 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"audio remux failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
     _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
+
+
+_EBUR128_I_RE = re.compile(r"Integrated loudness:\s*\n\s*I:\s*(-?[\d.]+|-inf)\s*LUFS")
+
+
+def measure_mix_loudness(edl: EDL, *, fps, cache_dir: Path | None) -> float | None:
+    """Pass 1 of the export's mastering (QA-121): the integrated loudness
+    (LUFS) of the timeline's raw MIX — every lane, ducks and gains applied,
+    before any normalisation or limiter; −70.0 when nothing is audible
+    (ebur128's gate); None when there is no target or the measurement failed
+    (the export then falls back to single-pass loudnorm).
+
+    An audio-only render of `_audio_only_graph` into `ebur128`: it decodes
+    the sound of every source once and encodes nothing (measured ~1.2 s per
+    minute of speech + bed on an M-series Mac, under a tenth of the video
+    encode it precedes). Runs through `render.cancel`, so a cancelled export
+    stops it."""
+    if getattr(edl.canvas, "loudness_lufs", None) is None:
+        return None
+    from .audio_mix import apply_solo, export_measure_scope
+    from .reverse import with_reversed_sources
+    edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
+    with export_measure_scope():
+        a_inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
+                                                apply_loudnorm=True)
+    fc += f";{label}ebur128=framelog=quiet[meas]"
+    args = [_pu.FFMPEG, "-hide_banner", "-nostats", "-v", "info", *a_inputs,
+            "-filter_complex", fc, "-map", "[meas]", "-f", "null", "-"]
+    proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", **_pu.SUBPROCESS_FLAGS)
+    if proc.returncode != 0:
+        return None
+    hits = _EBUR128_I_RE.findall(proc.stderr or "")
+    if not hits:
+        return None
+    return -70.0 if hits[-1] == "-inf" else max(-70.0, float(hits[-1]))
 
 
 #: Characters an export file name may not carry: path separators and the
@@ -2067,14 +2104,38 @@ def export_filename(project_name: str | None, w: int, h: int, fps, *, crf: int,
     `Reel 1080x1920 29.97fps 8000kbps.mov`. The same project exported again at
     the same settings replaces its previous file — that IS the same export.
     """
+    base = _export_base_name(project_name)
+    rate = f"{_tb.fps_float(fps):.3f}".rstrip("0").rstrip(".")
+    quality = f"{int(bitrate_kbps)}kbps" if bitrate_kbps else f"q{int(crf)}"
+    return f"{base} {int(w)}x{int(h)} {rate}fps {quality}.{ext}"
+
+
+def _export_base_name(project_name: str | None) -> str:
     raw = _UNSAFE_NAME_CHARS.sub(" ", str(project_name or ""))
     base = " ".join(raw.split()).strip(" .")
     while len(base.encode("utf-8")) > _EXPORT_NAME_MAX_BYTES:
         base = base[:-1]
-    base = base.rstrip(" .") or "Export"
-    rate = f"{_tb.fps_float(fps):.3f}".rstrip("0").rstrip(".")
-    quality = f"{int(bitrate_kbps)}kbps" if bitrate_kbps else f"q{int(crf)}"
-    return f"{base} {int(w)}x{int(h)} {rate}fps {quality}.{ext}"
+    return base.rstrip(" .") or "Export"
+
+
+#: Audio-only export containers (QA-100): the timeline's sound, mastered like
+#: a video export's, with no picture at all.
+AUDIO_CONTAINERS = ("m4a", "wav")
+#: The encode each writes. m4a: the video exports' own AAC
+#: (`_AAC_DELIVERY_OUT`), as a fast-start MP4 audio file. wav: 24-bit PCM, the
+#: interchange master a mixer or podcast host takes.
+_AUDIO_EXPORT_ARGS = {
+    "m4a": [*_AAC_DELIVERY_OUT, "-movflags", "+faststart"],
+    "wav": ["-c:a", "pcm_s24le", "-ar", "48000", "-ac", "2"],
+}
+
+
+def export_audio_filename(project_name: str | None, *, ext: str,
+                          lufs: float | None) -> str:
+    """`<Project> audio -16LUFS.m4a` — the project's name plus what makes
+    this file differ from another audio export of it (QA-098's rule)."""
+    loud = f" {int(round(lufs))}LUFS" if lufs is not None else ""
+    return f"{_export_base_name(project_name)} audio{loud}.{ext}"
 
 
 #: One lock per export destination: two requests that resolve to the same
@@ -2144,6 +2205,24 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
     h = edl.hash()
     out_dir = session_dir / "exports"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if container in AUDIO_CONTAINERS:
+        # QA-100: the sound alone — no picture graph at all.
+        name = filename or export_audio_filename(
+            project_name, ext=container, lufs=getattr(edl.canvas, "loudness_lufs", None))
+        dst = out_dir / name
+        lock = _export_lock(dst)
+        while not lock.acquire(timeout=0.1):
+            if cancel_event is not None and cancel_event.is_set():
+                from ..api.jobs import JobCancelled
+                raise JobCancelled()
+        try:
+            _render_audio_export(edl, dst, fps=fps or edl.canvas.fps,
+                                 cache_dir=session_dir / "cache",
+                                 on_progress=on_progress, cancel_event=cancel_event)
+        finally:
+            lock.release()
+        _cache_budget.enforce(session_dir)
+        return RenderResult(path=dst, cached=False, edl_hash=h)
     ext = container if container in ("mp4", "mov") else "mp4"
     canvas = edl.canvas
     w_out, h_out = export_dimensions(canvas.w, canvas.h, height)
@@ -2188,20 +2267,167 @@ def _render_export_to(edl: EDL, dst: Path, h: str, *, height: int, fps, crf: int
     # One pass unless there are more clips than one ffmpeg should hold open
     # decoders for (QA-097, see the chunk stage in `_render_locked`).
     chunked = len(_video_clips(edl)) > _EXPORT_SINGLE_PASS_MAX_CLIPS
-    _render(edl, dst, height=h_out, fps=f_out, preview=False,
-            cache_dir=session_dir / "cache",
-            on_progress=report if on_progress is not None else None,
-            cancel_event=cancel_event, crf=crf,
-            bitrate_kbps=target, bitrate_peak_cap=not vt_target, chunked=chunked)
-    if vt_target and (_video_kbps(dst) or 0) > target * _BITRATE_TOLERANCE:
-        # The first pass already reported ~100%; hold the bar there through
-        # the capped pass instead of running it backwards.
-        hold = (lambda _p: on_progress(max(0.99, seen[0]))) if on_progress is not None else None
+    # QA-121: measure the mix first; the render then masters it with a static
+    # gain + true-peak limiter (audio_mix `_export_master`).
+    from .audio_mix import export_gain_scope
+    gain = _export_mastering_gain(edl, fps=f_out, cache_dir=session_dir / "cache",
+                                  cancel_event=cancel_event)
+    with export_gain_scope(gain):
         _render(edl, dst, height=h_out, fps=f_out, preview=False,
                 cache_dir=session_dir / "cache",
-                on_progress=hold, cancel_event=cancel_event, crf=crf,
-                bitrate_kbps=target, bitrate_peak_cap=True, chunked=chunked)
+                on_progress=report if on_progress is not None else None,
+                cancel_event=cancel_event, crf=crf,
+                bitrate_kbps=target, bitrate_peak_cap=not vt_target, chunked=chunked)
+        if vt_target and (_video_kbps(dst) or 0) > target * _BITRATE_TOLERANCE:
+            # The first pass already reported ~100%; hold the bar there through
+            # the capped pass instead of running it backwards.
+            hold = (lambda _p: on_progress(max(0.99, seen[0]))) if on_progress is not None else None
+            _render(edl, dst, height=h_out, fps=f_out, preview=False,
+                    cache_dir=session_dir / "cache",
+                    on_progress=hold, cancel_event=cancel_event, crf=crf,
+                    bitrate_kbps=target, bitrate_peak_cap=True, chunked=chunked)
+    _hold_delivery_true_peak(dst, cancel_event=cancel_event)
     return RenderResult(path=dst, cached=False, edl_hash=h)
+
+
+#: Re-encode attempts `_hold_delivery_true_peak` makes before keeping the best.
+_TP_FIX_PASSES = 3
+#: Aim this far under the ceiling, so ebur128's 0.1 dB rounding cannot land
+#: a corrected file exactly on it.
+_TP_FIX_MARGIN_DB = 0.15
+
+
+def delivered_true_peak(path: Path) -> float | None:
+    """True peak (dBTP) of `path`'s first audio stream, measured the way a
+    platform does (ebur128 peak=true, 4x oversampled); None if unmeasurable."""
+    try:
+        proc = subprocess.run(
+            [_pu.FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0",
+             "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=600, **_pu.SUBPROCESS_FLAGS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    err = proc.stderr or ""
+    tail = err[err.rfind("Summary:"):] if "Summary:" in err else ""
+    m = re.search(r"Peak:\s+(-?[\d.]+|-inf) dBFS", tail)
+    if proc.returncode != 0 or m is None:
+        return None
+    return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
+
+
+def _hold_delivery_true_peak(dst: Path, *, cancel_event=None) -> None:
+    """QA-121: the delivered file, not the PCM master, must be under
+    `EXPORT_TRUE_PEAK_DBTP`. The encoder re-adds inter-sample peak the
+    master's limiter could not see; when it pushed the file over, the audio
+    alone is re-encoded through a lower true-peak limiter (the picture is
+    stream-copied — no re-render) and measured again. A limiter, not a gain
+    cut: only the peaks come down, so the loudness target still holds.
+
+    Each pass starts from the ORIGINAL delivered audio, so passes do not
+    stack generations; the lowest-peak result is kept."""
+    from .audio_mix import EXPORT_TP_LIMIT_DB, EXPORT_TRUE_PEAK_DBTP
+    tp = delivered_true_peak(dst)
+    if tp is None or tp <= EXPORT_TRUE_PEAK_DBTP:
+        return
+    ext = dst.suffix.lower()
+    audio_only = ext == ".m4a"
+    best: tuple[float, Path] | None = None
+    limit_db, seen = EXPORT_TP_LIMIT_DB, tp
+    try:
+        for n in range(_TP_FIX_PASSES):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            # Lower the ceiling by exactly how far the encode overshot it.
+            limit_db -= seen - EXPORT_TRUE_PEAK_DBTP + _TP_FIX_MARGIN_DB
+            lin = 10.0 ** (limit_db / 20.0)
+            cand = dst.with_name(f"{dst.stem}.tpfix{n}{dst.suffix}")
+            maps = ["-map", "0:a:0"] if audio_only else ["-map", "0:v?", "-map", "0:a:0", "-c:v", "copy"]
+            args = [_pu.FFMPEG, "-y", "-v", "error", "-i", str(dst), *maps,
+                    "-map_metadata", "0",
+                    "-af", f"aresample=192000,alimiter=limit={lin:.6f}:level=0:latency=1"
+                           f":attack=1:release=50,aresample=48000",
+                    *_AAC_DELIVERY_OUT, "-movflags", "+faststart", str(cand)]
+            proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=1800, **_pu.SUBPROCESS_FLAGS)
+            seen = delivered_true_peak(cand) if proc.returncode == 0 else None
+            if seen is None:
+                _pu.unlink_with_retry(cand)
+                break
+            if best is None or seen < best[0]:
+                if best is not None:
+                    _pu.unlink_with_retry(best[1])
+                best = (seen, cand)
+            else:
+                _pu.unlink_with_retry(cand)
+            if seen <= EXPORT_TRUE_PEAK_DBTP:
+                break
+        if best is not None and best[0] < tp:
+            _pu.replace_with_retry(best[1], dst)
+            best = None
+            import logging
+            logging.getLogger("video_ai_editor").info(
+                "export true peak %.1f dBTP after the encode; re-limited below the ceiling", tp)
+    finally:
+        if best is not None:
+            _pu.unlink_with_retry(best[1])
+
+
+def _export_mastering_gain(edl: EDL, *, fps, cache_dir: Path,
+                           cancel_event) -> float | None:
+    """Pass 1 of an export's mastering (QA-121): the static gain that brings
+    the timeline's mix to `canvas.loudness_lufs`, or None (no target, or the
+    measurement failed — the render then keeps single-pass loudnorm). A
+    background job's cancel event reaches the measuring ffmpeg too."""
+    target = getattr(edl.canvas, "loudness_lufs", None)
+    if target is None:
+        return None
+    from .audio_mix import export_gain_for
+    try:
+        if cancel_event is not None and _cancel.current() is None:
+            with _cancel.scope(cancel_event):
+                measured = measure_mix_loudness(edl, fps=fps, cache_dir=cache_dir)
+        else:
+            measured = measure_mix_loudness(edl, fps=fps, cache_dir=cache_dir)
+    except _cancel.RenderCancelled:
+        from ..api.jobs import JobCancelled
+        raise JobCancelled() from None
+    if measured is None:
+        return None
+    # A gated-silent mix gets 0 dB (`export_gain_for`) — never a loudnorm of
+    # silence, which emits NaN below its 3 s window and aborts the AAC encoder.
+    return export_gain_for(target, measured)
+
+
+def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,
+                         on_progress, cancel_event) -> None:
+    """The timeline's sound alone, mastered exactly like a video export's
+    (QA-100): pass 1 measures the mix, pass 2 renders `_audio_only_graph`
+    with the static gain + true-peak limiter into `dst` (.m4a AAC or 24-bit
+    .wav, by its suffix). Nothing of the picture is decoded or encoded."""
+    from .audio_mix import apply_solo, export_gain_scope
+    from .reverse import with_reversed_sources
+    ext = dst.suffix.lstrip(".").lower()
+    gain = _export_mastering_gain(edl, fps=fps, cache_dir=cache_dir,
+                                  cancel_event=cancel_event)
+    edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
+    with export_gain_scope(gain):
+        inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
+                                              apply_loudnorm=True)
+    tmp = _part_path(dst)
+    args = [_pu.FFMPEG, "-y", *inputs, "-filter_complex", fc, "-map", label,
+            *_AUDIO_EXPORT_ARGS.get(ext, _AUDIO_EXPORT_ARGS["m4a"]), str(tmp)]
+    try:
+        rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
+    except BaseException:
+        _pu.unlink_with_retry(tmp)
+        raise
+    if rc != 0:
+        _pu.unlink_with_retry(tmp)
+        raise RuntimeError(f"ffmpeg audio export failed (rc={rc}):\n{(err or '')[-2000:]}")
+    _pu.replace_with_retry(tmp, dst)
+    if ext == "m4a":                       # PCM (wav) has no encoder overshoot
+        _hold_delivery_true_peak(dst, cancel_event=cancel_event)
 
 
 #: How far over a platform bitrate target an uncapped VideoToolbox export may

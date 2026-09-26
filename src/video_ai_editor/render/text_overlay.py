@@ -738,6 +738,40 @@ def background_rect(anchor_x: float, centers: list[float], block_w: float, size:
             anchor_x + block_w / 2 + px, centers[-1] + lh / 2 + py, BG_RADIUS_RATIO * size)
 
 
+# ---- rule 8 (QA-078): letter spacing -----------------------------------------
+# `style.letter_spacing` canvas px (× the transform scale) of extra advance
+# after every grapheme cluster of a SIMPLE-script run and after every emoji —
+# between clusters only, so a line's width grows by (clusters − 1) · spacing.
+# A spaced cluster is shaped / measured on its own (no kerning or ligature
+# across a spaced pair — CSS letter-spacing drops ligatures too). A complex-
+# script run (Devanagari, Arabic, … `shaping.needs_shaping`) is never spaced:
+# pulling its clusters apart breaks the joins and the headline stroke; and a
+# right-to-left line is not spaced at all. The preview (lib/textLayout.ts
+# `trackedUnits`/`trackedWidth`) lays out by the same rule from its own glyph
+# measurements; the fixture's `block.letter_spacing` pins the arithmetic.
+LETTER_SPACING_RANGE = (-20.0, 100.0)
+
+
+def tracked_width(advances: list[float], tracked: list[bool], spacing: float) -> float:
+    """Rule 8's arithmetic: units of `advances` wide, each `tracked` one but
+    the LAST followed by `spacing`."""
+    n = len(advances)
+    return sum(advances) + sum(spacing for i in range(n - 1) if tracked[i]) if n else 0.0
+
+
+def _simple_clusters(chunk: str) -> list[tuple[str, bool]]:
+    """(unit, tracked) for a text chunk: complex-script pieces whole and
+    untracked, every other piece split into tracked grapheme clusters —
+    the same pieces the shaped path spaces (shaping._split_scripts)."""
+    out: list[tuple[str, bool]] = []
+    for _script, piece in _shaping._split_scripts(chunk):
+        if _shaping.needs_shaping(piece):
+            out.append((piece, False))
+        else:
+            out.extend((cl, True) for cl in _shaping.grapheme_clusters(piece))
+    return out
+
+
 def resolve_block_overrides(c: TextClip) -> dict:
     """The QA-078 block style of a clip: background rgba (or None), align,
     line spacing, shadow override (None = the role's). Defaults render exactly
@@ -747,14 +781,19 @@ def resolve_block_overrides(c: TextClip) -> dict:
     align = getattr(st, "align", "center") if st is not None else "center"
     spacing = getattr(st, "line_spacing", 1.0) if st is not None else 1.0
     shadow = getattr(st, "shadow_on", None) if st is not None else None
+    tracking = getattr(st, "letter_spacing", 0.0) if st is not None else 0.0
     return {"background": bg, "align": align if align in ("left", "right") else "center",
-            "line_spacing": float(spacing or 1.0), "shadow": shadow if isinstance(shadow, bool) else None}
+            "line_spacing": float(spacing or 1.0), "shadow": shadow if isinstance(shadow, bool) else None,
+            "letter_spacing": float(tracking or 0.0)}
 
 
 def block_key(b: dict) -> str:
     """Cache-key fragment for resolve_block_overrides' result."""
+    tracking = float(b.get("letter_spacing") or 0.0)
     return (f"bg{b['background'] or ''}|{b['align']}|ls{b['line_spacing']:.3f}|"
-            f"sh{'' if b['shadow'] is None else int(b['shadow'])}")
+            f"sh{'' if b['shadow'] is None else int(b['shadow'])}"
+            # Only when set, so every existing clip keeps its cached PNG.
+            + (f"|lsp{tracking:.3f}" if tracking else ""))
 
 
 def caption_position_y(edl: EDL) -> float | None:
@@ -861,6 +900,18 @@ def _line_w(line: str, draw: ImageDraw.ImageDraw,
     return total
 
 
+def _tracked_line_w(line: str, draw: ImageDraw.ImageDraw, font: ImageFont.FreeTypeFont,
+                    box: int, tracking: float) -> float:
+    """Rule 8 width of a line on the shaper-less (Latin-only) path."""
+    adv: list[float] = []
+    for kind, chunk in _tokenize_emoji(line):
+        if kind == "emoji":
+            adv.append(float(box))
+        else:
+            adv.extend(draw.textlength(u, font=font) for u, _t in _simple_clusters(chunk))
+    return tracked_width(adv, [True] * len(adv), tracking)
+
+
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
           max_w: int, box: int = 0, measure=None) -> list[str]:
     """Greedy word wrap. `measure(line) -> px` overrides the Pillow width —
@@ -922,7 +973,8 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
                     background: tuple[int, int, int, int] | None = None,
                     align: str = "center",
                     line_spacing: float = 1.0,
-                    shadow: bool | None = None) -> Image.Image:
+                    shadow: bool | None = None,
+                    letter_spacing: float = 0.0) -> Image.Image:
     """Render a transparent canvas-sized PNG with text drawn for the given role,
     laid out by the SHARED text layout model above (QA-015).
 
@@ -1003,11 +1055,16 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     # exported ~2 % wider with a visible L-T gap. Without the engine, Latin
     # falls back to Pillow; text that NEEDS shaping raises ShapingUnavailable
     # (a RuntimeError) — misspelled Hindi must never be delivered silently.
+    # Rule 8: letter spacing, every length × the transform scale.
+    tracking = min(LETTER_SPACING_RANGE[1], max(LETTER_SPACING_RANGE[0], float(letter_spacing or 0.0))) * k
     if _shaping.available() or _shaping.needs_shaping(body):
         shaped = _shaping.ShapedFont(chosen_font, size_px, weight,
                                      fallback=_script_fallback(role, size_px))
-        measure = (lambda s: shaped.width(s, _tokenize_emoji, box))
+        measure = (lambda s: shaped.width(s, _tokenize_emoji, box, tracking))
         lines = _wrap(draw, body, font, max_w, box, measure=measure)
+    elif tracking:
+        lines = _wrap(draw, body, font, max_w, box,
+                      measure=lambda s: _tracked_line_w(s, draw, font, box, tracking))
     else:
         lines = _wrap(draw, body, font, max_w, box)
 
@@ -1020,9 +1077,11 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
     spacing = min(3.0, max(0.5, float(line_spacing or 1.0)))
     centers = line_centers(y_anchor, len(lines), size_px, spacing)
     # Rule 7: every line's width first — alignment and the box need the block's.
-    run_cache = [shaped.runs(ln, _tokenize_emoji, box) for ln in lines] if shaped is not None else None
-    widths = ([sum(r.width for r in runs) for runs in run_cache] if run_cache is not None
-              else [_line_w(ln, draw, font, box) for ln in lines])
+    run_cache = ([shaped.runs(ln, _tokenize_emoji, box, tracking) for ln in lines]
+                 if shaped is not None else None)
+    widths = ([_shaping.tracked_line_width(runs, tracking) for runs in run_cache] if run_cache is not None
+              else [_tracked_line_w(ln, draw, font, box, tracking) if tracking
+                    else _line_w(ln, draw, font, box) for ln in lines])
     block_w = max(widths) if widths else 0.0
     # The box is its own layer, composited UNDER the finished text below:
     # Pillow's draw REPLACES pixels, so a shadow drawn straight onto the box
@@ -1057,25 +1116,34 @@ def render_text_png(text: str, role: str, canvas_w: int, canvas_h: int, *,
         # font and pasting emoji artwork. One pass per visual layer (shadow,
         # then fill) so an emoji can't land under the next run's shadow.
         segs = _tokenize_emoji(line)
+        if tracking:
+            # Rule 8 without the shaper (Latin only reaches here): one cluster
+            # at a time, `tracking` after each.
+            segs = [("emoji", ch) if kind == "emoji" else ("text", u)
+                    for kind, ch in segs
+                    for u in ([ch] if kind == "emoji" else [u for u, _t in _simple_clusters(ch)])]
+            box_adv, gap = box + tracking, tracking
+        else:
+            box_adv, gap = box, 0.0
         if style.get("shadow"):
             cx = x
             for kind, chunk in segs:
                 if kind == "emoji":
-                    cx += box
+                    cx += box_adv
                     continue
                 draw.text((cx + sdx, baseline + sdy), chunk, font=font, anchor="ls",
                           fill=shadow_rgba, stroke_width=stroke_px,
                           stroke_fill=shadow_rgba)
-                cx += draw.textlength(chunk, font=font)
+                cx += draw.textlength(chunk, font=font) + gap
         cx = x
         for kind, chunk in segs:
             if kind == "emoji":
                 _paste_emoji(img, chunk, cx, cy, box)
-                cx += box
+                cx += box_adv
                 continue
             draw.text((cx, baseline), chunk, font=font, anchor="ls", fill=style["fill"],
                       stroke_width=stroke_px, stroke_fill=style["stroke"])
-            cx += draw.textlength(chunk, font=font)
+            cx += draw.textlength(chunk, font=font) + gap
     if bg_layer is not None:
         img = Image.alpha_composite(bg_layer, img)
     if abs(float(rotation or 0.0)) > 0.01:
@@ -1186,7 +1254,8 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
                                   opacity=opacity, upper=caps,
                                   scale=k_scale, rotation=rotation,
                                   background=blk["background"], align=blk["align"],
-                                  line_spacing=blk["line_spacing"], shadow=blk["shadow"])
+                                  line_spacing=blk["line_spacing"], shadow=blk["shadow"],
+                                  letter_spacing=blk["letter_spacing"])
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -1237,7 +1306,8 @@ def cache_xform_text_pngs(edl: EDL, cache_dir: Path) -> list[dict]:
         style_kw = dict(fill=fill, font_file=font_file, size=size, stroke=stroke,
                         stroke_w=stroke_w, opacity=opacity, upper=caps,
                         background=blk["background"], align=blk["align"],
-                        line_spacing=blk["line_spacing"], shadow=blk["shadow"])
+                        line_spacing=blk["line_spacing"], shadow=blk["shadow"],
+                        letter_spacing=blk["letter_spacing"])
         key = hashlib.sha256(
             (f"xf2|{role}|{canvas.w}x{canvas.h}|{fill or ''}|"
              f"{font_file.name if font_file else ''}|{size}|{stroke or ''}|{stroke_w}|"

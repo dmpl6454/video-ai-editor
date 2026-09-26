@@ -121,9 +121,13 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
           count="number", max_dur="number", min_dur="number", platform=_PLATFORMS, finish=_YES_NO),
     _card("reframe", "Change the aspect ratio, keeping the subject in frame.",
           ratio=_RATIOS, platform=_PLATFORMS, subject_track=_YES_NO),
-    _card("music", "Add background music, ducked under speech.",
+    # QA-018 (wave C): the three music cards contrast each other, because the
+    # descriptions are all the on-device model sees — it used to answer "the
+    # tune should be barely audible" with add-music and "breathe less loudly"
+    # with ducking.
+    _card("music", "Add a NEW background music track, ducked under speech (never for the level of music already there).",
           mood=_MOODS, src="text", volume_db="number", duck=_YES_NO),
-    _card("duck", "Lower the music under speech (enabled=no turns ducking off).", to_db="number",
+    _card("duck", "Dip the music only WHILE someone speaks (enabled=no turns ducking off).", to_db="number",
           enabled=_YES_NO),
     _card("beat_sync", "Cut and pulse the picture on the music's beats.",
           subdivision="number", pulse=_YES_NO),
@@ -132,6 +136,8 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("clean_audio", "Reduce noise and normalise loudness.", strength="number", lufs="number"),
     _card("loudness", "Set the loudness target.", lufs="number"),
     _card("speed", "Change playback speed.", factor="number", clip_ref="text"),
+    _card("reverse", "Play a clip backwards (reverse=no plays it forwards again).",
+          clip_ref="text", reverse=_YES_NO),
     _card("trim", "Cut a time range out.", range="text"),
     _card("title", "Add a title or lower third.",
           text="text", name="text", handle="text", at="number", dur="number"),
@@ -151,7 +157,8 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("fade", "Fade the picture and sound in at the start or out at the end, or fade the music bed.",
           target=("video", "audio", "music"), edge=("in", "out", "both"), duration_s="number",
           clip_ref="text"),
-    _card("volume", "Turn the music bed or the original sound up or down, or set its level in dB.",
+    _card("volume", "Make the music bed or the original sound louder or quieter all the way through, "
+          "or set its level in dB.",
           target=("music", "voice"), change=("up", "down"), db="number"),
     _card("mute", "Mute or unmute the music bed or the original sound.",
           target=("music", "voice"), muted=_YES_NO),

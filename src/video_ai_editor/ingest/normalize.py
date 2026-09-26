@@ -39,7 +39,8 @@ def _color_meta(src: Path) -> dict:
     try:
         out = subprocess.run(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=color_transfer,color_primaries,color_space,pix_fmt",
+             "-show_entries", "stream=color_transfer,color_primaries,color_space,pix_fmt,field_order,"
+                              "sample_aspect_ratio",
              "-of", "json", str(src)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
             **_pu.SUBPROCESS_FLAGS,
@@ -52,6 +53,43 @@ def _color_meta(src: Path) -> dict:
 
 def _is_hdr(meta: dict) -> bool:
     return (meta.get("color_transfer") or "").lower() in _HDR_TRANSFERS
+
+
+#: ffprobe `field_order` values that mean the picture is stored as two
+#: interlaced fields: top/bottom first, and the two "coded one way, displayed
+#: the other" variants. "progressive" and "unknown" are left alone.
+_INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
+
+#: One progressive frame per interlaced frame (`send_frame`), so a 1080i29.97
+#: AVCHD clip becomes 1080p29.97 on the project's grid — the rate ingest
+#: already picked from the source — instead of doubling to 59.94. `deint=all`
+#: because camcorders do not flag individual frames reliably.
+DEINTERLACE_FILTER = "bwdif=mode=send_frame:parity=auto:deint=all"
+
+
+#: Resample non-square pixels to square ones, keeping the height: an HDV /
+#: AVCHD 1440x1080 frame with a 4:3 sample aspect is DISPLAYED 1920x1080. The
+#: compositor, the thumbnails and the canvas auto-match all size a clip from
+#: its coded width and height, so a clip kept anamorphic rendered squeezed
+#: into a pillarboxed 4:3 box inside a 16:9 export. Width rounded to even for
+#: 4:2:0 chroma.
+SQUARE_PIXELS_FILTER = "scale=w='trunc(iw*sar/2)*2':h=ih,setsar=1"
+
+
+def _is_anamorphic(meta: dict) -> bool:
+    raw = str(meta.get("sample_aspect_ratio") or "").strip()
+    try:
+        num, den = (int(x) for x in raw.split(":"))
+    except ValueError:
+        return False
+    return num > 0 and den > 0 and num != den
+
+
+def _is_interlaced(meta: dict) -> bool:
+    """AVCHD (.MTS/.M2TS), HDV and broadcast captures are commonly 1080i.
+    Encoding their woven fields as progressive H.264 burns "combing" into
+    every moving edge of the editing copy — and so into every export."""
+    return (meta.get("field_order") or "").lower() in _INTERLACED_FIELD_ORDERS
 
 
 def _vf_for_short_side(short_side: int | None) -> str:
@@ -103,7 +141,9 @@ def _has_video(src: Path) -> bool:
 
 def _attempts(src: Path, dst: Path, fps: str, sample_rate: int, channels: int,
               short_side: int | None, transfer: str | None,
-              lut_path: Path | None) -> list[tuple[str, list[str]]]:
+              lut_path: Path | None,
+              interlaced: bool = False,
+              anamorphic: bool = False) -> list[tuple[str, list[str]]]:
     """Ordered (label, ffmpeg args) attempts, simplest-likely-to-work last.
 
     `fps` is an ffmpeg rate string (``"25"``, ``"30000/1001"``) from
@@ -140,7 +180,13 @@ def _attempts(src: Path, dst: Path, fps: str, sample_rate: int, channels: int,
         return ",".join(p for p in parts if p)
 
     attempts: list[tuple[str, list[str]]] = []
-    scale = _vf_for_short_side(short_side)
+    # Deinterlace FIRST, on the full-height fields, before any scale or tone
+    # map mixes the two fields' lines together.
+    # Then square the pixels, THEN clamp the short side, so the clamp measures
+    # the frame as it is displayed.
+    scale = join(DEINTERLACE_FILTER if interlaced else "",
+                 SQUARE_PIXELS_FILTER if anamorphic else "",
+                 _vf_for_short_side(short_side))
 
     if hdr:
         # Attempt 1: our own tone-map LUT through the built-in lut3d filter —
@@ -268,7 +314,9 @@ def normalize(src: Path, dst: Path, fps: float | int | str | None = None,
             lut_path = None
     try:
         for label, args in _attempts(src, tmp, fps_arg, sample_rate, channels,
-                                     height, transfer, lut_path):
+                                     height, transfer, lut_path,
+                                     interlaced=_is_interlaced(meta),
+                                     anamorphic=_is_anamorphic(meta)):
             rc, err = _run_with_progress(args, duration, on_progress, cancel_event)
             if rc == 0 and tmp.exists() and tmp.stat().st_size > 0:
                 _pu.replace_with_retry(tmp, dst)

@@ -232,6 +232,15 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
         if bid == "recipes" or bid not in brains:
             continue
         brain = brains[bid]
+        if bid in ON_DEVICE and content.unanchored_prompt(req.prompt):
+            # A prompt with no editing words at all ("banana wobble zebra")
+            # got an unasked captions plan from Apple Intelligence that ran
+            # unconfirmed (wave C review). ground_to_prompt must keep drafts
+            # whose recipes are all unnamed — that is what a paraphrase looks
+            # like — so the gate is on the PROMPT, before the model is asked.
+            record(Attempt(bid, "failed", reason="rejected:ungrounded prompt",
+                           detail="nothing in the prompt names an edit"))
+            continue
         if bid in ON_DEVICE:
             remaining = budget_s - (clock() - start)
             if remaining < MIN_ATTEMPT_S:

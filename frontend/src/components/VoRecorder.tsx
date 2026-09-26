@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore, errorMessage } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
+import { Icon } from './Icon'
 import { CANCELLED, COUNTDOWN_S, PERMISSION_HINT_MS, cancellable, levelOf, recordStart } from '../lib/voCapture'
+import { MIC_UNAVAILABLE, micErrorMessage } from '../lib/micErrors'
 
 // Narrow shape of the bridge desktop.py's `_Api` exposes over pywebview's
 // js_api — only the two methods this file calls, not the whole class.
@@ -212,7 +214,7 @@ export function VoRecorder() {
         // refuses (e.g. Windows: avfoundation is mac-only). Fall through to
         // the getUserMedia path below, which WebView2 supports natively.
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(micErrorMessage(e))
         setRequesting(false)
         return
       }
@@ -226,7 +228,7 @@ export function VoRecorder() {
     // getUserMedia')". Fail with a message that actually explains what's
     // wrong instead of surfacing that verbatim.
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError('Microphone recording isn’t available in this window (no mic access in this build). Try the browser-dev mode instead of the packaged app, or check the app’s microphone permission in System Settings.')
+      setError(MIC_UNAVAILABLE)
       setRequesting(false)
       return
     }
@@ -269,7 +271,7 @@ export function VoRecorder() {
             useStore.getState().setSelection(cid)
             useStore.getState().flashClip(cid)
           }
-          toast.success('Voiceover recorded ✓')
+          toast.success('Voiceover recorded')
         } catch (e) {
           // api.voRecord throws api.ts's contract shape, "<status>
           // <statusText>: <raw envelope>", and this string is rendered
@@ -295,18 +297,10 @@ export function VoRecorder() {
       // doesn't stay lit.
       teardown()
       setRecording(false)
-      // getUserMedia rejects with DOMException name 'NotAllowedError' both when
-      // the browser's mic permission is blocked AND when the user dismisses the
-      // native permission prompt without choosing — the raw message in either
-      // case is a terse browser string ("Permission denied" / similar) that gives
-      // no next step. Replace it with an actionable one pointing at the browser's
-      // own site-settings UI, since nothing in this app's code can re-trigger
-      // that prompt once it's been blocked.
-      if (e instanceof DOMException && e.name === 'NotAllowedError') {
-        setError('Microphone access was blocked or the permission prompt was dismissed. Click the lock/site-settings icon in the address bar → Microphone → Allow, then reload the page and try again.')
-      } else {
-        setError(e instanceof Error ? e.message : String(e))
-      }
+      // getUserMedia / MediaRecorder reject with a DOMException whose message
+      // is the browser's terse string ("Not supported", "Permission denied")
+      // — lib/micErrors turns every known name into a next step.
+      setError(micErrorMessage(e))
     } finally {
       setRequesting(false)
     }
@@ -335,9 +329,9 @@ export function VoRecorder() {
           useStore.getState().setSelection(res.clip_id)
           useStore.getState().flashClip(res.clip_id)
         }
-        toast.success('Voiceover recorded ✓')
+        toast.success('Voiceover recorded')
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(micErrorMessage(e))
       } finally {
         setSubmitting(false)
       }
@@ -381,7 +375,7 @@ export function VoRecorder() {
       // the top of this function only clears it on the NEXT attempt's
       // start, not visibly confirming the retry actually worked) — this
       // toast is the "yes, that worked" signal either way.
-      toast.success('Voiceover imported ✓')
+      toast.success('Voiceover imported')
     } catch (e) {
       // Same reason as the record path above — this text is displayed as-is.
       setError(errorMessage(e))
@@ -424,7 +418,7 @@ export function VoRecorder() {
           disabled={submitting || !sid}
           title="Record a voiceover from your mic: a 3-2-1 count-in, then the timeline plays from the playhead while you speak"
         >
-          {submitting ? 'Encoding…' : 'Record voiceover'}
+          {submitting ? 'Encoding…' : <><Icon name="mic" /> Record voiceover</>}
         </button>
       )}
       {(recording || countdown !== null) && metering && (
@@ -452,15 +446,15 @@ export function VoRecorder() {
         onChange={onFileChosen}
       />
       <button
-        style={{ width: '100%', fontSize: 10, marginTop: 4, opacity: 0.8 }}
+        className="vo-btn vo-import"
         onClick={() => fileInputRef.current?.click()}
         disabled={submitting || recording || !sid}
         title="Import an existing audio file as the voiceover track (fallback if mic recording isn't available)"
       >
-        Import audio file as voiceover
+        <Icon name="audioFile" /> Import audio file as voiceover
       </button>
       {error && (
-        <div style={{ color: '#fbb', fontSize: 10, marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+        <div role="alert" style={{ color: 'var(--error-text)', fontSize: 10, marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
           <span style={{ flex: 1 }}>{error}</span>
           {/* A failed-record error otherwise only clears at the START of the
               next start()/importFile() call — if the user just reads it and
@@ -469,10 +463,10 @@ export function VoRecorder() {
               no way to acknowledge it. */}
           <button
             onClick={() => setError(null)}
-            style={{ background: 'none', border: 'none', color: '#fbb', cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1 }}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, lineHeight: 0 }}
             title="Dismiss"
             aria-label="Dismiss recording error"
-          ><span aria-hidden="true">×</span></button>
+          ><Icon name="close" /></button>
         </div>
       )}
     </div>

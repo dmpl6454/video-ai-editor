@@ -2,7 +2,8 @@
 // facts it shows (frame rates, size estimate, file name).
 import { describe, expect, it } from 'vitest'
 import {
-  FRAME_RATES, PLATFORM_SPECS, estimateBytes, estimateVideoKbps, exportBody, exportFileName, frameRateOptions, sameRate,
+  EXPORT_FORMATS, FRAME_RATES, PLATFORM_SPECS, WAV_KBPS, audioDescription, estimateAudioOnlyBytes, estimateBytes,
+  estimateVideoKbps, exportBody, exportFileName, frameRateOptions, isAudioOnly, sameRate,
 } from './exportOptions'
 
 const C30 = { w: 1920, h: 1080, fps: 30 }
@@ -44,5 +45,22 @@ describe('size estimate and file name (QA-100)', () => {
   })
   it('YouTube 16:9 is a platform the UI can reach', () => {
     expect(PLATFORM_SPECS.find((p) => p.preset === 'youtube_16x9')).toMatchObject({ w: 1920, h: 1080, lufs: -14 })
+  })
+})
+
+describe('audio-only export (QA-100 remainder)', () => {
+  it('offers the sound alone next to the video formats', () => {
+    expect(EXPORT_FORMATS.map((f) => f.value)).toEqual(['mp4', 'mov', 'm4a', 'wav'])
+    expect(EXPORT_FORMATS.filter((f) => isAudioOnly(f.value)).map((f) => f.label)).toEqual(['Audio M4A', 'Audio WAV'])
+  })
+  it('estimates the audio stream alone — 192 kbps AAC, or 24-bit 48 kHz stereo PCM', () => {
+    expect(estimateAudioOnlyBytes('m4a', 60)).toBe(192 * 1000 / 8 * 60)
+    expect(WAV_KBPS).toBe(2304)
+    expect(estimateAudioOnlyBytes('wav', 10)).toBe(2304 * 1000 / 8 * 10)
+    expect(audioDescription('wav')).toMatch(/24-bit/)
+  })
+  it('names the file with the audio extension', () => {
+    expect(exportFileName('Episode 1.mp4', 'm4a')).toBe('Episode 1.m4a')
+    expect(exportFileName('Episode 1.wav', 'wav')).toBe('Episode 1.wav')
   })
 })

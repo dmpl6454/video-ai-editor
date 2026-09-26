@@ -37,10 +37,11 @@ import { usePromptStore, isBusy } from '../lib/promptStore'
 import { formatCutTime, targetCut, v1CutPoints } from '../lib/cutPoints'
 import {
   FAMILY_ORDER, FALLBACK_CATALOG, MAX_DURATION_S, MIN_DURATION_S, cachedTransitionCatalog, clampDuration,
-  everyCutPrompt, loadTransitionCatalog, lookupTransition, type Family, type TransitionCatalog, type TransitionEntry,
+  everyCutPrompt, loadTransitionCatalog, lookupTransition, type Family, type TransitionCatalog, type TransitionEntry, transitionCountText,
 } from '../lib/transitionCatalog'
 import { previewClass, previewStyle } from '../lib/transitionPreview'
 import './transitionsPanel.css'
+import { Icon } from './Icon'
 
 const COLS = 2
 const TAB_KEY = 'vai.transitionsTab'
@@ -209,7 +210,7 @@ export function TransitionsPanel({ active }: Props) {
         ) : (
           <>
             <button type="button" className="trp-nav" onClick={() => goCut(-1)} disabled={!target || target.index === 0}
-                    aria-label="Previous cut" title="Previous cut ([ in the grid)">‹</button>
+                    aria-label="Previous cut" title="Previous cut ([ in the grid)"><Icon name="chevronLeft" /></button>
             <div className="trp-target-body">
               <span className="trp-target-at">
                 Cut at <b>{target ? formatCutTime(target.cut.at) : '—'}</b>
@@ -217,11 +218,11 @@ export function TransitionsPanel({ active }: Props) {
               </span>
               <span className="trp-target-why">
                 {target?.reason === 'selection' ? 'the selected clip starts here'
-                  : target?.reason === 'picked' ? 'picked with ‹ ›' : 'nearest the playhead'}
+                  : target?.reason === 'picked' ? 'picked with the arrows' : 'nearest the playhead'}
               </span>
             </div>
             <button type="button" className="trp-nav" onClick={() => goCut(1)} disabled={!target || target.index >= cuts.length - 1}
-                    aria-label="Next cut" title="Next cut (] in the grid)">›</button>
+                    aria-label="Next cut" title="Next cut (] in the grid)"><Icon name="chevronRight" /></button>
           </>
         )}
       </div>
@@ -277,7 +278,7 @@ export function TransitionsPanel({ active }: Props) {
         aria-labelledby={`trp-tab-${TAB_LABEL[family]}`}
         onKeyDown={onGridKey}
       >
-        {entries.length === 0 && <div className="trp-empty">Nothing in this family on this backend.</div>}
+        {entries.length === 0 && <div className="trp-empty">No looks in this family yet.</div>}
         {entries.map((e) => {
           const onCut = !!target?.cut.tr && applied?.name === e.name
           const label = `${e.display} — ${e.duration} s${e.description ? `. ${e.description}` : ''}${onCut ? '. On this cut' : ''}`
@@ -324,21 +325,24 @@ export function TransitionsPanel({ active }: Props) {
             <button type="button" className="trp-link" onClick={() => setDurationText('')} title="Use each look's own default again">default</button>
           )}
         </label>
-        <button
-          type="button"
-          className="trp-every"
-          disabled={!focused || cuts.length < 2 || promptBusy || !sid}
-          title={cuts.length < 2 ? 'Needs at least two cuts'
-            : promptBusy ? 'The Prompt bar is busy — wait or cancel'
-            : `Runs "${everyCutPrompt(focused ?? { name: '…' }, focused ? durationFor(focused) : 0)}" through the Prompt bar: one undo step, verified`}
-          onClick={() => focused && applyEverywhere(focused)}
-        >
-          Every cut <small>via Prompt</small>
-        </button>
+        {/* Only when there is more than one cut to fill (QA-119): with one
+            cut a tile click already applies to it, and a greyed "Every cut"
+            beside it read as broken. It says how many cuts it will fill. */}
+        {cuts.length >= 2 && (
+          <button
+            type="button"
+            className="trp-every"
+            disabled={!focused || promptBusy || !sid}
+            title={promptBusy ? 'The Prompt bar is busy — wait or cancel'
+              : `Puts ${focused?.display ?? 'this look'} on all ${cuts.length} cuts as one undo step, checked when it is done`}
+            onClick={() => focused && applyEverywhere(focused)}
+          >
+            Apply to all {cuts.length} cuts
+          </button>
+        )}
       </div>
       <div className="trp-hint">
-        {catalog.looks} looks · {catalog.aliasCount} more names accepted
-        {catalog.source === 'fallback' ? ' · built-in list' : ''}
+        {transitionCountText(catalog)}
       </div>
     </section>
   )

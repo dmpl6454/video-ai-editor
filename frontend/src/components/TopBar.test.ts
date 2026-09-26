@@ -80,14 +80,15 @@ describe('the TopBar tools', () => {
 
   it('keeps Text, Captions, Help and Shortcuts inline', () => {
     const t = tools()
-    expect(t).toMatch(/<b>T<\/b> Text/)
+    // The lucide Type icon, not a bold "T" glyph (QA-125).
+    expect(t).toMatch(/data-icon="text"[^>]*>(?:<path[^>]*><\/path>)+<\/svg> Text/)
     expect(t).toContain('Captions')
     // Glyph buttons carry a name; the glyph itself is aria-hidden (QA-102).
-    expect(t).toMatch(/aria-label="Keyboard shortcuts"[^>]*><span aria-hidden="true">\?<\/span><\/button>/)
+    expect(t).toMatch(/aria-label="Keyboard shortcuts"[^>]*><svg[^>]*class="lucide[^"]*"[^>]*data-icon="help"/)
     // One monochrome icon set (wave-B review): the shortcuts button is the
     // keyboard ICON, never the '⌨' glyph.
     expect(t).not.toContain('⌨')
-    expect(t).toMatch(/aria-label="Customize keyboard shortcuts"[^>]*><svg[^>]*class="icon"/)
+    expect(t).toMatch(/aria-label="Customize keyboard shortcuts"[^>]*><svg[^>]*class="lucide lucide-keyboard icon"/)
   })
 })
 
@@ -95,8 +96,9 @@ describe('the TopBar tools', () => {
 // cluster also shows a finished export's "↓ MP4" link and an export error.
 // Both used to render AFTER the Export button, so at every width the download
 // link (or a 340 px error chip) sat to Export's right.
-// The trigger's markup: its ▾ is decorative and hidden from assistive tech (QA-102).
-const EXPORT_LABEL = 'Export <span aria-hidden="true">▾</span>'
+// The trigger's markup: its chevron is a decorative lucide icon, hidden from
+// assistive tech (QA-102, QA-125).
+const EXPORT_LABEL = 'Export<svg'
 
 describe('the pinned cluster with an export link and an export error', () => {
   const seeded = async () => {
@@ -120,9 +122,9 @@ describe('the pinned cluster with an export link and an export error', () => {
     const pinned = await seeded()
     const exportAt = pinned.indexOf(EXPORT_LABEL)
     expect(exportAt).toBeGreaterThan(-1)
-    expect(pinned).toContain('↓ MP4')
+    expect(pinned).toMatch(/data-icon="download"[^>]*>(?:<[^>]+>)*<\/svg> MP4/)
     expect(pinned).toContain('the encoder ran out of disk')
-    expect(pinned.indexOf('↓ MP4')).toBeLessThan(exportAt)
+    expect(pinned.indexOf(' MP4')).toBeLessThan(exportAt)
     expect(pinned.indexOf('the encoder ran out of disk')).toBeLessThan(exportAt)
   })
 

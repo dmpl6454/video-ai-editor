@@ -32,7 +32,7 @@ export interface TextClip {
   style?: { font?: string | null; size?: number; color?: string; stroke?: string
             stroke_w?: number; upper?: boolean | null
             background?: string | null; align?: 'left' | 'center' | 'right'
-            line_spacing?: number; shadow_on?: boolean | null }
+            line_spacing?: number; shadow_on?: boolean | null; letter_spacing?: number }
   anim_in?: string | null
   anim_out?: string | null
   anim_dur?: number | null

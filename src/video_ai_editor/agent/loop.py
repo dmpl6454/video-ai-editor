@@ -133,6 +133,17 @@ def _live_context_block(store: EDLStore, ui_state: dict | None = None) -> str:
     )
 
 
+def _api_key() -> str:
+    """The key for this turn, resolved per turn so a key saved in Settings
+    (the macOS Keychain) works without a restart. This module's
+    ANTHROPIC_API_KEY — the env key, which tests patch — wins; the Keychain is
+    consulted only when the environment had no key at all."""
+    if ANTHROPIC_API_KEY:
+        return ANTHROPIC_API_KEY
+    from .. import config as _config
+    return "" if _config.ANTHROPIC_API_KEY else _config.anthropic_api_key()
+
+
 def _friendly_anthropic_error(e: Exception) -> str:
     """Map a raw Anthropic SDK exception to a user-facing message.
 
@@ -152,7 +163,7 @@ def _friendly_anthropic_error(e: Exception) -> str:
                 "console.anthropic.com (Plans & Billing) and try again.")
     if status == 401 or "authentication" in text or "invalid x-api-key" in text:
         return ("AI features are unavailable — the Anthropic API key is missing "
-                "or invalid. Check ANTHROPIC_API_KEY in your .env and restart.")
+                "or invalid. Check the key in Settings › Claude.")
     if status == 429 or "rate limit" in text:
         return ("AI is busy right now (rate limited). Wait a few seconds and "
                 "try again.")
@@ -344,7 +355,8 @@ async def chat_turn(
     `history` is mutated to append the new user/assistant messages so the caller
     can persist it.
     """
-    if not ANTHROPIC_API_KEY:
+    api_key = _api_key()
+    if not api_key:
         # No cloud key: the Prompt Editor plans and edits on the local brains
         # (recipes → Apple Intelligence → local model), validates every plan
         # before dispatch and verifies the result. Same event stream, same
@@ -355,7 +367,7 @@ async def chat_turn(
             yield evt
         return
 
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = Anthropic(api_key=api_key)
     history.append({"role": "user", "content": user_message})
 
     tools = _anthropic_tools()

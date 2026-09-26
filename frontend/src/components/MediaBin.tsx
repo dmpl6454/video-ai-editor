@@ -14,6 +14,7 @@ import { formatDb } from '../lib/dbFormat'
 import { useSliderCommit } from '../lib/useSliderCommit'
 import { Icon } from './Icon'
 import { insertAtPlayhead } from '../lib/mediaInsert'
+import { ConfirmDialog } from './ConfirmDialog'
 
 
 export function MediaBin() {
@@ -72,12 +73,12 @@ export function MediaBin() {
     void dispatch(ins.tool, ins.args)
   }
 
+  // Removing asks first in the app's own dialog (QA-129) — it was the native
+  // window.confirm, a light system sheet over the dark editor.
+  const [confirmRemove, setConfirmRemove] = useState<BinRow | null>(null)
   const removeRow = async (row: BinRow) => {
     if (!sid) return
-    const msg = row.uses
-      ? `Remove ${row.name} from the project? Its ${row.uses} clip(s) are deleted from the timeline too (Undo brings them back).`
-      : `Remove ${row.name} from the project's media? The file stays on disk; re-import it to use it again.`
-    if (!window.confirm(msg)) return
+    setConfirmRemove(null)
     try {
       if (row.uses) await dispatch('bulk_delete', { clip_ids: row.clipIds })
       if (row.id) await api.removeMedia(sid, row.id)
@@ -127,7 +128,8 @@ export function MediaBin() {
         Add imports to the timeline
       </label>
       <button
-        style={{ width: '100%', marginBottom: 10, fontSize: 11 }}
+        className="panel-btn"
+        style={{ marginBottom: 10 }}
         onClick={() => audioRef.current?.click()}
         title={addToTimeline
           ? 'Pick an audio file — it lands on the Music track'
@@ -148,9 +150,9 @@ export function MediaBin() {
 
       {uploadError && (
         <div style={{
-          background: '#311',
-          border: '1px solid #533',
-          color: '#fbb',
+          background: 'var(--error-bg)',
+          border: '1px solid var(--error-line)',
+          color: 'var(--error-text)',
           padding: '8px 10px',
           borderRadius: 6,
           fontSize: 11,
@@ -160,13 +162,13 @@ export function MediaBin() {
           overflow: 'auto',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-            <b style={{ color: '#fcc' }}>Upload failed</b>
+            <b>Upload failed</b>
             <button
               onClick={clearUploadError}
               aria-label="Dismiss upload error"
-              style={{ background: 'transparent', border: 'none', color: '#fbb', padding: 0, cursor: 'pointer' }}
+              style={{ background: 'transparent', border: 'none', color: 'inherit', padding: 0, cursor: 'pointer', lineHeight: 0 }}
             >
-              <span aria-hidden="true">×</span>
+              <Icon name="close" />
             </button>
           </div>
           {uploadError}
@@ -185,7 +187,7 @@ export function MediaBin() {
         </div>
       )}
       {rows.map((row) => (
-        <MediaRow key={row.id ?? row.src} row={row} sid={sid} onRemove={() => void removeRow(row)}
+        <MediaRow key={row.id ?? row.src} row={row} sid={sid} onRemove={() => setConfirmRemove(row)}
                   onInsert={() => insertRow(row)}
                   onRelinked={() => setLibraryTick((n) => n + 1)} />
       ))}
@@ -194,8 +196,25 @@ export function MediaBin() {
       <MusicPanel />
       <StickerPanel />
       <EffectsPanel />
+      {confirmRemove && (
+        <ConfirmDialog
+          title={`Remove “${confirmRemove.name}”?`}
+          body={removeMediaBody(confirmRemove.uses)}
+          confirmLabel="Remove"
+          danger
+          onConfirm={() => void removeRow(confirmRemove)}
+          onCancel={() => setConfirmRemove(null)}
+        />
+      )}
     </div>
   )
+}
+
+/** What removing a media item does, in words (QA-129; no "clip(s)", QA-101). */
+function removeMediaBody(uses: number): string {
+  if (uses === 1) return 'Its clip is deleted from the timeline too — Undo brings it back.'
+  if (uses > 1) return `Its ${uses} clips are deleted from the timeline too — Undo brings them back.`
+  return 'It leaves this project’s media. The file stays on disk; import it again to use it.'
 }
 
 /**
@@ -227,7 +246,7 @@ function UploadRow({ item, onCancel }: { item: UploadItem; onCancel: () => void 
       </div>
       <button className="media-remove" type="button" title="Cancel this import"
               aria-label={`Cancel importing ${item.name}`} onClick={onCancel}>
-        <span aria-hidden="true">×</span>
+        <Icon name="close" />
       </button>
     </div>
   )
@@ -270,7 +289,7 @@ function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
   }
   // The user's name only (QA-045) — never the disk name or a path.
   const hint = row.missing
-    ? `${row.name}\n\nThis file is missing from disk. Relink it to the original (or a copy) to bring back its ${row.uses} clip(s).`
+    ? `${row.name}\n\nThis file is missing from disk. Relink it to the original (or a copy) to bring back ${row.uses === 1 ? 'its clip' : `its ${row.uses} clips`}.`
     : `${row.name}\n\nDouble-click or press Enter to add ${row.uses ? 'another instance' : 'it'} at the playhead, or drag it onto a lane.`
   return (
     <div
@@ -300,7 +319,7 @@ function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
     >
       <div className="media-thumb" aria-hidden="true">
         {thumb ? <img src={thumb} alt="" width={96} height={54} loading="lazy" draggable={false} />
-          : row.missing ? <span className="media-offline-mark">!</span> : <Icon name="music" size={20} />}
+          : row.missing ? <span className="media-offline-mark"><Icon name="warning" /></span> : <Icon name="music" size={20} />}
       </div>
       <div className="media-text">
         <div className="media-name"><BreakableName name={row.name} /></div>
@@ -330,16 +349,16 @@ function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
           title="Add to the timeline at the playhead (Enter)"
           aria-label={`Add ${row.name} to the timeline`}
           onClick={(e) => { e.stopPropagation(); onInsert() }}
-        ><Icon name="addToTimeline" size={14} /></button>
+        ><Icon name="addToTimeline" /></button>
       )}
       <button
         className="media-remove"
         title={row.uses
-          ? `Remove from the project, with its ${row.uses} clip(s) on the timeline`
+          ? `Remove from the project, with ${row.uses === 1 ? 'its clip' : `its ${row.uses} clips`} on the timeline`
           : 'Remove from the project (the file stays on disk)'}
         aria-label={`Remove ${row.name}`}
         onClick={(e) => { e.stopPropagation(); onRemove() }}
-      >×</button>
+      ><Icon name="close" /></button>
     </div>
   )
 }
@@ -360,7 +379,7 @@ function MusicPanel() {
   const names = namesBySrc(library)
   return (
     <div className="item music-panel" style={{ background: 'var(--bg-3)', borderColor: 'var(--line)' }}>
-      <div className="music-panel-head"><Icon name="music" size={13} /> Music</div>
+      <div className="music-panel-head section-label"><Icon name="music" /> Music</div>
       {clips.map((clip) => (
         <MusicClipRow key={clip.id} clip={clip} name={displayNameFor(clip.src, names)}
                       onlyOne={clips.length === 1} />

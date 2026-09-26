@@ -490,7 +490,272 @@
     "h": 1080,
     "y": 129.6
    }
-  ]
+  ],
+  "letter_spacing": {
+   "_comment": "Rule 8 (QA-078): letter spacing. `width`: tracked_width(advances, tracked, spacing) — spacing after every tracked unit but the last. `units`: text_overlay._simple_clusters — complex-script pieces whole and untracked, every other piece one tracked grapheme at a time. Generated from render/text_overlay.py.",
+   "RANGE": [
+    -20.0,
+    100.0
+   ],
+   "width": [
+    {
+     "advances": [
+      10,
+      12,
+      8
+     ],
+     "tracked": [
+      true,
+      true,
+      true
+     ],
+     "spacing": 5,
+     "width": 40
+    },
+    {
+     "advances": [
+      10,
+      12,
+      8
+     ],
+     "tracked": [
+      true,
+      false,
+      true
+     ],
+     "spacing": 5,
+     "width": 35
+    },
+    {
+     "advances": [
+      40
+     ],
+     "tracked": [
+      true
+     ],
+     "spacing": 30,
+     "width": 40
+    },
+    {
+     "advances": [
+      20,
+      20,
+      20,
+      20
+     ],
+     "tracked": [
+      true,
+      true,
+      true,
+      true
+     ],
+     "spacing": -3,
+     "width": 71
+    },
+    {
+     "advances": [],
+     "tracked": [],
+     "spacing": 10,
+     "width": 0.0
+    },
+    {
+     "advances": [
+      55.5,
+      33.25,
+      90
+     ],
+     "tracked": [
+      false,
+      true,
+      true
+     ],
+     "spacing": 12.5,
+     "width": 191.25
+    }
+   ],
+   "units": [
+    {
+     "chunk": "AVA",
+     "units": [
+      [
+       "A",
+       true
+      ],
+      [
+       "V",
+       true
+      ],
+      [
+       "A",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "café ok",
+     "units": [
+      [
+       "c",
+       true
+      ],
+      [
+       "a",
+       true
+      ],
+      [
+       "f",
+       true
+      ],
+      [
+       "é",
+       true
+      ],
+      [
+       " ",
+       true
+      ],
+      [
+       "o",
+       true
+      ],
+      [
+       "k",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "नमस्ते दुनिया",
+     "units": [
+      [
+       "नमस्ते दुनिया",
+       false
+      ]
+     ]
+    },
+    {
+     "chunk": "Hi नमस्ते World",
+     "units": [
+      [
+       "H",
+       true
+      ],
+      [
+       "i",
+       true
+      ],
+      [
+       " ",
+       true
+      ],
+      [
+       "नमस्ते ",
+       false
+      ],
+      [
+       "W",
+       true
+      ],
+      [
+       "o",
+       true
+      ],
+      [
+       "r",
+       true
+      ],
+      [
+       "l",
+       true
+      ],
+      [
+       "d",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "Привет",
+     "units": [
+      [
+       "П",
+       true
+      ],
+      [
+       "р",
+       true
+      ],
+      [
+       "и",
+       true
+      ],
+      [
+       "в",
+       true
+      ],
+      [
+       "е",
+       true
+      ],
+      [
+       "т",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "你好 AI",
+     "units": [
+      [
+       "你",
+       true
+      ],
+      [
+       "好",
+       true
+      ],
+      [
+       " ",
+       true
+      ],
+      [
+       "A",
+       true
+      ],
+      [
+       "I",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "مرحبا hi",
+     "units": [
+      [
+       "مرحبا ",
+       false
+      ],
+      [
+       "h",
+       true
+      ],
+      [
+       "i",
+       true
+      ]
+     ]
+    },
+    {
+     "chunk": "x‍y",
+     "units": [
+      [
+       "x‍y",
+       true
+      ]
+     ]
+    }
+   ]
+  }
  },
  "script_fallback": {
   "_comment": "Per-RUN fallback faces (wave-B review): a run the clip's font does not cover is drawn in the bundled Noto face for its script. Export: text_overlay._SCRIPT_FALLBACK_FONTS; preview: textLayout.SCRIPT_FALLBACK_FAMILIES in the canvas font list (CJK has no browser face).",

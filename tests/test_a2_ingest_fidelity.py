@@ -221,7 +221,10 @@ def test_chunk_cache_is_keyed_on_file_identity_not_path(tmp_path):
     fp_red = fingerprint_clip(clip, canvas_w=320, canvas_h=240, fps=30, encoder_args=[])
 
     def _edl(marker: str) -> EDL:
-        e = EDL(canvas=Canvas(w=320, h=240, fps=30),
+        # The loudness target differs per variant too: a MARKER alone no
+        # longer misses the whole-preview cache (QA-131, EDL.render_hash).
+        e = EDL(canvas=Canvas(w=320, h=240, fps=30,
+                              loudness_lufs=-16.0 if marker == "a" else -14.0),
                 tracks=[Track(id="v1", type="video", clips=[clip.model_copy(deep=True)])],
                 markers=[Marker(time=0.5, label=marker)])
         e.recompute_duration()
@@ -236,8 +239,9 @@ def test_chunk_cache_is_keyed_on_file_identity_not_path(tmp_path):
     time.sleep(0.02)
     _colour_clip(media, "blue", 2)
     assert fingerprint_clip(clip, canvas_w=320, canvas_h=240, fps=30, encoder_args=[]) != fp_red
-    # A different marker changes the EDL hash (so the whole-preview cache
-    # misses) but not the clip — only the chunk key can tell the file changed.
+    # A different loudness target changes the render key (so the whole-preview
+    # cache misses) but not the clip — only the chunk key can tell the file
+    # changed.
     second = render_preview(_edl("b"), sess, height=240)
     r, g, b = _pixel(second.path, 1.0)
     assert b > 200 and r < 60, (r, g, b)

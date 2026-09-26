@@ -47,6 +47,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic import Field as PydField
+from pydantic import field_validator
 
 from . import platformutil as _pu
 from .config import WORKDIR, DEFAULT_CANVAS
@@ -103,6 +104,11 @@ from .api.auth import install as _install_pair_auth
 from .api.pair_routes import router as _pair_router
 _install_pair_auth(app)
 app.include_router(_pair_router)
+
+# Settings › Claude: the Anthropic key in the macOS Keychain (QA-063-SETTINGS).
+# Loopback-only, JSON-only, and no response ever carries the key.
+from .api.settings_routes import router as _settings_router
+app.include_router(_settings_router)
 
 # --- the published schema has to agree with the gate -------------------------
 # The mounted router makes /api/pair/* a routed 404 (above) — but it also puts
@@ -187,14 +193,19 @@ def app_openapi() -> dict:
 
 app.openapi = app_openapi  # type: ignore[method-assign]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
-)
+# The Vite dev origins exist only for browser dev. The packaged app serves its
+# own page from this server (same origin), so it never needs CORS, and leaving
+# :5173 allowed there let ANY other Vite project on the Mac read our answers
+# with credentials (REVIEW-C3-KEY-CORS-5173).
+if not getattr(sys, "frozen", False):
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
+    )
 
 
 def _validate_ai_config() -> None:
@@ -418,25 +429,51 @@ class ExportRequest(BaseModel):
     # per segment — an export with no practical end. None = the canvas rate.
     fps: float | None = PydField(None, ge=_FPS_MIN, le=_FPS_MAX)
     crf: int = PydField(18, ge=0, le=51)
-    container: Literal["mp4", "mov"] = "mp4"
+    # "m4a" / "wav" (QA-100): the timeline's sound alone — mastered to the
+    # project's loudness target and true-peak ceiling like a video export,
+    # no picture rendered. height/fps/crf/bitrate do not apply to them.
+    container: Literal["mp4", "mov", "m4a", "wav"] = "mp4"
     # QA-027: None = the platform target the project carries (set by
     # apply_export_preset); 0 = no target, encode by `crf` (the Quality
     # selector's explicit choice); >0 = that average bitrate in kbps.
     bitrate_kbps: int | None = PydField(None, ge=0, le=200_000)
 
+    @field_validator("bitrate_kbps")
+    @classmethod
+    def _bitrate_is_encodable(cls, v: int | None) -> int | None:
+        # QA-123: 1 kbps passed and produced a smeared file at whatever floor
+        # the encoder could reach. 0 still means "encode by quality".
+        if v is not None and 0 < v < MIN_EXPORT_BITRATE_KBPS:
+            raise ValueError(f"bitrate_kbps must be 0 (encode by quality) or at least "
+                             f"{MIN_EXPORT_BITRATE_KBPS} kbps, got {v}")
+        return v
+
+
+#: The lowest average video bitrate an export may target (QA-123) — below this
+#: even a 144p picture is mush.
+MIN_EXPORT_BITRATE_KBPS = 100
+
 
 # --- routes ---
 
 @app.get("/api/health")
-def health():
+def health(request: Request):
     # `max_upload_bytes` is advertised here, not just enforced at the ingress,
     # so the phone's Import screen can refuse a too-large pick locally instead
     # of spending five minutes of the user's battery pushing bytes at a server
-    # that will answer 413 at the end.
+    # that will answer 413 at the end. For the desktop's own editor it is what
+    # the disk can take (`upload_limit: "free_space"`, QA-114), not a fixed cap.
+    #
+    # `ok` stays the LIVENESS answer (desktop.py, CI and the offline probe poll
+    # it); `media_tools` says whether ffmpeg/ffprobe are installed (QA-108) so
+    # the UI can show how to install them instead of failing every import.
     from .config import APP_VERSION
-    from .api.uploads import max_upload_bytes
+    from .api.uploads import advertised_limit
+    from .ingest.tools import media_tools_status
+    limit, kind = advertised_limit(request)
     return {"ok": True, "version": APP_VERSION,
-            "max_upload_bytes": max_upload_bytes()}
+            "max_upload_bytes": limit, "upload_limit": kind,
+            "media_tools": media_tools_status()}
 
 
 @app.get("/api/version")
@@ -702,6 +739,7 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
+    _require_media_tools()                       # QA-108: the take is transcoded by ffmpeg
     sd = session_dir(sid)
     vo_dir = sd / "uploads" / "vo"
     vo_dir.mkdir(parents=True, exist_ok=True)
@@ -797,13 +835,16 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
 
         def _edit():
             canvas = store.edl.canvas
-            dispatch(store, "add_sticker", {
+            res = dispatch(store, "add_sticker", {
                 "src": str(dst),
                 "start": float(playhead),
                 "end": float(playhead) + 3.0,
                 "position": [canvas.w / 2, canvas.h * 0.55],
                 "scale": 1.0,
             })
+            # The new sticker's id, so the picker can select it (QA-128).
+            if isinstance(res, dict) and res.get("sticker_id"):
+                info["sticker_id"] = res["sticker_id"]
             return store.edl.hash()
 
         info["edl_hash"] = await _locked_edit(sid, _edit)
@@ -827,6 +868,7 @@ async def audio_upload(sid: str, request: Request, file: UploadFile = File(...),
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
+    _require_media_tools()                       # QA-108: not "damaged audio"
     store = _store(sid)
     sd = session_dir(sid)
     audio_dir = sd / "uploads" / "audio"
@@ -961,9 +1003,18 @@ def _match_canvas_to_source(store, probe) -> None:
     (see the `was_empty` check at the call site) — a later upload into an
     existing project must not silently resize the canvas the user is already
     working in.
+
+    QA-111, two more rules. (1) A frame shape somebody CHOSE is kept: picking
+    1:1 and then importing a 16:9 clip used to turn the project 16:9 anyway.
+    (2) The change is applied to the tree directly, not dispatched as its own
+    `set_aspect_ratio` op — the caller folds it into the add_clip commit, so
+    one Undo takes the import and the canvas change back together (it used to
+    take two, and the first left an empty 16:9 project behind).
     """
     video = probe.video
     if not video or not video.width or not video.height:
+        return
+    if _user_chose_canvas(store):
         return
     w, h = video.width, video.height
     if w == h:
@@ -972,7 +1023,27 @@ def _match_canvas_to_source(store, probe) -> None:
         ratio = "16:9"
     else:
         ratio = "9:16"
-    dispatch(store, "set_aspect_ratio", {"ratio": ratio})
+    from .agent.dispatch import _RATIOS, _rescale_overlays_for_canvas_change
+    canvas = store.edl.canvas
+    new_w, new_h = _RATIOS[ratio]
+    if (canvas.w, canvas.h) == (new_w, new_h):
+        return
+    old_w, old_h = canvas.w, canvas.h
+    canvas.w, canvas.h = new_w, new_h
+    # Same overlay re-placement set_aspect_ratio does: a title added before
+    # the first import keeps its relative position in the new frame.
+    _rescale_overlays_for_canvas_change(store.edl, old_w, old_h, new_w, new_h)
+
+
+def _user_chose_canvas(store) -> bool:
+    """Someone chose the project's frame shape (QA-111): a canvas-choice op in
+    the log (undoing it pops the op, so the auto-match comes back with it), or
+    a choice that changed nothing and so logged no op (QA-130) — remembered in
+    meta.json by dispatch()."""
+    from .agent.dispatch import canvas_choice_remembered, is_canvas_choice
+    if any(is_canvas_choice(op.tool, op.args) for op in store.ops.ops):
+        return True
+    return canvas_choice_remembered(store)
 
 
 def _user_chose_fps(store) -> bool:
@@ -985,6 +1056,17 @@ def _user_chose_fps(store) -> bool:
 def _place_ingested_clip(store, res) -> bool:
     """Put a freshly ingested video on v1 (runs under the session lock).
     Returns whether the timeline was empty before, i.e. this started a project."""
+    # ONE commit for the whole import (QA-111): the canvas match, the timebase
+    # and the clip. batch() also rolls the in-memory tree back if add_clip
+    # refuses, so a failed import cannot leave a changed canvas with no op.
+    with store.batch():
+        was_empty, add_args, result = _place_ingested_clip_uncommitted(store, res)
+    summary = result.get("summary", "add_clip") if isinstance(result, dict) else "add_clip"
+    store.commit("add_clip", add_args, str(summary))
+    return was_empty
+
+
+def _place_ingested_clip_uncommitted(store, res) -> tuple[bool, dict, object]:
     from .edl import timebase as _tb
     v1 = store.edl.get_track("v1")
     was_empty = not any(True for _ in (v1.clips if v1 else []))
@@ -1013,24 +1095,66 @@ def _place_ingested_clip(store, res) -> bool:
         out = _tb.floor_to_frame(
             video_frame_extent(Path(res.normalized)) or res.probe.duration,
             store.edl.canvas.fps)
-    dispatch(store, "add_clip", {
+    add_args = {
         "track": "v1",
         "src": str(res.normalized),
         "in": 0.0,
         "out": out,
         "start": start,
-    })
-    return was_empty
+    }
+    return was_empty, add_args, dispatch(store, "add_clip", add_args)
 
 
-def _ingest_failure(safe_name: str, e: Exception) -> HTTPException:
+def _media_tools_http() -> HTTPException | None:
+    """The one 503 `ffmpeg_missing` (QA-108) when ffmpeg/ffprobe cannot be
+    found right now, else None. Every route that shells out answers with it
+    instead of blaming the user's file ("may not be a valid video"), a bare
+    500, or "corrupt frames"."""
+    from .ingest.tools import MediaToolsMissing, missing_media_tools
+    missing = missing_media_tools()
+    if not missing:
+        return None
+    return HTTPException(503, MediaToolsMissing(missing).detail())
+
+
+def _require_media_tools() -> None:
+    err = _media_tools_http()
+    if err is not None:
+        raise err
+
+
+@app.exception_handler(FileNotFoundError)
+async def _missing_binary_handler(request: Request, exc: FileNotFoundError):
+    """Safety net for every route not guarded above (a voice-over transcode, a
+    thumbnail, a waveform…): a `FileNotFoundError` while ffmpeg/ffprobe are
+    missing is the 503 `ffmpeg_missing`, not a bare 500 + traceback. Any other
+    FileNotFoundError keeps the generic 500 exactly as before."""
+    missing = _media_tools_http()
+    if missing is not None:
+        from .api.hardening import _envelope
+        rid = getattr(request.state, "request_id", "")
+        return _envelope(status=503, code="FFMPEG_MISSING", message=missing.detail["message"],
+                         request_id=rid, details=missing.detail)
+    return await app.exception_handlers[Exception](request, exc)
+
+
+def _ingest_failure(safe_name: str, e: Exception,
+                    diagnosis: tuple[str, str] | None = None) -> HTTPException:
     """ANY ingest failure (unreadable container, exotic codec, corrupt file,
     ffprobe/ffmpeg error, JSON parse, etc.) must be a clean 422 — never a bare
     500. This is the "video import failed" path users hit with files that
-    aren't really valid video."""
+    aren't really valid video.
+
+    `diagnosis` (QA-112, `ingest.diagnose.diagnose_unreadable`) is what the
+    file itself says went wrong — empty, truncated, not media at all, an
+    undecodable codec — and replaces the one generic sentence all of those
+    used to share."""
     import logging
     logging.getLogger("video_ai_editor").warning(
         "upload ingest failed for %s: %s", safe_name, e)
+    tools = _media_tools_http()
+    if tools is not None:
+        return tools
     msg = str(e)
     # A filesystem refusal is not a codec problem (QA-091): telling the user to
     # re-export a perfectly valid video as H.264 sends them the wrong way.
@@ -1045,6 +1169,8 @@ def _ingest_failure(safe_name: str, e: Exception) -> HTTPException:
     elif isinstance(e, OSError) and not isinstance(e, FileNotFoundError):
         code, text = "storage_error", (f"Couldn't import this file — it couldn't be written to "
                                        f"the project folder ({e.strerror or 'file system error'}).")
+    elif diagnosis is not None:
+        code, text = diagnosis
     else:
         code, text = "couldn't_import", ("Couldn't import this file — it may not be a valid video, "
                                          "or it uses a codec/container we can't read. Try exporting "
@@ -1130,6 +1256,9 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
+    # QA-108: without ffmpeg nothing can be imported — say so before the user
+    # spends minutes sending the bytes, and never blame their file.
+    _require_media_tools()
     store = _store(sid)
     sd = session_dir(sid)
     uploads = sd / "uploads"
@@ -1157,6 +1286,14 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
             pre = _probe(dst)
         except Exception:
             pre = None                  # ingest below reports the real error
+        # QA-112: a probe that SUCCEEDS is not proof of media — ffmpeg reads
+        # a text file as ANSI art and random bytes as a picture. Refuse those
+        # before they are normalised into a clip (and re-shape the canvas).
+        from .ingest.diagnose import refuse_before_ingest, refuse_short_read
+        refusal = refuse_before_ingest(dst, pre)
+        if refusal is not None:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise _ingest_failure(safe_name, ValueError(refusal[0]), refusal)
         if pre is not None and pre.streams and pre.video is None:
             return _handoff_audio_only(sid, dst, upload_dir, safe_name, display_name,
                                        pre.duration, add_to_timeline)
@@ -1166,8 +1303,24 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
                                 on_progress=set_progress, cancel_event=cancel_event,
                                 still_fps=_store(sid).edl.canvas.fps)
         except Exception as e:
+            # QA-112: ask the file what is wrong with it BEFORE it is deleted.
+            from .ingest.diagnose import diagnose_unreadable
+            diagnosis = None
+            if not isinstance(e, OSError) or isinstance(e, FileNotFoundError):
+                try:
+                    diagnosis = diagnose_unreadable(dst, str(e)[-2000:])
+                except Exception:           # a diagnosis must never mask the failure
+                    diagnosis = None
             shutil.rmtree(upload_dir, ignore_errors=True)
-            raise _ingest_failure(safe_name, e) from e
+            raise _ingest_failure(safe_name, e, diagnosis) from e
+
+        # QA-112: a file cut short with its index intact still declares its
+        # full length; normalising decodes only what is there.
+        short = None if res.still or pre is None else \
+            refuse_short_read(pre.duration, res.probe.duration)
+        if short is not None:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise _ingest_failure(safe_name, ValueError(short[0]), short)
 
         # /upload is the VIDEO ingress and hardcodes track v1 below. An
         # audio-only file (an .mp4/.mov/.mkv with no picture — the frontend
@@ -1312,6 +1465,8 @@ def _dispatch_async(sid: str, store: EDLStore, body: DispatchRequest) -> JSONRes
             # HTTPException stringifies to its repr — unreadable in the UI's
             # job-error toast. Carry the detail across instead.
             detail = e.detail
+            if isinstance(detail, dict) and detail.get("error") == "ffmpeg_missing":
+                raise RuntimeError(detail["message"]) from e     # QA-108: the sentence, not JSON
             raise RuntimeError(detail if isinstance(detail, str) else json.dumps(detail)) from e
 
     job = JOB_MANAGER.submit(kind=f"dispatch:{body.tool}", fn=_job, session_id=sid)
@@ -1335,8 +1490,10 @@ def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
     except RuntimeError as e:
         # External-tool / setup errors bubble up here (pyannote token missing,
         # ffmpeg failure, model not found, etc.) — give the user the message.
+        _require_media_tools()                   # QA-108: say "install ffmpeg"
         raise HTTPException(422, str(e))
     except (OSError, subprocess.SubprocessError) as e:
+        _require_media_tools()                   # QA-108
         # There are ~20 `check=True` subprocess sites under ai/, so a missing
         # binary (FileNotFoundError) or a non-zero exit (CalledProcessError)
         # reached the client as a bare HTTP 500 + traceback rather than an
@@ -1701,6 +1858,16 @@ def _refuse_missing_media(store, verb: str) -> None:
                                   "missing": rows})
 
 
+def _refuse_empty_export(store) -> None:
+    """QA-123: an export of a timeline with nothing on it used to reach ffmpeg
+    and come back as "Couldn't render a preview for this clip — it may have
+    corrupt frames". There is no clip, and nothing is corrupt."""
+    if not any(track.clips for track in store.edl.tracks):
+        raise HTTPException(422, {"error": "nothing_to_export",
+                                  "message": "Nothing to export — the timeline is empty. "
+                                             "Add a clip, then export."})
+
+
 def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None):
     """render_preview for an interactive client, newest-EDL-wins (QA-004).
 
@@ -1719,7 +1886,7 @@ def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None
     # QA-095: missing media previews as a "Media offline" slate; the other
     # clips still play, and the render's key reflects the offline state.
     edl = _preview_edl(store)
-    ev = _rcancel.PREVIEWS.begin(sid, edl.hash())
+    ev = _rcancel.PREVIEWS.begin(sid, edl.render_hash())
     if ticket is not None:
         ticket.joined(ev)
     try:
@@ -1807,6 +1974,7 @@ async def make_preview(sid: str, request: Request, wait: int = 1):
         except RenderCancelled:
             raise _preview_superseded() from None
         except RENDER_ERRORS as e:
+            _require_media_tools()      # QA-108: no ffmpeg is not "corrupt frames"
             # ffmpeg render failure → actionable 422, not a bare 500. Surface a
             # short tail of ffmpeg's reason so the UI can show something useful.
             msg = str(e)
@@ -1837,6 +2005,11 @@ async def make_preview(sid: str, request: Request, wait: int = 1):
         except _rcancel.RenderCancelled:
             from .api.jobs import JobCancelled
             raise JobCancelled() from None
+        except RENDER_ERRORS as e:
+            missing = _media_tools_http()   # QA-108: the job's error says what to install
+            if missing is not None:
+                raise RuntimeError(missing.detail["message"]) from e
+            raise
         return _preview_payload(sid, res)
 
     job = JOB_MANAGER.submit(kind="preview", fn=_job, session_id=sid)
@@ -1870,8 +2043,8 @@ def clear_render_cache(sid: str):
     store = _store(sid)
     # The preview on screen is keyed on the RENDERED view: with media offline
     # that is the slated copy (_preview_edl), not store.edl.
-    keep = {store.dir / "previews" / f"{store.edl.hash()}.mp4",
-            store.dir / "previews" / f"{_preview_edl(store).hash()}.mp4"}
+    keep = {store.dir / "previews" / f"{store.edl.render_hash()}.mp4",
+            store.dir / "previews" / f"{_preview_edl(store).render_hash()}.mp4"}
     recent = cache_budget.PROTECT_RECENT_S if session_render_in_flight(store.dir) else 0.0
     freed = cache_budget.clear(store.dir, protect=tuple(keep), protect_recent_s=recent)
     return {"freed_bytes": freed, **cache_budget.usage(store.dir)}
@@ -1918,7 +2091,12 @@ async def stream_preview(sid: str, request: Request, h: str | None = None):
     # The hash the preview of the CURRENT state is stored under — offline-
     # aware (QA-095), so a render made while the media was present is never
     # served once it has gone.
-    current_hash = (await run_in_threadpool(_preview_edl, store)).hash()
+    # The RENDER key (QA-131): markers/lock/lane names never re-render.
+    pedl = await run_in_threadpool(_preview_edl, store)
+    current_hash = pedl.render_hash()
+    if h and h in (pedl.hash(), store.edl.hash()):
+        # The EDL's own hash (what /dispatch answers) names the current render.
+        h = current_hash
     target_hash = h or current_hash
     p = store.dir / "previews" / f"{target_hash}.mp4"
     # Treat a 0-byte leftover (from a killed render that predates atomic writes)
@@ -1945,6 +2123,7 @@ async def stream_preview(sid: str, request: Request, h: str | None = None):
         except RenderCancelled:
             raise _preview_superseded() from None
         except RENDER_ERRORS as e:
+            _require_media_tools()      # QA-108
             msg = str(e)
             tail = msg[-400:]
             raise HTTPException(422, {"error": "render_failed",
@@ -1985,14 +2164,20 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
     client where the request might time out (most browsers/proxies)."""
     store = _store(sid)
     body = body or ExportRequest()
+    _require_media_tools()                       # QA-108: every export needs ffmpeg
     _refuse_missing_media(store, "export")
+    _refuse_empty_export(store)                  # QA-123
     if wait:
         # Mirror the preview path's RuntimeError→422 handling. Without it an
         # ffmpeg failure fell through to hardening's generic handler as an
         # opaque HTTP 500 with the reason discarded into the server log.
         timeline_hash = store.edl.hash()
+        # An audio-only export (QA-100) renders no picture, so it never waits
+        # for full-quality video masters (QA-089).
+        audio_only = body.container in ("m4a", "wav")
         try:
-            res = render_export(_export_edl(store.edl, body.height), store.dir, height=body.height,
+            res = render_export(store.edl if audio_only else _export_edl(store.edl, body.height),
+                                store.dir, height=body.height,
                                 fps=body.fps, crf=body.crf, container=body.container,
                                 bitrate_kbps=body.bitrate_kbps,
                                 project_name=read_meta(sid).get("name"))
@@ -2019,7 +2204,9 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             # QA-089: first the full-quality masters a larger-than-proxy
             # export needs (the first 30 % of the bar when there are any).
             render_progress = set_progress
-            edl = _export_edl(edl_snapshot, height, dry_run=True)
+            # Audio-only (QA-100): no picture, so no video masters to make.
+            edl = (edl_snapshot if container in ("m4a", "wav")
+                   else _export_edl(edl_snapshot, height, dry_run=True))
             if edl is not edl_snapshot:
                 edl = _export_edl(edl_snapshot, height, cancel_event=cancel_event,
                                   on_progress=(lambda p: set_progress(0.3 * p)) if set_progress else None)
@@ -2168,6 +2355,36 @@ def _waveform_src_allowed(target: Path, sd: Path, store) -> bool:
     return False
 
 
+#: The picker row draws the poster 36 px tall; 72 keeps it sharp on Retina.
+_POSTER_HEIGHT = 72
+
+
+@app.get("/api/sessions/{sid}/poster")
+def session_poster(sid: str, v: str = ""):
+    """The project picker's poster frame (QA-099-THUMBS): the first video
+    clip's frame, cached per project (storage.poster_source) and re-derived
+    only when the project's edl.json changed. 204 when there is nothing to
+    show (no video yet, media offline, an undecodable file) — the row then
+    draws its placeholder. The source comes from the server's own EDL, never
+    from the request, so there is no path input here to validate."""
+    from .render.thumbs import thumbnail_for
+    from .storage import _edl_stamp, poster_source, session_path
+    _existing_session_or_error(sid)
+    found = poster_source(sid)
+    if found is None:
+        return Response(status_code=204, headers={"Cache-Control": "no-cache"})
+    src, t = found
+    try:
+        p = thumbnail_for(src, session_path(sid) / "cache" / "thumbs", t=t, height=_POSTER_HEIGHT)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return Response(status_code=204, headers={"Cache-Control": "no-cache"})
+    # `v` is the EDL stamp the listing handed out: while it is current the URL
+    # names exactly this image, so the browser may keep it for good.
+    current = v and v == _edl_stamp(session_path(sid))
+    return FileResponse(p, media_type="image/jpeg", headers={
+        "Cache-Control": "private, max-age=31536000, immutable" if current else "no-cache"})
+
+
 @app.get("/api/sessions/{sid}/thumb")
 def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
     """One scaled JPEG frame of a session source at time `t`.
@@ -2196,6 +2413,38 @@ def get_thumb(sid: str, src: str, t: float = 0.0, h: int = 54):
         raise HTTPException(422, str(e))
     return FileResponse(p, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/api/sessions/{sid}/thumbstrip")
+def get_thumbstrip(sid: str, src: str, step: float, page: int = 0,
+                   n: int = 16, h: int = 72):
+    """A filmstrip SPRITE (QA-059): `n` tiles side by side, tile i showing the
+    frame at `(page * n + i) * step` s; slots past the end are black. One
+    request (one ffmpeg run) per `n` tiles instead of one per tile. `step`
+    must be on the client's grid (0.5 s × 2^k). Same trust boundary as /thumb.
+    Cached on file identity (path + mtime + size) under cache/thumbs."""
+    _store(sid)  # validates sid shape before any filesystem work
+    sd_root = session_dir(sid).resolve()
+    target = Path(src)
+    if not target.is_absolute():
+        raise HTTPException(403, "src must be an absolute path")
+    target = target.resolve()
+    if not target.is_relative_to(sd_root):
+        raise HTTPException(403, "src must be inside the session workdir")
+    if not target.exists():
+        raise HTTPException(404, "src not found")
+    h = max(16, min(int(h), 270))
+    from .render.thumbs import sprite_for
+    try:
+        p = sprite_for(target, sd_root / "cache" / "thumbs",
+                       step=float(step), page=int(page), n=int(n), height=h)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+    return FileResponse(p, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=3600",
+                                 "X-Sprite-Tiles": str(int(n))})
 
 
 # --- M6: project save/load ---

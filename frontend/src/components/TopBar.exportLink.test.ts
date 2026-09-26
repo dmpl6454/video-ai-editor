@@ -69,7 +69,7 @@ describe('the export link belongs to its project', () => {
     await useStore.getState().refresh()
     await useStore.getState().doExport()
     saved.length = 0                       // doExport's own auto-save
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
 
     await switchTo('B')
     expect(shown()).toBeNull()
@@ -77,7 +77,7 @@ describe('the export link belongs to its project', () => {
     expect(saved).toEqual([])              // A's file is never handed out in B
 
     await switchTo('A')                    // …and it comes back with its project
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
     await useStore.getState().downloadExport()
     expect(saved).toEqual([['A', 'export_aaaaaaaaaaaaaaa1.mp4']])
   })
@@ -87,9 +87,9 @@ describe('the export link belongs to its project', () => {
     await useStore.getState().doExport()          // A
     await switchTo('B')
     await useStore.getState().doExport()          // B
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
     await switchTo('A')
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
     saved.length = 0
     await useStore.getState().downloadExport()
     expect(saved).toEqual([['A', 'export_aaaaaaaaaaaaaaa1.mp4']])
@@ -121,15 +121,15 @@ describe('the export link knows which timeline it rendered', () => {
     current.A = 'aaaaaaaaaaaaaaa2'           // edited (e.g. set 1:1) — then exported
     await useStore.getState().refresh()
     await useStore.getState().doExport()
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
 
     current.A = 'aaaaaaaaaaaaaaa1'           // Undo: history got SHORTER
     await useStore.getState().refresh()
-    expect(shown()).toBe('↓ MP4 (outdated)')
+    expect(shown()).toBe('MP4 (outdated)')
 
     current.A = 'aaaaaaaaaaaaaaa2'           // Redo: back to exactly what was rendered
     await useStore.getState().refresh()
-    expect(shown()).toBe('↓ MP4')
+    expect(shown()).toBe('MP4')
   })
 
   it('goes outdated after an ordinary edit', async () => {
@@ -137,6 +137,6 @@ describe('the export link knows which timeline it rendered', () => {
     await useStore.getState().doExport()
     current.A = 'aaaaaaaaaaaaaaa3'
     await useStore.getState().refresh()
-    expect(shown()).toBe('↓ MP4 (outdated)')
+    expect(shown()).toBe('MP4 (outdated)')
   })
 })

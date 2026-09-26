@@ -587,10 +587,30 @@ def c_captions_style(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, current == style, current, style)
 
 
+def _fit_trim_source_start(ctx: VerifyCtx, src: str | None) -> float | None:
+    """The source second the kept timeline STARTS on, when this run applied a
+    best-window target-length trim (`$fit_best:`, wave C QA-069) — the words
+    before it were trimmed as asked. None otherwise."""
+    if _fit_trim_source_end(ctx, src) is None:
+        return None
+    from .schema import FIT_BEST_PREFIX
+    if not any(s.tool == "cut_range" and str(s.args.get("start") or "").startswith(FIT_BEST_PREFIX)
+               for s in list(getattr(ctx.plan, "steps", []) or [])):
+        return None
+    from ..timemap import media_clips
+    t = ctx.edl.get_track("v1")
+    clips = sorted((c for c in (t.clips if t else []) if isinstance(c, Clip)), key=lambda c: c.start)
+    same = {id(c) for c in media_clips(ctx.edl, "v1", src=src)} if src is not None else {id(c) for c in clips}
+    if not clips or id(clips[0]) not in same:
+        return None
+    return float(clips[0].in_)
+
+
 def _fit_trim_source_end(ctx: VerifyCtx, src: str | None) -> float | None:
     """The source second the kept timeline ends on, when this run applied a
-    target-length trim (`cut_range(start="$fit_to:…")`, agent/prompt/live.py);
-    None otherwise, or when the last v1 clip is not the transcript's file."""
+    target-length trim (`cut_range(start="$fit_to:…")` or `"$fit_best:…"`,
+    agent/prompt/live.py); None otherwise, or when the last v1 clip is not
+    the transcript's file."""
     from .live import parse_fit_sentinel
     steps = list(getattr(ctx.plan, "steps", []) or [])
     ran = {o.index for o in getattr(ctx.exec_result, "steps", []) or []
@@ -642,7 +662,9 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     # ON PURPOSE — those words are what was asked for, not lost speech. They
     # were reported as "✗ 87 words lost" on a run that did exactly its job.
     tail_src = _fit_trim_source_end(ctx, src)
-    trimmed = [w for w in gone if tail_src is not None and float(w["start"]) >= tail_src - 0.05]
+    head_src = _fit_trim_source_start(ctx, src)
+    trimmed = [w for w in gone if (tail_src is not None and float(w["start"]) >= tail_src - 0.05)
+               or (head_src is not None and float(w["end"]) <= head_src + 0.05)]
     gone = [w for w in gone if not any(w is t for t in trimmed)]
     # Energy is ground truth, timestamps are estimates: a vanished word whose
     # source span sits inside a silent run of the SOURCE (measured with the
@@ -657,7 +679,7 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     if lost:
         parts.append("lost: " + ", ".join(str(w.get("word")) for w in lost[:6]))
     if trimmed:
-        parts.append(f"{len(trimmed)} words after the target length were trimmed as asked — not counted")
+        parts.append(f"{len(trimmed)} words outside the kept target length were trimmed as asked — not counted")
     if misaligned:
         parts.append(f"{len(misaligned)} transcript words sat inside measured silence (misaligned timestamps)"
                      " — not counted: " + ", ".join(str(w.get("word")) for w in misaligned[:6]))
@@ -1022,6 +1044,18 @@ def c_clips_muted(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, all(st == bool(want) for st in states), states[0] if len(set(states)) == 1 else states, bool(want))
 
 
+def c_clip_reversed(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """QA-037: every clip `clip_id` names carries `reverse` as asked — the
+    flag render/reverse.py reads (the render test decodes the frames)."""
+    clips = _clips_for_ref(ctx, _arg(pc, "clip_id"))
+    want = _arg(pc, "reverse")
+    want = True if want is None else bool(want)
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    states = [bool(c.reverse) for c in clips]
+    return _ok(pc, all(st == want for st in states), states[0] if len(set(states)) == 1 else states, want)
+
+
 def c_beat_splits_geq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     n = int(_arg(pc, "n") or 2)
     delta = max(0, len(v1_clips(ctx.edl)) - 1) - max(0, len(v1_clips(ctx.edl_before)) - 1)
@@ -1126,9 +1160,22 @@ def c_effect_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 def c_clip_src_changed(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     before = {c.id: c.src for c in v1_clips(ctx.edl_before)}
-    changed = [cid for cid in _clip_targets(ctx, _arg(pc, "clip_id"))
-               if (res := ctx.edl.get_clip(cid)) and isinstance(res[1], Clip)
-               and before.get(cid) not in (None, res[1].src)]
+    before_srcs = set(before.values())
+
+    def _changed(cid: str) -> bool:
+        res = ctx.edl.get_clip(cid)
+        if not (res and isinstance(res[1], Clip)):
+            return False
+        if cid in before:
+            return before[cid] != res[1].src
+        # A piece a cut earlier in the run split off (new id): re-rendered when
+        # its file is none of the files v1 played before the run. Without
+        # this, a trim that removed the ORIGINAL first piece (the best-window
+        # reel's head cut, QA-069) left no pre-run id to compare, and a clean
+        # noise_reduce read as "0 clips re-rendered".
+        return res[1].src not in before_srcs
+
+    changed = [cid for cid in _clip_targets(ctx, _arg(pc, "clip_id")) if _changed(cid)]
     return _ok(pc, len(changed) >= 1, len(changed), "≥ 1", unit="clips re-rendered")
 
 
@@ -1204,7 +1251,9 @@ def c_shorts_created(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     hi = float(max_dur) + 0.5 if max_dur is not None else float("inf")
     ok_dur = all(lo <= d <= hi for d in durations)
     return _ok(pc, ok_count and ok_dur, {"sessions": len(sessions), "durations": durations},
-               {"sessions": count, "duration": f"[{lo:.1f}, {hi if hi != float('inf') else '∞'}]"})
+               {"sessions": count, "duration": {"min": round(lo, 2),
+                                                "max": round(hi, 2) if hi != float("inf") else None,
+                                                "unit": "s"}})
 
 
 def c_shorts_finished(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:

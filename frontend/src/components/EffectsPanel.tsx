@@ -4,7 +4,9 @@ import { api } from '../api'
 import { isMediaClip, clipEnd, type Clip } from '../types'
 import { useSliderCommit } from '../lib/useSliderCommit'
 import './EffectsPanel.css'
-import { Icon } from './Icon'
+import { Icon, type IconName } from './Icon'
+import { effectsTargetLine } from '../lib/effectsTarget'
+import { useMediaNameMap } from './MediaName'
 
 // The backend Effect model isn't declared on types.ts's Clip ("M1 frontend
 // ignores transform/effects/etc.") — read it via a cast, same pattern as
@@ -18,17 +20,17 @@ interface EffectEntry {
 // builder's own default params passed explicitly so the applied chain is
 // self-describing. `color`/`color_grade` are deliberately skipped (the
 // Properties panel already has grading sliders) and `lut` has its own section.
-const EFFECT_PRESETS: { type: string; label: string; icon: string; params: Record<string, unknown>; hint: string }[] = [
-  { type: 'blur',      label: 'Blur',      icon: '🌫️', params: { radius: 8 },     hint: 'Gaussian blur (radius 8)' },
-  { type: 'sharpen',   label: 'Sharpen',   icon: '🔪', params: { amount: 1.0 },   hint: 'Unsharp mask (amount 1.0)' },
-  { type: 'vignette',  label: 'Vignette',  icon: '🌒', params: {},                hint: 'Darkened corners' },
-  { type: 'grain',     label: 'Grain',     icon: '🎞️', params: { strength: 20 },  hint: 'Film grain noise (strength 20)' },
-  { type: 'vintage',   label: 'Vintage',   icon: '📸', params: {},                hint: 'Warm faded look with grain + vignette' },
-  { type: 'vhs',       label: 'VHS',       icon: '📼', params: {},                hint: 'Desaturated, noisy tape look' },
-  { type: 'glow',      label: 'Glow',      icon: '✨', params: { strength: 0.4 }, hint: 'Soft glow / bloom (strength 0.4)' },
-  { type: 'rgb_split', label: 'RGB Split', icon: '🔴', params: { offset: 6 },     hint: 'Chromatic aberration (offset 6px)' },
-  { type: 'hflip',     label: 'Flip H',    icon: '↔️', params: {},                hint: 'Mirror horizontally' },
-  { type: 'vflip',     label: 'Flip V',    icon: '↕️', params: {},                hint: 'Mirror vertically' },
+const EFFECT_PRESETS: { type: string; label: string; icon: IconName; params: Record<string, unknown>; hint: string }[] = [
+  { type: 'blur',      label: 'Blur',      icon: 'blur',     params: { radius: 8 },     hint: 'Gaussian blur (radius 8)' },
+  { type: 'sharpen',   label: 'Sharpen',   icon: 'sharpen',  params: { amount: 1.0 },   hint: 'Unsharp mask (amount 1.0)' },
+  { type: 'vignette',  label: 'Vignette',  icon: 'vignette', params: {},                hint: 'Darkened corners' },
+  { type: 'grain',     label: 'Grain',     icon: 'grain',    params: { strength: 20 },  hint: 'Film grain noise (strength 20)' },
+  { type: 'vintage',   label: 'Vintage',   icon: 'vintage',  params: {},                hint: 'Warm faded look with grain + vignette' },
+  { type: 'vhs',       label: 'VHS',       icon: 'vhs',      params: {},                hint: 'Desaturated, noisy tape look' },
+  { type: 'glow',      label: 'Glow',      icon: 'glow',     params: { strength: 0.4 }, hint: 'Soft glow / bloom (strength 0.4)' },
+  { type: 'rgb_split', label: 'RGB Split', icon: 'rgbSplit', params: { offset: 6 },     hint: 'Chromatic aberration (offset 6px)' },
+  { type: 'hflip',     label: 'Flip H',    icon: 'flipH',    params: {},                hint: 'Mirror horizontally' },
+  { type: 'vflip',     label: 'Flip V',    icon: 'flipV',    params: {},                hint: 'Mirror vertically' },
 ]
 
 // Friendly names for chips of effects that can arrive via chat/MCP too.
@@ -62,6 +64,7 @@ export function EffectsPanel() {
   const edl = useStore((s) => s.edl)
   const selection = useStore((s) => s.selection)
   const dispatch = useStore((s) => s.dispatch)
+  const mediaNames = useMediaNameMap()      // the clip's name as the Media panel shows it
 
   const [open, setOpen] = useState(false)
   const [luts, setLuts] = useState<string[] | null>(null)
@@ -194,11 +197,12 @@ export function EffectsPanel() {
   return (
     <div className="effects-panel" style={{ marginTop: 16 }}>
       <button
-        style={{ width: '100%', fontSize: 11 }}
+        className="panel-disclosure"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         title="Filters, effects & LUT looks"
       >
-        {open ? '▼' : '▶'} <Icon name="effects" size={13} /> Effects
+        <Icon name={open ? 'chevronDown' : 'chevronRight'} /><Icon name="effects" /> Effects
       </button>
       {open && (
         <div style={{ marginTop: 8 }}>
@@ -211,8 +215,7 @@ export function EffectsPanel() {
             <div className="fx-target" title={targetIsFallback
               ? 'No clip selected — applying to the clip at the playhead. Click a clip to target it.'
               : 'Applying to the selected clip.'}>
-              → {targetIsFallback ? 'clip at playhead' : 'selected clip'}:{' '}
-              {clip!.src.split('/').pop()?.split('\\').pop()}
+              <Icon name="film" /> {effectsTargetLine(clip!.src, mediaNames, targetIsFallback)}
             </div>
           )}
           {listError && (
@@ -222,7 +225,7 @@ export function EffectsPanel() {
             </div>
           )}
 
-          <div className="fx-subhead">Looks (LUTs)</div>
+          <div className="fx-subhead section-label">Looks (LUTs)</div>
           <div className="fx-slider-row">
             <label>Intensity</label>
             {/* Keyed by clip: a commit still waiting on its idle delay lands
@@ -245,7 +248,7 @@ export function EffectsPanel() {
             return (
               <div key={name} className={`fx-lut-row${applied ? ' applied' : ''}`}>
                 <span className="fx-lut-name" title={name}>
-                  {applied ? '✓ ' : ''}{lutDisplayName(name)}
+                  {applied && <Icon name="check" />}{lutDisplayName(name)}
                 </span>
                 <button
                   disabled={disabled}
@@ -263,7 +266,7 @@ export function EffectsPanel() {
             <div className="fx-hint">No bundled LUTs found.</div>
           )}
 
-          <div className="fx-subhead" style={{ marginTop: 10 }}>Effects</div>
+          <div className="fx-subhead section-label" style={{ marginTop: 10 }}>Effects</div>
           <div className="fx-grid">
             {presets.map((p) => (
               <button
@@ -273,21 +276,21 @@ export function EffectsPanel() {
                 title={`${p.hint} — effects stack; remove from the chips below.`}
                 onClick={() => void addEffect(p.type, p.params)}
               >
-                <span className="fx-icon">{p.icon}</span>{p.label}
+                <Icon name={p.icon} />{p.label}
               </button>
             ))}
           </div>
 
           {clip && effects.length > 0 && (
             <>
-              <div className="fx-subhead" style={{ marginTop: 10 }}>
+              <div className="fx-subhead section-label" style={{ marginTop: 10 }}>
                 {targetIsFallback ? 'On the clip at the playhead' : 'On the selected clip'}
               </div>
               <div className="fx-chips">
                 {effects.map((e, i) => (
                   <span key={`${e.type}-${i}`} className="fx-chip">
                     {chipLabel(e)}
-                    <button title={`Remove ${chipLabel(e)}`} aria-label={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}><span aria-hidden="true">×</span></button>
+                    <button title={`Remove ${chipLabel(e)}`} aria-label={`Remove ${chipLabel(e)}`} onClick={() => void removeEffect(i)}><Icon name="close" /></button>
                   </span>
                 ))}
               </div>

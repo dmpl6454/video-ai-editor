@@ -174,6 +174,14 @@ uv run pyinstaller \
   ${FM_BIN:+--add-binary "$FM_BIN:."} \
   src/video_ai_editor/desktop.py
 
+# Font licences (OFL-1.1 §2): every bundled copy of the fonts must carry each
+# font's copyright notice and the licence. fonts/OFL.txt and
+# frontend/public/fonts/OFL.txt (scripts/font_licences.py --write) ride the
+# two --add-data copies above; this fails the build if either is missing from
+# the bundle or no longer matches the fonts in it.
+uv run python scripts/font_licences.py --check-app "dist/Video AI Editor.app" \
+  || { echo "[build] font licence check failed (run: uv run python scripts/font_licences.py --write)"; exit 1; }
+
 # PyInstaller's CLI mode (used here, not the committed .spec — the generated
 # one lands in $SPEC_DIR via --specpath, see above and CLAUDE.md) has no
 # flag for arbitrary Info.plist keys, so NSMicrophoneUsageDescription is

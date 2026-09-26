@@ -80,7 +80,7 @@ export function RatioMenu() {
         onClick={() => setOpen((o) => !o)}
       >
         <span className="ratio-glyph" aria-hidden="true" data-aspect={aspect ?? 'custom'} />
-        {ratioLabel(canvas)} ▾
+        {ratioLabel(canvas)}<Icon name="chevronDown" />
       </button>
       {open && pos && createPortal(
         <div
@@ -92,23 +92,23 @@ export function RatioMenu() {
           style={{ left: pos.left, top: pos.top }}
           onKeyDown={onMenuKey}
         >
-          <div className="ratio-menu-head">Aspect ratio</div>
+          <div className="ratio-menu-head section-label">Aspect ratio</div>
           {ASPECTS.map((r) => (
             <button key={r} role="menuitemradio" aria-checked={aspect === r} className="ratio-item"
                     title={`Set canvas aspect ratio to ${r} — overlays reposition to fit`}
                     onClick={() => pickAspect(r)}>
-              <span className="ratio-check menu-check" aria-hidden="true">{aspect === r && <Icon name="check" size={12} />}</span>
+              <span className="ratio-check menu-check" aria-hidden="true">{aspect === r && <Icon name="check" />}</span>
               <span className="ratio-label">{r}</span>
             </button>
           ))}
           <div className="ratio-menu-sep" role="separator" />
-          <div className="ratio-menu-head">Platform presets</div>
+          <div className="ratio-menu-head section-label">Platform presets</div>
           {PLATFORM_PRESETS.map((p) => {
             const on = presetActive(p, canvas)
             return (
               <button key={p.label} role="menuitemradio" aria-checked={on} className="ratio-item"
                       title={p.title} onClick={() => applyPreset(p)}>
-                <span className="ratio-check menu-check" aria-hidden="true">{on && <Icon name="check" size={12} />}</span>
+                <span className="ratio-check menu-check" aria-hidden="true">{on && <Icon name="check" />}</span>
                 <span className="ratio-label">{p.label}</span>
                 <span className="ratio-hint">{p.w}×{p.h} · {p.bitrateKbps / 1000} Mbps</span>
               </button>

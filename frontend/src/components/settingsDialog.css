@@ -1,0 +1,58 @@
+/* Settings (components/SettingsDialog.tsx). Tokens only (styles.css :root);
+   every text/surface pair here is pinned by lib/settingsDialog.contrast.test.ts. */
+.dialog.settings-dialog { width: min(600px, calc(100vw - 32px)); }
+.dialog.settings-dialog .dialog-body { padding-top: 4px; padding-bottom: 16px; }
+
+.settings-section { padding: 14px 0 12px; border-top: 1px solid var(--line); }
+.settings-section:first-child { border-top: none; padding-top: 6px; }
+.settings-section h3 {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 6px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; text-transform: none;
+  color: var(--text);
+}
+.settings-subhead { margin: 12px 0 6px; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: none; letter-spacing: 0; }
+
+.settings-help { margin: 0 0 8px; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }
+.settings-problem { margin: 0 0 8px; font-size: 11.5px; line-height: 1.5; color: var(--warn); }
+.settings-status { margin: 0 0 8px; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+.settings-status[data-tone="ok"] { color: var(--good); }
+.settings-status[data-tone="warn"] { color: var(--warn); }
+
+.settings-key-row { display: flex; gap: 6px; margin: 6px 0 4px; }
+.settings-key-row input {
+  flex: 1; min-width: 0; font-size: 12px; letter-spacing: 0.02em;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  color: var(--text); background: var(--bg-2); border: 1px solid var(--line);
+}
+.settings-key-row input[aria-invalid="true"] { border-color: var(--warn); }
+.settings-visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+.settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.settings-result { display: inline-flex; align-items: flex-start; gap: 5px; font-size: 11.5px; line-height: 1.45; color: var(--text-dim); }
+.settings-result svg.icon { margin-top: 1px; vertical-align: 0; }
+.settings-result[data-tone="ok"] { color: var(--good); }
+.settings-result[data-tone="warn"] { color: var(--warn); }
+
+.settings-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.settings-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 1px;
+  padding: 7px 10px; border-radius: 7px; background: var(--bg-2);
+}
+.settings-row-name { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12px; color: var(--text); }
+.settings-row-side {
+  grid-row: span 2; align-self: center; display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+.settings-row-side button { padding: 3px 10px; font-size: 11px; }
+.settings-row-meta { padding-left: 15px; font-size: 11px; line-height: 1.45; color: var(--text-dim); }
+.settings-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.settings-dot[data-on="false"] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text-faint); }
+
+.settings-cache { display: flex; align-items: center; gap: 12px; }
+.settings-cache-line { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-bar { flex: 1; min-width: 60px; height: 4px; border-radius: 2px; background: var(--bg-3); overflow: hidden; }
+.settings-bar > span { display: block; height: 100%; background: var(--accent-2); transform-origin: left center; }
+@media (prefers-reduced-motion: no-preference) { .settings-bar > span { transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1); } }

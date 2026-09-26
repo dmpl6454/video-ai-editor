@@ -4,18 +4,22 @@ import { isMediaClip, type AnyClip } from '../types'
 import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
 import { clipLocalTime } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
+import { CommandKey } from './CommandKey'
 import { setLivePipFraming } from '../lib/pipDraw'
 import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
-import { TimecodeField } from './TimecodeField'
+import { MediaTiming, OverlayTiming } from './TimingSection'
 import { MediaName } from './MediaName'
 import { SliderScope, useSliderCommit } from '../lib/useSliderCommit'
 import { formatDb } from '../lib/dbFormat'
 import { levelAt, VOLUME_RANGE, volumeCommit, volumeKeyAt, volumeKeyTimes, volumeKeyToggle, type ClipAudioProps } from '../lib/audioLevel'
+import { KEEP_PITCH_TITLE } from '../lib/audioChannels'
+import { ChannelModeField } from './ChannelModeField'
 import { textRoleLabel } from '../lib/opLabels'
 import { laneName } from '../lib/timelineLanes'
 import { TEXT_AXIS_SENTINEL, offAxisSentinel, roleAnchorY } from '../lib/textLayout'
 import { ColorField } from './ColorField'
 import { openCaptionStyle } from '../lib/captionStyleOpen'
+import { Icon } from './Icon'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -193,7 +197,7 @@ export function Properties() {
   if (!locked) return <SliderScope.Provider value={sel ?? ''}><PropertiesPanel /></SliderScope.Provider>
   return (
     <div className="props-locked">
-      <div className="props-locked-note" role="status">🔒 {lockedNotice(locked)}</div>
+      <div className="props-locked-note" role="status"><Icon name="lock" /> {lockedNotice(locked)}</div>
       <fieldset disabled aria-disabled="true">
         <PropertiesPanel />
       </fieldset>
@@ -224,7 +228,7 @@ function PropertiesPanel() {
         Nothing selected.
         <br />• Click a clip on the timeline to edit it here
         <br />• Drag a selected clip's edges to trim it
-        <br />• {chordLabel('Mod+KeyB')} splits the clip at the playhead
+        <br />• <CommandKey id="split" className="" /> splits the clip at the playhead
       </div>
     </div>
   )
@@ -400,10 +404,10 @@ function PropertiesPanel() {
       style={{
         background: kfHere ? 'var(--accent-fill)' : 'var(--bg-3)',
         border: `1px solid ${kfAnimated ? 'var(--accent)' : 'var(--line)'}`,
-        padding: '1px 8px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+        borderRadius: 3, cursor: 'pointer',
         color: kfHere ? 'var(--on-accent)' : kfAnimated ? 'inherit' : 'var(--text-dim)',
       }}
-    >{kfHere ? '◆' : '◇'} Keyframe</button>
+    ><Icon name="keyframe" filled={kfHere} /> Keyframe</button>
   )
 
   return (
@@ -423,36 +427,24 @@ function PropertiesPanel() {
           - ((c as unknown as { in?: number }).in ?? 0)) / (speed > 0 ? speed : 1))}
       />
 
+      {/* ONE timing model for every clip (QA-048, components/TimingSection):
+          Start moves, End and Duration trim; plus the source In / Out. */}
       <Section label="Timing">
-        <div className="row two">
-          <div className="field">
-            <label>In</label>
-            <TimecodeField ariaLabel="In" value={c.in} min={0}
-              onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, in: n })} />
-          </div>
-          <div className="field">
-            <label>Out</label>
-            <TimecodeField ariaLabel="Out" value={c.out} min={0}
-              onCommit={(n) => dispatch('trim_clip', { clip_id: c.id, out: n })} />
-          </div>
-        </div>
-        <div className="field">
-          <label>Start on timeline</label>
-          <TimecodeField ariaLabel="Start on timeline" value={c.start} min={0}
-            onCommit={(n) => dispatch('move_clip', { clip_id: c.id, new_start: n })} />
-        </div>
+        <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed }} send={dispatch} />
       </Section>
 
-      {!isAudioLane && (
+      {/* Audio lanes too (QA-086, wave C): the audio mix retimes a music/VO
+          clip with the v1 rule, so the control is real on every lane. */}
         <Section label="Speed" onReset={() => dispatch('set_speed', { clip_id: c.id, factor: 1 })}>
           <Slider label="Speed" min={0.25} max={4} step={0.05} value={speed}
             format={(v) => `${v.toFixed(2)}×`}
             onChange={(v) => dispatch('set_speed', { clip_id: c.id, factor: v })} />
           {Math.abs(speed - 1) > 1e-6 && (
             // QA-039 residual: time-stretching (keep pitch) moves transients by
-            // up to ±12 ms; varispeed is sample-exact and lets the pitch follow.
+            // up to ±12 ms (no rubberband in the render binary — documented
+            // limitation); varispeed is sample-exact and lets the pitch follow.
             <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
-              title="On: the sound keeps its pitch (time-stretched; claps and consonants can land a few ms off). Off: tape-style speed change — every sound stays exactly on its frame, and the pitch rises or falls with the speed.">
+              title={KEEP_PITCH_TITLE}>
               <input type="checkbox" checked={audio?.keep_pitch !== false}
                 onChange={(e) => dispatch('set_speed', { clip_id: c.id, factor: speed, keep_pitch: e.target.checked })}
                 style={{ marginRight: 4 }} />
@@ -461,6 +453,7 @@ function PropertiesPanel() {
           )}
           {/* QA-037: the field existed and rendered nothing; now the renderer
               plays the clip backwards (render/reverse.py), picture and sound. */}
+          {!isAudioLane && (
           <label style={{ fontSize: 11, color: 'var(--text-dim)' }}
             title="Play this clip backwards — picture and sound.">
             <input type="checkbox" checked={reversed} aria-label="Play backwards"
@@ -468,8 +461,8 @@ function PropertiesPanel() {
               style={{ marginRight: 4 }} />
             Play backwards
           </label>
+          )}
         </Section>
-      )}
 
       {!isAudioLane && (
         <Section label="Color" onReset={() => dispatch('color_grade', {
@@ -580,10 +573,10 @@ function PropertiesPanel() {
                   style={{
                     background: here ? 'var(--accent-fill)' : 'var(--bg-3)',
                     border: `1px solid ${keys ? 'var(--accent)' : 'var(--line)'}`,
-                    padding: '1px 8px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+                    borderRadius: 3, cursor: 'pointer',
                     color: here ? 'var(--on-accent)' : keys ? 'inherit' : 'var(--text-dim)',
                   }}
-                >{here ? '◆' : '◇'} Volume key</button>
+                ><Icon name="keyframe" filled={here} /> Volume key</button>
                 {keys > 0 && (
                   <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
                     {keys} volume {keys === 1 ? 'key' : 'keys'}
@@ -619,6 +612,8 @@ function PropertiesPanel() {
           }} style={{ marginRight: 4 }} />
           Mute clip
         </label>
+        {/* QA-122: which side(s) the clip's sound plays from. */}
+        <ChannelModeField clipId={c.id} src={c.src} audio={audio} />
       </Section>
 
       {!isAudioLane && (
@@ -942,8 +937,6 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
   const opacity = sampleKF(tx.opacity as KFNum | undefined, localT, 1)
   const setTx = (p: Record<string, number>) =>
     dispatch('set_clip_transform', { clip_id: c.id, ...p, time: localT })
-  const setTiming = (p: { start?: number; end?: number }) =>
-    dispatch('set_clip_timing', { clip_id: c.id, ...p })
 
   return (
     // See the media panel: key={c.id} guarantees a fresh field subtree per clip.
@@ -983,18 +976,7 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
       </Section>
 
       <Section label="Timing">
-        <div className="row two">
-          <div className="field">
-            <label>Start</label>
-            <TimecodeField ariaLabel="Start" value={start} min={0}
-              onCommit={(ns) => setTiming({ start: ns, end: ns + duration })} />
-          </div>
-          <div className="field">
-            <label>Duration</label>
-            <TimecodeField ariaLabel="Duration" value={duration} min={0.1}
-              onCommit={(nd) => setTiming({ end: start + nd })} />
-          </div>
-        </div>
+        <OverlayTiming clipId={c.id} span={{ start, end: start + duration }} send={dispatch} />
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
@@ -1051,7 +1033,7 @@ interface TextClipLike {
     font?: string | null; size?: number; color?: string
     stroke?: string; stroke_w?: number; upper?: boolean | null
     background?: string | null; align?: 'left' | 'center' | 'right'; line_spacing?: number
-    shadow_on?: boolean | null
+    shadow_on?: boolean | null; letter_spacing?: number
   }
   anim_in?: string | null
   anim_out?: string | null
@@ -1113,6 +1095,8 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   const bgAlpha = bgRaw && bgRaw.length === 9 ? bgRaw.slice(7) : 'B3'
   const align = c.style?.align ?? 'center'
   const lineSpacing = c.style?.line_spacing ?? 1
+  // Rule 8 (QA-078): canvas px between letters; Hindi/Arabic runs stay joined.
+  const letterSpacing = c.style?.letter_spacing ?? 0
   const shadowSel = typeof c.style?.shadow_on === 'boolean' ? (c.style.shadow_on ? 'on' : 'off') : ''
   const animDur = c.anim_dur ?? 0.35
   // "As typed" is being asked for, in a face that has no lowercase to show.
@@ -1125,12 +1109,11 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   // Editing an existing TextClip = `set_property` (dispatch.py's generic
   // dotted-path mutator): paths `text`, `style.size`, `style.color`,
   // `transform.x`, `transform.y`. Timing goes through `set_clip_timing`
-  // instead — it enforces end > start (clamps to a 0.1s minimum span) and
-  // re-sorts the track, which a raw set_property on start/end would skip.
+  // (components/TimingSection) instead — it enforces end > start (clamps to a
+  // 0.1s minimum span) and re-sorts the track, which a raw set_property on
+  // start/end would skip.
   const setProp = (path: string, value: unknown) =>
     dispatch('set_property', { clip_id: c.id, path, value })
-  const setTiming = (p: { start?: number; end?: number }) =>
-    dispatch('set_clip_timing', { clip_id: c.id, ...p })
 
   const commitText = (v: string) => {
     // Clearing the box CLEARS THE TEXT. Blank commits used to be skipped here,
@@ -1220,11 +1203,10 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
                 TextLayer mirrors the same curves. */}
         <div className="row two">
           <div className="field">
-            <label>Font</label>
-            <select key={`f${font}`} defaultValue={font} aria-label="Font"
+            <label htmlFor={`tp-font-${c.id}`}>Font</label>
+            <select id={`tp-font-${c.id}`} key={`f${font}`} defaultValue={font}
               title="Bundled font. Preview and export use the same file."
-              onChange={(e) => { const v = e.target.value; if (v !== font) void setProp('style.font', v || null) }}
-              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+              onChange={(e) => { const v = e.target.value; if (v !== font) void setProp('style.font', v || null) }}>
               {/* The first option names the face the ROLE renders in (QA-076). */}
               <option value="">{FONT_LABELS[ROLE_FONTS[c.role ?? 'default'] ?? 'Inter-Bold']} (default)</option>
               {Object.entries(FONT_LABELS).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
@@ -1245,14 +1227,13 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             explicit value and freeze the clip against future role changes. */}
         <div className="row two">
           <div className="field">
-            <label>Letter case</label>
-            <select key={`u${upperSel}`} defaultValue={upperSel}
+            <label htmlFor={`tp-case-${c.id}`}>Letter case</label>
+            <select id={`tp-case-${c.id}`} key={`u${upperSel}`} defaultValue={upperSel}
               title="ALL CAPS is the house style for Hook and Super. Choose 'As typed' to keep lowercase."
               onChange={(e) => {
                 const v = e.target.value
                 void setProp('style.upper', v === '' ? null : v === 'on')
-              }}
-              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+              }}>
               <option value="">Role default{ROLE_FORCES_CAPS.has(c.role ?? '') ? ' (ALL CAPS)' : ''}</option>
               <option value="on">ALL CAPS</option>
               <option value="off">As typed</option>
@@ -1279,7 +1260,7 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             <div className="row" style={{ gap: 4 }}>
               <select key={`ai${animIn}`} defaultValue={animIn} aria-label="Animate in"
                 onChange={(e) => void setProp('anim_in', e.target.value || null)}
-                style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
+                style={{ flex: 1 }}>
                 <option value="">none</option>
                 <option value="pop">pop</option>
                 <option value="fade">fade</option>
@@ -1288,7 +1269,7 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
               </select>
               <select key={`ao${animOut}`} defaultValue={animOut} aria-label="Animate out"
                 onChange={(e) => void setProp('anim_out', e.target.value || null)}
-                style={{ fontSize: 11, padding: '3px 2px', flex: 1 }}>
+                style={{ flex: 1 }}>
                 <option value="">none</option>
                 <option value="pop">pop</option>
                 <option value="fade">fade</option>
@@ -1318,16 +1299,15 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
                 <button key={a} type="button" role="radio" aria-checked={align === a}
                         aria-label={`Align ${a}`} title={`Align ${a}`}
                         onClick={() => { if (a !== align) void setProp('style.align', a) }}>
-                  <AlignGlyph align={a} />
+                  <Icon name={a === 'left' ? 'alignLeft' : a === 'right' ? 'alignRight' : 'alignCenter'} />
                 </button>
               ))}
             </div>
           </div>
           <div className="field">
-            <label>Shadow</label>
-            <select key={`sh${shadowSel}`} defaultValue={shadowSel} aria-label="Shadow"
-              onChange={(e) => void setProp('style.shadow_on', e.target.value === '' ? null : e.target.value === 'on')}
-              style={{ fontSize: 12, padding: '3px 4px', width: '100%' }}>
+            <label htmlFor={`tp-shadow-${c.id}`}>Shadow</label>
+            <select id={`tp-shadow-${c.id}`} key={`sh${shadowSel}`} defaultValue={shadowSel}
+              onChange={(e) => void setProp('style.shadow_on', e.target.value === '' ? null : e.target.value === 'on')}>
               <option value="">Role default</option>
               <option value="on">On</option>
               <option value="off">Off</option>
@@ -1352,6 +1332,9 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
         <Slider label="Line spacing" min={0.8} max={2} step={0.05} value={lineSpacing}
           format={(v) => `${v.toFixed(2)}×`}
           onChange={(v) => void setProp('style.line_spacing', v)} />
+        <Slider label="Tracking" min={-10} max={60} step={1} value={letterSpacing}
+          format={(v) => `${v > 0 ? '+' : ''}${Math.round(v)} px`}
+          onChange={(v) => void setProp('style.letter_spacing', v)} />
         {/* transform.opacity — rendered by BOTH paths (server render_text_png
             alpha-multiplies the baked PNG; TextLayer multiplies globalAlpha),
             so this is a live control, not another dead field (tester issue 4:
@@ -1389,40 +1372,22 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             </div>
           </div>
         )}
+        {/* One control per property across clip kinds (wave C review): the
+            sticker and media inspectors' slider + value, not number boxes. */}
         {!isCaption && (
-          <div className="row two">
-            <div className="field">
-              <label>Rotation (°)</label>
-              <NumberField ariaLabel="Rotation (°)" value={txRotation} dp={1} step={1}
-                onCommit={(n) => void setTx({ rotation: n })} />
-            </div>
-            <div className="field">
-              <label>Scale</label>
-              <NumberField ariaLabel="Scale" value={txScale} dp={2} step={0.05} min={0.01}
-                onCommit={(n) => void setTx({ scale: n })} />
-            </div>
-          </div>
+          <>
+            <Slider label="Scale" min={0.1} max={4} step={0.05} value={txScale}
+              format={(v) => `${v.toFixed(2)}`} onChange={(v) => void setTx({ scale: v })} />
+            <Slider label="Rotation" min={-180} max={180} step={1} value={txRotation}
+              format={(v) => `${v.toFixed(0)}°`} onChange={(v) => void setTx({ rotation: v })} />
+          </>
         )}
       </Section>
 
+      {/* The same Start / End / Duration as a sticker or a clip (QA-048):
+          Start MOVES the text now — it used to trim it. */}
       <Section label="Timing">
-        <div className="row two">
-          <div className="field">
-            {/* These two DID guard for finiteness, but compared against the raw
-                EDL float while displaying a 2-dp rounding of it — so re-blurring
-                an unchanged field whose true value was e.g. 1.004 dispatched a
-                no-op op, cleared the redo stack and forced a re-encode.
-                NumberField compares against the SEEDED display value instead. */}
-            <label>Start</label>
-            <TimecodeField ariaLabel="Start" value={start} min={0}
-              onCommit={(n) => void setTiming({ start: n })} />
-          </div>
-          <div className="field">
-            <label>End</label>
-            <TimecodeField ariaLabel="End" value={end} min={0}
-              onCommit={(n) => void setTiming({ end: n })} />
-          </div>
-        </div>
+        <OverlayTiming clipId={c.id} span={{ start, end }} send={dispatch} />
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
@@ -1442,19 +1407,13 @@ function Section({ label, children, onReset }: {
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     margin: '8px 0 4px' }}>
-        {/* 0.08em, like every other section header — this was
-            `0.08 * 10 + 'em'` = 0.8em ("T I M I N G"). */}
-        <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
-                      color: 'var(--text-dim)' }}>{label}</div>
+        {/* The shared .section-label (styles.css): it was an inline
+            `0.08 * 10 + 'em'` = 0.8em ("T I M I N G", QA-104). */}
+        <div className="section-label">{label}</div>
         {onReset && (
-          <button
+          <button type="button" className="props-reset"
             onClick={onReset}
             title={`Reset ${label.toLowerCase()} to default`}
-            style={{
-              fontSize: 10, padding: '1px 6px', background: 'transparent',
-              border: '1px solid var(--line)', borderRadius: 3, color: 'var(--text-dim)',
-              cursor: 'pointer',
-            }}
           >Reset</button>
         )}
       </div>
@@ -1618,16 +1577,5 @@ function ColorSlider({ label, min, max, step, commit, onLive, value, init = 0, f
         {format ? format(local) : local.toFixed(2)}
       </span>
     </div>
-  )
-}
-
-/** Three bars, aligned — the monochrome alignment glyph (no emoji). */
-function AlignGlyph({ align }: { align: 'left' | 'center' | 'right' }) {
-  const xs = align === 'left' ? [1, 1, 1] : align === 'right' ? [3, 7, 5] : [2, 4, 3]
-  const ws = align === 'left' ? [12, 8, 10] : align === 'right' ? [12, 8, 10] : [12, 8, 10]
-  return (
-    <svg width="14" height="12" viewBox="0 0 16 12" aria-hidden="true">
-      {[1, 5, 9].map((y, i) => <rect key={y} x={align === 'center' ? (16 - ws[i]) / 2 : xs[i]} y={y} width={ws[i]} height="2" rx="1" fill="currentColor" />)}
-    </svg>
   )
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Track } from '../types'
-import { isHeard, monitorHit } from './trackMonitor'
+import { isHeard, monitorButtons, monitorLabels, MONITOR_BUTTON } from './trackMonitor'
 
 const tr = (id: string, extra: Partial<Track> = {}): Track => ({ id, type: 'audio', z: 0, clips: [], ...extra })
 
@@ -19,10 +19,17 @@ describe('solo (QA-086)', () => {
   })
 })
 
-describe('label boxes', () => {
-  it('M sits above the middle of the row, S below it', () => {
-    expect(monitorHit(10, 100 + 18 - 8, 100, 36)).toBe('mute')
-    expect(monitorHit(10, 100 + 18 + 6, 100, 36)).toBe('solo')
-    expect(monitorHit(30, 100 + 18 + 6, 100, 36)).toBe(null)
+describe('lane monitor buttons (wave C review)', () => {
+  it('sit side by side inside the row, under the name, each at least 18 px tall', () => {
+    const { mute, solo } = monitorButtons(100, 36)
+    expect(mute.y).toBe(solo.y)
+    expect(solo.x).toBeGreaterThanOrEqual(mute.x + mute.w)
+    expect(mute.y).toBeGreaterThan(100 + 13)            // below the name's baseline
+    expect(mute.y + mute.h).toBeLessThanOrEqual(100 + 36)
+    expect(Math.min(MONITOR_BUTTON.w, MONITOR_BUTTON.h)).toBeGreaterThanOrEqual(18)
+    expect(solo.x + solo.w).toBeLessThanOrEqual(80)       // inside the 80 px label column
+  })
+  it('are named by action and lane', () => {
+    expect(monitorLabels('Main video')).toEqual({ mute: 'Mute Main video', solo: 'Solo Main video' })
   })
 })

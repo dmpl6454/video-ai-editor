@@ -136,6 +136,11 @@ HOOK_SENTINEL = "$hook_from_transcript"
 #: The number rides in the sentinel because the cut runs after the plan's own
 #: silence/filler cuts, so no plan-time second is the right one.
 FIT_SENTINEL_PREFIX = "$fit_to:"
+#: `cut_range(start="$fit_best:<seconds>")`: keep the BEST <seconds> of the
+#: live timeline — the sentence-aligned window that scores highest on
+#: complete sentences, speech density, no dead air and a strong opening line
+#: (QA-069, wave C) — as a tail cut plus a head cut in one step.
+FIT_BEST_PREFIX = "$fit_best:"
 
 #: Duration gate (§1.1): above this the planner appends the `go` confirm.
 LONG_RUN_SECONDS = 90.0
@@ -348,7 +353,7 @@ TOOL_STAGE: dict[str, int] = {
     "transcribe": 1, "name_speakers": 1,
     # 2 — cuts (change the v1 timeline; everything later measures the result)
     "cut_range": 2, "ripple_delete": 2, "remove_silences": 2, "remove_fillers": 2,
-    "set_speed": 2, "smooth_slow_motion": 2, "stabilize": 2, "upscale": 2,
+    "set_speed": 2, "set_clip_reverse": 2, "smooth_slow_motion": 2, "stabilize": 2, "upscale": 2,
     "trim_clip": 2, "split_at": 2, "set_clip_timing": 2, "move_clip": 2,
     "reorder_clips": 2, "bulk_delete": 2, "bulk_duplicate": 2, "duplicate_clip": 2,
     "detach_audio": 2,
@@ -462,6 +467,8 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("effect_present", "the effect is applied", type=None, track="v1", all=True),
     _spec("clip_src_changed", "the clip was re-rendered", clip_id=None),
     _spec("speed_equals", "the speed matches", clip_id=None, factor=None),
+    # QA-037: the reverse flag the renderer reads, on the clip(s) named.
+    _spec("clip_reversed", "the clip plays backwards", clip_id=None, reverse=True),
     _spec("transitions_count_geq", "transitions were added", n=1, type=None),
     _spec("export_preset_applied", "the export preset is set", name=None),
     # audio
@@ -515,6 +522,8 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
                       start=f"{ARG_REF}start", end=f"{ARG_REF}end", tol=0.1)],
     "set_speed": [_pc("speed_equals", "the speed matches",
                       clip_id=f"{ARG_REF}clip_id", factor=f"{ARG_REF}factor")],
+    "set_clip_reverse": [_pc("clip_reversed", "the clip plays backwards",
+                             clip_id=f"{ARG_REF}clip_id", reverse=f"{ARG_REF}reverse")],
     "add_transition": [_pc("transitions_count_geq", "transitions were added", n=1)],
     "apply_lut": [_pc("effect_present", "the look is applied", type="lut", track="v1")],
     "auto_reframe": [_pc("canvas_aspect", "the canvas has the requested aspect",
@@ -595,7 +604,7 @@ def bind_postconditions(tool: str, args: dict[str, Any]) -> list[Postcondition]:
                     # checked against a number — the recipe's own check
                     # (duration_leq) measures that step instead.
                     run_time = run_time or (isinstance(args[name], str)
-                                            and args[name].startswith(FIT_SENTINEL_PREFIX))
+                                            and args[name].startswith((FIT_SENTINEL_PREFIX, FIT_BEST_PREFIX)))
                 continue
             new_args[key] = value
         if not run_time:
@@ -604,7 +613,7 @@ def bind_postconditions(tool: str, args: dict[str, Any]) -> list[Postcondition]:
 
 
 __all__ = [
-    "PLAN_JSON_SCHEMA", "CLOUD_PLAN_STRIPPED_FIELDS", "cloud_plan_input_schema", "CLIP_SENTINELS", "SEAM_SENTINEL", "HOOK_SENTINEL", "FIT_SENTINEL_PREFIX", "LONG_RUN_SECONDS",
+    "PLAN_JSON_SCHEMA", "CLOUD_PLAN_STRIPPED_FIELDS", "cloud_plan_input_schema", "CLIP_SENTINELS", "SEAM_SENTINEL", "HOOK_SENTINEL", "FIT_SENTINEL_PREFIX", "FIT_BEST_PREFIX", "LONG_RUN_SECONDS",
     "BrainId", "NeedsInputKind", "SlotValue",
     "Step", "NeedsInputOption", "NeedsInput", "Postcondition", "DownloadNeeded", "Plan",
     "IntentItem", "DraftQuestion", "IntentDraft",

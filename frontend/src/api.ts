@@ -2,6 +2,8 @@
 
 import type { ImportAnswer } from './lib/importFollowUp'
 import type { DownloadReport } from './lib/modelDownloads'
+import type { MediaToolsStatus } from './lib/mediaTools'
+import type { KeyStatus } from './lib/settingsModel'
 import type { EDL, SessionInfo, Op, MediaItem } from './types'
 import {
   EngineOfflineError, isAbort, isGatewayFailure, reportEngineReachable, reportEngineUnreachable,
@@ -286,10 +288,17 @@ function postForm(url: string, fd: FormData,
 const UPLOAD_POLL_MS = 400
 
 export const api = {
-  health: () => http<{ ok: boolean }>('GET', '/health'),
+  // `media_tools` (QA-108): is ffmpeg/ffprobe installed — MediaToolsBanner.
+  // `upload_limit` (QA-114): "free_space" for the desktop's own imports.
+  health: () => http<{
+    ok: boolean; max_upload_bytes?: number; upload_limit?: 'fixed' | 'free_space'
+    media_tools?: MediaToolsStatus
+  }>('GET', '/health'),
 
+  // `poster` (QA-099-THUMBS): the picker row's frame URL, versioned by the
+  // project's EDL, or null when the project has nothing to show yet.
   listSessions: () =>
-    http<{ sessions: { id: string; name: string; modified_at?: number }[] }>('GET', '/sessions'),
+    http<{ sessions: { id: string; name: string; modified_at?: number; poster?: string | null }[] }>('GET', '/sessions'),
 
   createSession: (name?: string) =>
     http<{ id: string; name: string }>('POST', '/sessions', { name }),
@@ -436,7 +445,7 @@ export const api = {
   // `height` is a NAMED resolution (the canvas's short side — QA-025);
   // `bitrate_kbps` 0 = encode by crf even when the project has a platform
   // target, omitted = use the project's target (QA-027).
-  export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number } = {}) =>
+  export: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' | 'm4a' | 'wav'; bitrate_kbps?: number } = {}) =>
     http<{ path: string; filename: string; url: string }>(
       'POST',
       `/sessions/${sid}/export`,
@@ -447,7 +456,7 @@ export const api = {
   // request until the render finishes. Poll `getJob` until status is terminal.
   // Exports of long clips take minutes — the sync path can outlive a browser's
   // fetch timeout, which is exactly what made Export appear to "hang forever".
-  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov'; bitrate_kbps?: number } = {}) =>
+  exportAsync: (sid: string, opts: { height?: number; fps?: number; crf?: number; container?: 'mp4' | 'mov' | 'm4a' | 'wav'; bitrate_kbps?: number } = {}) =>
     http<{ job_id: string; status: JobStatus; status_url: string }>(
       'POST',
       `/sessions/${sid}/export?wait=0`,
@@ -484,8 +493,9 @@ export const api = {
     return res.json() as Promise<{ path: string; name: string }>
   },
 
+  // `peaks_l`/`peaks_r`: each side's own peaks for a 2+ channel source (QA-122).
   waveform: (sid: string, src: string, peaksPerSec = 50) =>
-    http<{ peaks: number[]; peaks_per_sec: number; duration: number }>(
+    http<{ peaks: number[]; peaks_per_sec: number; duration: number; peaks_l?: number[]; peaks_r?: number[] }>(
       'GET',
       `/sessions/${sid}/waveform?src=${encodeURIComponent(src)}&peaks_per_sec=${peaksPerSec}`
     ),
@@ -518,7 +528,7 @@ export const api = {
     fd.append('playhead', String(playhead))
     const res = await fetch(`${BASE}/sessions/${sid}/sticker_upload`, { method: 'POST', body: fd })
     if (!res.ok) throw await apiError(res)
-    return res.json() as Promise<{ src: string; filename: string; edl_hash?: string }>
+    return res.json() as Promise<{ src: string; filename: string; edl_hash?: string; sticker_id?: string }>
   },
 
   loadProject: async (file: File) => {
@@ -582,7 +592,30 @@ export const api = {
   // able to start a 4 GB download on the Mac. 202 + job id; poll getJob.
   downloadModel: (id: string) =>
     http<{ job_id: string }>('POST', '/prompt/models/download', { id }),
+
+  // Same posture: removes a downloaded local model. 202 + job id.
+  deleteModel: (id: string) =>
+    http<{ job_id: string }>('POST', '/prompt/models/delete', { id }),
+
+  // --- Settings (components/SettingsDialog) ---------------------------------
+  // The Anthropic key (QA-063-SETTINGS): kept in the macOS Keychain by the
+  // backend (keychain.py), loopback-only routes, and no response carries the
+  // key — only a masked suffix and where it comes from. The key is sent once,
+  // in a JSON body, and never stored or logged on this side.
+  anthropicKeyStatus: () => http<KeyStatus>('GET', '/settings/anthropic-key'),
+  saveAnthropicKey: (key: string) => http<KeyStatus>('POST', '/settings/anthropic-key', { key }),
+  removeAnthropicKey: () => http<KeyStatus & { removed: boolean }>('DELETE', '/settings/anthropic-key'),
+  testAnthropicKey: () =>
+    http<{ ok: boolean; message: string }>('POST', '/settings/anthropic-key/test', {}),
+
+  // This project's render caches against their byte budget, and Clear
+  // (QA-106; render/cache_budget.py). Clear keeps the preview on screen.
+  renderCacheUsage: (sid: string) => http<RenderCacheUsage>('GET', `/sessions/${sid}/render-cache`),
+  clearRenderCache: (sid: string) =>
+    http<RenderCacheUsage & { freed_bytes: number }>('DELETE', `/sessions/${sid}/render-cache`),
 }
+
+export interface RenderCacheUsage { bytes: number; budget_bytes: number; by_area: Record<string, number> }
 
 // One POST that returns the Response for an SSE body. Kept separate from
 // http() because the body is a stream, not JSON, but it sends the same

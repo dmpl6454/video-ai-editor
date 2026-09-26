@@ -83,6 +83,112 @@ def stem_scope(stem: str | None) -> Iterator[None]:
 PREVIEW_LIMITER = "alimiter=limit=0.891251:level=0:latency=1,aresample=48000"
 
 
+# ------------------------------------------------------- export mastering
+#
+# QA-121. Every export used to end in single-pass `loudnorm` (dynamic mode,
+# which rides the gain and missed −14 by 1.2 LU on a heavy timeline) and then
+# `alimiter=limit=0.97` — a SAMPLE-peak limiter at −0.26 dBFS with no
+# oversampling, so the inter-sample peaks the AAC decoder reconstructs landed
+# at −0.3 to −0.6 dBTP against the −1 dBTP every platform asks for. It also
+# ate the first transient: loudnorm's dynamic gain opens over its first
+# frames, and a click at t=0 read 17.4 ms late (QA-120's residual).
+#
+# The export now masters in two passes, like every loudness tool that has to
+# land a number:
+#   1. `compositor.measure_mix_loudness` renders the timeline's MIX once (audio
+#      only, `export_measure_scope` — no gain, no limiter) through `ebur128`;
+#   2. the real render applies the static gain `target − I`
+#      (`export_gain_scope`) and a TRUE-PEAK limiter: the mix is upsampled 4x,
+#      brick-walled at `EXPORT_TP_LIMIT_DB` there (so what it holds is the
+#      inter-sample peak, not the sample peak) and brought back to 48 kHz.
+# A static gain keeps the mix's dynamics (loudnorm's LRA=11 squeezed them) and
+# keeps a duck exactly as deep as `to_db` says.
+
+#: The delivery ceiling (dBTP) every export is measured against.
+EXPORT_TRUE_PEAK_DBTP = -1.0
+#: What the 4x-oversampled limiter holds: under the ceiling by a typical AAC
+#: overshoot. That overshoot is NOT bounded by this margin — dense, limited
+#: music re-added 0.8-2.6 dB at 192k with PNS — so the delivered file is
+#: measured and, if over, re-limited after the encode
+#: (`compositor._hold_delivery_true_peak`, QA-121).
+EXPORT_TP_LIMIT_DB = -1.6
+_TP_OVERSAMPLE = 192000
+#: The most an export lifts or cuts to reach its target. Wider than the
+#: preview's ±30 (render/preview_loudness): a delivery target is a spec, and a
+#: −53 LUFS recording asked for −14 must arrive at −14 (the single-pass
+#: loudnorm this replaces did). A gated-silent mix is never lifted at all.
+EXPORT_MAX_GAIN_DB = 60.0
+
+
+def true_peak_limiter() -> str:
+    """The export's final stage (no labels): 4x oversampled brick wall at
+    `EXPORT_TP_LIMIT_DB`, latency-compensated (`latency=1`: no delay against
+    the picture, QA-120), back to 48 kHz."""
+    lin = 10.0 ** (EXPORT_TP_LIMIT_DB / 20.0)
+    return (f"aresample={_TP_OVERSAMPLE},"
+            f"alimiter=limit={lin:.6f}:level=0:latency=1:attack=1:release=50,"
+            f"aresample=48000")
+
+
+_EXPORT_GAIN: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "vai_export_gain_db", default=None)
+_EXPORT_MEASURE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vai_export_measure", default=False)
+
+
+@contextlib.contextmanager
+def export_gain_scope(gain_db: float | None) -> Iterator[None]:
+    """Within this scope an export's master stage is `volume=gain_db` + the
+    true-peak limiter (pass 2). None keeps the single-pass fallback."""
+    tok = _EXPORT_GAIN.set(None if gain_db is None else float(gain_db))
+    try:
+        yield
+    finally:
+        _EXPORT_GAIN.reset(tok)
+
+
+@contextlib.contextmanager
+def export_measure_scope() -> Iterator[None]:
+    """Within this scope the export master stage is left out entirely, so the
+    graph ends on the raw mix — what pass 1 measures."""
+    tok = _EXPORT_MEASURE.set(True)
+    try:
+        yield
+    finally:
+        _EXPORT_MEASURE.reset(tok)
+
+
+def export_gain_for(target_lufs: float, measured_lufs: float | None) -> float:
+    """The static gain pass 2 applies: `target − I`, bounded; 0 for a gated-
+    silent programme (ebur128 reports −70 — there is nothing to normalise)."""
+    if measured_lufs is None or measured_lufs <= -69.0:
+        return 0.0
+    return max(-EXPORT_MAX_GAIN_DB, min(EXPORT_MAX_GAIN_DB, float(target_lufs) - float(measured_lufs)))
+
+
+def _export_master(edl: EDL, *, mixed: bool) -> str:
+    """The export's master stage (no labels, no leading comma), or "".
+
+      * measure scope (pass 1): nothing — the raw mix is what is measured;
+      * a gain from pass 2's scope: static gain + true-peak limiter;
+      * a target with no measurement (a caller that did not run pass 1):
+        single-pass loudnorm, then the same true-peak limiter;
+      * no target: the limiter only where lanes were MIXED (a summed bed and
+        voice can pass full scale); a lone v1 track is left exactly as is.
+    """
+    if _EXPORT_MEASURE.get():
+        return ""
+    lufs = getattr(edl.canvas, "loudness_lufs", None)
+    gain = _EXPORT_GAIN.get()
+    if lufs is not None and gain is not None:
+        return f"volume={gain:.2f}dB,{true_peak_limiter()}"
+    if lufs is not None:
+        # loudnorm's own TP=-1 is a sample-peak ride at its 192 kHz rate — the
+        # limiter after it is what holds the delivered true peak.
+        return f"loudnorm=I={float(lufs):.1f}:TP=-1:LRA=11,{true_peak_limiter()}"
+    return true_peak_limiter() if mixed else ""
+
+
 class PreviewLoudness:
     __slots__ = ("gain_db", "meas_path")
 
@@ -173,6 +279,83 @@ def varispeed_filter(speed: float) -> str:
     return f"asetrate={rate},aresample=48000"
 
 
+#: 960 samples (20 ms @ 48 kHz) of silence ahead of every atempo stage — see
+#: `speed_filters`.
+ATEMPO_LAG = "adelay=delays=960S:all=1"
+
+
+#: The keep-pitch (atempo/WSOLA) timing bound this build can promise, in ms:
+#: what the Keep pitch tooltip (`lib/audioChannels.KEEP_PITCH_TITLE`) and
+#: CLAUDE.md state, and what tests/test_c5_render_audio.py measures (QA-039).
+KEEP_PITCH_MAX_OFFSET_MS = 20.0
+
+
+def speed_filters(clip: Clip) -> str:
+    """`,…` fragment retiming a clip's sound to its speed (no labels), or ""
+    at 1x. The ONE speed rule for sound — v1, and (QA-086) the audio lanes.
+
+    keep_pitch False → varispeed (sample-exact, pitch follows the speed).
+    keep_pitch True → atempo, each stage preceded by `ATEMPO_LAG` of silence:
+    ffmpeg's WSOLA emits content ~20 ms of ITS INPUT early (measured on a
+    57-click track: −42.4 ms at 0.5x, −24.0 at 0.75x, −15.6 at 1.25x, −12.4 at
+    1.5x — a constant 18-21 ms of source time, divided by the tempo). Delaying
+    the stage's input by that much centres transients on the retimed picture
+    at every tempo (QA-039), leaving WSOLA's own jitter, at the cost of that
+    sliver of silence at the head of a retimed clip; the caller cuts the tail
+    back to the clip's exact length.
+
+    The render binary (Homebrew `ffmpeg`) has no `rubberband` — probed with a
+    real null graph (tests/test_c5_render_audio.py) — and no other phase-
+    vocoder stretcher, so WSOLA is the floor of keep-pitch timing on this
+    build (CLAUDE.md, the Keep pitch tooltip). Measured on a click track at
+    0.5-2x, v1 and the audio lanes: every transient within
+    `KEEP_PITCH_MAX_OFFSET_MS` (worst seen −19.8 ms, a music lane at 0.5x;
+    −17.3 ms on v1), the clip's first sound up to 20 ms late (the lag has
+    nothing before it to centre against), and at 2x a 4 ms click can be
+    dropped outright. Varispeed is the sample-exact choice.
+    """
+    sp = clip.speed
+    if not (isinstance(sp, (int, float)) and sp and sp > 0 and sp != 1.0):
+        return ""
+    if not getattr(clip.audio, "keep_pitch", True):
+        return "," + varispeed_filter(float(sp))
+    out = ""
+    remaining = float(sp)
+    while remaining > 2.0:
+        out += f",{ATEMPO_LAG},atempo=2.0"
+        remaining /= 2.0
+    while remaining < 0.5:
+        out += f",{ATEMPO_LAG},atempo=0.5"
+        remaining /= 0.5
+    if abs(remaining - 1.0) > 0.001:
+        out += f",{ATEMPO_LAG},atempo={remaining:.4f}"
+    return out
+
+
+# ------------------------------------------------------- channel mode
+#
+# QA-122. A camera recording on one input (a lav into the left jack) exports
+# one-sided: L −15 dB, R −240 dB. Every clip chain forces a stereo LAYOUT
+# (`aformat=channel_layouts=stereo`), which relabels channels but never moves
+# signal between them, and there was no per-clip way to say "this sound is on
+# the left only". `AudioProps.channels` is that switch, applied right after the
+# layout is fixed, on every lane (v1, PIP, music/vo/audio).
+
+#: `AudioProps.channels` → the pan that realises it (stereo in, stereo out).
+CHANNEL_PANS = {
+    "left": "pan=stereo|c0=c0|c1=c0",
+    "right": "pan=stereo|c0=c1|c1=c1",
+    "mono": "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1",
+}
+
+
+def channel_filter(audio) -> str:
+    """`,pan=…` for a clip's channel mode, "" for plain stereo (no labels)."""
+    mode = getattr(audio, "channels", "stereo") if audio is not None else "stereo"
+    pan = CHANNEL_PANS.get(str(mode))
+    return f",{pan}" if pan else ""
+
+
 def apply_solo(edl: EDL) -> EDL:
     """The EDL the audio renders hear: while any track is soloed, every clip on
     an audio-bearing track that is NOT soloed is muted (clip `audio.mute`,
@@ -190,6 +373,20 @@ def apply_solo(edl: EDL) -> EDL:
     return out
 
 
+def input_seek(t: float) -> list[str]:
+    """`-ss t` for an input-side seek, or nothing at all when `t` is the very
+    start of the file (QA-120 residual).
+
+    `-ss 0` is NOT a no-op on an AAC source — which is every import, since
+    ingest normalises sound to AAC: the seek skips the encoder-priming packet
+    the first real frame's overlap-add needs, so the first 21 ms (1024
+    samples) decode as garbage. Measured on a click at 0.000 s: 0.80 in the
+    source, 0.018 in the render, plus a ghost at 17.5 ms that read as the
+    click arriving 17 ms late. A mid-file seek is unaffected (the demuxer
+    pre-rolls a packet there); only the head needs this."""
+    return ["-ss", f"{t:.6f}"] if t > 0 else []
+
+
 def _esc_path(p: str) -> str:
     return p.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
@@ -205,17 +402,29 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
     and the v1 speech it mixes with has already been pulled left by the
     cross-fades before it.
     """
-    rs, re = window if window is not None else (float(clip.start), float(clip.start) + clip.duration)
+    eff = clip.effective_duration
+    rs, re = window if window is not None else (float(clip.start), float(clip.start) + eff)
     parts = [
         "aresample=async=1:first_pts=0",
         "aformat=channel_layouts=stereo:sample_rates=48000",
     ]
+    # QA-122: the clip's channel mode (left/right to both, mono mix).
+    chan = channel_filter(clip.audio)
+    if chan:
+        parts.append(chan.lstrip(","))
+    # QA-086: speed on an audio lane — the v1 rule (`speed_filters`), so the
+    # source's `in..out` fills `effective_duration` timeline seconds.
+    retime = speed_filters(clip)
+    if retime:
+        parts.append(retime.lstrip(","))
     # A clip straddling a seam is SHORTER on the render clock by what the
     # seam consumed — its end must land where the v1 frame at its layout end
-    # lands, not run on past it. Trimmed before the delay so the cut is
-    # measured from the clip's own first sample.
-    if re - rs < clip.duration - 0.0005:
-        parts.append(f"atrim=duration={max(0.0, re - rs):.3f}")
+    # lands, not run on past it. A retimed clip is cut to its exact length
+    # too (atempo's lag pads its head). Trimmed before the delay so the cut
+    # is measured from the clip's own first sample.
+    if retime or re - rs < eff - 0.0005:
+        n = max(0, int(round(min(re - rs, eff) * 48000)))
+        parts.append(f"atrim=end_sample={n}")
     # Volume automation in the clip's OWN time — before the adelay below
     # moves `t` onto the render clock (QA-086).
     env = gain_env_filter(clip.audio)
@@ -246,11 +455,11 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
 def _on_render_clock(clips: list[Clip], seams: clock.SeamTable
                      ) -> list[tuple[Clip, tuple[float, float]]]:
     """`(clip, render_window)` for the clips the seams leave audible, in the
-    order given. The layout window is `[start, start + duration)`: audio lanes
-    apply no speed, so source seconds are timeline seconds here."""
+    order given. The layout window is `[start, start + effective_duration)`:
+    an audio-lane clip is retimed by its speed like v1 (QA-086)."""
     placed: list[tuple[Clip, tuple[float, float]]] = []
     for c in clips:
-        win = clock.render_window(seams, c.start, c.start + c.duration)
+        win = clock.render_window(seams, c.start, c.start + c.effective_duration)
         if win is not None:
             placed.append((c, win))
     return placed
@@ -274,7 +483,9 @@ def build_audio_mix(
     pushes the sample rate up to 192k internally, which many players (and the
     AAC encoder) round-trip through 96k — Safari sometimes refuses to play
     96k AAC inside an mp4. Export renders keep loudnorm on for the LUFS
-    target; preview renders skip it for compatibility + speed.
+    target; preview renders skip it for compatibility + speed. (Since wave C
+    "loudnorm on" means the export MASTER stage — `_export_master`: the
+    measured static gain + true-peak limiter, loudnorm only as a fallback.)
     """
     music_track = edl.get_track("music")
     vo_track = edl.get_track("vo")
@@ -297,15 +508,12 @@ def build_audio_mix(
     vo_placed = _on_render_clock(vo_clips, seams)
 
     if not music_placed and not vo_placed:
-        # Still apply loudnorm on the speech-only path if a target is set
-        # AND we're in export mode. Preview skips it (see docstring).
-        lufs = getattr(edl.canvas, "loudness_lufs", None)
-        if lufs is not None and apply_loudnorm:
-            return (
-                f"{main_audio_label}loudnorm=I={float(lufs):.1f}:TP=-1:LRA=11,"
-                f"aresample=48000:async=1{out_label}",
-                [], out_label,
-            )
+        # Still master the speech-only path when a target is set AND we're in
+        # export mode (QA-121: gain + true-peak limiter). Preview skips it
+        # (see docstring).
+        master = _export_master(edl, mixed=False) if apply_loudnorm else ""
+        if master:
+            return f"{main_audio_label}{master}{out_label}", [], out_label
         preview_norm = "" if apply_loudnorm else _preview_norm_chain(edl)
         if preview_norm:
             return f"{main_audio_label}{preview_norm.lstrip(',')}{out_label}", [], out_label
@@ -318,7 +526,7 @@ def build_audio_mix(
     music_labels: list[str] = []
     for c, win in music_placed:
         # Read source from `c.in` to `c.out`
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+        extra_inputs += [*input_seek(float(c.in_)), "-to", f"{c.out:.6f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[m{next_idx}]"
         parts.append(_audio_clip_filter(in_label, c, out, window=win))
@@ -327,7 +535,7 @@ def build_audio_mix(
 
     vo_labels: list[str] = []
     for c, win in vo_placed:
-        extra_inputs += ["-ss", f"{c.in_:.3f}", "-to", f"{c.out:.3f}", "-i", c.src]
+        extra_inputs += [*input_seek(float(c.in_)), "-to", f"{c.out:.6f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[vo{next_idx}]"
         parts.append(_audio_clip_filter(in_label, c, out, window=win))
@@ -397,32 +605,33 @@ def build_audio_mix(
         final_inputs.append(music_mix_label)
     if vo_mix_label:
         final_inputs.append(vo_mix_label)
-    # Optional loudness normalisation (single-pass loudnorm). Cheap on the
-    # CPU and gets us close to broadcast-style LUFS targets (-16 for Reels,
-    # -14 for YouTube). Two-pass is more accurate but doubles render cost.
-    # The trailing aresample pulls the rate back to 48k — loudnorm internally
-    # works at 192k and the AAC encoder otherwise persists 96k, which Safari
-    # and a couple of phone browsers reject inside mp4 containers.
-    lufs = getattr(edl.canvas, "loudness_lufs", None)
-    norm_chain = ""
-    if lufs is not None and apply_loudnorm:
-        norm_chain = (f",loudnorm=I={float(lufs):.1f}:TP=-1:LRA=11"
-                      f",aresample=48000:async=1")
+    # Export: the master stage (QA-121 — static gain from the measuring pass
+    # + a 4x-oversampled true-peak limiter; see `_export_master`). Its
+    # trailing aresample pulls the rate back to 48k — the AAC encoder would
+    # otherwise persist 96k, which Safari and a couple of phone browsers
+    # reject inside mp4 containers.
+    master = _export_master(edl, mixed=len(final_inputs) > 1) if apply_loudnorm else ""
     # QA-082: the preview's static loudness match (empty outside its scope).
     preview_norm = "" if apply_loudnorm else _preview_norm_chain(edl)
 
     if len(final_inputs) == 1:
-        if norm_chain or preview_norm:
-            # Apply loudnorm to the single source so we still hit the target.
-            parts.append(f"{final_inputs[0]}{(norm_chain or preview_norm).lstrip(',')}{out_label}")
+        tail = master or preview_norm.lstrip(",")
+        if tail:
+            parts.append(f"{final_inputs[0]}{tail}{out_label}")
             return ";".join(parts), extra_inputs, out_label
         return ";".join(parts), extra_inputs, final_inputs[0]
+    mix = (f"{''.join(final_inputs)}amix=inputs={len(final_inputs)}:duration=first"
+           f":dropout_transition=0:normalize=0")
+    if apply_loudnorm:
+        # The export's own ceiling is the master stage (empty only while
+        # pass 1 measures the raw mix).
+        parts.append(f"{mix}{',' + master if master else ''}{out_label}")
+        return ";".join(parts), extra_inputs, out_label
     parts.append(
-        f"{''.join(final_inputs)}amix=inputs={len(final_inputs)}:duration=first:dropout_transition=0:normalize=0"
         # `latency=1`: alimiter looks ahead by its 5 ms attack and, without
         # compensation, DELAYS everything it passes by that much — every
         # timeline with a music or VO lane played 5 ms late against the
         # picture (measured on a VO click placed on a flash; QA-002 lane).
-        f"{norm_chain},alimiter=limit=0.97:latency=1{preview_norm}{out_label}"
+        f"{mix},alimiter=limit=0.97:latency=1{preview_norm}{out_label}"
     )
     return ";".join(parts), extra_inputs, out_label

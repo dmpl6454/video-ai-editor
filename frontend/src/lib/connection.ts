@@ -44,8 +44,21 @@ export function isAbort(e: unknown): boolean {
  * envelope, so a 500 WITH a body is a real server error, not an outage.
  */
 export function isGatewayFailure(status: number, body: string): boolean {
-  if (status === 502 || status === 503 || status === 504) return true
+  if (status === 502 || status === 504) return true
+  // A 503 carrying the engine's own envelope is the engine ANSWERING — e.g.
+  // `ffmpeg_missing` (QA-108): the app is up, a dependency is not. Treating it
+  // as an outage would bury the install instruction under "disconnected".
+  if (status === 503) return !isEngineEnvelope(body)
   return status === 500 && body.trim() === ''
+}
+
+function isEngineEnvelope(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown } }
+    return typeof parsed?.error?.code === 'string'
+  } catch {
+    return false
+  }
 }
 
 let state: EngineState = 'online'

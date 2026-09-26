@@ -21,17 +21,21 @@ export function brainCopy(row: BrainRow): BrainCopy {
   if (row.available) {
     if (row.id === 'local_model') return { detail: 'Ready on this Mac.', fix: null }
     if (row.id === 'apple_intelligence') return { detail: 'Ready on this Mac.', fix: null }
-    if (row.id === 'claude') return { detail: 'Ready. Uses the internet.', fix: null }
+    // A key is present — not proof Anthropic accepts it (Settings › Test key).
+    if (row.id === 'claude') return { detail: 'Key added. Uses the internet.', fix: null }
     return { detail: 'Ready.', fix: null }
   }
   switch (row.id) {
     case 'claude':
-      if (row.action === 'add_key') return { detail: 'Not set up.', fix: 'Claude needs an Anthropic API key, which isn’t set up on this Mac.' }
+      // Settings › Claude stores the key in the Keychain (QA-063-SETTINGS).
+      if (row.action === 'add_key') return { detail: 'Not set up.', fix: 'Claude needs an Anthropic API key. Add yours in Settings.' }
       return { detail: 'Turned off on this Mac.', fix: null }
     case 'local_model':
       if (row.action === 'download') return { detail: 'The model isn’t downloaded yet.', fix: null }
       if (/packaged app/.test(d)) return { detail: 'Not included in this version of the app.', fix: null }
-      if (row.action === 'install') return { detail: 'Not installed on this Mac.', fix: null }
+      // The engine that runs the model is missing — downloaded models included
+      // (QA-063: "not installed" read as if the cached Qwen weights were absent).
+      if (row.action === 'install') return { detail: 'The local model engine isn’t installed, so the model can’t run here.', fix: null }
       if (/RAM/.test(d)) return { detail: d.replace(/^needs/, 'Needs'), fix: null }
       if (/Apple silicon/.test(d)) return { detail: 'Needs a Mac with Apple silicon.', fix: null }
       return { detail: 'Not available on this Mac.', fix: null }
@@ -46,4 +50,11 @@ export function brainCopy(row: BrainRow): BrainCopy {
     default:
       return { detail: 'Not available.', fix: null }
   }
+}
+
+/** A brain row's state in one word, the same in the popover and Settings
+ *  (components/BrainRows): answered the last run, can answer, or can't. */
+export function brainStatus(row: BrainRow, answered?: string | null): string {
+  if (answered && answered === row.id) return 'Answered'
+  return row.available ? 'Available' : 'Not available'
 }

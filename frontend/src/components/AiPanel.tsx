@@ -8,6 +8,7 @@ import { isCancelMessage } from '../lib/dispatchErrors'
 import { AiToolCard } from './AiToolCard'
 import './aiPanel.css'
 import { featureStatus } from '../lib/featureStatus'
+import { Disclosure } from './Disclosure'
 
 // The AI tab: every chat/MCP-only tool as a searchable, grouped card list.
 // Schemas come from /api/tools, gates from /api/features (lib/aiRuns.ts owns
@@ -80,7 +81,7 @@ export function AiPanel({ active = true }: { active?: boolean }) {
     const fail = (message: string) =>
       runs.setRun(tool, { status: 'error', message, cancelled: isCancelMessage(message) })
     const sid = useStore.getState().sessionId
-    if (!sid) { fail('No session yet'); return }
+    if (!sid) { fail('Open a project first'); return }
     let finalArgs: Args
     try {
       finalArgs = await uploadFileArgs(sid, args)
@@ -105,7 +106,7 @@ export function AiPanel({ active = true }: { active?: boolean }) {
       // dispatch() returns null WITHOUT its catch when the session vanished
       // between the check above and the call (store.ts) — nothing fired
       // onError, so name it here rather than spin forever.
-      fail('No session yet')
+      fail('Open a project first')
     }
   }, [])
 
@@ -132,16 +133,15 @@ export function AiPanel({ active = true }: { active?: boolean }) {
         <div className="ai-status" role="status">
           <span className="ai-status-text">{status}</span>
           {fs && fs.missing.length > 0 && (
-            <details className="ai-status-details">
-              <summary>Details</summary>
+            <Disclosure className="ai-status-details" summary="Details">
               <ul>{fs.missing.map((m) => <li key={m}>{m}</li>)}</ul>
-            </details>
+            </Disclosure>
           )}
           <button
             type="button"
             className="ai-refresh"
             disabled={loading}
-            title="Re-probe which optional features are installed (after a `uv sync`)"
+            title="Check again which optional features this Mac has"
             onClick={() => { void loadCatalog({ refresh: true }) }}
           >
             {loading ? 'Checking…' : 'Refresh'}
@@ -151,7 +151,7 @@ export function AiPanel({ active = true }: { active?: boolean }) {
 
       {loadError && (
         <div className="ai-banner" role="alert">
-          <b>AI tools unavailable.</b> The backend didn’t answer <code>/api/tools</code>: {loadError}
+          <b>AI tools unavailable.</b> The editor engine didn’t list its tools: {loadError}
           <button type="button" onClick={() => { void loadCatalog({ refresh: true }) }}>Retry</button>
         </div>
       )}
@@ -161,7 +161,7 @@ export function AiPanel({ active = true }: { active?: boolean }) {
         const id = `ai-group-${g.group.replace(/\W+/g, '-').toLowerCase()}`
         return (
           <section key={g.group} className="ai-group" aria-labelledby={id}>
-            <h3 id={id}>{g.group}</h3>
+            <h3 id={id} className="section-label">{g.group}</h3>
             {g.entries.map((e) => (
               <AiToolCard key={e.tool} entry={e} schema={toolsByName.get(e.tool)!} onRun={runTool} />
             ))}

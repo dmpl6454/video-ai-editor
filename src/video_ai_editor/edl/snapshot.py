@@ -197,8 +197,15 @@ class EDLStore:
                            "fresh log", type(e).__name__, e, self.dir.name)
         return OpsLog()
 
-    def commit(self, tool: str, args: dict, summary: str, by: str = "user") -> None:
-        """Persist current EDL after a mutation; record op; manage undo snapshots."""
+    def commit(self, tool: str, args: dict, summary: str, by: str = "user", *,
+               record_unchanged: bool = False) -> None:
+        """Persist current EDL after a mutation; record op; manage undo snapshots.
+
+        An unchanged tree records nothing (QA-130) unless `record_unchanged`:
+        the one caller that sets it is the Prompt Editor's
+        make_shorts(save_as_sessions) run, whose op is the only provenance
+        record of the child sessions it created.
+        """
         if self._batch_depth:
             # Inside batch(): keep the duration honest for the next sub-tool's
             # timeline math, but no snapshot, no op, no redo clear — the
@@ -208,6 +215,15 @@ class EDLStore:
         prev_hash = self._last_hash()
         self.edl.recompute_duration()
         new_hash = self.edl.hash()
+        if prev_hash and new_hash == prev_hash and not record_unchanged:
+            # QA-130: nothing changed (a second split at the same playhead, a
+            # clip dropped back on its own start, a value set to what it
+            # already was). Recording it gave History a step whose ⌘Z
+            # restored an identical timeline — a "dead" undo — and cleared
+            # Redo for no reason. The hash covers the whole tree, so equal
+            # hashes mean equal state; `op` is then null in the /dispatch
+            # answer, which is how callers tell "no change".
+            return None
 
         payload = self.edl.to_json()
         self._assert_reloadable(payload, tool)

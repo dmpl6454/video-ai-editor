@@ -96,6 +96,38 @@ class _Run:
     width: float = 0.0
     font: "ShapedFont | None" = None   # the face that shaped it (None = the caller's)
     script: str | None = None          # ISO 15924 tag it was shaped as
+    # Letter spacing (QA-078): the run's width includes `tracking` after each
+    # of its grapheme clusters; `tracked_line_width` drops the line's last one.
+    tracked: bool = False
+
+
+#: Joiners and variation selectors stay with the cluster before them.
+_CLUSTER_GLUE = frozenset("\u200d\ufe0e\ufe0f")
+
+
+def grapheme_clusters(text: str) -> list[str]:
+    """User-perceived characters of a SIMPLE-script string: a base character
+    with its combining marks, variation selectors and ZWJ-joined partners.
+    Complex scripts never reach this (they are not tracked). Mirrored by
+    `graphemeClusters` in frontend/src/lib/textLayout.ts."""
+    import unicodedata as _ud
+    out: list[str] = []
+    for ch in text:
+        if out and (_ud.category(ch).startswith("M") or ch in _CLUSTER_GLUE
+                    or out[-1].endswith("\u200d")):
+            out[-1] += ch
+        else:
+            out.append(ch)
+    return out
+
+
+def tracked_line_width(runs: "list[_Run]", tracking: float) -> float:
+    """Rule 8 of the shared layout model: a line's width is its runs' widths
+    less the spacing after its LAST cluster (tracking sits BETWEEN clusters)."""
+    total = sum(r.width for r in runs)
+    if tracking and runs and runs[-1].tracked:
+        total -= tracking
+    return total
 
 
 # ---- script itemisation ------------------------------------------------------
@@ -286,12 +318,21 @@ class ShapedFont:
         return tuple(glyphs), pen
 
     def runs(self, line: str, split_emoji: Callable[[str], list[tuple[str, str]]],
-             emoji_box: float) -> list[_Run]:
+             emoji_box: float, tracking: float = 0.0) -> list[_Run]:
         """The line as runs in VISUAL (left-to-right) order. Emoji clusters are
         their own runs of fixed `emoji_box` width, placed by the bidi levels of
-        the characters around them like any neutral."""
+        the characters around them like any neutral.
+
+        `tracking` (canvas px, QA-078): every grapheme cluster of a simple-
+        script run, and every emoji, is followed by that much extra advance;
+        each cluster is shaped on its own then, exactly as the preview draws
+        it (no kerning or ligature across a spaced pair — CSS drops them too).
+        A complex-script run is never spaced, and a right-to-left line not at
+        all: both sides agree on that rule rather than on the browser's."""
         logical: list[tuple[int, str, str]] = []   # (level, kind, text)
         levels = _levels(line) if line else []
+        if tracking and line and _bidi.get_base_level(line) % 2:
+            tracking = 0.0
         # Group consecutive characters by (kind, level). Emoji kind comes from
         # the caller's tokenizer so preview and export split identically.
         pos = 0
@@ -315,20 +356,31 @@ class ShapedFont:
         for lv, kind, chunk in logical:
             rtl = bool(lv % 2)
             if kind == "emoji":
-                out.append((lv, _Run("emoji", chunk, rtl, (), float(emoji_box))))
+                out.append((lv, _Run("emoji", chunk, rtl, (), float(emoji_box) + tracking,
+                                     tracked=bool(tracking))))
                 continue
             # One script per run (see _split_scripts), appended in LOGICAL
             # order at the chunk's level — _visual_order's rule L2 reverses a
             # right-to-left level's runs, exactly as it does around an emoji.
             for script, piece in _split_scripts(chunk):
                 face = self.face_for(script, piece)
+                if tracking and not rtl and not needs_shaping(piece):
+                    glyphs_l: list = []
+                    pen = 0.0
+                    for cl in grapheme_clusters(piece):
+                        g, w = face._shape(cl, False, script)
+                        glyphs_l.extend((gid, gx + pen, gy) for gid, gx, gy in g)
+                        pen += w + tracking
+                    out.append((lv, _Run("text", piece, rtl, tuple(glyphs_l), pen,
+                                         None if face is self else face, script, tracked=True)))
+                    continue
                 glyphs, width = face._shape(piece, rtl, script)
                 out.append((lv, _Run("text", piece, rtl, glyphs, width,
                                      None if face is self else face, script)))
         return _visual_order(out)  # type: ignore[return-value]
 
-    def width(self, line: str, split_emoji, emoji_box: float) -> float:
-        return sum(r.width for r in self.runs(line, split_emoji, emoji_box))
+    def width(self, line: str, split_emoji, emoji_box: float, tracking: float = 0.0) -> float:
+        return tracked_line_width(self.runs(line, split_emoji, emoji_box, tracking), tracking)
 
     # -- rasterising -------------------------------------------------------
     #: Sub-pixel pen positions are snapped to this many steps per pixel so a
@@ -416,5 +468,5 @@ def draw_runs(img: Image.Image, font: ShapedFont, runs: list[_Run], x: float,
 
 
 __all__ = ["ShapingUnavailable", "ShapedFont", "needs_shaping", "available",
-           "require", "draw_runs", "script_of"]
+           "require", "draw_runs", "script_of", "grapheme_clusters", "tracked_line_width"]
 

@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { Dialog } from './Dialog'
+import { ETA_START, etaLeft, etaText, sampleEta, type EtaState } from '../lib/exportEta'
 
 /**
  * Export progress modal. Shows while a background export job runs: a live
- * progress bar (real ffmpeg progress from /api/jobs/:id), an ETA derived from
- * elapsed/progress, and a Cancel button. Auto-download + success toast happen
+ * progress bar (real ffmpeg progress from /api/jobs/:id), a time-left estimate
+ * from the current rate (lib/exportEta, QA-097), and a Cancel button. Auto-download + success toast happen
  * in the store's doExport on completion; this just visualises the job.
  */
 export function ExportModal() {
@@ -16,27 +17,34 @@ export function ExportModal() {
 
   const [elapsed, setElapsed] = useState(0)
   const [cancelling, setCancelling] = useState(false)
+  const t0Ref = useRef(0)
+  const [eta, setEta] = useState<EtaState>(ETA_START)
 
   useEffect(() => {
     if (!exporting) {
       setElapsed(0)
       setCancelling(false)
+      setEta(ETA_START)
       return
     }
     const t0 = Date.now()
+    t0Ref.current = t0
     const iv = window.setInterval(() => setElapsed((Date.now() - t0) / 1000), 250)
     return () => window.clearInterval(iv)
   }, [exporting])
+
+  // Every progress poll is one sample of the rate (lib/exportEta).
+  useEffect(() => {
+    if (!exporting || !t0Ref.current) return
+    setEta((s) => sampleEta(s, (Date.now() - t0Ref.current) / 1000, progress))
+  }, [exporting, progress])
 
   if (!exporting) return null
 
   const pct = Math.round(progress * 100)
   const indeterminate = pct <= 0
-  // ETA only becomes meaningful once a little real progress has landed.
-  const eta =
-    progress > 0.02 && progress < 1
-      ? Math.max(0, Math.round((elapsed / progress) * (1 - progress)))
-      : null
+  // Silent until 10 % and 3 s, then the current rate, counted down (QA-097).
+  const left = etaText(etaLeft(eta, elapsed))
   // 'reconnecting' (QA-034): the engine stopped answering the status poll;
   // the store waits a bounded time, and Cancel still closes at once.
   const phase =
@@ -74,7 +82,7 @@ export function ExportModal() {
       <div className="export-modal-meta">
         <span className="export-pct">{indeterminate ? '…' : `${pct}%`}</span>
         <span className="export-eta">
-          {eta != null ? `~${eta}s remaining` : `${elapsed.toFixed(0)}s elapsed`}
+          {left || `${elapsed.toFixed(0)} s elapsed`}
         </span>
       </div>
     </Dialog>

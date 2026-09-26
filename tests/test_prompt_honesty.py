@@ -263,7 +263,7 @@ def test_the_router_drops_a_model_plan_with_an_unfilled_placeholder():
     f = TimelineFacts.minimal()
     full = P.plan("apply my brand kit @acme and add a hook", f)
     brains = {"recipes": _recipes_at(0.6, full), "apple_intelligence": _FakeFM(_brand_plan())}
-    routed = router.plan(BrainRequest(prompt="x", facts=f, recipes=R.cards()),
+    routed = router.plan(BrainRequest(prompt="x the brand", facts=f, recipes=R.cards()),
                          order=("recipes", "apple_intelligence"), brains=brains,
                          validate=V.validate_plan, prefetch=False)
     assert routed.brain == "recipes" and routed.plan is not None

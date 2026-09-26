@@ -17,19 +17,21 @@ import { useState } from 'react'
 import { useStore } from '../store'
 import { toast } from '../toast'
 import { usePromptStore, isBusy } from '../lib/promptStore'
-import { brainLabel, humanBytes, humanDuration, type StepRow, type VerifyCheck } from '../lib/promptEvents'
+import { brainLabel, createdProjects, humanBytes, humanDuration, type ChildRun, type StepRow, type VerifyCheck } from '../lib/promptEvents'
+import { errorMessage } from '../store'
 import { checksHeadline, checkValues } from '../lib/checkProse'
 import { editorProse, toolTitle } from '../lib/opLabels'
+import { Icon, type IconName } from './Icon'
 
 const pad2 = (n: number) => String(n + 1).padStart(2, '0')
 
-function glyph(s: StepRow): string {
+function glyph(s: StepRow): IconName {
   switch (s.status) {
-    case 'ok': return '✓'
-    case 'failed': return '✗'
-    case 'skipped': return '–'
-    case 'cancelled': return '–'
-    default: return '…'
+    case 'ok': return 'check'
+    case 'failed': return 'close'
+    case 'skipped': return 'minus'
+    case 'cancelled': return 'minus'
+    default: return 'more'
   }
 }
 
@@ -89,6 +91,7 @@ export function PromptRunLog() {
   const cancelling = usePromptStore((s) => s.cancelling)
   const dismiss = usePromptStore((s) => s.dismiss)
   const runId = usePromptStore((s) => s.runId)
+  const children = usePromptStore((s) => s.children)
   const dispatch = useStore((s) => s.dispatch)
   const [copied, setCopied] = useState(false)
   // A FINISHED run folds to one summary row so the log stops taking the
@@ -98,6 +101,8 @@ export function PromptRunLog() {
   const [openFor, setOpenFor] = useState<string | null>(null)
 
   const busy = isBusy(status)
+  // Projects the run created (a shorts run): each one gets an Open button.
+  const projects = createdProjects({ steps, children })
   const title = plan?.title || plan?.intent || prompt || 'Prompt'
   const via = brain ? (brain.label || brainLabel(brain.brain)) : plan ? brainLabel(plan.brain) : null
   const contentBy = plan?.content_brain && plan.content_brain !== plan.brain ? brainLabel(plan.content_brain) : null
@@ -120,11 +125,11 @@ export function PromptRunLog() {
   const collapsed = status === 'done' && openFor !== runKey
   if (collapsed) {
     const chip = collapsedSummary({ steps, verify, reply, headline: checksHeadline(verify) })
-    const g = chip.tone === 'fail' ? '✗' : chip.tone === 'info' ? 'i' : '✓'
+    const g: IconName = chip.tone === 'fail' ? 'close' : chip.tone === 'info' ? 'info' : 'check'
     return (
       <section className="prompt-log is-collapsed" aria-label="Prompt run">
         <div className="prompt-log-summary">
-          <span className={`g is-${chip.tone}`} aria-hidden="true">{g}</span>
+          <span className={`g is-${chip.tone}`} aria-hidden="true"><Icon name={g} /></span>
           <span className="prompt-log-title">{title}</span>
           <span className="sum">{chip.text}</span>
           <span className="spacer" />
@@ -135,6 +140,7 @@ export function PromptRunLog() {
           )}
           <button type="button" className="ghost" onClick={dismiss}>Clear</button>
         </div>
+        <CreatedProjects items={projects} />
       </section>
     )
   }
@@ -167,7 +173,7 @@ export function PromptRunLog() {
             return (
               <li key={`${s.index}-${s.tool}`} className={cls}>
                 <span className="n">{verifyRow ? '··' : pad2(s.index)}</span>
-                <span className="g" aria-hidden="true">{glyph(s)}</span>
+                <span className="g" aria-hidden="true"><Icon name={glyph(s)} /></span>
                 {/* The tool id and the planner's rationale are internal
                     (QA-101): hover only, never the visible label. */}
                 <span className="tool" title={[plan?.steps?.[s.index]?.why, s.tool].filter(Boolean).join(' · ')}>{stepLabel(s)}</span>
@@ -209,6 +215,7 @@ export function PromptRunLog() {
       )}
 
       {reply && <p className="prompt-reply">{editorProse(reply)}</p>}
+      {!busy && <CreatedProjects items={projects} />}
       {/* QA-064: a cancel is the user's own choice — a neutral line, never a
           red "failed". While the current step finishes, say it is stopping. */}
       {cancelling && busy && (
@@ -239,15 +246,42 @@ export function PromptRunLog() {
   )
 }
 
+/** One Open button per project the run created (QA-068) — the reply used to
+ *  list raw `s_…` ids with no way to get to them from here. */
+function CreatedProjects({ items }: { items: readonly ChildRun[] }) {
+  const openSession = useStore((s) => s.openSession)
+  const current = useStore((s) => s.sessionId)
+  if (!items.length) return null
+  const open = (id: string, name: string) => {
+    openSession(id).catch((e) => toast.error(`Couldn't open “${name}”: ${errorMessage(e)}`))
+  }
+  return (
+    <ul className="prompt-projects" aria-label="New projects">
+      {items.map((c, i) => {
+        const name = c.name ?? `Short ${i + 1}`
+        const here = c.session === current
+        return (
+          <li key={c.session}>
+            <span className="name">{name}</span>
+            {c.status === 'failed' && <span className="note">not finished</span>}
+            <button type="button" disabled={here} aria-label={here ? `${name} is open` : `Open ${name}`}
+                    onClick={() => open(c.session, name)}>{here ? 'Open now' : 'Open'}</button>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 function CheckRow({ c }: { c: VerifyCheck }) {
   const state = c.pass === true ? 'pass' : c.pass === false ? 'fail' : 'skip'
-  const g = c.pass === true ? '✓' : c.pass === false ? '✗' : '—'
+  const g: IconName = c.pass === true ? 'check' : c.pass === false ? 'close' : 'minus'
   const label = c.pass === true ? 'passed' : c.pass === false ? 'failed' : 'not measured'
   // Prose, never JSON (lib/checkProse): one wrapping line under the label.
   const values = checkValues(c)
   return (
     <div className={`prompt-check is-${state}`} role="row">
-      <span className="g" aria-hidden="true">{g}</span>
+      <span className="g" aria-hidden="true"><Icon name={g} /></span>
       <span className="human" title={c.check}>
         {c.human || c.check.replace(/_/g, ' ')}
         {c.headline === false && <small>info</small>}

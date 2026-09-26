@@ -12,7 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Iterable
 
-from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from .. import config as _config
+from ..config import CLAUDE_MODEL
 from ..ingest.scenes import detect_shots, Shot
 from ..ingest.probe import probe
 from .. import platformutil as _pu
@@ -61,7 +62,8 @@ def describe_shot(src: Path, shot: Shot, cache_dir: Path) -> str:
     desc_path = cache_dir / f"desc_{key}.txt"
     if desc_path.exists():
         return desc_path.read_text(encoding="utf-8")
-    if not ANTHROPIC_API_KEY:
+    api_key = _config.anthropic_api_key()   # env, else the Settings Keychain key
+    if not api_key:
         return ""
 
     # Pull a frame at the middle of the shot
@@ -72,7 +74,7 @@ def describe_shot(src: Path, shot: Shot, cache_dir: Path) -> str:
         return ""
 
     from anthropic import Anthropic
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = Anthropic(api_key=api_key)
     img_b64 = base64.standard_b64encode(frame.read_bytes()).decode()
     resp = client.messages.create(
         model=CLAUDE_MODEL,

@@ -129,6 +129,8 @@ export interface StepRow {
   args?: Record<string, unknown>; result?: unknown
 }
 export interface ClarifyState { token: string; planId: string; questions: NeedsInput[]; expiresInS: number }
+/** A project a shorts run created and finished (`finish_short` records, QA-068). */
+export interface ChildRun { session: string; name: string | null; status: string }
 
 export interface PromptRunState {
   status: PromptStatus
@@ -143,11 +145,13 @@ export interface PromptRunState {
   lastError: string | null
   opSeen: boolean
   unknownEvents: number
+  /** Projects the run created and finished, in order (QA-068: Open buttons). */
+  children: ChildRun[]
 }
 
 export const EMPTY_RUN: PromptRunState = {
   status: 'idle', brain: null, attempts: [], plan: null, steps: [], verify: null,
-  reply: '', clarify: null, lastError: null, opSeen: false, unknownEvents: 0,
+  reply: '', clarify: null, lastError: null, opSeen: false, unknownEvents: 0, children: [],
 }
 
 /** The state a fresh turn starts from: everything cleared, status `planning`. */
@@ -186,6 +190,41 @@ function patchStep(steps: StepRow[], index: number | null, tool: string, patch: 
   }
   if (i === -1) return steps
   return steps.map((s, j) => (j === i ? { ...s, ...patch } : s))
+}
+
+const FINISH_SHORT_TOOL = 'finish_short'
+
+function upsertChild(children: readonly ChildRun[] | undefined, result: unknown): ChildRun[] {
+  const list = [...(children ?? [])]
+  const r = (result && typeof result === 'object' ? result : {}) as { session?: unknown; name?: unknown; status?: unknown }
+  if (typeof r.session !== 'string' || !r.session) return list
+  const row: ChildRun = {
+    session: r.session,
+    name: typeof r.name === 'string' && r.name.trim() ? r.name.trim() : null,
+    status: typeof r.status === 'string' ? r.status : 'ok',
+  }
+  const i = list.findIndex((c) => c.session === row.session)
+  if (i === -1) list.push(row)
+  else list[i] = row
+  return list
+}
+
+/**
+ * The projects a run created, in order, each with a name when one is known:
+ * the finished shorts first (their records carry the name), then any other
+ * session a step's result reports in `new_sessions` (a shorts run that was
+ * not finished). The run log renders one Open button per entry (QA-068).
+ */
+export function createdProjects(state: Pick<PromptRunState, 'steps' | 'children'>): ChildRun[] {
+  const out: ChildRun[] = [...(state.children ?? [])]
+  for (const s of state.steps) {
+    const ids = (s.result && typeof s.result === 'object' ? (s.result as { new_sessions?: unknown }).new_sessions : null)
+    if (!Array.isArray(ids)) continue
+    for (const id of ids) {
+      if (typeof id === 'string' && id && !out.some((c) => c.session === id)) out.push({ session: id, name: null, status: 'ok' })
+    }
+  }
+  return out
 }
 
 /**
@@ -233,6 +272,9 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
     }
     case 'tool_result': {
       const e = evt as Extract<PromptEvent, { type: 'tool_result' }>
+      // A finished short (executor._finish_children) is not a plan step: it
+      // becomes an Open button, by its name (QA-068).
+      if (e.name === FINISH_SHORT_TOOL) return { ...state, children: upsertChild(state.children, e.result) }
       return { ...state, steps: patchStep(state.steps, stepIndexFromId(e.id), e.name, { result: e.result }) }
     }
     case 'verify': {

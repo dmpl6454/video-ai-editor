@@ -20,6 +20,10 @@ export interface UploadItem {
   stageStartedAt: number
   /** Whether this import also lands on the timeline (QA-010 import-only). */
   addToTimeline: boolean
+  /** A lane drop's target lane and layout time — where the timeline draws
+   *  the in-flight ghost clip (lib/uploadGhosts). Absent: the default place. */
+  lane?: string | null
+  laneStart?: number | null
   error?: string
 }
 

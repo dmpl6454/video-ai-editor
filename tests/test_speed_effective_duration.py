@@ -179,20 +179,20 @@ def test_set_speed_rejected_on_v2_pip(tmp_path: Path):
     assert v2.clips[0].speed is None, "rejected call must not commit the field"
 
 
-def test_set_speed_rejected_on_audio_lanes(tmp_path: Path):
-    """set_speed on audio/music/vo clips must ValueError: audio_mix applies
-    no atempo, so a committed speed field never changes playback but DOES
-    shrink effective_duration/edl.duration (live repro: a 10s music clip
-    'became' 5s on the timeline while still playing all 10s)."""
+def test_set_speed_on_an_audio_lane_retimes_its_footprint(tmp_path: Path):
+    """QA-086 (wave C): set_speed on a music clip used to be refused because
+    audio_mix applied no atempo. The audio lanes now retime with the v1 rule
+    (render: tests/test_c5_render_audio.py measures the clicks), so the
+    footprint and edl.duration follow the speed like v1's do."""
     s = _fast_store(tmp_path)
     music = s.edl.get_track("music")
     music.clips.append(Clip(id="c_music", src="/song.mp3", in_=0, out=10, start=0.0))
     s.commit("seed", {}, "seed")
-    with pytest.raises(ValueError, match="audio lane"):
-        dispatch(s, "set_speed", {"clip_id": "c_music", "factor": 2.0})
+    dispatch(s, "set_speed", {"clip_id": "c_music", "factor": 2.0})
     c = s.edl.get_clip("c_music")[1]
-    assert c.speed is None
-    assert s.edl.duration == pytest.approx(10.0)
+    assert c.speed == 2.0
+    assert c.effective_duration == pytest.approx(5.0)
+    assert s.edl.duration == pytest.approx(5.0)
 
 
 def test_ripple_delete_sped_clip_shifts_overlays_by_effective_duration(tmp_path: Path):

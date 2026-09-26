@@ -192,6 +192,38 @@ export const LOUDNESS_TARGETS: readonly { lufs: number | null; label: string }[]
 export const AUDIO_KBPS = 192
 export const AUDIO_DESCRIPTION = 'AAC · stereo · 48 kHz · 192 kbps'
 
+// ---- format (QA-100: audio-only export) -------------------------------------
+
+/** What POST /export writes: a video file, or the timeline's sound alone
+ *  (compositor.AUDIO_CONTAINERS) — mastered to the same loudness target and
+ *  −1 dBTP ceiling, with no picture rendered at all. */
+export type ExportContainer = 'mp4' | 'mov' | 'm4a' | 'wav'
+
+export const EXPORT_FORMATS: readonly { value: ExportContainer; label: string; title: string }[] = [
+  { value: 'mp4', label: 'MP4', title: 'Video — H.264 + AAC in MP4, plays everywhere' },
+  { value: 'mov', label: 'MOV', title: 'Video — H.264 + AAC in QuickTime MOV' },
+  { value: 'm4a', label: 'Audio M4A', title: 'The sound only — AAC in M4A (podcasts, voice-overs)' },
+  { value: 'wav', label: 'Audio WAV', title: 'The sound only — uncompressed 24-bit WAV (hand-off to a mixer)' },
+]
+
+export function isAudioOnly(c: ExportContainer): boolean {
+  return c === 'm4a' || c === 'wav'
+}
+
+/** 24-bit stereo PCM at 48 kHz (compositor `_AUDIO_EXPORT_ARGS['wav']`). */
+export const WAV_KBPS = (48000 * 2 * 24) / 1000
+
+/** The audio row of the dialog for a format. */
+export function audioDescription(c: ExportContainer): string {
+  return c === 'wav' ? 'WAV · PCM 24-bit · stereo · 48 kHz' : AUDIO_DESCRIPTION
+}
+
+/** Estimated size of an audio-only export: its audio stream alone. */
+export function estimateAudioOnlyBytes(c: ExportContainer, seconds: number): number {
+  const kbps = c === 'wav' ? WAV_KBPS : AUDIO_KBPS
+  return Math.round((kbps * 1000 / 8) * Math.max(0, seconds))
+}
+
 /** Bits per pixel per frame the Mac's quality-mode export lands near.
  *  Measured with h264_videotoolbox at the -q:v each crf maps to
  *  (compositor._crf_to_videotoolbox_qv: 18→90, 23→78, 28→65) on the bench
@@ -224,9 +256,9 @@ export function estimateBytes(videoKbps: number, seconds: number): number {
 
 /** A download name from the project name: no path characters, the right
  *  extension, never empty. */
-export function exportFileName(name: string | null | undefined, container: 'mp4' | 'mov'): string {
+export function exportFileName(name: string | null | undefined, container: ExportContainer): string {
   // Path separators, the characters a filesystem refuses, and control characters.
-  const base = [...(name ?? '').replace(/\.(mp4|mov)$/i, '')]
+  const base = [...(name ?? '').replace(/\.(mp4|mov|m4a|wav)$/i, '')]
     .map((ch) => (ch.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(ch) ? ' ' : ch)).join('')
     .replace(/\s+/g, ' ').trim().slice(0, 120) || 'export'
   return `${base}.${container}`

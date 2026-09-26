@@ -60,9 +60,24 @@ const A_ON_TOP = new Set<TransitionPreview['kind']>([
   'iris-close', 'doors-close', 'curtain-close', 'reveal', 'squeeze', 'wind', 'blur',
 ])
 
+// A crossfade's still (QA-119): A on the left, B on the right, joined by a
+// ramp as wide as the blend lasts — so Fast Fade (almost a cut), Fade and Slow
+// Fade (lingers) read apart at rest, the way a crossfade reads on a timeline.
+const RAMP = { fast: '8%', normal: '45%', slow: '85%' } as const
+const PACE_DUR = { fast: '0.8s', normal: '1.3s', slow: '2.2s' } as const
+
+// A soft edge's gradient direction per slide direction: the edge travels the
+// way the look is named ("smoothleft" moves right-to-left, like wipe left).
+const SOFT_EDGE: Record<string, string> = { left: 'to left', right: 'to right', up: 'to top', down: 'to bottom' }
+
 /** The `--tp-*` variables the tile's CSS animations read. Total: never empty. */
 export function previewStyle(p: TransitionPreview): PreviewVars {
-  const vars: PreviewVars = { '--tp-dur': p.kind === 'whip' || p.kind === 'glitch' ? '0.8s' : '1.3s' }
+  const pace = p.pace ?? 'normal'
+  const vars: PreviewVars = {
+    '--tp-dur': p.kind === 'whip' || p.kind === 'glitch' ? '0.8s' : p.kind === 'fade' ? PACE_DUR[pace] : '1.3s',
+  }
+  if (p.kind === 'fade') vars['--ramp'] = RAMP[pace]
+  if (p.kind === 'smooth') vars['--edge-dir'] = SOFT_EDGE[p.dir ?? 'left'] ?? 'to left'
   const clip = clipEndpoints(p.kind, p.dir)
   if (clip) { vars['--cp-from'] = clip[0]; vars['--cp-to'] = clip[1] }
   if (['slide', 'cover', 'reveal', 'whip', 'wind', 'slice'].includes(p.kind)) {
@@ -82,6 +97,7 @@ export function previewStyle(p: TransitionPreview): PreviewVars {
 export function previewClass(p: TransitionPreview): string {
   const parts = ['tp-prev', `kind-${p.kind}`]
   if (p.dir) parts.push(`dir-${p.dir}`)
+  if (p.pace) parts.push(`pace-${p.pace}`)
   if (A_ON_TOP.has(p.kind)) parts.push('a-top')
   return parts.join(' ')
 }

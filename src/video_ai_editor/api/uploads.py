@@ -24,11 +24,24 @@ Three defences, in the order they fire:
 The limit is echoed in `/api/health` and in `/api/pair/whoami` so the phone's
 Import screen can refuse a too-large pick locally, before spending the user's
 time and battery pushing bytes at a server that will say no.
+
+WHO THE FIXED CAP IS FOR (QA-114). The 4 GiB cap exists for bodies arriving
+from ANOTHER device — a paired phone or a LAN peer. It used to apply to every
+import, so a desktop user dragging in a 6 GB ProRes take from their own disk
+was refused, and told to "raise VAI_MAX_UPLOAD_BYTES and restart" — an
+instruction for a developer, not for someone using a Mac app. A request from
+this machine's own editor (loopback, and not a hosted deployment that sets
+VAI_RESTRICT_PATHS) is now bounded by FREE DISK SPACE instead: the same
+`FREE_SPACE_HEADROOM` rule the precondition uses, enforced up front from the
+declared size and again mid-stream. `VAI_MAX_UPLOAD_BYTES`, when an operator
+sets it, still applies to everyone; it is documented for developers here and
+in CLAUDE.md, and never named in a message a user reads.
 """
 from __future__ import annotations
 
 import os
 import shutil
+from contextvars import ContextVar
 from pathlib import Path
 
 from fastapi import HTTPException, Request, UploadFile
@@ -48,31 +61,121 @@ FREE_SPACE_HEADROOM = 2.5
 _CHUNK = 1 << 20
 
 
-def max_upload_bytes() -> int:
-    """Read live, not captured at import, so a user who sets the variable in
-    `.env` and restarts gets it without a rebuild — and so the tests can move
-    it without reloading the module graph."""
+def _operator_cap() -> int | None:
+    """`VAI_MAX_UPLOAD_BYTES` when an operator set a usable value, else None.
+    Read live, not captured at import, so a value set in `.env` takes effect on
+    the next launch without a rebuild — and so the tests can move it without
+    reloading the module graph."""
     raw = os.environ.get("VAI_MAX_UPLOAD_BYTES", "").strip()
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            return DEFAULT_MAX_UPLOAD_BYTES
-        if value > 0:
-            return value
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def max_upload_bytes() -> int:
+    """The fixed cap for a body from ANOTHER device (phone / LAN peer): the
+    operator's value, else `DEFAULT_MAX_UPLOAD_BYTES`. What `/api/pair/whoami`
+    advertises to the phone."""
+    return _operator_cap() or DEFAULT_MAX_UPLOAD_BYTES
+
+
+def _is_local_desktop(request: Request) -> bool:
+    """Is this the Mac's own editor talking to its own engine?
+
+    Loopback (the same rule auth uses — `auth._is_loopback`), and not a hosted
+    deployment: a server behind a reverse proxy sees every client as loopback,
+    and such deployments are the ones that set `VAI_RESTRICT_PATHS`.
+    """
+    from .. import config
+    from .auth import _is_loopback
+    return _is_loopback(request) and not config.RESTRICT_PATHS
+
+
+def free_space_limit(dest_dir: Path | None = None) -> int | None:
+    """The largest import the volume can take with `FREE_SPACE_HEADROOM` to
+    spare (a normalised copy is written beside the original). None when the
+    volume cannot be stat-ed."""
+    from .. import config
+    target = Path(dest_dir) if dest_dir is not None else Path(config.WORKDIR)
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    try:
+        free = shutil.disk_usage(target).free
+    except OSError:
+        return None
+    return int(free / FREE_SPACE_HEADROOM)
+
+
+def upload_limit_for(request: Request) -> int | None:
+    """The fixed byte cap for this request, or None when the only bound is free
+    disk space (the desktop's own imports, QA-114)."""
+    cap = _operator_cap()
+    if cap is not None:
+        return cap
+    if _is_local_desktop(request):
+        return None
     return DEFAULT_MAX_UPLOAD_BYTES
 
 
-def _too_large(declared: int | None) -> dict:
-    limit = max_upload_bytes()
+def advertised_limit(request: Request) -> tuple[int, str]:
+    """(`max_upload_bytes`, `upload_limit`) for `/api/health`: the fixed cap
+    ("fixed"), or what the disk can take right now ("free_space")."""
+    cap = upload_limit_for(request)
+    if cap is not None:
+        return cap, "fixed"
+    room = free_space_limit()
+    return (room if room is not None else DEFAULT_MAX_UPLOAD_BYTES), "free_space"
+
+
+#: The limit the ingress middleware chose for the request being handled. The
+#: route-level streaming helper reads it (it has no Request in hand); the
+#: middleware runs first and a ContextVar set there is visible downstream.
+#: `_UNSET` = called outside a request (unit tests): fall back to the fixed cap.
+_UNSET = object()
+_REQUEST_LIMIT: ContextVar[object] = ContextVar("vai_upload_limit", default=_UNSET)
+
+
+def human_bytes(n: int | float) -> str:
+    """1536 -> "1.5 KB", 4294967296 -> "4 GB". Binary units, one decimal when it
+    matters — "0 MB" was what a 10 KB limit used to print."""
+    value = float(max(0, n))
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            if unit == "bytes":
+                return f"{int(value)} bytes"
+            text = f"{value:.1f}".rstrip("0").rstrip(".")
+            return f"{text} {unit}"
+        value /= 1024
+    return f"{int(n)} bytes"  # pragma: no cover - loop always returns
+
+
+def _too_large(declared: int | None, limit: int | None = None) -> dict:
+    limit = limit if limit is not None else max_upload_bytes()
+    size = (f"That file is {human_bytes(declared)}, which is more than the "
+            if declared else "That file is larger than the ")
     return {
         "error": "upload_too_large",
-        "message": (f"That file is larger than this Mac will accept "
-                    f"({limit // (1024 * 1024)} MB). Trim it first, or raise "
-                    f"VAI_MAX_UPLOAD_BYTES and restart."),
+        "message": (f"{size}{human_bytes(limit)} this editor accepts in one "
+                    f"import. Trim or compress it first, then import it again."),
         "limit_bytes": limit,
         "declared_bytes": declared,
     }
+
+
+def _no_room(needed: int, free: int) -> HTTPException:
+    return HTTPException(507, {
+        "error": "insufficient_space",
+        "message": (f"Not enough free space on this Mac to import that file. "
+                    f"It needs about {human_bytes(needed)} free (importing writes "
+                    f"a converted copy alongside the original) and there is "
+                    f"{human_bytes(free)}. Free some space and import it again."),
+        "needed_bytes": needed,
+        "free_bytes": free,
+    })
 
 
 class UploadLimitMiddleware(BaseHTTPMiddleware):
@@ -85,21 +188,26 @@ class UploadLimitMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
+        limit = upload_limit_for(request)
         raw = request.headers.get("content-length")
-        if raw and request.method in {"POST", "PUT", "PATCH"}:
+        if raw and limit is not None and request.method in {"POST", "PUT", "PATCH"}:
             try:
                 declared = int(raw)
             except ValueError:
                 declared = 0
-            if declared > max_upload_bytes():
-                details = _too_large(declared)
+            if declared > limit:
+                details = _too_large(declared, limit)
                 return JSONResponse(
                     status_code=413,
                     content={"error": {"code": "TOO_LARGE",
                                        "message": details["message"],
                                        "details": details}},
                 )
-        return await call_next(request)
+        token = _REQUEST_LIMIT.set(limit)
+        try:
+            return await call_next(request)
+        finally:
+            _REQUEST_LIMIT.reset(token)
 
 
 def assert_room_for(request: Request, dest_dir: Path) -> None:
@@ -128,15 +236,7 @@ def assert_room_for(request: Request, dest_dir: Path) -> None:
     needed = int(declared * FREE_SPACE_HEADROOM)
     if free >= needed:
         return
-    raise HTTPException(507, {
-        "error": "insufficient_space",
-        "message": (f"Not enough free space on this Mac to import that file. "
-                    f"It needs about {needed // (1024 * 1024)} MB free "
-                    f"(importing writes a normalised copy alongside the "
-                    f"original) and there is {free // (1024 * 1024)} MB."),
-        "needed_bytes": needed,
-        "free_bytes": free,
-    })
+    raise _no_room(needed, free)
 
 
 async def stream_upload_to(file: UploadFile, dst: Path) -> int:
@@ -146,14 +246,21 @@ async def stream_upload_to(file: UploadFile, dst: Path) -> int:
     it would mean a client could fill the disk with rejected uploads — the cap
     would count each request but the bytes would still be there.
     """
-    limit = max_upload_bytes()
+    chosen = _REQUEST_LIMIT.get()
+    limit: int | None = max_upload_bytes() if chosen is _UNSET else chosen  # type: ignore[assignment]
+    # The desktop's own import (limit None) is bounded by the disk instead: a
+    # chunked body declares no size, so this running check is the only one.
+    room = free_space_limit(dst.parent) if limit is None else None
     written = 0
     try:
         with dst.open("wb") as fh:
             while chunk := await file.read(_CHUNK):
                 written += len(chunk)
-                if written > limit:
-                    raise HTTPException(413, _too_large(None))
+                if limit is not None and written > limit:
+                    raise HTTPException(413, _too_large(None, limit))
+                if room is not None and written > room:
+                    raise _no_room(int(written * FREE_SPACE_HEADROOM),
+                                   int(room * FREE_SPACE_HEADROOM))
                 fh.write(chunk)
     except HTTPException:
         dst.unlink(missing_ok=True)

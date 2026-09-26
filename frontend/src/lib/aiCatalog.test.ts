@@ -91,7 +91,7 @@ describe('AI_CATALOG', () => {
 describe('gateFor', () => {
   it('greys out a tool whose feature is unavailable, with the fix verbatim', () => {
     const r = gateFor(entry('upscale'), report(['upscale']))
-    expect(r).toEqual({ ok: false, feature: 'Feature upscale', fix: 'uv sync --extra upscale', packagedExcluded: false })
+    expect(r).toEqual({ ok: false, feature: 'Feature upscale', fix: 'uv sync --extra upscale', packagedExcluded: false, packagedApp: false })
   })
 
   it('passes an available feature and an ungated tool', () => {

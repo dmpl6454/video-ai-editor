@@ -23,6 +23,18 @@ function num(n: number): string {
   return n.toFixed(Math.abs(n) < 10 ? 2 : 1)
 }
 
+/** A range the verifier sends as `{min, max, unit}` (max null = open). */
+function rangeText(v: Record<string, unknown>): string | null {
+  const keys = Object.keys(v)
+  if (!keys.length || !keys.every((k) => k === 'min' || k === 'max' || k === 'unit')) return null
+  const lo = typeof v.min === 'number' ? v.min : null
+  const hi = typeof v.max === 'number' ? v.max : null
+  if (lo === null && hi === null) return null
+  const u = typeof v.unit === 'string' && v.unit ? ` ${v.unit}` : ''
+  if (lo !== null && hi !== null) return `${num(lo)}–${num(hi)}${u}`
+  return lo !== null ? `at least ${num(lo)}${u}` : `at most ${num(hi as number)}${u}`
+}
+
 /** One measured/expected value as plain words. Never JSON. */
 export function humanValue(v: unknown, unit?: string): string {
   if (v === null || v === undefined) return '—'
@@ -35,11 +47,15 @@ export function humanValue(v: unknown, unit?: string): string {
     return unit && v.every((x) => typeof x === 'number') ? `${parts.join(', ')} ${unit}` : parts.join(', ')
   }
   if (typeof v === 'object') {
+    const range = rangeText(v as Record<string, unknown>)
+    if (range !== null) return range
     const entries = Object.entries(v as Record<string, unknown>)
     if (entries.length === 0) return '—'
     return entries.map(([k, x]) => {
       const inner = humanValue(x)
-      return typeof x === 'object' && x !== null && !Array.isArray(x) ? `${words(k)} (${inner})` : `${words(k)}: ${inner}`
+      const nested = typeof x === 'object' && x !== null && !Array.isArray(x)
+        && rangeText(x as Record<string, unknown>) === null
+      return nested ? `${words(k)} (${inner})` : `${words(k)}: ${inner}`
     }).join(', ')
   }
   return String(v)

@@ -22,6 +22,7 @@
 
 import { isBusy } from './promptStore'
 import type { PromptStatus } from './promptEvents'
+import { PROMPT_MAX_CHARS } from './promptLimit'
 
 /** Where focus was when the status changed. */
 export type FocusSpot = 'none' | 'inside-bar' | 'elsewhere'
@@ -42,7 +43,19 @@ export function canSubmitPrompt(status: PromptStatus, opts: { disabled: boolean;
   if (isBusy(status) || opts.disabled) return false
   // A card is waiting for an answer: Enter must not re-plan over it.
   if (status === 'clarify') return false
+  // Over the server's limit it can only fail (QA-124) — the bar says so instead.
+  if (opts.text.trim().length > PROMPT_MAX_CHARS) return false
   return opts.text.trim().length > 0
+}
+
+/**
+ * Should the input be emptied after a status change? Only when a run has
+ * FINISHED — its sentence is now in the history (↑ recalls it). A failed,
+ * refused or cancelled run keeps the text so it can be fixed and re-run
+ * (QA-124: any busy → not-busy transition used to clear it).
+ */
+export function shouldClearPromptText(prev: PromptStatus, next: PromptStatus): boolean {
+  return isBusy(prev) && next === 'done'
 }
 
 // Rule 3 lives in lib/clarifyKeys.ts: ClarifyCard is presentational and must

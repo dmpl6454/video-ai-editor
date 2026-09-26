@@ -80,7 +80,10 @@ def _edit(c: TestClient, sid: str, db: float) -> str:
     r = c.post(f"/api/sessions/{sid}/dispatch", json={
         "tool": "set_clip_transform", "args": {"clip_id": cid, "rotation": db}})
     assert r.status_code == 200, r.text
-    return r.json()["edl_hash"]
+    # The key a preview of this state is rendered and served under: the
+    # RENDER hash (QA-131 — a marker edit changes the EDL hash, not this).
+    from video_ai_editor import main as _main
+    return _main._store(sid).edl.render_hash()
 
 
 @pytest.mark.parametrize("transition", [False, True], ids=["chunk-path", "monolithic-path"])

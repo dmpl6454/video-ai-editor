@@ -94,8 +94,106 @@ def list_sessions() -> list[dict]:
             # on instead of its raw id, so two same-named copies stay apart.
             # `created_at` above has always been this mtime; kept for callers.
             "modified_at": mtime,
+            # QA-099-THUMBS: the picker row's poster frame, or None when the
+            # project is known to have nothing to show. A stat and a tiny
+            # sidecar read — never the EDL (see poster_url).
+            "poster": poster_url(d),
         })
     return sessions
+
+
+# --- QA-099-THUMBS: a cached per-project poster frame -------------------------
+#
+# The project picker shows a frame of each project. Deriving it means reading
+# the project's edl.json, and GET /api/sessions must not read every EDL on each
+# call. So the answer is cached in `poster.json` beside the EDL, stamped with
+# edl.json's (mtime_ns, size): the listing only STATS edl.json and compares
+# stamps; the EDL is read again only by the poster route, and only for a project
+# whose edl.json changed since the last derivation. The stamp covers EVERY
+# writer of edl.json (commit, undo, redo, .vae load, a restore) with no hook in
+# any of them — a "refresh on commit" hook would miss the ones that bypass
+# commit(). The image URL carries the stamp, so the browser caches a poster
+# until its project actually changes.
+
+POSTER_FILE = "poster.json"
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic"}
+
+
+def _edl_stamp(d: Path) -> str | None:
+    try:
+        st = (d / "edl.json").stat()
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns:x}-{st.st_size:x}"
+
+
+def _read_poster(d: Path) -> dict | None:
+    try:
+        data = json.loads((d / POSTER_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def poster_url(d: Path) -> str | None:
+    """The picker's image URL for session dir `d` (versioned by the EDL
+    stamp), or None when the cache says this project has no frame to show."""
+    stamp = _edl_stamp(d)
+    if stamp is None:
+        return None
+    cached = _read_poster(d)
+    if cached and cached.get("stamp") == stamp and not cached.get("src"):
+        return None
+    return f"/api/sessions/{d.name}/poster?v={stamp}"
+
+
+def _first_frame(edl: dict) -> tuple[str | None, float]:
+    """(source, time) of the frame that stands for the project: the earliest
+    media clip on the first video track that has one."""
+    for track in edl.get("tracks") or []:
+        if not isinstance(track, dict) or track.get("type") != "video":
+            continue
+        clips = [c for c in track.get("clips") or []
+                 if isinstance(c, dict) and isinstance(c.get("src"), str) and "in" in c]
+        if not clips:
+            continue
+        first = min(clips, key=lambda c: float(c.get("start") or 0.0))
+        src = first["src"]
+        if Path(src).suffix.lower() in _IMAGE_EXTS:
+            return src, 0.0
+        t_in = float(first.get("in") or 0.0)
+        span = max(0.0, float(first.get("out") or 0.0) - t_in)
+        # A quarter-second in (capped by the clip): frame 0 is often a fade from black.
+        return src, t_in + min(1.0, span * 0.25)
+    return None, 0.0
+
+
+def poster_source(session_id: str) -> tuple[Path, float] | None:
+    """The (source file, time) of a project's poster frame, re-derived from
+    the EDL only when edl.json changed since the cached answer."""
+    d = session_path(session_id)
+    stamp = _edl_stamp(d)
+    if stamp is None:
+        return None
+    cached = _read_poster(d)
+    if not cached or cached.get("stamp") != stamp:
+        try:
+            edl = json.loads((d / "edl.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        src, t = _first_frame(edl if isinstance(edl, dict) else {})
+        cached = {"stamp": stamp, "src": src, "t": round(t, 3)}
+        tmp = d / f".{POSTER_FILE}.{uuid4().hex[:8]}.tmp"   # two picker requests may race
+        try:
+            tmp.write_text(json.dumps(cached), encoding="utf-8")
+            _pu.replace_with_retry(tmp, d / POSTER_FILE)
+        except OSError:
+            pass    # a read-only dir still gets its poster, just uncached
+    src = cached.get("src")
+    if not src:
+        return None
+    p = Path(src)
+    return (p, float(cached.get("t") or 0.0)) if p.is_file() else None
 
 
 #: QA-099: a project with no name of its own is "Untitled project N", never

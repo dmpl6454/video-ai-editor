@@ -73,7 +73,8 @@ def test_a_body_under_the_cap_is_not_refused_by_the_cap(small_cap):
     r = c.post(f"/api/sessions/{sid}/upload",
                files={"file": ("tiny.mp4", io.BytesIO(b"\0" * 64), "video/mp4")})
     assert r.status_code == 422
-    assert r.json()["error"]["details"]["error"] == "couldn't_import"
+    # 64 NUL bytes are not media at all — said as such since QA-112.
+    assert r.json()["error"]["details"]["error"] == "not_media"
 
 
 # --- 2. the mid-stream abort --------------------------------------------------

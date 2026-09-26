@@ -1,13 +1,7 @@
 /* EffectsPanel — Filters / Effects / LUT looks section in the media bin.
    Uses only the app's dark-theme tokens from styles.css (:root). */
 
-.effects-panel .fx-subhead {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-dim);
-  margin: 8px 0 4px;
-}
+.effects-panel .fx-subhead { margin: 8px 0 4px; }
 
 .effects-panel .fx-hint {
   font-size: 10px;
@@ -21,9 +15,9 @@
 
 .effects-panel .fx-error {
   font-size: 10px;
-  color: #fbb;
-  background: #311;
-  border: 1px solid #533;
+  color: var(--error-text);
+  background: var(--error-bg);
+  border: 1px solid var(--error-line);
   border-radius: 6px;
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -66,7 +60,9 @@
   font-size: 12px;
 }
 .effects-panel .fx-lut-row.applied { border-color: var(--accent-2); }
+.effects-panel .fx-lut-row .fx-lut-name .icon { margin-right: 4px; color: var(--good); }
 .effects-panel .fx-lut-row .fx-lut-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -95,8 +91,6 @@
   min-width: 0;
 }
 .effects-panel .fx-btn:hover:not(:disabled) { border-color: var(--accent-2); }
-.effects-panel button:disabled { opacity: 0.5; cursor: not-allowed; }
-.effects-panel .fx-icon { font-size: 14px; line-height: 1; }
 
 .effects-panel .fx-chips {
   display: flex;
@@ -119,18 +113,17 @@
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 4px;
+  line-height: 0;
+  padding: 0 2px;
 }
 .effects-panel .fx-chip button:hover { color: var(--accent); }
 
 .fx-target {
   font-size: 11px;
-  color: var(--text-dim, #9aa3b2);
+  color: var(--text-dim);
   margin-bottom: 8px;
   padding: 4px 8px;
-  background: var(--bg-3, #1a1d24);
+  background: var(--bg-3);
   border-radius: 6px;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -30,7 +30,10 @@ from .prompt_text import facts_to_prompt_block, user_prompt_with_answers, recipe
 __all__ = ["CloudBrain", "CLOUD_ENV", "EMIT_PLAN_TOOL", "cloud_allowed", "default_tool_cards"]
 
 CLOUD_ENV = "VAI_PROMPT_CLOUD"
-KEY_FIX = "Add ANTHROPIC_API_KEY to .env and restart to enable Claude"
+# Settings (the macOS Keychain) is how a person adds a key to the packaged app;
+# ANTHROPIC_API_KEY stays the developer/CI route. No restart either way: the key
+# is resolved per call (config.anthropic_api_key).
+KEY_FIX = "Add an Anthropic API key in Settings (or set ANTHROPIC_API_KEY) to enable Claude"
 DISABLED_FIX = f"Unset {CLOUD_ENV}=0 to allow Claude"
 
 EMIT_PLAN_TOOL: dict[str, Any] = {
@@ -96,11 +99,18 @@ class CloudBrain:
     def __init__(self, *, api_key: str | None = None, allowed: bool | None = None,
                  model: str | None = None, client_factory: Callable[[str], Any] | None = None,
                  clock: Callable[[], float] = time.monotonic):
-        self._key = config.ANTHROPIC_API_KEY if api_key is None else api_key
+        self._key_override = api_key
         self._allowed = cloud_allowed() if allowed is None else allowed
         self._model = model or config.CLAUDE_MODEL
         self._client_factory = client_factory or self._default_client
         self._clock = clock
+
+    @property
+    def _key(self) -> str:
+        # Resolved on every use, not frozen at construction: the router keeps
+        # one CloudBrain for the process (router.default_brains), so a key
+        # saved in Settings must light this rung up without a restart.
+        return config.anthropic_api_key() if self._key_override is None else self._key_override
 
     @staticmethod
     def _default_client(api_key: str) -> Any:

@@ -1,0 +1,25 @@
+/* Keyboard shortcuts — rendered through <Dialog> (components/Dialog.tsx). Its
+   inline colours and radii became these token rules (wave C review). */
+.dialog.shortcuts-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(86vh, calc(100vh - 48px)); }
+.shortcuts-presets { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; flex-wrap: wrap; }
+.shortcuts-presets .spacer { flex: 1; }
+.shortcuts-label { font-size: 11px; color: var(--text-dim); }
+.shortcuts-help { margin: 0 0 10px; font-size: 11px; color: var(--text-dim); }
+.shortcuts-warning { margin: 0 0 10px; font-size: 11px; color: var(--accent); }
+.shortcuts-group { margin-bottom: 12px; }
+.shortcuts-group .section-label { margin: 6px 0; }
+.shortcuts-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: var(--control-h, 28px); padding: 3px 0; border-bottom: 1px solid var(--line); }
+.shortcuts-name { font-size: 13px; color: var(--text); display: inline-flex; align-items: center; gap: 6px; }
+.shortcuts-custom { color: var(--accent-2); line-height: 0; }
+.shortcuts-keys { display: flex; align-items: center; gap: 6px; }
+.shortcuts-cap {
+  min-width: 24px; padding: 2px 8px; border-radius: 5px; text-align: center;
+  font-family: var(--font-ui); font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--text); background: var(--bg-3); border: 1px solid var(--line); cursor: pointer;
+}
+.shortcuts-cap:hover { border-color: var(--text-faint); }
+.shortcuts-cap.conflict { border-color: var(--accent); }
+.shortcuts-cap.empty { color: var(--text-faint); }
+.shortcuts-cap.capturing { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); cursor: default; }
+.shortcuts-reset { padding: 2px 6px; line-height: 0; }

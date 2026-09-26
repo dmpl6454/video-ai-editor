@@ -45,7 +45,7 @@ from ..recipes import from_intents
 from .base import (Availability, BrainRequest, BrainResult, TextResult, TextTask, available,
                    unavailable)
 from ..schema import IntentDraft
-from .content import ground_duck_off, ground_to_prompt, strip_model_hook_text
+from .content import ground_duck_off, ground_music_level, ground_to_prompt, strip_model_hook_text
 from .prompt_text import (DraftShapeError, contains_devanagari, draft_key, facts_to_prompt_block,
                           flatten_fm_item, normalize_draft, user_prompt_with_answers)
 
@@ -312,6 +312,7 @@ class FMBrain:
     def _expand(self, draft: IntentDraft, req: BrainRequest, *, latency: int) -> BrainResult:
         draft = ground_duck_off(ground_to_prompt(strip_model_hook_text(draft, req.prompt), req.prompt),
                                 req.prompt)
+        draft = ground_music_level(draft, req.prompt, req.facts)
         if not draft.intents:
             # Nothing to do but the model's own questions (dropped above): not
             # an answer — the ladder falls through to the recipes' reading.

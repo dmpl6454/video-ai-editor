@@ -6,12 +6,13 @@ codebase should route through a function in this module rather than an inline
 """
 from __future__ import annotations
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -228,3 +229,29 @@ def rmtree_with_retry(path: Path | str,
             last = e
             time.sleep(delay * (i + 1))
     raise last  # type: ignore[misc]
+
+
+# A path written on the OTHER operating system, as it arrives inside a project
+# file (.vae) someone saved on Windows and opened on a Mac: "C:\...\a.mp4" or a
+# UNC share "\\nas\footage\a.mp4". POSIX `Path` treats "\" as an ordinary
+# filename character, so `Path(src).name` was the ENTIRE Windows path — the
+# offline-media row for a clip that was not bundled read
+# "C:\Users\…\interview.mp4" instead of "interview.mp4".
+_WINDOWS_ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def pure_path(src: str | os.PathLike) -> PurePath:
+    """A pure path that splits `src` the way the machine that WROTE it did.
+
+    A Windows-shaped absolute path (drive letter or UNC) is parsed as
+    `PureWindowsPath` on every OS; anything else is this OS's own path. Only
+    for looking at a path's parts — never for opening it."""
+    s = os.fspath(src)
+    if not IS_WINDOWS and _WINDOWS_ABS.match(s):
+        return PureWindowsPath(s)
+    return Path(s)
+
+
+def path_leaf(src: str | os.PathLike) -> str:
+    """The file name of `src`, even when `src` was written on another OS."""
+    return pure_path(src).name

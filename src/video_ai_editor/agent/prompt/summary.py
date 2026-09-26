@@ -80,6 +80,29 @@ def _unmeasured_lines(verify_result: dict[str, Any] | None) -> list[str]:
             for c in verify_result.get("checks", []) if c.get("pass") is None]
 
 
+def _project_name(sid: str, child_runs: list[dict[str, Any]] | None = None) -> str:
+    """A created project's NAME for the reply (QA-068) — never its `s_…` id.
+    The finishing pass records it; otherwise it is read from the project."""
+    for c in child_runs or []:
+        if c.get("session") == sid and str(c.get("name") or "").strip():
+            return str(c["name"]).strip()
+    try:
+        from ...storage import read_meta
+        name = str(read_meta(sid).get("name") or "").strip()
+    except Exception:  # noqa: BLE001 — a name is a nicety; the reply must still be written
+        name = ""
+    return name or "a new project"
+
+
+def created_projects_line(sessions: list[str], child_runs: list[dict[str, Any]] | None = None) -> str:
+    """'3 shorts ready: Talk short 1 · Talk short 2 · Talk short 3.' — the
+    projects a shorts run made, by name. The run log turns each into an Open
+    button from the finish_short records; the ids stay out of the text."""
+    names = [_project_name(s, child_runs) for s in sessions]
+    n = len(names)
+    return f"{n} short{'' if n == 1 else 's'} ready: {' · '.join(names)}."
+
+
 def compose_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | None) -> str:
     """The end-of-run text. `exec_result` is an `executor.ExecResult`;
     `verify_result` the `verify` event payload (or None when nothing ran)."""
@@ -123,14 +146,17 @@ def compose_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | 
     if plan.reply:
         parts.append(plan.reply)
     if exec_result.new_sessions:
-        parts.append("Created sessions: " + ", ".join(exec_result.new_sessions) + ".")
+        parts.append(created_projects_line(list(exec_result.new_sessions), exec_result.child_runs))
         finished = [c for c in exec_result.child_runs if c.get("status") == "ok"]
         if exec_result.child_runs:
-            parts.append(f"Finished {len(finished)}/{len(exec_result.child_runs)} of them "
-                         f"(reframe, captions, hook).")
+            if len(finished) == len(exec_result.child_runs):
+                parts.append("Each one is tightened, reframed to 9:16, captioned and has a hook.")
+            else:
+                parts.append(f"{len(finished)} of {len(exec_result.child_runs)} were finished "
+                             f"(tightened, reframed, captioned, hooked); open the others to finish them.")
     if exec_result.committed:
-        parts.append("Undo with ⌘Z" + (" (created sessions are kept)." if exec_result.new_sessions else "."))
+        parts.append("Undo with ⌘Z" + (" (the new shorts are kept)." if exec_result.new_sessions else "."))
     return head + " ".join(parts)
 
 
-__all__ = ["compose_reply"]
+__all__ = ["compose_reply", "created_projects_line"]

@@ -26,5 +26,7 @@ describe('brain popover copy (QA-063)', () => {
   it('says what a user can do when there is something to do', () => {
     expect(brainCopy(REAL[5]).fix).toMatch(/System Settings/)
     expect(brainCopy(REAL[2]).fix).toMatch(/API key/)
+    // Where to add it, now that the app has a place for it.
+    expect(brainCopy(REAL[2]).fix).toMatch(/Settings/)
   })
 })

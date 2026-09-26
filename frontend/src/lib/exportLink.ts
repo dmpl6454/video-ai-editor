@@ -81,5 +81,5 @@ export function exportLinkView(
   const here = exportFor(links, sid)
   if (!here) return null
   const stale = isExportStale(here, currentHash)
-  return { link: here, stale, label: `↓ ${exportKind(here)}${stale ? ' (outdated)' : ''}` }
+  return { link: here, stale, label: `${exportKind(here)}${stale ? ' (outdated)' : ''}` }
 }

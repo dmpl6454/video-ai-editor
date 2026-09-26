@@ -4,25 +4,8 @@
    — styles.css is owned elsewhere). All colours come from the app's existing
    custom properties so this follows the theme rather than restating it. */
 
-.cc-spinner {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
-  vertical-align: -1px;
-  margin-right: 3px;
-  animation: cc-spin 0.8s linear infinite;
-}
-
-@keyframes cc-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cc-spinner { animation-duration: 2.4s; }
-}
+/* The busy mark is the app's lucide LoaderCircle (.icon-spin, styles.css),
+   which stands still under prefers-reduced-motion (QA-127). */
 
 /* --- idle: [ CC Captions | Auto ▾ ] ------------------------------------- */
 
@@ -38,13 +21,10 @@
 }
 
 .cc-wrap .cc-caret {
-  font-size: 10px;
-  padding-left: 5px;
-  padding-right: 5px;
   margin-left: -1px;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
-  color: var(--text-dim, #9aa3b2);
+  color: var(--text-dim);
 }
 
 .cc-wrap .cc-caret:hover:not(:disabled) { color: inherit; }
@@ -60,19 +40,13 @@
   z-index: 1000;
   min-width: 230px;
   padding: 4px;
-  background: var(--bg-2, #191d24);
-  border: 1px solid var(--line, #2b313b);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
   border-radius: 5px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 
-.cc-menu-head {
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-dim, #9aa3b2);
-  padding: 4px 8px 6px;
-}
+.cc-menu-head { padding: 4px 8px 6px; }
 
 .cc-menu-item {
   display: flex;
@@ -89,14 +63,14 @@
 }
 
 .cc-menu-item:hover,
-.cc-menu-item:focus-visible { background: var(--bg-3, #232935); }
+.cc-menu-item:focus-visible { background: var(--bg-3); }
 
-.cc-menu-item.is-on { background: var(--bg-3, #232935); }
+.cc-menu-item.is-on { background: var(--bg-3); }
 
 .cc-check {
   width: 9px;
   flex: 0 0 9px;
-  color: var(--accent, #5b8dff);
+  color: var(--accent);
   font-size: 9px;
   line-height: 16px;
 }
@@ -109,14 +83,14 @@
 .cc-menu-hint {
   display: block;
   font-size: 10px;
-  color: var(--text-dim, #9aa3b2);
+  color: var(--text-dim);
   margin-top: 1px;
 }
 
 .cc-menu-sep {
   height: 1px;
   margin: 4px 4px;
-  background: var(--line, #2b313b);
+  background: var(--line);
 }
 
 /* --- running: spinner, percentage, ETA, bar, cancel --------------------- */
@@ -127,9 +101,9 @@
   gap: 6px;
   padding: 2px 6px;
   font-size: 11px;
-  border: 1px solid var(--line, #2b313b);
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: var(--bg-2, #191d24);
+  background: var(--bg-2);
 }
 
 .cc-busy-text {
@@ -140,7 +114,7 @@
 }
 
 .cc-busy-sub {
-  color: var(--text-dim, #9aa3b2);
+  color: var(--text-dim);
   font-size: 10px;
 }
 
@@ -149,14 +123,14 @@
   width: 54px;
   height: 3px;
   border-radius: 2px;
-  background: var(--bg-3, #232935);
+  background: var(--bg-3);
   overflow: hidden;
 }
 
 .cc-bar-fill {
   display: block;
   height: 100%;
-  background: var(--accent, #5b8dff);
+  background: var(--accent);
   transition: width 0.4s linear;
 }
 

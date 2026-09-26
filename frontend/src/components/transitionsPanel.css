@@ -145,14 +145,21 @@
 .trp-tile.is-browse-only .trp-tile-name, .trp-tile.is-browse-only .trp-tile-dur { opacity: 0.5; }
 .trp-tile.is-browse-only { cursor: help; }
 .trp-hint-line { font-size: 11px; color: var(--text-dim); padding: 4px 6px; border-left: 2px solid var(--accent-2); }
+/* Up to two lines (QA-119): a one-line ellipsis turned Diagonal Bottom-Left
+   and Diagonal Bottom-Right into the same "Diagonal Bot…". The box always
+   holds two lines so the grid rows stay aligned. */
 .trp-tile-name {
   font-size: 11px;
   font-weight: 600;
   color: var(--text);
   line-height: 1.25;
+  min-height: 2.5em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   padding: 0 2px;
 }
 .trp-tile-dur { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; padding: 0 2px; }
@@ -161,6 +168,7 @@
 
 @property --tp-band { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
 @property --tp-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+@property --tp-dot { syntax: '<length>'; inherits: false; initial-value: 0px; }
 
 .tp-prev {
   --ca: color-mix(in srgb, var(--accent-2) 58%, var(--bg-3));
@@ -213,9 +221,33 @@
   }
 }
 
-/* Basic */
-.kind-fade .tp-b { animation-name: tp-fade; }
+/* Basic. A crossfade's STILL is a ramp from A to B as wide as its blend
+   (lib/transitionPreview --ramp), so Fast Fade / Fade / Slow Fade differ at
+   rest (QA-119); hover drops the ramp and plays the real crossfade. */
+.kind-fade .tp-b {
+  mask-image: linear-gradient(90deg, transparent calc(50% - var(--ramp, 45%) / 2), #000 calc(50% + var(--ramp, 45%) / 2));
+}
+.trp-tile:hover .kind-fade .tp-b, .trp-tile:focus-visible .kind-fade .tp-b { mask-image: none; animation-name: tp-fade; }
+@media (prefers-reduced-motion: reduce) {
+  .trp-tile:hover .kind-fade .tp-b, .trp-tile:focus-visible .kind-fade .tp-b {
+    mask-image: linear-gradient(90deg, transparent calc(50% - var(--ramp, 45%) / 2), #000 calc(50% + var(--ramp, 45%) / 2));
+    animation-name: none;
+  }
+}
+/* Dissolve: grain, not a blend — B arrives as a growing stipple of dots. */
+.kind-dissolve .tp-b {
+  mask-image: radial-gradient(circle, #000 var(--tp-dot), transparent calc(var(--tp-dot) + 0.6px)),
+              radial-gradient(circle, #000 var(--tp-dot), transparent calc(var(--tp-dot) + 0.6px));
+  mask-size: 5px 5px, 7px 7px;
+  mask-position: 0 0, 2px 3px;
+  animation-name: tp-dots;
+}
 .kind-distance .tp-b { animation-name: tp-distance; }
+/* Smooth: a soft-edged slide — the edge travels the named way. */
+.kind-smooth .tp-b {
+  mask-image: linear-gradient(var(--edge-dir, to left), #000 calc(var(--tp-band) - 30%), transparent var(--tp-band));
+  animation-name: tp-soft-edge;
+}
 /* Light */
 .kind-dip-black .tp-veil { background: #000; animation-name: tp-dip; }
 .kind-dip-white .tp-veil { background: #fff; animation-name: tp-dip; }
@@ -235,9 +267,12 @@
   mask-image: repeating-linear-gradient(var(--mask-angle, 90deg), #000 0 var(--tp-band), transparent var(--tp-band) 20%);
   animation-name: tp-band-in;
 }
-/* Slide */
+/* Slide. Push, cover and reveal share a seam at rest, so the layer that is
+   ON TOP casts a shadow across it (QA-119): cover = the new clip slides over,
+   reveal = the old clip slides off, slide = both move flush. */
 .kind-slide .tp-a, .kind-reveal .tp-a { animation-name: tp-move-out; }
 .kind-slide .tp-b, .kind-cover .tp-b { animation-name: tp-move-in; }
+.kind-cover .tp-b, .kind-reveal .tp-a { box-shadow: 0 0 12px 3px rgba(0, 0, 0, 0.6); }
 /* Zoom */
 .kind-zoom .tp-b { animation-name: tp-zoom; }
 .kind-squeeze .tp-a { animation-name: tp-squeeze; }
@@ -267,7 +302,9 @@
 .kind-whip .tp-b { animation-name: tp-whip-in; animation-timing-function: cubic-bezier(0.7, 0, 0.3, 1); }
 
 @keyframes tp-fade { from { opacity: 0; } to { opacity: 1; } }
-@keyframes tp-distance { from { opacity: 0; transform: scale(1.3); } to { opacity: 1; transform: scale(1); } }
+@keyframes tp-distance { from { opacity: 0; transform: scale(0.45); } to { opacity: 1; transform: scale(1); } }
+@keyframes tp-dots { from { --tp-dot: 0px; } to { --tp-dot: 4px; } }
+@keyframes tp-soft-edge { from { --tp-band: 0%; } to { --tp-band: 130%; } }
 @keyframes tp-dip { 0% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
 @keyframes tp-swap { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
 @keyframes tp-burn { 0% { opacity: 0; transform: scale(0.6); } 45% { opacity: 0.95; transform: scale(1.3); } 100% { opacity: 0; transform: scale(1.6); } }
@@ -311,6 +348,6 @@
 .trp-unit { font-size: 11px; color: var(--text-dim); }
 .trp-link { font-size: 10px; padding: 0; background: none; border: none; color: var(--accent-2); }
 .trp-link:hover:not(:disabled) { background: none; text-decoration: underline; }
-.trp-every { margin-left: auto; font-size: 11px; padding: 4px 10px; }
-.trp-every small { font-size: 9.5px; color: var(--text-dim); margin-left: 4px; }
+.trp-every { margin-left: auto; font-size: 11px; padding: 4px 10px; border-color: var(--accent-2); color: var(--text); }
+.trp-every:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 .trp-hint { font-size: 10px; color: var(--text-dim); }

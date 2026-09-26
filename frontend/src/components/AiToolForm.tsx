@@ -1,10 +1,12 @@
 import { useEffect, type KeyboardEvent } from 'react'
 import { isMediaClip, isTextClip, type EDL } from '../types'
 import { displayNameFor } from '../lib/mediaNames'
+import { aiClipLabel, aiOptionLabel } from '../lib/aiOptionLabels'
 import { useMediaNameMap } from './MediaName'
 import { useGuideRects } from '../lib/guideRects'
 import { useAiRuns } from '../lib/aiRuns'
 import type { Field } from '../lib/schemaForm'
+import { Icon } from './Icon'
 
 // Generated form for one tool: one control per lib/schemaForm Field. Values
 // are kept as the user typed them (strings, a File, a 4-string bbox) and only
@@ -51,7 +53,7 @@ function clipOptions(edl: EDL | null, filter: 'overlay' | 'video',
       }
     } else if (t.type === 'video') {
       for (const c of t.clips) {
-        if (isMediaClip(c)) out.push({ id: c.id, label: `${t.id} · ${displayNameFor(c.src, names)} @ ${c.start.toFixed(1)}s` })
+        if (isMediaClip(c)) out.push({ id: c.id, label: aiClipLabel(t, displayNameFor(c.src, names), c.start, edl.canvas.fps) })
       }
     }
   }
@@ -121,7 +123,7 @@ export function AiToolForm({ tool, label, fields, values, errors, disabled, edl,
             <input {...common} type="number" step="any" min={0} value={text}
                    onChange={(e) => onChange(f.name, e.target.value)} onKeyDown={onEnter} />
             <button type="button" disabled={off} title="Use the current playhead time"
-                    onClick={() => onChange(f.name, Math.round(playhead * 1000) / 1000)}>◀ playhead</button>
+                    onClick={() => onChange(f.name, Math.round(playhead * 1000) / 1000)}><Icon name="chevronLeft" /> Playhead</button>
           </div>
         )
       case 'select': {
@@ -131,7 +133,7 @@ export function AiToolForm({ tool, label, fields, values, errors, disabled, edl,
         return (
           <select {...common} value={text} onChange={(e) => onChange(f.name, e.target.value)}>
             {blank && <option value="">—</option>}
-            {(f.options ?? []).map((o) => <option key={String(o)} value={String(o)}>{String(o)}</option>)}
+            {(f.options ?? []).map((o) => <option key={String(o)} value={String(o)}>{aiOptionLabel(f.name, o, edl?.tracks)}</option>)}
           </select>
         )
       }

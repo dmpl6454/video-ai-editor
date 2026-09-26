@@ -1,37 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { chordLabel, useKeymapStore, IS_MAC } from '../keymap/engine'
 import { PRESETS } from '../keymap/presets'
+import { COMMANDS, CATEGORIES } from '../keymap/commands'
+import { gestureRows, helpGroups, type HelpRow } from '../lib/helpShortcuts'
+import { openShortcuts } from './ShortcutsSettings'
+import { Dialog } from './Dialog'
+import { FONT_LICENCE_URL, parseFontLicences, type FontLicences } from '../lib/fontLicences'
+import './help.css'
+import { Disclosure } from './Disclosure'
 
 let _setOpen: ((v: boolean) => void) | null = null
 export function openHelp() { _setOpen?.(true) }
 
-// Rows tagged with `cmds` read their keys from the LIVE keymap (active preset
-// + user overrides) at render time, so the modal can't advertise a binding
-// that isn't real for the current preset (it used to hardcode "⌘B · S" while
-// no preset bound S, and Premiere splits with ⌘K) — and chordLabel renders
-// platform-correct modifiers (⌘/⌥/⇧ on mac, Ctrl/Alt/Shift on Windows), so
-// no mac glyph is ever hardcoded here. Rows with a static `keys` are mouse /
-// non-keymap gestures only.
-const SHORTCUTS: { keys?: string; label: string; cmds?: string[] }[] = [
-  { cmds: ['playPause'],          label: 'Play / pause' },
-  { cmds: ['shuttleReverse', 'shuttleStop', 'shuttleForward'],
-                                  label: 'Shuttle reverse / pause / forward' },
-  { cmds: ['frameBack', 'frameForward'],   label: 'Step 1 frame back / forward' },
-  { cmds: ['secondBack', 'secondForward'], label: 'Step 1 second back / forward' },
-  { cmds: ['split'],              label: 'Split clip at playhead' },
-  { cmds: ['rippleDelete'],       label: 'Delete selected clip(s) (ripple)' },
-  { cmds: ['duplicate'],          label: 'Duplicate selected clip(s)' },
-  { keys: 'Shift-click clip',     label: 'Add to multi-selection' },
-  { cmds: ['markIn', 'markOut'],  label: 'Set in / out marks (range)' },
-  { cmds: ['addMarker'],          label: 'Add marker at playhead' },
-  { cmds: ['zoomIn', 'zoomOut'],  label: 'Zoom timeline in / out' },
-  { cmds: ['deselect'],           label: 'Clear selection + marks' },
-  { cmds: ['undo', 'redo'],       label: 'Undo / redo' },
-  { cmds: ['focusPrompt'],        label: 'Focus the Prompt bar (one sentence → a verified edit)' },
-  { keys: `${IS_MAC ? '⌘' : 'Ctrl'}+scroll`, label: 'Zoom timeline (wheel)' },
-  { keys: 'Right-click clip',     label: 'Context menu (split / mute / lock / delete)' },
-  { keys: '?',                    label: 'Toggle this help' },
-]
+// The list is GENERATED (QA-110, lib/helpShortcuts): every command in the
+// registry (keymap/commands.ts), grouped by category, with the chords the
+// active preset plus the user's overrides bind — so it can never advertise a
+// key that is not real, nor omit one that is. It used to be a hand-written
+// table of 17 rows that had already dropped N, ⌘\, Home/End, ⌥←/⌥→, ⌘C/⌘V
+// and ⌘A. chordLabel renders platform-correct modifiers. Only the mouse
+// gestures (lib/helpShortcuts.gestureRows) are not keymap commands.
 
 /** "Video AI Editor 0.7.2 · build 45d3e15" from GET /api/version. */
 function aboutLine(v: { version?: string; build?: string } | null): string | null {
@@ -39,16 +26,40 @@ function aboutLine(v: { version?: string; build?: string } | null): string | nul
   return `Video AI Editor ${v.version}${v.build ? ` · build ${v.build}` : ''}`
 }
 
+function Row({ r }: { r: HelpRow }) {
+  return (
+    <tr data-help-row={r.id}>
+      <td className="help-keys">
+        {r.keys.length
+          ? r.keys.map((k, i) => <kbd key={k + i} className="kbd">{k}</kbd>)
+          : <span className="help-unbound">No key</span>}
+      </td>
+      <td className="help-label">{r.label}</td>
+    </tr>
+  )
+}
+
 export function Help() {
   const [open, setOpen] = useState(false)
   const [version, setVersion] = useState<{ version?: string; build?: string } | null>(null)
+  const titleId = useId()
   useEffect(() => {
     if (!open || version) return
     fetch('/api/version').then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) setVersion(d) })
       .catch((e) => console.warn('[Help] version fetch failed:', e))
   }, [open, version])
-  // Live keymap inputs for the `cmd`-tagged rows. Subscribed (not getState())
-  // so a preset switch re-renders an already-open modal too.
+  // The bundled fonts' OFL-1.1 notices, from the licence file shipped next to
+  // them (public/fonts/OFL.txt; scripts/font_licences.py writes it).
+  const [fonts, setFonts] = useState<FontLicences | null>(null)
+  const [fontsError, setFontsError] = useState(false)
+  useEffect(() => {
+    if (!open || fonts) return
+    fetch(FONT_LICENCE_URL).then((r) => (r.ok ? r.text() : Promise.reject(new Error(`${r.status}`))))
+      .then((t) => { setFonts(parseFontLicences(t)); setFontsError(false) })
+      .catch((e) => { console.warn('[Help] font licence fetch failed:', e); setFontsError(true) })
+  }, [open, fonts])
+  // Subscribed (not getState()) so a preset switch or a rebind re-renders an
+  // already-open list too.
   const presetId = useKeymapStore((s) => s.presetId)
   const overrides = useKeymapStore((s) => s.overrides)
   // expose a handle so the topbar's ? button can open us
@@ -62,12 +73,10 @@ export function Help() {
       const tgt = e.target as HTMLElement | null
       const tag = tgt?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return
-      // `?` is shift+/ on US layouts; accept either
+      // `?` is shift+/ on US layouts; accept either. Escape is the Dialog's.
       if (e.key === '?' || (e.shiftKey && e.code === 'Slash')) {
         e.preventDefault()
         setOpen((o) => !o)
-      } else if (e.code === 'Escape') {
-        setOpen(false)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -76,64 +85,64 @@ export function Help() {
 
   if (!open) return null
   const about = aboutLine(version)
-  // Per-command override replaces the preset's chords wholesale — the same
-  // merge rule as the engine's effectiveMap(). An unbound command shows "—"
-  // rather than falling back to a key that wouldn't work. Single-command rows
-  // list every chord (e.g. CapCut split "⌘B · S"); multi-command rows list
-  // each command's primary chord so the row stays scannable.
-  const chordsOf = (cmd: string): string[] =>
-    overrides[cmd] ?? PRESETS[presetId].map[cmd] ?? []
-  const rows = SHORTCUTS.map((s) => {
-    if (!s.cmds) return { label: s.label, keys: s.keys ?? '' }
-    const multi = s.cmds.length > 1
-    const parts = s.cmds
-      .map((c) => (multi ? chordsOf(c).slice(0, 1) : chordsOf(c)).map(chordLabel).join('  ·  '))
-      .filter(Boolean)
-    return { label: s.label, keys: parts.join('  ·  ') || '—' }
-  })
+  // The engine's own merge rule (effectiveMap): an override replaces the
+  // preset's chords for that command wholesale.
+  const keymap = { ...PRESETS[presetId].map, ...overrides }
+  const groups = helpGroups(COMMANDS, CATEGORIES, keymap, chordLabel)
   return (
-    <div
-      onClick={() => setOpen(false)}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 200,
-        background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: 'var(--bg-1)', border: '1px solid var(--line)',
-          borderRadius: 10, padding: 24, width: 'min(540px, 92vw)', maxHeight: '80vh', overflow: 'auto',
-          boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>Keyboard shortcuts</h2>
-          <button onClick={() => setOpen(false)}>Close</button>
-        </div>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <tbody>
-            {rows.map((s, i) => (
-              <tr key={s.keys + i} style={{ borderBottom: '1px solid var(--line)' }}>
-                <td style={{ padding: '8px 0', width: 200 }}>
-                  <span className="kbd" style={{ fontSize: 11 }}>{s.keys}</span>
-                </td>
-                <td style={{ padding: '8px 0', color: 'var(--text-dim)' }}>{s.label}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-dim)' }}>
-          Tip: drag clips from the Media bin onto the timeline. Drag clips between
-          tracks to move them. Drag clip edges to trim. Clip edges, markers and
-          the playhead snap when within 8 px — the magnet button above the
-          timeline (or N) turns snapping on and off.
-        </div>
-        {/* About: the build identity lives here and in the version's tooltip,
-            not as developer text in the toolbar (QA-101). */}
-        {about && <div className="help-about">{about}</div>}
+    <Dialog open title="Keyboard shortcuts" labelId={titleId} onClose={() => setOpen(false)}
+            className="help-dialog"
+            footer={<>
+              <span className="help-preset">{PRESETS[presetId].label} keys</span>
+              <span className="spacer" />
+              <button type="button" onClick={() => { setOpen(false); openShortcuts() }}>Change keys…</button>
+              <button type="button" onClick={() => setOpen(false)}>Close</button>
+            </>}>
+      <div className="help-groups">
+        {groups.map((g) => (
+          <section key={g.title} className="help-group" aria-label={g.title}>
+            <h3>{g.title}</h3>
+            <table><tbody>{g.rows.map((r) => <Row key={r.id} r={r} />)}</tbody></table>
+          </section>
+        ))}
+        <section className="help-group" aria-label="Mouse">
+          <h3>Mouse</h3>
+          <table><tbody>{gestureRows(IS_MAC).map((r) => <Row key={r.id} r={r} />)}</tbody></table>
+        </section>
       </div>
-    </div>
+      <p className="help-tip">
+        Drag clips from the Media panel onto the timeline, between tracks to move
+        them, and by their edges to trim. Edges, markers and the playhead snap
+        together; the magnet above the timeline turns snapping on and off.
+      </p>
+      {/* About: the build identity lives here and in the version's tooltip,
+          not as developer text in the toolbar (QA-101). */}
+      <section className="help-licences" aria-labelledby={`${titleId}-fonts`}>
+        <h3 id={`${titleId}-fonts`}>Fonts and licences</h3>
+        {fonts ? (
+          <>
+            <p className="help-licences-lead">
+              These typefaces ship with the app and are licensed under the SIL Open Font License 1.1.
+            </p>
+            <ul className="help-licences-list">
+              {fonts.entries.map((e) => (
+                <li key={e.family} data-font-licence={e.family}>
+                  <b>{e.family}</b> <span className="help-licences-files">{e.files.join(', ')}</span>
+                  <div className="help-licences-cr">{e.copyright}</div>
+                </li>
+              ))}
+            </ul>
+            <Disclosure className="help-licences-text" summary="SIL Open Font License 1.1 (full text)">
+              <pre>{fonts.licence}</pre>
+            </Disclosure>
+          </>
+        ) : (
+          <p className="help-licences-lead">{fontsError
+            ? 'The font licence file could not be read. Every bundled font is under the SIL Open Font License 1.1.'
+            : 'Loading…'}</p>
+        )}
+      </section>
+      {about && <div className="help-about">{about}</div>}
+    </Dialog>
   )
 }

@@ -228,7 +228,9 @@ def _route(prompt: str, fm_plan) -> router.RoutedPlan:
 
 
 def test_an_on_device_recut_nobody_asked_for_falls_through_to_did_you_mean():
-    routed = _route("banana wobble zebra", _shorts_plan)
+    # A prompt with editing words but none that name a re-cut. (A prompt with
+    # no editing words at all never reaches the model: test_c6_prompt_paraphrase.)
+    routed = _route("polish the vibe", _shorts_plan)
     assert routed.plan is None and routed.clarify is not None and routed.clarify.key == "intent"
     fm = [a for a in routed.attempts if a.brain == "apple_intelligence"]
     assert fm and fm[-1].status == "failed" and "ungrounded" in fm[-1].reason and "make_shorts" in fm[-1].reason

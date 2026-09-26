@@ -33,6 +33,7 @@ from .jsonfix import JsonRepairFailed, repair
 __all__ = ["HOOK_MAX_CHARS", "HOOK_MAX_WORDS", "HOOK_TOOL", "HOOK_RECIPE", "HookText", "RankResult",
            "hook_candidates_task", "rank_windows_task", "sanitize_hook_items", "sanitize_ranking",
            "needs_hook_text", "strip_model_hook_text", "ground_duck_off", "ground_to_prompt",
+           "ground_music_level", "music_level_direction",
            "mentioned_intents", "parse_text_items", "text_task_prompts",
            "heuristic_hook_candidates", "hook_text", "rank_windows", "HEURISTIC_SOURCE"]
 
@@ -81,6 +82,65 @@ def mentioned_intents(prompt: str) -> set[str]:
     return found
 
 
+#: Word stems that make a prompt ABOUT an edit even when no intent phrase
+#: matches (a paraphrase: "let the ending melt to black", "I want the backing
+#: track to sit lower", "slap LAUNCH DAY across the top"). Matched at a word
+#: start. Deliberately broad — the cost of a miss is a "did you mean" list;
+#: the cost of a false hit is an unasked plan running (see unanchored_prompt).
+_EDIT_STEMS = (
+    # sound
+    "music", "song", "tune", "track", "beat", "bed", "soundtrack", "audio", "sound", "voice", "vocal",
+    "speech", "speak", "talk", "narrat", "mic", "noise", "hiss", "hum", "loud", "quiet", "soft",
+    "volume", "level", "mute", "silen", "duck", "bass", "treble", "pitch", "echo", "reverb", "sing",
+    # picture and time
+    "fade", "ease", "melt", "black", "white", "begin", "start", "end", "intro", "outro", "open",
+    "clos", "tail", "cut", "trim", "split", "clip", "shot", "scene", "frame", "video", "picture",
+    "footage", "image", "photo", "colo", "bright", "dark", "contrast", "satur", "grade", "lut",
+    "filter", "effect", "blur", "zoom", "crop", "reframe", "vertical", "horizontal", "portrait",
+    "landscape", "square", "ratio", "aspect", "speed", "slow", "fast", "quick", "reverse",
+    "backward", "rewind", "loop", "freeze", "pause", "gap", "filler", "umm", "tight", "stabili",
+    "shak", "transition", "keyframe", "mask", "marker", "chapter", "thumbnail", "length",
+    "duration", "second", "sec", "minute", "pace", "pacing", "hook", "highlight", "moment",
+    # text and layout
+    "caption", "subtitle", "transcri", "title", "text", "word", "headline", "heading", "label",
+    "top", "bottom", "left", "right", "cent", "corner", "sticker", "emoji", "logo", "watermark",
+    "brand", "font", "bold", "animat", "overlay", "pip", "background", "translat", "hindi",
+    "english", "spanish", "hinglish", "language",
+    # delivery
+    "tiktok", "reel", "short", "youtube", "instagram", "insta", "story", "stories", "platform",
+    "export", "render", "podcast", "interview", "vlog",
+    # verbs of editing
+    "remove", "delete", "add", "insert", "put", "make", "move", "place", "drop", "replace", "chang",
+    "lower", "raise", "boost", "louder", "softer", "longer", "shorter", "edit", "polish", "clean",
+    "enhanc", "improv", "fix", "undo", "redo", "slap", "sit",
+    # Hinglish (Latin script) editing words
+    "gaan", "awaaz", "awaz", "aawaz", "kam", "zyada", "jyada", "kaat", "hata", "dheer", "tez",
+    "shuru", "aakhir", "likh", "badh", "chhot",
+)
+_EDIT_WORD_RE = re.compile(r"\b(?:" + "|".join(_EDIT_STEMS) + r")", re.IGNORECASE)
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
+
+
+def unanchored_prompt(prompt: str) -> bool:
+    """True when nothing in `prompt` is about editing: no intent phrase
+    matches AND no editing word appears ("banana wobble zebra", "purple
+    monkey dishwasher"). The router then keeps it from the on-device model,
+    which answered such prompts with an unasked captions plan that ran
+    unconfirmed; the recipes' "did you mean" list answers instead.
+
+    A prompt in another script (or with accented letters) is never judged
+    here: the grammar and this word list are English and Hinglish, and the
+    model reads languages they do not."""
+    text = (prompt or "").strip()
+    if not text:
+        return True
+    if _NON_ASCII_RE.search(text):
+        return False
+    if mentioned_intents(text):
+        return False
+    return not _EDIT_WORD_RE.search(text)
+
+
 #: A named recipe also grounds the recipes it is made of or implies.
 _GROUND_RELATIVES: dict[str, frozenset[str]] = {
     "tighten": frozenset({"remove_silences", "remove_fillers"}),
@@ -103,6 +163,9 @@ _NUMBER_RE = re.compile(r"\d|\b(?:one|two|three|four|five|six|seven|eight|nine|t
                         r"forty|fifty|sixty|ninety|half|a couple|a few|several|dozen)\b")
 _EDGE_IN_RE = re.compile(r"\b(?:in|up|begin\w*|start\w*|opening|open|intro|from black)\b")
 _EDGE_OUT_RE = re.compile(r"\b(?:out|away|end\w*|finish\w*|close|closing|outro|to black|melt|tail)\b")
+
+
+_PICTURE_RE = re.compile(r"\b(?:picture|video|clips?|image|footage|screen|black|dark\w*|white|scene|shot|frame)\b")
 
 
 def _fade_edge_of(text: str) -> str | None:
@@ -147,6 +210,11 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
             edge = _fade_edge_of(text)
             if edge:
                 slots["edge"] = edge
+        if (it.recipe == "fade" and slots.get("target") in (None, "video")
+                and _BED_WORD_RE.search(text) and not _PICTURE_RE.search(text)):
+            # "let the track ease in at the beginning" came back as a PICTURE
+            # fade (QA-018 live pass, wave C): the words name the bed only.
+            slots["target"] = "music"
         if it.recipe == "duck" and slots.get("enabled") is False and not G.duck_off(prompt or ""):
             # "I want the backing track to sit lower" came back as ducking OFF.
             slots.pop("enabled")
@@ -163,6 +231,93 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
     # built from what the run did (summary.py).
     return draft.model_copy(update={"intents": fixed, "exclusions": exclusions,
                                     "needs_input": [], "reply": ""})
+
+
+#: The bed, named (the grammar's own music nouns).
+_BED_WORD_RE = re.compile(r"\b(?:music|song|track|bed|bgm|soundtrack|tune|score|beat|backing track)\b")
+#: The speaker — what ducking is relative to. Without one a duck reading of a
+#: level complaint is a guess ("the soundtrack needs to breathe less loudly").
+_SPEECH_RE = re.compile(r"\b(?:talk\w*|speak\w*|speech|voice|dialogue|narrat\w*|vocals?|words|says?|saying"
+                        r"|someone|anyone|people|when i|while i|whenever i|under me|over me|behind me)\b")
+#: Asking for a (new / another) bed rather than about the one on the timeline.
+_ADD_BED_RE = re.compile(r"\b(?:add|put|lay|throw in|drop in|use|play|another|new|different|replace|swap|switch"
+                         r"|pick|choose|find|want (?:some|a|an)|need (?:some|a|an)|give (?:it|me) (?:some|a))\b")
+_REMOVE_BED_RE = re.compile(r"\b(?:remove|delete|get rid of|take (?:it )?(?:out|off)|lose|ditch|scrap|no more"
+                            r"|without|cut (?:the )?(?:music|song|track) (?:out|off))\b")
+#: A complaint names the direction by its opposite: "too timid" means louder.
+_TOO_QUIET_RE = re.compile(r"\btoo (?:quiet|soft|softly|low|timid|weak|faint|thin|subtle|meek)\b"
+                           r"|\b(?:can'?t|cannot|barely|hardly) hear (?:the\s+)?(?:music|song|track|bed|tune|soundtrack)\b"
+                           r"|\b(?:lost|buried) (?:in|under) the mix\b")
+_TOO_LOUD_RE = re.compile(r"\btoo (?:loud|loudly|strong|much|busy|heavy|big|intense|harsh|aggressive)\b"
+                          r"|\boverpower\w*|\bdrown\w*|\bbarely audible\b|\bdistract\w*")
+_LEVEL_UP_RE = re.compile(r"\b(?:louder|presence|boost\w*|harder|punch\w*|stronger|bigger|pump\w*|lift\w*|swell\w*"
+                          r"|bolder|fuller|forward|prominent|up|raise|higher)\b")
+_LEVEL_DOWN_RE = re.compile(r"\b(?:quieter|softer|lower|less|down|under|behind|back|tame|subtle|gentle|calm\w*"
+                            r"|breathe|recede|sit|tone (?:it )?down|background|duller|smaller)\b")
+
+
+def music_level_direction(prompt: str) -> str | None:
+    """"up" / "down" when the prompt asks for the bed louder / quieter in
+    words the grammar has no row for, else None. A complaint wins over the
+    imperative words around it ("it hits too softly, make it hit harder")."""
+    text = " ".join((prompt or "").lower().replace("’", "'").split())
+    if _TOO_QUIET_RE.search(text):
+        return "up"
+    if _TOO_LOUD_RE.search(text):
+        return "down"
+    up, down = bool(_LEVEL_UP_RE.search(text)), bool(_LEVEL_DOWN_RE.search(text))
+    return "up" if up and not down else "down" if down and not up else None
+
+
+def ground_music_level(draft: IntentDraft, prompt: str, facts: TimelineFacts | None) -> IntentDraft:
+    """A level paraphrase the model read as something else becomes `volume`
+    on the bed (QA-018, wave C). The recorded Apple Intelligence misreads:
+    "the soundtrack needs to breathe less loudly" → duck; "can the tune sit
+    under me more", "the song feels too timid", "the music drowns
+    everything, tame it" → add-music (a no-op "music is already on the
+    timeline"); "the backing track is overpowering me" → remove the music
+    (rejected as ungrounded, so the user got "did you mean").
+
+    Only when a bed EXISTS, the prompt names it, and it says which way:
+      * `music` without an add/replace verb → the level of the bed it has;
+      * `remove_music` without a removal verb → a level, not a deletion;
+      * `loudness` (the programme target) when the words are about the bed;
+      * `duck` with no speaker in the prompt — ducking is relative to speech,
+        so without one it is a level change.
+    A draft that already plans a `volume` keeps it (grounding fills a gap)."""
+    if facts is None or not getattr(facts, "has_music", False):
+        return draft
+    text = " ".join((prompt or "").lower().replace("’", "'").split())
+    if not _BED_WORD_RE.search(text):
+        return draft
+    direction = music_level_direction(text)
+    if direction is None:
+        return draft
+    from .. import grammar as G
+    from ..schema import IntentItem
+
+    def _misread(it) -> bool:
+        if it.recipe == "music":
+            return not _ADD_BED_RE.search(text)
+        if it.recipe == "remove_music":
+            return not _REMOVE_BED_RE.search(text)
+        if it.recipe == "loudness":
+            return it.slots.get("lufs") is None
+        if it.recipe == "duck":
+            return not G.duck_off(text) and not _SPEECH_RE.search(text)
+        return False
+
+    if not any(_misread(it) for it in draft.intents):
+        return draft
+    has_volume = any(it.recipe == "volume" for it in draft.intents)
+    items = []
+    for it in draft.intents:
+        if not _misread(it):
+            items.append(it)
+        elif not has_volume:
+            items.append(IntentItem(recipe="volume", slots={"target": "music", "change": direction}))
+            has_volume = True
+    return draft.model_copy(update={"intents": items})
 
 
 def ground_duck_off(draft: IntentDraft, prompt: str) -> IntentDraft:

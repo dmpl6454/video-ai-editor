@@ -8,7 +8,7 @@ import { CropReposition } from './CropReposition'
 import { SafeZones } from './SafeZones'
 import { FrameScrubber, type FrameScrubberHandle } from './FrameScrubber'
 import { ErrorBoundary } from './ErrorBoundary'
-import { chordLabel } from '../keymap/engine'
+import { CommandKey } from './CommandKey'
 import { pipIsClientDrawn, sourcePreviewVideo, releaseSourcePreviewVideos,
          syncPipVideo } from '../lib/pipDraw'
 import { liveCssTransform, liveCssFilter, colorGradeOf, sampleKF,
@@ -909,7 +909,8 @@ export function Preview() {
       <div className="preview-empty">
         <div style={{ marginBottom: 6, color: 'var(--text-dim)' }}><Icon name="film" size={28} /></div>
         <div>Drop a video in the Media panel to start.</div>
-        <div style={{ marginTop: 6 }}><span className="kbd">Space</span> play · <span className="kbd">{chordLabel('Mod+KeyB')}</span> split · <span className="kbd">⌫</span> delete</div>
+        {/* The live keymap's keys, not CapCut's (QA-110: Premiere splits with ⌘K). */}
+        <div style={{ marginTop: 6 }}><CommandKey id="playPause" /> play · <CommandKey id="split" /> split · <CommandKey id="rippleDelete" /> delete</div>
       </div>
     )
   }

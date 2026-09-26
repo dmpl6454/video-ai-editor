@@ -387,6 +387,11 @@ def test_shorts_checks_read_the_child_sessions(store):
     ctx.store_resolver = lambda sid: children[sid]
     r = _check(ctx, "shorts_created", count=2, max_dur=30, min_dur=5)
     assert r.passed is True and r.measured["durations"] == [12.0, 12.0]
+    # Numbers, never a stringified Python list (the run log printed
+    # "duration: [4.5, 30.5]"): a range the frontend words as "4.5–30.5 s".
+    assert r.expected == {"sessions": 2, "duration": {"min": 4.5, "max": 30.5, "unit": "s"}}
+    assert _check(ctx, "shorts_created", count=2).expected["duration"] == \
+        {"min": 0.0, "max": None, "unit": "s"}
     assert _check(ctx, "shorts_created", count=3, max_dur=30, min_dur=5).passed is False
     assert _check(ctx, "shorts_created", count=2, max_dur=10, min_dur=5).passed is False
     r = _check(ctx, "shorts_finished")

@@ -89,9 +89,12 @@ EDIT_TOOLS = [
        "edit",
        {"track": {"type": "string"}, "time": {"type": "number"}},
        ["track", "time"]),
-    _t("trim_clip", "Adjust a clip's source in/out (does not move its timeline start).",
+    _t("trim_clip", "Adjust a clip's source in/out (does not move its timeline start, unless "
+       "move_start is set on a non-main lane: then a head trim moves the start with it so the "
+       "kept frames stay where they play).",
        "edit",
-       {"clip_id": {"type": "string"}, "in": {"type": "number"}, "out": {"type": "number"}},
+       {"clip_id": {"type": "string"}, "in": {"type": "number"}, "out": {"type": "number"},
+        "move_start": {"type": "boolean", "default": False}},
        ["clip_id"]),
     _t("move_clip", "Move a clip to a new timeline start (and optional new track).",
        "edit",
@@ -494,6 +497,9 @@ TEXT_TOOLS = [
            "align": {"type": "string", "enum": ["left", "center", "right"],
                      "description": "Line alignment inside the block"},
            "line_spacing": {"type": "number", "description": "Line height multiplier (1 = normal)"},
+           "letter_spacing": {"type": "number",
+                              "description": "Extra canvas px between letters (-20..100; 0 = normal). "
+                                             "Hindi/Arabic runs are never spaced"},
            "shadow_on": {"type": "boolean", "description": "Drop shadow on/off (omit = the role's)"},
            "anim_dur": {"type": "number", "description": "Seconds each in/out animation lasts (default 0.35)"},
            "allow_stack": {"type": "boolean", "default": False,
@@ -630,6 +636,13 @@ AUDIO_TOOLS = [
        "audio",
        {"clip_id": {"type": "string"},
         "muted": {"type": "boolean", "description": "Omit to toggle"}},
+       ["clip_id"]),
+    _t("set_clip_reverse",
+       "Play ONE media clip backwards (picture and sound), or forwards again with "
+       "reverse=false. Omit `reverse` to toggle. Does not change the clip's length.",
+       "edit",
+       {"clip_id": {"type": "string"},
+        "reverse": {"type": "boolean", "description": "Omit to toggle"}},
        ["clip_id"]),
     _t("detach_audio",
        "Detach a video clip's sound onto an audio lane so picture and sound trim and "

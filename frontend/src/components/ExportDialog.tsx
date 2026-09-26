@@ -12,16 +12,23 @@
 //     browser download), not the render's internal `export_<hash>.mp4`.
 // The location is chosen in the Save-As box after the render (in a browser,
 // the downloads folder).
+//
+// Format also offers the SOUND alone (wave C, QA-100 remainder): Audio M4A /
+// Audio WAV render no picture at all — the backend masters the mix to the
+// same loudness target and −1 dBTP ceiling as a video export — so the picture
+// rows (resolution, frame rate, quality) step aside while one is chosen.
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { humanBytes } from '../lib/promptEvents'
 import {
-  AUDIO_DESCRIPTION, LOUDNESS_TARGETS, defaultQuality, estimateBytes, estimateVideoKbps, exportBody, exportDimensions,
-  exportFileName, frameRateOptions, qualityOptions, resolutionOptions, type CanvasLike, type QualityChoice,
+  EXPORT_FORMATS, LOUDNESS_TARGETS, audioDescription, defaultQuality, estimateAudioOnlyBytes, estimateBytes,
+  estimateVideoKbps, exportBody, exportDimensions, exportFileName, frameRateOptions, isAudioOnly, qualityOptions,
+  resolutionOptions, type CanvasLike, type ExportContainer, type QualityChoice,
 } from '../lib/exportOptions'
 import { formatTimecode } from '../lib/timecode'
 import { Dialog } from './Dialog'
+import { Icon } from './Icon'
 
 export function ExportButton() {
   const edl = useStore((s) => s.edl)
@@ -60,7 +67,7 @@ export function ExportButton() {
       >
         {exporting
           ? `Exporting${exportStatus === 'queued' ? ' (queued)' : ''}… ${elapsed}s`
-          : <>Export <span aria-hidden="true">▾</span></>}
+          : <>Export<Icon name="chevronDown" /></>}
       </button>
       {open && canvas && (
         <ExportForm
@@ -101,21 +108,23 @@ function ExportForm({ canvas, duration, defaultName, triggerRef, onClose, onExpo
   const [shortSide, setShortSide] = useState(0)
   const [fps, setFps] = useState('')            // '' = the project rate
   const [quality, setQuality] = useState<string>(String(defaultQuality(canvas)))
-  const [container, setContainer] = useState<'mp4' | 'mov'>('mp4')
+  const [container, setContainer] = useState<ExportContainer>('mp4')
   const [lufs, setLufs] = useState<string>(canvas.loudness_lufs == null ? 'off' : String(canvas.loudness_lufs))
 
   const q: QualityChoice = quality === 'platform' ? 'platform' : Number(quality)
   const rate = fps ? Number(fps) : null
   const [w, h] = exportDimensions(canvas.w, canvas.h, shortSide || null)
   const kbps = estimateVideoKbps(canvas, shortSide, q, rate)
-  const bytes = estimateBytes(kbps, duration)
+  const audioOnly = isAudioOnly(container)
+  const bytes = audioOnly ? estimateAudioOnlyBytes(container, duration) : estimateBytes(kbps, duration)
   const lufsValue = lufs === 'off' ? null : Number(lufs)
   const lufsOptions = LOUDNESS_TARGETS.some((t) => t.lufs === canvas.loudness_lufs)
     ? LOUDNESS_TARGETS
     : [{ lufs: canvas.loudness_lufs ?? null, label: `${canvas.loudness_lufs} LUFS · this project` }, ...LOUDNESS_TARGETS]
 
   const submit = () => onExport({
-    ...exportBody(canvas, shortSide, q, rate),
+    // Audio-only: nothing about the picture applies, so nothing of it is sent.
+    ...(audioOnly ? {} : exportBody(canvas, shortSide, q, rate)),
     container,
     saveAs: exportFileName(name, container),
   }, lufsValue)
@@ -123,7 +132,7 @@ function ExportForm({ canvas, duration, defaultName, triggerRef, onClose, onExpo
   return (
     <Dialog
       open
-      title="Export video"
+      title={audioOnly ? 'Export audio' : 'Export video'}
       labelId={`${id}-title`}
       triggerRef={triggerRef}
       onClose={onClose}
@@ -131,7 +140,7 @@ function ExportForm({ canvas, duration, defaultName, triggerRef, onClose, onExpo
       footer={(
         <>
           <span className="export-dialog-estimate" aria-live="polite">
-            About <b>{humanBytes(bytes)}</b> · {w}×{h} · {formatTimecode(duration, canvas.fps ?? 30)}
+            About <b>{humanBytes(bytes)}</b> · {audioOnly ? 'sound only' : `${w}×${h}`} · {formatTimecode(duration, canvas.fps ?? 30)}
           </span>
           <button type="button" onClick={onClose}>Cancel</button>
           <button type="button" className="primary" onClick={submit}>Export</button>
@@ -147,31 +156,40 @@ function ExportForm({ canvas, duration, defaultName, triggerRef, onClose, onExpo
         </div>
         <span className="export-dialog-help export-dialog-full">You choose where to save it when the render finishes.</span>
 
-        <label htmlFor={`${id}-res`}>Resolution</label>
-        <select id={`${id}-res`} value={shortSide} onChange={(e) => setShortSide(Number(e.target.value))}>
-          {resolutionOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-
-        <label htmlFor={`${id}-fps`}>Frame rate</label>
-        <select id={`${id}-fps`} value={fps} onChange={(e) => setFps(e.target.value)}>
-          {frameRateOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-
-        <label htmlFor={`${id}-q`}>Quality</label>
-        <select id={`${id}-q`} value={quality} onChange={(e) => setQuality(e.target.value)}>
-          {qualityOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-        <span className="export-dialog-help export-dialog-full">
-          {q === 'platform' ? 'Average' : 'About'} {(kbps / 1000).toFixed(kbps >= 10000 ? 0 : 1)} Mbps video
-        </span>
-
         <span className="export-dialog-label" id={`${id}-fmt`}>Format</span>
         <div className="export-dialog-seg" role="radiogroup" aria-labelledby={`${id}-fmt`}>
-          {(['mp4', 'mov'] as const).map((c) => (
-            <button key={c} type="button" role="radio" aria-checked={container === c}
-                    onClick={() => setContainer(c)}>{c.toUpperCase()}</button>
+          {EXPORT_FORMATS.map((f) => (
+            <button key={f.value} type="button" role="radio" aria-checked={container === f.value}
+                    title={f.title} onClick={() => setContainer(f.value)}>{f.label}</button>
           ))}
         </div>
+        {audioOnly && (
+          <span className="export-dialog-help export-dialog-full">
+            The sound only — every lane mixed and mastered, no picture.
+          </span>
+        )}
+
+        {!audioOnly && (
+          <>
+            <label htmlFor={`${id}-res`}>Resolution</label>
+            <select id={`${id}-res`} value={shortSide} onChange={(e) => setShortSide(Number(e.target.value))}>
+              {resolutionOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+
+            <label htmlFor={`${id}-fps`}>Frame rate</label>
+            <select id={`${id}-fps`} value={fps} onChange={(e) => setFps(e.target.value)}>
+              {frameRateOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+
+            <label htmlFor={`${id}-q`}>Quality</label>
+            <select id={`${id}-q`} value={quality} onChange={(e) => setQuality(e.target.value)}>
+              {qualityOptions(canvas).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <span className="export-dialog-help export-dialog-full">
+              {q === 'platform' ? 'Average' : 'About'} {(kbps / 1000).toFixed(kbps >= 10000 ? 0 : 1)} Mbps video
+            </span>
+          </>
+        )}
 
         <label htmlFor={`${id}-lufs`}>Loudness</label>
         <select id={`${id}-lufs`} value={lufs} onChange={(e) => setLufs(e.target.value)}>
@@ -179,10 +197,10 @@ function ExportForm({ canvas, duration, defaultName, triggerRef, onClose, onExpo
             <option key={String(t.lufs)} value={t.lufs == null ? 'off' : String(t.lufs)}>{t.label}</option>
           ))}
         </select>
-        <span className="export-dialog-help export-dialog-full">Saved with the project; Undo reverts it.</span>
+        <span className="export-dialog-help export-dialog-full">Saved with the project; Undo reverts it. Peaks are held under −1 dBTP.</span>
 
         <span className="export-dialog-label">Audio</span>
-        <span className="export-dialog-value">{AUDIO_DESCRIPTION}</span>
+        <span className="export-dialog-value">{audioDescription(container)}</span>
       </form>
     </Dialog>
   )

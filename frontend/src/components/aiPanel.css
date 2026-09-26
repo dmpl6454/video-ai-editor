@@ -88,17 +88,20 @@
 
 .ai-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
   margin-top: 6px;
   font-size: 10.5px;
   color: var(--text-dim);
 }
-.ai-status-text { min-width: 0; }
-/* What is missing, in human names, behind "Details" (QA-101). */
-.ai-status-details { font-size: 11px; color: var(--text-dim); }
-.ai-status-details summary { cursor: pointer; color: var(--accent-2); }
+.ai-status-text { flex: 1 1 0; min-width: 0; }
+/* What is missing, in human names, behind "Details" (QA-101). The word never
+   breaks ("Detail / s" in a narrow panel); the open list takes its own row. */
+.ai-status-details { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.ai-status-details summary { cursor: pointer; color: var(--accent-2); white-space: nowrap; }
+.ai-status-details[open] { order: 3; flex-basis: 100%; }
 .ai-status-details ul { margin: 4px 0 0; padding-left: 16px; }
 .ai-refresh { font-size: 10px; padding: 2px 8px; white-space: nowrap; }
 
@@ -116,17 +119,12 @@
 
 .ai-empty { font-size: 11px; color: var(--text-dim); line-height: 1.5; margin: 12px 2px; }
 
-/* Group headings: the 11px uppercase rhythm of the sidebar, plus a rule that
+/* Group headings: the shared .section-label (styles.css), plus a rule that
    runs out to the edge so a long list reads in chapters. */
 .ai-group h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-dim);
   margin: 14px 0 6px;
 }
 .ai-group h3::after { content: ''; flex: 1; height: 1px; background: var(--line); }
@@ -222,7 +220,11 @@
   background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 .ai-badge.dim { font-weight: 500; text-transform: none; letter-spacing: 0; }
-.ai-copy { font-size: 10px; padding: 1px 8px; margin-left: auto; }
+.ai-copy { font-size: 10px; padding: 1px 8px; margin-top: 4px; }
+/* The developer setup command, only in a source checkout (lib/featureCopy). */
+.ai-fix-more { margin-top: 4px; }
+.ai-fix-more summary { font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.ai-fix-more summary:hover { color: var(--text); }
 
 .ai-card-desc {
   font-size: 11px;

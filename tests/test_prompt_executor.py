@@ -85,6 +85,14 @@ def test_a_multi_step_plan_is_one_op_and_one_undo_step(session):
         not any((Path(store.dir) / "cache" / "prompt_snap").iterdir())  # snapshot discarded on success
 
 
+def test_a_one_step_plan_says_step_not_steps(session):
+    """History read "Prompt — Mute (1 steps)" (wave C review)."""
+    store, facts = session
+    res, _ = _run(store, F.plan_of(F.step("cut_range", track="v1", start=4.0, end=6.0), title="Trim"), facts)
+    assert res.committed and res.applied == 1
+    assert store.ops.last().summary == "Prompt: Trim (1 step)"
+
+
 def test_a_plan_with_no_effect_commits_nothing(session):
     store, facts = session
     ops_before = len(store.ops.ops)

@@ -54,6 +54,16 @@ class _PlatformutilProxy:
 _pairing._pu = _PlatformutilProxy()    # settings.json, paired devices — read at app import
 _hardening._pu = _PlatformutilProxy()  # request logs — keep them out of the real profile
 
+# The owner's Anthropic key lives in the login Keychain under "Video AI Editor"
+# once Settings saves it (keychain.py). No test may read it — a suite run
+# without ANTHROPIC_API_KEY="" in the environment would otherwise send real
+# Claude calls on the owner's account — and none may write it. Every test sees
+# a service that holds nothing; the Keychain tests use their own uuid-named
+# services and delete them.
+from video_ai_editor import keychain as _keychain  # noqa: E402
+
+_keychain.SERVICE = "Video AI Editor TEST (pytest, never holds a key)"
+
 
 @pytest.fixture(scope="session")
 def isolated_user_data_dir() -> Path:

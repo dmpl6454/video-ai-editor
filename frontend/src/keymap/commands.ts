@@ -3,6 +3,10 @@ import { usePromptStore } from '../lib/promptStore'
 import { layoutPlayhead } from '../lib/timelineLayout'
 import { frameDuration, stepFrames, toFrameGrid } from '../lib/frameStep'
 import { fitZoom, timelineView } from '../lib/timelineZoom'
+import { planLift, planTrimToPlayhead, type EditPlan, type TrimSide } from '../lib/trimToPlayhead'
+import { toast } from '../toast'
+import { chordLabel, useKeymapStore } from './engine'
+import { openSettings } from '../lib/settingsOpen'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -30,6 +34,24 @@ const fpsOf = (s: Store): unknown => s.edl?.canvas?.fps
 const selectedIds = (s: Store): string[] =>
   Array.from(new Set([s.selection, ...s.multiSelection].filter(Boolean) as string[]))
 
+/** Run a planned edit (lib/trimToPlayhead): a refusal says why in a toast
+ *  instead of the key silently doing nothing (QA-115). */
+async function runPlan(s: Store, plan: EditPlan): Promise<unknown> {
+  if (plan.kind === 'refuse') { toast.info(plan.message); return null }
+  const res = await s.dispatch(plan.tool, plan.args)
+  if (res && plan.playheadAfter !== undefined) s.setPlayhead(plan.playheadAfter)
+  return res
+}
+
+const trimToPlayhead = (s: Store, side: TrimSide) =>
+  runPlan(s, planTrimToPlayhead(s.edl, selectedIds(s), s.playhead, side))
+
+/** The key(s) that ripple-delete in the ACTIVE keymap, for the lift refusal. */
+function rippleChord(): string {
+  const chords = useKeymapStore.getState().effectiveMap().rippleDelete ?? []
+  return chords.slice(0, 1).map(chordLabel).join('')
+}
+
 export const COMMANDS: Command[] = [
   // ---------- Transport ----------
   { id: 'playPause', label: 'Play / Pause', category: 'Transport',
@@ -50,11 +72,11 @@ export const COMMANDS: Command[] = [
   // J/L start at 1× from a stop and double only while ALREADY shuttling that
   // way (QA-058). K resets the rate to 1, so the old `(r || 1) * 2` made the
   // very first L play at 2×.
-  { id: 'shuttleReverse', label: 'Shuttle reverse (J)', category: 'Transport',
+  { id: 'shuttleReverse', label: 'Shuttle reverse', category: 'Transport',
     run: (s) => { const r = s.isPlaying ? s.playbackRate : 0; s.setPlaybackRate(r < 0 ? Math.max(-8, r * 2) : -1); s.setPlaying(true) } },
-  { id: 'shuttleStop', label: 'Shuttle stop (K)', category: 'Transport',
+  { id: 'shuttleStop', label: 'Shuttle stop', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlaybackRate(1) } },
-  { id: 'shuttleForward', label: 'Shuttle forward (L)', category: 'Transport',
+  { id: 'shuttleForward', label: 'Shuttle forward', category: 'Transport',
     run: (s) => { const r = s.isPlaying ? s.playbackRate : 0; s.setPlaybackRate(r > 0 ? Math.min(8, r * 2) : 1); s.setPlaying(true) } },
   { id: 'frameBack', label: 'Step back 1 frame', category: 'Transport',
     run: (s) => { s.setPlaying(false); s.setPlayhead(stepFrames(s.playhead, -1, fpsOf(s))) } },
@@ -79,6 +101,19 @@ export const COMMANDS: Command[] = [
       // says why; the clip is still there, so it stays selected.
       if (res) s.clearSelection()
     } },
+  // Delete WITHOUT closing the gap (Premiere's Delete, Final Cut's ⇧⌫).
+  // Refused, with the ripple key, when the selection includes a Main video
+  // clip — that lane is magnetic (see lib/trimToPlayhead.planLift).
+  { id: 'lift', label: 'Delete, leave gap (lift)', category: 'Editing',
+    run: async (s) => {
+      const res = await runPlan(s, planLift(s.edl, selectedIds(s), rippleChord()))
+      if (res) s.clearSelection()
+    } },
+  // Trim to the playhead (QA-115): CapCut/Premiere Q and W, Final Cut ⌥[ ⌥].
+  { id: 'trimStartToPlayhead', label: 'Trim clip start to playhead', category: 'Editing',
+    run: (s) => trimToPlayhead(s, 'start') },
+  { id: 'trimEndToPlayhead', label: 'Trim clip end to playhead', category: 'Editing',
+    run: (s) => trimToPlayhead(s, 'end') },
   { id: 'duplicate', label: 'Duplicate selection', category: 'Editing',
     run: async (s) => {
       const ids = selectedIds(s)
@@ -132,6 +167,9 @@ export const COMMANDS: Command[] = [
   // the timeline or a button it jumps to the bar with the text selected.
   { id: 'focusPrompt', label: 'Focus the Prompt bar', category: 'Navigation',
     run: () => usePromptStore.getState().focus() },
+  // ⌘, / Ctrl+, — the platform's Settings shortcut (QA-063-SETTINGS).
+  { id: 'openSettings', label: 'Open Settings', category: 'Navigation',
+    run: () => openSettings() },
 
   // ---------- History ----------
   { id: 'undo', label: 'Undo', category: 'History', run: (s) => s.dispatch('undo') },

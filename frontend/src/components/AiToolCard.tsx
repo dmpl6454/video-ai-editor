@@ -3,12 +3,15 @@ import { api, type ToolSchema } from '../api'
 import { ASYNC_DISPATCH_TOOLS, useStore } from '../store'
 import { toast } from '../toast'
 import { clipRequirement, gateFor, motionTrackSeed, type CatalogEntry } from '../lib/aiCatalog'
+import { featureCopy } from '../lib/featureCopy'
 import { useAiRuns, type RunState } from '../lib/aiRuns'
 import { buildArgs, fieldsFor, initialValues, reseedContextValues, type FormContext } from '../lib/schemaForm'
 import { AiToolForm } from './AiToolForm'
 import { AiResult } from './AiResult'
+import { Icon } from './Icon'
 import { etaText } from '../lib/aiEta'
 import { consentText, downloadBadge, downloadKeyFor, pendingDownload, type DownloadInfo } from '../lib/modelDownloads'
+import { Disclosure } from './Disclosure'
 
 interface Props {
   entry: CatalogEntry
@@ -180,7 +183,10 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
     setValues((v) => v && reseedContextValues(fields, v, touched.current, formContext()))
   }, [open, fields, playhead, inMark, outMark])
 
-  const disabledReason = !gate.ok ? `${gate.feature} isn’t installed` : !clipReq.ok ? clipReq.reason : null
+  // Editor language for a missing feature (lib/featureCopy, QA-101): the
+  // developer fix only where it can be run (a source checkout).
+  const missing = gate.ok ? null : featureCopy(gate)
+  const disabledReason = missing ? missing.reason : !clipReq.ok ? clipReq.reason : null
   const canRun = !disabledReason && !running
 
   const pending = pendingDownload(downloads, downloadKeyFor(tool, values ?? {}))
@@ -213,8 +219,8 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
   }
 
   const copyFix = async () => {
-    if (gate.ok) return
-    if (await copyText(gate.fix, fixRef.current)) toast.success('Copied')
+    if (!missing?.fix) return
+    if (await copyText(missing.fix, fixRef.current)) toast.success('Copied')
     else toast.info('Select and copy')
   }
 
@@ -229,7 +235,7 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
       <div className="ai-sr-only" role="status" aria-live="polite">{liveAnnouncement(run, entry.label)}</div>
       <button type="button" className="ai-card-head" aria-expanded={open} aria-controls={bodyId} onClick={toggle}>
         <span className="ai-card-title">{entry.label}</span>
-        <span className="ai-chevron" aria-hidden="true">›</span>
+        <span className="ai-chevron" aria-hidden="true"><Icon name="chevronRight" /></span>
       </button>
       <div className="ai-card-meta">
         {/* Editor-language badges (QA-101): "long" / "read-only" /
@@ -237,16 +243,20 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
         {entry.readOnly && <span className="ai-badge" title="Shows a result; doesn’t change the timeline">Report</span>}
         {entry.advanced && <span className="ai-badge" title="Takes file paths typed by hand">Advanced</span>}
         {pending && <span className="ai-badge warn" title={consentText(pending)}>{downloadBadge(pending)}</span>}
-        {!gate.ok && <span className="ai-badge warn">Not installed</span>}
+        {missing && <span className="ai-badge warn">{missing.badge}</span>}
         {gate.ok && gate.checking && !featuresError && <span className="ai-badge dim">checking…</span>}
         {noKey && <span className="ai-badge dim" title={entry.keyHint}>no API key</span>}
-        {!gate.ok && <button type="button" className="ai-copy" onClick={() => { void copyFix() }}>Copy fix</button>}
       </div>
       <p className="ai-card-desc">{entry.description}</p>
-      {!gate.ok && (
+      {missing && (
         <div className="ai-unavail">
-          <b>{gate.feature}</b>{gate.packagedExcluded ? ' is not included in the packaged app.' : ' is not installed.'}
-          {gate.fix && <pre ref={fixRef} className="ai-fix" tabIndex={0}>{gate.fix}</pre>}
+          {missing.line}
+          {missing.fix && (
+            <Disclosure className="ai-fix-more" summary="How to install it">
+              <pre ref={fixRef} className="ai-fix" tabIndex={0}>{missing.fix}</pre>
+              <button type="button" className="ai-copy" onClick={() => { void copyFix() }}>Copy</button>
+            </Disclosure>
+          )}
         </div>
       )}
       {open && values && (

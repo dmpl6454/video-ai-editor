@@ -16,19 +16,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api, type PromptModelRow } from '../api'
-import { errorMessage } from '../store'
 import { usePromptStore } from '../lib/promptStore'
-import { brainCopy } from '../lib/brainCopy'
+import { useModelDownload } from '../lib/useModelDownload'
+import { openSettings } from '../lib/settingsOpen'
 import { brainLabel, humanBytes, isLoopbackOrigin, shortModel,
          type BrainAttempt, type BrainRow } from '../lib/promptEvents'
-
-const JOB_POLL_MS = 700
-
-type DlState =
-  | { status: 'idle' }
-  | { status: 'running'; jobId: string; progress: number }
-  | { status: 'done' }
-  | { status: 'error'; message: string }
+import { BRAINS_HEADING, BrainRows, CHECK_AGAIN } from './BrainRows'
 
 export function BrainBadge() {
   const brain = usePromptStore((s) => s.brain)
@@ -42,7 +35,8 @@ export function BrainBadge() {
 
   const [open, setOpen] = useState(false)
   const [models, setModels] = useState<PromptModelRow[] | null>(null)
-  const [dl, setDl] = useState<DlState>({ status: 'idle' })
+  const recheck = useCallback(() => loadBrains(true), [loadBrains])
+  const { dl, start, cancel: cancelDownload } = useModelDownload(recheck)
   // The popover is portaled to document.body and positioned from the pill's
   // rect — .center clips overflow on both axes (styles.css), so a child
   // positioned under the pill was cut off at the column edge at the 900px
@@ -129,32 +123,54 @@ export function BrainBadge() {
     }
   }
 
-  const startDownload = async (row: BrainRow) => {
+  const startDownload = (row: BrainRow) => {
     const id = row.model ?? models?.find((m) => !m.installed)?.id
-    if (!id) return
-    setDl({ status: 'running', jobId: '', progress: 0 })
-    try {
-      const { job_id } = await api.downloadModel(id)
-      setDl({ status: 'running', jobId: job_id, progress: 0 })
-      for (;;) {
-        await new Promise((r) => setTimeout(r, JOB_POLL_MS))
-        const job = await api.getJob(job_id)
-        if (job.status === 'completed') { setDl({ status: 'done' }); await loadBrains(true); return }
-        if (job.status === 'failed') { setDl({ status: 'error', message: job.error || 'download failed' }); return }
-        if (job.status === 'cancelled') { setDl({ status: 'idle' }); return }
-        setDl({ status: 'running', jobId: job_id, progress: job.progress ?? 0 })
-      }
-    } catch (e) {
-      setDl({ status: 'error', message: errorMessage(e) })
-    }
-  }
-
-  const cancelDownload = async () => {
-    if (dl.status !== 'running' || !dl.jobId) return
-    try { await api.cancelJob(dl.jobId) } catch (e) { setDl({ status: 'error', message: errorMessage(e) }) }
+    if (id) void start(id)
   }
 
   const modelRow = (row: BrainRow) => models?.find((m) => m.id === row.model) ?? models?.find((m) => !m.installed) ?? null
+
+  // What only the popover offers under a row: Open Settings for the key, and
+  // the local model's download (BrainRows draws the row itself).
+  const rowActions = (row: BrainRow) => {
+    const canDownload = loopback && row.action === 'download' && !row.available
+    const m = canDownload ? modelRow(row) : null
+    const size = m?.expected_bytes ?? row.bytes ?? null
+    return (
+      <>
+        {row.action === 'add_key' && !row.available && (
+          <div className="brain-row-actions">
+            <button type="button" onClick={() => { close(); openSettings() }}>Open Settings</button>
+          </div>
+        )}
+        {canDownload && (
+          <div className="brain-row-actions">
+            {dl.status === 'running' ? (
+              <>
+                <button type="button" onClick={() => void cancelDownload()}>Cancel</button>
+                <span className="note">{Math.round(dl.progress * 100)}%{size ? ` of ${humanBytes(size)}` : ''}</span>
+              </>
+            ) : (
+              <button type="button" className="primary" onClick={() => startDownload(row)}>
+                Download{size ? ` ${humanBytes(size)}` : ''}
+              </button>
+            )}
+            {typeof m?.free_bytes === 'number' && <span className="note">{humanBytes(m.free_bytes)} free</span>}
+            {dl.status === 'error' && <span className="note bad">{dl.message}</span>}
+            {dl.status === 'done' && <span className="note good">Downloaded — rechecked</span>}
+          </div>
+        )}
+        {canDownload && dl.status === 'running' && (
+          <div className="brain-dl-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(dl.progress * 100)}>
+            <span style={{ transform: `scaleX(${Math.max(0.02, dl.progress)})` }} />
+          </div>
+        )}
+        {!loopback && row.action === 'download' && !row.available && (
+          <div className="brain-row-detail">Downloads can only be started from the Mac itself.</div>
+        )}
+      </>
+    )
+  }
 
   return (
     <div className="brain-badge">
@@ -172,65 +188,16 @@ export function BrainBadge() {
         <span className="name">{pillText}{modelTag && <span className="model"> · {modelTag}</span>}</span>
       </button>
       {open && popPos && createPortal(
-        <div className="brain-pop" ref={popRef} role="dialog" aria-label="Brains"
+        <div className="brain-pop" ref={popRef} role="dialog" aria-label={BRAINS_HEADING}
              style={{ left: popPos.left, top: popPos.top, width: popPos.width }}>
           <div className="brain-pop-head">
-            <h3>Brains — which one answers, and why</h3>
+            <h3>{BRAINS_HEADING}</h3>
             <button type="button" ref={recheckRef} disabled={brainsLoading} onClick={() => void loadBrains(true)}>
-              {brainsLoading ? 'Checking…' : 'Recheck'}
+              {brainsLoading ? 'Checking…' : CHECK_AGAIN}
             </button>
           </div>
           {brainsError && <div className="prompt-error">Couldn't read the brain report: {brainsError}</div>}
-          {brains && (
-            <ul className="brain-rows">
-              {brains.brains.map((row) => {
-                const answered = brain?.brain === row.id
-                const canDownload = loopback && row.action === 'download' && !row.available
-                const m = canDownload ? modelRow(row) : null
-                const size = m?.expected_bytes ?? row.bytes ?? null
-                return (
-                  <li className="brain-row" key={row.id}>
-                    <span className={`brain-dot ${answered ? 'is-answered' : row.available ? '' : 'is-struck'}`} aria-hidden="true" />
-                    <div className="brain-row-name">
-                      {row.label}
-                      {row.id === 'local_model' && row.model && <span className="tag">{shortModel(row.model)}</span>}
-                      {answered && <span className="tag answered">answered</span>}
-                      {!answered && <span className="tag">{row.available ? 'available' : 'unavailable'}</span>}
-                    </div>
-                    {/* Editor language, not the report's shell commands (QA-063);
-                        the raw report is the row's hover title. */}
-                    <div className="brain-row-detail" title={[row.detail, row.fix].filter(Boolean).join(' · ')}>{brainCopy(row).detail}</div>
-                    {brainCopy(row).fix && <div className="brain-row-fix">{brainCopy(row).fix}</div>}
-                    {canDownload && (
-                      <div className="brain-row-actions">
-                        {dl.status === 'running' ? (
-                          <>
-                            <button type="button" onClick={() => void cancelDownload()}>Cancel</button>
-                            <span className="note">{Math.round(dl.progress * 100)}%{size ? ` of ${humanBytes(size)}` : ''}</span>
-                          </>
-                        ) : (
-                          <button type="button" className="primary" onClick={() => void startDownload(row)}>
-                            Download{size ? ` ${humanBytes(size)}` : ''}
-                          </button>
-                        )}
-                        {typeof m?.free_bytes === 'number' && <span className="note">{humanBytes(m.free_bytes)} free</span>}
-                        {dl.status === 'error' && <span className="note bad">{dl.message}</span>}
-                        {dl.status === 'done' && <span className="note good">Downloaded — rechecked</span>}
-                      </div>
-                    )}
-                    {canDownload && dl.status === 'running' && (
-                      <div className="brain-dl-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(dl.progress * 100)}>
-                        <span style={{ transform: `scaleX(${Math.max(0.02, dl.progress)})` }} />
-                      </div>
-                    )}
-                    {!loopback && row.action === 'download' && !row.available && (
-                      <div className="brain-row-detail">Downloads can only be started from the Mac itself.</div>
-                    )}
-                  </li>
-                )
-              })}
-            </ul>
-          )}
+          {brains && <BrainRows rows={brains.brains} answered={brain?.brain ?? null} extra={rowActions} />}
           {attempts.length > 0 && <Ladder attempts={attempts} />}
         </div>,
         document.body,

@@ -52,6 +52,10 @@ describe('check values as prose', () => {
     expect(humanValue([1.5, 2], 's')).toBe('1.50, 2 s')
     expect(humanValue({ lufs: { integrated: -14.2 } })).toBe('lufs (integrated: -14.2)')
     expect(humanValue([])).toBe('none')
+    // A range the verifier sends as numbers (never "[11.5, 30.5]").
+    expect(humanValue({ sessions: 3, duration: { min: 11.5, max: 30.5, unit: 's' } }))
+      .toBe('sessions: 3, duration: 11.5–30.5 s')
+    expect(humanValue({ min: 0, max: null, unit: 's' })).toBe('at least 0 s')
     expect(humanValue(undefined)).toBe('—')
   })
 

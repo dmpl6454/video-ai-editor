@@ -18,6 +18,8 @@ export interface TileSpec {
   w: number
   /** SOURCE time the tile shows, on a zoom-stable grid. */
   ts: number
+  /** That grid's step (s) — the sprite a tile's frame comes from. */
+  step: number
 }
 
 export interface FilmstripInput {
@@ -52,9 +54,41 @@ export function filmstripTiles(p: FilmstripInput): TileSpec[] {
     let ts = p.srcIn + mid * perPx
     ts = Math.round(ts / grid) * grid
     ts = Math.min(Math.max(ts, p.srcIn), Math.max(p.srcIn, p.srcOut - 0.05))
-    out.push({ x: tx, w: tileW, ts: Number(ts.toFixed(3)) })
+    out.push({ x: tx, w: tileW, ts: Number(ts.toFixed(3)), step: grid })
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Sprites (QA-059 remainder): one GET /thumbstrip returns SPRITE_TILES frames
+// side by side — slot i of page p is the frame at (p·N + i)·step — so a
+// filmstrip costs one request (one ffmpeg run) per SPRITE_TILES tiles instead
+// of one per tile. Must match the `n` the server is asked for.
+
+export const SPRITE_TILES = 16
+
+export interface SpriteSlot { step: number; page: number; index: number }
+
+/**
+ * The sprite slot holding a tile's frame: the grid point nearest the tile's
+ * time that lies inside the clip's source window [srcIn, srcOut). null when
+ * the window holds no grid point at all (a clip shorter than one step at this
+ * zoom) — that tile falls back to a single /thumb at its own time.
+ */
+export function spriteSlot(tile: Pick<TileSpec, 'ts' | 'step'>, srcIn: number, srcOut: number): SpriteSlot | null {
+  const step = tile.step
+  if (!(step > 0)) return null
+  const lo = Math.ceil((srcIn - 1e-6) / step)
+  const hi = Math.floor((srcOut - 0.05 + 1e-6) / step)
+  if (lo > hi) return null
+  const k = Math.min(hi, Math.max(lo, Math.round(tile.ts / step)))
+  return { step, page: Math.floor(k / SPRITE_TILES), index: k % SPRITE_TILES }
+}
+
+/** The request for one sprite page. */
+export function spriteUrl(sid: string, src: string, slot: SpriteSlot, h: number): string {
+  return `/api/sessions/${sid}/thumbstrip?src=${encodeURIComponent(src)}&step=${slot.step}`
+    + `&page=${slot.page}&n=${SPRITE_TILES}&h=${h}`
 }
 
 type Status = 'queued' | 'loading' | 'done' | 'error'
@@ -71,6 +105,7 @@ export class ThumbQueue {
   private order: string[] = []
   private wanted = new Set<string>()
   private active = 0
+  private held = false
 
   private readonly start: (key: string, url: string, done: (ok: boolean) => void) => void
   private readonly maxConcurrent: number
@@ -92,7 +127,15 @@ export class ThumbQueue {
     this.order.push(key)
   }
 
+  /** While held, nothing new starts (queued keys wait): the filmstrip holds
+   *  its requests until the preview has loaded (lib/previewGate). */
+  hold(on: boolean): void {
+    this.held = on
+    if (!on) this.pump()
+  }
+
   pump(): void {
+    if (this.held) return
     while (this.active < this.maxConcurrent && this.order.length) {
       const key = this.order.shift()!
       if (this.status.get(key) !== 'queued') continue

@@ -228,13 +228,14 @@ def _claude_translate_phrase(phrase: str, to_code: str) -> str | None:
     """Ask Claude to translate one short phrase. Returns None (never raises)
     on a missing key, an unsupported target, or any API/network failure —
     the caller must treat that as "leave the phrase as-is", not as an error."""
-    from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+    from ..config import CLAUDE_MODEL, anthropic_api_key
     lang_name = {"hi": "Hindi (Devanagari script)"}.get(to_code)
-    if not ANTHROPIC_API_KEY or not lang_name:
+    api_key = anthropic_api_key()   # env, else the Settings Keychain key
+    if not api_key or not lang_name:
         return None
     try:
         from anthropic import Anthropic
-        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = Anthropic(api_key=api_key)
         resp = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,

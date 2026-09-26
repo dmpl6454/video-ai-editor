@@ -119,6 +119,112 @@ export function animDuration(animDur: number | null | undefined, windowLen: numb
   return Math.min(base, Math.max(0.1, windowLen * 0.4))
 }
 
+// ---- rule 8 (QA-078): letter spacing. Mirror of the block in
+// render/text_overlay.py and shaping.py; `block.letter_spacing` in the fixture
+// pins the arithmetic and the unit split on both sides.
+export const LETTER_SPACING_RANGE: readonly [number, number] = [-20, 100]
+
+/** Codepoint ranges that need shaping (shaping._COMPLEX_RANGES). */
+const COMPLEX_RANGES: readonly (readonly [number, number])[] = [
+  [0x0590, 0x05FF], [0x0600, 0x06FF], [0x0700, 0x074F], [0x0750, 0x077F],
+  [0x0780, 0x07BF], [0x08A0, 0x08FF], [0x0900, 0x0DFF], [0x0E00, 0x0EFF],
+  [0x0F00, 0x0FFF], [0x1000, 0x109F], [0x1780, 0x17FF], [0xA8E0, 0xA8FF],
+  [0xFB1D, 0xFDFF], [0xFE70, 0xFEFF],
+]
+
+/** shaping.needs_shaping: a script the export shapes with HarfBuzz. */
+export function needsShaping(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    if (cp < 0x0590) continue
+    for (const [lo, hi] of COMPLEX_RANGES) if (cp >= lo && cp <= hi) return true
+  }
+  return false
+}
+
+/** shaping._SCRIPT_RANGES (first, last, ISO 15924 tag). */
+const SCRIPT_RANGES: readonly (readonly [number, number, string])[] = [
+  [0x0370, 0x03FF, 'Grek'], [0x0400, 0x052F, 'Cyrl'],
+  [0x0590, 0x05FF, 'Hebr'], [0x0600, 0x06FF, 'Arab'], [0x0700, 0x074F, 'Syrc'],
+  [0x0750, 0x077F, 'Arab'], [0x0780, 0x07BF, 'Thaa'], [0x08A0, 0x08FF, 'Arab'],
+  [0x0900, 0x097F, 'Deva'], [0x0980, 0x09FF, 'Beng'], [0x0A00, 0x0A7F, 'Guru'],
+  [0x0A80, 0x0AFF, 'Gujr'], [0x0B00, 0x0B7F, 'Orya'], [0x0B80, 0x0BFF, 'Taml'],
+  [0x0C00, 0x0C7F, 'Telu'], [0x0C80, 0x0CFF, 'Knda'], [0x0D00, 0x0D7F, 'Mlym'],
+  [0x0D80, 0x0DFF, 'Sinh'], [0x0E00, 0x0E7F, 'Thai'], [0x0E80, 0x0EFF, 'Laoo'],
+  [0x0F00, 0x0FFF, 'Tibt'], [0x1000, 0x109F, 'Mymr'], [0x1780, 0x17FF, 'Khmr'],
+  [0x1CD0, 0x1CFF, 'Deva'], [0x3040, 0x30FF, 'Hani'], [0x3400, 0x4DBF, 'Hani'],
+  [0x4E00, 0x9FFF, 'Hani'], [0xA8E0, 0xA8FF, 'Deva'], [0xFB1D, 0xFB4F, 'Hebr'],
+  [0xFB50, 0xFDFF, 'Arab'], [0xFE70, 0xFEFF, 'Arab'],
+]
+
+/** shaping.script_of: the script tag of `ch`, or null for a Common /
+ *  Inherited character that joins the run around it. */
+export function scriptOf(ch: string): string | null {
+  if (ch === '\u200C' || ch === '\u200D') return null
+  const cp = ch.codePointAt(0) ?? 0
+  if (cp >= 0x0370) {
+    for (const [lo, hi, tag] of SCRIPT_RANGES) {
+      if (cp >= lo && cp <= hi) return /[\p{L}\p{M}\p{N}\p{P}]/u.test(ch) ? tag : null
+    }
+  }
+  return /\p{L}/u.test(ch) ? 'Latn' : null
+}
+
+/** shaping._split_scripts: consecutive one-script pieces; Common characters
+ *  join the PRECEDING piece (leading ones the following). */
+export function splitScripts(chunk: string): string[] {
+  const chars = Array.from(chunk)
+  const tags = chars.map(scriptOf)
+  let curTag = tags.find((t) => t !== null) ?? null
+  const out: string[] = []
+  let cur = ''
+  chars.forEach((ch, i) => {
+    const tag = tags[i]
+    if (tag !== null && tag !== curTag && cur) { out.push(cur); cur = '' }
+    if (tag !== null) curTag = tag
+    cur += ch
+  })
+  if (cur) out.push(cur)
+  return out
+}
+
+/** shaping.grapheme_clusters: a base character with its marks, variation
+ *  selectors and ZWJ-joined partners (simple scripts only). */
+export function graphemeClusters(text: string): string[] {
+  const out: string[] = []
+  for (const ch of text) {
+    const last = out.length ? out[out.length - 1] : null
+    if (last !== null && (/\p{M}/u.test(ch) || ch === '\u200D' || ch === '\uFE0E' || ch === '\uFE0F'
+                          || last.endsWith('\u200D'))) out[out.length - 1] = last + ch
+    else out.push(ch)
+  }
+  return out
+}
+
+/** text_overlay._simple_clusters: [unit, tracked] for a text chunk. */
+export function trackedUnits(chunk: string): [string, boolean][] {
+  const out: [string, boolean][] = []
+  for (const piece of splitScripts(chunk)) {
+    if (needsShaping(piece)) out.push([piece, false])
+    else for (const cl of graphemeClusters(piece)) out.push([cl, true])
+  }
+  return out
+}
+
+/** text_overlay.tracked_width: units `advances` wide, each tracked one but
+ *  the LAST followed by `spacing`. */
+export function trackedWidth(advances: readonly number[], tracked: readonly boolean[], spacing: number): number {
+  let w = 0
+  advances.forEach((a, i) => { w += a + (i < advances.length - 1 && tracked[i] ? spacing : 0) })
+  return w
+}
+
+/** The clip's letter spacing in canvas px, clamped (TextStyle.letter_spacing). */
+export function letterSpacingOf(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.min(LETTER_SPACING_RANGE[1], Math.max(LETTER_SPACING_RANGE[0], v)) : 0
+}
+
 /** Rule 3: the alphabetic baseline that centres the 'H' ink (ascent `asc`
  *  above, descent `desc` below the baseline) on `center`. */
 export function baselineFor(center: number, asc: number, desc: number): number {

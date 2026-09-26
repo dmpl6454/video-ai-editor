@@ -85,14 +85,19 @@ describe('the recorded catalog', () => {
   })
 
   it('gives every look a hover preview that is not the generic crossfade unless it IS one', () => {
-    const generic = new Set(['fade', 'fadefast', 'fadeslow', 'dissolve'])
+    const generic = new Set(['fade', 'fadefast', 'fadeslow'])
     for (const e of cat.entries) {
       if (generic.has(e.name)) expect(e.preview.kind).toBe('fade')
       else expect(e.preview.kind).not.toBe('fade')
     }
+    // QA-119: the crossfades differ by pace, the grainy dissolve and the
+    // soft-edged "smooth" slides have looks of their own.
+    expect(previewFor('fadefast')).toEqual({ kind: 'fade', dir: null, pace: 'fast' })
+    expect(previewFor('fadeslow')).toEqual({ kind: 'fade', dir: null, pace: 'slow' })
+    expect(previewFor('dissolve')).toEqual({ kind: 'dissolve', dir: null })
     expect(previewFor('slideleft')).toEqual({ kind: 'slide', dir: 'left' })
     expect(previewFor('wipebr')).toEqual({ kind: 'wipe', dir: 'br' })
-    expect(previewFor('smoothup')).toEqual({ kind: 'slide', dir: 'up' })
+    expect(previewFor('smoothup')).toEqual({ kind: 'smooth', dir: 'up' })
     expect(previewFor('whipdown')).toEqual({ kind: 'whip', dir: 'down' })
     expect(previewFor('circleclose')).toEqual({ kind: 'iris-close', dir: null })
     expect(previewFor('nonsense')).toEqual({ kind: 'fade', dir: null })
@@ -178,5 +183,14 @@ describe('the "Every cut" sentence', () => {
     }
     expect(everyCutPrompt({ name: 'vertopen' }, 9)).toBe('add a vertopen transition between every clip lasting 2 seconds')
     expect(everyCutPrompt({ name: 'whip' }, 0)).toBe('add a whip transition between every clip lasting 0.1 seconds')
+  })
+})
+
+describe('the panel footer (wave C review: "72 looks · 33 more names accepted")', () => {
+  it('counts transitions and names the fallback, never the aliases', async () => {
+    const { transitionCountText } = await import('./transitionCatalog')
+    expect(transitionCountText({ looks: 72, source: 'entries' })).toBe('72 transitions')
+    expect(transitionCountText({ looks: 1, source: 'derived' })).toBe('1 transition')
+    expect(transitionCountText({ looks: 40, source: 'fallback' })).toBe('40 transitions (built-in list)')
   })
 })

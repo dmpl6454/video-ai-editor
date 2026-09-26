@@ -247,7 +247,9 @@ def test_a_30s_reel_ends_on_the_last_sentence_that_fits(tmp_path):
     res, _ = _run(s, plan, f)
     extent = s.edl.video_extent()
     # "It tracks faces …" straddles 30 s: the reel ends after "… shooting." (24.4 s + pad).
-    assert 24.4 <= extent <= 24.6, extent
+    # Wave C (best window): this opening IS the best-scoring window, and the
+    # 0.5 s of silence before its first word is trimmed as dead air.
+    assert 23.9 <= extent <= 24.6, extent
     notices = [n for st in res.steps for n in st.notices]
     assert any("sentence" in n for n in notices), notices
 
@@ -524,11 +526,14 @@ def test_fm_invented_questions_and_reply_are_dropped_and_misreadings_grounded():
         "confidence": 0.9, "reply": "I'll ease the picture in from black using the fade recipe."})
     assert not plan.blocking_questions and "recipe" not in (plan.reply or "")
     assert {s.tool for s in plan.steps} >= {"set_video_fade"}
-    # "I want the backing track to sit lower" came back as ducking OFF.
+    # "I want the backing track to sit lower" came back as ducking OFF. It
+    # names no speaker, so (wave C, QA-018) it is a level: the bed goes down,
+    # never ducking off (and no longer ducking on either).
     plan = _fm_plan("I want the backing track to sit lower", {
         "intents": [{"recipe": "duck", "enabled": False}], "exclusions": [], "needs_input": [],
         "confidence": 0.9, "reply": ""})
-    assert [s.args.get("enabled") for s in plan.steps if s.tool == "set_duck"] == [True]
+    assert [s.args.get("enabled") for s in plan.steps if s.tool == "set_duck"] == []
+    assert [s.args.get("target") for s in plan.steps if s.tool == "set_volume"] == ["music"]
     # "slap LAUNCH DAY across the top" came back as a name card.
     plan = _fm_plan("slap LAUNCH DAY across the top", {
         "intents": [{"recipe": "title", "name": "LAUNCH DAY"}], "exclusions": [], "needs_input": [],

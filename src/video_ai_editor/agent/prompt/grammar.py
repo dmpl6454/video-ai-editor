@@ -39,6 +39,8 @@ INTENTS: tuple[str, ...] = (
     "voiceover", "stabilize", "upscale", "undo", "redo", "ask",
     # QA-018: the everyday one-liners — fades, levels, mutes, fitting the bed.
     "fade", "volume", "mute", "fit_music", "audit", "preview", "remove_music",
+    # QA-037: play a clip backwards (or forwards again).
+    "reverse",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -209,6 +211,18 @@ def duck_off(clause: str) -> bool:
     return bool(_DUCK_OFF_RE.search(S.normalize(clause)))
 
 
+#: A `reverse` clause asking for FORWARDS playback again (QA-037).
+_REVERSE_OFF_RE = re.compile(
+    r"\bun-?reverse\w*|\bforwards?\b|\bnormally again\b|\bnormal direction\b|\bno longer revers\w*"
+    r"|\b(?:stop|turn off|remove|undo|cancel|drop|get rid of|take off)\s+(?:the\s+)?(?:reverse|reversing|reversal|backwards?)\w*"
+    r"|\b(?:don'?t|do not|not|never)\s+(?:play\s+)?(?:it\s+|this\s+)?(?:reverse|backwards?)\w*|\bseedha\b|\bsidha\b")
+
+
+def reverse_off(clause: str) -> bool:
+    """True when a `reverse` clause asks for the clip to play forwards again."""
+    return bool(_REVERSE_OFF_RE.search(S.normalize(clause)))
+
+
 def strip_negations(clause: str) -> str:
     """The clause with negated phrases removed, so "add music but no captions"
     still yields `music`."""
@@ -292,6 +306,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                    rf"|\b(?:end|stop|finish) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN} (?:when|where|as|with|at) (?:the\s+)?video\b"
                    rf"|\b{_MUSIC_NOUN} (?:should |must |needs to |has to )?(?:end|stop|finish) (?:with|when|at|where) the (?:video|footage)\b"
                    r"|\bblack (?:tail|screen|frames?) at the end\b"
+                   # "the music outlives the video" (QA-018 live pass, wave C)
+                   rf"|\b{_MUSIC_NOUN}\s+(?:outlives|outlasts|overruns|runs longer than|lasts longer than|is longer than"
+                   r"|goes on after|keeps going after|plays past|runs past)\s+(?:the\s+)?(?:video|footage|picture|clip|clips)\b"
                    # "trim the song so it matches the clip" (QA-018 paraphrase)
                    rf"|\b(?:trim|cut|fit|shorten)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+so\s+(?:that\s+)?(?:it\s+)?"
                    r"(?:matches|fits|ends with|lines up with|stops with)\s+(?:the\s+)?(?:clip|video|footage)\b", EXACT),),
@@ -314,6 +331,10 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               rf"|\b(?:turn|switch)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+off\b"
               rf"|\b(?:turn|switch|put)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:back\s+)?on\b"
               rf"|\b{_MUSIC_NOUN}\s+(?:band|bandh|off|chalu|on)\s*(?:karo|kar do|kardo|kijiye|karein|do)\b"
+              # QA-018 live pass: "kill the audio from the camera" (it read as
+              # noise reduction) — the programme's own sound, off.
+              r"|\b(?:kill|cut|drop|lose|silence|switch off|turn off)\s+(?:the\s+|all\s+(?:the\s+)?)?(?:audio|sound)\s+"
+              r"(?:from|of|on|in)\s+(?:the\s+|my\s+)?(?:camera|clips?|video|footage|recording|phone)\b"
               rf"|\b(?:un)?mute\b", EXACT),),
     "volume": ((rf"\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
                 rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?(?:\s+(?:volume|level|gain))?\b"
@@ -331,7 +352,26 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"|\bvolume (?:down|up) (?:on|for) (?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\b"
                 rf"|\b(?:quieter|softer|louder|lower) (?:background\s+)?{_MUSIC_NOUN}\b"
                 rf"|\bcan'?t hear (?:my|the) (?:voice|speech|dialogue|narration|words|talking) (?:over|under|because of|with|through) (?:the\s+)?{_MUSIC_NOUN}\b"
-                rf"|\b{_MUSIC_NOUN} (?:drowns|is drowning|covers|buries|overpowers) (?:out )?(?:my|the) (?:voice|speech|dialogue|narration)\b", EXACT),),
+                rf"|\b{_MUSIC_NOUN} (?:drowns|is drowning|covers|buries|overpowers) (?:out )?(?:my|the) (?:voice|speech|dialogue|narration)\b"
+                # QA-018 live pass (wave C): paraphrases the grammar used to hand
+                # to the loudness target or to add-music — "let the song swell
+                # louder", "I want the beat pushed further back in the mix".
+                rf"|\b{_MUSIC_NOUN}\s+(?:\w+\s+){{1,2}}(?:louder|quieter|softer)\b(?!\s+(?:when|while|under|during))"
+                rf"|\b(?:{_MUSIC_NOUN}|beat|beats)\s+(?:pushed|pulled|sat|tucked|set|moved|nudged|placed|sits?|sitting)\s+"
+                r"(?:further\s+|more\s+|a (?:bit|little|touch)\s+|way\s+)?(?:back|behind|down|lower|forward|up|louder)"
+                r"(?:\s+in the mix)?\b"
+                rf"|\b(?:push|pull|sit|tuck|set|move|nudge|put)\s+(?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|beat|beats)\s+"
+                r"(?:further\s+|more\s+|a (?:bit|little|touch)\s+|way\s+)?(?:back|behind|forward)(?:\s+in the mix)?\b"
+                rf"|\b(?:{_MUSIC_NOUN}|beat|beats)\b.*\bin the mix\b", EXACT),),
+    # QA-037: "reverse the clip", "play it backwards", "ulta chala do"; the
+    # forwards-again wording is read by `reverse_off`. "reverse that" / "reverse
+    # the last edit" is an undo and "reverse the order" a reorder, so neither
+    # reads as this row.
+    "reverse": ((r"\b(?:un-?)?reverse(?:d|s)?\b(?!\s+(?:that|it all|the (?:last|previous) (?:edit|change|step)|my last|the order|order|the sequence))"
+                 r"|\bplay(?:s|ing)?\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+)?(?:backwards?|in reverse|forwards? again|forwards?|normally again)\b"
+                 r"|\brun(?:s)?\s+(?:it\s+|this\s+|the\s+(?:clip|video|footage|shot)\s+)?(?:backwards?|in reverse)\b"
+                 r"|\brewind(?:ing)? effect\b|\bbackwards? (?:clip|video|playback|effect)\b"
+                 r"|\bulta\s+(?:chala\w*|karo|kar do|kardo|play)\b", EXACT),),
     "audit": ((r"\b(?:audit|review|check|score|grade)\s+(?:it|this|the (?:edit|video|result|timeline)|everything)\b|\b(?:aesthetic )?audit\b|\bquality check\b", EXACT),),
     "preview": ((r"\brender (?:a |the )?preview\b|\bpreview render\b|\b(?:render|make|build|export) (?:a |the )?(?:quick |low[- ]res )?(?:preview|draft)(?: render| video| file)?\b", EXACT),),
     "beat_sync": ((r"\b(?:cut|edit|sync|snap|match|time|align)\w*\s+(?:it\s+|this\s+|the\s+(?:video|cuts|clips|footage)\s+)?(?:to|on|with|along)\s+(?:the\s+)?(?:beat|music|rhythm|drums?|bpm|tempo)\b|\bbeat[- ]?sync\b|\bon[- ]beat\b|\bbeat[- ]match(?:ed|ing)?\b|\bpulse (?:to|with|on) the (?:beat|music)\b|\bcuts? on (?:the )?beats?\b|\bbeat drops?\b", EXACT),
@@ -420,6 +460,7 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("audit", "ask"), ("preview", "export_preset"),
     ("remove_music", "music"), ("remove_music", "trim"), ("remove_music", "mute"),
     ("remove_music", "clean_audio"), ("remove_music", "fit_music"),
+    ("reverse", "speed"), ("reverse", "trim"), ("undo", "reverse"),
 )
 
 
@@ -538,4 +579,5 @@ def detect(prompt: str) -> Detection:
 
 __all__ = ["INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
            "IntentHit", "Detection", "split_clauses", "exclusions_in", "strip_negations", "duck_off",
+           "reverse_off",
            "CUT_PRECEDENCE", "PHRASES", "detect"]

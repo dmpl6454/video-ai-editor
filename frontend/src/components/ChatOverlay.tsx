@@ -23,6 +23,7 @@ import { usePromptStore, isBusy } from '../lib/promptStore'
 import { brainLabel, readSseStream, type ClarifyEvent, type Plan, type PromptEvent } from '../lib/promptEvents'
 import type { Answers } from '../lib/clarifyDefaults'
 import { ClarifyCard } from './ClarifyCard'
+import { Icon } from './Icon'
 import { parseInlineMarkdown } from '../lib/inlineMarkdown'
 import { cleanSummary, toolTitle } from '../lib/opLabels'
 
@@ -144,7 +145,7 @@ export function ChatOverlay({ onClose }: { onClose: () => void }) {
       // thinking. Say what happened instead.
       setMsgs((m) => [...m, {
         role: 'assistant',
-        text: `⚠ The connection dropped mid-answer (${errorMessage(e)}). `
+        text: `The connection dropped mid-answer (${errorMessage(e)}). `
             + `Any edits already applied are saved — send the message again to continue.`,
       }])
     } finally {
@@ -183,7 +184,7 @@ export function ChatOverlay({ onClose }: { onClose: () => void }) {
   }
 
   const placeholder = busy ? 'Working…'
-    : promptBusy ? 'The Prompt bar is running — chat waits for the same session'
+    : promptBusy ? 'The Prompt bar is working — chat waits until it finishes'
     : 'Tell the editor what to do — Enter to send'
 
   // Docked in the right sidebar's Chat tab (App.tsx, QA-061): no floating
@@ -201,7 +202,7 @@ export function ChatOverlay({ onClose }: { onClose: () => void }) {
           </span>
         )}
         <div style={{ flex: 1 }} />
-        <button onClick={onClose} aria-label="Close chat" title="Close chat"><span aria-hidden="true">×</span></button>
+        <button className="icon-btn" onClick={onClose} aria-label="Close chat" title="Close chat"><Icon name="close" /></button>
       </header>
       <div className="body" ref={bodyRef}>
         {msgs.length === 0 && (

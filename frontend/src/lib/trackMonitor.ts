@@ -16,20 +16,26 @@ export function isHeard(t: Track, tracks: Track[]): boolean {
   return anySolo(tracks) ? !!t.solo : true
 }
 
-/** The two 12 px boxes in a label row of height `h` starting at `top`:
- *  M above the row's middle, S below it, both at x 6–18. */
-export const MONITOR_BOX = { x: 6, size: 12 } as const
+/** Where a sound lane's Mute and Solo buttons sit in its label row
+ *  (wave C review: they were 12 px canvas boxes holding 9 px "M"/"S", mouse
+ *  only). Real <button>s now — keyboard-reachable, aria-pressed, lucide icons
+ *  — side by side under the lane name, each a 22×18 target. */
+export const MONITOR_BUTTON = { w: 22, h: 18, gap: 2, left: 6, bottom: 2 } as const
 
-export function monitorBoxes(top: number, h: number): { mute: number; solo: number } {
-  const mid = top + h / 2
-  return { mute: mid - 13, solo: mid + 1 }
+export interface MonitorRect { x: number; y: number; w: number; h: number }
+
+export function monitorButtons(top: number, h: number): { mute: MonitorRect; solo: MonitorRect } {
+  const { w, h: bh, gap, left, bottom } = MONITOR_BUTTON
+  const y = top + h - bottom - bh
+  return { mute: { x: left, y, w, h: bh }, solo: { x: left + w + gap, y, w, h: bh } }
 }
 
-/** Which box (if any) a point on the label canvas hits. */
-export function monitorHit(x: number, y: number, top: number, h: number): 'mute' | 'solo' | null {
-  if (x < MONITOR_BOX.x || x > MONITOR_BOX.x + MONITOR_BOX.size) return null
-  const b = monitorBoxes(top, h)
-  if (y >= b.mute && y <= b.mute + MONITOR_BOX.size) return 'mute'
-  if (y >= b.solo && y <= b.solo + MONITOR_BOX.size) return 'solo'
-  return null
+/** Baseline of a sound lane's name: the line above its buttons. */
+export function laneNameBaseline(top: number): number {
+  return top + 13
+}
+
+/** The buttons' accessible names — the action, then the lane. */
+export function monitorLabels(lane: string): { mute: string; solo: string } {
+  return { mute: `Mute ${lane}`, solo: `Solo ${lane}` }
 }

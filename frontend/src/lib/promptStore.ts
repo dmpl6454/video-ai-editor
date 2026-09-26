@@ -26,6 +26,7 @@ import { api, type PromptBody, type PromptPending, type PromptRunEnvelope, type 
 import { useStore, errorMessage } from '../store'
 import { toast } from '../toast'
 import { answersPayload, type Answers } from './clarifyDefaults'
+import { promptTooLongError } from './promptLimit'
 import {
   EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, onPromptRunning, onSessionSwitch, promptRunningFromError,
   readSseStream, reduce, startRun, type BrainsReport, type PromptEvent, type PromptRunState,
@@ -175,7 +176,9 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
         await get().reconnect(sid)
         return
       }
-      set({ status: 'error', lastError: errorMessage(e) })
+      // A prompt refused for its length says so (QA-124), not "invalid request".
+      const tooLong = e instanceof Error ? promptTooLongError(e.message) : null
+      set({ status: 'error', lastError: tooLong ?? errorMessage(e) })
       return
     }
     try {

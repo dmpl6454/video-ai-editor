@@ -32,6 +32,13 @@ export const PRESETS = {
       // advertised "S = split" while nothing actually bound it.
       split: ['Mod+KeyB', 'KeyS'],
       rippleDelete: ['Delete', 'Backspace'],
+      // Main track is magnetic in CapCut, so plain Delete closes up; the lift
+      // (gap-leaving delete) sits on Shift like Final Cut's (QA-115).
+      lift: ['Shift+Delete', 'Shift+Backspace'],
+      // CapCut's Q/W ("delete left/right of the playhead"); ⌥[ ⌥] as in
+      // Final Cut, since [ and ] alone are the in/out marks here.
+      trimStartToPlayhead: ['KeyQ', 'Alt+BracketLeft'],
+      trimEndToPlayhead: ['KeyW', 'Alt+BracketRight'],
       duplicate: ['Mod+KeyD'],
       copy: ['Mod+KeyC'],
       paste: ['Mod+KeyV'],
@@ -59,6 +66,7 @@ export const PRESETS = {
       // elsewhere in this preset; `?` (Shift+Slash) is a different chord and
       // still opens Help.
       focusPrompt: ['Slash', 'Mod+KeyK'],
+      openSettings: ['Mod+Comma'],
     } as KeyMap,
   },
 
@@ -76,7 +84,13 @@ export const PRESETS = {
       goToStart: ['Home'],
       goToEnd: ['End'],
       split: ['Mod+KeyK'],                  // Add Edit at playhead
-      rippleDelete: ['Shift+Delete', 'Delete', 'Backspace'],
+      // Premiere's Delete is Clear (a lift: the gap stays); Shift+Delete is
+      // Ripple Delete (QA-115 — Delete used to ripple here).
+      rippleDelete: ['Shift+Delete', 'Shift+Backspace'],
+      lift: ['Delete', 'Backspace'],
+      // Q / W: ripple trim previous / next edit to the playhead.
+      trimStartToPlayhead: ['KeyQ'],
+      trimEndToPlayhead: ['KeyW'],
       duplicate: ['Mod+KeyD'],
       copy: ['Mod+KeyC'],
       paste: ['Mod+KeyV'],
@@ -98,6 +112,7 @@ export const PRESETS = {
       // engine's chord map is last-write-wins, so binding it twice would
       // silently steal split. Rebind in Settings if you want ⌘K anyway.
       focusPrompt: ['Slash'],
+      openSettings: ['Mod+Comma'],
     } as KeyMap,
   },
 
@@ -116,6 +131,9 @@ export const PRESETS = {
       goToEnd: ['End'],
       split: ['Mod+KeyB'],                  // Blade at playhead
       rippleDelete: ['Delete', 'Backspace'],
+      lift: ['Shift+Delete', 'Shift+Backspace'],   // Replace with gap
+      trimStartToPlayhead: ['Alt+BracketLeft'],    // Trim Start
+      trimEndToPlayhead: ['Alt+BracketRight'],     // Trim End
       duplicate: ['Mod+KeyD'],
       copy: ['Mod+KeyC'],
       paste: ['Mod+KeyV'],
@@ -134,6 +152,7 @@ export const PRESETS = {
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
       focusPrompt: ['Slash', 'Mod+KeyK'],
+      openSettings: ['Mod+Comma'],
     } as KeyMap,
   },
 } as const

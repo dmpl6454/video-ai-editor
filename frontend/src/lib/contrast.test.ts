@@ -11,13 +11,18 @@ const tok = (v: string) => resolveToken(v, TOKENS)
 
 const SURFACES = ['--bg-0', '--bg-1', '--bg-2', '--bg-3'] as const
 // Every token the UI uses as a TEXT colour on the dark surfaces.
-const TEXT_ON_SURFACES = ['--text', '--text-dim', '--text-faint', '--accent', '--accent-2', '--good', '--warn'] as const
+const TEXT_ON_SURFACES = ['--text', '--text-dim', '--text-faint', '--text-disabled', '--accent', '--accent-2', '--good', '--warn'] as const
 // Filled controls: [background token, text token].
 const FILLS = [
   ['--accent-fill', '--on-accent'],
   ['--accent-fill-hover', '--on-accent'],
   ['--accent-2-fill', '--on-accent'],
   ['--accent-2-fill-hover', '--on-accent'],
+  // Wave C: a panel error well, and THE disabled state.
+  ['--error-bg', '--error-text'],
+  ['--bg-disabled', '--text-disabled'],
+  // A soloed lane's Solo button (components/Timeline .lane-monitor, wave C review).
+  ['--warn', '--bg-0'],
 ] as const
 
 describe('contrast math', () => {
@@ -81,5 +86,18 @@ describe('filled controls in the stylesheets use a passing pair', () => {
     expect(tok(d.background)).not.toBe(tok('var(--accent)'))
     expect(tok(d.background)).not.toBe(tok('var(--accent-fill)'))
     expect(contrastRatio(tok(d.color), tok(d.background))).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+describe('the one disabled state (wave C)', () => {
+  it('is neutral and legible: --text-disabled on --bg-disabled, never a faded accent', () => {
+    const d = ruleDeclarations(STYLES, 'button.primary:disabled')
+    expect(tok(d.color)).toBe(tok('var(--text-disabled)'))
+    expect(tok(d.background)).toBe(tok('var(--bg-disabled)'))
+  })
+  it('reads as OFF next to live text: dimmer than --text and --text-dim', () => {
+    const lum = (c: string) => contrastRatio(tok(c), '#000000')
+    expect(lum('var(--text-disabled)')).toBeLessThan(lum('var(--text-dim)'))
+    expect(lum('var(--text-disabled)')).toBeLessThan(lum('var(--text)'))
   })
 })

@@ -21,8 +21,11 @@ import { useMenuA11y } from '../lib/useMenuA11y'
 import { editedLabel, projectLabel } from '../lib/projectName'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Icon } from './Icon'
+import { ProjectPoster } from './ProjectPoster'
+import { openSettings } from '../lib/settingsOpen'
+import { chordLabel, useKeymapStore } from '../keymap/engine'
 
-interface SessionRow { id: string; name: string; modified_at?: number }
+interface SessionRow { id: string; name: string; modified_at?: number; poster?: string | null }
 
 export function TopBar() {
   const name = useStore((s) => s.sessionName)
@@ -60,6 +63,8 @@ export function TopBar() {
   const [confirmDelete, setConfirmDelete] = useState<SessionRow | null>(null)
   const renameCommitted = useRef(false)
   const shownName = projectLabel(name, sid)
+  // The live binding (rebindable; ⌘, / Ctrl+, by default) for the gear's tooltip.
+  const settingsChord = useKeymapStore((s) => s.effectiveMap)().openSettings?.[0] ?? null
   // One object from the single GET /api/version below, replaced wholesale (never
   // mutated): the semantic version, the git short-sha / baked BUILD_ID shown next
   // to it so a bug report identifies the exact bits (which "v0.3.7" did not), and
@@ -280,7 +285,7 @@ export function TopBar() {
           onDoubleClick={(e) => { e.preventDefault(); startRename() }}
           style={{ cursor: 'pointer', padding: '3px 10px', fontSize: 11 }}
         >
-          {shownName} <span aria-hidden="true">▾</span>
+          <span className="topbar-session-name">{shownName}</span><Icon name="chevronDown" />
         </button>
         )}
         {pickerOpen && pickerPos && createPortal(
@@ -306,12 +311,15 @@ export function TopBar() {
             <button type="button" role="menuitem" className="menu-item" onClick={newSession}>
               <Icon name="plus" /> New project
             </button>
+            {/* Every item carries its icon, so the labels line up (wave C
+                review); the file extension is for the tooltip, not the label. */}
             <button type="button" role="menuitem" className="menu-item"
+              title="Open a Video AI Editor project file (.vae)"
               onClick={() => { pickerA11y.close(false); importRef.current?.click() }}>
-              <Icon name="open" /> Open .vae…
+              <Icon name="open" /> Open project file…
             </button>
             <button type="button" role="menuitem" className="menu-item" onClick={startRename}>
-              Rename this project…
+              <Icon name="rename" /> Rename this project…
             </button>
             <div role="separator" style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
             {sessions.length === 0 && (
@@ -333,7 +341,9 @@ export function TopBar() {
                   title={projectLabel(s.name, s.id)}
                   style={{ flex: 1, minWidth: 0 }}
                 >
-                  <span className="menu-check" aria-hidden="true">{s.id === sid && <Icon name="check" size={12} />}</span>
+                  <span className="menu-check" aria-hidden="true">{s.id === sid && <Icon name="check" />}</span>
+                  {/* QA-099-THUMBS: a frame of the project, cached per project. */}
+                  <ProjectPoster key={s.poster ?? 'none'} src={s.poster} />
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
                     {projectLabel(s.name, s.id)}
                   </span>
@@ -349,7 +359,7 @@ export function TopBar() {
                   title={`Delete “${projectLabel(s.name, s.id)}”`}
                   aria-label={`Delete project ${projectLabel(s.name, s.id)}`}
                 >
-                  <span aria-hidden="true">×</span>
+                  <Icon name="close" />
                 </button>
               </div>
             ))}
@@ -369,7 +379,7 @@ export function TopBar() {
       </div>
       {pendingOps > 0 && (
         <span className="pill" title="An edit is being applied" style={{ color: 'var(--text-dim)' }}>
-          ⋯ Applying
+          <Icon name="more" /> Applying
         </span>
       )}
       {edl && (
@@ -399,11 +409,16 @@ export function TopBar() {
         <CaptionsButton />
         <span style={{ width: 1, height: 20, background: 'var(--line)', margin: '0 2px' }} />
         {/* Glyph buttons carry a NAME (QA-102): screen readers announced "?" and "⌨". */}
-        <button onClick={openHelp} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-keyshortcuts="?" style={{ fontSize: 11 }}>
-          <span aria-hidden="true">?</span>
+        <button className="icon-btn" onClick={openHelp} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-keyshortcuts="?">
+          <Icon name="help" />
         </button>
         <button className="icon-btn" onClick={openShortcuts} title="Customize keyboard shortcuts (CapCut / Premiere / Final Cut)" aria-label="Customize keyboard shortcuts">
           <Icon name="keyboard" />
+        </button>
+        {/* Settings (QA-063-SETTINGS): the Anthropic key, brains, models, render cache. */}
+        <button className="icon-btn" onClick={openSettings}
+                title={`Settings${settingsChord ? ` (${chordLabel(settingsChord)})` : ''}`} aria-label="Settings">
+          <Icon name="settings" />
         </button>
         {/* The iPhone-pairing affordance, rendered ONLY when this build reports
             `phone_pairing: true` on /api/version.
@@ -429,8 +444,7 @@ export function TopBar() {
             <button
               onClick={() => setPhoneOpen(true)}
               title="Connect an iPhone to this Mac — the phone edits, this Mac does the work"
-              style={{ fontSize: 11 }}
-            >📱 Phone</button>
+            ><Icon name="phone" /> Phone</button>
             {phoneOpen && <PhonePanel onClose={() => setPhoneOpen(false)} />}
           </>
         )}
@@ -471,7 +485,7 @@ export function TopBar() {
             className={savedStale ? 'stale-dl' : ''}
             title={savedStale ? 'This .vae predates your latest edits' : 'Download saved project'}
             style={{ color: savedStale ? undefined : 'var(--good)', fontSize: 12 }}>
-            ↓ .vae{savedStale ? ' (outdated)' : ''}
+            <Icon name="download" /> .vae{savedStale ? ' (outdated)' : ''}
           </a>
         )}
         {/* The export's result — its download link, or why it failed — sits
@@ -491,7 +505,7 @@ export function TopBar() {
             className={exportView.stale ? 'stale-dl' : ''}
             title={exportView.stale ? 'This render is not the timeline you have now — re-export for an up-to-date file' : `Save exported ${exportKind(exportView.link)}`}
             style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: exportView.stale ? undefined : 'var(--good)', fontSize: 12 }}>
-            {exportView.label}
+            <Icon name="download" /> {exportView.label}
           </button>
         )}
         {exportError && (
@@ -518,7 +532,7 @@ export function TopBar() {
             aria-label={`Export failed: ${exportError.replace(/^\w*Error:\s*/, '')}. Dismiss`}
             onClick={() => clearExportError()}
           >
-            <span aria-hidden="true">⚠</span> {exportError.replace(/^\w*Error:\s*/, '')} <span aria-hidden="true">✕</span>
+            <Icon name="warning" /> {exportError.replace(/^\w*Error:\s*/, '')} <Icon name="close" />
           </button>
         )}
         {/* The right-most pinned control (QA-012): Export ▾ → the dialog. */}

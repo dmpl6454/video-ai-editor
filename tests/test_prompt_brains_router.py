@@ -90,7 +90,10 @@ class Clock:
         return self.t
 
 
-def req(prompt: str = "do a thing", **facts) -> BrainRequest:
+# The default prompt carries one editing word: a prompt with NONE is kept
+# from the on-device rungs (content.unanchored_prompt), and these tests are
+# about the ladder's mechanics, not about that gate.
+def req(prompt: str = "do a thing to the video", **facts) -> BrainRequest:
     return BrainRequest(prompt=prompt, facts=TimelineFacts.minimal(**facts), recipes=cards())
 
 

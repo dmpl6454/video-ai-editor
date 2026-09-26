@@ -243,6 +243,34 @@ WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+
+def anthropic_key_source() -> str:
+    """Where the Claude key comes from, resolved at CALL time (QA-063-SETTINGS):
+    "env" (a non-empty ANTHROPIC_API_KEY from the shell or .env), "disabled"
+    (ANTHROPIC_API_KEY present but EMPTY in the environment — an explicit
+    "no Claude": the test gate and benchmark harness run that way, so an owner's
+    saved key never leaks into their runs), "keychain" (Settings saved one in
+    the macOS Keychain) or "none". Reads the module global, so a test that
+    monkeypatches `config.ANTHROPIC_API_KEY` is honoured."""
+    if ANTHROPIC_API_KEY:
+        return "env"
+    if "ANTHROPIC_API_KEY" in os.environ:
+        return "disabled"
+    from . import keychain
+    return "keychain" if keychain.anthropic_key() else "none"
+
+
+def anthropic_api_key() -> str:
+    """THE Claude key ('' when there is none) — the one resolver every Claude
+    call site uses, so a key saved in Settings takes effect without a restart.
+    Never log or return the value; `keychain.mask()` is the only printable form."""
+    if ANTHROPIC_API_KEY:
+        return ANTHROPIC_API_KEY
+    if "ANTHROPIC_API_KEY" in os.environ:
+        return ""
+    from . import keychain
+    return keychain.anthropic_key()
+
 DEFAULT_CANVAS = {"w": 1080, "h": 1920, "fps": 30}
 
 # --- filesystem path restriction --------------------------------------------

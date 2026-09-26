@@ -4,6 +4,9 @@ import {
   useKeymapStore, chordFromEvent, chordLabel, setCaptureMode, IS_MAC,
 } from '../keymap/engine'
 import { PRESETS, PRESET_IDS, type PresetId } from '../keymap/presets'
+import { Dialog } from './Dialog'
+import { Icon } from './Icon'
+import './shortcutsSettings.css'
 
 let _setOpen: ((v: boolean) => void) | null = null
 /** Open the Keyboard Shortcuts settings (from the TopBar / Help). */
@@ -84,101 +87,62 @@ export function ShortcutsSettings() {
     }
   }, [capturing, rebind])
 
-  // Esc closes the panel (when not capturing)
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.code === 'Escape' && !capturing) setOpen(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, capturing])
-
   if (!open) return null
 
+  // One dialog (COHERENCE, wave C review): this was a fourth hand-rolled
+  // modal — no role=dialog, no focus trap, the editor behind it reachable
+  // by Tab, a text "Close" and inline colours. <Dialog> gives it the X,
+  // focus-in, the Tab trap, Escape, the inert editor and focus restore.
+  // While a chord is being captured, the capture listener above (window,
+  // capture phase) stops Escape before the dialog sees it, so Escape
+  // cancels the capture rather than closing the dialog.
+  const customised = Object.keys(overrides).length > 0
   return (
-    <div
-      onClick={() => setOpen(false)}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 10000,
-        background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(3px)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 'min(720px, 92vw)', maxHeight: '86vh', overflow: 'auto',
-          background: 'var(--bg-2, #15171f)', color: 'var(--text, #eee)',
-          border: '1px solid var(--line, #2a2d3a)', borderRadius: 14,
-          padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>Keyboard Shortcuts</h2>
-          <button onClick={() => setOpen(false)} style={btnStyle}>Close</button>
-        </div>
-
-        {/* Preset picker */}
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '14px 0' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-dim,#9aa)' }}>Preset:</span>
+    <Dialog open title="Keyboard shortcuts" labelId="shortcuts-dialog-title" className="shortcuts-dialog"
+      onClose={() => { setCapturing(null); setOpen(false) }}>
+      <div className="shortcuts-presets">
+        <span className="shortcuts-label" id="shortcuts-preset-label">Preset</span>
+        <div className="export-dialog-seg" role="radiogroup" aria-labelledby="shortcuts-preset-label">
           {PRESET_IDS.map((id) => (
-            <button
-              key={id}
-              onClick={() => setPreset(id as PresetId)}
-              style={{
-                ...chipStyle,
-                background: presetId === id ? 'var(--accent-fill)' : 'var(--bg-3,#222)',
-                color: presetId === id ? 'var(--on-accent)' : 'inherit',
-                fontWeight: presetId === id ? 700 : 400,
-              }}
-            >
+            <button key={id} type="button" role="radio" aria-checked={presetId === id}
+              onClick={() => setPreset(id as PresetId)}>
               {PRESETS[id].label}
             </button>
           ))}
-          <div style={{ flex: 1 }} />
-          {Object.keys(overrides).length > 0 && (
-            <button onClick={resetAll} style={btnStyle} title="Discard all custom rebinds">
-              Reset all
-            </button>
-          )}
         </div>
-
-        <div style={{ fontSize: 11, color: 'var(--text-dim,#9aa)', marginBottom: 12 }}>
-          Click a shortcut to rebind it, then press the new key combo. Esc cancels.
-          {Object.keys(overrides).length > 0 && ' · customised (★)'}
-        </div>
-        {warning && (
-          <div style={{ fontSize: 11, color: '#e0556d', marginBottom: 12 }}>
-            {warning}
-          </div>
+        <span className="spacer" />
+        {customised && (
+          <button type="button" onClick={resetAll} title="Discard all custom rebinds">Reset all</button>
         )}
-
-        {CATEGORIES.map((cat) => {
-          const cmds = COMMANDS.filter((c) => c.category === cat)
-          if (!cmds.length) return null
-          return (
-            <div key={cat} style={{ marginBottom: 14 }}>
-              <div style={{
-                fontSize: 11, textTransform: 'uppercase', letterSpacing: 1,
-                color: 'var(--text-dim,#9aa)', margin: '6px 0',
-              }}>{cat}</div>
-              {cmds.map((c) => (
-                <Row
-                  key={c.id} cmd={c}
-                  chords={effective[c.id] || []}
-                  overridden={c.id in overrides}
-                  capturing={capturing === c.id}
-                  conflict={(effective[c.id] || []).some((ch) => (chordOwners[ch] || []).length > 1)}
-                  onCapture={() => setCapturing(c.id)}
-                  onReset={() => resetCommand(c.id)}
-                />
-              ))}
-            </div>
-          )
-        })}
       </div>
-    </div>
+
+      <p className="shortcuts-help">
+        Click a shortcut to rebind it, then press the new key combo. Esc cancels.
+        {customised && <> · customised (<Icon name="custom" label="star" />)</>}
+      </p>
+      {warning && <p role="alert" className="shortcuts-warning">{warning}</p>}
+
+      {CATEGORIES.map((cat) => {
+        const cmds = COMMANDS.filter((c) => c.category === cat)
+        if (!cmds.length) return null
+        return (
+          <section key={cat} className="shortcuts-group" aria-label={cat}>
+            <div className="section-label">{cat}</div>
+            {cmds.map((c) => (
+              <Row
+                key={c.id} cmd={c}
+                chords={effective[c.id] || []}
+                overridden={c.id in overrides}
+                capturing={capturing === c.id}
+                conflict={(effective[c.id] || []).some((ch) => (chordOwners[ch] || []).length > 1)}
+                onCapture={() => setCapturing(c.id)}
+                onReset={() => resetCommand(c.id)}
+              />
+            ))}
+          </section>
+        )
+      })}
+    </Dialog>
   )
 }
 
@@ -187,45 +151,34 @@ function Row({ cmd, chords, overridden, capturing, conflict, onCapture, onReset 
   conflict: boolean; onCapture: () => void; onReset: () => void;
 }) {
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '5px 0', borderBottom: '1px solid var(--line,#23252f)',
-    }}>
-      <span style={{ fontSize: 13 }}>
+    <div className="shortcuts-row">
+      <span className="shortcuts-name">
         {cmd.label}
-        {overridden && <span title="customised" style={{ color: 'var(--accent,#6c8cff)' }}> ★</span>}
+        {overridden && <span className="shortcuts-custom" title="customised"><Icon name="custom" label="customised" /></span>}
       </span>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      <div className="shortcuts-keys">
         {capturing ? (
-          <span style={{ ...kbd, background: 'var(--accent-fill)', color: 'var(--on-accent)' }}>press keys…</span>
+          <span className="shortcuts-cap capturing">press keys…</span>
         ) : chords.length ? (
           chords.map((ch, i) => (
-            <button key={i} onClick={onCapture}
+            <button key={i} type="button" onClick={onCapture} data-keycap
+              className={`shortcuts-cap${conflict ? ' conflict' : ''}`}
               title={conflict ? 'Conflicts with another command' : 'Click to rebind'}
-              aria-label={`${cmd.label}: ${chordLabel(ch)}. Rebind`}
-              style={{ ...kbd, cursor: 'pointer', border: conflict ? '1px solid #e0556d' : kbd.border }}>
+              aria-label={`${cmd.label}: ${chordLabel(ch)}. Rebind`}>
               {chordLabel(ch)}
             </button>
           ))
         ) : (
-          <button onClick={onCapture} aria-label={`${cmd.label}: no shortcut. Set one`} style={{ ...kbd, cursor: 'pointer', opacity: 0.5 }}><span aria-hidden="true">—</span></button>
+          <button type="button" onClick={onCapture} className="shortcuts-cap empty"
+            aria-label={`${cmd.label}: no shortcut. Set one`}><span aria-hidden="true">—</span></button>
         )}
         {overridden && (
-          <button onClick={onReset} title="Reset to preset default" aria-label={`Reset ${cmd.label} to the preset default`}
-            style={{ ...btnStyle, padding: '1px 6px', fontSize: 11 }}><span aria-hidden="true">↺</span></button>
+          <button type="button" onClick={onReset} title="Reset to preset default"
+            aria-label={`Reset ${cmd.label} to the preset default`} className="icon-btn shortcuts-reset">
+            <Icon name="reset" />
+          </button>
         )}
       </div>
     </div>
   )
-}
-
-const btnStyle: React.CSSProperties = {
-  background: 'var(--bg-3,#222)', color: 'inherit', border: '1px solid var(--line,#2a2d3a)',
-  borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer',
-}
-const chipStyle: React.CSSProperties = { ...btnStyle, padding: '4px 12px' }
-const kbd: React.CSSProperties = {
-  fontFamily: 'ui-monospace, monospace', fontSize: 12, padding: '2px 8px',
-  background: 'var(--bg-3,#222)', border: '1px solid var(--line,#2a2d3a)',
-  borderRadius: 5, color: 'inherit', minWidth: 24, textAlign: 'center',
 }

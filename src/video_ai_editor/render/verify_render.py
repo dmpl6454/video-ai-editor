@@ -64,7 +64,7 @@ def render_for_verify(edl: EDL, session_dir: Path, *, max_duration_s: float,
     out_dir = Path(session_dir) / "cache" / "verify"
     out_dir.mkdir(parents=True, exist_ok=True)
     suffix = ("_speech" if speech_only else "") + (f"_{stem}" if stem else "")
-    dst = out_dir / f"verify_{edl.hash()}_{VERIFY_HEIGHT}{suffix}.mp4"
+    dst = out_dir / f"verify_{edl.render_hash()}_{VERIFY_HEIGHT}{suffix}.mp4"
     if dst.exists() and dst.stat().st_size > 0:
         return dst
     with stem_scope(stem):

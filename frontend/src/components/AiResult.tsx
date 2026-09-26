@@ -1,6 +1,7 @@
 import { useStore } from '../store'
 import { toast } from '../toast'
 import { resultView, type ResultRow } from '../lib/aiResults'
+import { Disclosure } from './Disclosure'
 
 // The result view for read-only tools (find_moments, make_shorts, search_media,
 // generate_hook, find_broll, diarize, audit_aesthetic, match_style). Rows come
@@ -78,10 +79,9 @@ export function AiResult({ tool, label, result }: { tool: string; label: string;
           {view.rows.map((r, i) => <Row key={i} row={r} tool={tool} />)}
         </ul>
       )}
-      <details className="ai-raw">
-        <summary>Raw JSON</summary>
+      <Disclosure className="ai-raw" summary="Technical details">
         <pre>{safeJson(view.raw)}</pre>
-      </details>
+      </Disclosure>
     </div>
   )
 }

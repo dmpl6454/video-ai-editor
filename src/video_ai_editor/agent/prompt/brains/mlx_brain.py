@@ -52,7 +52,7 @@ from ..recipes import from_intents
 from ..schema import IntentDraft
 from .base import (Availability, BrainRequest, BrainResult, TextResult, TextTask, available,
                    unavailable)
-from .content import ground_duck_off, ground_to_prompt, parse_text_items, strip_model_hook_text, text_task_prompts
+from .content import ground_duck_off, ground_music_level, ground_to_prompt, parse_text_items, strip_model_hook_text, text_task_prompts
 from .jsonfix import JsonRepairFailed, repair
 from .prompt_text import (DraftShapeError, draft_key, facts_to_prompt_block, mlx_system_prompt,
                           normalize_draft, user_prompt_with_answers)
@@ -275,6 +275,7 @@ class MLXBrain:
     def _expand(self, draft: IntentDraft, req: BrainRequest, *, latency: int, model: str) -> BrainResult:
         draft = ground_duck_off(ground_to_prompt(strip_model_hook_text(draft, req.prompt), req.prompt),
                                 req.prompt)
+        draft = ground_music_level(draft, req.prompt, req.facts)
         if not draft.intents:
             # Nothing to do but the model's own questions (dropped above): not
             # an answer — the ladder falls through to the recipes' reading.

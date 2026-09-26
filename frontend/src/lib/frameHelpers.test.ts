@@ -23,9 +23,14 @@ describe('fps for display', () => {
     expect(formatFps(undefined)).toBe('30')
   })
 
-  it('the canvas facts line uses it', () => {
+  it('the canvas facts line uses it, and states length as timecode like every clock', () => {
+    // Wave C review: "1920×1080 · 30fps · 91.0s" beside the transport's
+    // "/ 00:01:31:00" — two time formats on one bar.
+    expect(canvasFacts({ w: 1080, h: 1920, fps: 30 }, 91))
+      .toBe('1080×1920 · 30fps · 00:01:31:00')
     expect(canvasFacts({ w: 1080, h: 1920, fps: 29.97002997002997 }, 12.34))
-      .toBe('1080×1920 · 29.97fps · 12.3s')
+      .toMatch(/^1080×1920 · 29\.97fps · 00:00:12[:;]\d\d$/)
+    expect(canvasFacts({ w: 1080, h: 1920, fps: 30 }, 0)).toBe('1080×1920 · 30fps · 00:00:00:00')
   })
 })
 

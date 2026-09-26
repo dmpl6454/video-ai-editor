@@ -320,7 +320,7 @@ export function CaptionsButton() {
   if (busy) {
     return (
       <span className="cc-busy" role="status" aria-live="polite">
-        <span className="cc-spinner" aria-hidden="true" />
+        <Icon name="loading" className="icon-spin" />
         {cancelling ? (
           <span className="cc-busy-text">
             Stopping…
@@ -376,9 +376,8 @@ export function CaptionsButton() {
           : `Auto-captions in ${current.label}, ${currentSpeed.label.toLowerCase()} — `
             + 'transcribes the footage again. '
             + 'A long clip can take a while; progress and a Cancel button appear while it runs.'}
-        style={{ fontSize: 11 }}
       >
-        <b>CC</b> Captions
+        <Icon name="captions" /> Captions
       </button>
       <button
         ref={caretRef}
@@ -391,7 +390,7 @@ export function CaptionsButton() {
         aria-label={`Caption language: ${current.label}, speed: ${currentSpeed.label}`}
         title={`Caption language: ${current.label} · Speed: ${currentSpeed.label}`}
       >{SHORT_LABEL[current.id]}
-        {speed === 'fast' ? <span aria-hidden="true">⚡</span> : ''} <span aria-hidden="true">▾</span></button>
+        {speed === 'fast' ? <Icon name="fast" /> : null}<Icon name="chevronDown" /></button>
 
       {menuOpen && menuPos && createPortal(
         <div
@@ -409,7 +408,7 @@ export function CaptionsButton() {
             transform: 'translateX(-100%)',   // right-align under the caret, like the old right:0
           }}
         >
-          <div className="cc-menu-head">Caption language</div>
+          <div className="cc-menu-head section-label">Caption language</div>
           {TARGETS.map((t) => (
             <button
               key={t.id}
@@ -419,7 +418,7 @@ export function CaptionsButton() {
               onClick={() => pick(t.id)}
               title={t.hint}
             >
-              <span className="cc-check menu-check" aria-hidden="true">{t.id === target && <Icon name="check" size={12} />}</span>
+              <span className="cc-check menu-check" aria-hidden="true">{t.id === target && <Icon name="check" />}</span>
               <span>
                 <span className="cc-menu-label">{t.label}</span>
                 <span className="cc-menu-hint">{t.hint}</span>
@@ -427,7 +426,7 @@ export function CaptionsButton() {
             </button>
           ))}
           <div className="cc-menu-sep" role="separator" />
-          <div className="cc-menu-head">Speed</div>
+          <div className="cc-menu-head section-label">Speed</div>
           {SPEEDS.map((s) => (
             <button
               key={s.id}
@@ -437,7 +436,7 @@ export function CaptionsButton() {
               onClick={() => pickSpeed(s.id)}
               title={s.hint}
             >
-              <span className="cc-check menu-check" aria-hidden="true">{s.id === speed && <Icon name="check" size={12} />}</span>
+              <span className="cc-check menu-check" aria-hidden="true">{s.id === speed && <Icon name="check" />}</span>
               <span>
                 <span className="cc-menu-label">{s.label}</span>
                 <span className="cc-menu-hint">{s.hint}</span>

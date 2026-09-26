@@ -201,6 +201,8 @@ SPEED_RANGE = (0.1, 100.0)
 #: 1e5 outline overflowed freetype's rasteriser — every later render 500'd.
 TEXT_SIZE_RANGE = (1.0, 2000.0)
 TEXT_STROKE_RANGE = (0.0, 200.0)
+#: Letter spacing (tracking) bounds in canvas px (QA-078). Negative tightens.
+TEXT_LETTER_SPACING_RANGE = (-20.0, 100.0)
 
 
 def _clamp_num(v: float, rng: tuple[float, float], field: str) -> float:
@@ -223,6 +225,11 @@ class AudioProps(_EDLModel):
     # ±12 ms), False is varispeed (asetrate: sample-exact, pitch follows the
     # speed like tape).
     keep_pitch: bool = True
+    # Channel mode (QA-122): "stereo" plays the source as it is; "left" /
+    # "right" put that one channel on both sides (a lav into one camera
+    # input); "mono" folds both channels to the middle. Rendered by
+    # `render/audio_mix.channel_filter` on every lane, drawn by the waveform.
+    channels: Literal["stereo", "left", "right", "mono"] = "stereo"
 
     @field_validator("gain_db")
     @classmethod
@@ -430,6 +437,11 @@ class TextStyle(_EDLModel):
     line_spacing: float = 1.0
     # Drop shadow: None = the role's own choice, True/False = explicit.
     shadow_on: bool | None = None
+    # Letter spacing (tracking) in canvas px added after every grapheme of a
+    # simple-script run, never inside a complex-script run (Devanagari,
+    # Arabic, … — spacing their clusters apart breaks the joins and the
+    # headline). Rule 8 of the shared layout model; 0 = off.
+    letter_spacing: float = 0.0
 
     @field_validator("background")
     @classmethod
@@ -445,6 +457,11 @@ class TextStyle(_EDLModel):
     @classmethod
     def _clamp_line_spacing(cls, v: float) -> float:
         return min(3.0, max(0.5, _finite(float(v), "line_spacing")))
+
+    @field_validator("letter_spacing")
+    @classmethod
+    def _clamp_letter_spacing(cls, v: float) -> float:
+        return _clamp_num(v, TEXT_LETTER_SPACING_RANGE, "letter_spacing")
 
     @field_validator("size")
     @classmethod
@@ -694,6 +711,11 @@ def _migrate_v2_text(data: dict) -> dict:
     return {**data, "tracks": tracks, "version": EDL_VERSION}
 
 
+#: Track fields that never reach a rendered frame or sample (a lane's lock and
+#: display name). `EDL.render_hash` leaves them out, and the markers.
+NON_RENDER_TRACK_FIELDS = ("locked", "label")
+
+
 class EDL(_EDLModel):
     version: int = EDL_VERSION
 
@@ -729,6 +751,25 @@ class EDL(_EDLModel):
         # reason on the per-clip chunk cache.
         canonical = json.dumps(self.model_dump(by_alias=True, mode="json"), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(f"{RENDER_BEHAVIOR_VERSION}|{canonical}".encode()).hexdigest()[:16]
+
+    def render_hash(self) -> str:
+        """The key of a RENDER of this EDL (preview files, the supersede
+        registry, verify renders): `hash()` without the fields no render
+        reads (QA-131).
+
+        `hash()` stays the identity of the EDL itself — the ops log's
+        before/after, stale-edit detection and "is this export outdated" all
+        need a marker edit to count as an edit. The preview cache must not:
+        adding a marker re-rendered a byte-identical preview (49.8 s on a
+        12-minute timeline) and left the player blank while it did. The
+        frontend's `videoFingerprint` already ignores markers."""
+        d = self.model_dump(by_alias=True, mode="json")
+        d.pop("markers", None)
+        for t in d.get("tracks") or []:
+            for k in NON_RENDER_TRACK_FIELDS:
+                t.pop(k, None)
+        canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(f"{RENDER_BEHAVIOR_VERSION}|render|{canonical}".encode()).hexdigest()[:16]
 
     def get_track(self, track_id: str) -> Track | None:
         for t in self.tracks:

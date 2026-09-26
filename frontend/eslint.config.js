@@ -18,5 +18,16 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // ONE icon approach (QA-125, wave C review): lucide-react is reached only
+      // through the name map in lib/icons.ts, rendered by components/Icon —
+      // a direct import skips the app's stroke width, size and data-icon.
+      'no-restricted-imports': ['error', { paths: [{ name: 'lucide-react',
+        message: 'Use <Icon name=…/> (components/Icon) and add the glyph to lib/icons.ts.' }] }],
+    },
+  },
+  {
+    files: ['src/lib/icons.ts', 'src/lib/icons.test.ts'],
+    rules: { 'no-restricted-imports': 'off' },
   },
 ])

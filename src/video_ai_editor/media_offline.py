@@ -50,7 +50,8 @@ def _exists(src: str) -> bool:
 def derived_tag(path: str | Path) -> str | None:
     """`cache/reframe_ab12.mp4` → "reframed"; None for anything an AI step did
     not render (an upload named `stable_shot.mp4` is not "stabilized")."""
-    p = Path(path)
+    from . import platformutil as _pu
+    p = _pu.pure_path(path)       # a Windows-authored project's path, on a Mac
     if "cache" not in p.parts or "_" not in p.stem:
         return None
     return _DERIVED_TAGS.get(p.stem.split("_", 1)[0].lower())
@@ -84,7 +85,8 @@ def display_name_for(session_dir: Path | None, src: str) -> str:
         except OSError:
             name = None
     if name is None:
-        stem = base.name
+        from . import platformutil as _pu
+        stem = _pu.path_leaf(base)    # not base.name: the whole C:\…\a.mp4 on a Mac
         if stem.endswith(".normalized.mp4"):
             stem = stem[: -len(".normalized.mp4")] + ".mp4"
         name = _display_from_disk(stem)

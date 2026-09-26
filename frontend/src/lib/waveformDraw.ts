@@ -11,7 +11,9 @@
 
 import { levelAt, type ClipAudioProps } from './audioLevel'
 
-export interface WaveData { peaks: number[]; peaks_per_sec: number; duration: number }
+/** `peaks_l`/`peaks_r`: each side's peaks for a 2+ channel source (QA-122 —
+ *  lib/audioChannels draws the top half from L and the bottom from R). */
+export interface WaveData { peaks: number[]; peaks_per_sec: number; duration: number; peaks_l?: number[]; peaks_r?: number[] }
 
 /** The clip's audio props as the EDL stores them — ONE level model with the
  *  inspector (lib/audioLevel): `gain_db` is a scalar trim and volume

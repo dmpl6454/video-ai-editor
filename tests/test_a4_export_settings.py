@@ -181,6 +181,10 @@ def test_export_accepts_real_delivery_rates(tmp_path, monkeypatch):
     import video_ai_editor.main as m
     from types import SimpleNamespace
     s = EDLStore(tmp_path / "sess")
+    # A clip to export: an empty timeline is refused up front (QA-123).
+    s.edl.get_track("v1").clips.append(Clip(src=str(tmp_path / "a.mp4"), in_=0.0, out=2.0, start=0.0))
+    (tmp_path / "a.mp4").write_bytes(b"\0")
+    s.commit("seed", {}, "seed")
     monkeypatch.setattr(m, "_store", lambda sid: s)
     seen: list = []
 

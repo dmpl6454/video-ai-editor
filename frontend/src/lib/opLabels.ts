@@ -26,7 +26,7 @@ export const TOOL_TITLES: Record<string, string> = {
   cut_range: 'Trim', diarize: 'Detect speakers', duplicate_clip: 'Duplicate', export_ass: 'Export subtitles',
   export_srt: 'Export subtitles', export_vtt: 'Export subtitles', find_broll: 'Find B-roll',
   find_moments: 'Find moments', fit_music_to_video: 'Fit music', generate_hook: 'Hook',
-  import_srt: 'Import subtitles', instrumental_isolate: 'Music only', make_shorts: 'Shorts',
+  import_srt: 'Import subtitles', instrumental_isolate: 'Isolate instrumental', make_shorts: 'Shorts',
   match_style: 'Match style', motion_track: 'Motion tracking', move_clip: 'Move', multicam: 'Multicam',
   name_speakers: 'Name speakers', noise_reduce: 'Noise removal', object_erase: 'Erase object',
   paste_clips: 'Paste', record_voiceover: 'Voiceover', redo: 'Redo', remove_background: 'Remove background',
@@ -34,13 +34,13 @@ export const TOOL_TITLES: Record<string, string> = {
   remove_marker: 'Remove marker', remove_mask: 'Remove mask', remove_silences: 'Remove silences',
   remove_transition: 'Remove transition', reorder_clips: 'Reorder', ripple_delete: 'Delete',
   save_show_template: 'Save show template', set_aspect_ratio: 'Aspect ratio', set_canvas: 'Canvas',
-  set_clip_fit: 'Fit', set_clip_muted: 'Mute', set_clip_timing: 'Timing', set_clip_transform: 'Transform',
+  set_clip_fit: 'Fit', set_clip_muted: 'Mute', set_clip_reverse: 'Reverse', set_clip_timing: 'Timing', set_clip_transform: 'Transform',
   set_clip_z: 'Layer order', set_duck: 'Ducking', set_loudness_target: 'Loudness', set_pip_framing: 'Framing',
   set_property: 'Edit', set_speed: 'Speed', set_track_locked: 'Lock track', set_track_muted: 'Mute track',
   set_track_solo: 'Solo track', detach_audio: 'Detach audio',
   set_video_fade: 'Fade', set_volume: 'Volume', smooth_slow_motion: 'Smooth slow motion',
   split_at: 'Split', stabilize: 'Stabilize', transcribe: 'Transcribe', translate_captions: 'Translate captions',
-  trim_clip: 'Trim', tts_voiceover: 'Voiceover', undo: 'Undo', upscale: 'AI upscale', vocal_isolate: 'Voice only',
+  trim_clip: 'Trim', tts_voiceover: 'Voiceover', undo: 'Undo', upscale: 'AI upscale', vocal_isolate: 'Isolate vocals',
   prompt: 'Prompt', verify_render: 'Check the result', download: 'Download', finish_short: 'Finish short',
   repair_media_paths: 'Relink media', repair_chunks: 'Repair preview',
 }
@@ -63,8 +63,13 @@ export function cleanSummary(summary: string): string {
   // "clip(s)" → "clip" / "clips" from the count in front of it.
   s = s.replace(/(\d+)\s+([a-z]+)\(s\)/gi, (_m, n: string, w: string) => `${n} ${Number(n) === 1 ? w : `${w}s`}`)
   s = s.replace(/\(s\)/g, 's')
+  // "(1 steps)" — the prompt op summary before it was pluralised.
+  s = s.replace(/\b1 steps\b/g, '1 step')
   // A missing role printed as Python None ("Added text None 'X'").
   s = s.replace(/\bNone\s+/g, '')
+  // Canvas pixel coordinates ("Sticker 😁 @ (960,594) …") mean nothing to an
+  // editor — the sticker is where it is on the picture (QA-101 sweep).
+  s = s.replace(/\s*@\s*\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)/g, '')
   // {'brightness': 0.1, 'contrast': 1.2} → brightness 0.1, contrast 1.2
   s = s.replace(/\{([^{}]*)\}/g, (_m, body: string) =>
     body.replace(/'([^']+)':\s*/g, '$1 ').replace(/\s*,\s*/g, ', ').trim())
@@ -128,8 +133,112 @@ export function editorSummary(summary: string, ctx: LabelContext = {}): string {
   return s
 }
 
+// ---------------------------------------------------------------- set_property
+
+/** set_property's first path segment → the History title (the property
+ *  group). Mirrors agent/dispatch._PROPERTY_GROUPS. */
+const PROPERTY_GROUPS: Record<string, string> = {
+  style: 'Text style', audio: 'Audio', transform: 'Transform', speed: 'Speed', reverse: 'Speed',
+  text: 'Text', anim_in: 'Animation', anim_out: 'Animation', anim_dur: 'Animation', in: 'Timing',
+  out: 'Timing', start: 'Timing', end: 'Timing', src: 'Media',
+}
+const CHANNEL_WORDS: Record<string, string> = {
+  stereo: 'Stereo', left: 'Left to both', right: 'Right to both', mono: 'Mono mix',
+}
+
+/** 120 → "120", 1.25 → "1.25" (two decimals at most, like the inspector). */
+function numText(v: unknown): string {
+  const f = Number(v)
+  if (!Number.isFinite(f)) return String(v)
+  return String(Math.round(f * 100) / 100)
+}
+const onOff = (v: unknown) => (v ? 'on' : 'off')
+
+type Phrase = (v: unknown) => string
+const PROPERTY_PHRASES: Record<string, Phrase> = {
+  reverse: (v) => `Play backwards ${onOff(v)}`,
+  speed: (v) => `Speed ${numText(v)}x`,
+  'style.size': (v) => `Text size ${numText(v)} px`,
+  'style.color': (v) => `Text colour ${String(v)}`,
+  'style.font': (v) => `Font: ${v ? String(v) : 'default'}`,
+  'style.stroke_w': (v) => `Outline width ${numText(v)} px`,
+  'style.stroke': (v) => `Outline colour ${String(v)}`,
+  'style.upper': (v) => `Letter case: ${v == null ? 'style default' : v ? 'ALL CAPS' : 'as typed'}`,
+  'style.align': (v) => `Alignment: ${String(v)}`,
+  'style.shadow_on': (v) => (v == null ? 'Shadow: style default' : `Shadow ${onOff(v)}`),
+  'style.background': (v) => `Background box ${onOff(v)}`,
+  'style.line_spacing': (v) => `Line spacing ${numText(v)}`,
+  'style.letter_spacing': (v) => `Tracking ${numText(v)} px`,
+  'audio.channels': (v) => `Channels: ${CHANNEL_WORDS[String(v)] ?? String(v)}`,
+  'audio.gain_db': (v) => `Volume ${numText(v)} dB`,
+  'audio.mute': (v) => (v ? 'Muted' : 'Unmuted'),
+  'audio.fade_in': (v) => `Fade in ${numText(v)} s`,
+  'audio.fade_out': (v) => `Fade out ${numText(v)} s`,
+  'audio.keep_pitch': (v) => `Keep pitch ${onOff(v)}`,
+  'transform.scale': (v) => `Scale ${numText(Number(v) * 100)}%`,
+  'transform.rotation': (v) => `Rotation ${numText(v)}°`,
+  'transform.opacity': (v) => `Opacity ${numText(Number(v) * 100)}%`,
+  'transform.x': (v) => `Position X ${numText(v)}`,
+  'transform.y': (v) => `Position Y ${numText(v)}`,
+  text: (v) => {
+    const t = String(v)
+    return `Text: “${t.slice(0, 40)}${t.length > 40 ? '…' : ''}”`
+  },
+  anim_in: (v) => `Animate in: ${v ? String(v) : 'none'}`,
+  anim_out: (v) => `Animate out: ${v ? String(v) : 'none'}`,
+  anim_dur: (v) => `Animation length ${numText(v)} s`,
+  in: (v) => `Source in ${numText(v)} s`,
+  out: (v) => `Source out ${numText(v)} s`,
+  start: (v) => `Start ${numText(v)} s`,
+  end: (v) => `End ${numText(v)} s`,
+  src: () => 'Media replaced',
+}
+
+/** { group, phrase } for a set_property change in editor language
+ *  (QA-101-SWEEP): Text style / "Text size 120 px", Speed / "Play backwards
+ *  on". The same table as agent/dispatch.property_label; both run
+ *  __fixtures__/property_labels.json. */
+export function propertyLabel(path: string, value: unknown): { group: string; phrase: string } {
+  const p = String(path ?? '')
+  const group = PROPERTY_GROUPS[p.split('.', 1)[0]] ?? 'Edit'
+  const scalar = value == null || ['boolean', 'number', 'string'].includes(typeof value)
+  const fn = scalar ? PROPERTY_PHRASES[p] : undefined
+  if (fn) return { group, phrase: fn(value) }
+  const leaf = (p.split('.').pop() ?? '').replace(/_/g, ' ').trim() || 'a property'
+  return { group, phrase: `Changed ${leaf}` }
+}
+
+// "Set t_1a2b3c4d.style.size = 120" — the summary set_property wrote before
+// 0.7.3; saved projects still carry it in their ops log.
+const LEGACY_SET_RE = /^Set\s+[a-z]{1,3}_[0-9a-f]{6,}\.([\w.]+)\s*=\s*(.*)$/
+
+/** A Python repr from a legacy summary back to a value. */
+function fromRepr(repr: string): unknown {
+  const r = repr.trim()
+  if (r === 'True') return true
+  if (r === 'False') return false
+  if (r === 'None') return null
+  const q = /^(['"])(.*)\1$/.exec(r)
+  if (q) return q[2]
+  const n = Number(r)
+  return r !== '' && Number.isFinite(n) ? n : r
+}
+
+function setPropertyLabel(op: { summary?: string | null; args?: Record<string, unknown> | null }):
+  { group: string; phrase: string } | null {
+  const a = op.args
+  if (a && typeof a.path === 'string') return propertyLabel(a.path, a.value)
+  const m = LEGACY_SET_RE.exec(op.summary ?? '')
+  return m ? propertyLabel(m[1], fromRepr(m[2])) : null
+}
+
 /** What a History row shows for an op. `raw` is for the hover title only. */
-export function opLabel(op: { tool: string; summary?: string | null }, ctx?: LabelContext): OpLabel {
+export function opLabel(op: { tool: string; summary?: string | null; args?: Record<string, unknown> | null },
+  ctx?: LabelContext): OpLabel {
+  if (op.tool === 'set_property') {
+    const pl = setPropertyLabel(op)
+    if (pl) return { title: pl.group, detail: pl.phrase, raw: `${op.tool} — ${op.summary ?? ''}` }
+  }
   const title = toolTitle(op.tool)
   let detail = ctx ? editorSummary(op.summary ?? '', ctx) : cleanSummary(op.summary ?? '')
   // Don't say it twice: "Split — Split at 5.00s" → "Split — at 5.00s", and

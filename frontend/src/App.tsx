@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore, startSessionWatch } from './store'
 import { ConnectionBanner } from './components/ConnectionBanner'
+import { MediaToolsBanner } from './components/MediaToolsBanner'
 import { TopBar } from './components/TopBar'
 import { LeftPane } from './components/LeftPane'
 import { Preview } from './components/Preview'
@@ -13,10 +14,12 @@ import { ChatOverlay } from './components/ChatOverlay'
 import { Help } from './components/Help'
 import { FileDropOverlay } from './components/FileDropOverlay'
 import { ShortcutsSettings } from './components/ShortcutsSettings'
+import { SettingsDialog } from './components/SettingsDialog'
 import { ExportModal } from './components/ExportModal'
 import { CaptionStylePanel } from './components/CaptionStylePanel'
 import { ToastHost } from './components/Toast'
 import { Splitter } from './components/Splitter'
+import { Icon } from './components/Icon'
 import { browserStorage, readRightTab, writeRightTab, type RightTab } from './lib/rightTab'
 import { useKeymap } from './keymap/engine'
 
@@ -81,7 +84,7 @@ export default function App() {
     <>
       {showNarrowWarning && (
         <div className="narrow-warning" role="status">
-          <span className="nw-icon" aria-hidden="true">↔</span>
+          <span className="nw-icon"><Icon name="flipH" /></span>
           <span className="nw-msg">
             Please use a wider window (min {MIN_EDITOR_WIDTH}px) for the best experience.
           </span>
@@ -110,13 +113,18 @@ export default function App() {
         {/* One sentence → a verified, single-undo edit. Above the picture,
             never over it; the .center grid's first (auto) row is its home
             (styles.css). Tools, chat and the phone all share the session
-            lock with it — see lib/promptStore.ts. */}
-        <PromptBar />
+            lock with it — see lib/promptStore.ts. The missing-ffmpeg notice
+            shares that row, in flow above it, so it pushes the bar down
+            instead of covering the sidebars (wave C review). */}
+        <div className="center-head">
+          <MediaToolsBanner />
+          <PromptBar />
+        </div>
         <div className="preview-pane">
           <ErrorBoundary
             fallback={(err) => (
               <div className="preview-empty" style={{ padding: 16, textAlign: 'center' }}>
-                <div style={{ fontSize: 24, marginBottom: 6 }}>⚠️</div>
+                <div style={{ marginBottom: 6, color: 'var(--warn)' }}><Icon name="warning" size={24} /></div>
                 <div>Preview hit an error and was paused.</div>
                 <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)' }}>
                   {err.message}
@@ -146,14 +154,17 @@ export default function App() {
         disabled={!rightPanelOpen}
       />
       <aside className={`sidebar right${rightPanelOpen ? '' : ' collapsed'}${rightTab === 'chat' ? ' is-chat' : ''}`}>
+        {/* An icon button at the end of the tab strip (QA-129) — it was a
+            full-width empty-looking 22 px bar with a tiny chevron. */}
         <button
+          type="button"
           className="right-panel-toggle"
           onClick={() => setRightPanelOpen(!rightPanelOpen)}
-          title={rightPanelOpen ? 'Collapse panel' : 'Expand panel'}
-          aria-label={rightPanelOpen ? 'Collapse properties panel' : 'Expand properties panel'}
+          title={rightPanelOpen ? 'Hide the Inspector and Chat' : 'Show the Inspector and Chat'}
+          aria-label={rightPanelOpen ? 'Hide the Inspector and Chat panel' : 'Show the Inspector and Chat panel'}
           aria-expanded={rightPanelOpen}
         >
-          <span aria-hidden="true">{rightPanelOpen ? '›' : '‹'}</span>
+          <Icon name={rightPanelOpen ? 'chevronRight' : 'chevronLeft'} />
         </button>
         <div className="right-panel-content">
           {/* Chat is DOCKED here as a tab (QA-061) — it used to float over the
@@ -179,6 +190,7 @@ export default function App() {
       </aside>
       <Help />
       <ShortcutsSettings />
+      <SettingsDialog />
       <FileDropOverlay />
       <ConnectionBanner />
     </div>

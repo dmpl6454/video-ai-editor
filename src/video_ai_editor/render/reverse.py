@@ -126,7 +126,8 @@ def _render_segment(c: Clip, fps, j0: int, n: int, s0: int, m: int, dst: Path, *
     span = pre + _tb.time_of(n + _SLACK_FRAMES, fps)
     rate = _tb.ffmpeg_rate(fps)
     parts, maps = [], []
-    inputs = ["-ss", f"{seek:.6f}", "-t", f"{span:.6f}", "-i", str(c.src)]
+    from .audio_mix import input_seek     # no `-ss 0` on AAC (QA-120)
+    inputs = [*input_seek(seek), "-t", f"{span:.6f}", "-i", str(c.src)]
     if has_video:
         parts.append(f"[0:v]setpts=PTS-STARTPTS,fps={rate},"
                      f"tpad=stop={n}:stop_mode=clone,trim=end_frame={n},"

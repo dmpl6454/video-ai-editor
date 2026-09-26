@@ -41,6 +41,7 @@ describe('op labels (QA-101)', () => {
   it('titles unknown tools readably', () => {
     expect(toolTitle('some_new_tool')).toBe('Some new tool')
     expect(toolTitle('auto_reframe')).toBe('Reframe')
+    expect(toolTitle('set_clip_reverse')).toBe('Reverse')   // QA-037 prompt tool
   })
 })
 
@@ -58,7 +59,24 @@ describe('History in project terms (QA-101 remainder)', () => {
     // an unlisted upload still loses its disk suffix
     expect(editorSummary('Add music vo8_49bd5f30.wav @ 2.5s', ctx)).toBe('Add music vo8.wav at 00:00:02:15')
   })
+  it('drops canvas pixel coordinates (QA-101 sweep: "Sticker — 😁 @ (960,594)")', () => {
+    // Verbatim add_sticker summary from a live backend.
+    const l = opLabel({ tool: 'add_sticker', summary: 'Sticker 😁 @ (960,594) 1.03–4.03s' }, ctx)
+    expect(l.detail).not.toMatch(/\(\d+,\d+\)|@/)
+    expect(l.detail).toContain('😁')
+  })
   it('does not say the title twice', () => {
     expect(opLabel({ tool: 'prompt', summary: 'Prompt: Reframe (2 steps)' }, ctx)).toMatchObject({ title: 'Prompt', detail: 'Reframe (2 steps)' })
+  })
+})
+
+describe('wave C review copy', () => {
+  it('names vocal isolation the way its card does', () => {
+    expect(toolTitle('vocal_isolate')).toBe('Isolate vocals')
+    expect(toolTitle('instrumental_isolate')).toBe('Isolate instrumental')
+  })
+  it('pluralises a step count saved before the fix ("(1 steps)")', () => {
+    expect(opLabel({ tool: 'prompt', summary: 'Prompt: Mute (1 steps)' }).detail).toBe('Mute (1 step)')
+    expect(opLabel({ tool: 'prompt', summary: 'Prompt: Shorts (3 steps)' }).detail).toBe('Shorts (3 steps)')
   })
 })

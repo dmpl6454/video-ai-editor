@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { SafeZoneToggle } from './SafeZones'
 import { useMenuA11y } from '../lib/useMenuA11y'
+import { Icon } from './Icon'
 
 export function TopBarMore({ version }: { version: string | null }) {
   const [open, setOpen] = useState(false)
@@ -43,8 +44,8 @@ export function TopBarMore({ version }: { version: string | null }) {
         aria-label="More: safe zones and app version"
         title={version ? `More — safe zones · ${version}` : 'More — safe zones'}
         onClick={() => setOpen((o) => !o)}
-        style={{ fontSize: 13, padding: '2px 8px' }}
-      ><span aria-hidden="true">⋯</span></button>
+        className="icon-btn"
+      ><Icon name="more" /></button>
       {open && pos && createPortal(
         <div ref={popRef} data-topbar-more data-keymap-ignore role="dialog" aria-label="More options"
              className="topbar-more-menu" style={{ right: pos.right, top: pos.top }} onKeyDown={a11y.onKeyDown}>

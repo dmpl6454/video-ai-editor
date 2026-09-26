@@ -8,6 +8,8 @@
 // playhead held, so a playhead parked between frames snaps onto one and a
 // long run of steps never accumulates float drift.
 
+import { formatTimecode } from './timecode'
+
 export const DEFAULT_FPS = 30
 
 /** A usable project frame rate: `fps` when it is a finite 1..240, else 30 —
@@ -58,7 +60,9 @@ export function formatFps(fps: unknown): string {
   return String(Number(projectFps(fps).toFixed(3)))
 }
 
-/** The "1080×1920 · 29.97fps · 12.3s" facts line (top bar and Ratio menu). */
+/** The "1080×1920 · 29.97fps · 00:01:31:00" facts line (top bar and Ratio
+ *  menu). The length is SMPTE timecode, the format of every clock, ruler and
+ *  History row beside it (it said "91.0s"). */
 export function canvasFacts(canvas: { w: number; h: number; fps: unknown }, duration: number): string {
-  return `${canvas.w}×${canvas.h} · ${formatFps(canvas.fps)}fps · ${duration.toFixed(1)}s`
+  return `${canvas.w}×${canvas.h} · ${formatFps(canvas.fps)}fps · ${formatTimecode(duration, canvas.fps)}`
 }

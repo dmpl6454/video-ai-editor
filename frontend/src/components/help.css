@@ -1,0 +1,39 @@
+/* The Help overlay (components/Help.tsx) on THE app dialog. Two columns of
+   command groups on a wide window, one on a narrow one; every colour is a
+   token from styles.css. */
+
+.dialog.help-dialog { width: min(760px, calc(100vw - 32px)); }
+.help-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  column-gap: 28px;
+  row-gap: 14px;
+}
+.help-group h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.help-group table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.help-group tr + tr td { border-top: 1px solid var(--line); }
+.help-group td { padding: 5px 0; vertical-align: top; }
+.help-keys { width: 128px; white-space: nowrap; }
+.help-keys .kbd { font-family: inherit; font-size: 11px; color: var(--text); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.help-label { color: var(--text); }
+.help-unbound { font-size: 11px; color: var(--text-faint); }
+.help-tip { margin: 14px 0 0; font-size: 11px; line-height: 1.5; color: var(--text-dim); }
+.help-preset { font-size: 11px; color: var(--text-dim); }
+
+/* Fonts and licences (OFL-1.1 notices for the bundled typefaces). */
+.help-licences { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.help-licences h3 { margin: 0 0 4px; font-size: 11px; font-weight: 600; color: var(--text-dim); }
+.help-licences-lead { margin: 0 0 8px; font-size: 11px; line-height: 1.5; color: var(--text-dim); }
+.help-licences-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); column-gap: 28px; row-gap: 6px; font-size: 12px; }
+.help-licences-list b { font-weight: 600; color: var(--text); }
+.help-licences-files { font-size: 10.5px; color: var(--text-dim); }
+.help-licences-cr { font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+.help-licences-text summary { cursor: pointer; font-size: 11px; color: var(--accent-2); }
+.help-licences-text pre { margin: 8px 0 0; max-height: 220px; overflow: auto; padding: 8px 10px; white-space: pre-wrap;
+  font-size: 10.5px; line-height: 1.45; color: var(--text-dim); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; }

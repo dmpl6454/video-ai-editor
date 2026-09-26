@@ -21,11 +21,13 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useStore } from '../store'
 import { usePromptStore, isBusy } from '../lib/promptStore'
 import { runProgress, terminalAnnouncement } from '../lib/promptEvents'
-import { canSubmitPrompt, shouldRefocusPrompt } from '../lib/promptFocus'
+import { canSubmitPrompt, shouldClearPromptText, shouldRefocusPrompt } from '../lib/promptFocus'
+import { promptLengthNote } from '../lib/promptLimit'
 import { BrainBadge } from './BrainBadge'
 import { ClarifyCard } from './ClarifyCard'
 import { PromptRunLog } from './PromptRunLog'
 import './promptBar.css'
+import { Icon } from './Icon'
 
 // Five real prompts from the benchmark set (spec §6.2), rotated while idle.
 const EXAMPLES = [
@@ -102,7 +104,9 @@ export function PromptBar() {
     const spot = !active || active === document.body ? 'none'
       : taRef.current?.closest('.prompt-bar')?.contains(active) ? 'inside-bar' : 'elsewhere'
     if (shouldRefocusPrompt(was, status, spot)) taRef.current?.focus()
-    if (isBusy(was) && !isBusy(status) && status !== 'clarify') setText('')
+    // Only a FINISHED run empties the field; a failed or cancelled one keeps
+    // the sentence so it can be fixed and run again (QA-124).
+    if (shouldClearPromptText(was, status)) setText('')
     const line = terminalAnnouncement(usePromptStore.getState())
     if (line && !isBusy(status) && was !== status) setAnnounce(line)
   }, [status])
@@ -218,6 +222,8 @@ export function PromptBar() {
   }
 
   const progress = busy ? runProgress(steps) : null
+  // The counter near the server's 4000-character limit, and the refusal past it (QA-124).
+  const lengthNote = promptLengthNote(text)
   const cls = [
     'prompt-bar',
     busy ? 'is-busy' : '',
@@ -229,7 +235,7 @@ export function PromptBar() {
   ].filter(Boolean).join(' ')
   const showLog = logOpen && status !== 'clarify' && (steps.length > 0 || !!plan || !!reply || !!lastError || busy)
   const placeholder = disabled
-    ? (chatBusy ? 'Chat is working — the bar waits for the same session lock' : 'Open a project to start')
+    ? (chatBusy ? 'Chat is working — the Prompt bar waits until it finishes' : 'Open a project to start')
     : cancelling ? 'Stopping after the current step…'
     : busy ? 'Working… Esc to cancel' : `Try: ${EXAMPLES[example]}`
 
@@ -244,7 +250,7 @@ export function PromptBar() {
       onSubmit={(e) => { e.preventDefault(); submit() }}
     >
       <div className="prompt-row">
-        <span className="prompt-glyph" aria-hidden="true">›</span>
+        <span className="prompt-glyph" aria-hidden="true"><Icon name="chevronRight" /></span>
         <textarea
           ref={taRef}
           className="prompt-input"
@@ -253,6 +259,8 @@ export function PromptBar() {
           placeholder={placeholder}
           aria-label="What should happen to this video?"
           aria-keyshortcuts="Enter / ArrowUp ArrowDown Escape"
+          aria-invalid={lengthNote?.over || undefined}
+          aria-describedby={lengthNote ? 'prompt-length-note' : undefined}
           disabled={disabled}
           readOnly={busy}
           spellCheck={false}
@@ -267,13 +275,20 @@ export function PromptBar() {
               {cancelling ? 'Stopping…' : <>Cancel<kbd>Esc</kbd></>}
             </button>
           ) : (
-            <button type="submit" className="prompt-run primary" disabled={disabled || !text.trim()}>
+            <button type="submit" className="prompt-run primary" disabled={disabled || !text.trim() || !!lengthNote?.over}>
               Run<kbd>↵</kbd>
             </button>
           )}
         </div>
         <div className="prompt-line" aria-hidden="true" />
       </div>
+
+      {lengthNote && (
+        <div id="prompt-length-note" className={`prompt-limit${lengthNote.over ? ' is-over' : ''}`}
+             role={lengthNote.over ? 'alert' : 'status'}>
+          {lengthNote.text}
+        </div>
+      )}
 
       {askCancel && busy && !cancelling && (
         <div className="prompt-confirm" role="alertdialog" aria-label="Cancel the run?"
@@ -297,7 +312,7 @@ export function PromptBar() {
       {showLog && <PromptRunLog />}
 
       {!showLog && status === 'idle' && !text && history.length === 0 && sid && (
-        <div className="prompt-hint">Enter runs · ↑ recalls · <kbd className="kbd">/</kbd> focuses from anywhere</div>
+        <div className="prompt-hint"><kbd className="kbd">Enter</kbd> runs · <kbd className="kbd">↑</kbd> recalls · <kbd className="kbd">/</kbd> focuses from anywhere</div>
       )}
 
       <div className="prompt-sr-only" aria-live="polite" aria-atomic="true">{announce}</div>

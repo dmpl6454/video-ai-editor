@@ -41,6 +41,20 @@ describe('previewStyle over the recorded catalog', () => {
     for (const k of kinds) expect(CSS, k).toContain(`.kind-${k}`)
   })
 
+  // QA-119: at rest a tile is a still, so two looks of one family must never
+  // render the same still — the Basic tab used to be five identical mauve
+  // swatches and Slide/Smooth pairs were the same push.
+  it('gives every look a still that differs from every other look in its family', () => {
+    for (const [family, entries] of cat.families) {
+      const seen = new Map<string, string>()
+      for (const e of entries) {
+        const sig = previewClass(e.preview) + JSON.stringify(previewStyle(e.preview))
+        expect(seen.get(sig), `${family}: ${e.name} looks like ${seen.get(sig)}`).toBeUndefined()
+        seen.set(sig, e.name)
+      }
+    }
+  })
+
   it('directions drive the endpoints, not just the class', () => {
     expect(previewStyle({ kind: 'wipe', dir: 'left' })['--cp-from']).toBe('inset(0 0 0 100%)')
     expect(previewStyle({ kind: 'wipe', dir: 'down' })['--cp-from']).toBe('inset(0 0 100% 0)')

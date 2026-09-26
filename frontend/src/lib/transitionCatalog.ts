@@ -29,15 +29,18 @@ export const FAMILY_ORDER: Family[] = ['Basic', 'Wipe', 'Slide', 'Zoom', 'Blur',
 export type Direction = 'left' | 'right' | 'up' | 'down' | 'tl' | 'tr' | 'bl' | 'br'
 
 export type PreviewKind =
-  | 'fade' | 'dip-black' | 'dip-white' | 'gray' | 'distance'
-  | 'wipe' | 'diag' | 'slide' | 'cover' | 'reveal' | 'slice' | 'wind' | 'clock' | 'wave'
+  | 'fade' | 'dissolve' | 'dip-black' | 'dip-white' | 'gray' | 'distance'
+  | 'wipe' | 'diag' | 'slide' | 'smooth' | 'cover' | 'reveal' | 'slice' | 'wind' | 'clock' | 'wave'
   | 'zoom' | 'squeeze' | 'crop'
   | 'blur' | 'pixel'
   | 'iris' | 'iris-close' | 'box' | 'diamond' | 'doors' | 'doors-close' | 'curtain' | 'curtain-close'
   | 'blinds' | 'bars' | 'checker' | 'ripple'
   | 'glitch' | 'spin' | 'whip' | 'burn'
 
-export interface TransitionPreview { kind: PreviewKind; dir: Direction | null }
+/** `pace` separates looks that share a motion and differ only in speed
+ *  (Fast Fade / Fade / Slow Fade): their tile stills must still differ
+ *  (QA-119), so the still shows the crossfade's length as a ramp. */
+export interface TransitionPreview { kind: PreviewKind; dir: Direction | null; pace?: 'fast' | 'slow' }
 
 export interface TransitionEntry {
   /** Canonical backend name — what `add_transition.type` receives. */
@@ -175,8 +178,9 @@ function dirOf(name: string, stem: string): Direction | null {
 }
 
 const PREVIEW_EXACT: Record<string, TransitionPreview> = {
-  fade: { kind: 'fade', dir: null }, fadefast: { kind: 'fade', dir: null }, fadeslow: { kind: 'fade', dir: null },
-  dissolve: { kind: 'fade', dir: null }, distance: { kind: 'distance', dir: null },
+  fade: { kind: 'fade', dir: null }, fadefast: { kind: 'fade', dir: null, pace: 'fast' },
+  fadeslow: { kind: 'fade', dir: null, pace: 'slow' },
+  dissolve: { kind: 'dissolve', dir: null }, distance: { kind: 'distance', dir: null },
   fadeblack: { kind: 'dip-black', dir: null }, fadewhite: { kind: 'dip-white', dir: null },
   fadegrays: { kind: 'gray', dir: null }, burn: { kind: 'burn', dir: null },
   radial: { kind: 'clock', dir: null }, wave: { kind: 'wave', dir: null },
@@ -197,7 +201,7 @@ const PREVIEW_EXACT: Record<string, TransitionPreview> = {
   whip: { kind: 'whip', dir: 'left' },
 }
 const PREVIEW_STEMS: [string, PreviewKind][] = [
-  ['whip', 'whip'], ['smooth', 'slide'], ['slide', 'slide'], ['cover', 'cover'], ['reveal', 'reveal'],
+  ['whip', 'whip'], ['smooth', 'smooth'], ['slide', 'slide'], ['cover', 'cover'], ['reveal', 'reveal'],
   ['diag', 'diag'], ['wipe', 'wipe'],
 ]
 
@@ -308,6 +312,15 @@ function build(entries: TransitionEntry[], names: Set<string>, meta: Raw, source
  * unusable payload (no names at all) yields the fallback catalog rather
  * than an empty panel — the fallback names are ones every backend accepts.
  */
+/** The panel footer: how many transitions there are, in the user's terms.
+ *  The alias count ("33 more names accepted") was catalog jargon; the fact a
+ *  user can act on is only whether the list came from the app or is the
+ *  built-in fallback shown while the backend could not be asked. */
+export function transitionCountText(c: Pick<TransitionCatalog, 'looks' | 'source'>): string {
+  const n = `${c.looks} transition${c.looks === 1 ? '' : 's'}`
+  return c.source === 'fallback' ? `${n} (built-in list)` : n
+}
+
 export function normalizeCatalog(raw: unknown): TransitionCatalog {
   const root = asObj(raw)
   const cat = asObj(root.catalog)

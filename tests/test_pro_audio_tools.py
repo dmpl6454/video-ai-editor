@@ -190,9 +190,13 @@ def test_volume_keyframes_on_a_music_lane_are_in_clip_time(tmp_path):
     dispatch(s, "add_keyframe", {"clip_id": mid, "prop": "audio.gain_db", "time": 2.0, "value": 0.0})
     a = _pcm(render_export(s.edl, s.dir).path)
     ref = 20 * math.log10(0.5)
-    # clip-local 0.5 s = timeline 3.5 s; clip-local 3 s = timeline 6 s
+    # clip-local 0.5 s = timeline 3.5 s; clip-local 2.4-2.9 s = timeline
+    # 5.4-5.9 s, the plateau before add_music's default 1 s fade-out (from
+    # 6.0 s). The window used to straddle that fade and only passed because
+    # the old mix limiter's auto-level lifted every mixed export by 0.26 dB
+    # (alimiter level=1; wave C's true-peak limiter is level-true).
     assert _band_db(a, 220, 3.45, 3.55) - ref == pytest.approx(-22.5, abs=1.5)
-    assert _band_db(a, 220, 5.5, 6.5) - ref == pytest.approx(0.0, abs=1.0)
+    assert _band_db(a, 220, 5.4, 5.9) - ref == pytest.approx(0.0, abs=1.0)
 
 
 def test_a_split_keeps_the_volume_curve(tmp_path):

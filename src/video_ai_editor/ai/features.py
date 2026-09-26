@@ -277,6 +277,11 @@ PACKAGED_FIX = (
 )
 
 
+def _anthropic_key() -> str:
+    from ..config import anthropic_api_key
+    return anthropic_api_key()
+
+
 def feature_report() -> dict:
     """{available: [...], unavailable: [...]} with a concrete fix for each gap."""
     frozen = bool(getattr(sys, "frozen", False))
@@ -315,7 +320,8 @@ def feature_report() -> dict:
     return {
         "packaged_app": frozen,
         "python": sys.version.split()[0],
-        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        # Env key or the Settings Keychain key (config.anthropic_api_key).
+        "anthropic_key_set": bool(_anthropic_key()),
         "available": avail,
         "unavailable": missing,
         "summary": (f"{len(avail)}/{len(FEATURES)} optional features available"
@@ -345,5 +351,8 @@ def cached_feature_report(*, refresh: bool = False) -> dict:
     with _REPORT_CACHE_LOCK:
         if refresh or _REPORT_CACHE is None:
             _REPORT_CACHE = feature_report()
-        return _REPORT_CACHE
+        # The key is not an install: Settings can add or remove it at any
+        # moment, so this one field is re-read on every call (a memoised
+        # Keychain lookup) instead of freezing with the probes.
+        return {**_REPORT_CACHE, "anthropic_key_set": bool(_anthropic_key())}
 

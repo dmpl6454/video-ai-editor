@@ -396,7 +396,7 @@ def test_auto_edit_honours_a_target_length():
     p = P.plan("make this a 20s reel with hinglish captions", F916, allow_downloads=False)
     trim = _step(p, "cut_range")
     # QA-069: the cut point is resolved at run time on a sentence boundary.
-    assert trim.args["start"] == "$fit_to:20" and trim.optional and trim.stage == Sc.STAGE_STRUCTURE
+    assert trim.args["start"] == "$fit_best:20" and trim.optional and trim.stage == Sc.STAGE_STRUCTURE
     assert _tools(p).index("cut_range") > _tools(p).index("remove_fillers")     # after the cuts
     laid = next(t for t in _tools(p) if t in ("auto_caption", "add_caption_track"))
     assert _tools(p).index("cut_range") < _tools(p).index(laid)                 # before the captions are laid

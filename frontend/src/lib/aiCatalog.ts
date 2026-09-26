@@ -75,12 +75,14 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
   { tool: 'remove_silences', keywords: 'ripple', group: 'Auto edit', label: 'Remove silences',
     description: 'Find the pauses in a track, cut them out and close the gaps. The defaults suit talking-head speech.',
     runAsJob: true,
-    fields: { track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' } } },
+    fields: { track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' },
+              keep_pad: { label: 'Silence to keep at each cut (s)' } } },
   { tool: 'remove_fillers', group: 'Auto edit', label: 'Remove filler words',
     description: 'Cut “um”, “uh”, “like” and “you know” and close the gaps.',
     runAsJob: true,
     fields: { words: { label: 'Words (blank = the built-in list)' },
-              track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' } } },
+              track: { widget: 'select', options: TRACK_CHOICES, default: 'v1' },
+              pad: { label: 'Silence to keep at each cut (s)' } } },
   { tool: 'auto_cut_to_beats', group: 'Auto edit', label: 'Cut to the beat',
     description: 'Cut the main video on every Nth beat of the music. Add music to the timeline first.',
     gate: 'beats', runAsJob: true },
@@ -251,7 +253,7 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
 
 export type GateResult =
   | { ok: true; checking: boolean }
-  | { ok: false; feature: string; fix: string; packagedExcluded: boolean }
+  | { ok: false; feature: string; fix: string; packagedExcluded: boolean; packagedApp: boolean }
 
 // `report === null` means features haven't loaded (or the route failed):
 // unknown is not unavailable, so the tool stays runnable with a quiet
@@ -268,7 +270,7 @@ export function gateFor(
   const missing = report.unavailable.find((f) => f.key === entry.gate)
   if (!missing) return { ok: true, checking: false }
   return { ok: false, feature: missing.feature, fix: missing.fix ?? '',
-           packagedExcluded: !!missing.packaged_app_excluded }
+           packagedExcluded: !!missing.packaged_app_excluded, packagedApp: !!report.packaged_app }
 }
 
 export function filterCatalog(entries: readonly CatalogEntry[], query: string): CatalogEntry[] {

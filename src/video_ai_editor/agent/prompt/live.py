@@ -28,7 +28,7 @@ from ...edl import timebase as _tb
 from ...edl.schema import EDL, Clip
 from ..timemap import map_segments_to_timeline, map_words_to_timeline
 from .heuristics import _CANNED_HOOK, heuristic_hook
-from .schema import FIT_SENTINEL_PREFIX, HOOK_SENTINEL, SEAM_SENTINEL
+from .schema import FIT_BEST_PREFIX, FIT_SENTINEL_PREFIX, HOOK_SENTINEL, SEAM_SENTINEL
 
 _D = importlib.import_module("video_ai_editor.agent.dispatch")
 
@@ -131,10 +131,14 @@ class FitCut:
 
 
 def parse_fit_sentinel(value: Any) -> float | None:
-    if not isinstance(value, str) or not value.startswith(FIT_SENTINEL_PREFIX):
+    """The target seconds of a `$fit_to:` / `$fit_best:` sentinel, else None."""
+    if not isinstance(value, str):
+        return None
+    prefix = next((p for p in (FIT_SENTINEL_PREFIX, FIT_BEST_PREFIX) if value.startswith(p)), None)
+    if prefix is None:
         return None
     try:
-        v = float(value[len(FIT_SENTINEL_PREFIX):])
+        v = float(value[len(prefix):])
     except ValueError:
         return None
     return v if v > 0 else None
@@ -193,6 +197,95 @@ def fit_cut(store: EDLStore, max_s: float) -> FitCut:
     return FitCut(at, end, [f"{why}: {smpte(at, fps)} ({at:.2f} s of the {max_s:g} s target)"])
 
 
+@dataclass
+class BestWindow:
+    """The kept window [start, end) of the live timeline and the cuts that
+    leave only it — tail first, so the head cut's ripple cannot move it."""
+    start: float
+    end: float
+    cuts: list[tuple[float, float]]
+    score: float
+    notices: list[str] = field(default_factory=list)
+
+
+def _scored_windows(words: list[dict], max_s: float) -> list[tuple[float, float, float, str]]:
+    """Every sentence-aligned window that fits `max_s` and reaches
+    FIT_MIN_SHARE of it, as (score, start, end, why) — scored by ai/shorts'
+    own `_score_window` (speech density, a strong opening line, a finished
+    last sentence, length fit; dead air and filler words penalised). Energy is
+    neutral here: the timeline's mix is not rendered to plan one cut."""
+    from ...ai.shorts import _PAUSE_BREAK_S, _score_window, _sentences
+    # One segment per breath group: a real pause ends a sentence even when the
+    # speaker's words carry no punctuation (whisper often leaves a ramble
+    # unpunctuated while punctuating the rest).
+    groups: list[list[dict]] = []
+    for w in words:
+        if groups and float(w["start"]) - float(groups[-1][-1]["end"]) < _PAUSE_BREAK_S:
+            groups[-1].append(w)
+        else:
+            groups.append([w])
+    tx = {"segments": [{"start": float(g[0]["start"]), "end": float(g[-1]["end"]),
+                        "text": " ".join(str(w.get("word") or "") for w in g),
+                        "words": [{"start": float(w["start"]), "end": float(w["end"]),
+                                   "word": str(w.get("word") or "")} for w in g]} for g in groups]}
+    sents = _sentences(tx)
+    floor = FIT_MIN_SHARE * max_s
+    out: list[tuple[float, float, float, str]] = []
+    for i in range(len(sents)):
+        # A breath of lead-in, at most half the gap to the previous sentence
+        # (the same rule as the tail), so neither edge lands on a word.
+        lead = FIT_TAIL_PAD_S if i == 0 else max(0.0, min(FIT_TAIL_PAD_S, (sents[i].start - sents[i - 1].end) / 2))
+        start = max(0.0, sents[i].start - lead)
+        for j in range(i, len(sents)):
+            nxt = sents[j + 1].start if j + 1 < len(sents) else None
+            end = sents[j].end + (FIT_TAIL_PAD_S if nxt is None else max(0.0, min(FIT_TAIL_PAD_S, (nxt - sents[j].end) / 2)))
+            if end - start > max_s + 1e-6:
+                break
+            if end - start < floor:
+                continue
+            score, why, _stats = _score_window(sents[i:j + 1], [], 0.0, max_s)
+            out.append((score, start, end, why))
+    return out
+
+
+def best_window(store: EDLStore, max_s: float) -> BestWindow | FitCut:
+    """The best `max_s` seconds of the live timeline (QA-069, wave C).
+
+    "make this a 30s reel" used to keep the FIRST 30 s (then: the first 30 s
+    ending on a sentence). A reel is the strongest 30 s, wherever it is: every
+    run of whole sentences that fits is scored and the best kept, cut to the
+    frame grid. Returns a `FitCut` (the first-N rule, said) when there is no
+    transcript to score, and `FitCut(None, …)` when the timeline already fits."""
+    edl = store.edl
+    fps = edl.canvas.fps
+    extent = edl.video_extent()
+    rendered = extent - edl.transition_overlap()
+    if rendered <= max_s + 1e-6:
+        return fit_cut(store, max_s)
+    words = _timeline_words(store)
+    cands = _scored_windows(words, max_s) if words else []
+    if not cands:
+        fc = fit_cut(store, max_s)
+        fc.notices.append("no transcript to choose the best window from — kept the opening instead")
+        return fc
+    best = max(cands, key=lambda c: (round(c[0], 6), -c[1]))
+    score, start, end, why = best
+    start = _tb.floor_to_frame(start, fps) if start > 1e-6 else 0.0
+    end = _tb.floor_to_frame(min(end, start + max_s, extent), fps)
+    tail_end = _tb.ceil_to_frame(extent + 1.0, fps)
+    cuts: list[tuple[float, float]] = []
+    if end < extent - 1e-3:
+        cuts.append((round(end, 4), round(tail_end, 4)))
+    if start > 1e-3:
+        cuts.append((0.0, round(start, 4)))
+    # The opening window (earliest start, longest), named when it lost.
+    first = min(cands, key=lambda c: (c[1], -c[2]))
+    note = (f"kept the best {end - start:.1f} s of whole sentences ({smpte(start, fps)}–{smpte(end, fps)}): {why}"
+            + (f"; the opening window scored {first[0]:.2f} against {score:.2f}"
+               if first[1] < best[1] - 1e-6 else ""))
+    return BestWindow(start, end, cuts, score, [note])
+
+
 # --------------------------------------------------------------- hook text
 
 def live_hook_text(store: EDLStore) -> tuple[str, str]:
@@ -210,14 +303,30 @@ def live_hook_text(store: EDLStore) -> tuple[str, str]:
 
 # --------------------------------------------------------------- one entry point
 
-def resolve_live_args(store: EDLStore, tool: str, args: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+def resolve_live_args(store: EDLStore, tool: str,
+                      args: dict[str, Any]) -> tuple[dict[str, Any] | list[dict[str, Any]] | None, list[str]]:
     """Replace this step's run-time sentinels. Returns (args, notices); args
-    is None when the step has nothing to do (the timeline already fits)."""
+    is None when the step has nothing to do (the timeline already fits), and
+    a LIST of arg dicts when one step fans out (the best-window trim is a
+    tail cut and a head cut — one step, so one undo)."""
     out = dict(args)
     notices: list[str] = []
     if tool == "apply_hook_stack" and out.get("text") == HOOK_SENTINEL:
         out["text"], note = live_hook_text(store)
         notices.append(note)
+    if tool == "cut_range" and isinstance(out.get("start"), str) and out["start"].startswith(FIT_BEST_PREFIX):
+        max_s = parse_fit_sentinel(out["start"])
+        if max_s is not None:
+            bw = best_window(store, max_s)
+            notices.extend(bw.notices)
+            if isinstance(bw, BestWindow):
+                if not bw.cuts:
+                    return None, notices
+                return [{**out, "start": a, "end": b} for a, b in bw.cuts], notices
+            if bw.start is None:
+                return None, notices
+            out["start"], out["end"] = round(bw.start, 4), round(bw.end, 4)
+            return out, notices
     if tool == "cut_range":
         max_s = parse_fit_sentinel(out.get("start"))
         if max_s is not None:
@@ -229,6 +338,7 @@ def resolve_live_args(store: EDLStore, tool: str, args: dict[str, Any]) -> tuple
     return out, notices
 
 
-__all__ = ["MAX_SEAM_FANOUT", "MIN_TRANSITION_NEIGHBOUR_S", "SeamFanout", "FitCut", "smpte", "seam_fanout",
+__all__ = ["MAX_SEAM_FANOUT", "MIN_TRANSITION_NEIGHBOUR_S", "SeamFanout", "FitCut", "BestWindow", "best_window",
+           "smpte", "seam_fanout",
            "seams_from_boundaries", "fit_cut", "parse_fit_sentinel", "live_hook_text", "resolve_live_args",
            "SEAM_SENTINEL"]

@@ -21,6 +21,8 @@ import { useStore } from '../store'
 import { defaultOverlayEnd, videoContentEnd } from '../lib/timelineExtent'
 import { useMenuA11y } from '../lib/useMenuA11y'
 import { TEXT_STYLE_PRESETS, textStyleArgs, type TextStylePreset } from '../lib/textStyles'
+import { selectNewClip } from '../lib/newClip'
+import { Icon } from './Icon'
 
 const PRESETS = [
   { name: 'countdown_3_2_1', label: '3 · 2 · 1', title: 'Center-screen countdown (pop in, fade out)', needsField: false },
@@ -29,17 +31,8 @@ const PRESETS = [
   { name: 'watermark_handle', label: '@Handle', title: 'Corner watermark — type your handle above first', needsField: true },
 ] as const
 
-/** Selects + flashes a freshly added text clip. Refreshes the EDL immediately
-    (not the ~120ms debounced refreshSoon dispatch() already queued) so the
-    Properties panel can actually find the clip the moment it's selected. */
-async function selectNewClip(result: unknown): Promise<void> {
-  const id = (result as { id?: string } | null | undefined)?.id
-  if (!id) return
-  const s = useStore.getState()
-  await s.refresh()
-  s.setSelection(id)
-  s.flashClip(id)
-}
+// selectNewClip (lib/newClip) selects + flashes the fresh clip — shared with
+// the sticker picker so every insert behaves the same (QA-128).
 
 export function TextTool() {
   const dispatch = useStore((s) => s.dispatch)
@@ -127,9 +120,8 @@ export function TextTool() {
       <button
         onClick={() => { void addDefaultText() }}
         title="Add a text overlay at the playhead (edit it in Properties)"
-        style={{ fontSize: 11 }}
       >
-        <b>T</b> Text
+        <Icon name="text" /> Text
       </button>
       <button
         ref={btnRef}
@@ -138,9 +130,9 @@ export function TextTool() {
         aria-label="Text presets"
         aria-haspopup="dialog"
         aria-expanded={presetsOpen}
-        style={{ fontSize: 11, padding: '2px 5px' }}
+        className="split-caret"
       >
-        <span aria-hidden="true">▾</span>
+        <Icon name="chevronDown" />
       </button>
       {presetsOpen && pos && createPortal(
         <div

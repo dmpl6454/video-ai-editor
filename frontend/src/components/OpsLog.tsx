@@ -19,7 +19,7 @@ export function OpsLog() {
   const { edits, footer, horizonAt } = historyRows(ops, undoDepth)
   return (
     <div className="ops-log">
-      <h2 style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.08em', margin: '8px 0' }}>History</h2>
+      <h2 className="section-label">History</h2>
       {edits.length === 0 && <div>No edits yet.</div>}
       {edits.map((op, i) => {
         const l = opLabel(op, ctx)

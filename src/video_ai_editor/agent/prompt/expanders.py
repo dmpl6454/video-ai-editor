@@ -32,7 +32,7 @@ from .live import MIN_TRANSITION_NEIGHBOUR_S, seams_from_boundaries, smpte
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
                          WORD_EDGE_TOLERANCE_S, beat_split_times, heuristic_hook)
-from .schema import (ARG_REF, FIT_SENTINEL_PREFIX, HOOK_SENTINEL, SEAM_SENTINEL, STAGE_AUDIO, STAGE_AUDIT, STAGE_CAPTIONS, STAGE_CUTS, STAGE_EXPORT,
+from .schema import (ARG_REF, FIT_BEST_PREFIX, HOOK_SENTINEL, SEAM_SENTINEL, STAGE_AUDIO, STAGE_AUDIT, STAGE_CAPTIONS, STAGE_CUTS, STAGE_EXPORT,
                      STAGE_LOOK, STAGE_MUSIC, STAGE_PREREQ, STAGE_REFRAME, STAGE_STRUCTURE, STAGE_TEXT,
                      STAGE_TRANSITIONS, DownloadNeeded, NeedsInput, Step)
 
@@ -521,6 +521,31 @@ def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs))
 
 
+def _x_reverse(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """QA-037: play the named clip backwards (or forwards again). The target
+    is the clip the prompt names, else the selected clip, else every v1
+    clip. A selection is bound to its real id here so the check measures the
+    clip that was reversed, not every clip (`$selected` has no verify-time
+    meaning)."""
+    rev = it.get("reverse")
+    rev = True if rev is None else bool(rev)
+    ref = it.get("clip_ref")
+    if ref in (None, "$selected"):
+        if f.selection and f.selection in f.clip_ids:
+            ref = f.selection
+        elif ref == "$selected":
+            return Expansion(notes=("select a clip first, or say 'reverse every clip'",))
+        else:
+            ref = "$v1_all"
+    what = {"$v1_all": "every clip", "$v1_first": "the first clip", "$v1_last": "the last clip",
+            "$playhead": "the clip at the playhead"}.get(str(ref), f"clip {ref}")
+    human = f"{what} plays backwards" if rev else f"{what} plays forwards"
+    return Expansion(
+        steps=(step("set_clip_reverse", STAGE_CUTS, f"play {what} {'backwards' if rev else 'forwards'}",
+                    clip_id=ref, reverse=rev),),
+        postconditions=(pc("clip_reversed", human, clip_id=ref, reverse=rev),))
+
+
 def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     rng = it.get("range")
     if isinstance(rng, str):
@@ -540,16 +565,17 @@ def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         # reshapes the footage at), so the honest check is the final length,
         # not a removed-range arithmetic against the pre-plan duration.
         #
-        # QA-069: WHERE it ends is decided at run time, on the live timeline
-        # after those cuts: after the last sentence (else pause) that fits,
-        # never mid-word at exactly `max_s` (agent/prompt/live.fit_cut).
+        # QA-069: WHICH part is kept is decided at run time, on the live
+        # timeline after those cuts: the best-scoring run of whole sentences
+        # that fits (wave C — it used to be the first `max_s` seconds, ending
+        # on a sentence), as a tail and a head cut (agent/prompt/live.best_window).
         return Expansion(
             steps=(step("cut_range", STAGE_STRUCTURE,
-                        f"keep the first {float(max_s):g}s, ending on a sentence (target length)",
+                        f"keep the best {float(max_s):g}s — whole sentences, dense speech, a strong opening line",
                         optional=bool(it.get("_optional")), track="v1",
-                        start=f"{FIT_SENTINEL_PREFIX}{float(max_s):g}", end=round(max(end, f.duration), 3)),),
+                        start=f"{FIT_BEST_PREFIX}{float(max_s):g}", end=round(max(end, f.duration), 3)),),
             postconditions=(pc("duration_leq", "the video fits the target length", max=round(float(max_s) + 0.5, 3)),),
-            notes=(f"trimmed to about {float(max_s):g}s after the cuts, ending on the last sentence that fits",))
+            notes=(f"trimmed to the best {float(max_s):g}s after the cuts, on sentence boundaries",))
     return Expansion(
         steps=(step("cut_range", STAGE_CUTS, f"remove {start:.2f}–{end:.2f}s and close the gap",
                     track="v1", start=round(start, 3), end=round(end, 3)),),
@@ -1086,7 +1112,7 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     "remove_silences": _x_remove_silences, "remove_fillers": _x_remove_fillers, "tighten": _x_tighten,
     "shorts": _x_shorts, "reframe": _x_reframe, "music": _x_music, "duck": _x_duck, "beat_sync": _x_beat_sync,
     "hook": _x_hook, "color_look": _x_color_look, "clean_audio": _x_clean_audio, "loudness": _x_loudness,
-    "speed": _x_speed, "trim": _x_trim, "title": _x_title, "brand": _x_brand, "end_card": _x_end_card,
+    "speed": _x_speed, "reverse": _x_reverse, "trim": _x_trim, "title": _x_title, "brand": _x_brand, "end_card": _x_end_card,
     "transitions": _x_transitions, "export_preset": _x_export_preset, "voiceover": _x_voiceover,
     "stabilize": _x_stabilize, "upscale": _x_upscale, "ask": _x_ask,
     "fade": _x_fade, "volume": _x_volume, "mute": _x_mute, "fit_music": _x_fit_music, "preview": _x_preview,

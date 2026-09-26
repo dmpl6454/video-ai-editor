@@ -52,7 +52,7 @@ CUT_RECIPES: frozenset[str] = frozenset({"tighten", "remove_silences", "remove_f
 
 #: Expansion order — prerequisites before dependents, then stage order.
 RECIPE_ORDER: tuple[str, ...] = (
-    "transcribe", "trim", "speed", "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten",
+    "transcribe", "trim", "speed", "reverse", "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten",
     "shorts", "color_look", "transitions", "reframe", "captions", "translate_captions", "hook", "title",
     "brand", "end_card", "voiceover", "remove_music", "music", "duck", "beat_sync", "fit_music", "fade", "volume",
     "mute",
@@ -73,7 +73,7 @@ _TITLES: dict[str, str] = {
     "transitions": "Transitions", "export_preset": "Export preset", "voiceover": "Voiceover",
     "stabilize": "Stabilise", "upscale": "Upscale", "auto_edit": "Auto edit", "ask": "Question",
     "fade": "Fade", "volume": "Volume", "mute": "Mute", "fit_music": "Fit music", "audit": "Audit",
-    "remove_music": "Remove music",
+    "remove_music": "Remove music", "reverse": "Reverse",
     "_audit": "Audit", "preview": "Preview",
 }
 
@@ -149,6 +149,8 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> d
         return {"lufs": lufs, "_platform": platform}
     if r == "speed":
         return {"factor": c.speed or w.speed, "clip_ref": c.clip_ref, "_smooth": c.smooth}
+    if r == "reverse":
+        return {"clip_ref": c.clip_ref, "reverse": not G.reverse_off(hit.clause)}
     if r == "trim":
         return {"range": c.range or w.range}
     if r == "title":

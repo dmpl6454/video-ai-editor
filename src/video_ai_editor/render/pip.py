@@ -162,7 +162,10 @@ def pip_input_args(c: Clip, n: int, fps) -> list[str]:
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
     span = pre + _tb.time_of(n + _DECODE_SLACK_FRAMES, fps)
-    return ["-ss", f"{seek:.6f}", "-t", f"{span:.6f}", "-i", str(c.src)]
+    # No `-ss` from the file's start (audio_mix.input_seek: `-ss 0` garbles an
+    # AAC source's first 21 ms — the PIP's sound is read from this input).
+    from .audio_mix import input_seek
+    return [*input_seek(seek), "-t", f"{span:.6f}", "-i", str(c.src)]
 
 
 def pip_video_timing(n: int, first_frame: int, fps) -> str:

@@ -1533,6 +1533,22 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     if new_out <= new_in:
         raise ValueError(
             f"out ({new_out:.3f}) must be greater than in ({new_in:.3f})")
+    if args.get("move_start") and track.id != MAIN_LANE_ID and abs(new_in - old_in) > 1e-9:
+        # A HEAD trim on a non-magnetic lane (a timeline left-edge drag, Q
+        # "trim start to playhead"): the start moves with the head, so the
+        # frames that stay keep playing exactly where they did. Without it
+        # the edge snapped back and the kept content slid earlier by the
+        # trimmed length. Never before 0 or into the previous clip on the lane.
+        sf = c.speed_factor
+        fps_ = store.edl.canvas.fps
+        floor = max([0.0] + [o.start + o.effective_duration for o in track.clips
+                             if isinstance(o, Clip) and o is not c
+                             and o.start + o.effective_duration <= old_start + 1e-6])
+        new_start = old_start + (new_in - old_in) / sf
+        if new_start < floor - 1e-9:
+            new_in = _q(store.edl, old_in - (old_start - floor) * sf)
+            new_start = floor
+        c.start = _tb.quantize(max(0.0, new_start), fps_)
     c.in_, c.out = new_in, new_out
     new_duration = c.duration
     _ripple_close_gap(track, store.edl.canvas.fps)
@@ -3275,6 +3291,26 @@ def set_clip_muted(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "muted": c.audio.mute}
 
 
+def set_clip_reverse(store: EDLStore, args: dict) -> dict:
+    """Play ONE media clip backwards (or forwards again); omit `reverse` to
+    toggle. The narrow tool the Prompt Editor's "reverse the clip" recipe
+    plans (QA-037): `set_property` is on the plan deny list because its
+    `src` path bypasses the upload guard, so a plan cannot reach
+    `Clip.reverse` through it. The renderer honours the flag on every lane
+    (render/reverse.py), picture and sound together."""
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    _, c = res
+    if not isinstance(c, Clip):
+        raise ValueError("set_clip_reverse only supports media clips")
+    c.reverse = bool(args.get("reverse", not c.reverse))
+    summary = f"{'Reversed' if c.reverse else 'Un-reversed'} clip {cid}"
+    store.commit("set_clip_reverse", args, summary)
+    return {"summary": summary, "reverse": c.reverse}
+
+
 def _merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Union of closed ranges, sorted ascending; overlapping/touching ones
     become one. Pure — returns a new list."""
@@ -4233,12 +4269,9 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     track, c = res
     if not isinstance(c, Clip):
         raise ValueError("set_speed only supports media clips")
-    # Audio lanes: audio_mix applies no atempo, so a committed speed field
-    # would never change playback — but it WOULD change effective_duration
-    # and therefore edl.duration / timeline geometry, desyncing what the
-    # timeline shows from what actually plays. Fail loudly (same posture as
-    # _reject_audio_lane_clip for transform/effects).
-    _reject_audio_lane_clip(track, cid, "set_speed")
+    # Audio lanes (QA-086): audio_mix retimes a music/vo/audio clip with the
+    # v1 rule (`audio_mix.speed_filters`) and places it by its
+    # effective_duration, so a speed here is heard exactly as drawn.
     # Non-v1 video tracks (PIP overlays): render/pip.py applies no setpts
     # either, so speed on a v2 clip is fiction — and the old code worse-than-
     # no-op'd by _ripple_close_gap-repacking the whole v2 track from t=0,
@@ -4258,6 +4291,8 @@ def set_speed(store: EDLStore, args: dict) -> dict:
         # QA-039 residual: False = varispeed (sample-exact, pitch follows).
         c.audio.keep_pitch = bool(args["keep_pitch"])
     new_fp = c.effective_duration
+    if track.type in _AUDIO_LANE_TYPES and new_fp > old_fp + 1e-9:
+        _push_lane_after(track, c, store.edl.canvas.fps)
     if track.id == "v1" and abs(new_fp - old_fp) > 1e-9:
         _ripple_close_gap(track, store.edl.canvas.fps)
         # Overlays after this clip must follow the shift (same contract
@@ -4282,6 +4317,26 @@ def set_speed(store: EDLStore, args: dict) -> dict:
     summary = f"Speed {cid} → {factor:.2f}× (now {new_fp:.2f}s on timeline)"
     store.commit("set_speed", args, summary)
     return {"summary": summary}
+
+
+def _push_lane_after(track: Track, c: Clip, fps) -> None:
+    """A slowed-down clip on an AUDIO lane must not run over the next clip:
+    push every later clip on that lane right by exactly the overlap (QA-086).
+    A gap wide enough to absorb the growth moves nothing — an audio lane
+    legitimately has gaps, so it is never repacked (v1's ripple is not the
+    rule here)."""
+    from ..edl import timebase as _tb
+    end = c.start + c.effective_duration
+    later = sorted((o for o in track.clips if isinstance(o, Clip) and o is not c
+                    and o.start >= c.start - 1e-9), key=lambda o: o.start)
+    if not later:
+        return
+    push = end - later[0].start
+    if push <= 1e-9:
+        return
+    push = _tb.ceil_to_frame(push, fps)      # later clips stay on the frame grid
+    for o in later:
+        o.start += push
 
 
 def set_clip_transform(store: EDLStore, args: dict) -> dict:
@@ -6145,6 +6200,96 @@ _TIME_KEYS = frozenset({(Clip, "start"), (Clip, "in_"), (Clip, "out"), (TextClip
                         (TextClip, "end"), (Sticker, "start"), (Sticker, "end")})
 
 
+#: set_property's first path segment → the History title (the property group).
+_PROPERTY_GROUPS = {
+    "style": "Text style", "audio": "Audio", "transform": "Transform", "speed": "Speed",
+    "reverse": "Speed", "text": "Text", "anim_in": "Animation", "anim_out": "Animation",
+    "anim_dur": "Animation", "in": "Timing", "out": "Timing", "start": "Timing", "end": "Timing",
+    "src": "Media",
+}
+#: audio.channels values as the inspector names them (lib/audioChannels.CHANNEL_MODES).
+_CHANNEL_LABELS = {"stereo": "Stereo", "left": "Left to both", "right": "Right to both",
+                   "mono": "Mono mix"}
+
+
+def _num_text(v: Any) -> str:
+    """120.0 → "120", 1.25 → "1.25" — how the inspector shows a number."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    from math import isfinite
+    return f"{f:.2f}".rstrip("0").rstrip(".") if isfinite(f) else str(v)
+
+
+def _on_off(v: Any) -> str:
+    return "on" if v else "off"
+
+
+def _property_phrase(path: str, value: Any) -> str | None:
+    """The editor's words for one property change, or None for a path the
+    table does not know (the caller falls back to "Changed <name>")."""
+    scalar = value is None or isinstance(value, (bool, int, float, str))
+    if not scalar:
+        return None
+    n = _num_text
+    table: dict[str, Callable[[Any], str]] = {
+        "reverse": lambda v: f"Play backwards {_on_off(v)}",
+        "speed": lambda v: f"Speed {n(v)}x",
+        "style.size": lambda v: f"Text size {n(v)} px",
+        "style.color": lambda v: f"Text colour {v}",
+        "style.font": lambda v: f"Font: {v or 'default'}",
+        "style.stroke_w": lambda v: f"Outline width {n(v)} px",
+        "style.stroke": lambda v: f"Outline colour {v}",
+        "style.upper": lambda v: "Letter case: " + (
+            "style default" if v is None else "ALL CAPS" if v else "as typed"),
+        "style.align": lambda v: f"Alignment: {v}",
+        "style.shadow_on": lambda v: "Shadow: style default" if v is None else f"Shadow {_on_off(v)}",
+        "style.background": lambda v: f"Background box {_on_off(v)}",
+        "style.line_spacing": lambda v: f"Line spacing {n(v)}",
+        "style.letter_spacing": lambda v: f"Tracking {n(v)} px",
+        "audio.channels": lambda v: f"Channels: {_CHANNEL_LABELS.get(str(v), v)}",
+        "audio.gain_db": lambda v: f"Volume {n(v)} dB",
+        "audio.mute": lambda v: "Muted" if v else "Unmuted",
+        "audio.fade_in": lambda v: f"Fade in {n(v)} s",
+        "audio.fade_out": lambda v: f"Fade out {n(v)} s",
+        "audio.keep_pitch": lambda v: f"Keep pitch {_on_off(v)}",
+        "transform.scale": lambda v: f"Scale {n(float(v) * 100)}%",
+        "transform.rotation": lambda v: f"Rotation {n(v)}°",
+        "transform.opacity": lambda v: f"Opacity {n(float(v) * 100)}%",
+        "transform.x": lambda v: f"Position X {n(v)}",
+        "transform.y": lambda v: f"Position Y {n(v)}",
+        "text": lambda v: f"Text: “{str(v)[:40]}{'…' if len(str(v)) > 40 else ''}”",
+        "anim_in": lambda v: f"Animate in: {v or 'none'}",
+        "anim_out": lambda v: f"Animate out: {v or 'none'}",
+        "anim_dur": lambda v: f"Animation length {n(v)} s",
+        "in": lambda v: f"Source in {n(v)} s",
+        "out": lambda v: f"Source out {n(v)} s",
+        "start": lambda v: f"Start {n(v)} s",
+        "end": lambda v: f"End {n(v)} s",
+        "src": lambda _v: "Media replaced",
+    }
+    fn = table.get(path)
+    try:
+        return fn(value) if fn else None
+    except (TypeError, ValueError):
+        return None
+
+
+def property_label(path: str, value: Any) -> tuple[str, str]:
+    """(group, phrase) for a set_property change, in editor language
+    (QA-101-SWEEP): ("Text style", "Text size 120 px"), ("Speed", "Play
+    backwards on"). Mirrored by lib/opLabels.propertyLabel — both run the
+    cases in frontend/src/lib/__fixtures__/property_labels.json."""
+    path = str(path or "")
+    group = _PROPERTY_GROUPS.get(path.split(".", 1)[0], "Edit")
+    phrase = _property_phrase(path, value)
+    if phrase is None:
+        leaf = path.rsplit(".", 1)[-1].replace("_", " ").strip() or "a property"
+        phrase = f"Changed {leaf}"
+    return group, phrase
+
+
 def set_property(store: EDLStore, args: dict) -> dict:
     """Generic dotted-path mutator. The most flexible CapCut-style 'tweak any
     field' operation: `set_property(clip_id, path, value)`.
@@ -6203,7 +6348,8 @@ def set_property(store: EDLStore, args: dict) -> dict:
             and c.end <= c.start + 1e-9:
         setattr(obj, leaf, before)
         raise ValueError("the clip's end must come after its start")
-    summary = f"Set {cid}.{path} = {value!r}"
+    group, phrase = property_label(path, value)
+    summary = f"{group}: {phrase}"
     store.commit("set_property", args, summary)
     return {"summary": summary}
 
@@ -6285,6 +6431,7 @@ def add_text(store: EDLStore, args: dict) -> dict:
         align=str(args.get("align") or "center"),
         line_spacing=float(args.get("line_spacing", 1.0)),
         shadow_on=args.get("shadow_on") if isinstance(args.get("shadow_on"), bool) else None,
+        letter_spacing=float(args.get("letter_spacing", 0.0)),
     )
     anim_dur = args.get("anim_dur")
     tc = TextClip(text=text, start=float(args["start"]), end=float(args["end"]),
@@ -6507,8 +6654,9 @@ def generate_hook(store: EDLStore, args: dict) -> dict:
     Pure suggestion — does NOT mutate the EDL. Caller (or Claude itself) picks
     one and calls add_hook_overlay.
     """
-    from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
-    if not ANTHROPIC_API_KEY:
+    from ..config import CLAUDE_MODEL, anthropic_api_key
+    api_key = anthropic_api_key()   # env, else the Settings Keychain key
+    if not api_key:
         # Heuristic fallback: pull the first sentence of the transcript.
         tx = get_transcript(store, {})
         first = ""
@@ -6536,7 +6684,7 @@ def generate_hook(store: EDLStore, args: dict) -> dict:
         f"Project: canvas {summary['canvas']['w']}×{summary['canvas']['h']}, duration {summary['duration']:.1f}s.\n"
         f"Transcript:\n{text or '(no transcript yet)'}"
     )
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=300,
@@ -6615,8 +6763,9 @@ def auto_reframe(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "w": w, "h": h, "reframed": reframed}
 
 
-def vocal_isolate(store: EDLStore, args: dict) -> dict:
-    """Replace a clip's audio with the vocal stem (Demucs)."""
+def vocal_isolate(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
+    """Replace a clip's audio with the vocal stem (Demucs). Reports progress
+    per demucs segment and stops on Cancel between segments (QA-066)."""
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
     if not res:
@@ -6629,7 +6778,8 @@ def vocal_isolate(store: EDLStore, args: dict) -> dict:
         raise RuntimeError(
             "Vocal isolation needs demucs (install with `uv sync --all-extras`) "
             "and the full Python install — it is excluded from the packaged app.")
-    stem = isolate_vocals(Path(c.src), store.dir / "cache" / "stems")
+    stem = isolate_vocals(Path(c.src), store.dir / "cache" / "stems",
+                          on_progress=set_progress, cancel_event=cancel_event)
     # Drop the vocal stem onto the vo track; mute the original audio of the clip.
     c.audio.mute = True
     track = ensure_track(store.edl, "vo", "vo", z=0)
@@ -6647,8 +6797,9 @@ def vocal_isolate(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "stem": str(stem)}
 
 
-def instrumental_isolate(store: EDLStore, args: dict) -> dict:
-    """Replace a clip's audio with the instrumental stem (no vocals)."""
+def instrumental_isolate(store: EDLStore, args: dict, *, set_progress=None, cancel_event=None) -> dict:
+    """Replace a clip's audio with the instrumental stem (no vocals); progress
+    and Cancel as vocal_isolate."""
     cid = str(args["clip_id"])
     res = store.edl.get_clip(cid)
     if not res:
@@ -6662,7 +6813,8 @@ def instrumental_isolate(store: EDLStore, args: dict) -> dict:
             "Instrumental isolation needs demucs (install with "
             "`uv sync --all-extras`) and the full Python install — it is "
             "excluded from the packaged app.")
-    inst = isolate_instrumental(Path(c.src), store.dir / "cache" / "stems")
+    inst = isolate_instrumental(Path(c.src), store.dir / "cache" / "stems",
+                                on_progress=set_progress, cancel_event=cancel_event)
     c.audio.mute = True
     track = ensure_track(store.edl, "music", "music", z=0)
     from ..edl.schema import AudioProps
@@ -6738,6 +6890,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "fit_music_to_video": fit_music_to_video,
     "set_volume": set_volume,
     "set_clip_muted": set_clip_muted,
+    "set_clip_reverse": set_clip_reverse,
     "add_fade": add_fade,
     "set_video_fade": set_video_fade,
     "remove_silences": remove_silences,
@@ -6929,6 +7082,64 @@ def _call_guarded(store: EDLStore, tool: str, fn, args: dict, hooks: dict) -> di
     return result
 
 
+#: Ops that mean someone chose the project's frame shape (QA-111). The first
+#: import only matches the canvas to its footage while none of these happened.
+CANVAS_CHOICE_TOOLS = frozenset({"set_aspect_ratio", "apply_export_preset", "auto_reframe"})
+#: meta.json key recording a choice that changed nothing (so QA-130 logged no
+#: op): picking 9:16 on the default 9:16 canvas is still a choice.
+CANVAS_CHOSEN_META_KEY = "canvas_chosen"
+
+
+def is_canvas_choice(tool: str, args: dict) -> bool:
+    if tool in CANVAS_CHOICE_TOOLS:
+        return True
+    return tool == "set_canvas" and isinstance(args, dict) and \
+        (args.get("w") is not None or args.get("h") is not None)
+
+
+def _op_count(store) -> int:
+    ops = getattr(getattr(store, "ops", None), "ops", None)
+    return len(ops) if isinstance(ops, list) else -1
+
+
+def _meta_path(store):
+    d = getattr(store, "dir", None)
+    return Path(d) / "meta.json" if d else None
+
+
+def _remember_canvas_choice(store) -> None:
+    """Persist a no-op canvas choice outside the undo log (REVIEW-XLANE-QA130-
+    QA111-RATIO). A choice that DID change the canvas is an op, and undoing it
+    brings the auto-match back; this flag only covers the unchanged case, which
+    has nothing to undo. meta.json travels inside a saved .vae."""
+    p = _meta_path(store)
+    if p is None or not p.parent.is_dir():
+        return
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict) or meta.get(CANVAS_CHOSEN_META_KEY) is True:
+        return
+    try:
+        p.write_text(json.dumps({**meta, CANVAS_CHOSEN_META_KEY: True}, indent=2), encoding="utf-8")
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning("could not record the canvas choice for %s: %s",
+                                            p.parent.name, e)
+
+
+def canvas_choice_remembered(store) -> bool:
+    p = _meta_path(store)
+    if p is None or not p.exists():
+        return False
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(meta, dict) and meta.get(CANVAS_CHOSEN_META_KEY) is True
+
+
 def dispatch(store: EDLStore, tool: str, args: dict, *,
              set_progress=None, cancel_event=None) -> dict:
     """The single mutation path. `fn(store, args) -> dict`, nothing else.
@@ -6956,7 +7167,11 @@ def dispatch(store: EDLStore, tool: str, args: dict, *,
         if cancel_event is not None and "cancel_event" in params:
             hooks["cancel_event"] = cancel_event
     try:
-        return _call_guarded(store, tool, fn, args, hooks)
+        n_ops = _op_count(store)
+        result = _call_guarded(store, tool, fn, args, hooks)
+        if is_canvas_choice(tool, args) and _op_count(store) == n_ops:
+            _remember_canvas_choice(store)
+        return result
     except KeyError as e:
         # Handlers read mandatory args as `args["clip_id"]`, so omitting one was
         # an unhandled KeyError -> HTTP 500 with a traceback. Converting it here

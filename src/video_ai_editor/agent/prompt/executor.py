@@ -641,9 +641,16 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
         emit({"type": "step", "index": index, "total": total, "tool": tool, "status": "ok",
               "progress": 1.0, "effect": "none", "summary": outcome.results[0]["summary"]})
         return outcome
-    live_args = resolved
-    guard_step(tool, live_args, facts, consented=consented)
-    arg_sets = resolve_step_args(store.edl, live_args, facts)
+    if isinstance(resolved, list):
+        # A run-time fan-out (the best-window trim: tail cut, then head cut),
+        # each call guarded like any other — still one step, one undo.
+        for a in resolved:
+            guard_step(tool, a, facts, consented=consented)
+        live_args, arg_sets = resolved[0], [dict(a) for a in resolved]
+    else:
+        live_args = resolved
+        guard_step(tool, live_args, facts, consented=consented)
+        arg_sets = resolve_step_args(store.edl, live_args, facts)
     if live_args.get("at") == SEAM_SENTINEL:
         notices.extend(_live.seam_fanout(store.edl).notices(store.edl.canvas.fps))
     outcome = StepOutcome(index=index, tool=tool, args=arg_sets, notices=notices)
@@ -653,6 +660,8 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
         shown_args = dict(step.args)
     elif "clip_id" in arg_sets[0] and step.args.get("clip_id") in CLIP_SENTINELS:
         shown_args = {**step.args, "clip_id": [a["clip_id"] for a in arg_sets]}
+    elif "at" not in arg_sets[0]:
+        shown_args = {**step.args, "ranges": [[a.get("start"), a.get("end")] for a in arg_sets]}
     else:
         shown_args = {**step.args, "at": [a["at"] for a in arg_sets]}
     emit({"type": "tool_use", "name": tool, "args": shown_args, "id": call_id})
@@ -694,7 +703,8 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     result_payload: Any = outcome.results[0] if n == 1 else {"results": outcome.results}
     emit({"type": "tool_result", "name": tool, "result": result_payload, "id": call_id})
     summary = _result_summary(outcome.results[0]) if n == 1 else (
-        f"{n} seams" if step.args.get("at") == SEAM_SENTINEL else f"{n} clips")
+        f"{n} seams" if step.args.get("at") == SEAM_SENTINEL
+        else f"{n} cuts" if tool == "cut_range" else f"{n} clips")
     for r in outcome.results:
         note = r.get("notice") if isinstance(r, dict) else None
         if isinstance(note, str) and note and note not in outcome.notices:
@@ -849,7 +859,8 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
         title = validated.title or validated.intent
         store.commit("prompt", {"prompt": prompt, "plan_id": validated.id,
                                 "steps": [s.tool for s in steps]},
-                     f"Prompt: {title} ({result.applied} steps)")
+                     f"Prompt: {title} ({result.applied} step{'' if result.applied == 1 else 's'})",
+                     record_unchanged=bool(result.new_sessions))
         result.committed = True
         last = store.ops.last()
         result.op = last.model_dump() if last else None
@@ -867,7 +878,9 @@ def _sessions_created(result: ExecResult) -> list[str]:
 def _with_kept_sessions(message: str, sessions: list[str]) -> str:
     if not sessions:
         return message
-    return f"{message} Created sessions kept: {', '.join(sessions)}."
+    # By name, never the raw `s_…` ids (QA-068).
+    from .summary import created_projects_line
+    return f"{message} Kept — {created_projects_line(sessions)}"
 
 
 # --------------------------------------------------------------------------
@@ -930,8 +943,18 @@ def _finish_children(store_resolver: Callable[[str], EDLStore], parent: ExecResu
     from .schema import IntentDraft, IntentItem
 
     plan_id = parent.plan.id or "p_00000000"
+    from ...storage import read_meta
     for k, child_sid in enumerate(parent.new_sessions):
+        # The short's NAME travels with its record so the reply and the run
+        # log's Open buttons can say it instead of the id (QA-068).
+        try:
+            meta = read_meta(child_sid)
+        except Exception:  # noqa: BLE001 — an unreadable meta must not stop the finish
+            meta = {}
         record: dict[str, Any] = {"session": child_sid, "status": "running"}
+        name = str(meta.get("name") or "").strip()
+        if name:
+            record["name"] = name
         call_id = f"{plan_id}_child{k}"
         emit({"type": "tool_use", "name": "finish_short", "args": {"session": child_sid}, "id": call_id})
         try:
@@ -941,8 +964,7 @@ def _finish_children(store_resolver: Callable[[str], EDLStore], parent: ExecResu
                 # QA-068: tighten first (the short's ums and dead air go), and
                 # hook it with the opening line make_shorts chose FROM the
                 # short — a whole sentence — rather than a transcript slice.
-                from ...storage import read_meta
-                hook_text = str(read_meta(child_sid).get("hook") or "").strip()
+                hook_text = str(meta.get("hook") or "").strip()
                 draft = IntentDraft(intents=[IntentItem(recipe="tighten", slots={}),
                                              IntentItem(recipe="reframe", slots={"ratio": "9:16"}),
                                              IntentItem(recipe="captions", slots={}),

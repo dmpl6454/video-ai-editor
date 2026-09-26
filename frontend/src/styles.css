@@ -35,6 +35,20 @@
   --track-text: #fbbf24;
   --track-captions: #f472b6;
   --selection: #ffffff;
+  /* Errors in a panel (upload/record/effects failures): light-red text on a
+     dark-red well (>= 4.5:1, pinned by lib/contrast.test.ts). */
+  --error-text: #ffb3bd;
+  --error-bg: #2a1216;
+  --error-line: #5a2a32;
+  /* THE disabled state (every control, wave C): neutral grey, never a faded
+     accent. --text-disabled is dimmer than --text/--text-dim so a disabled
+     control reads as off at a glance, yet stays >= 4.5:1 on --bg-disabled. */
+  --text-disabled: #8e8e98;
+  --bg-disabled: #1d1d22;
+  /* Control rhythm: every top-bar control and every full-width panel button
+     is one of these heights; icons are 16 px (components/Icon.tsx). */
+  --control-h: 28px;
+  --panel-btn-h: 30px;
   --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
 }
 /* The whole app is dark: native controls (select pop-ups, scrollbars, date
@@ -49,12 +63,27 @@ html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var
 #root { overflow-x: auto; }
 button { font: inherit; color: inherit; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 button:hover:not(:disabled) { background: #2f2f37; }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* ONE disabled state for every control (wave C): full opacity, the neutral
+   --text-disabled colour (icons follow via currentColor), not-allowed cursor.
+   `!important` because a state must beat per-component opacity hacks
+   (0.4 / 0.5 / 0.55) and inline colours. A control FILLED with an accent —
+   by class or inline style — turns neutral grey rather than faded pink. */
+button:disabled, input:disabled, select:disabled, textarea:disabled,
+[role="button"][aria-disabled="true"], [role="menuitem"][aria-disabled="true"] {
+  opacity: 1 !important;
+  color: var(--text-disabled) !important;
+  cursor: not-allowed;
+}
+input[type="range"]:disabled, input[type="checkbox"]:disabled, input[type="radio"]:disabled { accent-color: var(--text-disabled); }
+button:disabled[style*="accent"], .dialog-foot button:disabled.danger, .dialog-foot button:disabled.primary {
+  background: var(--bg-disabled) !important;
+  border-color: var(--line) !important;
+}
 button.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
 button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
 /* A disabled primary is NEUTRAL, not a faded pink (it read as a dimmed live
    button at 1.54:1 — QA-103). */
-button.primary:disabled { opacity: 1; background: var(--bg-3); border-color: var(--line); color: var(--text-faint); }
+button.primary:disabled { opacity: 1; background: var(--bg-disabled); border-color: var(--line); color: var(--text-disabled); }
 /* One visible keyboard focus ring for every control (QA-102). :focus-visible
    keeps it off mouse clicks. */
 :where(button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="tab"], a, input, select, textarea, summary, [tabindex]):focus-visible {
@@ -69,8 +98,42 @@ select:hover:not(:disabled) { border-color: var(--text-faint); }
 /* The app icon set (components/Icon.tsx) sits on the text baseline of the
    control that holds it. */
 svg.icon { display: inline-block; vertical-align: -3px; flex-shrink: 0; }
-button.icon-btn { padding: 5px 8px; line-height: 0; }
-.music-panel-head { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+/* No UA disclosure triangle anywhere (a second icon approach): every
+   <summary> is components/Disclosure, which draws the lucide chevron. */
+summary { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+summary::marker { content: ''; }
+/* An icon-only control: a square, the icon centred. */
+button.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 5px 8px; line-height: 0; }
+/* The busy mark (LoaderCircle) turns; it stands still under reduced motion. */
+.icon-spin { animation: icon-spin 0.8s linear infinite; }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
+
+/* ONE panel section header (QA-104): Properties' TIMING/POSITION, History,
+   the sticker groups, Effects' sub-heads, menu heads. It was restated inline
+   per panel, and two of those copies computed 0.8em and 0.6em tracking
+   (`0.08 * 10 + 'em'`), spreading "P O S I T I O N" over two lines. */
+.section-label, .sidebar h2 {
+  font-size: 10px; font-weight: 600; line-height: 1.4; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.sidebar h2 { margin: 8px 0; }
+.section-label .icon { vertical-align: -4px; margin-right: 4px; }
+button.emoji-group-toggle {
+  display: flex; align-items: center; gap: 4px; width: 100%; text-align: left;
+  padding: 3px 0; background: none; border: none;
+}
+button.emoji-group-toggle:hover:not(:disabled) { background: none; color: var(--text); }
+/* Full-width panel buttons (Add music, Record voiceover, Stickers, Effects):
+   one height, icon + words centred, 11 px like the rest of the left pane. */
+.panel-btn, .vo-btn, .panel-disclosure {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; min-height: var(--panel-btn-h); padding: 0 10px; font-size: 11px;
+}
+.panel-disclosure { justify-content: flex-start; }
+.vo-import { margin-top: 6px; }
+.music-panel-head { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.music-panel-head .icon { margin-right: 0; }
 /* Sliders, checkboxes and radios take the app accent, not the browser blue. */
 input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-2); }
 
@@ -108,6 +171,17 @@ input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color:
   overflow: hidden;
 }
 .topbar > * { flex-shrink: 0; }
+/* Control rhythm (wave C): every control in the bar is --control-h tall with
+   one font size, icon and words centred on one line; icon-only controls are
+   square. The bar used 24-34 px controls at 11-13 px before. */
+.topbar button, .topbar select {
+  height: var(--control-h); font-size: 12px; line-height: 1;
+}
+.topbar button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; }
+.topbar button.icon-btn { width: var(--control-h); padding: 0; }
+.topbar .split-caret, .topbar .cc-caret { padding: 0 6px; gap: 2px; }
+.topbar .pill { line-height: 18px; }
+.topbar-session-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The tools (Ratio ▾, Text, Captions, Help, Shortcuts, ⋯) — QA-012. This was
    `.topbar-scroll`, an overflow-x strip whose scrollbar was 0 px tall: at 1440
    wide Help and Shortcuts sat past its edge, at 1024 Text and Captions did too,
@@ -177,7 +251,7 @@ input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color:
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
 }
-.ratio-menu-head { padding: 6px 10px 3px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); }
+.ratio-menu-head { padding: 6px 10px 3px; }
 .ratio-menu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
 .ratio-menu-foot { padding: 6px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .ratio-item {
@@ -190,7 +264,7 @@ input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color:
 .ratio-check { width: 12px; flex-shrink: 0; color: var(--good); }
 /* ONE checked marker for every menuitemradio (Ratio, Captions, the project
    picker): the monochrome check icon, in the same column. */
-span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(--text); line-height: 0; }
+span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(--text); line-height: 0; }
 .ratio-hint { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* A plain popover row (project picker, timeline context menu) — QA-102: they
    were click-only <div>s; now <button role="menuitem"> styled as a row. */
@@ -236,35 +310,35 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
   padding: 10px;
 }
 .sidebar.right { border-right: none; border-left: 1px solid var(--line); position: relative; }
-.sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 8px 0; }
 
-/* Right-panel collapse toggle (Task 4b) — CapCut-style: a thin tab affixed to
-   the sidebar's outer edge. Fixed position within the sidebar (not affected
-   by its own scroll) so it stays reachable regardless of scroll position. */
+/* Right-panel collapse toggle (QA-129): an icon button at the right end of
+   the Inspector / Chat tab strip — it was a full-width 22 px bar with a tiny
+   chevron that read as an empty panel. Collapsed, it is the only thing on the
+   28 px rail. */
 .right-panel-toggle {
-  position: sticky;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 22px;
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
   padding: 0;
-  margin-bottom: 6px;
-  font-size: 12px;
-  line-height: 1;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
   color: var(--text-dim);
   z-index: 2;
 }
-.right-panel-toggle:hover { background: var(--bg-3); color: var(--text); }
+.right-panel-toggle:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.right-panel-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.sidebar.right:not(.collapsed) .right-tabs { margin-right: 32px; }
 /* Collapsed: the sidebar itself shrinks to a thin rail (--right-w is driven
    down to RIGHT_RAIL_W by App.tsx); hide the Properties/OpsLog content via
    display:none (not just visibility) so it doesn't render uselessly while
-   invisible, and let the toggle tab fill the rail as the sole visible thing. */
+   invisible, and let the toggle fill the rail as the sole visible thing. */
 .sidebar.right.collapsed { padding: 10px 2px; }
 .sidebar.right.collapsed .right-panel-content { display: none; }
-.sidebar.right.collapsed .right-panel-toggle { writing-mode: vertical-rl; height: 72px; }
+.sidebar.right.collapsed .right-panel-toggle { position: static; width: 24px; height: 24px; }
 
 /* A disabled splitter (Task 4b: the right splitter while the panel is
    collapsed) keeps its seam but drops the resize cursor/hover affordance —
@@ -379,7 +453,7 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
   background: linear-gradient(90deg, var(--warn), #ffd35c);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
 }
-.narrow-warning .nw-icon { font-size: 14px; }
+.narrow-warning .nw-icon { display: inline-flex; line-height: 0; }
 .narrow-warning .nw-msg { flex: 1; font-weight: 500; }
 .narrow-warning .nw-dismiss {
   background: rgba(0, 0, 0, 0.14);
@@ -483,10 +557,9 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
   background: transparent;
   border: none;
   color: var(--text-dim);
-  font-size: 11px;
-  padding: 2px 5px;
+  padding: 3px;
   border-radius: 5px;
-  line-height: 1;
+  line-height: 0;
 }
 .toast-x:hover { color: var(--text); background: var(--bg-3); }
 @keyframes toast-in {
@@ -658,9 +731,9 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
 .media-remove {
   position: absolute; top: 6px; right: 6px;
   border: none; background: transparent; color: var(--text-dim);
-  cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px;
+  cursor: pointer; line-height: 0; padding: 2px;
 }
-.media-remove:hover { color: var(--bad, #ff4d6d); }
+.media-remove:hover { color: var(--accent); }
 /* A library row (QA-010): thumbnail, the user's name, then length · size ·
    used-count. Unused media stays listed, just quieter, until removed here. */
 .media-bin .media-row { display: flex; gap: 8px; align-items: center; padding: 6px 26px 6px 6px; cursor: grab; word-break: normal; }
@@ -685,7 +758,7 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
 /* Offline media (QA-095): the file is gone; the row says so and offers Relink. */
 .media-bin .media-row.is-offline { border-color: var(--warn); border-style: solid; cursor: default; }
 .media-row.is-offline .media-meta { color: var(--warn); }
-.media-offline-mark { color: var(--warn); font-weight: 700; }
+.media-offline-mark { color: var(--warn); line-height: 0; }
 .media-relink { margin-top: 4px; font-size: 11px; padding: 2px 8px; }
 .music-clip + .music-clip { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
 .music-clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -712,7 +785,7 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
    wrap inside the fixed-width panel instead of painting past its edge. */
 .props { min-width: 0; overflow-wrap: anywhere; }
 /* QA-023: a clip on a locked lane — inspectable, not editable. */
-.props-locked > fieldset { border: 0; margin: 0; padding: 0; min-width: 0; opacity: 0.55; }
+.props-locked > fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .props-locked-note {
   font-size: 11px; line-height: 1.5; color: var(--warn);
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px;
@@ -733,6 +806,26 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
   min-width: 0;
   box-sizing: border-box;
 }
+/* Control rhythm in the inspector (wave C review): the same kind of control
+   was 23, 25 or 30 px tall at 10-13 px depending on the panel, from inline
+   font/padding on each select and ad-hoc button sizes. One height for every
+   field (select, number, text), one floor for every button, 12 px and 11 px
+   type. Selects, number and text fields share --panel-btn-h. */
+.props select,
+.props input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]) {
+  height: var(--panel-btn-h);
+  padding-top: 0; padding-bottom: 0;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.props select { width: 100%; min-width: 0; }
+.props button { min-height: 24px; font-size: 11px; }
+.props .seg button { min-height: 24px; min-width: 28px; }
+.props .props-reset {
+  padding: 0 8px; background: transparent; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--text-dim);
+}
+.props .props-reset:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
 
 .ops-log {
   font-size: 11px;
@@ -765,6 +858,50 @@ span.menu-check { display: inline-flex; width: 12px; flex: 0 0 12px; color: var(
 .engine-banner-text { flex: 1; min-width: 0; }
 .engine-banner button { flex-shrink: 0; font-size: 11px; padding: 4px 10px; }
 
+/* The centre column's first grid row: the missing-ffmpeg notice (when there
+   is one) stacked above the prompt bar. */
+.center-head { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+/* "ffmpeg is not installed" (QA-108): in flow at the top of the centre column
+   (wave C review — it was a fixed, viewport-centred overlay that covered the
+   right sidebar's tabs at 1024 px and the prompt bar's Run at 1440 px). */
+.tools-banner {
+  position: relative;
+  display: flex; align-items: flex-start; gap: 12px; margin: 8px 12px; min-width: 0;
+  padding: 12px 12px 12px 14px; border-radius: 10px;
+  background: var(--bg-2); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  color: var(--text);
+  font-size: 12px; line-height: 1.45;
+}
+.tools-banner-icon { flex-shrink: 0; margin-top: 1px; color: var(--warn); }
+.tools-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.tools-banner-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+.tools-banner-text { margin: 0; color: var(--text-dim); }
+.tools-banner-command {
+  display: flex; align-items: center; gap: 8px; margin-top: 2px;
+  padding: 4px 4px 4px 10px; border-radius: 6px; background: var(--bg-0); border: 1px solid var(--line);
+}
+.tools-banner-command code {
+  flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; color: var(--text);
+}
+.tools-banner button {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  font-size: 11px; padding: 4px 10px; height: 26px;
+}
+.tools-banner-copy { background: var(--bg-2); }
+.tools-banner-copy:hover:not(:disabled) { border-color: var(--text-faint); }
+.tools-banner-recheck { align-self: flex-start; }
+.tools-banner .tools-banner-close { align-self: flex-start; padding: 0 5px; line-height: 0; background: transparent; border-color: transparent; color: var(--text-dim); }
+.tools-banner .tools-banner-close:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+@media (max-width: 560px) {
+  /* Narrow window: "Check again" moves under the text so the command box
+     gets the full width. */
+  .tools-banner { flex-wrap: wrap; }
+  .tools-banner-body { flex-basis: calc(100% - 28px); }
+  .tools-banner-recheck { margin-left: 28px; }
+}
+
 .dropzone {
   border: 1px dashed var(--line);
   border-radius: 8px;
@@ -779,12 +916,28 @@ button.dropzone { display: block; width: 100%; background: transparent; line-hei
 button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--text); }
 .dropzone.over { border-color: var(--accent-2); color: var(--text); background: rgba(91,141,255,0.06); }
 
+/* Mute / Solo on each sound lane's label (components/Timeline). A layer the
+   size of the label canvas, over it; only the buttons take the pointer. */
+.lane-monitors { position: absolute; top: 0; left: 0; z-index: 2; pointer-events: none; }
+.lane-monitor {
+  position: absolute; pointer-events: auto; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border-radius: 4px; line-height: 0;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--text-dim);
+}
+.lane-monitor:hover:not(:disabled) { color: var(--text); background: var(--bg-3); border-color: var(--text-faint); }
+.lane-monitor:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.lane-monitor[data-monitor="mute"][aria-pressed="true"] { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.lane-monitor[data-monitor="solo"][aria-pressed="true"] { background: var(--warn); border-color: var(--warn); color: var(--bg-0); }
+
 .kbd {
   display: inline-block;
   background: var(--bg-3);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 1px 5px;
+  /* One keycap face whether it is a <kbd> (UA monospace) or a <span>. */
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   font-size: 10px;
   color: var(--text-dim);
 }
@@ -860,7 +1013,7 @@ button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--tex
 .dialog.confirm-dialog .dialog-foot { border-top: none; padding-top: 4px; }
 .dialog.export-progress-dialog { width: min(440px, calc(100vw - 32px)); }
 .dialog.export-progress-dialog .dialog-body { padding-top: 12px; }
-.dialog-x { position: absolute; top: 12px; right: 12px; padding: 2px 8px; font-size: 16px; line-height: 1; background: transparent; border: none; color: var(--text-dim); }
+.dialog-x { position: absolute; top: 12px; right: 12px; padding: 4px; line-height: 0; background: transparent; border: none; color: var(--text-dim); }
 .dialog-x:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
 .dialog :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .dialog select, .dialog input[type="text"] {
@@ -882,6 +1035,9 @@ button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--tex
 .export-dialog-seg button[aria-checked="true"] { background: var(--bg-3); color: var(--text); font-weight: 600; }
 .export-dialog-estimate { margin-right: auto; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .export-dialog-estimate b { color: var(--text); font-weight: 600; }
+/* QA-122: Properties → Audio → Channels, and its one-sided-source notice. */
+.channel-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; padding: 5px 7px; font-size: 11px; color: var(--text); background: var(--bg-2); border: 1px solid var(--warn); border-radius: 4px; }
+.channel-notice button { padding: 1px 8px; font-size: 11px; }
 .help-about { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .dialog-text { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text); }
 
@@ -909,3 +1065,26 @@ button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--tex
 .text-style-chip { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 4px; font-size: 10.5px; color: var(--text-dim); background: var(--bg-1); }
 .text-style-chip:hover:not(:disabled) { color: var(--text); }
 .text-style-sample { font-size: 15px; line-height: 1.25; padding: 0 5px; border-radius: 3px; text-shadow: 0 1px 0 rgba(0,0,0,0.6); }
+
+/* ---- Reduced motion (QA-127) ------------------------------------------------
+   The app honours prefers-reduced-motion EVERYWHERE, not per component: the
+   export sweep (1.15 s, infinite) and the toast entrance kept moving because
+   only five component stylesheets had a block. The explicit rules say what
+   each moving thing becomes; the catch-all collapses every other animation
+   and transition to a single instant frame (events still fire, so nothing
+   waiting on animationend/transitionend hangs). The transition-preview tiles
+   are exempt: their reduced-motion design is a still frame at the midpoint
+   (transitionsPanel.css), which a 0.01 ms duration would push to the end. */
+@media (prefers-reduced-motion: reduce) {
+  .export-progress-track.indeterminate .export-progress-fill { animation: none; transform: none; width: 100%; opacity: 0.5; }
+  .export-progress-fill { transition: none; }
+  .toast { animation: none; }
+  .icon-spin { animation: none; }
+  *:not(.trp-tile *), *:not(.trp-tile *)::before, *:not(.trp-tile *)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}

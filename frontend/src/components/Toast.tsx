@@ -1,4 +1,5 @@
 import { useToasts } from '../toast'
+import { Icon } from './Icon'
 
 // Stacked transient notifications, bottom-right. Click to dismiss early.
 export function ToastHost() {
@@ -20,7 +21,7 @@ export function ToastHost() {
             </button>
           )}
           <button className="toast-x" onClick={() => dismiss(t.id)} title="Dismiss" aria-label="Dismiss">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
       ))}
