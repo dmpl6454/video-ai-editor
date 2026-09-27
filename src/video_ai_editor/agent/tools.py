@@ -140,7 +140,10 @@ EDIT_TOOLS = [
        "length on the timeline follows the speed and later clips ripple. "
        "`keep_pitch` (default true) time-stretches the sound at its own pitch; "
        "false is varispeed — sample-exact timing, pitch follows the speed like tape. "
-       "Main video track (v1) and audio tracks only.",
+       "Works on the main video track (v1), on overlay (picture-in-picture, v2+) "
+       "clips and on audio tracks. An overlay clip retimes in place, picture and "
+       "sound: nothing else moves, except that a slow-down running into the next "
+       "clip on the same overlay lane pushes that lane's later clips right.",
        "edit",
        {"clip_id": {"type": "string"},
         "factor": {"type": "number", "description": "Constant speed, 0.1-100x"},
@@ -160,11 +163,15 @@ EDIT_TOOLS = [
        "track. The clip there is split and a still of that exact frame is "
        "inserted; later clips, overlays and transitions move right by the hold. "
        "Give `clip_id` to require a particular clip (it must be under `time`; "
-       "without `time`, its first frame is held). Freezing a freeze holds it longer. "
+       "without `time`, its first frame is held). An overlay (picture-in-picture) "
+       "clip freezes too: give its `clip_id` (or `track`, e.g. 'v2'); then only that "
+       "overlay lane's later clips move right. Freezing a freeze holds it longer. "
        "The still is silent.",
        "edit",
        {"time": {"type": "number", "description": "Timeline seconds of the frame to hold"},
         "clip_id": {"type": "string"},
+        "track": {"type": "string",
+                  "description": "Overlay lane to freeze on (default: the clip's lane, else v1)"},
         "duration": {"type": "number", "description": "Seconds to hold (default 3)"}},
        []),
     _t("set_clip_fit",

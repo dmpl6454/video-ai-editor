@@ -94,7 +94,13 @@ EDL_VERSION = 3
 #     evaluated at clip-local TIMELINE seconds (the clip's retime of the
 #     chain's `t`), not `t - start`: a clip not at 0, or retimed, animates
 #     differently.
-RENDER_BEHAVIOR_VERSION = 18
+# 19: (wave D3, E2) a PIP (v2+) clip's speed, curve and freeze are rendered —
+#     picture and sound, on its effective_duration window (they were ignored).
+# 20: (wave D3, E1b) a speed-CURVE clip's chain runs on the file clock anchored at `in`
+#     (edl/speed_curve.py): a split/cut/trim piece exports its parent's frames.
+# 21: (wave D3, E1a) anamorphic sources fit by their displayed shape; keyframed v1 geometry runs on the output grid (+x right, zoom about the centre); v1 pans scale with the output size.
+# 22: (wave D3, review RD3) a reversed clip keeps its footprint (odd 2x/4x ties), a transition after a retimed clip is applied, keyed PiP opacity/rotation animate, overlay/text step keys switch on their frame, a static opacity keeps an odd pan, a render with no picture fails.
+RENDER_BEHAVIOR_VERSION = 22
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -1027,9 +1033,33 @@ def seam_table_for(clips: list[Clip], transitions: list[Transition],
         # segments and the transition IS applied. Testing `abs(...)` here
         # would let a legacy overlapping pair report a longer timeline than
         # it renders.
+        #
+        # With `fps` the gap is judged on the FRAME GRID, as `_v1_frame_plan`
+        # judges it (review RD3): a filler exists only where the next clip
+        # starts at least one whole frame after this one's last frame. A
+        # retimed clip's exact end is rarely on the grid (1.5x of 91 frames
+        # ends at 5.0222 s, and set_speed ripples the next clip to 5.0333),
+        # and the old 1 ms rule called that sub-frame sliver a gap: the
+        # transition the user added there was stored, reported, and never
+        # applied (no xfade, no blend frames, no transport change).
+        # (Seconds-adjacent pairs stay seams whatever the grid says: an
+        # off-grid legacy/MCP layout can round a filler frame between them,
+        # and the renderer has always cross-faded those — golden fuzz_08.)
         if nxt.start - boundary > V1_GAP_EPS_S:
-            continue          # a gap → filler → the renderer keeps the cut
+            if fps is None:
+                continue      # a gap → filler → the renderer keeps the cut
+            from . import timebase as _tb
+            gap_frames = (_tb.frame_of(nxt.start, fps)
+                          - _tb.frame_of(cur.start, fps)
+                          - max(1, _tb.frame_of(cur.effective_duration, fps)))
+            if gap_frames >= 1:
+                continue      # a whole-frame gap → filler → a hard cut
         match = seam_matching(transitions, boundary)
+        if match is None and nxt.start > boundary:
+            # A record placed at the NEXT clip's start (what the UI and
+            # add_transition use for a cut) when the two are a sub-frame
+            # apart (more than the tolerance only below 20 fps): one seam.
+            match = seam_matching(transitions, nxt.start)
         if match:
             # Never claim more than the shorter side can give: xfade cannot
             # overlap further than a clip is long. The compositor xfades with

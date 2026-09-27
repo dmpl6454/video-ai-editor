@@ -31,7 +31,6 @@ from __future__ import annotations
 import contextvars
 import json
 import os
-import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
@@ -94,7 +93,8 @@ def _on_grid(t: float, fps) -> bool:
 @lru_cache(maxsize=256)
 def _source_rate_cached(src: str, mtime_ns: int, size: int) -> Fraction | None:
     try:
-        out = subprocess.run(
+        # niced under priority=low like every process a preview render starts
+        out = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
              "stream=avg_frame_rate,r_frame_rate", "-of", "json", src],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -311,9 +311,8 @@ def _mux(seg_paths: list[Path], frames: list[int], audio_path: Path, dst: Path,
 
 def _count_frames(p: Path) -> int | None:
     """Video packet count (no decode) — the chunk's frame count."""
-    import subprocess
     try:
-        out = subprocess.run(
+        out = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets",
              "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(p)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",

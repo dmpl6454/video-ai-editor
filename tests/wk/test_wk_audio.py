@@ -131,6 +131,7 @@ def cases(audio_root) -> dict:
     e, fps = fx.mix_edl(**mix, loudness=-14.0)
     add("mix_loud", e, fps, loud=-4.5)
     add("mix_curve", *fx.curve_edl(S["toneA"], S["toneB"], S["bed"]))
+    add("pip_speed", *fx.pip_speed_edl(S["toneA"], S["toneB"]))
     return out
 
 
@@ -356,7 +357,7 @@ def _lag(client: np.ndarray, server: np.ndarray, max_lag: int = 64) -> int:
     return arg
 
 
-@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve"])
+@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed"])
 def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
     edl, fps, server, aac = cases[name]
     r = browser.run("render", case=name, timeout=120)

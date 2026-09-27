@@ -80,3 +80,21 @@ describe('wave C review copy', () => {
     expect(opLabel({ tool: 'prompt', summary: 'Prompt: Shorts (3 steps)' }).detail).toBe('Shorts (3 steps)')
   })
 })
+
+describe('review RD3: split-descendant ids and what they leave behind', () => {
+  const ctx = { fps: 30 }
+  it('hides a split-descendant id (c_627c3ffb_6b1f58) and the arrow it leaves', () => {
+    const l = opLabel({ tool: 'set_speed', summary: 'Speed c_627c3ffb_6b1f58 → 2.00x (now 1.00s on timeline)' }, ctx)
+    expect(l).toMatchObject({ title: 'Speed', detail: '2.00x (now 1.00s on timeline)' })
+  })
+  it('reads a trim\'s in / out as timecode', () => {
+    const l = opLabel({ tool: 'trim_clip', summary: 'Trim c_627c3ffb_6b1f58 → in=8.00 out=18.00' }, ctx)
+    expect(l.detail).toBe('in 00:00:08:00 out 00:00:18:00')
+  })
+  it('drops the empty brackets a hidden id leaves', () => {
+    const l = opLabel({ tool: 'freeze_frame',
+      summary: 'Freeze frame at 3.83s for 2.00s (c_a674b046_51af85_c97bf3_81540d_cf9af5_955e62_88cd77)' }, ctx)
+    expect(l.detail).toBe('at 00:00:03:25 for 2.00s')
+    expect(cleanSummary('Freeze frame at 3.83s for 2.00s (c_a674b046_51af85)')).toBe('Freeze frame at 3.83s for 2.00s')
+  })
+})

@@ -10,6 +10,7 @@ import { CommandKey } from './CommandKey'
 import { setLivePipFraming } from '../lib/pipDraw'
 import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
 import { MediaTiming, OverlayTiming } from './TimingSection'
+import { curveClockOf } from '../lib/clipTiming'
 import { MediaName } from './MediaName'
 import { SliderScope, useSliderCommit } from '../lib/useSliderCommit'
 import { formatDb } from '../lib/dbFormat'
@@ -438,11 +439,14 @@ function PropertiesPanel() {
       {/* ONE timing model for every clip (QA-048, components/TimingSection):
           Start moves, End and Duration trim; plus the source In / Out. */}
       <Section label="Timing">
-        <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed: meanSpeed }} send={dispatch} />
+        <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed: meanSpeed, curve: curveClockOf(c) }}
+                     send={dispatch} />
       </Section>
 
       {/* Audio lanes too (QA-086, wave C): the audio mix retimes a music/VO
-          clip with the v1 rule, so the control is real on every lane. */}
+          clip with the v1 rule, so the control is real on every lane — and
+          overlay (PIP) lanes since wave D3 (E2): speed, curves, freeze and
+          reverse render there like on v1. */}
         <Section label="Speed" onReset={freeze === null ? () => dispatch('set_speed', { clip_id: c.id, factor: 1 }) : undefined}>
           {/* Wave D S2 (components/speed): Normal | Curve, the CapCut curve
               presets, an editable curve, the resulting length and Keep pitch
@@ -450,7 +454,9 @@ function PropertiesPanel() {
               ±12 ms; varispeed is sample-exact and lets the pitch follow). */}
           <SpeedSection clipId={c.id} speed={speedRaw} freeze={freeze}
             sourceSeconds={Math.max(0, c.out - c.in)} keepPitch={audio?.keep_pitch !== false}
-            curveAllowed={clip.t.id === 'v1'}
+            // Curves on v1 and on overlay (PIP) lanes: render/pip.py retimes
+            // a PIP with v1's rule, picture and sound (wave D3, E2).
+            curveAllowed={clip.t.type === 'video'}
             playheadFrac={(() => {
               // Unclamped (localT is clamped to the clip): outside it, no line.
               const sp = renderSpanOf(edl, clip.t.id, c as AnyClip)
@@ -1181,6 +1187,12 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
               e.preventDefault()
               ;(e.target as HTMLTextAreaElement).blur()
+            } else if (e.key === 'Escape') {
+              // Done typing (review RD3: ⌥T lands here): commit through blur,
+              // then back to the timeline, where the shortcuts are.
+              e.preventDefault()
+              ;(e.target as HTMLTextAreaElement).blur()
+              document.querySelector<HTMLElement>('canvas[aria-label="Timeline"]')?.focus()
             }
           }}
           style={{ width: '100%', resize: 'vertical', fontSize: 12,

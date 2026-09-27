@@ -136,7 +136,7 @@ def test_an_edl_without_the_new_fields_serialises_byte_for_byte_as_before():
             assert again == d, case["name"]
             n += 1
     assert n > 100
-    assert RENDER_BEHAVIOR_VERSION == 18
+    assert RENDER_BEHAVIOR_VERSION >= 18      # 19: wave D3 PIP speed (E2)
 
 
 _RATES = [Fraction(24000, 1001), 24, 25, Fraction(30000, 1001), 30, 50, Fraction(60000, 1001), 60]

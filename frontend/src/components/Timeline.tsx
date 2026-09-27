@@ -16,6 +16,7 @@ import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
 import { splitTimeFor } from '../lib/splitTargets'
 import { freezeAtPlayhead, planFreeze } from '../lib/freezeFrame'
 import { useSpeedCatalog } from '../lib/speed/speedCatalog'
+import { BADGE_ICON, layoutSpeedBadge, speedBadgeText, type BadgeKind, type BadgeLayout } from '../lib/speedBadge'
 import { v1CutPoints } from '../lib/cutPoints'
 import { chordLabel, IS_MAC, useKeymapStore } from '../keymap/engine'
 import { undoTitle } from '../lib/undoHorizon'
@@ -48,6 +49,7 @@ import { dropFilesOnLane } from '../lib/laneDrop'
 import { COMMAND_BY_ID } from '../keymap/commands'
 import { TimelineIcon } from './TimelineIcons'
 import { drawIcon } from '../lib/icons'
+import { curveClockOf } from '../lib/clipTiming'
 import { Icon } from './Icon'
 import { TimecodeField } from './TimecodeField'
 
@@ -567,6 +569,10 @@ export function Timeline() {
     // bg
     ctx.fillStyle = '#16161a'
     ctx.fillRect(viewL, 0, vs.cssW, contentH)
+    // The speed badges this pass draws, in canvas CSS px — published as
+    // `data-speed-badges` (a canvas has no DOM for a test or a tool to read).
+    const drawnBadges: { id: string; text: string; icon: boolean; x: number; y: number; w: number; h: number;
+                         nameRight: number }[] = []
 
     // (The ruler is painted LAST, at the visible top — see "pinned ruler".)
     const dur = edl?.duration ?? 0
@@ -673,6 +679,20 @@ export function Timeline() {
           ctx.restore()
         }
 
+        // The speed badge (wave D3, lib/speedBadge): laid out BEFORE the
+        // waveform and the name so neither is drawn under it — the waveform
+        // skips the badge's rect and the name ellipsizes short of it.
+        const badgeTxt = speedBadgeText(c)
+        let badge: BadgeLayout | null = null
+        if (badgeTxt) {
+          ctx.font = uiFont(9, '600')
+          const tailBowtie = t.id === 'v1' && cutMarks.some((cm) => cm.hasTransition && Math.abs(cm.cx - (x + w)) < 9)
+          badge = layoutSpeedBadge(badgeTxt.text, {
+            clipX: x, clipW: w, viewLeft: viewL + labelWidth, viewRight: viewR, rectTop: y + 4,
+            tailReserve: tailBowtie ? 10 : 0,
+          }, (s) => ctx.measureText(s).width)
+        }
+
         // Waveform inside the clip rect
         if (showWaveOn && isMediaClip(c) && w > 12) {
           const wave = WAVE_CACHE.get(c.src)
@@ -682,6 +702,14 @@ export function Timeline() {
             ctx.beginPath()
             roundRect(ctx, x, y + 4, w, trackHeight - 8, 4)
             ctx.clip()
+            if (badge) {
+              // ...minus the speed badge's rect (evenodd: the outer rect with
+              // a hole), so the badge never covers a peak.
+              ctx.beginPath()
+              ctx.rect(x, y, w, trackHeight)
+              ctx.rect(badge.x - 1, badge.y - 1, badge.w + 2, badge.h + 2)
+              ctx.clip('evenodd')
+            }
             const baseY = y + trackHeight / 2
             const halfH = (trackHeight - 12) / 2
             // Map [c.in .. c.out] → x..x+w. Each pixel column is the MAX of
@@ -762,7 +790,8 @@ export function Timeline() {
         if (t.id === 'v1' && cutMarks.some((cm) => cm.hasTransition && Math.abs(cm.cx - x) < 9)) {
           lx = Math.min(Math.max(lx, x + 13), x + w)
         }
-        const txt = fitLabel(label, x + w - lx - 8, (s) => ctx.measureText(s).width)
+        const txt = fitLabel(label, Math.min(x + w - lx - 8, badge ? badge.nameMaxRight - lx : Infinity),
+                             (s) => ctx.measureText(s).width)
         if (txt) {
           // A plate behind the name, always (QA-118 remainder): over a
           // filmstrip, a dark waveform or the bare clip colour alike.
@@ -778,6 +807,11 @@ export function Timeline() {
         }
         ctx.fillStyle = isOffline ? cssToken('--warn', '#fbbf24') : cssToken('--text', '#e6e6eb')
         if (txt) ctx.fillText(txt, lx, y + trackHeight / 2 + 3)
+        if (badge && badgeTxt) {
+          drawSpeedBadge(ctx, badge, badgeTxt.kind)
+          drawnBadges.push({ id: c.id, text: badge.text, icon: badge.icon, x: badge.x - scrollX, y: badge.y,
+                             w: badge.w, h: badge.h, nameRight: txt ? lx + ctx.measureText(txt).width - scrollX : -1 })
+        }
         // selection ring — 2px white so it stays unmistakable over bright
         // filmstrip frames and on tiny (w≈2px min) clips
         if (isSel) {
@@ -868,6 +902,9 @@ export function Timeline() {
         for (const cut of drawnCuts(cutMarks, null)) drawBowtie(ctx, cut.cx, cut.cy, true)
       }
     }
+
+    const badgesJson = JSON.stringify(drawnBadges)
+    if (cv.dataset.speedBadges !== badgesJson) cv.dataset.speedBadges = badgesJson
 
     // Empty-timeline hint: with zero clips the rows are just anonymous gray
     // bands — say what to do (the preview pane has the same posture).
@@ -1314,9 +1351,16 @@ export function Timeline() {
         // Trim preview in TIMELINE space: the timeline delta converts to a
         // source delta via the clip's speed (resolveMediaTrim's speed param),
         // and the resulting source span maps back to its footprint.
-        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, edgeDelta, sp)
-        const footprint = (r.out - r.in) / sp
-        edgeSec = side === 'l' ? drag.origStart + (r.in - drag.origIn) / sp : drag.origStart + footprint
+        // A speed-CURVE clip shortened keeps the piece of its curve under
+        // the edge (review RD3): the drag reads the curve, not the mean, and
+        // the piece is exactly the timeline span that is left.
+        const curve = c ? curveClockOf(c) : null
+        const r = dragResolve.resolveMediaTrim({ in: drag.origIn, out: drag.origOut }, side, edgeDelta, sp, curve)
+        const inward = side === 'l' ? edgeDelta > 0 : edgeDelta < 0
+        const footprint = curve && inward ? curve.duration - Math.abs(edgeDelta) : (r.out - r.in) / sp
+        edgeSec = side === 'l'
+          ? drag.origStart + (curve && inward ? edgeDelta : (r.in - drag.origIn) / sp)
+          : drag.origStart + footprint
         label = `Trim · ${formatTimecode(footprint, fps)}`
       } else {
         const r = dragResolve.resolveOverlayTiming({ start: drag.origStart, end: trimOrigEnd(drag) }, side, edgeDelta)
@@ -1828,7 +1872,7 @@ export function Timeline() {
         // Plain media edge-drag = trim. `edgeDelta` is TIMELINE-space, so pass
         // the clip's speed and let resolveMediaTrim convert to source space.
         const r = dragResolve.resolveMediaTrim(
-          { in: drag.origIn, out: drag.origOut }, side, edgeDelta, trimSpeed)
+          { in: drag.origIn, out: drag.origOut }, side, edgeDelta, trimSpeed, trimClip ? curveClockOf(trimClip) : null)
         // Off the magnetic Main video lane a head trim keeps the kept frames
         // where they play (`move_start`); without it the edge snapped back and
         // the clip's content slid earlier by the trimmed length.
@@ -2566,7 +2610,9 @@ export function Timeline() {
               // time and the playhead is render time — same path as ⌘B.
               action: () => useStore.getState().splitTrackAt(
                 contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead)) },
-            ...(contextMenu.trackId === 'v1' && menuClip && isMediaClip(menuClip)
+            // v1 and overlay (PIP) video lanes (wave D3, E2: an overlay freeze
+            // opens only its own lane — lib/freezeFrame).
+            ...(edl?.tracks.find((t) => t.id === contextMenu.trackId)?.type === 'video' && menuClip && isMediaClip(menuClip)
               ? [{ label: 'Freeze frame',
                    title: `Hold the frame at the playhead${freezeHold}; the rest of the clip follows it`,
                    action: () => { void freezeAtPlayhead(useStore.getState(), toast.info, contextMenu.clipId) } }]
@@ -2648,6 +2694,36 @@ export function Timeline() {
       )}
     </>
   )
+}
+
+/** The speed badge pill (lib/speedBadge lays it out): a plate like the clip
+ *  name's, a small glyph — a gauge for a speed, a pause mark for a freeze —
+ *  and the text. */
+function drawSpeedBadge(ctx: CanvasRenderingContext2D, b: BadgeLayout, kind: BadgeKind) {
+  ctx.save()
+  ctx.globalAlpha = 0.82
+  ctx.fillStyle = cssToken('--bg-0', '#0e0e10')
+  roundRect(ctx, b.x, b.y, b.w, b.h, 3)
+  ctx.fill()
+  ctx.globalAlpha = 1
+  const tint = kind === 'freeze' ? cssToken('--good', '#4ade80')
+    : kind === 'curve' ? cssToken('--track-music', '#a78bfa') : cssToken('--warn', '#fbbf24')
+  let tx = b.x + 3
+  if (b.icon) {
+    // The lucide glyphs the Inspector and the toolbar use (house rule: icons
+    // only through lib/icons; review RD3 — the badge hand-drew a gauge and a
+    // pause mark, which no longer matched the Freeze button's snowflake).
+    const glyph = kind === 'freeze' ? 'freeze' : kind === 'curve' ? 'speedCurve' : 'speedNormal'
+    drawIcon(ctx, glyph, b.x + 3, b.y + (b.h - BADGE_ICON) / 2, BADGE_ICON, tint, 1.4)
+    tx = b.x + 3 + BADGE_ICON + 2
+  }
+  if (b.text) {
+    ctx.font = uiFont(9, '600')
+    ctx.fillStyle = cssToken('--text', '#e6e6eb')
+    ctx.textBaseline = 'middle'
+    ctx.fillText(b.text, tx, b.y + b.h / 2 + 0.5)
+  }
+  ctx.restore()
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {

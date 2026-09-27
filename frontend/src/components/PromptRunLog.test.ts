@@ -161,3 +161,13 @@ describe('the run log speaks editor language and says what happened (wave-B revi
     expect(s2.steps[0].status).toBe('cancelled')
   })
 })
+
+describe('review RD3: repeated checks', () => {
+  it('lists an identical check once (Auto edit sent "the video got shorter" twice: a duplicate React key)', async () => {
+    const { shownChecks } = await import('../lib/checkProse')
+    const dup: VerifyCheck = { check: 'duration_shrank', human: 'the video got shorter', pass: true, headline: true }
+    const info: VerifyCheck = { check: 'loudness', human: 'loudness measured', pass: null, headline: false }
+    const out = shownChecks([info, dup, { ...dup }, { ...dup, pass: false }])
+    expect(out.map((c) => [c.check, c.pass])).toEqual([['duration_shrank', true], ['duration_shrank', false], ['loudness', null]])
+  })
+})

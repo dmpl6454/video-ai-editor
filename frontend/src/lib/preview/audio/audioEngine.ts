@@ -23,6 +23,7 @@ import type { AudioProgramInfo, AudioSink, ProgramDiff } from '../engine'
 import type { EdlLike } from '../timeline/framePlan'
 import type { AudioPlacement } from '../timeline/programMap'
 import { samplesForFrames, type Rational } from '../timeline/timebase'
+import { editLeadFrames } from '../clock/editLead'
 import { buildAudioPlan, type AudioPlan } from './audioPlan'
 import { AudioChunks, chunkReader, type PcmReader } from './audioChunks'
 import { SAMPLE_RATE } from './curves'
@@ -32,9 +33,6 @@ const SR = SAMPLE_RATE
 export const WINDOW_S = 4
 export const REFILL_S = 1
 export const PREFETCH_S = 8
-/** A structural edit while playing lands this many frames past the
- *  presented one (≈ 200 ms at 30 fps, §3.6). */
-export const EDIT_LEAD_FRAMES = 6
 /** Suspend the context this long after a stop's ramp (§3.5). */
 const SUSPEND_AFTER_MS = 20
 const WHEN_RUNNING_POLL_MS = 20
@@ -171,10 +169,12 @@ export class AudioEngine implements AudioSink {
     }, Math.round((LIMITER_WARMUP_S + 0.05) * 1000))
   }
 
-  /** The output sample an edit while playing lands on: presented + 6 frames. */
+  /** The output sample an edit while playing lands on: the picture's lead
+   *  past the presented frame (clock/editLead.ts: 150 ms rounded up to whole
+   *  frames, 5 at 30 fps, 4 at 24, 9 at 60; it was 6 frames, 250 ms at 24). */
   private editSample(): number {
     const R = this.program?.info.R ?? this.pending?.info.R
-    const lead = R ? samplesForFrames(EDIT_LEAD_FRAMES, R) : Math.round(0.2 * SR)
+    const lead = R ? samplesForFrames(editLeadFrames(R), R) : Math.round(0.15 * SR)
     return Math.round(this.heardSample()) + lead
   }
 

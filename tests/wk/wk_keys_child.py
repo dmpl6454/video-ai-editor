@@ -36,6 +36,7 @@ KEYS: dict[str, tuple[int, str]] = {
     "1": (18, "1"), "2": (19, "2"), "3": (20, "3"), "8": (28, "8"), "9": (25, "9"), "0": (29, "0"),
     "e": (14, "e"), "k": (40, "k"), "t": (17, "t"), "z": (6, "z"), "j": (38, "j"), "l": (37, "l"),
     "n": (45, "n"), "space": (49, " "), "backslash": (42, "\\"), "f6": (97, ""),
+    "tab": (48, "\t"),
 }
 
 
@@ -63,7 +64,8 @@ def _event(AppKit, kind, spec: str, win):  # noqa: N803 - AppKit module
         kind, (0, 0), flags, time.monotonic(), win.windowNumber(), None, typed, chars, False, code)
 
 
-def main(url: str, done: Path, timeout: float, steps: list[dict]) -> int:  # pragma: no cover - child process
+def main(url: str, done: Path, timeout: float, steps: list[dict],
+         tab_to_all: bool = False) -> int:  # pragma: no cover - child process
     import AppKit  # noqa: PLC0415
     import Foundation  # noqa: PLC0415
     import WebKit  # noqa: PLC0415
@@ -84,6 +86,11 @@ def main(url: str, done: Path, timeout: float, steps: list[dict]) -> int:  # pra
     config = WebKit.WKWebViewConfiguration.alloc().init()
     config.setWebsiteDataStore_(WebKit.WKWebsiteDataStore.defaultDataStore())
     wv = WebKit.WKWebView.alloc().initWithFrame_configuration_(Foundation.NSMakeRect(0, 0, 800, 600), config)
+    if tab_to_all:
+        # the app's own setting (desktop.enable_tab_to_all_controls)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+        from video_ai_editor.desktop import enable_tab_to_all_controls  # noqa: PLC0415
+        _say(f"tab to all controls: {enable_tab_to_all_controls(wv)}")
     win.contentView().addSubview_(wv)
     win.setLevel_(AppKit.NSStatusWindowLevel)
     win.setCollectionBehavior_(
@@ -157,5 +164,6 @@ if __name__ == "__main__":  # pragma: no cover - child entry point
     ap.add_argument("--done", required=True, type=Path)
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--steps", required=True)
+    ap.add_argument("--tab-to-all", action="store_true")
     ns = ap.parse_args()
-    sys.exit(main(ns.url, ns.done, ns.timeout, json.loads(ns.steps)))
+    sys.exit(main(ns.url, ns.done, ns.timeout, json.loads(ns.steps), tab_to_all=ns.tab_to_all))

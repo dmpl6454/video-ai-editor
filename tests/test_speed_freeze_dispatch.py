@@ -121,11 +121,12 @@ def test_set_speed_refuses_malformed_speed(tmp_path, sources, args, needle):
     assert s.edl.to_json() == before
 
 
-def test_curve_refused_on_a_pip_and_on_a_freeze(tmp_path, sources):
+def test_curve_on_a_pip_is_allowed_and_refused_on_a_freeze(tmp_path, sources):
     s = _store(tmp_path, sources["s30"][0])
     s.edl.get_track("v2").clips.append(Clip(src=sources["s30"][0], in_=0, out=2, start=1, id="c_p"))
-    with pytest.raises(ValueError, match="main video track"):
-        dispatch(s, "set_speed", {"clip_id": "c_p", "preset": "hero"})
+    # Wave D3 (E2): a PIP retimes like v1 (tests/test_e2_pip_speed_dispatch.py).
+    dispatch(s, "set_speed", {"clip_id": "c_p", "preset": "hero"})
+    assert s.edl.get_clip("c_p")[1].speed_curve is not None
     dispatch(s, "freeze_frame", {"time": 1.0, "duration": 1.0})
     still = next(c for c in s.edl.get_track("v1").clips if c.freeze)
     with pytest.raises(ValueError, match="freeze frame"):

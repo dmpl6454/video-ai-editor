@@ -23,7 +23,7 @@ from ..config import FONTS_DIR
 from .fonts import resolve_font
 from ..edl import EDL
 from ..edl.schema import TextClip, Sticker
-from ..edl.keyframes import is_keyframed, sample, to_ffmpeg_expr
+from ..edl.keyframes import frame_exact_expr, is_keyframed, sample
 from .. import platformutil as _pu
 from ..edl import timebase
 from . import clock
@@ -1555,23 +1555,23 @@ def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
     sx = out_w / max(1, canvas.w)
     sy = out_h / max(1, canvas.h)
     w, h = item["size"]
-    tvar = f"(t-{rs:.4f})"
+    tvar = f"(t-{rs:.9f})"
     pre = f"[ov{i}]"
     chain = f"[{idx}:v]format=rgba,scale={_even(w * sx)}:{_even(h * sy)}"
     if is_keyframed(getattr(tx, "opacity", None)):
-        aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{rs:.4f})")
+        aexpr = frame_exact_expr(tx.opacity, f"(T-{rs:.9f})")
         chain += f",geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
     if a_in == "fade":
         chain += f",fade=t=in:st={rs:.3f}:d={d:.3f}:alpha=1"
     if a_out == "fade":
         chain += f",fade=t=out:st={re - d:.3f}:d={d:.3f}:alpha=1"
     if item.get("rot_kf"):
-        rexpr = to_ffmpeg_expr(tx.rotation, time_var=tvar)
+        rexpr = frame_exact_expr(tx.rotation, tvar)
         chain += (f",rotate=a='({rexpr})*PI/180':ow='hypot(iw\\,ih)'"
                   f":oh='hypot(iw\\,ih)':c=black@0")
     s_terms: list[str] = []
     if item.get("smax"):
-        s_terms.append(f"(({to_ffmpeg_expr(tx.scale, time_var=tvar)})/{item['smax']:.6f})")
+        s_terms.append(f"(({frame_exact_expr(tx.scale, tvar)})/{item['smax']:.6f})")
     if a_in == "pop":
         q = f"clip((t-{rs:.4f})/{d:.4f}\\,0\\,1)"
         s_terms.append(f"if(lt({q}\\,0.7)\\,0.6+0.657*{q}\\,1.06-0.2*({q}-0.7))")
@@ -1586,11 +1586,11 @@ def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
 
     ax, ay = resolve_anchor_overrides(tc, role, canvas.w, canvas.h)
     if is_keyframed(tx.x):
-        x_c = f"({to_ffmpeg_expr(tx.x, time_var=tvar)})*{sx:.6f}"
+        x_c = f"({frame_exact_expr(tx.x, tvar)})*{sx:.6f}"
     else:
         x_c = f"{(ax if ax is not None else canvas.w / 2) * sx:.3f}"
     if is_keyframed(tx.y):
-        y_c = f"({to_ffmpeg_expr(tx.y, time_var=tvar)})*{sy:.6f}"
+        y_c = f"({frame_exact_expr(tx.y, tvar)})*{sy:.6f}"
     else:
         y_c = f"{_y_for_role(role, ay, canvas.h, canvas.w) * sy:.3f}"
     off = out_h * 0.04
@@ -1813,8 +1813,7 @@ def build_overlay_chain(
             # Keyframed opacity (the pre-existing path, time-shifted to
             # clip-local now that the input pts sit at absolute time).
             if is_keyframed(getattr(tc.transform, "opacity", None)):
-                aexpr = to_ffmpeg_expr(tc.transform.opacity,
-                                       time_var=f"(T-{rs:.4f})")
+                aexpr = frame_exact_expr(tc.transform.opacity, f"(T-{rs:.9f})")
                 chain += f",geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"
 
             # Fades ride the fade filter's alpha mode (cheap, no geq).
@@ -1867,7 +1866,7 @@ def build_overlay_chain(
             s: Sticker = item["sticker"]
             sw, sh = item["size"]  # PNG natural pixel size (canvas-aligned)
             tx = s.transform
-            tvar = f"(t-{rs:.4f})"  # clip-local time, on the render clock
+            tvar = f"(t-{rs:.9f})"  # clip-local time, on the render clock
             sx = out_w / max(1, canvas.w)
             sy = out_h / max(1, canvas.h)
             # The PNG is at canvas-pixel size; rescale to match output pixels.
@@ -1882,13 +1881,13 @@ def build_overlay_chain(
 
             # Position. Center on (x, y): subtract overlay_w/_h via ffmpeg vars.
             if is_keyframed(tx.x):
-                xe = to_ffmpeg_expr(tx.x, time_var=tvar)
+                xe = frame_exact_expr(tx.x, tvar)
                 xexpr = f"({xe})*{sx:.6f}-overlay_w/2"
             else:
                 xc = _scalar_or_last(tx.x, canvas.w / 2)
                 xexpr = f"{xc * sx - sticker_out_w / 2:.2f}"
             if is_keyframed(tx.y):
-                ye = to_ffmpeg_expr(tx.y, time_var=tvar)
+                ye = frame_exact_expr(tx.y, tvar)
                 yexpr = f"({ye})*{sy:.6f}-overlay_h/2"
             else:
                 yc = _scalar_or_last(tx.y, canvas.h / 2)
@@ -1902,7 +1901,7 @@ def build_overlay_chain(
                 # Keyframes are clip-local; the looped input's pts sit at
                 # absolute time via -itsoffset (see the input-building comment
                 # above), so shift: local = T - start.
-                aexpr = to_ffmpeg_expr(tx.opacity, time_var=f"(T-{rs:.4f})")
+                aexpr = frame_exact_expr(tx.opacity, f"(T-{rs:.9f})")
                 parts.append(
                     f"{sticker_stream}format=yuva420p,"
                     f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='alpha(X\\,Y)*({aexpr})'"

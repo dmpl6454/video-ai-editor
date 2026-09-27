@@ -131,6 +131,7 @@ export const ToolPanel = forwardRef<HTMLElement>(function ToolPanel(_props, ref)
           id={railPanelId(r.id)}
           aria-labelledby={railTabId(r.id)}
           className="tool-tabpanel"
+          tabIndex={-1}
           data-panel={r.id}
           hidden={leftTab !== r.id}
         >

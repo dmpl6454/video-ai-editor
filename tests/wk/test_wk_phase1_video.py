@@ -32,7 +32,7 @@ import pytest
 from .conftest import FRONTEND, PAGES
 from .engine_server import EngineServer
 from .harness import WKHarness
-from .playback import max_drops
+from .playback import max_drops, timing_budget
 from .proxy_fixture import SourceSpec, write_proxy_dir
 
 pytestmark = pytest.mark.wk
@@ -205,11 +205,20 @@ def test_rvfc_handler_budget_at_1080p(wk_engine):
     """§11.2: the rVFC handler (texture upload + uniforms + draw) at a
     1920x1080 canvas; p99 is reported against the 4 ms budget and bounded
     loosely here (timing under load)."""
-    r = run(wk_engine, "playback", timeout=150, canvas="1920x1080", perf="1")
-    print(json.dumps({"handler_1080p_ms": r["handler"], "frames": r["frames"], "missing": len(r["missing"]), "load": _load()}))
+    for _attempt in range(3):
+        r = run(wk_engine, "playback", timeout=150, canvas="1920x1080", perf="1")
+        print(json.dumps({"handler_1080p_ms": r["handler"], "frames": r["frames"], "missing": len(r["missing"]),
+                          "load": _load(), "stopLog": r.get("stopLog")}))
+        # a pause WebKit made (the window hidden or covered by another run on
+        # this machine) ends the playback early: that run measures nothing
+        if not r.get("externalPauses"):
+            break
     assert r["handler"]["n"] >= 300
     assert r["handler"]["p50"] < 4
-    assert r["handler"]["p99"] < 4 * (4 if os.getloadavg()[0] > 6 else 1)
+    # §11.2 says p99 <= 4 ms, and WK's performance.now() is whole ms: a run
+    # that meets the spec reads 4 (review RD3). Load-scaled by the shared
+    # helper, not a hard switch at a 1-minute load of 6.
+    assert r["handler"]["p99"] <= timing_budget(4), r["handler"]
 
 
 # ------------------------------------------------------------------- P1-F5
@@ -250,7 +259,8 @@ def test_buffering_stops_sound_with_the_picture_and_resumes_both(wk_engine, engi
     stall, resume = log[i], log[i + 1]
     assert resume["buffering"] is False and resume["at"] - stall["at"] >= 800, log
     stall_k = stall["k"]
-    stops = [c for c in r["calls"] if c["op"] == "stop" and c["at"] >= stall["at"]]
+    # (the page stamps its log to 1 ms, the sink to 0.01 ms: the stop can read 1 ms "early")
+    stops = [c for c in r["calls"] if c["op"] == "stop" and c["at"] >= stall["at"] - 1]
     assert stops and stops[0]["k"] == stall_k, (stops, stall_k)
     # nothing restarts the sound while the picture is frozen
     starts_after = [c for c in r["calls"] if c["op"] == "start" and c["at"] > stall["at"]]
@@ -529,13 +539,19 @@ def test_real_window_hide_pauses_both_and_resumes_both(wk_engine, self_pause):
     hidden-pause disabled, WebKit's pause of the muted element is what the
     engine must notice."""
     # Other WK runs on this machine can land a window on the same 4 px slot
-    # (slot = pid % 256) and occlude ours, which hides the page again; that
-    # extra hide/show cycle is the environment, not the engine. One retry.
-    for attempt in range(2):
+    # (slot = pid % 256) and occlude ours, which hides the page: BEFORE our
+    # own hide request (the engine then was not playing when we hid it, or
+    # already paused on its own) or as an extra hide/show cycle after it.
+    # Either is the environment, not the engine: such a run is retried (up
+    # to 4 runs); the assertions below judge only a clean run.
+    for attempt in range(4):
         r = run(wk_engine, "real_hide", timeout=60, selfPause=self_pause)
-        print(json.dumps({"real_hide": r["log"], "whileHidden": r["whileHidden"], "afterShow": r["afterShow"]}))
-        if sum(1 for e in r["log"] if e["ev"] == "visibility") == 2:
+        clean = not r["envBeforeHide"] and sum(1 for e in r["log"] if e["ev"] == "visibility") == 2
+        print(json.dumps({"real_hide": r["log"], "attempt": attempt, "clean": clean, "envBeforeHide": r["envBeforeHide"],
+                          "whileHidden": r["whileHidden"], "afterShow": r["afterShow"]}))
+        if clean:
             break
+    assert r["playingAtHide"] is True, ("never a clean run: the environment kept hiding the window", r["log"])
     h = r["whileHidden"]
     assert h["visibility"] == "hidden", r["log"]
     assert h["playing"] is False and h["videoPaused"] is True

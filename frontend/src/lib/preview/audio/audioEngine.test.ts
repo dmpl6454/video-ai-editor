@@ -127,7 +127,7 @@ describe('transport', () => {
 })
 
 describe('edits while playing', () => {
-  it('a new program applies itself at presented + 6 frames when nobody names a point', async () => {
+  it('a new program applies itself at presented + the edit lead (5 frames at 30 fps) when nobody names a point', async () => {
     const { ctx, engine, prepare } = setup()
     prepare(base)
     await loaded(engine)
@@ -140,9 +140,9 @@ describe('edits while playing', () => {
     await Promise.resolve()
     expect(engine.stats.applied).toBe(1)
     const fresh = ctx.sources.slice(n0).map((s) => Math.round((s.startedAt! - 0.1) * SR))
-    // heard now = (0.6 − 0.1 − latency) s; + 6 frames (9600 samples).
+    // heard now = (0.6 − 0.1 − latency) s; + 5 frames (8000 samples).
     const heard = Math.round((0.6 - 0.1 - (ctx.baseLatency + ctx.outputLatency)) * SR)
-    expect(Math.min(...fresh)).toBe(heard + 9600)
+    expect(Math.min(...fresh)).toBe(heard + 8000)
   })
 
   it('reschedule() names the point; setParams() applies a gain edit now', async () => {

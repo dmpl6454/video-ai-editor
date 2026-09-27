@@ -31,6 +31,7 @@ import type { EdlLike } from './timeline/framePlan'
 import { defaultTimeBase, sourceFromJson, type SourceInfo, type SourceInfoJson } from './timeline/frameMap'
 import { frameOf, rateOf } from './timeline/timebase'
 import { MODE_BAKED } from './timeline/support'
+import { sessionFileUrl } from '../media'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -304,7 +305,10 @@ export class PreviewController {
           const prev = this.known.get(src)
           const info = prev?.exact ? prev.source.info : this.standIn(summary)
           this.known.set(src, {
-            source: { info, proxy: { key: summary.key, state: failed ? 'failed' : (summary.state as 'ready' | 'partial' | 'pending') ?? 'ready' } },
+            source: {
+              info, proxy: { key: summary.key, state: failed ? 'failed' : (summary.state as 'ready' | 'partial' | 'pending') ?? 'ready' },
+              media: this.mediaUrl(src),
+            },
             exact: prev?.exact ?? false,
           })
           this.loading.delete(src)
@@ -315,6 +319,11 @@ export class PreviewController {
       await new Promise((res) => setTimeout(res, Math.min(2000, (this.opts.sourceRetryMs ?? 250) * (1 + attempt / 4))))
     }
     this.loading.delete(src)
+  }
+
+  /** The master the degraded tier plays when the proxy fails (§7). */
+  private mediaUrl(src: string): string | undefined {
+    return sessionFileUrl(src, this.sessionId) ?? undefined
   }
 
   /** The `/frame_map` answer's SourceInfo table replaces provisional infos. */
@@ -328,7 +337,7 @@ export class PreviewController {
         this.known.set(src, { source: prev.source, exact: true })
         continue
       }
-      this.known.set(src, { source: { info, proxy: prev?.source.proxy ?? null }, exact: true })
+      this.known.set(src, { source: { info, proxy: prev?.source.proxy ?? null, media: this.mediaUrl(src) }, exact: true })
       if (!prev?.source.proxy) this.loadSource(src)
       changed = true
     }

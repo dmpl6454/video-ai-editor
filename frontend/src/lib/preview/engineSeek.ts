@@ -19,6 +19,7 @@
 // the moment of the assignment.
 
 import type { LaneA } from './media/laneA'
+import { presentedTime } from './media/presentedFrame'
 
 export const SEEK_TIMEOUT_MS = 2000
 
@@ -135,5 +136,135 @@ export class PlayingSeekGate {
       return true
     }
     return false
+  }
+}
+
+/** After a paused 'seeked' whose element does not present the sought frame
+ *  yet — Chromium fires 'seeked' before the new frame reaches the video
+ *  compositor, so texImage2D would read the PREVIOUS frame (a neighbour
+ *  drawn under the new k, never corrected: the milestone-2 gate, 1 in 16) —
+ *  wait for it: each presented frame (rVFC) or animation frame re-checks,
+ *  appends stay held, and after PRESENT_WAIT_MS the seek is issued again. */
+export const PRESENT_WAIT_MS = 500
+
+export class PresentedWait {
+  private token = 0
+  private rvfc = 0
+  private raf = 0
+  private video: HTMLVideoElement | null = null
+
+  /** `check()` → true when the frame is there (the caller uploaded it);
+   *  `giveUp()` after PRESENT_WAIT_MS. */
+  start(video: HTMLVideoElement, check: () => boolean, giveUp: () => void, ms = PRESENT_WAIT_MS): void {
+    this.cancel()
+    const token = ++this.token
+    const t0 = performance.now()
+    this.video = video
+    const tick = () => {
+      if (token !== this.token) return
+      this.rvfc = 0
+      this.raf = 0
+      if (check()) { this.cancel(); return }
+      if (performance.now() - t0 > ms) { this.cancel(); giveUp(); return }
+      if (video.requestVideoFrameCallback) this.rvfc = video.requestVideoFrameCallback(() => tick())
+      this.raf = requestAnimationFrame(() => tick())
+    }
+    if (video.requestVideoFrameCallback) this.rvfc = video.requestVideoFrameCallback(() => tick())
+    this.raf = requestAnimationFrame(() => tick())
+  }
+
+  get active(): boolean {
+    return this.video !== null
+  }
+
+  cancel(): void {
+    this.token++
+    if (this.rvfc && this.video?.cancelVideoFrameCallback) this.video.cancelVideoFrameCallback(this.rvfc)
+    if (this.raf) cancelAnimationFrame(this.raf)
+    this.rvfc = 0
+    this.raf = 0
+    this.video = null
+  }
+}
+
+/** What finishing a paused seek needs from the engine. */
+export interface SoughtHost {
+  /** k is still the paused target on this lane. */
+  stillWanted(k: number): boolean
+  /** Upload the element's frame as k's texture (true: uploaded). */
+  upload(k: number): boolean
+  draw(k: number): void
+  /** The element never presented k: seek again. */
+  retry(): void
+  /** Counted: 'seeked' came before the element presented k. */
+  early(): void
+}
+
+/** The end of a paused seek (§4.1 step 5): the frame is uploaded BEFORE the
+ *  hold is released — hold(false) pumps laneA, and an append issued in there
+ *  makes WebKit re-enqueue, so a texImage2D after it read a neighbouring
+ *  frame (measured in WK: a paused seek to k = 587 drew source frame 64
+ *  instead of 62 when the stale frame 590 was appended inside the handler) —
+ *  and only once the element PRESENTS k (see PresentedWait). */
+export class SoughtFrame {
+  readonly wait = new PresentedWait()
+  /** The frame a wait is for (−1: none). */
+  k = -1
+
+  complete(k: number, video: HTMLVideoElement, lane: LaneA, host: SoughtHost): void {
+    this.cancel()
+    const now = (): boolean => {
+      if (!host.stillWanted(k)) { lane.hold(false); return true }
+      const t = presentedTime(video)
+      if (t !== null && lane.frameAt(t) !== k) return false
+      const uploaded = host.upload(k)
+      lane.hold(false)
+      this.k = -1
+      if (uploaded) host.draw(k)
+      return true
+    }
+    if (now()) return
+    host.early()
+    this.k = k
+    this.wait.start(video, now, () => { this.k = -1; lane.hold(false); host.retry() })
+  }
+
+  cancel(): void {
+    this.wait.cancel()
+    this.k = -1
+  }
+}
+
+/** A playing run that starts AWAY from the frame on screen (play() from 0
+ *  after the end, a seek while playing): until a frame of the new position is
+ *  presented, WebKit still presents frames of the OLD position and fires
+ *  'waiting' while the new start is not buffered. Those must not end the new
+ *  run as "end of program" — measured in the soak (E5): play at the end of a
+ *  12-minute timeline stopped again 8 ms later at the last frame, 3,249 times
+ *  in a row, because the start's spans had left the LRU. `stale(k)`: frame k
+ *  is of the old position (ignore it); the gate opens at the first frame
+ *  within (frames elapsed since `begin` + 2) of the start. */
+export class RunStartGate {
+  private k = -1
+  private at = 0
+
+  /** A run starts at `k` while `shown` is on screen. */
+  begin(k: number, shown: number, now = performance.now()): void {
+    this.k = k === shown ? -1 : k
+    this.at = now
+  }
+
+  /** No frame of the new position has been presented yet. */
+  get pending(): boolean {
+    return this.k >= 0
+  }
+
+  stale(k: number, fps: number, now = performance.now()): boolean {
+    if (this.k < 0) return false
+    if (Math.abs(k - this.k) <= ((now - this.at) * fps) / 1000 + 2) {
+      this.k = -1
+      return false
+    }
+    return true
   }
 }

@@ -1,4 +1,6 @@
 import { PAUSED_SEEK_BIAS_S } from './frameStep'
+import { pipIsRetimed, pipTiming } from './pipTime'
+import type { EdlClip } from './preview/timeline/framePlan'
 // Client-side painting of PIP (v2+) clips.
 //
 // The preview render deliberately does NOT bake a PIP's picture (see the
@@ -266,6 +268,71 @@ export function syncPipVideo(
     // Just past the frame's pts, never on it: a µs-truncated exact seek
     // decodes the previous frame (QA-077, lib/frameStep.displaySeekTime).
     const target = Math.min(v.duration - 1e-3, want + PAUSED_SEEK_BIAS_S)
+    try { v.currentTime = target } catch { /* not seekable yet */ }
+  }
+}
+
+/** Playback rates an HTMLMediaElement is safe to be asked for: Blink throws
+ *  outside [0.0625, 16], and WebKit silently stops rendering video frames at
+ *  extreme rates. Outside it the element is STEPPED (seeked per frame). */
+const PIP_MIN_PLAY_RATE = 0.0625
+const PIP_MAX_PLAY_RATE = 16
+/** A retimed PIP's paused tolerance: its targets are mid-frame instants, so
+ *  the same slot asks for the SAME instant and anything else is a new frame
+ *  (at 0.5x consecutive slots are only half a source frame apart). */
+const PIP_RETIMED_SEEK_TOL = 1e-3
+
+/** Put the hidden element on the source instant a (possibly RETIMED) PIP
+ *  shows at clip-local render seconds `local` — speed, curve, freeze and
+ *  reverse (wave D3, E2; the map is lib/pipTime, mirroring render/pip.py).
+ *
+ *  A plain 1x PIP takes exactly the old path (`syncPipVideo`). Otherwise:
+ *
+ *  * PAUSED → seek to the mid-frame source instant of the output slot under
+ *    the playhead (`frameTime`), which decodes the export's frame. The
+ *    tolerance is HALF a project frame, not a frame: at 0.5x consecutive
+ *    slots are half a source frame apart and a whole-frame tolerance would
+ *    leave every other step on the previous picture.
+ *  * PLAYING forwards at a playable rate → play at `speed × transport rate`
+ *    (a curve's rate is updated as it changes, to 1%), correcting only real
+ *    drift — the same no-thrash rule as `syncPipVideo`.
+ *  * PLAYING a reverse, a freeze, or a rate no element can play → STEP:
+ *    paused, one seek per frame, never while a seek is still in flight (a
+ *    queued seek is what made a PIP flicker; `drawPipVideoFrame` shows the
+ *    previous frame meanwhile). A freeze seeks once and then holds.
+ */
+export function syncPipClipVideo(
+  v: HTMLVideoElement, clip: EdlClip, local: number, fps: number,
+  opts?: { playing?: boolean; rate?: number },
+): void {
+  if (!pipIsRetimed(clip)) {
+    syncPipVideo(v, local, 0, clip.in ?? 0, fps, opts)
+    return
+  }
+  if (!Number.isFinite(v.duration) || v.duration <= 0) return
+  const tm = pipTiming(clip, local, fps)
+  const transport = opts?.rate ?? 1
+  const playRate = Math.round(tm.rate * transport * 100) / 100
+  const playing = !!opts?.playing && transport > 0
+  if (playing && tm.kind === 'forward' && playRate >= PIP_MIN_PLAY_RATE && playRate <= PIP_MAX_PLAY_RATE) {
+    if (Math.abs(v.playbackRate - playRate) > 0.01 * playRate) {
+      try { v.playbackRate = playRate } catch { /* out of supported range */ }
+    }
+    const want = Math.max(0, Math.min(v.duration - 1e-3, tm.time))
+    if (v.paused) {
+      if (Math.abs(v.currentTime - want) > PIP_RESYNC_TOL) {
+        try { v.currentTime = want } catch { /* not seekable yet */ }
+      }
+      v.play().catch(() => { /* autoplay/decode hiccup — next frame retries */ })
+    } else if (Math.abs(v.currentTime - want) > PIP_RESYNC_TOL) {
+      try { v.currentTime = want } catch { /* not seekable yet */ }
+    }
+    return
+  }
+  if (!v.paused) v.pause()
+  if (playing && v.seeking) return
+  const target = Math.max(0, Math.min(v.duration - 1e-3, tm.frameTime))
+  if (Math.abs(v.currentTime - target) > PIP_RETIMED_SEEK_TOL) {
     try { v.currentTime = target } catch { /* not seekable yet */ }
   }
 }

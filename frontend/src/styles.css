@@ -788,6 +788,14 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
 .music-clip + .music-clip { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
 .music-clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .media-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+/* Below the app's 1100 px minimum (the editor in a browser, review RD3) the
+   rail's panel is too narrow for two lines of a name: one line, cut with an
+   ellipsis (the row's title has the whole name), never mid-word breaks, and
+   the meta line on one line too. The packaged app never gets this narrow. */
+@media (max-width: 1099px) {
+  .media-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+  .media-meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
 /* A file still importing (QA-044): its placeholder row, a progress ring in
    the thumbnail slot, and the stage/ETA line. Not draggable yet. */
 .media-bin .media-row.is-pending { cursor: default; border-style: dashed; }

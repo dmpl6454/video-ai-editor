@@ -7,7 +7,7 @@ import type { KeyStatus } from './lib/settingsModel'
 import type { PreviewSettingsWire } from './lib/previewEngineSetting'
 import type { EDL, SessionInfo, Op, MediaItem } from './types'
 import {
-  EngineOfflineError, isAbort, isGatewayFailure, reportEngineReachable, reportEngineUnreachable,
+  EngineOfflineError, isAbort, isGatewayFailure, leavingError, pageLeavingSoon, reportEngineReachable, reportEngineUnreachable,
 } from './lib/connection'
 
 const BASE = '/api'
@@ -234,6 +234,8 @@ async function send(url: string, init: RequestInit): Promise<Response> {
     res = await fetch(url, init)
   } catch (e) {
     if (isAbort(e)) throw e
+    // a reload fails every request in flight just before pagehide (WebKit)
+    if (await pageLeavingSoon()) throw leavingError()
     reportEngineUnreachable()
     throw new EngineOfflineError()
   }
@@ -282,7 +284,14 @@ function postForm(url: string, fd: FormData,
       if (res.ok || res.status < 500) reportEngineReachable()
       resolve(res)
     }
-    xhr.onerror = () => { done(); reportEngineUnreachable(); reject(new EngineOfflineError()) }
+    xhr.onerror = () => {
+      done()
+      void pageLeavingSoon().then((gone) => {
+        if (gone) { reject(leavingError()); return }
+        reportEngineUnreachable()
+        reject(new EngineOfflineError())
+      })
+    }
     xhr.onabort = () => { done(); reject(new DOMException('The import was cancelled.', 'AbortError')) }
     xhr.send(fd)
   })

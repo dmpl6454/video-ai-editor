@@ -150,9 +150,9 @@ export function SpeedCurveEditor({ points, playheadFrac, onCommit, onDraft, rese
   const atReset = JSON.stringify(normalizeForCommit(draft)) === resetKey
 
   return (
-    // Arrows on a focused point are its own (keymap rule 4: a focused
-    // button keeps its navigation keys); Delete/Backspace are claimed by the
-    // point itself (data-keymap-own), so ripple delete never fires there
+    // Arrows and Delete/Backspace on a focused point are its own
+    // (data-keymap-own: a plain button no longer keeps its arrows under
+    // keymap rule 4 since review RD3), so ripple delete never fires there
     // while ⌘Z, Space, J/K/L and N still do (review RD2).
     <div className="speed-editor">
       <div className="speed-graph" onDoubleClick={onGraphDouble}
@@ -175,7 +175,7 @@ export function SpeedCurveEditor({ points, playheadFrac, onCommit, onDraft, rese
             )}
           </svg>
           {draft.map(([x, r], i) => (
-            <button key={i} type="button" className="speed-point" data-point={i} data-keymap-own="Delete Backspace"
+            <button key={i} type="button" className="speed-point" data-point={i} data-keymap-own="Delete Backspace ArrowLeft ArrowRight ArrowUp ArrowDown"
                     ref={(el) => { pointRefs.current[i] = el }}
                     aria-label={pointLabel(draft, i)}
                     aria-pressed={sel === i}

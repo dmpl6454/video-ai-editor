@@ -88,6 +88,10 @@ export const PRESETS = {
       zoomFit: ['Mod+Backslash'],
       toggleSnap: ['KeyN'],
       selectAll: ['Mod+KeyA'],
+      // review RD3: a particular clip from the keyboard
+      selectClipAtPlayhead: ['KeyC'],
+      selectNextClip: ['ArrowDown'],
+      selectPrevClip: ['ArrowUp'],
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
@@ -136,6 +140,10 @@ export const PRESETS = {
       zoomFit: ['Backslash'],               // \ zoom to sequence
       toggleSnap: ['KeyS'],                 // S toggles snapping
       selectAll: ['Mod+KeyA'],
+      // review RD3: a particular clip from the keyboard
+      selectClipAtPlayhead: ['KeyD'],
+      selectNextClip: ['ArrowDown'],
+      selectPrevClip: ['ArrowUp'],
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],
@@ -180,6 +188,10 @@ export const PRESETS = {
       zoomFit: ['Shift+KeyZ'],              // Shift+Z zoom to fit
       toggleSnap: ['KeyN'],                 // N toggles snapping
       selectAll: ['Mod+KeyA'],
+      // review RD3: a particular clip from the keyboard
+      selectClipAtPlayhead: ['KeyC'],
+      selectNextClip: ['ArrowDown'],
+      selectPrevClip: ['ArrowUp'],
       deselect: ['Escape'],
       undo: ['Mod+KeyZ'],
       redo: ['Mod+Shift+KeyZ'],

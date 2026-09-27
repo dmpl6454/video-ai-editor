@@ -295,6 +295,18 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
                            model=recipes_result.model, detail=f"fuller reading · confidence {rp.confidence:.2f}"))  # type: ignore[union-attr]
             return _finish(RoutedPlan(rp.with_(reply=_fallback_reply(rp, note)), "recipes", tuple(attempts), note=note),
                            req, brains=brains, order=order, validate=validate)
+        if _recipes_answered_what_llm_asks(recipes_result, validated):
+            # Review RD3: the grammar read every slot ("between 2 and 4
+            # seconds" → cut_range 2.0-4.0) and the model came back asking
+            # "Which part should I cut?" — the complete reading wins.
+            rp = recipes_result.plan  # type: ignore[union-attr]
+            note = f"I read that as: {rp.title or rp.intent}"
+            record(Attempt(bid, "failed", reason="rejected:asked what the prompt already said",
+                           latency_ms=result.latency_ms, model=result.model))
+            record(Attempt("recipes", "answered", latency_ms=recipes_result.latency_ms,  # type: ignore[union-attr]
+                           model=recipes_result.model, detail=f"complete reading · confidence {rp.confidence:.2f}"))  # type: ignore[union-attr]
+            return _finish(RoutedPlan(rp.with_(reply=_fallback_reply(rp, note)), "recipes", tuple(attempts), note=note),
+                           req, brains=brains, order=order, validate=validate)
         if validated.brain != bid:
             validated = validated.with_(brain=bid)
         record(Attempt(bid, "answered", latency_ms=result.latency_ms, model=result.model,
@@ -333,10 +345,16 @@ RESTRUCTURE_GROUNDS: dict[str, frozenset[str]] = {
     "remove_silences": frozenset({"remove_silences", "tighten", "auto_edit"}),
     "remove_fillers": frozenset({"remove_fillers", "tighten", "auto_edit"}),
     "cut_range": frozenset({"trim", "tighten", "auto_edit"}),
-    "ripple_delete": frozenset({"trim"}),
+    "ripple_delete": frozenset({"trim", "delete_clip"}),
     "auto_cut_to_beats": frozenset({"beat_sync"}),
-    "split_at": frozenset({"beat_sync", "trim"}),
+    # a split is asked for by name, or made by a speed / mute over "the last N
+    # seconds" (wave D3, E3)
+    "split_at": frozenset({"beat_sync", "trim", "split", "speed", "mute"}),
     "set_speed": frozenset({"speed"}),
+    # wave D3 (E3): the clip edits a model may only make when they were asked for
+    "reorder_clips": frozenset({"move_clip"}),
+    "duplicate_clip": frozenset({"duplicate"}),
+    "freeze_frame": frozenset({"freeze"}),
     "auto_reframe": frozenset({"reframe", "auto_edit", "export_preset", "shorts"}),
     # Deleting the music bed ("remove the music", "replace the music").
     "bulk_delete": frozenset({"remove_music"}),
@@ -368,6 +386,21 @@ def _recipes_read_more(recipes_result: BrainResult | None, llm: Plan) -> bool:
         return False
     mine, theirs = {s.tool for s in rp.steps}, {s.tool for s in llm.steps}
     return bool(theirs) and theirs < mine
+
+
+def _recipes_answered_what_llm_asks(recipes_result: BrainResult | None, llm: Plan) -> bool:
+    """True when the model's plan stops on a question while the recipes plan
+    (above the fallback bar) already has every value filled: real steps, no
+    question of its own, no placeholder left in any argument."""
+    if not llm.blocking_questions:
+        return False
+    if recipes_result is None or not recipes_result.ok or recipes_result.plan is None:
+        return False
+    rp = recipes_result.plan
+    if rp.confidence < RECIPES_FALLBACK or rp.blocking_questions or not rp.steps:
+        return False
+    from ..validate import _is_placeholder
+    return not any(_is_placeholder(v) for st in rp.steps for v in st.args.values())
 
 
 def _fallback_reply(rp: Plan, note: str) -> str:

@@ -50,7 +50,9 @@ export function sampleKF(v: KFNum | undefined, t: number, fallback: number): num
         else if (interp === 'ease-out') g = 1 - (1 - f) ** 2
         else if (interp === 'ease-in-out') g = 3 * f * f - 2 * f * f * f
         else if (interp === 'back-out') g = 1 - (1 - f) ** 3
-        else if (interp === 'step') g = 0
+        // step: hold v0 until the NEXT key's own time, which shows v1 — the
+        // export's `if(lt(t, t1), v0, …)` (edl/keyframes.to_ffmpeg_expr)
+        else if (interp === 'step') g = f >= 1 ? 1 : 0
         return v0 + (v1 - v0) * g
       }
     }

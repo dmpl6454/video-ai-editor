@@ -41,6 +41,20 @@ export function CaptionsPanel({ active }: { active: boolean }) {
   const elapsed = useCaptionRun((s) => s.elapsed)
   const cancelling = useCaptionRun((s) => s.cancelling)
   const mainRef = useRef<HTMLButtonElement | null>(null)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  // A run started from the KEYBOARD (focus on Generate): the button is
+  // disabled while it runs, which drops focus to <body> (review RD3). Focus
+  // goes to Cancel for the run, and back to Generate when it ends.
+  const keyboardRun = useRef(false)
+  useEffect(() => {
+    if (!keyboardRun.current) return
+    if (busy) cancelRef.current?.focus()
+    else {
+      keyboardRun.current = false
+      const a = document.activeElement
+      if (!a || a === document.body) mainRef.current?.focus()
+    }
+  }, [busy])
 
   // QA-065: which caption models are on disk, re-read whenever the panel
   // shows (the old menu re-read it on open) so "Fastest" wears the right badge.
@@ -78,7 +92,7 @@ export function CaptionsPanel({ active }: { active: boolean }) {
         ref={mainRef}
         type="button"
         className="panel-btn cc-generate"
-        onClick={() => { void run.run() }}
+        onClick={() => { keyboardRun.current = document.activeElement === mainRef.current; void run.run() }}
         disabled={!hasFootage || busy}
         title={!hasFootage
           ? 'Add a video to the timeline first — captions transcribe the main (v1) footage'
@@ -112,7 +126,7 @@ export function CaptionsPanel({ active }: { active: boolean }) {
             <span className="cc-bar-fill" style={{ transform: `scaleX(${Math.max(2, pct) / 100})` }} />
           </span>
           {!cancelling && (
-            <button type="button" className="panel-btn cc-cancel" onClick={() => { void run.cancel() }}
+            <button ref={cancelRef} type="button" className="panel-btn cc-cancel" onClick={() => { void run.cancel() }}
                     title="Stop transcribing">Cancel</button>
           )}
         </div>

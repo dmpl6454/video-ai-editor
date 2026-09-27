@@ -204,11 +204,21 @@ def curve_map(points: list[tuple[float, float]], S: float) -> CurveMap | None:
     return CurveMap(S=S, D=D, segs=tuple(segs), s_end=s, r_end=points[-1][1])
 
 
+def start_speed(cm: CurveMap) -> float:
+    """The curve's speed at output 0 (the first piece's)."""
+    return cm.segs[0].r if cm.segs else cm.r_end
+
+
 def out_seconds(cm: CurveMap, T: float) -> float:
     """Output seconds at source seconds ``T`` — the ``setpts`` expression of
     ``setpts_expr`` evaluated with the same double operations in the same
     order (``render/frame_map.py`` truncates ``out / TB`` like ffmpeg's
-    ``D2TS``)."""
+    ``D2TS``). Before the clip's ``in`` (``T < 0``: the pre-roll frames an
+    in-anchored chain decodes, see ``anchored_setpts_expr``) the curve is
+    extended at its start speed — linear, so never the square root of a
+    negative number."""
+    if T < 0:
+        return T / start_speed(cm)
     for g in cm.segs:
         if T < g.s1:
             q = T - g.s0
@@ -234,13 +244,118 @@ def out_seconds_expr(cm: CurveMap, T: str) -> str:
         q = f"({T}-{_num(g.s0)})"
         e = f"({_num(g.t0)}+2*{q}/({_num(g.r)}+sqrt({_num(g.rr)}+{_num(g.k)}*{q})))"
         expr = f"if(lt({T}\\,{_num(g.s1)})\\,{e}\\,{expr})"
-    return expr
+    return f"if(lt({T}\\,0)\\,({T}/{_num(start_speed(cm))})\\,{expr})"
 
 
 def setpts_expr(cm: CurveMap) -> str:
     """The ``setpts`` value (no ``setpts=``): ``out_seconds_expr`` at
     ``T = PTS·TB``, divided by ``TB`` into the stream's ticks."""
     return f"({out_seconds_expr(cm, '(PTS*TB)')})/TB"
+
+
+# ---------------------------------------------------------------- the v1 chain's clock
+#
+# WHY. The v1 chain used to rebase a curve clip at its FIRST KEPT source
+# frame (`setpts=PTS-STARTPTS`), so the curve's source clock started up to
+# half a frame away from `in`, and it truncated the curve's output into the
+# SOURCE's time base. At 1x neither shows, but a curve maps source time
+# non-linearly: a split piece whose `in` falls mid-frame played its whole
+# curve shifted by that sub-frame offset — measured on a Hero clip (20 s,
+# 30 fps) split at 10 s: 103 of 759 later frames one source frame late, the
+# cut frame held 1 output frame instead of 2. A split, a cut_range and a
+# trim of a curve clip are now INVISIBLE (the pieces export the frames the
+# whole clip did), because the chain measures the curve on clocks every
+# piece of one clip shares:
+#
+#   * the input seek lands on a 1/5 s grid at least `CURVE_PREROLL_S` before
+#     `in` (`curve_seek`): the frame just before `in` — which a slow curve
+#     still shows in slot 0 — is always decoded, and the demuxer's timestamp
+#     shift (the seek rounded into the stream time base) is never a rounding
+#     tie for a 1/n time base (seek·n has a fractional part in fifths);
+#   * the first `setpts` adds that shift back, `PTS + round(seek/TB)`
+#     (`file_clock_expr`): every frame's pts is its pts on the FILE's clock,
+#     whatever the seek;
+#   * `settb` (`curve_settb_expr`) refines the time base by
+#     k = R.num / gcd(R.num, n) — pts × k exactly — so a project frame is a
+#     WHOLE number of ticks (1/15360 at 25 fps was 614.4 ticks a frame,
+#     which put the truncation grid of a piece off its parent's);
+#   * the curve's `setpts` takes T = PTS·TB − in (`anchored_setpts_expr`):
+#     the same double for a given source frame in every piece of the clip,
+#     minus `in`; the result gains `CURVE_TICK_BIAS` before the truncation
+#     into ticks, so a value that is mathematically a whole tick (a 1x
+#     stretch, an exact rounding tie of the fps filter) truncates to that
+#     tick in every piece instead of by its last-ulp noise;
+#   * `fps=R:start_time=0` anchors the output grid at T = 0 (`in`), not at
+#     the first decoded frame: pre-roll slots before it are dropped, slot 0
+#     shows the latest frame whose rounded slot is <= 0.
+#
+# `render/frame_map.py` and `speedCurve.ts` model these steps with the same
+# double operations (`c_round` is C's `round`, half away from zero).
+
+#: A curve clip's input seek lands at least this far before `in`: past the
+#: previous source frame of any source above 2 fps.
+CURVE_PREROLL_S = 0.5
+#: ... on a grid of 1/CURVE_SEEK_GRID seconds (see the block above).
+CURVE_SEEK_GRID = 5.0
+#: Seconds added to a curve's output time before it is truncated into ticks
+#: (see the block above): far above the double noise of a time under 6 h
+#: (~1e-11 s), far below a tick (>= ~0.1 µs after `curve_settb_expr`).
+CURVE_TICK_BIAS = 1e-8
+
+
+def curve_seek(in_: float) -> float:
+    """The input seek (seconds, 0 = no ``-ss``) of a curve clip at ``in_``:
+    the latest multiple of 1/5 s at least ``CURVE_PREROLL_S`` before it."""
+    k = math.floor((float(in_) - CURVE_PREROLL_S) * CURVE_SEEK_GRID)
+    return k / CURVE_SEEK_GRID if k > 0 else 0.0
+
+
+def c_round(x: float) -> float:
+    """C's ``round()`` (ffmpeg's expression ``round``): nearest integer,
+    halves away from zero, exact for every double."""
+    a = abs(x)
+    f = math.floor(a)
+    r = f + 1.0 if a - f >= 0.5 else f
+    return math.copysign(r, x)
+
+
+def file_clock_expr(seek: float) -> str | None:
+    """The chain's FIRST ``setpts`` value for a curve clip opened at
+    ``seek``: the demuxer's shift added back (None without a seek — the
+    pts already are on the file clock)."""
+    return f"PTS+round({_num(seek)}/TB)" if seek > 0 else None
+
+
+def curve_settb_expr(rate_num: int) -> str:
+    """``settb`` value: the stream time base divided by
+    ``rate_num / gcd(rate_num, 1/TB)`` (see the block above)."""
+    n = int(rate_num)
+    return f"intb*gcd({n}\\,round(1/intb))/{n}"
+
+
+def curve_time_base(tb, rate_num: int):
+    """The time base ``curve_settb_expr`` gives a stream in ``tb`` (a
+    Fraction): the same integer steps (``round(1/TB)`` is the denominator
+    of a 1/n time base)."""
+    from fractions import Fraction
+    tb = Fraction(tb)
+    n = int(rate_num)
+    den = int(c_round(1.0 / (tb.numerator / tb.denominator)))
+    return tb * math.gcd(n, den) / n
+
+
+def anchored_setpts_expr(cm: CurveMap, in_: float) -> str:
+    """The curve ``setpts`` value on the file clock, anchored at ``in``."""
+    T = f"(PTS*TB-{_num(in_)})"
+    return f"({out_seconds_expr(cm, T)}+{_num(CURVE_TICK_BIAS)})/TB"
+
+
+def anchored_ticks(pts_file: int, TB: float, in_: float, cm: CurveMap) -> int:
+    """Output ticks ``anchored_setpts_expr`` gives the frame whose pts (on
+    the file clock, in the refined time base ``TB``) is ``pts_file``: the
+    same double operations, truncated like ``D2TS``."""
+    T = float(pts_file) * TB - float(in_)
+    return int((out_seconds(cm, T) + CURVE_TICK_BIAS) / TB)
 
 
 def source_seconds(cm: CurveMap, t: float) -> float:
@@ -301,6 +416,9 @@ def integral_fraction(points: list[tuple[float, float]], u: float) -> float:
 __all__ = [
     "CURVE_SPEED_RANGE", "MAX_CURVE_POINTS", "CURVE_PRESETS",
     "normalize_curve", "curve_points", "is_curve", "mean_speed",
-    "CurveSeg", "CurveMap", "curve_map", "out_seconds", "setpts_expr",
+    "CurveSeg", "CurveMap", "curve_map", "out_seconds", "setpts_expr", "start_speed",
+    "CURVE_PREROLL_S", "CURVE_SEEK_GRID", "CURVE_TICK_BIAS", "curve_seek", "c_round",
+    "file_clock_expr", "curve_settb_expr", "curve_time_base", "anchored_setpts_expr",
+    "anchored_ticks",
     "source_seconds", "speed_at", "split_curve", "integral_fraction",
 ]

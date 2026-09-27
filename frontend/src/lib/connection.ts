@@ -61,6 +61,46 @@ function isEngineEnvelope(body: string): boolean {
   }
 }
 
+// ------------------------------------------------------------ page leaving
+//
+// A reload (⌘R, location.reload) or a navigation makes WebKit fail EVERY
+// request in flight with a plain TypeError ("Load failed") a few ms BEFORE
+// 'pagehide' — measured in WKWebView (tests/wk/test_wk_robustness.py): the
+// fetch rejected at 170 ms, pagehide at 174 ms, and no 'beforeunload' at all
+// for a scripted reload. Reported at once, that flashed "The editor engine is
+// not responding." (banner, panel errors) in the dying page, in server mode
+// as much as in client mode. So a network failure is judged only after
+// LEAVE_GRACE_MS: a page that meanwhile says pagehide was leaving, not
+// offline (and a page that is gone never runs that timer at all).
+
+/** How long a network failure waits for 'pagehide' before it counts. */
+export const LEAVE_GRACE_MS = 250
+let leaving = false
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => { leaving = true })
+  window.addEventListener('pageshow', () => { leaving = false })
+}
+
+/** The page is being unloaded (pagehide seen, not shown again). */
+export function isPageLeaving(): boolean {
+  return leaving
+}
+
+/** After a network failure: resolves true when the page turns out to be
+ *  leaving within `ms` (the failure was the unload, not the engine). */
+export function pageLeavingSoon(ms = LEAVE_GRACE_MS): Promise<boolean> {
+  if (leaving) return Promise.resolve(true)
+  return new Promise((resolve) => { setTimeout(() => resolve(leaving), ms) })
+}
+
+/** The error a request gets when it failed only because the page is leaving:
+ *  an AbortError, so every caller stays silent (`isAbort`). */
+export function leavingError(): Error {
+  const e = new Error('The page is being unloaded.')
+  e.name = 'AbortError'
+  return e
+}
+
 let state: EngineState = 'online'
 const listeners = new Set<Listener>()
 let probeTimer: ReturnType<typeof setTimeout> | null = null
@@ -85,8 +125,8 @@ function setState(next: EngineState): void {
   }
 }
 
-/** A request could not reach the engine. */
-export function reportEngineUnreachable(): void { setState('offline') }
+/** A request could not reach the engine (ignored while the page is leaving). */
+export function reportEngineUnreachable(): void { if (!leaving) setState('offline') }
 /** Something the engine itself answered arrived (any status). */
 export function reportEngineReachable(): void { setState('online') }
 
@@ -115,7 +155,8 @@ export async function probeEngineNow(): Promise<boolean> {
       return true
     }
   } catch {
-    // unreachable — fall through
+    // unreachable — fall through (unless the page is just leaving)
+    if (await pageLeavingSoon()) { probing = false; return state === 'online' }
   } finally {
     probing = false
   }
@@ -127,6 +168,7 @@ export async function probeEngineNow(): Promise<boolean> {
 /** Tests only: back to a clean `online` with no timers or listeners. */
 export function _resetConnectionForTests(): void {
   clearProbe()
+  leaving = false
   listeners.clear()
   state = 'online'
   probing = false

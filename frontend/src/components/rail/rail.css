@@ -227,6 +227,10 @@
   padding: var(--tool-panel-pad-top) var(--tool-panel-pad-x) 16px;
   animation: tool-panel-in var(--dur-normal) var(--ease-out-expo);
 }
+/* ⌥1…⌥8 put focus on the panel itself (review RD3): Tab goes on into its
+   controls, and the ring says where focus is without a heavy frame. */
+.tool-tabpanel:focus { outline: none; }
+.tool-tabpanel:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 @keyframes tool-panel-in {
   from { opacity: 0; transform: translateX(-6px); }
   to { opacity: 1; transform: none; }

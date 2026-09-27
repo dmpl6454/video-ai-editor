@@ -19,7 +19,7 @@ import { toast } from '../toast'
 import { usePromptStore, isBusy } from '../lib/promptStore'
 import { brainLabel, createdProjects, humanBytes, humanDuration, type ChildRun, type StepRow, type VerifyCheck } from '../lib/promptEvents'
 import { errorMessage } from '../store'
-import { checksHeadline, checkValues } from '../lib/checkProse'
+import { checksHeadline, checkValues, shownChecks } from '../lib/checkProse'
 import { editorProse, toolTitle } from '../lib/opLabels'
 import { Icon, type IconName } from './Icon'
 
@@ -108,8 +108,6 @@ export function PromptRunLog() {
   const contentBy = plan?.content_brain && plan.content_brain !== plan.brain ? brainLabel(plan.content_brain) : null
   const downloads = plan?.downloads_needed ?? []
   const eta = typeof plan?.estimated_seconds === 'number' ? plan.estimated_seconds : null
-  const headline = verify ? verify.checks.filter((c) => c.headline !== false) : []
-  const info = verify ? verify.checks.filter((c) => c.headline === false) : []
 
   const copyPlan = async () => {
     if (!plan) return
@@ -209,7 +207,7 @@ export function PromptRunLog() {
             <span className="rendered">{verify.rendered ? 'measured on a 360p render' : 'measured on the timeline'}</span>
           </div>
           <div className="prompt-checks">
-            {[...headline, ...info].map((c) => <CheckRow key={c.check + c.human} c={c} />)}
+            {shownChecks(verify.checks).map((c, i) => <CheckRow key={`${i}-${c.check}`} c={c} />)}
           </div>
         </div>
       )}

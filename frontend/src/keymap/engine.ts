@@ -172,10 +172,25 @@ const TEXT_INPUT_TYPES = new Set([
   'text', 'search', 'email', 'url', 'password', 'tel', 'number',
   'date', 'time', 'datetime-local', 'month', 'week',
 ])
-// Keys a focused non-text control (slider/checkbox/select) needs for itself —
-// arrows step a range slider, Home/End jump it. Don't hijack those.
+// Keys a focused navigable control (slider/select/radio group/tab list/menu)
+// needs for itself — arrows step a range slider, Home/End jump it, arrows
+// move within a radio group or a menu. Don't hijack those. A PLAIN button or
+// checkbox has no arrow behaviour, so Shift+→ and friends still run there
+// (review RD3: focus on a toolbar button swallowed them, silently).
 const CONTROL_NAV_KEYS = new Set([
   'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown',
+])
+const NAV_INPUT_TYPES = new Set(['range', 'radio'])
+const NAV_ROLES = new Set([
+  'slider', 'spinbutton', 'radio', 'tab', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'option',
+  'treeitem', 'gridcell', 'listbox', 'scrollbar', 'combobox',
+])
+// Controls Space (and, where the platform does, Enter) ACTIVATES: a keyboard
+// user toggles Play backwards, Keep pitch, Mute, Solo and Snapping with
+// Space, as everywhere else (review RD3: Space started playback instead).
+const ACTIVATE_INPUT_TYPES = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file'])
+const ACTIVATE_ROLES = new Set([
+  'button', 'switch', 'checkbox', 'radio', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'link', 'option',
 ])
 
 /** A focused tab's own activation keys (WAI-ARIA APG tabs: Space and Enter
@@ -195,6 +210,67 @@ export interface KeyTarget {
   isContentEditable?: boolean
   closest?(selector: string): unknown
   getAttribute?(name: string): string | null
+}
+
+/** A focused control whose own keys are arrows/Home/End (see NAV_ROLES). */
+function ownsNavKeys(t: KeyTarget | null | undefined): boolean {
+  const tag = t?.tagName
+  if (tag === 'SELECT') return true
+  if (tag === 'INPUT') return NAV_INPUT_TYPES.has(t?.type || '')
+  const role = t?.getAttribute?.('role')
+  return !!role && NAV_ROLES.has(role)
+}
+
+/** A control Space activates (a button, a checkbox, a switch…). */
+function isActivatable(t: KeyTarget | null | undefined): boolean {
+  const tag = t?.tagName
+  if (tag === 'INPUT') return ACTIVATE_INPUT_TYPES.has(t?.type || '')
+  const role = t?.getAttribute?.('role')
+  if (role) return ACTIVATE_ROLES.has(role)
+  return tag === 'BUTTON' || tag === 'SUMMARY'
+}
+
+/** Elements that took focus from a pointer press (a mouse click leaves
+ *  focus on a clicked button or checkbox in Chromium; WebKit does not focus
+ *  on click at all). `:focus-visible` cannot tell: the Space keydown itself
+ *  turns it on before any listener runs (measured in Chromium). */
+const pointerFocused = new WeakSet<object>()
+let pointerDownAt = -Infinity
+const POINTER_FOCUS_MS = 800
+
+/** Record that `target` took focus from a pointer (the listeners below; a
+ *  test calls it on a stand-in). */
+export function notePointerFocus(target: object): void {
+  pointerFocused.add(target)
+}
+
+let pointerTarget: Node | null = null
+
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('pointerdown', (e) => {
+    pointerDownAt = performance.now()
+    pointerTarget = e.target instanceof Node ? e.target : null
+  }, true)
+  // any key press after it: the next focus move is the keyboard's (Tab)
+  document.addEventListener('keydown', () => { pointerDownAt = -Infinity }, true)
+  document.addEventListener('focusin', (e) => {
+    const t = e.target
+    if (!(t instanceof Node)) return
+    // focus the press itself gave: the pressed element or the control
+    // around it (a click on a label's text focuses its checkbox)
+    const fromPress = performance.now() - pointerDownAt < POINTER_FOCUS_MS && !!pointerTarget
+      && (t === pointerTarget || t.contains(pointerTarget) || pointerTarget.contains(t)
+        || (t instanceof HTMLElement && !!pointerTarget.parentElement?.closest('label')?.contains(t)))
+    if (fromPress) pointerFocused.add(t)
+    else pointerFocused.delete(t)
+  }, true)
+}
+
+/** Focus the user (or a script acting for them) moved there WITHOUT the
+ *  pointer: Space activates such a control; after a mouse click on it Space
+ *  still plays (the NLE convention). */
+function keyboardFocused(t: KeyTarget | null | undefined): boolean {
+  return !(t && pointerFocused.has(t as object))
 }
 
 /** A field the user is typing in: it keeps every key. */
@@ -222,9 +298,14 @@ export function isTextEntry(t: KeyTarget | null | undefined): boolean {
  *    commands; `'global'` ones (⌥1…⌥8, ⌘E…) still run there (critique H1).
  *    Per-command scope rather than "the scope swallows only unmodified keys":
  *    ⌘Z inside an AI form must not undo the timeline behind the user's back.
- * 4. A focused non-text control keeps its navigation keys (arrows step a
- *    slider, Home/End jump it). Everything else goes to the command, above
- *    all Space → play/pause, so a quick slider tweak does not swallow it.
+ * 4. A focused NAVIGABLE control (a slider, a select, a radio group, a tab
+ *    list, a menu) keeps its navigation keys (arrows step a slider, Home/End
+ *    jump it). A plain button or checkbox has none, so arrows still run the
+ *    editor's commands there (review RD3). Space still plays from a slider.
+ * 4c. A KEYBOARD-focused button, checkbox, switch or radio keeps Space (it
+ *    activates the control), and a native button Enter; after a MOUSE click
+ *    on it (focus that followed a pointer press) Space still plays, so a click
+ *    on a toolbar button never turns Space into "press it again" (RD3).
  * 4b. A `[data-keymap-own="Delete Backspace"]` target keeps exactly the keys
  *    it names, with any modifiers, from every command: a focused curve point
  *    removes itself on Delete, and ripple delete never fires there, while ⌘Z,
@@ -254,9 +335,14 @@ export function shouldRun(
   const owner = target?.closest?.('[data-keymap-own]') as KeyTarget | null | undefined
   const owned = owner?.getAttribute?.('data-keymap-own')
   if (owned && owned.split(/\s+/).includes(key)) return false
-  const tag = target?.tagName
-  if ((tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT') && CONTROL_NAV_KEYS.has(key)) return false
+  if (CONTROL_NAV_KEYS.has(key) && ownsNavKeys(target)) return false
   if (TAB_KEYS.has(chord) && target?.getAttribute?.('role') === 'tab') return false
+  // Space on a keyboard-focused button / checkbox / switch activates it; a
+  // native button also takes Enter (a checkbox has no Enter of its own).
+  if (isActivatable(target) && keyboardFocused(target)) {
+    if (chord === 'Space') return false
+    if (chord === 'Enter' && !(target?.tagName === 'INPUT' && (target.type === 'checkbox' || target.type === 'radio'))) return false
+  }
   return true
 }
 

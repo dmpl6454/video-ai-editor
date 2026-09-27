@@ -15,7 +15,13 @@ import { now } from './mseKit'
 
 const q = new URLSearchParams(location.search)
 
-export interface FixtureSource { info: SourceInfoJson; key: string; srcId?: number }
+export interface FixtureSource {
+  info: SourceInfoJson
+  key: string
+  srcId?: number
+  /** URL of the source's master (the degraded tier plays it, §7). */
+  media?: string
+}
 export interface Fixture {
   edl: EdlLike
   sources: Record<string, FixtureSource>
@@ -32,7 +38,7 @@ export function lookupOf(fx: Fixture): EngineSourceLookup {
   return (src) => {
     if (!cache.has(src)) {
       const s = fx.sources[src]
-      cache.set(src, s ? { info: sourceFromJson(s.info), proxy: { key: s.key, state: 'ready' } } : null)
+      cache.set(src, s ? { info: sourceFromJson(s.info), proxy: { key: s.key, state: 'ready' }, media: s.media } : null)
     }
     return cache.get(src)!
   }

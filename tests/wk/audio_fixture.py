@@ -296,3 +296,23 @@ def curve_edl(tone_a: str, tone_b: str, bed: str):
                                             audio={"gain_db": -6.0, "keep_pitch": False}))
     e.recompute_duration()
     return e, 30
+
+
+def pip_speed_edl(tone_a: str, tone_b: str):
+    """Wave D3 (E2): overlay (PIP) clips retimed like v1 — a 2x varispeed,
+    a varispeed curve, a freeze (silent) and a reverse — folded into the
+    main sound over a v1 tone. APPROX where resampled (the engine plays a
+    PIP's retimed sound by `audioPlan`'s rate / curve maps)."""
+    e = empty_edl(Canvas(w=64, h=36, fps=30))
+    e.canvas.loudness_lufs = None
+    e.get_track("v1").clips.append(_clip(tone_a, "base", 0.0, 0.0, 6.0, audio={"gain_db": -9.0}))
+    v2 = e.get_track("v2")
+    v2.clips += [
+        _clip(tone_b, "p2x", 0.4, 1.0, 3.0, speed=2.0, audio={"keep_pitch": False}),            # 0.4-1.4
+        _clip(tone_b, "pcv", 1.6, 0.5, 2.5, speed={"curve": [[0.0, 0.5], [1.0, 2.0]]},
+              audio={"keep_pitch": False}),                                                       # 1.6-2.4
+        _clip(tone_b, "pfz", 2.6, 3.0, 3.0 + 1 / 30, freeze=0.8),                                 # 2.6-3.4 silent
+        _clip(tone_b, "prv", 3.6, 4.0, 5.2, reverse=True, audio={"gain_db": -3.0}),              # 3.6-4.8
+    ]
+    e.recompute_duration()
+    return e, 30

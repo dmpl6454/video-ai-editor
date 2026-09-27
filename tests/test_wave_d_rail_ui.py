@@ -89,7 +89,7 @@ def _open(browser, base_url, sid, width=1440, height=900, extra: dict | None = N
     ctx.add_init_script("try { " + " ".join(
         f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});" for k, v in items.items()) + " } catch (e) {}")
     page = ctx.new_page()
-    page.goto(base_url + "/")
+    page.goto(base_url + "/?vae-test")  # lib/testHook.ts: the store, in the built bundle too
     page.get_by_role("tab", name="Media", exact=True).wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)
@@ -449,7 +449,7 @@ def _open_with(browser, base_url, sid, script, width=1280, height=800):  # noqa:
         f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});"
         for k, v in {"vai.sessionId": sid, "vai.rightTab": "inspect"}.items()) + " } catch (e) {}")
     page = ctx.new_page()
-    page.goto(base_url + "/")
+    page.goto(base_url + "/?vae-test")  # lib/testHook.ts: the store, in the built bundle too
     page.get_by_role("tab", name="Media", exact=True).wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)

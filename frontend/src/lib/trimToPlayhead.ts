@@ -12,6 +12,8 @@
 // on the frame the split would have cut.
 import { clipDuration, clipEnd, clipSpeedFactor, isMediaClip, type AnyClip, type EDL, type Track } from '../types'
 import { splitTimeFor } from './splitTargets'
+import { sourceOffsetAt, type EdlClip } from './preview/timeline/framePlan'
+import { isCurve } from './preview/timeline/speedCurve'
 import { renderSpanOf } from './timelineLayout'
 import { isTrackLocked, lockedNotice } from './trackLock'
 import { frameDuration } from './frameStep'
@@ -75,7 +77,12 @@ export function planTrimToPlayhead(
     return { kind: 'refuse', message: 'The playhead is on the clip\'s edge — there is nothing to trim.' }
   }
   if (isMediaClip(clip)) {
-    const at = clip.in + offset * clipSpeedFactor(clip)
+    // SOURCE seconds under the playhead: a speed curve's integral (the
+    // server trims a curve clip to exactly the frame it showed there), else
+    // the offset through the speed (a freeze reads it back as a hold).
+    const at = isCurve((clip as unknown as EdlClip).speed)
+      ? clip.in + sourceOffsetAt(clip as unknown as EdlClip, offset)
+      : clip.in + offset * clipSpeedFactor(clip)
     if (side === 'end') return { kind: 'dispatch', tool: 'trim_clip', args: { clip_id: clip.id, out: at } }
     const args: Record<string, unknown> = { clip_id: clip.id, in: at }
     if (track.id !== MAIN) args.move_start = true

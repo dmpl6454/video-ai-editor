@@ -391,3 +391,93 @@ describe('rotateHandleLocal', () => {
     expect(at.ly).toBe(50 + dv.ROT_GAP)
   })
 })
+
+// ---- syncPipClipVideo: a RETIMED PIP (wave D3, E2) --------------------------
+// The hidden element must follow the clip's speed / curve / freeze / reverse
+// (lib/pipTime, pinned to the export's frames in pipTime.test.ts) without
+// reintroducing the per-frame seek thrash above.
+
+describe('syncPipClipVideo', () => {
+  const clip = (over: Record<string, unknown>) =>
+    ({ id: 'p', src: 's', in: 1, out: 5, start: 0, ...over }) as unknown as import('./preview/timeline/framePlan').EdlClip
+
+  it('a 1x PIP takes the old path unchanged', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const a = fakeVideo(); const b = fakeVideo()
+    syncPipClipVideo(a.v, clip({}), 3, 30)
+    syncPipVideo(b.v, 3, 0, 1, 30)
+    expect(a.seeks).toEqual(b.seeks)
+  })
+
+  it('paused at 2x: seeks to the export frame of the slot, twice as deep', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v, seeks } = fakeVideo()
+    syncPipClipVideo(v, clip({ speed: 2 }), 1, 30)
+    // slot 30 → source 1 + 2·(30.5/30) − 1 µs
+    expect(seeks).toHaveLength(1)
+    expect(seeks[0]).toBeCloseTo(1 + 2 * (30.5 / 30) - 1e-6, 9)
+  })
+
+  it('paused at 0.5x: a one-frame step that moves half a source frame still seeks', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v, seeks } = fakeVideo()
+    const c = clip({ speed: 0.5 })
+    syncPipClipVideo(v, c, 1, 30)
+    syncPipClipVideo(v, c, 1 + 1 / 30, 30)
+    expect(seeks).toHaveLength(2)                       // a whole-frame tolerance would skip it
+    expect(seeks[1] - seeks[0]).toBeCloseTo(0.5 / 30, 9)
+  })
+
+  it('playing at 2x: plays the element at 2x the transport, no per-frame seeks', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v, seeks } = fakeVideo()
+    const c = clip({ speed: 2 })
+    syncPipClipVideo(v, c, 0, 30, { playing: true, rate: 1 })
+    expect(v.playbackRate).toBe(2)
+    expect(v.playCalls).toBe(1)
+    seeks.length = 0
+    for (let i = 1; i <= 30; i++) {
+      ;(v as unknown as { currentTime: number }).currentTime = 1 + 2 * (i / 30)
+      seeks.length = 0
+      syncPipClipVideo(v, c, i / 30, 30, { playing: true, rate: 1 })
+      expect(seeks).toEqual([])
+    }
+    syncPipClipVideo(v, c, 1, 30, { playing: true, rate: 0.5 })
+    expect(v.playbackRate).toBe(1)                      // shuttle × speed
+  })
+
+  it('playing a curve follows its instantaneous speed', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v } = fakeVideo()
+    const c = clip({ speed: { curve: [[0, 1], [0.5, 0.25], [1, 1]] } })
+    syncPipClipVideo(v, c, 3.2, 30, { playing: true, rate: 1 })
+    expect(v.playbackRate).toBeCloseTo(0.25, 2)
+  })
+
+  it('playing a reverse STEPS: paused, one seek per frame, none while a seek is in flight', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v, seeks } = fakeVideo({ paused: false })
+    const c = clip({ reverse: true })
+    syncPipClipVideo(v, c, 0, 30, { playing: true, rate: 1 })
+    expect(v.paused).toBe(true)
+    expect(seeks).toHaveLength(1)
+    expect(seeks[0]).toBeGreaterThan(4.9)               // the range's LAST frame first
+    ;(v as unknown as { seeking: boolean }).seeking = true
+    syncPipClipVideo(v, c, 1 / 30, 30, { playing: true, rate: 1 })
+    expect(seeks).toHaveLength(1)                       // the queued seek would thrash
+    ;(v as unknown as { seeking: boolean }).seeking = false
+    syncPipClipVideo(v, c, 2 / 30, 30, { playing: true, rate: 1 })
+    expect(seeks).toHaveLength(2)
+    expect(seeks[1]).toBeLessThan(seeks[0])             // backwards
+    expect(v.playCalls).toBe(0)
+  })
+
+  it('a freeze seeks once and then holds, playing or not', async () => {
+    const { syncPipClipVideo } = await import('./pipDraw')
+    const { v, seeks } = fakeVideo()
+    const c = clip({ out: 1 + 1 / 30, freeze: 2 })
+    for (let i = 0; i < 20; i++) syncPipClipVideo(v, c, i / 30, 30, { playing: true, rate: 1 })
+    expect(seeks).toHaveLength(1)
+    expect(v.playCalls).toBe(0)
+  })
+})

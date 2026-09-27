@@ -31,7 +31,9 @@ def sample(value: float | Keyframe | dict, t: float) -> float:
                 return v1
             f = (t - t0) / (t1 - t0)
             if interp == "step":
-                return v0
+                # v0 until the next key's own time, which shows v1 — the
+                # export's `if(lt(t, t1), v0, …)` below and lib/overlay.ts
+                return v1 if t >= t1 else v0
             if interp == "ease-in":
                 f = f * f
             elif interp == "ease-out":
@@ -52,7 +54,7 @@ def is_keyframed(value: float | Keyframe | dict | None) -> bool:
 
 
 def _segment_expr(t0: float, v0: float, t1: float, v1: float,
-                  interp: str, time_var: str) -> str:
+                  interp: str, time_var: str, digits: int = 4) -> str:
     """One segment's value expression, with the same easing math as sample().
 
     Commas inside function calls are escaped (`\\,`) because these
@@ -60,7 +62,7 @@ def _segment_expr(t0: float, v0: float, t1: float, v1: float,
     """
     if interp == "step" or t1 - t0 < 1e-6:
         return f"{v0:.4f}" if interp == "step" else f"{v1:.4f}"
-    f_raw = f"(({time_var}-{t0:.4f})/({t1 - t0:.6f}))"
+    f_raw = f"(({time_var}-{t0:.{digits}f})/({t1 - t0:.{digits + 2}f}))"
     if interp == "ease-in":
         prog = f"pow({f_raw}\\,2)"
     elif interp == "ease-out":
@@ -74,8 +76,20 @@ def _segment_expr(t0: float, v0: float, t1: float, v1: float,
     return f"({v0:.4f}+{prog}*({v1 - v0:.4f}))"
 
 
+def frame_exact_expr(value: float | Keyframe | dict, time_var: str) -> str:
+    """`to_ffmpeg_expr` as every PICTURE layer evaluates keys (review RD3):
+    key times printed to 9 digits and the segment picked 1 µs past the
+    frame's own time — a step key on its own frame then switches ON that
+    frame, as `lib/overlay.ts` sampleKF and the v1 chain do. (4 digits print
+    23/30 s as 0.7667, after the frame; `k·(1/R)` lands a hair under k/R.)
+    The sound's volume automation keeps the historical text."""
+    return to_ffmpeg_expr(value, time_var=time_var, time_digits=9,
+                          compare_var=f"({time_var}+0.000001)")
+
+
 def to_ffmpeg_expr(value: float | Keyframe | dict, *, time_var: str = "t",
-                   start_offset: float = 0.0) -> str:
+                   start_offset: float = 0.0, time_digits: int = 4,
+                   compare_var: str | None = None) -> str:
     """Build an ffmpeg filter expression for a keyframed scalar.
 
     `start_offset` shifts so that t=0 in the expression maps to clip-local 0.
@@ -84,7 +98,15 @@ def to_ffmpeg_expr(value: float | Keyframe | dict, *, time_var: str = "t",
 
     Returns a numeric expression usable in filters that accept the `t` variable
     (e.g. overlay's x= and y=).
+
+    `time_digits` prints the key TIMES (4 by default, the historical text):
+    a key on a frame time such as 23/30 prints as 0.7667, after the frame,
+    so a `step` there switched a frame late — the v1 chain asks for 9.
+    `compare_var` (default `time_var`) is what picks the SEGMENT; the v1
+    chain nudges it 1 µs past ffmpeg's `t` (k·(1/R) lands a hair under the
+    key k/R) while the value itself is still evaluated at `time_var`.
     """
+    cmp_var = compare_var or time_var
     if isinstance(value, (int, float)):
         return f"{value:.4f}"
     if isinstance(value, dict):
@@ -106,8 +128,8 @@ def to_ffmpeg_expr(value: float | Keyframe | dict, *, time_var: str = "t",
     for i in range(len(pts) - 1, 0, -1):
         t0, v0 = pts[i - 1]
         t1, v1 = pts[i]
-        seg = _segment_expr(t0, v0, t1, v1, interp, time_var)
-        expr = f"if(lt({time_var}\\,{t1:.4f})\\,{seg}\\,{expr})"
+        seg = _segment_expr(t0, v0, t1, v1, interp, time_var, time_digits)
+        expr = f"if(lt({cmp_var}\\,{t1:.{time_digits}f})\\,{seg}\\,{expr})"
     # Hold first value before t0
-    expr = f"if(lt({time_var}\\,{pts[0][0]:.4f})\\,{pts[0][1]:.4f}\\,{expr})"
+    expr = f"if(lt({cmp_var}\\,{pts[0][0]:.{time_digits}f})\\,{pts[0][1]:.4f}\\,{expr})"
     return expr

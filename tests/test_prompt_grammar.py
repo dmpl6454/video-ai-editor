@@ -156,7 +156,10 @@ def test_transition_requests_without_the_word_transition():
     # QA-018: "at the END" is the closing fade of the video, not the last seam.
     assert G.detect("fade to black at the end").intents == ["fade"]
     assert G.detect("add a hook").intents == ["hook"]        # no seam vocabulary → still a hook
-    assert G.detect("zoom in on the product").intents == []
+    # Wave D3 (E3): a zoom on the picture is its own recipe now (it asks
+    # which clip when none is named or selected) — never a transition.
+    assert G.detect("zoom in on the product").intents == ["zoom"]
+    assert G.detect("smooth zoom between every clip").intents == ["transitions"]
 
 
 def test_every_intent_has_a_phrase_row_and_the_tie_breaks_are_real_intents():

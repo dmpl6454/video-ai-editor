@@ -122,13 +122,35 @@ function goBack(from: RailId) {
   ;(row ?? document.getElementById(railTabId(from)))?.focus({ preventScroll: true })
   if (!panel || !point) return
   panel.scrollTop = point.scrollTop
-  // WebKit (WKWebView, measured) still reveals a row that is partly out of
-  // view in the rendering update after a preventScroll focus in a panel that
-  // was display:none a moment ago; put the scroll back once more before that
-  // frame paints, unless focus has moved on.
-  requestAnimationFrame(() => {
-    if (row && document.activeElement === row) panel.scrollTop = point.scrollTop
-  })
+  if (row) holdScroll(panel, row, point.scrollTop)
+}
+
+/** Events that mean the user is scrolling or acting in the panel. */
+const USER_INPUT = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
+/** How long a restored scroll is defended against the engine's own reveal. */
+const HOLD_SCROLL_MS = 400
+
+/** WebKit (WKWebView, measured) still reveals a row that is partly out of
+ *  view after a preventScroll focus in a panel that was display:none a moment
+ *  ago — in the next rendering update, or (under load) the one after it, so
+ *  one rAF was not enough (review RD3: the Text panel landed at 27 instead of
+ *  0 in 2 of 3 runs). For a short while, while focus stays on the row and
+ *  the user does nothing in the panel, any scroll is put back. */
+function holdScroll(panel: HTMLElement, row: HTMLElement, top: number) {
+  let live = true
+  const restore = () => {
+    if (live && document.activeElement === row && panel.scrollTop !== top) panel.scrollTop = top
+  }
+  const stop = () => {
+    if (!live) return
+    live = false
+    panel.removeEventListener('scroll', restore)
+    for (const t of USER_INPUT) panel.removeEventListener(t, stop, true)
+  }
+  panel.addEventListener('scroll', restore)
+  for (const t of USER_INPUT) panel.addEventListener(t, stop, true)
+  requestAnimationFrame(() => { restore(); requestAnimationFrame(restore) })
+  setTimeout(stop, HOLD_SCROLL_MS)
 }
 
 export function AiBackChip() {

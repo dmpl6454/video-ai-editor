@@ -6,7 +6,7 @@ import type { KeyTarget } from './engine'
 
 // engine.ts imports the store, which reads localStorage at module load.
 vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} })
-const { shouldRun, isTextEntry } = await import('./engine')
+const { shouldRun, isTextEntry, notePointerFocus } = await import('./engine')
 
 function el(tagName: string, o: { type?: string; role?: string; editable?: boolean; inside?: string[]; own?: string } = {}): KeyTarget {
   // `own`: the value of the nearest [data-keymap-own] (this element or an ancestor)
@@ -21,6 +21,12 @@ function el(tagName: string, o: { type?: string; role?: string; editable?: boole
     },
     getAttribute: (n: string) => (n === 'role' ? o.role ?? null : null),
   }
+}
+/** A stand-in focused by a mouse click (Chromium leaves focus there). */
+function clicked(tagName: string, o: Parameters<typeof el>[1] = {}): KeyTarget {
+  const t = el(tagName, o)
+  notePointerFocus(t)
+  return t
 }
 
 const canvas = el('CANVAS')
@@ -43,11 +49,26 @@ const chatBox = el('TEXTAREA', { inside: ['#right-panel'] })
 const promptBox = el('TEXTAREA', { inside: ['.prompt-bar'] })
 
 describe('shouldRun: the command scope rule', () => {
-  it('runs a default command on ordinary targets, and Space on a focused button or slider (global play)', () => {
+  it('runs a default command on ordinary targets, and Space from a slider or a mouse-focused button (global play)', () => {
     for (const t of [canvas, button, slider, null]) {
-      expect(shouldRun(undefined, 'Space', t)).toBe(true)
       expect(shouldRun('default', 'Mod+KeyZ', t)).toBe(true)
     }
+    for (const t of [canvas, slider, null, clicked('BUTTON'), clicked('INPUT', { type: 'checkbox' })]) {
+      expect(shouldRun(undefined, 'Space', t)).toBe(true)
+    }
+  })
+
+  it('a KEYBOARD-focused checkbox, button or switch keeps Space; a button also Enter (review RD3)', () => {
+    const checkbox = el('INPUT', { type: 'checkbox' })
+    const toggle = el('BUTTON')
+    const sw = el('DIV', { role: 'switch' })
+    for (const t of [checkbox, toggle, sw, el('INPUT', { type: 'radio' })]) {
+      expect(shouldRun(undefined, 'Space', t)).toBe(false)
+    }
+    expect(shouldRun(undefined, 'Enter', toggle)).toBe(false)
+    expect(shouldRun(undefined, 'Enter', checkbox)).toBe(true)     // a checkbox has no Enter of its own
+    // everything else still runs there
+    for (const chord of ['Mod+KeyZ', 'KeyJ', 'KeyK', 'KeyL', 'Shift+Space']) expect(shouldRun('default', chord, checkbox), chord).toBe(true)
   })
 
   it('runs a global command inside [data-keymap-ignore]; a default one does not', () => {
@@ -70,13 +91,20 @@ describe('shouldRun: the command scope rule', () => {
     expect(isTextEntry(el('INPUT', { type: 'checkbox' }))).toBe(false)
   })
 
-  it('keeps a focused control\'s navigation keys, with or without modifiers', () => {
+  it('keeps a focused NAVIGABLE control\'s navigation keys, with or without modifiers; a plain button has none', () => {
+    const select = el('SELECT')
+    const radio = el('BUTTON', { role: 'radio' })
+    const menuItem = el('BUTTON', { role: 'menuitem' })
     for (const code of ['ArrowLeft', 'ArrowUp', 'Home', 'End', 'PageDown']) {
-      expect(shouldRun('default', code, slider)).toBe(false)
-      expect(shouldRun('global', code, button)).toBe(false)
+      for (const t of [slider, select, radio, menuItem, railTab]) expect(shouldRun('global', code, t), code).toBe(false)
     }
-    expect(shouldRun('default', 'Alt+ArrowLeft', button)).toBe(false)
+    expect(shouldRun('default', 'Alt+ArrowLeft', slider)).toBe(false)
     expect(shouldRun('default', 'ArrowLeft', canvas)).toBe(true)
+    // review RD3: Shift+→ with a toolbar button focused moved nothing
+    for (const chord of ['Shift+ArrowRight', 'ArrowLeft', 'Home']) {
+      expect(shouldRun('default', chord, button), chord).toBe(true)
+      expect(shouldRun('default', chord, el('INPUT', { type: 'checkbox' })), chord).toBe(true)
+    }
   })
 
   it('gives a focused tab its own Space and Enter, and nothing else', () => {
@@ -96,11 +124,12 @@ describe('shouldRun: the command scope rule', () => {
         expect(shouldRun('default', chord, t), chord).toBe(true)
       }
     }
-    // Space plays from a Speed radio or a curve point, as from any button
-    // (Enter, bound to nothing, chooses the radio natively); the Inspector
-    // TAB keeps Space/Enter to activate itself, like the rail's tabs
-    expect(shouldRun('default', 'Space', speedPreset)).toBe(true)
-    expect(shouldRun('default', 'Space', speedPoint)).toBe(true)
+    // Space CHOOSES a keyboard-focused Speed radio (and presses a curve
+    // point) as on any control (review RD3); after a mouse click it plays;
+    // the Inspector TAB keeps Space/Enter to activate itself, like the rail's
+    expect(shouldRun('default', 'Space', speedPreset)).toBe(false)
+    expect(shouldRun('default', 'Space', speedPoint)).toBe(false)
+    expect(shouldRun('default', 'Space', clicked('BUTTON', { role: 'radio' }))).toBe(true)
     expect(shouldRun('default', 'Space', inspectorTab)).toBe(false)
   })
 

@@ -655,6 +655,8 @@ def main() -> None:
             except Exception:
                 pass
         window.events.loaded += _harden_webview
+    if _pu.IS_MAC:
+        window.events.loaded += lambda w=window: _mac_keyboard_tabbing(w)
     try:
         webview.start()
     except Exception as e:  # WebView2 Runtime missing / init failure on Windows
@@ -665,6 +667,39 @@ def main() -> None:
                   f"and relaunch.\n  Underlying error: {e}")
             sys.exit(1)
         raise
+
+
+def enable_tab_to_all_controls(wkwebview) -> bool:
+    """Let Tab reach every control in `wkwebview` (a Cocoa WKWebView), as it
+    does in Chromium (review RD3). By default WebKit tabs only to text fields
+    unless the Mac's own "Keyboard navigation" is on — the whole editor had
+    six Tab stops, and Import, Export, Split, Freeze or any Inspector button
+    were out of a keyboard user's reach without Option-Tab. This is Safari's
+    "Press Tab to highlight each item" (WKPreferences.tabFocusesLinks)."""
+    try:
+        wkwebview.configuration().preferences().setTabFocusesLinks_(True)
+        return bool(wkwebview.configuration().preferences().tabFocusesLinks())
+    except Exception:  # an older WebKit without the property: Option-Tab still works
+        return False
+
+
+def _mac_keyboard_tabbing(window) -> None:
+    """`enable_tab_to_all_controls` on the pywebview window's WKWebView, on
+    the main thread (`events.loaded` fires on a pywebview worker thread and
+    WebKit objects belong to the main one)."""
+    try:
+        from PyObjCTools import AppHelper
+        from webview.platforms.cocoa import BrowserView
+    except Exception:
+        return
+
+    def _apply():
+        view = BrowserView.instances.get(getattr(window, "uid", None))
+        wk = getattr(view, "webview", None)
+        if wk is not None and not enable_tab_to_all_controls(wk):
+            _diag("Tab stays on text fields in this WebKit — use Option-Tab to reach buttons.")
+
+    AppHelper.callAfter(_apply)
 
 
 if __name__ == "__main__":

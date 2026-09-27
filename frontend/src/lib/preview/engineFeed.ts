@@ -13,6 +13,7 @@ import { MODE_BAKED, classify, type ProxyState, type Support } from './timeline/
 import type { Rational } from './timeline/timebase'
 import { GAP, type LaneProgram } from './media/laneA'
 import type { ProxyHandle, ProxyStore } from './media/proxyIndex'
+import type { DegradedRequest } from './media/degradedSource'
 import type { Size } from './render/geometry'
 import type { EngineSourceLookup } from './engine'
 
@@ -259,6 +260,20 @@ export class ProgramFeed {
 
   markFailed(key: string): void {
     this.failed.add(key)
+  }
+
+  /** Output frame k comes from the DEGRADED tier while paused (§7): its
+   *  source's proxy is failed, it is not a landed bake frame, and the
+   *  source's master can be played (`EngineSource.media`). Null otherwise. */
+  degradedAt(k: number): DegradedRequest | null {
+    const pm = this.pm
+    const id = this.want[k]
+    if (!pm || id === undefined || id < 0 || k >= pm.total || this.isBaked(k)) return null
+    const src = pm.sources[pm.srcKey[k]]
+    if (this.proxyState(src) !== 'failed') return null
+    const url = this.lookup(src)?.media
+    if (!url) return null
+    return { url, info: this.sourceInfo(src), frame: pm.srcFrame[k], contentId: id }
   }
 
   proxyState(src: string): ProxyState {

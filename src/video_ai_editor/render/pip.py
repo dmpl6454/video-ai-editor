@@ -14,10 +14,12 @@ clips with sound (talking-head over screen recording, etc.) play correctly.
 from __future__ import annotations
 import math
 from pathlib import Path
+from typing import NamedTuple
 from ..edl import EDL
 from ..edl.schema import Clip
-from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
+from ..edl.keyframes import frame_exact_expr, is_keyframed
 from .effects import build_chromakey_filter
+from .sar import square_pixels_filter
 from .text_overlay import enable_expr
 from . import clock
 from ..edl import timebase as _tb
@@ -158,7 +160,16 @@ def pip_input_args(c: Clip, n: int, fps) -> list[str]:
     camera file, GOPs of several seconds) lost that much of its TAIL, frozen
     on its last decoded frame. Measured: `-ss 0.983 -t 3 -itsoffset 2.5`
     decodes frames 0-89, not 30-119. Placement moved into the graph
-    (`pip_video_timing`), where it is exact."""
+    (`pip_video_timing`), where it is exact.
+
+    A RETIMED PIP (a speed, a curve, a freeze — wave D3, E2) is opened
+    exactly as v1 opens the same clip (`compositor.clip_input_args`: the
+    whole source range, a curve's in-anchored seek, a freeze's one frame),
+    because its chain is v1's (`pip_retime`) and the frames it picks depend
+    on what was decoded. Safe now that no input carries `-itsoffset`."""
+    if is_retimed(c):
+        from .compositor import clip_input_args
+        return clip_input_args(c, fps)
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
     span = pre + _tb.time_of(n + _DECODE_SLACK_FRAMES, fps)
@@ -168,7 +179,77 @@ def pip_input_args(c: Clip, n: int, fps) -> list[str]:
     return [*input_seek(seek), "-t", f"{span:.6f}", "-i", str(c.src)]
 
 
-def pip_video_timing(n: int, first_frame: int, fps) -> str:
+def is_retimed(c: Clip) -> bool:
+    """A PIP whose picture is not its source at 1x: a freeze, a constant
+    speed != 1 or a speed curve. (A reverse is substituted by
+    `render.reverse.with_reversed_sources` before any of this runs — the
+    intermediate plays forwards, retimed or not.)"""
+    if getattr(c, "freeze", None) is not None:
+        return True
+    sp = c.speed
+    if isinstance(sp, (int, float)):
+        return bool(sp) and sp > 0 and float(sp) != 1.0
+    from ..edl import speed_curve as _sc
+    return _sc.curve_points(sp) is not None
+
+
+class PipRetime(NamedTuple):
+    """The pieces of v1's clip chain that decide WHICH frames a clip shows
+    (compositor._build_clip_video_chain), in the order they run there:
+    `head` (the clock the chain starts on), `retime` (the speed stage) and
+    `anchor` (an option of the project-grid `fps=` that follows)."""
+    head: str
+    retime: str
+    anchor: str
+
+
+_REBASE = "setpts=PTS-STARTPTS,"
+
+
+def pip_retime(c: Clip, fps) -> PipRetime:
+    """v1's retime for clip `c` (wave D3, E2), so a PIP's project-grid `fps=`
+    picks the SAME source frames v1 would — which `frame_map.clip_frame_list`
+    models and tests/test_b5_pip_frame_exact.py decodes:
+
+    * 1x       — the rebase only (a plain PIP's graph is byte-identical);
+    * speed s  — rebase, `setpts=PTS/s`;
+    * a curve  — the FILE clock anchored at `in` (`speed_curve.
+      file_clock_expr` of the in-anchored seek), `settb` to whole-tick
+      frames, the anchored closed-form integral, and `fps=…:start_time=0`
+      (edl/speed_curve.py, "the v1 chain's clock");
+    * a freeze — the first frame on the grid, one frame long, which the
+      clone-pad that follows holds for the whole window
+      (`frame_map.freeze_frame`).
+
+    Mirrors the chain's retime branch rather than sharing it only because
+    that branch is interleaved with v1's geometry; the frame-exact PIP tests
+    fail the moment the two disagree."""
+    if getattr(c, "freeze", None) is not None:
+        return PipRetime(_REBASE, f"fps={_tb.ffmpeg_rate(fps)},trim=end_frame=1,setpts=PTS-STARTPTS,", "")
+    sp = c.speed
+    if isinstance(sp, (int, float)) and sp and sp > 0 and float(sp) != 1.0:
+        return PipRetime(_REBASE, f"setpts=PTS/{float(sp)},", "")
+    from .compositor import _v1_curve_map
+    cm = _v1_curve_map(c)
+    if cm is None:
+        return PipRetime(_REBASE, "", "")
+    from ..edl.speed_curve import anchored_setpts_expr, curve_seek, curve_settb_expr, file_clock_expr
+    fc = file_clock_expr(curve_seek(c.in_))
+    return PipRetime(f"setpts={fc}," if fc else "",
+                     f"settb={curve_settb_expr(_tb.rate_of(fps).numerator)},"
+                     f"setpts={anchored_setpts_expr(cm, float(c.in_))},",
+                     ":start_time=0")
+
+
+def pip_layout_end(c: Clip) -> float:
+    """Layout end of a PIP: `start` plus its TIMELINE footprint
+    (`effective_duration` — a 2x PIP fills half its source length, a curve
+    its integral, a freeze its hold). The one window rule the picture and
+    both audio folds in compositor.py share."""
+    return float(c.start) + float(c.effective_duration)
+
+
+def pip_video_timing(n: int, first_frame: int, fps, retime: PipRetime | None = None) -> str:
     """Filters (no labels, trailing comma) that make a PIP's picture exactly
     `n` frames on the project grid, starting at timeline frame `first_frame`:
     the v1 recipe (rebase, `fps=`, clone-pad, `trim=end_frame`), then a shift
@@ -179,8 +260,12 @@ def pip_video_timing(n: int, first_frame: int, fps) -> str:
     The shift is in whole TICKS: after `fps=` the time base is exactly one
     frame, so `+first_frame` is exact. A seconds expression is not — setpts
     TRUNCATES, and 1.001/(1001/30000) evaluates to 29.999999999999996, which
-    put every PIP on a 29.97 project one frame early."""
-    return (f"setpts=PTS-STARTPTS,fps={_tb.ffmpeg_rate(fps)},"
+    put every PIP on a 29.97 project one frame early.
+
+    `retime` (`pip_retime`) replaces the rebase with v1's clock and puts v1's
+    speed stage before `fps=`: the grid then picks the same frames."""
+    rt = retime or PipRetime(_REBASE, "", "")
+    return (f"{rt.head}{rt.retime}fps={_tb.ffmpeg_rate(fps)}{rt.anchor},"
             f"tpad=stop={n}:stop_mode=clone,trim=end_frame={n},"
             f"setpts=PTS-STARTPTS+{int(first_frame)},")
 
@@ -188,38 +273,57 @@ def pip_video_timing(n: int, first_frame: int, fps) -> str:
 def pip_audio_chain(c: Clip, input_label: str, label_out: str, *, rs: float,
                     re: float, fps) -> str:
     """A PIP's sound, sample-exact to its picture: resampled, the seek
-    pre-roll dropped, gain/fade/mute applied, cut to exactly its frames'
-    samples and delayed (in samples) to its snapped start. A source with no
-    audio stream contributes silence of that length instead of failing the
-    graph (the v1 rule, QA-040). No atempo: the PIP picture applies no speed
-    either, and the two must stay together."""
+    pre-roll dropped, retimed, gain/fade/mute applied, cut to exactly its
+    frames' samples and delayed (in samples) to its snapped start. A source
+    with no audio stream contributes silence of that length instead of
+    failing the graph (the v1 rule, QA-040).
+
+    Retimed by v1's rules, because the picture now is (`pip_retime`): a
+    constant speed through `audio_mix.speed_filters` (varispeed, or atempo
+    centred by its lag), a curve from its cached intermediate
+    (render/speed_audio.py, built by `speed_audio.prepare`, read from
+    clip-local 0 with no pre-roll), a freeze is digital silence. A reverse
+    was substituted upstream (its intermediate's sound already runs
+    backwards)."""
     from .compositor import _audio_props_filters, source_has_audio
+    from . import speed_audio as _speed_audio
     f0, n = pip_frames(rs, re, fps)
-    if not source_has_audio(str(c.src)):
-        input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
-    chain = (f"{input_label}aresample=async=1:first_pts=0,"
-             f"aformat=channel_layouts=stereo:sample_rates=48000")
-    pre = _tb.seek_preroll(c.in_, fps)
-    if pre > 1e-9:
-        chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
-    chain += _audio_props_filters(c)
     m = _tb.samples_for_frames(n, fps)
-    chain += f",apad=whole_len={m},atrim=end_sample={m}"
     delay = _tb.samples_for_frames(f0, fps)
-    if delay > 0:
-        chain += f",adelay=delays={delay}S:all=1"
-    return chain + label_out
+    tail = f",adelay=delays={delay}S:all=1" if delay > 0 else ""
+    if getattr(c, "freeze", None) is not None:
+        # A FREEZE is a still: silence of its exact length (v1's rule).
+        return ("anullsrc=channel_layout=stereo:sample_rate=48000,"
+                "aformat=channel_layouts=stereo:sample_rates=48000"
+                f",atrim=end_sample={m}{tail}{label_out}")
+    curve_src = _speed_audio.chain_source(c, fps) if _speed_audio.has_curve(c) else None
+    if curve_src is not None:
+        chain = (f"{curve_src}aresample=async=1:first_pts=0,"
+                 f"aformat=channel_layouts=stereo:sample_rates=48000")
+    else:
+        if not source_has_audio(str(c.src)):
+            input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
+        chain = (f"{input_label}aresample=async=1:first_pts=0,"
+                 f"aformat=channel_layouts=stereo:sample_rates=48000")
+        pre = _tb.seek_preroll(c.in_, fps)
+        if pre > 1e-9:
+            chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
+        from .audio_mix import speed_filters
+        chain += speed_filters(c)
+    chain += _audio_props_filters(c)
+    chain += f",apad=whole_len={m},atrim=end_sample={m}"
+    return chain + tail + label_out
 
 
 def _on_render_clock(pips: list[tuple[str, Clip]], seams: clock.SeamTable
                      ) -> list[tuple[str, Clip, float, float]]:
     """`(track_id, clip, render_start, render_end)` for every PIP the seams
-    leave visible, in the order `collect_pip_clips` gave. `c.duration` (source
-    seconds) is the layout length on purpose: the PIP chain applies no speed,
-    which is the same reason the audio fold applies no atempo."""
+    leave visible, in the order `collect_pip_clips` gave. The layout length
+    is the clip's TIMELINE footprint (`pip_layout_end`): the chain retimes a
+    PIP exactly as v1 (`pip_retime`), and its sound follows (E2)."""
     placed: list[tuple[str, Clip, float, float]] = []
     for tid, c in pips:
-        win = clock.render_window(seams, c.start, c.start + c.duration)
+        win = clock.render_window(seams, c.start, pip_layout_end(c))
         if win is None:
             continue
         placed.append((tid, c, win[0], win[1]))
@@ -364,6 +468,10 @@ def build_pip_overlay_chain(
             continue
 
         tx = c.transform
+        # Speed, curve, freeze (E2): the v1 retime between the rebase and the
+        # grid, so the frames are v1's. Keyframes and the enable gate stay on
+        # the render clock (`t - t0`): they are TIMELINE-local, like the UI.
+        retime = pip_retime(c, fps)
         # Scale relative to canvas long edge. Default size = 35% of canvas long edge.
         # A KEYFRAMED scale (QA-035) builds the element at its LARGEST keyed
         # size — so an animated grow/shrink only ever DOWN-scales pixels — and
@@ -462,14 +570,16 @@ def build_pip_overlay_chain(
                 # crop clear of the corners.
                 inner_rot = f"rotate={math.radians(f_rot):.6f}:c=black@0,"
             parts.append(
-                f"[{idx}:v]{pip_video_timing(n, f0, fps)}"
+                f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{square_pixels_filter(c.src)}"
                 f"scale={cover_w}:{cover_h}:force_original_aspect_ratio=increase,"
                 f"{inner_rot}"
                 f"crop={box_w}:{box_h}:'{x_expr}':'{y_expr}'{scaled_label}"
             )
         else:
             # We don't know the source aspect; -1 preserves it
-            parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps)}"
+            # (an anamorphic source is squared first, lane E1a: `h=-1` and
+            # the UI's box, <video>.videoWidth, use its DISPLAYED aspect)
+            parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{square_pixels_filter(c.src)}"
                          f"scale=w={target_long}:h=-1{scaled_label}")
 
         # Optional chroma key BEFORE rotate/opacity so transparency survives.
@@ -498,20 +608,44 @@ def build_pip_overlay_chain(
             )
             scaled_label = shaped
 
-        # Optional rotation
-        rot_static = _scalar_or_last(tx.rotation, 0.0)
-        if abs(rot_static) > 0.01:
-            rad = rot_static * 3.14159265 / 180.0
-            rotated = f"[pipr{i}]"
-            parts.append(f"{scaled_label}rotate={rad}:c=black@0:ow=rotw({rad}):oh=roth({rad}){rotated}")
-            scaled_label = rotated
+        # Keyed values run on the element's own clock, `t - t0` (timeline-
+        # local, like the UI), frame-exact (`frame_exact_expr`).
+        kt = f"(t-{t0:.9f})"
 
-        # Optional opacity
-        opa_static = _scalar_or_last(tx.opacity, 1.0)
-        if opa_static < 0.999:
+        # Optional rotation. KEYED (review RD3): per frame, on a square
+        # canvas big enough for any angle (hypot), so the overlay's centring
+        # on overlay_w/2 keeps the pivot where the preview has it. It used to
+        # take the LAST key for the whole clip — a keyed spin exported still.
+        if is_keyframed(tx.rotation):
+            re_ = frame_exact_expr(tx.rotation, kt)
+            rotated = f"[pipr{i}]"
+            parts.append(f"{scaled_label}rotate=a='({re_})*PI/180':c=black@0"
+                         f":ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'{rotated}")
+            scaled_label = rotated
+        else:
+            rot_static = _scalar_or_last(tx.rotation, 0.0)
+            if abs(rot_static) > 0.01:
+                rad = rot_static * 3.14159265 / 180.0
+                rotated = f"[pipr{i}]"
+                parts.append(f"{scaled_label}rotate={rad}:c=black@0:ow=rotw({rad}):oh=roth({rad}){rotated}")
+                scaled_label = rotated
+
+        # Optional opacity. KEYED (review RD3): a per-frame alpha multiply,
+        # after the shape mask and the rotation so their alphas multiply in.
+        # (geq's clock is `T`.) It used to be the LAST key throughout.
+        if is_keyframed(tx.opacity):
+            oe = frame_exact_expr(tx.opacity, f"(T-{t0:.9f})")
             faded = f"[pipo{i}]"
-            parts.append(f"{scaled_label}format=yuva420p,colorchannelmixer=aa={opa_static:.3f}{faded}")
+            parts.append(f"{scaled_label}format=yuva420p,"
+                         f"geq=lum='p(X\\,Y)':cb='p(X\\,Y)':cr='p(X\\,Y)'"
+                         f":a='alpha(X\\,Y)*({oe})'{faded}")
             scaled_label = faded
+        else:
+            opa_static = _scalar_or_last(tx.opacity, 1.0)
+            if opa_static < 0.999:
+                faded = f"[pipo{i}]"
+                parts.append(f"{scaled_label}format=yuva420p,colorchannelmixer=aa={opa_static:.3f}{faded}")
+                scaled_label = faded
 
         # Animated scale (QA-035): the element above is built at the largest
         # keyed scale; shrink it per frame to S(t)/S_max. Same mechanism the
@@ -522,7 +656,7 @@ def build_pip_overlay_chain(
         # so every filter before it (shape geq, rotate, opacity) sees a fixed
         # frame size.
         if scale_kf and sc_static > 0:
-            se = to_ffmpeg_expr(tx.scale, time_var=f"(t-{t0:.6f})")
+            se = frame_exact_expr(tx.scale, kt)
             ratio = f"(({se})/{sc_static:.6f})"
             animated = f"[pips{i}]"
             parts.append(
@@ -537,13 +671,13 @@ def build_pip_overlay_chain(
         x_kf = tx.x
         y_kf = tx.y
         if is_keyframed(x_kf):
-            xe = to_ffmpeg_expr(x_kf, time_var=f"(t-{t0:.6f})")
+            xe = frame_exact_expr(x_kf, kt)
             x_expr = f"({xe})*{sx:.6f}-overlay_w/2"
         else:
             xc = float(getattr(tx, "x", 0)) if isinstance(tx.x, (int, float)) else canvas.w / 2
             x_expr = f"({xc * sx:.2f})-overlay_w/2"
         if is_keyframed(y_kf):
-            ye = to_ffmpeg_expr(y_kf, time_var=f"(t-{t0:.6f})")
+            ye = frame_exact_expr(y_kf, kt)
             y_expr = f"({ye})*{sy:.6f}-overlay_h/2"
         else:
             yc = float(getattr(tx, "y", 0)) if isinstance(tx.y, (int, float)) else canvas.h / 2

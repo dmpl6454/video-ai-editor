@@ -365,19 +365,12 @@ interface State {
   clearExportError(): void
   resetTransient(): void
 
-  // --- resizable panel sizes (Task 9), persisted to localStorage so a drag
-  // survives reload. Plain px, clamped in setPanelSize. ---
-  leftW: number
-  rightW: number
+  // --- the timeline's resizable height (Task 9), persisted to localStorage
+  // so a drag survives reload. Plain px, clamped in setPanelSize. The side
+  // panels' widths and the right panel's open state live in
+  // lib/layoutStore.ts (LEFT_RAIL_SPEC R1; the old copies here went in R6). ---
   timelineH: number
-  setPanelSize(key: 'leftW' | 'rightW' | 'timelineH', px: number): void
-
-  // --- right-panel (Properties/History) collapse toggle, persisted like the
-  // panel sizes above. When false, the sidebar shrinks to a thin rail (see
-  // RIGHT_RAIL_W in App.tsx) instead of removing the grid column outright,
-  // so there's no layout reflow jump on toggle. ---
-  rightPanelOpen: boolean
-  setRightPanelOpen(open: boolean): void
+  setPanelSize(key: 'timelineH', px: number): void
 
   // --- timeline view + shortcut-driven actions ---
   timelineZoom: number              // px per second
@@ -495,13 +488,10 @@ export const useStore = create<State>((set, get) => ({
   exportProgress: 0,
   exportJobId: null,
 
-  // Panel sizes: read from localStorage (falls back to the historical fixed
-  // CSS defaults — 220/280/280 — when unset, invalid, or running server-side
-  // where localStorage doesn't exist).
-  leftW: readStoredPanelSize('vai.leftW', 220),
-  rightW: readStoredPanelSize('vai.rightW', 280),
+  // The timeline height: read from localStorage (falls back to the historical
+  // 280 px when unset, invalid, or running server-side where localStorage
+  // doesn't exist).
   timelineH: readStoredPanelSize('vai.timelineH', 280),
-  rightPanelOpen: readStoredBool('vai.rightPanelOpen', true),
 
   setSelection: (id) => set((s) => ({
     selection: id, multiSelection: id ? [] : [],
@@ -658,15 +648,6 @@ export const useStore = create<State>((set, get) => ({
     const clamped = Math.max(160, Math.min(640, px))
     if (typeof localStorage !== 'undefined') localStorage.setItem(`vai.${key}`, String(clamped))
     set({ [key]: clamped } as Partial<State>)
-  },
-
-  // Toggles the right panel (Properties/History) collapsed/open, persisted
-  // the same way panel sizes are. Does not touch `rightW` — the splitter's
-  // dragged width is preserved underneath the collapse so re-expanding
-  // returns to the same size rather than a fixed default.
-  setRightPanelOpen: (open) => {
-    if (typeof localStorage !== 'undefined') localStorage.setItem('vai.rightPanelOpen', String(open))
-    set({ rightPanelOpen: open })
   },
 
   // --- timeline view + shortcut-driven actions ---

@@ -9,9 +9,11 @@ import { freezeAtPlayhead } from '../lib/freezeFrame'
 import { chordLabel, useKeymapStore } from './engine'
 import { openSettings } from '../lib/settingsOpen'
 import { useLayoutStore } from '../lib/layoutStore'
-import { RAIL_ITEMS } from '../components/rail/railModel'
+import { RAIL_ITEMS, railPanelId } from '../components/rail/railModel'
 import { cycleRegion } from './regions'
 import { pressControl, type UiTarget } from './uiTargets'
+import { adjacentClip, clipAtPlayhead, type ClipPick } from '../lib/clipSelect'
+import { announce } from '../lib/announce'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -79,6 +81,55 @@ function press(target: UiTarget): void {
   const r = pressControl(target)
   if (r.kind === 'disabled' && r.reason) toast.info(r.reason)
   else if (r.kind === 'missing') console.warn(`[keymap] no control on screen for ${target}`)
+}
+
+/** Select a clip picked from the keyboard (review RD3), optionally moving
+ *  the playhead to its first frame, and say which one it is. */
+function pickClip(s: Store, pick: ClipPick | null, movePlayhead: boolean): void {
+  if (!pick) { announce('No clip there'); return }
+  s.setSelection(pick.id)
+  if (movePlayhead) { s.setPlaying(false); s.setPlayhead(pick.start) }
+  announce(`Selected ${pick.name}`)
+}
+
+const laneOf = (s: Store, id: string | null): string | null =>
+  (id && s.edl?.tracks.find((t) => t.clips.some((c) => c.id === id))?.id) || null
+
+/** After ⌥T (review RD3): the new text clip's Inspector field takes focus
+ *  with its words selected, so what the user types next IS the text (it was
+ *  left on the timeline, where L shuttled and K stopped). Waits for the
+ *  insert to land and select the clip; Escape in the field returns to the
+ *  timeline (Properties.tsx). */
+async function focusNewText(before: string | null): Promise<void> {
+  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined') return
+  const t0 = performance.now()
+  while (performance.now() - t0 < 3000) {
+    await new Promise((r) => requestAnimationFrame(() => r(null)))
+    const s = useStore.getState()
+    const id = s.selection
+    if (!id || id === before) continue
+    if (!s.edl?.tracks.some((t) => t.clips.some((c) => c.id === id && 'text' in c))) return
+    if (useLayoutStore.getState().rightTab !== 'inspect' || !useLayoutStore.getState().rightOpen) {
+      useLayoutStore.getState().showRight('inspect')
+      continue
+    }
+    const field = document.querySelector<HTMLTextAreaElement>('.props textarea[aria-label="Text"]')
+    if (!field) continue
+    field.focus()
+    field.select()
+    return
+  }
+}
+
+/** Focus a rail panel once the switch has committed (unless focus is
+ *  already inside it, or the user typed into a field meanwhile). */
+function focusPanel(id: (typeof RAIL_ITEMS)[number]['id']): void {
+  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined') return
+  requestAnimationFrame(() => {
+    const panel = document.getElementById(railPanelId(id))
+    if (!panel || panel.hidden || panel.contains(document.activeElement)) return
+    panel.focus({ preventScroll: true })
+  })
 }
 
 /** Open the right panel on a tab; Chat also takes focus in its message box
@@ -175,7 +226,7 @@ export const COMMANDS: Command[] = [
   // ⌥T: the Text tool's own "add text" button (the default style at the
   // playhead, selected). 'global' like the panel chords.
   { id: 'addText', label: 'Add text at the playhead', category: 'Editing', scope: 'global',
-    run: () => press('addText') },
+    run: (s) => { const before = s.selection; press('addText'); void focusNewText(before) } },
 
   // ---------- Marks ----------
   { id: 'markIn', label: 'Mark in', category: 'Marks', run: (s) => s.setInMark(s.playhead) },
@@ -208,6 +259,15 @@ export const COMMANDS: Command[] = [
 
   // ---------- Selection ----------
   { id: 'selectAll', label: 'Select all clips', category: 'Selection', run: (s) => s.selectAll() },
+  // A particular clip from the keyboard (review RD3): Final Cut's C,
+  // Premiere's D; ↑ / ↓ walk the lane (main track when nothing is selected)
+  // and bring the playhead to the clip's first frame.
+  { id: 'selectClipAtPlayhead', label: 'Select the clip at the playhead', category: 'Selection',
+    run: (s) => pickClip(s, clipAtPlayhead(s.edl, s.playhead, laneOf(s, s.selection)), false) },
+  { id: 'selectNextClip', label: 'Select the next clip', category: 'Selection',
+    run: (s) => pickClip(s, adjacentClip(s.edl, s.selection, s.playhead, 1), true) },
+  { id: 'selectPrevClip', label: 'Select the previous clip', category: 'Selection',
+    run: (s) => pickClip(s, adjacentClip(s.edl, s.selection, s.playhead, -1), true) },
   { id: 'deselect', label: 'Deselect / clear', category: 'Selection',
     run: (s) => { s.clearSelection(); s.setInMark(null); s.setOutMark(null) } },
 
@@ -238,9 +298,17 @@ export const COMMANDS: Command[] = [
   // collapses it, like a click on the active tab. Focus stays where it is
   // unless it was inside the part that hid (focus rescue, §5.3). 'global': a
   // chord still switches from a media row or an AI form (critique H1).
+  // Showing a panel puts focus ON it (review RD3: ⌥7 left focus on the
+  // timeline, 17 Tab stops from "Generate captions"): Tab goes on into its
+  // controls, a screen reader names it, and Space still plays (the panel is
+  // not a control). Hiding it leaves focus where the rescue puts it.
   ...RAIL_ITEMS.map((r): Command => ({
     id: r.command, label: `Show or hide the ${r.label} panel`, category: 'Panels', scope: 'global',
-    run: () => useLayoutStore.getState().showTab(r.id, { toggle: true }),
+    run: () => {
+      useLayoutStore.getState().showTab(r.id, { toggle: true })
+      const after = useLayoutStore.getState()
+      if (after.leftOpen && after.leftTab === r.id) focusPanel(r.id)
+    },
   })),
   { id: 'toggleToolPanel', label: 'Show or hide the tool panel', category: 'Panels', scope: 'global',
     run: () => useLayoutStore.getState().toggleLeftOpen() },

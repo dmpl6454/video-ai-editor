@@ -43,6 +43,18 @@ INTENTS: tuple[str, ...] = (
     "reverse",
     # Wave D (review RD2): a freeze frame, and a split at a named moment.
     "freeze", "split",
+    # Wave D3 (E3 key-free sweep): the CapCut clip edits — delete / duplicate /
+    # move a clip, zoom (Ken Burns, punch-in, a zoom level), rotate, the Adjust
+    # sliders (brightness, contrast, saturation) — and stickers, which a plan
+    # may not place (add_sticker fetches artwork), so they get an honest reply.
+    "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust", "sticker",
+    # "remove the captions / the filter / the transitions": no plan tool can
+    # find those by name, so the reply says where to do it — it used to ADD
+    # captions and apply a LUT (the E3 sweep's wrong edits).
+    "remove_feature",
+    # Review RD3: flip / mirror is not a Transform yet (wave E F4) — an honest
+    # reply instead of a question the reply could not act on.
+    "flip",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -117,6 +129,20 @@ _PROTECTED = (
 )
 
 
+#: Ordinal words a clip reference uses ("the second clip", "the 3rd shot").
+ORDINAL = (r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)"
+           r"|last|final|opening|closing|middle|penultimate|second[- ]to[- ]last|next[- ]to[- ]last)")
+#: What a clip is called in a prompt.
+CLIP_NOUN = r"(?:clips?|shots?|segments?|scenes?|video clips?)"
+#: A reference to ONE clip: "the second clip", "clip 2", "the selected clip",
+#: "the last one", "the clip at 0:05" (the planner resolves which one).
+CLIP_PHRASE = (rf"(?:(?:the\s+|that\s+|this\s+)?(?:{ORDINAL}|selected|current|this|that)\s+(?:{CLIP_NOUN}|one|part|bit|section|piece)\b"
+               rf"|(?:the\s+)?{CLIP_NOUN}\s+(?:#\s*|number\s+|no\.?\s*)?(?:\d{{1,2}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
+               rf"|(?:the\s+|this\s+|that\s+|all\s+(?:the\s+|of\s+the\s+)?|every\s+|each\s+){CLIP_NOUN}\b)")
+#: "the first and second clip", "clips 1 and 2": one reference, not two clauses.
+_ORDINAL_PAIR_RE = re.compile(rf"\b({ORDINAL})\s+and\s+((?:the\s+)?{ORDINAL})\b|\b({CLIP_NOUN}\s+\d{{1,2}})\s+and\s+(\d{{1,2}})\b")
+
+
 def split_clauses(prompt: str) -> list[str]:
     """Clauses of a normalised prompt. Quoted spans are opaque (an `and`
     inside quotes is text, and the quotes are restored afterwards)."""
@@ -131,6 +157,9 @@ def split_clauses(prompt: str) -> list[str]:
         return key
 
     text = _QUOTE_RE.sub(_stash, text)
+    # "swap the first and second clip" / "between clips 2 and 3" name clips,
+    # not two edits: the pair is stashed like a quote so `and` cannot split it.
+    text = _ORDINAL_PAIR_RE.sub(_stash, text)
     for i, phrase in enumerate(_PROTECTED):
         text = text.replace(phrase, phrase.replace(" and ", f"\x01{i}\x01"))
     parts = [p for p in _SPLIT_RE.split(text) if p and p.strip()]
@@ -144,6 +173,67 @@ def split_clauses(prompt: str) -> list[str]:
         if p:
             out.append(p)
     return out
+
+
+_ORDINAL_N: dict[str, int] = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+                              "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10, "opening": 1}
+#: What ONE clip may be called when an ordinal points at it ("the second
+#: part", "the last bit").
+_PIECE = rf"(?:{CLIP_NOUN}|one|part|bit|section|piece)"
+_NTH_CLIP_RE = re.compile(rf"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|opening|(\d{{1,2}})(?:st|nd|rd|th))"
+                          rf"\s+{_PIECE}\b")
+_CLIP_NUM_RE = re.compile(rf"\b{CLIP_NOUN}\s+(?:#\s*|number\s+|no\.?\s*)?(\d{{1,2}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
+                          r"(?!\s*(?:s|sec|secs|seconds?|%|x)\b)")
+_NUM_WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+_PENULT_RE = re.compile(rf"\b(?:second[- ]to[- ]last|next[- ]to[- ]last|penultimate|second[- ]last)\s+{_PIECE}\b")
+_MIDDLE_RE = re.compile(rf"\bmiddle\s+{_PIECE}\b|\bin the middle\b")
+_LAST_CLIP_RE = re.compile(rf"\b(?:last|final|closing)\s+{_PIECE}\b")
+#: "the intro" / "the outro" of a multi-clip edit are its first / last clip
+#: ("the intro drags, speed it up" sped up EVERY clip).
+_INTRO_RE = re.compile(r"\bthe\s+(?:intro|opening)\b(?!\s+(?:text|title|music|song|card|line|hook)\b)")
+_OUTRO_RE = re.compile(r"\bthe\s+(?:outro|ending)\b(?!\s+(?:text|title|music|song|card|line|screen)\b)")
+_CLIP_AT_RE = re.compile(rf"\b{CLIP_NOUN}\s+(?:at|around|that starts at|starting at)\s+"
+                         r"(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?)\b")
+_THIS_CLIP_RE = re.compile(rf"\b(?:this|that|the selected|selected|current|the current)\s+(?:{CLIP_NOUN}|one|part|bit|section|portion)\b"
+                           r"|\bthe selection\b")
+#: Internal clip references the expanders bind to a real id against facts
+#: (never reach validate_plan): the N-th v1 clip (1-based; -2 = second to
+#: last) and the v1 clip under a timeline time.
+NTH_REF, AT_REF = "$v1_nth:", "$v1_at:"
+
+
+def clip_ref_of(text: str) -> str | None:
+    """Which ONE clip `text` names, as a sentinel or an internal reference:
+    "the second clip" → `$v1_nth:2`, "clip 3" → `$v1_nth:3`, "the first clip"
+    → `$v1_first`, "the last one" → `$v1_last`, "the second to last clip" →
+    `$v1_nth:-2`, "the clip at 0:05" → `$v1_at:5.0`, "this clip" →
+    `$selected`, "every clip" → `$v1_all`. None when no clip is named."""
+    t = S.normalize(text or "")
+    if not t:
+        return None
+    if m := _CLIP_AT_RE.search(t):
+        secs = int(m.group(1)) * 60 + float(m.group(2)) if m.group(1) is not None else float(m.group(3))
+        return f"{AT_REF}{round(secs, 3):g}"
+    if _PENULT_RE.search(t):
+        return f"{NTH_REF}-2"
+    if _MIDDLE_RE.search(t):
+        return f"{NTH_REF}mid"
+    if m := _NTH_CLIP_RE.search(t):
+        n = int(m.group(2)) if m.group(2) else _ORDINAL_N[m.group(1)]
+        return "$v1_first" if n == 1 else f"{NTH_REF}{n}"
+    if m := _CLIP_NUM_RE.search(t):
+        n = int(m.group(1)) if m.group(1).isdigit() else _NUM_WORD[m.group(1)]
+        return "$v1_first" if n == 1 else f"{NTH_REF}{n}"
+    if _LAST_CLIP_RE.search(t):
+        return "$v1_last"
+    if _THIS_CLIP_RE.search(t):
+        return "$selected"
+    ref = S.extract(t).clip_ref
+    if ref is None and _INTRO_RE.search(t):
+        return "$v1_first"
+    if ref is None and _OUTRO_RE.search(t):
+        return "$v1_last"
+    return ref
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +327,31 @@ def strip_negations(clause: str) -> str:
 
 _HAS_RANGE = r"(?:\bfirst\b|\blast\b|\bfrom\b|\bbetween\b|\d+\s*(?:s|sec|secs|seconds?|m|min|mins|minutes?)\b|\d{1,2}:\d{2})"
 
+#: A verb that takes one CLIP away ("delete the second clip", "ripple delete
+#: this clip", "remove clip 3", "delete it"). Not "remove the first 5 seconds"
+#: (no clip noun) and not "remove the clip's audio / the filter on the clip".
+_DELETE_CLIP = (rf"\b(?:ripple[- ]?)?(?:delete|remove|drop|get rid of|take out|cut out|lose|trash|erase|ditch|scrap|kill)"
+                rf"\s+{CLIP_PHRASE}(?!\s*'s\b)(?!\s+(?:audio|sound|music|voice|captions?|text|filter|effect|"
+                r"transitions?|fades?|keyframes?|speed|look|colou?r)\b)"
+                r"|\bripple[- ]?delete\b|^(?:ripple[- ]?)?(?:delete|remove)\s+(?:it|this|that)$")
+#: Taking away something a clip or the timeline CARRIES (not a clip, not the
+#: music bed, not silences or noise — those have their own recipes).
+REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|hide|drop|lose|kill|strip)"
+                  r"\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|every\s+|that\s+|this\s+|those\s+|these\s+)?"
+                  r"(?:\w+\s+)?(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|grades?|grading|effects?"
+                  r"|transitions?|text|titles?|lower thirds?|hooks?|keyframes?|zoom|ken burns|stickers?|emojis?"
+                  r"|watermark|end ?card|speed ramp|speed curve|freeze(?: frame)?)\b(?!\s*(?:from|on)\s+the\s+music)")
+#: A zoom on a clip's picture — Ken Burns, a slow push, a punch-in, a zoom
+#: level. Never a clause about transitions or seams ("zoom transition at
+#: 0:04", "a zoom at every cut" stay transitions), and never the hook's own
+#: punch-in ("add a hook with a punch in").
+_ZOOM = (r"^(?!.*\btransitions?\b)(?!.*\bhook\b)(?!.*\b(?:music|volume|audio|sound|voice|song)\b)"
+         r"(?!.*\b(?:between|at|on)\s+(?:the\s+|every\s+|each\s+|all\s+(?:the\s+)?)?(?:cuts?|seams?|scene changes?|clip changes?)\b)"
+         r".*?(?:\b(?:zoom|push)(?:s|ed|ing)?[- ]?(?:in|out|into)\b|\bpunch(?:es|ed|ing)?[- ]?in(?:to)?\b"
+         r"|\bken[- ]?burns\b|\bpan (?:and|&) zoom\b|\bslow(?:ly)? zoom|\bzoom (?:effect|animation)\b"
+         r"|\b(?:zoom|scale|enlarge|magnify)\b[^%]*?\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)"
+         r"|\bzoom (?:it|this|that|the [\w ]{0,20}?clip)\b)")
+
 #: (regex, intent, score) checked in order BEFORE the phrase table (§2.3).
 CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # QA-018: a fade to/from black anchored at the END / START of the video is
@@ -247,6 +362,18 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
      r"|\bfade (?:in |up )?from black (?:at|in|for) (?:the )?(?:very )?(?:start|beginning|opening|intro)\b"
      r"|\b(?:end|finish|close) (?:it |the video |everything )?(?:with|on) a fade(?: out| to black)?\b", "fade", EXACT),
     (r"\bcut(?:s|ting)?\s+(?:it\s+|this\s+|the\s+video\s+)?(?:to|on|with|along)\s+the\s+(?:beat|music|rhythm|drums?|bpm)\b|\bcut to the beat\b|\bon the beat\b|\bbeat[- ]sync\b|\bsync(?:ed)?\s+to\s+the\s+(?:beat|music)\b|\bbeat[- ]match\b", "beat_sync", EXACT),
+    (REMOVE_FEATURE, "remove_feature", EXACT),
+    (_ZOOM, "zoom", EXACT),
+    # "export in 4k" is the 4K export preset, not an AI upscale of every clip.
+    (r"\bexport\b(?!.*\bupscal)(?=.*\b(?:4k|uhd|2160p)\b)", "export_preset", EXACT),
+    # A CLIP taken out wins over the range trim below ("remove the first clip"
+    # has `first` in it, which `_HAS_RANGE` reads as a range with no length).
+    (_DELETE_CLIP, "delete_clip", EXACT),
+    # CapCut's "cut" at a moment is its Split: "cut it at 6s", "cut here";
+    # "chop / slice / snip it at 00:06" too (review RD3: those asked which
+    # part to cut).
+    (r"\b(?:cut|chop|slice|snip)\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+)?"
+     r"(?:(?:right\s+)?(?:at|@)\s+(?:\d|the playhead\b|the cursor\b|this point\b)|here\b|in (?:two|half) at\b)", "split", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:ums?|uhs?|umms?|filler(?:s| words?)|hesitations?|stutters?)\b", "remove_fillers", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:silences?|pauses?|dead air|gaps?|quiet parts?)\b", "remove_silences", EXACT),
     (r"\bcut\s+(?:it\s+|this\s+|the\s+video\s+)?(?:up\s+)?into\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some)\s*(?:shorts?|clips?|parts?|pieces?|highlights?|reels?|segments?|videos?)\b|\bcut\s+(?:it\s+)?into\s+shorts\b", "shorts", EXACT),
@@ -281,7 +408,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                         (r"\bsilences?\b|\bpauses?\b|\bdead air\b|\bawkward gaps?\b", SYNONYM)),
     "tighten": ((r"\btighten(?: it| this| the video| up| it up| this up)?\b|\bmake (?:it|this) (?:tighter|snappier|punchier|faster paced)\b|\bremove (?:the )?(?:silences?|pauses?) and (?:the )?(?:fillers?|filler words|ums)\b|\b(?:silences?|pauses?) and (?:fillers?|filler words|ums)\b|\bjump ?cut (?:it|this|the video)\b|\bcut the (?:fat|fluff|dead weight)\b|\btrim the fat\b|\bshorten (?:it|this|the video)\b|\btrim (?:it|this) down\b|\bsmart cut\b", EXACT),
                 (r"\bsnappier\b|\bpacier\b|\bfaster paced\b|\bless rambling\b|\bconcise\b", SYNONYM)),
-    "shorts": ((r"\b(?:make|create|generate|give me|produce|extract|pull|find|get)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some|a couple of)?\s*(?:short|vertical|quick|viral|best)?\s*(?:shorts?|clips?|highlights?|reels?|snippets?|teasers?|moments)\b(?! (?:transitions?|captions?))|\bhighlights? reel\b|\bbest (?:bits|moments|parts)\b|\bsplit (?:it|this) into (?:\d+|shorts|clips)\b|\bchop (?:it|this) (?:up )?into\b|\bmake shorts\b|\bshorts out of (?:this|it)\b", EXACT),
+    "shorts": ((r"\b(?:make|create|generate|give me|produce|extract|pull|find|get)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some|a couple of)?\s*(?:short|vertical|quick|viral|best)?\s*(?:shorts?|clips?|highlights?|reels?|snippets?|teasers?|moments)\b(?! (?:transitions?|captions?))(?!\s+(?:#\s*|number\s+)?(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b)|\bhighlights? reel\b|\bbest (?:bits|moments|parts)\b|\bsplit (?:it|this) into (?:\d+|shorts|clips)\b|\bchop (?:it|this) (?:up )?into\b|\bmake shorts\b|\bshorts out of (?:this|it)\b", EXACT),
                (r"\bhighlights?\b|\bclip (?:it|this) up\b|\bviral moments?\b", SYNONYM)),
     "reframe": ((r"\b(?:make|turn|flip|convert|reframe|crop|resize|change)\s+(?:it|this|the video|the canvas|the aspect(?: ratio)?)?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b"
                  # QA-018 live pass: "make it fit a phone screen", "turn this into a phone video"
@@ -337,6 +464,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               # noise reduction) — the programme's own sound, off.
               r"|\b(?:kill|cut|drop|lose|silence|switch off|turn off)\s+(?:the\s+|all\s+(?:the\s+)?)?(?:audio|sound)\s+"
               r"(?:from|of|on|in)\s+(?:the\s+|my\s+)?(?:camera|clips?|video|footage|recording|phone)\b"
+              rf"|\b(?:take|pull|strip|remove|kill|cut)\s+(?:the\s+)?(?:sound|audio)\s+(?:out\s+)?(?:of|from|on)\s+{CLIP_PHRASE}"
               rf"|\b(?:un)?mute\b", EXACT),),
     "volume": ((rf"\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
                 rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?(?:\s+(?:volume|level|gain))?\b"
@@ -364,13 +492,19 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 r"(?:\s+in the mix)?\b"
                 rf"|\b(?:push|pull|sit|tuck|set|move|nudge|put)\s+(?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|beat|beats)\s+"
                 r"(?:further\s+|more\s+|a (?:bit|little|touch)\s+|way\s+)?(?:back|behind|forward)(?:\s+in the mix)?\b"
-                rf"|\b(?:{_MUSIC_NOUN}|beat|beats)\b.*\bin the mix\b", EXACT),),
+                rf"|\b(?:{_MUSIC_NOUN}|beat|beats)\b.*\bin the mix\b"
+                # one clip's level (wave D3, E3): "lower the volume of the second
+                # clip" used to move the whole programme's loudness target
+                rf"|\b(?:lower|raise|reduce|increase|boost|drop|decrease|turn (?:up|down)|bring (?:up|down))\s+(?:the\s+)?"
+                rf"(?:volume|level|gain|audio|sound)\s+(?:of|on|for|in)\s+{CLIP_PHRASE}"
+                rf"|\bmake\s+{CLIP_PHRASE}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?(?:louder|quieter|softer)\b"
+                rf"|\b(?:turn|bring)\s+{CLIP_PHRASE}\s+(?:up|down)\b", EXACT),),
     # QA-037: "reverse the clip", "play it backwards", "ulta chala do"; the
     # forwards-again wording is read by `reverse_off`. "reverse that" / "reverse
     # the last edit" is an undo and "reverse the order" a reorder, so neither
     # reads as this row.
     "reverse": ((r"\b(?:un-?)?reverse(?:d|s)?\b(?!\s+(?:that|it all|the (?:last|previous) (?:edit|change|step)|my last|the order|order|the sequence))"
-                 r"|\bplay(?:s|ing)?\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+)?(?:backwards?|in reverse|forwards? again|forwards?|normally again)\b"
+                 r"|\bplay(?:s|ing)?\s+(?:it\s+|this\s+|that\s+|(?:the|this|that)\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+)?(?:backwards?|in reverse|forwards? again|forwards?|normally again)\b"
                  r"|\brun(?:s)?\s+(?:it\s+|this\s+|the\s+(?:clip|video|footage|shot)\s+)?(?:backwards?|in reverse)\b"
                  r"|\brewind(?:ing)? effect\b|\bbackwards? (?:clip|video|playback|effect)\b"
                  r"|\bulta\s+(?:chala\w*|karo|kar do|kardo|play)\b", EXACT),),
@@ -388,7 +522,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               (r"\bmusic\b|\bsoundtrack\b|\bsong\b|\btune\b", WEAK)),
     "hook": ((r"\b(?:add|put|write|create|give (?:it|me)|make|need|i want|generate|open with)\s+(?:a\s+|an\s+|the\s+|some\s+|a\s+\w+\s+)?(?:hook|opener|opening (?:line|text|title|hook)|cold open|scroll[- ]stopper|attention grabber|punchy (?:intro|opening|start))\b|\bhook (?:it|this|them|the viewer)\b|\b(?:a |the )?hook\b|\bstop the scroll\b|\bgrab attention\b|\bpunchy (?:intro|opening|start)\b|\bfirst (?:3|three) seconds\b", EXACT),
              (r"\bintro text\b|\bopening text\b|\bopener\b|\battention\b", SYNONYM)),
-    "color_look": ((r"\b(?:give|make|apply|add|put|use|grade|colou?r[- ]grade|slap on|throw on|set)\s+(?:it|this|the video|the footage|the clips?)?\s*(?:a\s+|an\s+|the\s+|some\s+)?(?:\w+[- ])?(?:look|grade|lut|filter|tone|vibe|feel|colou?r(?:s| grade| grading| correction| look)?|preset|teal[- ]orange|black and white|b ?and ?w)\b|\b(?:cinematic|warm(?:er)?|cool(?:er)?|cold|punchy|vivid|faded|vintage|retro|film|moody|teal(?: and orange| orange)?|black and white|monochrome|b ?and ?w|greyscale|grayscale)\s+(?:look|grade|lut|filter|tone|vibe|feel|colou?rs?|preset|footage)\b|\bmake (?:it|this|the (?:video|footage|colou?rs?)) (?:more )?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w|pop)\b|\bapply (?:a |the )?lut\b|\bcolou?r[- ]?grad(?:e|ing)\b|\blut\b", EXACT),
+    "color_look": ((r"\b(?:give|make|apply|add|put|use|grade|colou?r[- ]grade|slap on|throw on|set)\s+(?:it|this|the video|the footage|the clips?)?\s*(?:a\s+|an\s+|the\s+|some\s+)?(?:\w+[- ])?(?:look|grade|lut|filter|tone|vibe|feel|colou?r(?:s| grade| grading| correction| look)?|preset|teal[- ]orange|black and white|b ?and ?w)\b|\b(?:cinematic|warm(?:er)?|cool(?:er)?|cold|punchy|vivid|faded|vintage|retro|film|moody|teal(?: and orange| orange)?|black and white|monochrome|b ?and ?w|greyscale|grayscale)\s+(?:look|grade|lut|filter|tone|vibe|feel|colou?rs?|preset|footage)\b|\bmake (?:it|this|everything|the (?:video|footage|colou?rs?)) (?:more )?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w|pop)\b|\bapply (?:a |the )?lut\b|\bcolou?r[- ]?grad(?:e|ing)\b|\blut\b", EXACT),
                    (r"\bcinematic\b|\bwarm\b|\bvintage\b|\bcolou?rs?\b|\bfilter\b|\bmoody\b", SYNONYM)),
     "clean_audio": ((r"\b(?:clean(?: up)?|fix|improve|enhance|de-?noise|denoise|reduce (?:the )?(?:background )?noise (?:in|on|of))\s+(?:up\s+)?(?:the\s+|my\s+|this\s+)?(?:audio|sound|voice|speech|mic|recording|hiss|hum|background noise|noise)\b|\bnoise (?:reduction|removal|cancel\w*)\b|\bremove (?:the )?(?:background )?(?:noise|hiss|hum|buzz|static)\b|\bdenois\w+\b|\baudio (?:clean ?up|enhance\w*|repair)\b|\bmake (?:the )?(?:audio|sound|voice) (?:clearer|cleaner|better|crisper)\b|\bbackground noise\b", EXACT),
                     (r"\bnoisy\b|\bhiss\b|\bhum\b|\bmuffled\b|\baudio\b", SYNONYM)),
@@ -398,32 +532,78 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     # "the montage curve") or "speed ramp/curve" is this intent too; the
     # planner reads the name into the preset slot (never a constant factor).
     "speed": ((r"\b(?:montage|hero|bullet|jump[- ]?cut|flash[- ]?(?:in|out)|ramp[- ]?(?:up|down))\s+(?:speed\s+)?(?:ramp|curve|preset)\b"
-               r"|\bspeed[- ]?(?:ramp|curve)s?\b|\bspeed[- ]?ramp(?:ing|ed)?\b", EXACT),
-              (r"\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
+               r"|\bspeed[- ]?(?:ramp|curve)s?\b|\bspeed[- ]?ramp(?:ing|ed)?\b|\bbullet[- ]?time\b"
+               # "the intro drags": too slow, said as a complaint (wave D3, E3)
+               r"|^(?!.*\b(?:music|song|track|beat)\b).*\b(?:drags?|dragging|feels? (?:too )?(?:slow|long)|(?:is|are|feels?) too slow)\b", EXACT),
+              (r"\b(?:slow|speed)\s+(?:that|the\s+[\w ]{0,20}?(?:clip|video|footage|shot|part|bit|section))\s+(?:down|up)\b|\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
               (r"\bspeed\b|\bquick(?:er)?\b|\btempo of the video\b", SYNONYM)),
     # CapCut's Freeze (wave D): hold the frame at a moment. "freeze frame"
     # used to reach the on-device model and come back as a title (RD2).
     "freeze": ((r"\bfreeze(?:[- ]?frames?|s|d)?\b(?!\s+(?:up|out)\b)|\bhold (?:the|this|that) (?:frame|shot|picture|image)\b"
+                r"|\bhold\s+(?:on\s+)?(?:the|this|that)\s+(?:final|last|first|opening|end|ending)\s+(?:frame|shot|image)\b"
                 r"|\bstill frame\b", EXACT),),
     # A split at a named time ("split at 3 seconds", "split the clip at 1:05");
     # "split it into 3 shorts" is the shorts intent.
     "split": ((r"\bsplit\s+(?:it\s+|this\s+|that\s+|here\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot|timeline)\s+)?(?:at|@)\s+(?:\d|the playhead\b)"
-               r"|\bsplit (?:it |the clip )?(?:at|on) the playhead\b|\bcut (?:it|the clip) in (?:two|half) at\b", EXACT),),
+               r"|\bsplit (?:it |the clip )?(?:at|on) the playhead\b|\bcut (?:it|the clip) in (?:two|half) at\b"
+               # CapCut's Split button: "split here", "split this clip" = at the playhead
+               r"|\bsplit\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?clip\s+)?(?:right\s+)?(?:here|now|at the cursor)\b"
+               r"|^split(?:\s+(?:it|this|that|the (?:\w+ )?clip|this clip))?$", EXACT),),
+    # --- Wave D3 (E3): the CapCut clip edits ------------------------------
+    "delete_clip": ((_DELETE_CLIP, EXACT),),
+    "duplicate": ((rf"\b(?:duplicate|copy|clone|repeat)\s+{CLIP_PHRASE}(?!\s*'s\b)"
+                   r"|^(?:duplicate|copy|clone)\s+(?:it|this|that)$"
+                   rf"|\b(?:make|add|create)\s+(?:a\s+|another\s+)?(?:copy|duplicate)\s+of\s+(?:{CLIP_PHRASE}|it|this|that)", EXACT),),
+    "move_clip": ((rf"\b(?:move|put|drag|place|shift|bring|send|shove|slide)\s+(?:{CLIP_PHRASE}|it|this|that)\s+"
+                   r"(?:(?:to|at)\s+(?:the\s+)?(?:very\s+)?(?:end|start|beginning|front|back|finish)\b|(?:to\s+)?(?:be\s+)?(?:first|last)\b"
+                   rf"|(?:right\s+|just\s+)?(?:before|after|in front of|behind)\s+{CLIP_PHRASE})"
+                   rf"|\bswap\s+(?:the\s+)?(?:{ORDINAL}|{CLIP_NOUN}\s+\d)"
+                   rf"|\bswitch\s+(?:the\s+)?(?:order of\s+(?:the\s+)?)?(?:{ORDINAL})\s+(?:and|&)\s+(?:the\s+)?{ORDINAL}\s+{CLIP_NOUN}"
+                   r"|\breverse\s+the\s+(?:order|sequence)\s+of\s+(?:the\s+|all\s+(?:the\s+)?)?clips\b"
+                   rf"|\bmake\s+{CLIP_PHRASE}\s+(?:the\s+)?(?:first|last)(?:\s+(?:one|clip))?\b", EXACT),),
+    "zoom": ((_ZOOM, EXACT),),
+    "rotate": ((r"^rotate(?:\s+(?:it|this|that|the\s+[\w ]{0,20}?(?:clip|video|shot)))?$"
+                r"|\brotat(?:e|ed|ing)\b(?=.*?\b\d{1,3}\s*(?:°|degrees?|deg)\b|.*?\b(?:upside down|sideways|clockwise|counter[- ]?clockwise|anti[- ]?clockwise)\b)"
+                r"|\b(?:turn|flip)\s+(?:it|this|that|the\s+[\w ]{0,20}?(?:clip|video|shot)"
+                r"|(?:clip|shot)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten))\s+upside down\b"
+                r"|\bstraighten\s+(?:it|this|the\s+[\w ]{0,20}?(?:clip|video|shot))\s+by\s+\d", EXACT),),
+    "adjust": ((r"\b(?:brighten|darken|desaturate)\b"
+                r"|\b(?:make|turn|get)\s+(?:it|this|that|everything|the\s+[\w ]{0,24}?)\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+|way\s+|slightly\s+)?"
+                r"(?:brighter|darker|lighter|dimmer|more saturated|less saturated|more colou?rful|less colou?rful|more contrasty|less contrasty|flatter)\b"
+                r"|\b(?:increase|boost|raise|bump(?: up)?|up|turn up|crank(?: up)?|add(?: more| some)?|more|lower|reduce|decrease|drop|lessen|turn down|less|tone down|dial (?:up|down|back))\s+"
+                r"(?:the\s+|some\s+)?(?:brightness|contrast|saturation|exposure|vibrance|colou?r saturation)\b"
+                r"|\b(?:brightness|contrast|saturation|exposure|vibrance)\s+(?:up|down|higher|lower|\+|-)"
+                r"|\b(?:it'?s|it is|looks?|the (?:video|clip|footage|picture) (?:is|looks))\s+(?:way |far |a bit |a little |too |very |so )*(?:too )?(?:dark|bright|dull|washed out|flat|oversaturated)\b", EXACT),
+               (r"\bbrighter\b|\bdarker\b|\bbrightness\b|\bcontrast\b|\bsaturation\b|\bexposure\b", SYNONYM)),
+    "remove_feature": ((REMOVE_FEATURE, EXACT),),
+    # Stickers are placed from the Stickers panel: `add_sticker` fetches its
+    # artwork from a CDN, so a plan may not name it (schema.PLAN_DENY).
+    "sticker": ((r"\bstickers?\b|\bemojis?\b|\bgifs?\b|\bheart (?:icon|emoji|sticker)\b", EXACT),),
+    # a mirror image; "flip it upside down" is a rotation (tie-break below)
+    "flip": ((r"\bmirror(?:ed|ing|s)?\b|\bflip(?:ped|ping|s)?\b(?:(?!upside).)*\b(?:horizontal(?:ly)?|vertical(?:ly)?|sideways|left to right|right to left)\b", EXACT),),
     "trim": ((rf"\b(?:trim|cut|remove|delete|drop|chop|lose|take (?:off|out)|get rid of|skip|shave)\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?:first|last|opening|closing|intro|outro)?\s*(?=.*{_HAS_RANGE})|\btrim (?:it|this|the (?:start|end|beginning|intro|outro|clip|video))\b|\bstart (?:it |the video )?(?:at|from)\s+\d|\bend (?:it |the video )?at\s+\d|\bkeep (?:only )?(?:the )?(?:first|last)\b|\bremove the (?:intro|outro|beginning|ending)\b|\bcut (?:the )?(?:intro|outro|beginning|ending|start|end)\b", EXACT),
              (r"\btrim\b|\bshorter\b|\bchop\b", SYNONYM)),
-    "title": ((r"\blower[- ]?third\b|\bname (?:tag|plate|card|strap|title|banner)\b|\bnameplate\b|\bstrap(?:line)?\b|\b(?:add|put|show|display|write|overlay)\s+(?:a\s+|the\s+|some\s+|my\s+)?(?:title|text|caption text|label|heading|headline|super|on[- ]screen text|text overlay|name)\b|\btitle (?:card|it|this)\b|\bintroduce (?:me|him|her|them|the speaker|the guest)\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b", EXACT),
+    # "write 'The End' over the last 2 seconds" (review RD3): quoted words
+    # written / put / typed somewhere are a title.
+    "title": ((r"\b(?:write|type|put|add|show|display|overlay)\s+(?:the\s+(?:words?|text|line)\s+)?[\"'][^\"']+[\"']\s+(?:over|on|across|at|during|for|in)\b|\blower[- ]?third\b|\bname (?:tag|plate|card|strap|title|banner)\b|\bnameplate\b|\bstrap(?:line)?\b|\b(?:add|put|show|display|write|overlay)\s+(?:a\s+|the\s+|some\s+|my\s+)?(?:title|text|caption text|label|heading|headline|super|on[- ]screen text|text overlay|name)\b|\btitle (?:card|it|this)\b|\bintroduce (?:me|him|her|them|the speaker|the guest)\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b", EXACT),
               (r"\btext\b|\btitle\b|\blabel\b|\bheadline\b", SYNONYM)),
     "brand": ((r"\bbrand(?:ing| kit| it| this|ed)?\b|\bwatermark\b|\bmy (?:handle|logo|colou?rs|brand)\b|\bapply (?:my |the )?(?:brand|kit)\b|\badd (?:my |the |a )?(?:handle|watermark|logo)\b|\bbrand colou?rs\b|\bhashtags?\b", EXACT),
               (r"\bhandle\b|\blogo\b|\b@\w+\b", SYNONYM)),
     "end_card": ((r"\bend[- ]?card\b|\bend (?:screen|slate|plate|title|frame)\b|\bouttro card\b|\boutro(?: card| screen)?\b|\bclosing (?:card|slate|screen)\b|\bfollow (?:me|us) (?:card|screen|at the end)\b|\bcall to action at the end\b|\bcta at the end\b|\bcta card\b|\bsubscribe (?:card|screen|reminder)\b", EXACT),
                  (r"\bcta\b|\bcall to action\b|\bfollow (?:me|us)\b", SYNONYM)),
-    "transitions": ((r"\btransitions?\b|\bcross[- ]?(?:fade|dissolve)s?\b|\bdissolves?\b|\bwipes?\b|\bwhip pans?\b|\bswipes? between\b|\b(?:smooth|soft|clean|punchy|cinematic|fancy|nice|cool|fun)\s+(?:cuts|transitions?)\s+between\b|\bfade between (?:the )?clips\b|\bblend (?:the )?(?:clips|cuts)\b|\bsoften the cuts\b|\bcut points? (?:smoother|softer)\b"
+    "transitions": ((rf"\bbetween\s+(?:the\s+)?{ORDINAL}\s+(?:and|&)\s+(?:the\s+)?{ORDINAL}\s+{CLIP_NOUN}"
+                     rf"|\bbetween\s+{CLIP_NOUN}\s+\d{{1,2}}\s+(?:and|&)\s+\d{{1,2}}\b"
+                     r"|\btransitions?\b|\bcross[- ]?(?:fade|dissolve)s?\b|\bdissolves?\b|\bwipes?\b|\bwhip pans?\b|\bswipes? between\b|\b(?:smooth|soft|clean|punchy|cinematic|fancy|nice|cool|fun)\s+(?:cuts|transitions?)\s+between\b|\bfade between (?:the )?clips\b|\bblend (?:the )?(?:clips|cuts)\b|\bsoften the cuts\b|\bcut points? (?:smoother|softer)\b"
                      # A named look + a seam reference is a transition request even without the word:
                      # "smooth zoom between every clip", "a glitch at every cut", "fade to black at the last cut".
                      # ("fade to black at the END" is the closing fade — CUT_PRECEDENCE routes it to `fade`.)
                      r"|\b(?:zoom|glitch|whip|wipe|slide|push|blur|dissolve|flash|pixelat\w*|mosaic|spiral|spin|ripple|iris|diamond|blinds|checkerboard|film burn|(?:dip|fade) to (?:black|white))\b(?=.*\b(?:between|at|on) (?:the |every |each |all (?:the )?)?(?:(?:last|first|final|next|second) )?(?:clips?|cuts?|seams?|scenes?|shots?|hook|start|end|beginning|clip changes?)\b)", EXACT),
                     (r"\bbetween (?:the |every |each |all (?:the )?)?(?:clips?|cuts?|scenes?|shots?)\b|\bsmooth(?:er)? cuts\b|\bthe cuts\b", SYNONYM)),
-    "export_preset": ((r"\bexport (?:preset|settings?|for|as|to)\b|\bexport[- ]ready\b|\brender (?:for|as|settings?)\b|\b(?:set|use|apply)\s+(?:the\s+)?(?:\w+\s+)?(?:export\s+)?preset\b|\boptimi[sz]e (?:the )?(?:export|output|render|settings) for\b|\bformat (?:it|this) for\b|\bsettings for (?:instagram|reels|tiktok|youtube|shorts|linkedin|stories)\b|\b(?:instagram|reels|tiktok|youtube|shorts|linkedin|story|stories) (?:export|settings?|specs?|format|preset|ready|spec)\b|\bbitrate\b|\bready to (?:upload|post|publish)\b", EXACT),
+    # Review RD3: "render / export / output / save IT (or this) for <platform>"
+    # is the export preset, whatever the pronoun; the platform phrase alone
+    # ("for youtube", 0.85) had made it the Auto edit (silences cut, text
+    # added). "make it into a short" stays the Auto edit.
+    "export_preset": ((r"\b(?:render|export|output|save|encode)\s+(?:it|this|that|the (?:video|edit|project|clip|timeline|movie))?\s*(?:for|as)\s+(?:instagram|reels?|tiktok|youtube|shorts?|linkedin|stories|story|facebook|twitter)\b|\bexport (?:preset|settings?|for|as|to)\b|\bexport[- ]ready\b|\brender (?:for|as|settings?)\b|\b(?:set|use|apply)\s+(?:the\s+)?(?:\w+\s+)?(?:export\s+)?preset\b|\boptimi[sz]e (?:the )?(?:export|output|render|settings) for\b|\bformat (?:it|this) for\b|\bsettings for (?:instagram|reels|tiktok|youtube|shorts|linkedin|stories)\b|\b(?:instagram|reels|tiktok|youtube|shorts|linkedin|story|stories) (?:export|settings?|specs?|format|preset|ready|spec)\b|\bbitrate\b|\bready to (?:upload|post|publish)\b", EXACT),
                       (r"\bexport\b|\bpreset\b|\bupload (?:it|this|ready)\b", SYNONYM)),
     "voiceover": ((r"\bvoice[- ]?over\b|\bnarrat(?:e|ion|or)\b|\btts\b|\btext[- ]to[- ]speech\b|\bai voice\b|\b(?:add|put|record|generate|make|have)\s+(?:a\s+|an\s+|some\s+|the\s+)?(?:\w+\s+)?voice\s+(?:say(?:ing)?|read(?:ing)?|that says|line|clip|narration)\b|\bvoice (?:say|saying|read|reading)\b|\bsay(?:ing)?\s+[\"“'].+[\"”']|\bread (?:this|it|the text) (?:out|aloud)\b|\bspoken (?:intro|outro|line)\b", EXACT),
                   (r"\bvoice\b|\bnarration\b|\bsay\b", SYNONYM)),
@@ -476,6 +656,11 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("remove_music", "music"), ("remove_music", "trim"), ("remove_music", "mute"),
     ("remove_music", "clean_audio"), ("remove_music", "fit_music"),
     ("reverse", "speed"), ("reverse", "trim"), ("undo", "reverse"),
+    # Wave D3 (E3): a clip edit names its clip; the look / range readings lose.
+    ("adjust", "color_look"), ("adjust", "loudness"), ("duplicate", "trim"), ("move_clip", "trim"),
+    ("move_clip", "reverse"), ("rotate", "transitions"), ("sticker", "title"), ("sticker", "brand"),
+    ("rotate", "flip"),
+    ("delete_clip", "trim"), ("zoom", "transitions"), ("zoom", "reframe"),
 )
 
 
@@ -592,7 +777,7 @@ def detect(prompt: str) -> Detection:
                      slots=whole, unmatched=tuple(unmatched))
 
 
-__all__ = ["INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
+__all__ = ["REMOVE_FEATURE", "INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
            "IntentHit", "Detection", "split_clauses", "exclusions_in", "strip_negations", "duck_off",
-           "reverse_off",
+           "reverse_off", "clip_ref_of", "NTH_REF", "AT_REF", "ORDINAL", "CLIP_NOUN", "CLIP_PHRASE",
            "CUT_PRECEDENCE", "PHRASES", "detect"]

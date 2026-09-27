@@ -43,12 +43,18 @@ def _capture_filter_complex_and_inputs(edl: EDL) -> tuple[str, int]:
     captured: dict = {}
 
     def fake_run(args, **kwargs):
-        captured["args"] = list(args)
+        # the render's own argv (the picture check's ffprobe runs after it)
+        if "-filter_complex" in args:
+            captured["args"] = list(args)
         # _render writes to a .part path then atomically replaces `dst` with
         # it — create an empty stand-in so that bookkeeping succeeds and we
         # reach the filter_complex we actually want to inspect.
-        dst_idx = len(args) - 1
-        Path(args[dst_idx]).touch()
+        # (Not for a probe such as `ffmpeg -hide_banner -encoders`, whose
+        # last argument is a flag: touching it left a stray `-encoders`
+        # file in the working directory.)
+        dst = str(args[-1])
+        if not dst.startswith("-"):
+            Path(dst).touch()
 
         class _R:
             returncode = 0

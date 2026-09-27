@@ -38,14 +38,49 @@ def source_offset(c: Clip, local_t: float) -> float:
 def source_cut(c: Clip, local_t: float, snap) -> float:
     """The SOURCE time a cut at clip-local timeline seconds `local_t` lands
     on. A constant speed snaps it to the project grid with `snap` (QA-002,
-    `dispatch._q` — unchanged behaviour). A CURVE keeps the exact integral
-    (to the microsecond ffmpeg prints): snapping it would move the left
-    piece's footprint off `local_t` by up to a frame · mean speed, and the
-    two pieces would then occupy one frame more (or less) than the whole —
-    measured on a 25 fps Montage split at 1.7 s: 145 frames for 144."""
+    `dispatch._q` — unchanged behaviour). A CURVE keeps the exact integral,
+    to the last bit: snapping it would move the left piece's footprint off
+    `local_t` by up to a frame · mean speed, and the two pieces would then
+    occupy one frame more (or less) than the whole — measured on a 25 fps
+    Montage split at 1.7 s: 145 frames for 144. It is not rounded to the
+    microsecond either (it was, "to what ffmpeg prints"): the in-anchored
+    chain prints `in` in full (`speed_curve.anchored_setpts_expr`), and a
+    right piece whose `in` is off by half a µs plays its curve up to 5 µs
+    off its parent's — enough to flip a frame sitting on a rounding tie."""
     if c.speed_curve is not None:
-        return round(float(c.in_) + source_offset(c, local_t), 6)
+        return float(c.in_) + source_offset(c, local_t)
     return snap(float(c.in_) + source_offset(c, local_t))
+
+
+def cut_point(c: Clip, local_t: float, snap) -> float:
+    """The SOURCE time a cut at clip-local timeline seconds `local_t` lands
+    on, for a clip that may play BACKWARDS (review RD3). A reversed clip
+    shows source `out - offset` at offset `local_t` (`render/reverse.py`:
+    its intermediate's frame j is the range's frame M-1-j), so the cut is
+    mirrored from `out`; the curve still lives on the OUTPUT clock, so the
+    offset is the same integral a forward clip uses. Snapped like
+    `source_cut` (a constant speed snaps, a curve keeps the exact value)."""
+    if not getattr(c, "reverse", False):
+        return source_cut(c, local_t, snap)
+    v = float(c.out) - source_offset(c, local_t)
+    return v if c.speed_curve is not None else snap(v)
+
+
+def piece_range(c: Clip, t0: float, t1: float, snap) -> tuple[float, float]:
+    """`(in, out)` of the piece of `c` that plays clip-local timeline seconds
+    [t0, t1) — the part a split / cut_range / trim keeps. Forward: from `in`
+    upwards. REVERSED: the piece that plays first holds the source's END
+    (left `[cut, out]`, right `[in, cut]`), or the edited clip plays its
+    source out of order (measured: a split at 40 % changed 180/180 frames).
+    An edge the piece shares with the whole clip keeps the clip's value."""
+    D = c.effective_duration
+    lo = t0 <= 1e-12
+    hi = t1 >= D - 1e-12
+    if getattr(c, "reverse", False):
+        return (float(c.in_) if hi else cut_point(c, t1, snap),
+                float(c.out) if lo else cut_point(c, t0, snap))
+    return (float(c.in_) if lo else cut_point(c, t0, snap),
+            float(c.out) if hi else cut_point(c, t1, snap))
 
 
 def _piece_points(points: list[tuple[float, float]], a: float, b: float) -> list[list[float]]:
@@ -86,4 +121,5 @@ def freeze_piece(c: Clip, t0: float, t1: float) -> float | None:
     return max(0.0, min(float(c.freeze), t1) - max(0.0, t0))
 
 
-__all__ = ["is_retimed", "source_offset", "source_cut", "piece_speed", "freeze_piece"]
+__all__ = ["is_retimed", "source_offset", "source_cut", "cut_point", "piece_range", "piece_speed",
+           "freeze_piece"]

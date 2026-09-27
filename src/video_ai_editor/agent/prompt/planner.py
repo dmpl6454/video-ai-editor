@@ -36,6 +36,7 @@ import math
 import re
 from typing import Any, Iterable
 
+from . import clip_slots as CS
 from . import grammar as G
 from . import slots as S
 from .facts import TimelineFacts
@@ -48,11 +49,14 @@ from .schema import (ARG_REF, LONG_RUN_SECONDS, STAGE_PREREQ, DownloadNeeded, Ne
                      Step)
 
 #: Recipes whose steps re-time v1 (so later positional maths is stale).
-CUT_RECIPES: frozenset[str] = frozenset({"tighten", "remove_silences", "remove_fillers", "trim", "speed"})
+CUT_RECIPES: frozenset[str] = frozenset({"tighten", "remove_silences", "remove_fillers", "trim", "speed",
+                                         # wave D3 (E3): they move or remove clips
+                                         "delete_clip", "duplicate", "move_clip", "freeze"})
 
 #: Expansion order — prerequisites before dependents, then stage order.
 RECIPE_ORDER: tuple[str, ...] = (
-    "transcribe", "trim", "speed", "reverse", "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten",
+    "transcribe", "trim", "delete_clip", "duplicate", "move_clip", "split", "freeze", "speed", "reverse",
+    "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten", "zoom", "rotate", "adjust",
     "shorts", "color_look", "transitions", "reframe", "captions", "translate_captions", "hook", "title",
     "brand", "end_card", "voiceover", "remove_music", "music", "duck", "beat_sync", "fit_music", "fade", "volume",
     "mute",
@@ -73,7 +77,9 @@ _TITLES: dict[str, str] = {
     "transitions": "Transitions", "export_preset": "Export preset", "voiceover": "Voiceover",
     "stabilize": "Stabilise", "upscale": "Upscale", "auto_edit": "Auto edit", "ask": "Question",
     "fade": "Fade", "volume": "Volume", "mute": "Mute", "fit_music": "Fit music", "audit": "Audit",
-    "remove_music": "Remove music", "reverse": "Reverse",
+    "remove_music": "Remove music", "reverse": "Reverse", "freeze": "Freeze", "split": "Split",
+    "delete_clip": "Delete clip", "duplicate": "Duplicate", "move_clip": "Move clip", "zoom": "Zoom",
+    "rotate": "Rotate", "adjust": "Adjust", "sticker": "Sticker", "remove_feature": "Remove", "flip": "Flip",
     "_audit": "Audit", "preview": "Preview",
 }
 
@@ -104,6 +110,16 @@ def _original_case(text: str, prompt: str | None) -> str:
 
 
 def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> dict[str, Any]:
+    """The recipe slots one grammar hit carries. The clip-level readings
+    (which clip, which range — wave D3, E3) come from `clip_slots`."""
+    if hit.intent in CS.READERS:
+        return CS.READERS[hit.intent](hit, hit.slots)
+    out = _base_slots(hit, whole, prompt)
+    extras = CS.clip_extras(hit.intent, hit, hit.slots)
+    return {**out, **{k: v for k, v in extras.items() if v is not None}}
+
+
+def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> dict[str, Any]:
     c, w = hit.slots, whole
     r = hit.intent
     # Clause slots come from the lower-cased clause; the whole-prompt slots
@@ -172,8 +188,19 @@ def _hit_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> d
             m = _TITLE_TEXT_RE.search(hit.clause)
             if m and len(m.group(1).split()) <= 8:
                 text = _original_case(m.group(1).strip(), prompt)
-        return {"text": text, "name": name, "handle": c.handle, "dur": c.duration_s,
-                "at": "end" if c.at_end else ("start" if c.at_start else None),
+        at: Any = "end" if c.at_end else ("start" if c.at_start else None)
+        dur = c.duration_s
+        rng = c.range
+        # "over the last 2 seconds" / "for the first 3 seconds" / "from 0:04
+        # to 0:07" places the card there (review RD3: it went on at 0-3 s)
+        if rng is not None and rng.kind == "last" and rng.end:
+            at, dur = "end", float(rng.end)
+        elif rng is not None and rng.kind == "first" and rng.end:
+            at, dur = "start", float(rng.end)
+        elif rng is not None and rng.kind == "abs" and rng.start is not None and rng.end is not None \
+                and rng.end > rng.start:
+            at, dur = float(rng.start), float(rng.end) - float(rng.start)
+        return {"text": text, "name": name, "handle": c.handle, "dur": dur, "at": at,
                 "_style": "label_tag" if c.caption_position == "top" else "bold_pop",
                 "_lower_third": is_name_card}
     if r == "brand":
@@ -210,6 +237,8 @@ _AT_TIME_RE = re.compile(r"\b(?:at|@)\s+(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.
 
 def _speed_preset_in(clause: str) -> str | None:
     from ...edl.speed_presets import preset_id
+    if re.search(r"\bbullet[- ]?time\b", clause):
+        return preset_id("bullet")
     m = _SPEED_PRESET_RE.search(clause)
     if not m or not _CURVE_WORD_RE.search(clause[m.end():m.end() + 24] + " " + clause):
         return None
@@ -618,6 +647,51 @@ def _ask_reply(facts: TimelineFacts) -> str:
     return "; ".join(bits)[:400]
 
 
+#: Stickers (wave D3, E3): `add_sticker` fetches its artwork from a CDN, so no
+#: plan may name it (schema.PLAN_DENY) — the Prompt bar says where they are
+#: instead of "I did not catch that" (which offered captions for "add a sticker").
+STICKER_REPLY = ("Want a sticker? Open the Stickers panel in the left rail and pick one — it lands at the playhead "
+                 "for 3 s. The Prompt bar cannot place one itself (a sticker downloads its artwork).")
+
+
+#: What "remove the captions / the filter / the transitions" is about, and
+#: where that is done by hand (no plan tool can find those by name yet).
+_FEATURE_WORDS: tuple[tuple[str, str], ...] = (
+    (r"captions?|subtitles?|subs", "the captions"), (r"filters?|luts?|looks?|colou?r grade|grades?|grading", "a filter"),
+    (r"effects?", "an effect"), (r"transitions?", "a transition"), (r"lower thirds?|titles?|text", "the text"),
+    (r"hooks?", "the hook"), (r"keyframes?|zoom|ken burns", "the zoom keyframes"), (r"stickers?|emojis?", "a sticker"),
+    (r"watermark|end ?card", "the brand overlay"), (r"speed ramp|speed curve", "the speed curve"),
+    (r"freeze(?: frame)?", "the freeze frame"),
+)
+#: Flip / mirror (review RD3): no Transform field for it yet (wave E, F4).
+FLIP_REPLY = ("Flipping or mirroring a clip is not available yet — it is coming. Want it turned upside down "
+              "instead (a 180° rotation)?")
+READ_ONLY_INTENTS: tuple[str, ...] = ("sticker", "remove_feature", "flip")
+
+
+def _read_only_reply(hit: G.IntentHit) -> str:
+    if hit.intent == "sticker":
+        return STICKER_REPLY
+    if hit.intent == "flip":
+        return FLIP_REPLY
+    what = next((label for pat, label in _FEATURE_WORDS if re.search(rf"\b(?:{pat})\b", hit.clause)), "that")
+    return (f"The Prompt bar cannot remove {what} yet — select it on the timeline and press Delete, or remove it "
+            f"in the Inspector. Was it your last edit? Then say 'undo'.")
+
+
+#: Words that point at an intent when no phrase matched (review RD3: "slow
+#: the middle clip down…" was offered Captions / Tighten / Auto edit).
+_GUESS_WORDS: tuple[tuple[str, str], ...] = (
+    (r"slow|fast|quick|speed|pace|tempo", "speed"), (r"text|words?|write|writ|type|title|caption|say", "title"),
+    (r"zoom|closer|punch|push in", "zoom"), (r"rotat|turn|tilt|spin|upside", "rotate"),
+    (r"cut|trim|lose|remove|delete|chop|shorten|drop", "trim"), (r"split|slice|blade", "split"),
+    (r"music|song|soundtrack|beat", "music"), (r"loud|quiet|volume|louder|softer", "volume"),
+    (r"colou?r|filter|look|grade|warm|cool|cinematic", "color_look"), (r"bright|dark|contrast|saturat", "adjust"),
+    (r"fade", "fade"), (r"freeze|hold|pause the picture", "freeze"), (r"transition|dissolve|wipe", "transitions"),
+    (r"reverse|backwards?", "reverse"), (r"mute|silence the", "mute"), (r"subtitle|captions", "captions"),
+)
+
+
 def _guesses(prompt: str) -> list[tuple[str, str]]:
     text = S.normalize(prompt)
     found: list[str] = []
@@ -628,7 +702,13 @@ def _guesses(prompt: str) -> list[tuple[str, str]]:
             if re.search(pat, text):
                 found.append(intent)
                 break
-    for fallback in ("captions", "tighten", "auto_edit"):
+    # the nearest intents by keyword, before any fixed suggestion
+    for pat, intent in _GUESS_WORDS:
+        if intent not in found and re.search(rf"\b(?:{pat})", text):
+            found.append(intent)
+    for fallback in ("trim", "speed", "title"):
+        if len(found) >= 3:
+            break
         if fallback not in found:
             found.append(fallback)
     return [(i, _TITLES.get(i, i)) for i in found[:3]]
@@ -645,7 +725,12 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
                         reply=f"{'Undoing' if verb == 'undo' else 'Redoing'} the last edit.")
     if det.hits and all(h.intent == "ask" for h in det.hits):
         return Plan.new(intent="ask", brain="recipes", confidence=conf, title="Question", reply=_ask_reply(facts))
-    hits = [h for h in det.hits if h.intent != "ask"]
+    replies = [_read_only_reply(h) for h in det.hits if h.intent in READ_ONLY_INTENTS]
+    if det.hits and all(h.intent in (*READ_ONLY_INTENTS, "ask") for h in det.hits):
+        first = next(h.intent for h in det.hits if h.intent != "ask") if replies else "ask"
+        return Plan.new(intent=first, brain="recipes", confidence=conf, title=_TITLES.get(first, first),
+                        reply=" ".join(dict.fromkeys(replies))[:400] or _ask_reply(facts))
+    hits = [h for h in det.hits if h.intent not in ("ask", *READ_ONLY_INTENTS)]
     if not hits:
         if det.exclusions and not det.unmatched:
             return Plan.new(intent="noop", brain="recipes", confidence=conf, title="Nothing to do",
@@ -660,6 +745,8 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
     prefix = None
     if G.NORMALISE_THRESHOLD <= conf < G.RUN_THRESHOLD:
         prefix = "I read that as: " + ", ".join(_TITLES.get(h.intent, h.intent) for h in hits)
+    if replies:
+        prefix = "; ".join(x for x in (prefix, *dict.fromkeys(replies)) if x)
     p = compose(intents, facts, exclusions=exclusions, confidence=conf, reply_prefix=prefix,
                 hook_text=hook_text, allow_downloads=allow_downloads, brain="recipes")
     if conf < G.NORMALISE_THRESHOLD:
@@ -854,5 +941,5 @@ def apply_answers(p: Plan, answers: dict[str, Any], facts: TimelineFacts) -> Pla
     return result
 
 
-__all__ = ["CUT_RECIPES", "RECIPE_ORDER", "GATE_EXEMPT_TOOLS", "bind", "compose", "plan",
+__all__ = ["CUT_RECIPES", "RECIPE_ORDER", "GATE_EXEMPT_TOOLS", "STICKER_REPLY", "bind", "compose", "plan",
            "without_downloads", "apply_answers"]

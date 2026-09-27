@@ -38,6 +38,19 @@ describe('planTrimToPlayhead', () => {
     expect(plan).toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'a', out: 6 } })
   })
 
+  it('on a speed CURVE the source time is the curve\'s integral, not the mean speed', () => {
+    // a: Hero over 0-10 s of source fills 12.658 s (edl/speed_curve.py);
+    // the server trims a curve clip to exactly the frame it showed there.
+    const e = edl()
+    const hero = [[0, 1], [0.3, 1], [0.42, 0.25], [0.58, 0.25], [0.7, 1], [1, 1]]
+    ;(e.tracks[0].clips[0] as unknown as { speed: unknown }).speed = { curve: hero, name: 'hero' }
+    e.tracks[0].clips[1].start = 12.658227848101266
+    expect(planTrimToPlayhead(e, ['a'], 6, 'end'))
+      .toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'a', out: 4.917721518987341 } })
+    expect(planTrimToPlayhead(e, ['a'], 3, 'start'))
+      .toMatchObject({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'a', in: 3 } })
+  })
+
   it('a head trim off the main lane keeps the kept frames in place (move_start)', () => {
     const plan = planTrimToPlayhead(edl(), ['p'], 6, 'start')
     expect(plan).toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'p', in: 4, move_start: true } })

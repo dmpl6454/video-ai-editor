@@ -8,6 +8,8 @@ GPU encoding: when VideoToolbox is available (Apple Silicon), preview + export
 encode via h264_videotoolbox for ~5–10× the throughput of libx264.
 """
 from __future__ import annotations
+import logging
+import math
 import os
 import re
 import shutil
@@ -28,11 +30,12 @@ from .audio_mix import build_audio_mix
 from .audio_mix import ATEMPO_LAG as _ATEMPO_LAG  # noqa: F401
 from .effects import effect_chain, render_mask_png, build_chromakey_filter, mask_png_is_valid
 from .pip import (build_pip_overlay_chain, collect_pip_clips, pip_audio_input_index,
-                  pip_audio_chain, pip_frames, pip_input_args)
+                  pip_audio_chain, pip_frames, pip_input_args, pip_layout_end)
 from . import clock
 from . import cancel as _cancel
 from . import cache_budget as _cache_budget
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
+from .sar import fit_dims, source_anamorphic
 from ..edl import timebase as _tb
 
 
@@ -118,7 +121,7 @@ def _usable_encoder(name: str) -> bool:
     exception: it's Apple-only and cheap to trust from the listing, but the null
     encode works for it too, so we use one code path. Cached per process."""
     try:
-        out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-encoders"],
+        out = _cancel.run_prioritised([_pu.FFMPEG, "-hide_banner", "-encoders"],
                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, **_pu.SUBPROCESS_FLAGS)
         if f" {name} " not in out.stdout:
             return False
@@ -126,7 +129,7 @@ def _usable_encoder(name: str) -> bool:
         return False
     # Functional probe: a ~0.1s black-frame encode to null.
     try:
-        r = subprocess.run(
+        r = _cancel.run_prioritised(
             [_pu.FFMPEG, "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
              "-c:v", name, "-f", "null", "-"],
@@ -441,14 +444,41 @@ def freeze_input_span(in_: float, fps) -> tuple[float, float]:
     return seek, end
 
 
+def _v1_curve_map(c: Clip):
+    """The speed curve clip `c`'s v1 chain retimes by (in-anchored, see
+    `edl/speed_curve.py`), or None: not a curve, a freeze, or no source."""
+    if getattr(c, "freeze", None) is not None:
+        return None
+    from ..edl import speed_curve as _sc
+    pts = _sc.curve_points(c.speed)
+    return _sc.curve_map(pts, c.duration) if pts is not None else None
+
+
 def clip_input_args(c: Clip, fps) -> list[str]:
     """`-ss/-to/-i` for clip `c`: seek half a frame early, decode a little past
     `out`. Precision is µs, not the old `%.3f` (which alone could land a seek
-    after the frame it meant to keep)."""
+    after the frame it meant to keep). A speed-CURVE clip seeks further back,
+    on a 1/5 s grid (`speed_curve.curve_seek`): its chain is anchored at `in`
+    on the source's own clock, and a slow curve can show the frame before
+    `in` in its first slot."""
     if getattr(c, "freeze", None) is not None:
         seek, end = freeze_input_span(c.in_, fps)
         from .audio_mix import input_seek
         return [*input_seek(seek), "-to", f"{end:.6f}", "-i", str(c.src)]
+    if fps is not None and _v1_curve_map(c) is not None:
+        from ..edl.speed_curve import curve_seek
+        from .audio_mix import input_seek
+        end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
+        return [*input_seek(curve_seek(c.in_)), "-to", f"{end:.6f}", "-i", str(c.src)]
+    return sound_input_args(c, fps)
+
+
+def sound_input_args(c: Clip, fps) -> list[str]:
+    """`clip_input_args` of a 1x clip at `c`'s in/out: the half-frame
+    pre-roll seek every sound chain drops with `atrim=start=pre`
+    (`_clip_preroll`). The speed-curve sound intermediate
+    (`render/speed_audio.py`) decodes through this, whatever its picture's
+    input does."""
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
     end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
@@ -465,7 +495,7 @@ def _clip_preroll(c: Clip, fps) -> float:
 @lru_cache(maxsize=512)
 def _has_audio_stream_cached(src: str, mtime_ns: int, size: int) -> bool:
     try:
-        out = subprocess.run(
+        out = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", src],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -547,7 +577,17 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     project grid — see the block above `clip_frames`. The input must then be
     opened with `clip_input_args`.
     """
-    if fps is not None:
+    curve_cm = _v1_curve_map(c) if fps is not None else None
+    if curve_cm is not None:
+        # A speed CURVE runs on the FILE's clock, anchored at `in` by its
+        # setpts below, not at the first decoded frame (edl/speed_curve.py,
+        # "the v1 chain's clock"), so a split piece continues its parent's
+        # curve exactly.
+        from ..edl.speed_curve import curve_seek, file_clock_expr
+        fc = file_clock_expr(curve_seek(c.in_))
+        if fc:
+            input_label = f"{input_label}setpts={fc},"
+    elif fps is not None:
         # Rebase first: the half-frame seek pre-roll leaves the first kept
         # frame at PTS ≈ half a frame, and every retime below assumes 0.
         input_label = f"{input_label}setpts=PTS-STARTPTS,"
@@ -571,12 +611,30 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # handled entirely by the animated branch below.
     x_static = 0.0 if x_animated else float(tx.x) if isinstance(tx.x, (int, float)) else 0.0
     y_static = 0.0 if y_animated else float(tx.y) if isinstance(tx.y, (int, float)) else 0.0
-    # Keyframes are authored in clip-local TIMELINE seconds (the Properties
-    # panel's clipLocalTime); the transform filters below run BEFORE the
-    # speed retime, on source-local `t`, so `t` goes through the clip's retime
-    # first. It used to be `(t - start)`: a clip not at 0 animated late or
-    # not at all, and a retimed one at the source's pace (review RD2).
-    tvar = _kf_time_expr(c, "t")
+    # KEYFRAME CLOCK. Keys are authored in clip-local TIMELINE seconds: the
+    # UI samples them at `playhead - clip.start` (lib/overlay.ts). A clip
+    # with any keyframed transform/opacity therefore runs its whole geometry
+    # block (fit … chromakey) AFTER the retime and the project-grid `fps`
+    # (see `kf_clip` below), where the filters' `t` IS that time, frame for
+    # frame. Before the retime, `t` is the SOURCE frame's time: it needed the
+    # clip's retime to become timeline time (review RD2) and still could not
+    # animate the frames a slow clip repeats (0.5x: every second frame held
+    # the previous one's value), a 25 fps source in a 30 fps project, or a
+    # freeze. Time-independent chains keep the old order, so every clip
+    # without keyframes renders byte-identically (Wave D3, lane E1a).
+    opa_animated = is_keyframed(tx.opacity)
+    kf_clip = rot_animated or sc_animated or x_animated or y_animated or opa_animated
+    # Key TIMES printed to the nanosecond, and the SEGMENT picked 1 µs past
+    # `t`: ffmpeg's `t` of frame 23 at 1/30 is 0.76666…66, a hair under the
+    # key 23/30 the UI authors at that playhead (and %.4f printed it 0.7667),
+    # so a `step` key switched a frame late. The value is still `t`'s.
+    tvar = "t"
+
+    def kf_expr(v, var: str = tvar) -> str:
+        return to_ffmpeg_expr(v, time_var=var, time_digits=9, compare_var=f"({var}+0.000001)")
+    # A non-square-pixel source is fitted by its DISPLAYED shape (render/
+    # sar.py); None for square pixels, whose filter text is unchanged.
+    ana = source_anamorphic(c.src)
 
     # `fit` decides what happens when the source aspect doesn't match the canvas:
     #   contain (default) — scale DOWN to fit, pad the remainder black. Letterbox.
@@ -601,6 +659,17 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         and not (sc_animated or x_animated or y_animated)
         and (x_static != 0 or y_static != 0)
     )
+    def _fit_scale(mode: str) -> str:
+        # force_original_aspect_ratio sizes from the STORED width, so a
+        # 720x576 SAR 16:15 clip was fitted as 5:4 instead of its displayed
+        # 4:3 (768x576). Anamorphic: the size its DISPLAYED shape gets, by
+        # the same integer rule, in one resample (geometry.ts fits the
+        # engine's display-size SourceInfo identically).
+        if ana is None:
+            return f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio={mode}"
+        fw, fh = fit_dims(ana.display_w, ana.display_h, canvas_w, canvas_h, mode)
+        return f"scale={fw}:{fh}"
+
     if getattr(c, "fit", "contain") == "cover":
         if cover_needs_real_pan:
             # Keep the "increase"-scaled frame OVERSIZED (don't crop yet) so
@@ -615,30 +684,25 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
             # clamps an out-of-range crop x/y to the available margin on its
             # own, so panning past the real footage's edge holds on the last
             # real pixel instead of exposing black — cover's whole point.
-            v_chain = (f"{input_label}"
-                       f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,setsar=1")
+            geo = f"{_fit_scale('increase')},setsar=1"
             # Clamped to >=1: this multiplier only ever WIDENS the pan margin.
             # sc_static<1 (zooming OUT) would shrink the already-covering
             # frame to SMALLER than the canvas — crop then has less input
             # than its requested output size and produces black (found live:
             # a scale=0.1 pan committed via the wheel-zoom rendered a solid
-            # black frame, no ffmpeg error). Mirrors the `max(1, ...)` guard
-            # the keyframed branch below already applies for the same reason.
+            # black frame, no ffmpeg error).
             extra_zoom = max(1.0, sc_static)
             if extra_zoom > 1.001:
-                v_chain += f",scale=w='iw*{extra_zoom:.4f}':h='ih*{extra_zoom:.4f}'"
-            v_chain += (
+                geo += f",scale=w='iw*{extra_zoom:.4f}':h='ih*{extra_zoom:.4f}'"
+            geo += (
                 f",crop={canvas_w}:{canvas_h}:"
                 f"'(in_w-out_w)/2-{x_static:.2f}':'(in_h-out_h)/2-{y_static:.2f}'"
             )
         else:
-            v_chain = (f"{input_label}"
-                       f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
-                       f"crop={canvas_w}:{canvas_h},setsar=1")
+            geo = f"{_fit_scale('increase')},crop={canvas_w}:{canvas_h},setsar=1"
     else:
-        v_chain = (f"{input_label}"
-                   f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
-                   f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+        geo = (f"{_fit_scale('decrease')},"
+               f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
 
     # Rotation happens IN PLACE: the frame keeps its canvas size and the corners
     # that swing outside it are cut, exactly like the browser's `rotate()` and
@@ -656,29 +720,40 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # and in-place is the one users expect. `rotate`'s default ow/oh IS iw/ih,
     # so simply not overriding them gives in-place rotation with black corners.
     if rot_animated:
-        re = to_ffmpeg_expr(tx.rotation, time_var=tvar)
+        re = kf_expr(tx.rotation)
         re_rad = f"({re})*PI/180"
-        v_chain += f",rotate=a='{re_rad}':c=black"
+        geo += f",rotate=a='{re_rad}':c=black"
     elif abs(rot_static) > 0.001:
         rad = rot_static * 3.14159265 / 180.0
-        v_chain += f",rotate={rad}:c=black"
+        geo += f",rotate={rad}:c=black"
 
     if sc_animated or x_animated or y_animated:
-        sexpr = to_ffmpeg_expr(tx.scale, time_var=tvar) if sc_animated else f"{sc_static:.4f}"
-        zoom = f"max(1\\,{sexpr})"
-        if x_animated:
-            xe = to_ffmpeg_expr(tx.x, time_var=tvar)
-            cx_expr = f"(iw-{canvas_w})/2 + ({xe})"
-        else:
-            cx_expr = f"(iw-{canvas_w})/2 + {float(tx.x) if isinstance(tx.x, (int, float)) else 0:.2f}"
-        if y_animated:
-            ye = to_ffmpeg_expr(tx.y, time_var=tvar)
-            cy_expr = f"(ih-{canvas_h})/2 + ({ye})"
-        else:
-            cy_expr = f"(ih-{canvas_h})/2 + {float(tx.y) if isinstance(tx.y, (int, float)) else 0:.2f}"
-        v_chain += (
-            f",scale=w='{canvas_w}*{zoom}':h='{canvas_h}*{zoom}':eval=frame"
-            f",crop={canvas_w}:{canvas_h}:'{cx_expr}':'{cy_expr}'"
+        # KEYFRAMED scale/pan: the static branch below, per frame. scale to
+        # (W·s, H·s) on the chroma grid, centre it in a fixed frame big
+        # enough for every keyed size and pan, then cut the canvas at
+        # centre − (x, y): +x moves the picture RIGHT, a scale zooms about
+        # the centre and a scale < 1 shrinks it with black around — what
+        # the static values, the UI's CSS preview and cover-pan all mean.
+        # It was a crop-zoom (`scale=W·max(1,s)`, `crop` at
+        # `(iw−W)/2 + x`): +x moved the picture LEFT, a scale < 1 did
+        # nothing, a pan at scale 1 could not move, and since `crop`'s `iw`
+        # is its CONFIGURED size (the first frame's), a keyed zoom grew from
+        # the top-left corner instead of the centre (Wave D3, lane E1a).
+        sexpr = kf_expr(tx.scale) if sc_animated else f"{sc_static:.4f}"
+        xe = (kf_expr(tx.x) if x_animated
+              else f"{float(tx.x) if isinstance(tx.x, (int, float)) else 0:.2f}")
+        ye = (kf_expr(tx.y) if y_animated
+              else f"{float(tx.y) if isinstance(tx.y, (int, float)) else 0:.2f}")
+        fw, fh = kf_pan_frame(tx, canvas_w, canvas_h)
+        geo += (
+            f",scale=w='max(2\\,trunc({canvas_w}*({sexpr})/2)*2)'"
+            f":h='max(2\\,trunc({canvas_h}*({sexpr})/2)*2)':eval=frame"
+            # pinned: pad/crop snap offsets to the chroma grid only in a 4:2:0
+            # format, and a later gbrp (opacity) otherwise pulls the
+            # negotiation up to here (measured: odd offsets, ±1 px)
+            f",format=yuv420p"
+            f",pad=w={fw}:h={fh}:x=(ow-iw)/2:y=(oh-ih)/2:color=black:eval=frame"
+            f",crop={canvas_w}:{canvas_h}:'{(fw - canvas_w) // 2}-({xe})':'{(fh - canvas_h) // 2}-({ye})'"
         )
     elif cover_needs_real_pan:
         # Already applied above, in the `cover`-fit block — this branch's
@@ -709,20 +784,27 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         sw = max(2, int(canvas_w * sc_static) // 2 * 2)
         sh = max(2, int(canvas_h * sc_static) // 2 * 2)
         dx, dy = int(round(x_static)), int(round(y_static))
-        v_chain += f",scale={sw}:{sh}"
+        geo += f",scale={sw}:{sh}"
+        if is_keyframed(tx.opacity) or (isinstance(tx.opacity, (int, float)) and tx.opacity < 0.999):
+            # pinned, as in the keyframed branch: the opacity's gbrp below
+            # would otherwise pull pad/crop out of 4:2:0, where their offsets
+            # lose the chroma-grid rounding (review RD3, measured: scale 0.5 +
+            # pan (1, 1) landed 1 px up-left at opacity 0.6). An opaque chain
+            # is unchanged, byte for byte.
+            geo += ",format=yuv420p"
         # Intermediate must cover the scaled frame AND the canvas plus the pan
         # margin on both sides; even parity for the same chroma reason as h_out.
         pw = (max(sw, canvas_w) + 2 * abs(dx) + 1) // 2 * 2
         ph = (max(sh, canvas_h) + 2 * abs(dy) + 1) // 2 * 2
         if pw > sw or ph > sh:
-            v_chain += (f",pad={pw}:{ph}:"
-                        f"({pw}-{sw})/2+{dx}:({ph}-{sh})/2+{dy}:color=black")
-        v_chain += (f",crop={canvas_w}:{canvas_h}:"
-                    f"({pw}-{canvas_w})/2:({ph}-{canvas_h})/2")
+            geo += (f",pad={pw}:{ph}:"
+                    f"({pw}-{sw})/2+{dx}:({ph}-{sh})/2+{dy}:color=black")
+        geo += (f",crop={canvas_w}:{canvas_h}:"
+                f"({pw}-{canvas_w})/2:({ph}-{canvas_h})/2")
 
     ec = effect_chain(c.effects or [], uid=c.id)
     if ec:
-        v_chain += "," + ec
+        geo += "," + ec
 
     # OPACITY. This chain had NO opacity handling at all, so `Transform.opacity`
     # was a dead control on v1 — it committed to the EDL, survived a reload and
@@ -767,13 +849,13 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # — a whole-graph failure, i.e. the render fails outright rather than
         # animating wrong. `rotate` above legitimately uses `t`, which is why
         # reusing tvar here looks right and is not.
-        oe = to_ffmpeg_expr(tx.opacity, time_var=_kf_time_expr(c, "T"))
-        v_chain += (f",format=gbrp,geq=r='r(X\\,Y)*({oe})'"
-                    f":g='g(X\\,Y)*({oe})':b='b(X\\,Y)*({oe})',format=yuv420p")
+        oe = kf_expr(tx.opacity, "T")
+        geo += (f",format=gbrp,geq=r='r(X\\,Y)*({oe})'"
+                f":g='g(X\\,Y)*({oe})':b='b(X\\,Y)*({oe})',format=yuv420p")
     elif opa_static < 0.999:
         o = max(0.0, min(1.0, opa_static))
-        v_chain += (f",format=gbrp,colorchannelmixer=rr={o:.4f}:gg={o:.4f}:bb={o:.4f}"
-                    f",format=yuv420p")
+        geo += (f",format=gbrp,colorchannelmixer=rr={o:.4f}:gg={o:.4f}:bb={o:.4f}"
+                f",format=yuv420p")
     # ...and back to yuv420p EXPLICITLY, so a faded clip leaves this chain in the
     # same pixel format an untouched one does. libavfilter does auto-negotiate a
     # conversion into `concat` (verified: a mixed-opacity timeline renders), so
@@ -787,10 +869,27 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # Chroma key (green/blue screen) — produces transparent regions; on V1 they
     # show through to canvas bg colour, on PiP they show through to the layer below.
     if getattr(c, "chromakey", None) is not None:
-        v_chain += "," + build_chromakey_filter(c.chromakey)
+        geo += "," + build_chromakey_filter(c.chromakey)
+
+    # Time-independent geometry sits before the retime, as it always has
+    # (byte-identical renders); a keyframed clip's runs after the grid below.
+    # `input_label` ends in "," when a rebase was prepended; otherwise a
+    # `null` gives the retime's leading comma something to follow.
+    if kf_clip:
+        v_chain = input_label[:-1] if input_label.endswith(",") else f"{input_label}null"
+    else:
+        v_chain = f"{input_label}{geo}"
 
     if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         v_chain += f",setpts=PTS/{float(c.speed)}"
+    elif curve_cm is not None:
+        # A speed CURVE: a time base in which a project frame is whole ticks,
+        # then the closed-form integral of T = source - in on the file clock
+        # (above), so the SAME fps=R rule picks its frames and frame_map
+        # models it exactly.
+        from ..edl.speed_curve import anchored_setpts_expr, curve_settb_expr
+        v_chain += (f",settb={curve_settb_expr(_tb.rate_of(fps).numerator)}"
+                    f",setpts={anchored_setpts_expr(curve_cm, float(c.in_))}")
     else:
         curve = _curve_setpts(c)
         if curve:
@@ -810,10 +909,13 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     eff = c.effective_duration
     vfi = min(float(getattr(c, "video_fade_in", 0.0) or 0.0), eff)
     vfo = min(float(getattr(c, "video_fade_out", 0.0) or 0.0), eff)
+    fades = ""
     if vfi > 0.001:
-        v_chain += f",fade=t=in:st=0:d={vfi:.3f}"
+        fades += f",fade=t=in:st=0:d={vfi:.3f}"
     if vfo > 0.001:
-        v_chain += f",fade=t=out:st={max(0.0, eff - vfo):.3f}:d={vfo:.3f}"
+        fades += f",fade=t=out:st={max(0.0, eff - vfo):.3f}:d={vfo:.3f}"
+    if not kf_clip:
+        v_chain += fades
 
     if fps is not None:
         # QA-002/QA-039: land on the project grid HERE, inside the clip, and
@@ -823,9 +925,18 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # `tpad` clones the last frame when a source is a frame short of what
         # its `out` claims (legacy audio-padded extents), so the count holds.
         n = clip_frames(c, fps)
-        v_chain += (f",fps={_tb.ffmpeg_rate(fps)}"
+        # A curve's grid starts at `in` (T = 0), not at its first decoded
+        # pre-roll frame: `start_time=0` drops the slots before it.
+        anchor = ":start_time=0" if curve_cm is not None else ""
+        v_chain += (f",fps={_tb.ffmpeg_rate(fps)}{anchor}"
                     f",tpad=stop={n}:stop_mode=clone"
                     f",trim=end_frame={n},setpts=PTS-STARTPTS")
+
+    if kf_clip:
+        # On the grid: `t` (and geq's `T`) is k/R, the clip-local timeline
+        # seconds of output frame k; the fades follow the geometry as they
+        # always have (after effects and opacity), on that same clock.
+        v_chain += f",{geo}{fades}"
 
     # Normalize sample aspect ratio at the end. rotate / scale-with-eval=frame
     # can produce SAR like 86519:86488 which makes concat fail with
@@ -835,20 +946,65 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
-def _kf_time_expr(c: Clip, var: str) -> str:
-    """Clip-local TIMELINE seconds of the source frame a pre-retime filter
-    sees at source-local seconds `var` (`t` for rotate/scale/crop, `T` for
-    geq): the clip's retime applied to it — `var/speed`, a speed curve's
-    `out_seconds`, or `var` itself at 1x. geometry.ts's `kfTimeOf` mirrors
-    it with the same double operations."""
-    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
-        return f"({var}/{float(c.speed)})"
-    from ..edl import speed_curve as _sc
-    pts = _sc.curve_points(c.speed)
-    cm = _sc.curve_map(pts, c.duration) if pts is not None else None
-    if cm is not None:
-        return f"({_sc.out_seconds_expr(cm, f'({var})')})"
-    return var
+def kf_pan_frame(tx, canvas_w: int, canvas_h: int) -> tuple[int, int]:
+    """The fixed frame a KEYFRAMED scale/pan is centred in before the canvas
+    is cut from it (`_build_clip_video_chain`): wide enough for the largest
+    keyed size plus the largest pan on both sides, even. geometry.ts
+    `kfPanFrame` computes the same integers from the same EDL values (its
+    parity decides where `pad` and `crop` round)."""
+    def peak(v, static: float) -> float:
+        if is_keyframed(v):
+            return max(abs(float(p[1])) for p in v.keyframes)
+        return abs(static)
+
+    def num(v, default: float) -> float:
+        return float(v) if isinstance(v, (int, float)) else default
+
+    s_max = peak(tx.scale, float(f"{num(tx.scale, 1.0):.4f}"))
+    x_max = peak(tx.x, float(f"{num(tx.x, 0.0):.2f}"))
+    y_max = peak(tx.y, float(f"{num(tx.y, 0.0):.2f}"))
+
+    def side(canvas: int, pan: float) -> int:
+        scaled = max(2, int(canvas * s_max / 2) * 2)
+        n = max(canvas, scaled) + 2 * math.ceil(pan) + 2
+        return n + n % 2
+
+    return side(canvas_w, x_max), side(canvas_h, y_max)
+
+
+def v1_pans_at_output(edl: EDL, w_out: int, h_out: int) -> EDL:
+    """`edl` with its v1 clips' x/y pans in OUTPUT pixels.
+
+    A v1 pan is authored in CANVAS pixels, but the chain draws on the
+    output frame: a 1280x720 project previewed at 640x360 (the server
+    preview, every bake span) or exported at another size panned x = 100 by
+    100 OUTPUT pixels — twice as far as the canvas (and the engine, which
+    draws in canvas pixels) says (measured: 420 for 370, Wave D3, lane E1a).
+    Scale is relative and needs nothing. The same EDL (no copy) when the
+    output is the canvas or no v1 clip pans."""
+    cw, ch = int(edl.canvas.w), int(edl.canvas.h)
+    if (int(w_out), int(h_out)) == (cw, ch) or cw <= 0 or ch <= 0:
+        return edl
+
+    def pans(c: Clip) -> bool:
+        return any(is_keyframed(v) or (isinstance(v, (int, float)) and v != 0)
+                   for v in (c.transform.x, c.transform.y))
+
+    if not any(pans(c) for c in _video_clips(edl)):
+        return edl
+    from ..edl.schema import Keyframe
+    sx, sy = w_out / cw, h_out / ch
+    out = edl.model_copy(deep=True)
+    for c in _video_clips(out):
+        for axis, k in (("x", sx), ("y", sy)):
+            v = getattr(c.transform, axis)
+            if isinstance(v, Keyframe):
+                v = Keyframe(keyframes=[(t, val * k) for t, val in v.keyframes], interp=v.interp)
+            elif isinstance(v, (int, float)):
+                v = float(v) * k
+            # past the model's clamp on purpose: an OUTPUT-pixel value
+            object.__setattr__(c.transform, axis, v)
+    return out
 
 
 def _curve_setpts(c: Clip) -> str:
@@ -945,7 +1101,7 @@ def _audio_props_filters(c: Clip) -> str:
             # it used source `duration`, so a 0.5x clip faded at its midpoint
             # and sat in -180 dB silence for the rest, and a 2x clip's fade
             # started after its audio had already ended (never heard). PIP
-            # audio calls this too; a PIP is always 1x, where the two agree.
+            # audio calls this too, after its own retime (pip.pip_audio_chain).
             fade_out_start = max(0.0, c.effective_duration - c.audio.fade_out)
             frag += (f",afade=t=out:st={fade_out_start:.3f}"
                      f":d={c.audio.fade_out:.3f}")
@@ -1259,7 +1415,7 @@ def _preview_aac_out() -> list[str]:
     a 12-min timeline's whole sound, re-encoded per split or volume change."""
     at_args = ["-c:a", "aac_at", "-b:a", "192k", "-aac_at_quality", "2"]
     try:
-        proc = subprocess.run(
+        proc = _cancel.run_prioritised(
             [_pu.FFMPEG, "-v", "error", "-f", "lavfi", "-i",
              "anullsrc=channel_layout=stereo:sample_rate=48000", "-t", "0.1",
              *at_args, "-f", "null", "-"],
@@ -1299,13 +1455,49 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # place in the queue instead of waiting for a slot it will never use.
     _cancel.acquire(_RENDER_SLOTS)
     try:
-        return _render_locked(edl, dst, height=height, fps=fps, preview=preview,
-                              cache_dir=cache_dir, on_progress=on_progress,
-                              cancel_event=cancel_event, crf=crf,
-                              bitrate_kbps=bitrate_kbps,
-                              bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
+        out = _render_locked(edl, dst, height=height, fps=fps, preview=preview,
+                             cache_dir=cache_dir, on_progress=on_progress,
+                             cancel_event=cancel_event, crf=crf,
+                             bitrate_kbps=bitrate_kbps,
+                             bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
     finally:
         _RENDER_SLOTS.release()
+    _check_picture(edl, Path(out), fps)
+    return out
+
+
+def _check_picture(edl: EDL, path: Path, fps) -> None:
+    """Fail a render whose file has NO PICTURE (review RD3). ffmpeg reports
+    'No filtered frames for output stream' and still exits 0 when a clip's
+    chain emits nothing (a raw MPEG-TS whose seek landed past its only
+    keyframe), so the render "succeeded" with a sound-only mp4. A frame count
+    that differs from the plan is logged, not fatal: the file is playable,
+    and the frame-exact goldens pin the counts."""
+    try:
+        proc = _cancel.run_prioritised(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets",
+             "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    except Exception as e:  # noqa: BLE001 — cannot check: do not fail a render over the check
+        logging.getLogger(__name__).warning("render check skipped for %s: %s", path, e)
+        return
+    out = getattr(proc, "stdout", None)
+    if not isinstance(out, str):      # a stubbed runner (tests): nothing to read
+        return
+    text = out.strip().splitlines()
+    try:
+        n = int(text[0].strip().rstrip(",")) if text else 0
+    except ValueError:
+        n = 0
+    if getattr(proc, "returncode", 1) == 0 and n <= 0:
+        raise RuntimeError(
+            "The render produced no picture, only sound: a clip's video could not be read "
+            "from its source at the requested point. Re-import the source file (or convert "
+            "it to MP4) and try again.")
+    want = _tb.frame_of(edl.duration, fps)
+    if n and want and n != want:
+        logging.getLogger(__name__).warning(
+            "render %s has %d video frames, the timeline plans %d", path.name, n, want)
 
 
 def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
@@ -1347,6 +1539,8 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # of the EDL, and only when something is reversed.
     from .reverse import with_reversed_sources
     edl = with_reversed_sources(edl, cache_dir, fps)
+    # v1 pans are canvas pixels; the chain draws output pixels (lane E1a).
+    edl = v1_pans_at_output(edl, w_out, h_out)
     # Speed-curve sound intermediates (render/speed_audio.py), built once
     # into the render cache before the graph names them.
     from .speed_audio import prepare as _prepare_curve_audio
@@ -1568,8 +1762,8 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             # The same render window pip.py placed the picture in; the chain
             # is sample-exact to its frames and carries the clip's own
             # gain/fade/mute (QA-002 PIP half — see pip.pip_audio_chain).
-            win = clock.render_window(seams, c.start, c.start + c.duration)
-            rs, re = win if win is not None else (c.start, c.start + c.duration)
+            win = clock.render_window(seams, c.start, pip_layout_end(c))
+            rs, re = win if win is not None else (c.start, pip_layout_end(c))
             pa_label = f"[pa{j}]"
             pa_parts.append(pip_audio_chain(c, f"[{input_idx}:a]", pa_label,
                                             rs=rs, re=re, fps=fps))
@@ -1632,7 +1826,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
 def _probe_duration(p: Path) -> float | None:
     """Container duration in seconds, or None if ffprobe can't say."""
     try:
-        out = subprocess.run(
+        out = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", str(p)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -1915,7 +2109,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
         # Also cache the video-only version (extract from the just-rendered
         # full preview — `-c:v copy -an` is essentially free).
         try:
-            subprocess.run(
+            _cancel.run_prioritised(
                 [_pu.FFMPEG, "-y", "-i", str(dst), "-c:v", "copy", "-an",
                  "-movflags", "+faststart", str(cached_video)],
                 capture_output=True, check=True,
@@ -2073,7 +2267,7 @@ def _audio_only_graph(edl: EDL, *, fps, first_input: int,
     # not an input at all.
     next_idx = first_input + len(clips)
     pip_clips = [(c, win) for _tid, c in collect_pip_clips(edl)
-                 if (win := clock.render_window(seams, c.start, c.start + c.duration)) is not None]
+                 if (win := clock.render_window(seams, c.start, pip_layout_end(c))) is not None]
     if pip_clips:
         pa_labels: list[str] = []
         for j, (c, (rs, re)) in enumerate(pip_clips):
@@ -2408,7 +2602,7 @@ def delivered_true_peak(path: Path) -> float | None:
     """True peak (dBTP) of `path`'s first audio stream, measured the way a
     platform does (ebur128 peak=true, 4x oversampled); None if unmeasurable."""
     try:
-        proc = subprocess.run(
+        proc = _cancel.run_prioritised(
             [_pu.FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0",
              "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -2455,7 +2649,7 @@ def _hold_delivery_true_peak(dst: Path, *, cancel_event=None) -> None:
                     "-af", f"aresample=192000,alimiter=limit={lin:.6f}:level=0:latency=1"
                            f":attack=1:release=50,aresample=48000",
                     *_AAC_DELIVERY_OUT, "-movflags", "+faststart", str(cand)]
-            proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+            proc = _cancel.run_prioritised(args, capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", timeout=1800, **_pu.SUBPROCESS_FLAGS)
             seen = delivered_true_peak(cand) if proc.returncode == 0 else None
             if seen is None:
@@ -2547,7 +2741,7 @@ _BITRATE_TOLERANCE = 1.15
 def _video_kbps(path: Path) -> float | None:
     """The encoded video stream's average bitrate in kb/s (ffprobe), or None."""
     try:
-        out = subprocess.run(
+        out = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=bit_rate", "-of", "csv=p=0", str(path)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",

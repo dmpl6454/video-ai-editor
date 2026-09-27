@@ -138,14 +138,18 @@ export function iconNode(name: IconName): IconNode {
   return C.render?.({}, null)?.props?.icon?.node ?? []
 }
 
-export function drawIcon(ctx: CanvasRenderingContext2D, name: IconName, x: number, y: number, size: number, color: string) {
+/** `strokePx`: the stroke's width on screen (default lucide's 2 of 24
+ *  units, which is under a pixel for a glyph smaller than 12 px — the speed
+ *  badge's 8 px glyph asks for 1.4 px so it reads). */
+export function drawIcon(ctx: CanvasRenderingContext2D, name: IconName, x: number, y: number, size: number, color: string,
+                         strokePx?: number) {
   const node = iconNode(name)
   const k = size / 24
   ctx.save()
   ctx.translate(x, y)
   ctx.scale(k, k)
   ctx.strokeStyle = color
-  ctx.lineWidth = 2
+  ctx.lineWidth = strokePx ? strokePx / k : 2
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
   for (const [tag, a] of node) {

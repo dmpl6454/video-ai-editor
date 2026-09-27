@@ -95,10 +95,27 @@ const MIN_SPAN = 0.1
 const SPEED_MIN = 0.25
 const SPEED_MAX = 4
 
+/** A speed-CURVE clip's clock for a trim: its timeline footprint and the
+ *  source seconds past `in` at a clip-local timeline time
+ *  (`framePlan.sourceOffsetAt`). */
+export interface CurveTrimClock { duration: number; sourceAt: (localT: number) => number }
+
 export function resolveMediaTrim(
   clip: { in: number; out: number }, side: 'l' | 'r', deltaSec: number,
-  speed: number = 1,
+  speed: number = 1, curve?: CurveTrimClock | null,
 ): { in: number; out: number } {
+  // A curve clip SHORTENED: the edge's source time is the curve's integral
+  // at the dragged timeline point (the mean speed is exact only at the
+  // clip's edges), so the server keeps exactly the frames under the edge.
+  // Lengthening has no curve to read: the mean speed, as before.
+  if (curve && side === 'l' && deltaSec > 0) {
+    const newIn = Math.min(clip.in + curve.sourceAt(deltaSec), clip.out - MIN_SPAN)
+    return { in: Math.max(0, newIn), out: clip.out }
+  }
+  if (curve && side === 'r' && deltaSec < 0) {
+    const newOut = Math.max(clip.in + curve.sourceAt(curve.duration + deltaSec), clip.in + MIN_SPAN)
+    return { in: clip.in, out: newOut }
+  }
   // `deltaSec` is a TIMELINE-space delta (pixels/zoom at the drag site), but
   // in/out are SOURCE-space. A clip at speed s covers (out-in)/s timeline
   // seconds, so 1 timeline second of edge movement consumes s source seconds.

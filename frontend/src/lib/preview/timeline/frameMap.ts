@@ -14,8 +14,11 @@
 //   slot s, the latest frame whose slot is <= s; at EOF it flushes up to the
 //   rounded end timestamp, and tpad clones the last frame (a "freeze").
 // * a reversed clip plays an intermediate built segment by segment;
-// * a speed CURVE retimes with its closed-form setpts (speedCurve.ts), then
-//   the same fps=R rule; a FREEZE holds the first frame of a 1x chain at `in`.
+// * a speed CURVE runs on the file clock anchored at `in` (wave D3,
+//   speedCurve.ts "the v1 chain's clock": a 1/5 s-grid seek 0.5 s early, a
+//   refined time base, the closed-form setpts of T = PTS·TB − in, then
+//   fps=R:start_time=0), so a split piece shows its parent's frames; a
+//   FREEZE holds the first frame of a 1x chain at `in`.
 //
 // Normative definition: tests/goldens/frame_map/*.json (real ffmpeg renders).
 
@@ -24,7 +27,9 @@ import {
   type FpsLike, type Rational,
 } from './timebase'
 import { clipFrames, clipIn, clipOut, freezeOf, reversedFrameCount, reversedView, type EdlClip } from './framePlan'
-import { curveMap, curvePoints, curveRetimer, type CurveMap } from './speedCurve'
+import {
+  anchoredTicks, cRound, curveMap, curvePoints, curveRetimer, curveSeek, curveTimeBase, type CurveMap,
+} from './speedCurve'
 
 /** What the program map needs to know about one source (see frame_map.py). */
 export interface SourceInfo {
@@ -100,7 +105,12 @@ function firstAtOrAfter(src: SourceInfo, ticks: number): number {
  *  `curve` (a speed curve laid over the clip) replaces the constant retime. */
 export function selectFrames(
   src: SourceInfo,
-  opts: { seekUs: number | null; durUs: number; n: number; fps: FpsLike; speed?: EdlClip['speed']; curve?: CurveMap | null },
+  opts: {
+    seekUs: number | null; durUs: number; n: number; fps: FpsLike; speed?: EdlClip['speed']
+    curve?: CurveMap | null
+    /** `(seek, in)`: the curve runs on the v1 chain's in-anchored clock. */
+    anchor?: readonly [number, number] | null
+  },
 ): Int32Array {
   const { seekUs, durUs, n, fps } = opts
   const out = new Int32Array(Math.max(0, n))
@@ -110,8 +120,9 @@ export function selectFrames(
   const r = rateOf(fps)
   const outTb: Rational = { num: r.den, den: r.num }
   let f0 = 0
+  let off = 0
   if (seekUs !== null) {
-    const off = rescale(-seekUs, US, src.tb)
+    off = rescale(-seekUs, US, src.tb)
     f0 = firstAtOrAfter(src, -off)
   }
   if (f0 > last) { out.fill(last); return out }
@@ -120,10 +131,24 @@ export function selectFrames(
   let qlast = 0
   while (f0 + qlast + 1 <= last && ptsOf(src, f0 + qlast + 1) - base < durTb) qlast++
   const div = speedDivisor(opts.speed)
-  const retime = opts.curve
-    ? curveRetimer(opts.curve, src.tb)
-    : (x: number) => (div !== null ? Math.trunc(x / div) : x)
-  const slotOf = (q: number) => rescale(retime(ptsOf(src, f0 + q) - base), src.tb, outTb)
+  let slotOf: (q: number) => number
+  if (opts.curve && opts.anchor) {
+    // edl/speed_curve.py "the v1 chain's clock": back on the file clock,
+    // the refined time base (pts × k), T = PTS·TB − in.
+    const cm = opts.curve
+    const TB = src.tb.num / src.tb.den
+    const [aSeek, aIn] = opts.anchor
+    const back = (seekUs !== null ? off : 0) + (aSeek > 0 ? cRound(aSeek / TB) : 0)
+    const tbc = curveTimeBase(src.tb, r.num)
+    const k = (src.tb.num * tbc.den) / (src.tb.den * tbc.num)
+    const TBc = tbc.num / tbc.den
+    slotOf = (q: number) => rescale(anchoredTicks((ptsOf(src, f0 + q) + back) * k, TBc, aIn, cm), tbc, outTb)
+  } else {
+    const retime = opts.curve
+      ? curveRetimer(opts.curve, src.tb)
+      : (x: number) => (div !== null ? Math.trunc(x / div) : x)
+    slotOf = (q: number) => rescale(retime(ptsOf(src, f0 + q) - base), src.tb, outTb)
+  }
   const eof = slotOf(qlast + 1)
   let q = 0
   let nextSlot = qlast > 0 ? slotOf(1) : 0
@@ -145,16 +170,19 @@ export function speedCurveMap(speed: EdlClip['speed'], inS: number, outS: number
   return pts ? curveMap(pts, Math.max(0, outS - inS)) : null
 }
 
-/** `forward_clip_frames`: the clip chain opened with `clip_input_args`. */
+/** `forward_clip_frames`: the clip chain opened with `clip_input_args` (a
+ *  speed CURVE: the in-anchored chain, seeking at `curveSeek`). */
 export function forwardClipFrames(
   src: SourceInfo, c: { in: number; out: number; speed?: EdlClip['speed'] }, n: number, fps: FpsLike,
 ): Int32Array {
-  const pre = seekPreroll(c.in, fps)
-  const seek = Math.max(0, c.in - pre)
+  const curve = speedCurveMap(c.speed, c.in, c.out)
+  const seek = curve ? curveSeek(c.in) : Math.max(0, c.in - seekPreroll(c.in, fps))
   const end = c.out + 2 * frameDuration(fps)
   const seekUs = seek > 0 ? ffmpegMicros(seek) : null
   const durUs = ffmpegMicros(end) - (seekUs ?? 0)
-  return selectFrames(src, { seekUs, durUs, n, fps, speed: c.speed, curve: speedCurveMap(c.speed, c.in, c.out) })
+  return selectFrames(src, {
+    seekUs, durUs, n, fps, speed: c.speed, curve, anchor: curve ? [seek, c.in] : null,
+  })
 }
 
 /** `compositor.freeze_input_span`: a freeze's (seek, end). */

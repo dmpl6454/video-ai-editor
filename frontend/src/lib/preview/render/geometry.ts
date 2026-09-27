@@ -4,8 +4,9 @@
 //
 //   fit (contain: scale "decrease" + pad; cover: scale "increase" + crop,
 //        or the oversized cover-pan crop) → rotate in place, black corners →
-//   transform (keyframed: scale by max(1, s) + crop at centre + x/y;
-//              static:    scale to (W·s, H·s) + pad by (dx, dy) + crop) →
+//   transform (static:    scale to (W·s, H·s) + pad by (dx, dy) + crop;
+//              keyframed: the same per frame — scale to (W·s, H·s), centre
+//              in a fixed pan frame, crop at centre − (x, y)) →
 //   hflip / vflip (effects, on the canvas-sized frame) →
 //   opacity (RGB × o) → video fades (RGB × fade factor)
 //
@@ -21,37 +22,19 @@
 //   canvas px → F2 (pre-transform frame) → F1 (pre-rotation frame) → source uv
 // with a bounds test at each stage (black outside), plus the RGB gain.
 //
-// Keyframe TIME. The export evaluates a keyframed transform/opacity at the
-// clip-local TIMELINE seconds of the displayed source frame: the filter's
-// `t` (source-local, after `setpts=PTS-STARTPTS`, before the speed retime)
-// through the clip's retime (compositor `_kf_time_expr`: `t/speed`, a
-// curve's out_seconds, or `t`) — the time the Properties panel authors keys
-// at (clipLocalTime). It used to be `t - start` (review RD2: a clip at
-// start = 1 s keyed x 0→200 over its first second rendered x = 0
-// throughout); the compositor and `kfTimeOf` changed together.
+// Keyframe TIME. A clip with any keyframed transform/opacity runs its
+// geometry AFTER the retime and the project-grid `fps` in the export
+// (compositor `kf_clip`), so every keyframe — and that clip's video fades —
+// is evaluated at the clip-local TIMELINE seconds of the OUTPUT frame,
+// `(k − clipStart)/R`: exactly `playhead − clip.start`, where the UI
+// samples keys (lib/overlay.ts). Before (review RD2) it was the displayed
+// SOURCE frame's retimed time, which cannot animate the frames a slow clip
+// repeats, a 25 fps source in a 30 fps project, or a freeze (Wave D3, E1a).
 
 import { sampleKF, type KFNum } from '../../overlay'
-import { clipIn, clipOut, effectiveDuration, type EdlClip } from '../timeline/framePlan'
-import { curveMap, curvePoints, outSeconds } from '../timeline/speedCurve'
+import { effectiveDuration, type EdlClip } from '../timeline/framePlan'
 import { KIND_GAP, type ProgramMap } from '../timeline/programMap'
 import { ptsOf, type SourceInfo } from '../timeline/frameMap'
-
-/** The export once evaluated keyframes at `t - start`; fixed in the compositor
- *  (review RD2) and here together. Kept, false, so a reader of the old notes
- *  finds where the rule went: see `kfTimeOf`. */
-export const SERVER_KF_TIME_MINUS_START = false
-
-/** Clip-local TIMELINE seconds at which the export evaluates keyframes for
- *  a source frame `tSrc` source-local seconds into the clip chain: the same
- *  double operations as compositor `_kf_time_expr` (`t/speed`, the curve's
- *  `out_seconds` over `out - in` source seconds, or `t`). */
-export function kfTimeOf(clip: EdlClip, tSrc: number): number {
-  const sp = clip.speed
-  if (typeof sp === 'number' && sp > 0 && sp !== 1) return tSrc / sp
-  const pts = curvePoints(sp)
-  const cm = pts ? curveMap(pts, clipOut(clip) - clipIn(clip)) : null
-  return cm ? outSeconds(cm, tSrc) : tSrc
-}
 
 // ------------------------------------------------------------------ affine
 
@@ -147,6 +130,29 @@ export function propValue(v: unknown, t: number, fallback: number): number {
   return fallback
 }
 
+/** Whether the export runs this clip's geometry on the output grid
+ *  (compositor `kf_clip`): any keyframed transform or opacity. */
+export function hasKeyframes(clip: EdlClip): boolean {
+  const tx = (clip.transform ?? {}) as Transform
+  return [tx.x, tx.y, tx.scale, tx.rotation, tx.opacity].some(isKeyframed)
+}
+
+/** compositor `kf_pan_frame`: the fixed frame a keyframed scale/pan is
+ *  centred in — the largest keyed size plus the largest pan on both sides,
+ *  even. Same EDL values, same double operations. */
+export function kfPanFrame(tx: Transform, W: number, H: number): [number, number] {
+  const peak = (v: unknown, stat: number): number =>
+    isKeyframed(v) ? Math.max(...v.keyframes.map((p) => Math.abs(p[1]))) : Math.abs(stat)
+  const num = (v: unknown, d: number): number => (typeof v === 'number' ? v : d)
+  const sMax = peak(tx.scale, printed(num(tx.scale, 1), 4))
+  const side = (canvas: number, pan: number): number => {
+    const scaled = Math.max(2, Math.trunc((canvas * sMax) / 2) * 2)
+    const n = Math.max(canvas, scaled) + 2 * Math.ceil(pan) + 2
+    return n + (n % 2)
+  }
+  return [side(W, peak(tx.x, printed(num(tx.x, 0), 2))), side(H, peak(tx.y, printed(num(tx.y, 0), 2)))]
+}
+
 // --------------------------------------------------------------- the chain
 
 export interface Size { w: number; h: number }
@@ -158,10 +164,14 @@ export interface GeometryInput {
   source: Size
   clip: EdlClip
   /** Source-local seconds of the displayed frame (pre-speed, from the
-   *  clip's first kept frame): the filters' `t`. */
+   *  clip's first kept frame). */
   tSrc: number
-  /** Clip-local timeline seconds after the retime (the video fades' clock);
-   *  default tSrc / scalar speed. */
+  /** Clip-local TIMELINE seconds of the output frame, `(k − clipStart)/R`:
+   *  the clock of every keyframe and, on a keyframed clip, of the fades.
+   *  Default tSrc / scalar speed. */
+  tClip?: number
+  /** A non-keyframed clip's fade clock: the retimed source frame's time
+   *  (the fades run before the grid there); default tSrc / scalar speed. */
   tOut?: number
 }
 
@@ -251,28 +261,27 @@ function rotationInverse(tx: Transform, t: number, W: number, H: number): Affine
 }
 
 /** The transform stage: F3 (canvas-sized) → F2, and the zoom it applies. */
-function transformInverse(tx: Transform, t: number, t0: number, W: number, H: number, coverPan: boolean): { m: Affine; zoom: number } {
+function transformInverse(tx: Transform, t: number, W: number, H: number, coverPan: boolean): { m: Affine; zoom: number } {
   const animated = isKeyframed(tx.scale) || isKeyframed(tx.x) || isKeyframed(tx.y)
   const scStatic = typeof tx.scale === 'number' ? tx.scale : 1
   const xStatic = isKeyframed(tx.x) ? 0 : typeof tx.x === 'number' ? tx.x : 0
   const yStatic = isKeyframed(tx.y) ? 0 : typeof tx.y === 'number' ? tx.y : 0
   if (animated) {
-    const zoomAt = (tt: number) => Math.max(1, isKeyframed(tx.scale) ? propValue(tx.scale, tt, 1) : printed(scStatic, 4))
-    const zoom = zoomAt(t)
-    const sw = trunc(W * zoom)
-    const sh = trunc(H * zoom)
-    // crop's `iw`/`ih` are its input size AT CONFIGURATION — the first frame
-    // scale (eval=frame) emitted — while its clamp uses each frame's real
-    // size. Measured: scale keyed 1→2 with x = 30 crops at x = 30, not at
-    // (iw_now − W)/2 + 30.
-    const sw0 = trunc(W * zoomAt(t0))
-    const sh0 = trunc(H * zoomAt(t0))
+    // scale=w='max(2,trunc(W·s/2)·2)' (eval=frame) → pad to the fixed pan
+    // frame at its centre (eval=frame: re-centred per frame size, truncated
+    // and snapped to the chroma grid) → crop W×H at centre − (x, y).
+    const s = isKeyframed(tx.scale) ? propValue(tx.scale, t, 1) : printed(scStatic, 4)
+    const sw = Math.max(2, trunc((W * s) / 2) * 2)
+    const sh = Math.max(2, trunc((H * s) / 2) * 2)
+    const [fw, fh] = kfPanFrame(tx, W, H)
     const xv = isKeyframed(tx.x) ? propValue(tx.x, t, 0) : printed(xStatic, 2)
     const yv = isKeyframed(tx.y) ? propValue(tx.y, t, 0) : printed(yStatic, 2)
-    const cx = cropOffset((sw0 - W) / 2 + xv, sw, W)
-    const cy = cropOffset((sh0 - H) / 2 + yv, sh, H)
-    // F3 (x, y) → scaled (x + cx, y + cy) → F2 = scaled · (W/sw, H/sh)
-    return { m: scaleT(W / sw, H / sh, (cx * W) / sw, (cy * H) / sh), zoom: sw / W }
+    const px = padOffset((fw - sw) / 2)
+    const py = padOffset((fh - sh) / 2)
+    const cx = cropOffset(Math.trunc((fw - W) / 2) - xv, fw, W)
+    const cy = cropOffset(Math.trunc((fh - H) / 2) - yv, fh, H)
+    // F3 (x, y) → pan frame (x + cx, y + cy) → scaled (… − px, … − py) → F2 · (W/sw, H/sh)
+    return { m: scaleT(W / sw, H / sh, ((cx - px) * W) / sw, ((cy - py) * H) / sh), zoom: sw / W }
   }
   if (coverPan) return { m: IDENTITY, zoom: 1 }
   const changed = (Math.abs(scStatic - 1.0) > 0.001 && scStatic > 0) || xStatic !== 0 || yStatic !== 0
@@ -319,8 +328,8 @@ export function fadeFactor(tOut: number, st: number, d: number, out: boolean): n
   return f / 65535
 }
 
-/** Opacity × video fades. `tSrc` for opacity keyframes, `tOut` (clip-local
- *  timeline seconds after the speed retime) for the fades. */
+/** Opacity × video fades: opacity keyframes at `tKf`, the fades at `tOut`
+ *  (both clip-local timeline seconds; see GeometryInput). */
 export function clipGain(c: EdlClip, tx: Transform, tKf: number, tOut: number): number {
   let g = 1
   if (isKeyframed(tx.opacity)) g = propValue(tx.opacity, tKf, 1)
@@ -345,14 +354,13 @@ export function computeGeometry(input: GeometryInput): ClipGeometry {
   const sw = input.source.w > 0 ? input.source.w : W
   const sh = input.source.h > 0 ? input.source.h : H
   const tx = (clip.transform ?? {}) as Transform
-  const tKf = kfTimeOf(clip, input.tSrc)
-  const tKf0 = 0
+  const sp = typeof clip.speed === 'number' && clip.speed > 0 ? clip.speed : 1
+  const tKf = input.tClip ?? input.tSrc / sp
   const fit = fitStage(clip, W, H, sw, sh, tx)
   const rot = rotationInverse(tx, tKf, W, H)
-  const tr = transformInverse(tx, tKf, tKf0, W, H, fit.coverPan)
+  const tr = transformInverse(tx, tKf, W, H, fit.coverPan)
   const toF2 = compose(tr.m, flipMap(clip, W, H))
-  const sp = typeof clip.speed === 'number' && clip.speed > 0 ? clip.speed : 1
-  const tOut = input.tOut ?? input.tSrc / sp
+  const tOut = hasKeyframes(clip) ? tKf : input.tOut ?? input.tSrc / sp
   const frame: Bounds = { x0: 0, y0: 0, x1: W, y1: H }
   return {
     toF2, f2Bounds: frame,
@@ -429,6 +437,7 @@ export function frameGeometry(
   // clock is then the clip-local output time (the retimed pts on the grid).
   const scalar = clip.speed === null || clip.speed === undefined || typeof clip.speed === 'number'
   const frozen = typeof (clip as { freeze?: unknown }).freeze === 'number'
-  const tOut = scalar && !frozen ? undefined : ((k - pm.clipStart[ci]) * pm.R.den) / pm.R.num
-  return { clip, srcIndex: pm.srcKey[k], srcFrame: i, geometry: computeGeometry({ canvas, source, clip, tSrc, tOut }) }
+  const tClip = ((k - pm.clipStart[ci]) * pm.R.den) / pm.R.num
+  const tOut = scalar && !frozen ? undefined : tClip
+  return { clip, srcIndex: pm.srcKey[k], srcFrame: i, geometry: computeGeometry({ canvas, source, clip, tSrc, tClip, tOut }) }
 }

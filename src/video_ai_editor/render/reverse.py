@@ -87,10 +87,22 @@ def _source_info(src: str) -> tuple[int, int, bool, bool]:
     return _probe(str(src), st.st_mtime_ns, st.st_size)
 
 
+def _sar_of(c: Clip) -> str:
+    """`setsar` of the intermediate: the source's own sample aspect for an
+    anamorphic source (render/sar.py — it used to be squared to 1:1 without
+    resampling, so a reversed PAL/HDV clip exported squeezed), else 1."""
+    from .sar import source_anamorphic
+    ana = source_anamorphic(c.src)
+    return ana.sar_text if ana is not None else "1"
+
+
 def _key(c: Clip, fps) -> str:
     from .chunks import file_identity
     payload = {"r": _RECIPE, "file": file_identity(c.src), "src": str(c.src),
                "in": float(c.in_), "out": float(c.out), "fps": _tb.ffmpeg_rate(fps)}
+    sar = _sar_of(c)
+    if sar != "1":
+        payload["sar"] = sar          # only then: every square key is unchanged
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -131,7 +143,7 @@ def _render_segment(c: Clip, fps, j0: int, n: int, s0: int, m: int, dst: Path, *
     if has_video:
         parts.append(f"[0:v]setpts=PTS-STARTPTS,fps={rate},"
                      f"tpad=stop={n}:stop_mode=clone,trim=end_frame={n},"
-                     f"reverse,setpts=PTS-STARTPTS,setsar=1[v]")
+                     f"reverse,setpts=PTS-STARTPTS,setsar={_sar_of(c)}[v]")
         maps += ["-map", "[v]", "-r", rate, *vcodec]
     if has_audio:
         a_in = "[0:a]"
@@ -223,12 +235,24 @@ def _build(c: Clip, fps, dst: Path) -> None:
         _pu.rmtree_with_retry(work)
 
 
+def view_out(c: Clip) -> float:
+    """The reversed view's `out` (its `in` is 0): the clip's OWN source span
+    `out - in`, the very float `Clip.effective_duration` divides — so the
+    view keeps the original's timeline footprint bit for bit (review RD3).
+    It was the intermediate's length `time_of(M)`: equal in exact
+    arithmetic, but a reversed 2x/4x clip with an odd frame count sits on a
+    .5-frame tie, which the two floats rounded differently (the export and
+    the program map then laid a frame more or less than the EDL did, and
+    every later v1 clip slid); and a curve piece cut off the grid played its
+    curve over M/R instead of its real span."""
+    return float(c.out) - float(c.in_)
+
+
 def reversed_view(c: Clip, fps, cache_dir: Path) -> Clip:
     """`c` playing its reversed intermediate forwards (a deep copy)."""
     path = build_reversed(c, fps, cache_dir)
     return c.model_copy(deep=True, update={
-        "src": str(path), "in_": 0.0,
-        "out": _tb.time_of(reversed_frames(c, fps), fps), "reverse": False})
+        "src": str(path), "in_": 0.0, "out": view_out(c), "reverse": False})
 
 
 def has_reversed(edl) -> bool:

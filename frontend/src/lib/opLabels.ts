@@ -53,8 +53,10 @@ export function toolTitle(tool: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-// Internal ids: clips (c_/t_/s_/k_/m_…) and sessions carry an 8+ hex suffix.
-const ID_RE = /\s*(?:→\s*)?\b[a-z]{1,3}_[0-9a-f]{6,}\b/g
+// Internal ids: clips (c_/t_/s_/k_/m_…) and sessions carry an 8+ hex suffix;
+// a split / cut piece adds `_<hex>` per generation (c_627c3ffb_6b1f58 — review
+// RD3: those leaked into History whole).
+const ID_RE = /\s*(?:→\s*)?\b[a-z]{1,3}_[0-9a-f]{6,}(?:_[0-9a-f]{4,})*\b/g
 
 /** A dispatch summary with internal ids and Python reprs taken out. */
 export function cleanSummary(summary: string): string {
@@ -78,7 +80,9 @@ export function cleanSummary(summary: string): string {
   // Lane ids read the way the timeline labels them.
   s = s.replace(/\b(v|a)(\d)\b/g, (_m, l: string, n: string) => `${l.toUpperCase()}${n}`)
   s = s.replace(/\s+([:,)])/g, '$1').replace(/\(\s+/g, '(').replace(/\s{2,}/g, ' ').trim()
-  return s.replace(/^[:—-]\s*/, '')
+  // what a hidden id leaves: "()" and a dangling arrow ("Speed → 2.00x")
+  s = s.replace(/\s*\(\s*\)/g, '').replace(/^([A-Z][\w ]*?)\s+→\s+/, '$1 ').trim()
+  return s.replace(/^[:—→-]\s*/, '')
 }
 
 // A snake_case word that IS a tool id ("· add_text: replaced …").
@@ -106,6 +110,7 @@ export interface LabelContext {
 const MEDIA_FILE_RE = /\b[\w.\-]+\.(?:mp4|mov|m4v|mkv|webm|wav|mp3|m4a|aac|flac|ogg|png|jpe?g|heic|gif|webp)\b/gi
 const SPAN_RE = /(\d+(?:\.\d+)?)s?\s*[–-]\s*(\d+(?:\.\d+)?)s?(?=[)\s,]|$)/g
 const AT_RE = /(^|\s)(?:@|at)\s+(\d+(?:\.\d+)?)s\b/g
+const INOUT_RE = /\b(in|out)\s+(\d+(?:\.\d+)?)(?=\s|$|,)/g
 const LANE_RE = /\b(to|on|from|in)\s+(v\d+|a\d+|vo\d*|music\d*|captions|text|stickers|tx_[a-z]+)\b/gi
 
 /** `summary` in editor language for this project: `cleanSummary`, then media
@@ -129,6 +134,8 @@ export function editorSummary(summary: string, ctx: LabelContext = {}): string {
     s = s.replace(SPAN_RE, (_m, a: string, b: string) =>
       `${formatTimecode(Number(a), ctx.fps)}–${formatTimecode(Number(b), ctx.fps)}`)
     s = s.replace(AT_RE, (_m, pre: string, t: string) => `${pre}at ${formatTimecode(Number(t), ctx.fps)}`)
+    // a trim's source points ("in 8.00 out 18.00", from in=8.00 out=18.00)
+    s = s.replace(INOUT_RE, (_m, w: string, t: string) => `${w} ${formatTimecode(Number(t), ctx.fps)}`)
   }
   return s
 }
@@ -247,6 +254,7 @@ export function opLabel(op: { tool: string; summary?: string | null; args?: Reco
   const t = title.toLowerCase()
   if (low.startsWith(t + ': ')) detail = detail.slice(title.length + 2)
   else if (low.startsWith(t + ' ')) detail = detail.slice(title.length + 1)
+  detail = detail.replace(/^[→:—-]\s*/, '')
   return { title, detail, raw: `${op.tool} — ${op.summary ?? ''}` }
 }
 

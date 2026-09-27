@@ -107,14 +107,12 @@ def test_move_clip_rejects_sped_clip_onto_audio_lane(store: EDLStore):
     with pytest.raises(ValueError, match="reset speed"):
         dispatch(store, "move_clip", {"clip_id": "c1", "new_start": 0.0,
                                       "new_track": "music"})
-    with pytest.raises(ValueError, match="reset speed"):
-        dispatch(store, "move_clip", {"clip_id": "c1", "new_start": 0.0,
-                                      "new_track": "v2"})
-    # Normal-speed clips still move freely.
-    dispatch(store, "set_speed", {"clip_id": "c1", "factor": 1.0})
+    # A PIP lane retimes like v1 since wave D3 (E2), so a sped clip may move
+    # there and keeps its speed.
     dispatch(store, "move_clip", {"clip_id": "c1", "new_start": 0.0,
                                   "new_track": "v2"})
-    assert any(c.id == "c1" for c in store.edl.get_track("v2").clips)
+    moved = next(c for c in store.edl.get_track("v2").clips if c.id == "c1")
+    assert moved.speed == 2.0
 
 
 def test_cut_range_on_sped_clip_uses_effective_time(store: EDLStore):
@@ -162,23 +160,22 @@ def _fast_store(tmp_path: Path) -> EDLStore:
     return EDLStore(tmp_path)
 
 
-def test_set_speed_rejected_on_v2_pip(tmp_path: Path):
-    """set_speed on a non-v1 video track must ValueError, not commit.
-
-    render/pip.py applies no setpts, so speed on a v2 clip is fiction — and
-    the pre-fix code additionally ran _ripple_close_gap on the v2 track,
-    repacking deliberately-gapped PIP placements from t=0 (8.0/20.0 became
-    0.0/2.0 in the live repro)."""
+def test_set_speed_on_v2_pip_keeps_every_placement(tmp_path: Path):
+    """set_speed on a non-v1 video track retimes the PIP IN PLACE (wave D3,
+    E2: render/pip.py now retimes a PIP like v1). It must never repack the
+    lane — the pre-QA code ran _ripple_close_gap on v2, collapsing
+    deliberately-gapped PIP placements from t=0 (8.0/20.0 became 0.0/2.0
+    in the live repro), which is why speed on a PIP was refused until now."""
     s = _fast_store(tmp_path)
     v2 = s.edl.get_track("v2")
     v2.clips.append(Clip(id="c_pip1", src="/x/a.mp4", in_=0, out=4, start=8.0))
     v2.clips.append(Clip(id="c_pip2", src="/x/b.mp4", in_=0, out=4, start=20.0))
     s.commit("seed", {}, "seed")
-    with pytest.raises(ValueError, match="main video track"):
-        dispatch(s, "set_speed", {"clip_id": "c_pip1", "factor": 2.0})
+    dispatch(s, "set_speed", {"clip_id": "c_pip1", "factor": 2.0})
     assert v2.clips[0].start == pytest.approx(8.0), "PIP placement must survive"
     assert v2.clips[1].start == pytest.approx(20.0)
-    assert v2.clips[0].speed is None, "rejected call must not commit the field"
+    assert v2.clips[0].speed == 2.0
+    assert v2.clips[0].effective_duration == pytest.approx(2.0)
 
 
 def test_set_speed_on_an_audio_lane_retimes_its_footprint(tmp_path: Path):

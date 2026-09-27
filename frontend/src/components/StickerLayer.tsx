@@ -54,14 +54,15 @@ import {
 } from '../lib/overlay'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import {
-  pipVideo, syncPipVideo, pipDrawGeom, clipToShape, pipIsClientDrawn,
+  pipVideo, syncPipClipVideo, pipDrawGeom, clipToShape, pipIsClientDrawn,
   pausePipVideosExcept, drawPipVideoFrame, pipInnerPlan,
   setLivePipFraming, livePipFraming,
 } from '../lib/pipDraw'
 import * as dv from '../lib/dragVisuals'
 import {
-  activeOnFrames, layoutClock, renderLocal, renderTime, v1ClipAt, v1LayoutOf, v1SeamsOf,
+  activeOnFrames, layoutClock, renderLocal, v1ClipAt, v1LayoutOf, v1SeamsOf,
 } from '../lib/timelineLayout'
+import type { EdlClip } from '../lib/preview/timeline/framePlan'
 
 interface Props {
   edl: EDL
@@ -166,7 +167,7 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
   // Framing mode gates the base-video drag (see v1DragAllowed).
   const framing = useStore((s) => s.framing)
   // Playback state decides whether a PIP's hidden element is PLAYED or SEEKED
-  // (see syncPipVideo — seeking it per frame is what made the PIP flicker).
+  // (see syncPipVideo/syncPipClipVideo — seeking it per frame is what made the PIP flicker).
   const isPlaying = useStore((s) => s.isPlaying)
   const playbackRate = useStore((s) => s.playbackRate)
   // The Properties Transform sliders publish their in-flight value here. For a
@@ -539,11 +540,16 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
           // window opens, `render_time(start)`, so handing it the layout start
           // would play the footage that much too early into itself (up to
           // 2.4 s on the reported session) while the box appeared late.
-          syncPipVideo(v, t, renderTime(stateRef.current.seams, pc.start),
-                       (pc as unknown as { in?: number }).in ?? 0,
-                       stateRef.current.edl.canvas.fps ?? 30,
-                       { playing: stateRef.current.isPlaying,
-                         rate: stateRef.current.playbackRate })
+          //
+          // Through the clip's RETIME (wave D3, E2): a PIP plays its speed,
+          // curve, freeze or reverse like the export (render/pip.py
+          // `pip_retime`; the map is lib/pipTime), in server and client
+          // preview alike — `t` is whichever clock drives this layer.
+          syncPipClipVideo(v, pc as unknown as EdlClip,
+                           renderLocal(stateRef.current.seams, pc.start, t),
+                           stateRef.current.edl.canvas.fps ?? 30,
+                           { playing: stateRef.current.isPlaying,
+                             rate: stateRef.current.playbackRate })
           livePipSrcs.add(pc.src)
         }
         const pcx = pc as unknown as {

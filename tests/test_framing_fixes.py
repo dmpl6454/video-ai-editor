@@ -263,7 +263,11 @@ def test_the_cover_pan_sign_holds_in_the_actual_PIXELS(tmp_path: Path):
 
     r_mid, b_mid = bars(0)
     assert r_mid < 0.01 and b_mid < 0.01, "a centred cover crop shows neither edge"
-    r_pos, b_pos = bars(600)
+    # x is CANVAS px (1080x1920): the 1920x1080 source covers it at 3413x1920,
+    # the red bar is its left 533 px and the centred window starts at 1166,
+    # so +1100 reveals it. (±600 used to pass only because the export applied
+    # the pan in OUTPUT px, 1.69x too far at 640 — compositor.v1_pans_at_output.)
+    r_pos, b_pos = bars(1100)
     assert r_pos > 0.2 and b_pos < 0.01, "+x must reveal the source's LEFT edge"
-    r_neg, b_neg = bars(-600)
+    r_neg, b_neg = bars(-1100)
     assert b_neg > 0.2 and r_neg < 0.01, "-x must reveal the source's RIGHT edge"

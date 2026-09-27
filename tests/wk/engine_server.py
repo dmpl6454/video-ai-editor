@@ -92,6 +92,10 @@ class EngineServer:
                 m = _PROXY.match(path)
                 if m:
                     return self._proxy(m.group(1), m.group(2), rng, entry)
+                with server._lock:
+                    delay = server.delays.get(path, 0.0)
+                if delay:
+                    time.sleep(delay)
                 rel = path.lstrip("/")
                 prefix = next((p for p in server.mount_order if rel.startswith(p + "/")), None)
                 if prefix is None:
@@ -105,8 +109,21 @@ class EngineServer:
                 ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
                 if target.suffix in (".js", ".mjs"):
                     ctype = "text/javascript"
+                data = target.read_bytes()
+                r = _RANGE.match(rng or "")
+                if r and ctype.startswith("video/"):
+                    # a <video> on a file (the degraded tier's master) needs
+                    # byte ranges: WebKit will not play media without them
+                    a = int(r.group(1))
+                    b = min(len(data) - 1, int(r.group(2)) if r.group(2) else len(data) - 1)
+                    if a >= len(data):
+                        entry["status"] = 416
+                        return self._send(416, headers={"Content-Range": f"bytes */{len(data)}"})
+                    entry["status"] = 206
+                    return self._send(206, data[a:b + 1], ctype, {"Content-Range": f"bytes {a}-{b}/{len(data)}",
+                                                                  "Accept-Ranges": "bytes"})
                 entry["status"] = 200
-                return self._send(200, target.read_bytes(), ctype)
+                return self._send(200, data, ctype, {"Accept-Ranges": "bytes"} if ctype.startswith("video/") else None)
 
             def _proxy(self, key: str, rel: str, rng: str | None, entry: dict) -> None:
                 root = server.proxies.get(key)

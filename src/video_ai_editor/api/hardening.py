@@ -43,6 +43,31 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # Structured logger — JSON one-line records.
 
 _logger = logging.getLogger("video_ai_editor")
+
+
+def _log_dir():
+    """Where app.log rotates (review RD3). `VAI_LOG_DIR` names it; a pytest
+    process (the handler is installed at IMPORT, before tests/conftest.py
+    can redirect anything) logs under the temp dir, and a backend started
+    with an absolute WORKDIR (a scratch or QA server) logs beside it — only
+    the app itself writes the owner's ~/Library/Application Support log, so
+    QA traffic never rotates the owner's diagnostics away."""
+    import os
+    import sys
+    import tempfile
+    from pathlib import Path
+    env = os.environ.get("VAI_LOG_DIR")
+    if env:
+        return Path(env)
+    if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+        return Path(tempfile.gettempdir()) / "vae-pytest-logs"
+    wd = os.environ.get("WORKDIR")
+    if wd and os.path.isabs(wd):
+        return Path(wd) / "logs"
+    from .. import platformutil as _pu
+    return _pu.user_data_dir("Video AI Editor") / "logs"
+
+
 if not _logger.handlers:
     handler = logging.StreamHandler()
     class _JSONFormatter(logging.Formatter):
@@ -72,8 +97,7 @@ if not _logger.handlers:
     # makes a user-reported "it froze" actionable.
     try:
         from logging.handlers import RotatingFileHandler
-        from .. import platformutil as _pu
-        log_dir = _pu.user_data_dir("Video AI Editor") / "logs"
+        log_dir = _log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         fh = RotatingFileHandler(log_dir / "app.log", maxBytes=2_000_000,
                                  backupCount=3, encoding="utf-8")

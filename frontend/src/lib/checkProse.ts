@@ -85,3 +85,18 @@ export function checksHeadline(verify: { passed: number; total: number; checks: 
   const base = `${verify.passed} of ${verify.total} check${verify.total === 1 ? '' : 's'} passed`
   return failed ? `${base} · ${failed} failed` : base
 }
+
+/** The checks a run log lists: headline ones first, then the info ones, each
+ *  identical check (same id, words and result) once (review RD3: Auto edit
+ *  sent "the video got shorter" twice, and the repeated React key threw). */
+export function shownChecks(checks: readonly VerifyCheck[]): VerifyCheck[] {
+  const seen = new Set<string>()
+  const out: VerifyCheck[] = []
+  for (const c of [...checks.filter((x) => x.headline !== false), ...checks.filter((x) => x.headline === false)]) {
+    const k = `${c.check}\u0000${c.human}\u0000${String(c.pass)}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(c)
+  }
+  return out
+}

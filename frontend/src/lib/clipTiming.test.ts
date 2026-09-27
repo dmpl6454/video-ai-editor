@@ -1,7 +1,8 @@
 // QA-048 (remainder): one timing model — Start moves, End trims, Duration
 // trims — for text, stickers and media alike.
 import { describe, expect, it } from 'vitest'
-import { mediaTimelineDuration, mediaTimingEdit, overlayTimingEdit } from './clipTiming'
+import { mediaTimelineDuration, mediaTimingEdit, overlayTimingEdit, curveClockOf } from './clipTiming'
+import { effectiveDuration, sourceOffsetAt } from './preview/timeline/framePlan'
 
 const overlay = { start: 2, end: 5 }
 
@@ -56,5 +57,35 @@ describe('media clips: the same timeline triple, plus the source In / Out', () =
     expect(overlayTimingEdit(asOverlay, 'end', 5)?.args).toEqual({ end: 5 })
     const t = mediaTimingEdit(clip, 'end', 5)!
     expect(clip.start + mediaTimelineDuration({ ...clip, out: t.args.out })).toBe(5)
+  })
+})
+
+describe('a speed-CURVE clip trims through its curve, not its mean speed (review RD3)', () => {
+  // The Hero preset over source 5.0-8.0: the clip the reviewer typed a
+  // Duration of 00:00:02:00 into and got 00:00:02:07 (out 6.584, the mean).
+  const hero = { id: 'c', src: 's', in: 5.0, out: 8.0, start: 0,
+    speed: { curve: [[0, 1.0], [0.3, 0.2], [0.7, 0.2], [1, 1.6]] } }
+  const clock = curveClockOf(hero)!
+  const span = { in: 5.0, out: 8.0, start: 3.0, speed: 3.0 / clock.duration, curve: clock }
+
+  it('shows the curve\'s footprint', () => {
+    expect(clock.duration).toBeCloseTo(effectiveDuration(hero as never), 12)
+    expect(mediaTimelineDuration(span)).toBe(clock.duration)
+  })
+
+  it('a shorter Duration / End asks for the source time the curve reaches there', () => {
+    const d = mediaTimingEdit(span, 'duration', 2.0)!
+    expect(d.args.out).toBeCloseTo(5.0 + sourceOffsetAt(hero as never, 2.0), 12)
+    expect(d.args.out).not.toBeCloseTo(5.0 + 2.0 * span.speed, 3)
+    expect(mediaTimingEdit(span, 'end', 3.0 + 2.0)!.args.out).toBe(d.args.out)
+  })
+
+  it('a longer one has no curve to read: the mean speed, as before', () => {
+    expect(mediaTimingEdit(span, 'duration', clock.duration + 1)!.args.out).toBeCloseTo(5.0 + (clock.duration + 1) * span.speed, 9)
+  })
+
+  it('a constant speed or a freeze has no curve clock', () => {
+    expect(curveClockOf({ ...hero, speed: 2 })).toBeNull()
+    expect(curveClockOf({ ...hero, freeze: 1.5 })).toBeNull()
   })
 })

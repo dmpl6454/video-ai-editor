@@ -59,3 +59,45 @@ export class FrameLoop {
     this.tick = null
   }
 }
+
+/** A playing transport with no new presented frame for this long, while not
+ *  waiting on data, is stuck (review RD3: Space set playing while the
+ *  picture stayed on k=1 for seconds, no error, no 'waiting'). */
+export const STALL_MS = 1500
+/** Restarts tried in a row without progress before the watchdog gives up. */
+export const STALL_MAX_RESTARTS = 3
+
+/** The stuck-play watchdog's arithmetic: fed the presented k on every tick,
+ *  answers whether to restart the run. Progress (a new k) resets it. */
+export class StallWatch {
+  private k = -1
+  private since = 0
+  private elementT = NaN
+  /** Restarts since the last progress. */
+  restarts = 0
+
+  /** `buffering`: the element said 'waiting'. That is a wait for data, not
+   *  a stall — unless the element's own clock (`elementT`) is moving while
+   *  no frame reaches the canvas (the flag is only cleared by a presented
+   *  frame, so a lost frame callback left it up for good). */
+  check(k: number, buffering: boolean, now: number, elementT = NaN): boolean {
+    const moving = elementT !== this.elementT && !Number.isNaN(elementT)
+    this.elementT = elementT
+    const waiting = buffering && !moving
+    if (k !== this.k || waiting) {
+      if (k !== this.k) this.restarts = 0
+      this.k = k
+      this.since = now
+      return false
+    }
+    if (now - this.since < STALL_MS || this.restarts >= STALL_MAX_RESTARTS) return false
+    this.restarts++
+    this.since = now
+    return true
+  }
+
+  /** A new run (play, or a playing seek): the clock starts now. */
+  arm(now: number): void {
+    this.since = now
+  }
+}

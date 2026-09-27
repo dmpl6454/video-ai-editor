@@ -62,8 +62,16 @@ export function curveMap(points: CurvePoints, S: number): CurveMap | null {
   return { S, D, segs, sEnd: s, rEnd: points[points.length - 1][1] }
 }
 
-/** `out_seconds`: output seconds at source seconds T (the setpts expression). */
+/** `start_speed`: the curve's speed at output 0. */
+export function startSpeed(cm: CurveMap): number {
+  return cm.segs.length ? cm.segs[0].r : cm.rEnd
+}
+
+/** `out_seconds`: output seconds at source seconds T (the setpts expression).
+ *  Before `in` (T < 0, an in-anchored chain's pre-roll) it extends the curve
+ *  at its start speed. */
 export function outSeconds(cm: CurveMap, T: number): number {
+  if (T < 0) return T / startSpeed(cm)
   for (const g of cm.segs) {
     if (T < g.s1) {
       const q = T - g.s0
@@ -89,6 +97,57 @@ export function sourceSeconds(cm: CurveMap, t: number): number {
 export function speedAt(cm: CurveMap, t: number): number {
   for (const g of cm.segs) if (t < g.t1) return g.r + (g.k / 2) * (t - g.t0)
   return cm.rEnd
+}
+
+// ---------------------------------------------------------- the v1 chain's clock
+// `edl/speed_curve.py` "the v1 chain's clock": a curve clip is seeked on a
+// 1/5 s grid at least 0.5 s before `in`, put back on the FILE's clock, its
+// time base refined by k = R.num / gcd(R.num, 1/TB) so a project frame is
+// whole ticks, and retimed at T = PTS·TB − in with a 1e-8 s bias before the
+// truncation; `fps=R:start_time=0` anchors the grid at `in`. So a split,
+// cut or trim of a curve clip exports the frames the whole clip did.
+
+export const CURVE_PREROLL_S = 0.5
+export const CURVE_SEEK_GRID = 5
+export const CURVE_TICK_BIAS = 1e-8
+
+/** `curve_seek`: a curve clip's input seek (0 = no -ss). */
+export function curveSeek(inS: number): number {
+  const k = Math.floor((inS - CURVE_PREROLL_S) * CURVE_SEEK_GRID)
+  return k > 0 ? k / CURVE_SEEK_GRID : 0
+}
+
+/** `c_round`: C's round() (ffmpeg's expression round), halves away from 0. */
+export function cRound(x: number): number {
+  const a = Math.abs(x)
+  const f = Math.floor(a)
+  const r = a - f >= 0.5 ? f + 1 : f
+  return x < 0 ? -r : r
+}
+
+function igcd(a: number, b: number): number {
+  let x = Math.abs(a)
+  let y = Math.abs(b)
+  while (y) { const t = x % y; x = y; y = t }
+  return x
+}
+
+/** `curve_time_base`: the time base `settb` gives a stream in `tb` (a
+ *  project frame is then whole ticks), reduced. */
+export function curveTimeBase(tb: { num: number; den: number }, rateNum: number): { num: number; den: number } {
+  const den = cRound(1 / (tb.num / tb.den))
+  const g = igcd(rateNum, den)
+  const num = tb.num * g
+  const d = tb.den * rateNum
+  const r = igcd(num, d)
+  return { num: num / r, den: d / r }
+}
+
+/** `anchored_ticks`: output ticks of the frame whose file-clock pts in the
+ *  refined time base (seconds per tick `TB`) is `ptsFile`. */
+export function anchoredTicks(ptsFile: number, TB: number, inS: number, cm: CurveMap): number {
+  const T = ptsFile * TB - inS
+  return Math.trunc((outSeconds(cm, T) + CURVE_TICK_BIAS) / TB)
 }
 
 /** `frame_map.curve_retimer`: rebased input ticks → output ticks on a stream

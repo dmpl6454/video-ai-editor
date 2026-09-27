@@ -20,9 +20,13 @@ numbers the compositor prints into its ffmpeg command lines:
 * ``-to`` (``-t`` for the reversed intermediate) becomes a trim DURATION
   measured from the first kept frame;
 * ``setpts=PTS-STARTPTS`` rebases to 0, ``setpts=PTS/speed`` divides in
-  double and truncates (``D2TS``); a speed CURVE is the closed-form
-  ``setpts`` of ``edl/speed_curve.py``, evaluated here with the same double
-  operations (``speed_curve.out_seconds``) and truncated the same way;
+  double and truncates (``D2TS``);
+* a speed CURVE runs on the file's clock anchored at ``in`` (wave D3,
+  ``edl/speed_curve.py`` "the v1 chain's clock"): a seek on a 1/5 s grid
+  0.5 s early, the demuxer's shift added back, ``settb`` refining the time
+  base so a project frame is whole ticks, the closed-form ``setpts`` of
+  ``T = PTS·TB − in`` (``speed_curve.anchored_ticks``, the same doubles)
+  and ``fps=R:start_time=0`` — so a split piece shows its parent's frames;
 * a FREEZE (``Clip.freeze``) is the first output frame of a 1x chain opened
   at ``in`` (``compositor.freeze_input_span``), cloned for the whole hold;
 * ``fps=R`` (round=near) rounds every pts half-away-from-zero into output
@@ -42,6 +46,14 @@ browser port (``frontend/src/lib/preview/timeline/``) is pinned to the same
 JSON. Change a compositor rule without regenerating the goldens and both
 sides fail.
 
+SPEED (wave D3). The selection is integer and vectorised arithmetic
+(``render/frame_map_vec.py``), the fold writes the per-frame arrays
+directly, the RLE finds its runs with array compares, and
+``clip_frame_list`` is memoised per clip: 300 clips / 21,600 frames in
+~11 ms cold (was ~140 ms), ~7 ms after an edit. ``tests/frame_map_reference.py``
+keeps the per-frame ``Fraction`` reading; ``tests/test_frame_map_perf.py``
+holds this module to it byte for byte (goldens and fuzz).
+
 WHAT IT DOES NOT DO. Pixels (geometry, colour, effects) are not modelled —
 only frame SELECTION. The plan functions (``_v1_frame_plan``,
 ``clip_frames``, ``seam_table_for``) are the compositor's own, imported, not
@@ -49,23 +61,34 @@ copied.
 """
 from __future__ import annotations
 
-import base64
 import dataclasses
+import functools
 import math
+import threading
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Mapping, Sequence
+
+import numpy as np
 
 from ..edl import speed_curve as _sc
 from ..edl import timebase as _tb
 from ..edl.schema import EDL, Clip, seam_matching, seam_table_for
+from .frame_map_vec import (  # noqa: F401 — re-exported (tests, the fast path)
+    _I64_SAFE, _ArithIndex, _decode_varints, _encode_seq_np, _i8, _i64, _out_seconds_vec, _rescale_int,
+    _rescale_vec, _select_scan, _trunc_i64, _varints, _zigzag,
+)
 
 #: MSE timescale the client writes its fragments in (spec §3.1): an integer
 #: number of ticks per frame for every standard rate.
 MSE_TIMESCALE = 240000
 
-#: Frame-map format version. Bump when the JSON shape or a selection rule
-#: changes (the goldens record it).
+#: Frame-map format version. Bump when the JSON SHAPE changes (the goldens
+#: record it in every case's model). A selection-rule change rides on
+#: ``RENDER_BEHAVIOR_VERSION`` — every map is served for a ``render_hash``,
+#: which it salts — and on regenerated goldens (wave D3: the in-anchored
+#: curve clock, version 20, left this at 1 so the constant-speed goldens
+#: stay byte-identical).
 FRAME_MAP_VERSION = 1
 
 #: ``kind`` codes (shared with ``programMap.ts``).
@@ -150,6 +173,14 @@ class SourceInfo:
     def frame_ticks(self) -> Fraction:
         return 1 / (self.rate * self.time_base)
 
+    @functools.cached_property
+    def frame_ticks_ratio(self) -> tuple[int, int]:
+        """``frame_ticks`` as ``(num, den)`` integers (computed once)."""
+        num = self.time_base.denominator * self.rate.denominator
+        den = self.time_base.numerator * self.rate.numerator
+        g = math.gcd(num, den)
+        return num // g, den // g
+
     def pts(self, i: int) -> int:
         """pts (ticks) of decoded frame ``i`` — CFR arithmetic, or the real
         table; frames past the end are extrapolated (the EOF timestamp is the
@@ -160,10 +191,10 @@ class SourceInfo:
                 return t[i]
             step = t[-1] - t[-2] if len(t) > 1 else round_half_away(self.frame_ticks)
             return t[-1] + (i - len(t) + 1) * step
-        f = self.frame_ticks
-        if f.denominator == 1:
-            return self.start_ticks + i * f.numerator
-        return self.start_ticks + round_half_away(i * f)
+        num, den = self.frame_ticks_ratio
+        if den == 1:
+            return self.start_ticks + i * num
+        return self.start_ticks + _rescale_int(i, num, den)
 
     @classmethod
     def from_proxy(cls, info) -> "SourceInfo":
@@ -239,7 +270,8 @@ def curve_retimer(curve: "_sc.CurveMap", time_base: Fraction) -> Callable[[int],
 
 
 def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
-                  n: int, fps, speed=None, curve: "_sc.CurveMap | None" = None) -> list[int]:
+                  n: int, fps, speed=None, curve: "_sc.CurveMap | None" = None,
+                  anchor: tuple[float, float] | None = None) -> list[int]:
     """Source frame index shown in each of ``n`` output slots of one clip
     chain: ``[-ss seek] -t/-to … setpts=PTS-STARTPTS[,setpts=PTS/speed],
     fps=R,tpad=stop_mode=clone,trim=end_frame=n``.
@@ -247,19 +279,25 @@ def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
     ``seek_us`` is the parsed ``-ss`` (None when the chain has no ``-ss``);
     ``dur_us`` is the recording time (``-t``, or ``-to`` minus ``-ss``).
     ``curve`` (a speed curve laid over the clip) replaces the constant
-    ``speed`` retime with the curve's ``setpts``."""
+    ``speed`` retime with the curve's ``setpts``. With ``anchor = (seek,
+    in)`` the curve runs on the v1 chain's IN-ANCHORED clock
+    (``speed_curve.file_clock_expr``, ``curve_settb_expr``,
+    ``anchored_setpts_expr``, then ``fps=R:start_time=0``): T is the
+    frame's pts on the file clock times TB minus ``in``, and the output grid
+    starts at T = 0, so the slots before it are dropped and slot 0 shows the
+    latest frame rounding to <= 0."""
     if n <= 0:
         return []
     tb = src.time_base
     r = _tb.rate_of(fps)
-    out_tb = 1 / r
     last = src.frames - 1
     if last < 0:
         return [0] * n
     # Accurate seek: timestamps shift by -seek (rounded into the stream tb)
     # and the inserted trim keeps pts >= 0.
+    off = 0
     if seek_us is not None:
-        off = rescale(-seek_us, _US, tb)
+        off = _rescale_int(-seek_us, tb.denominator, 1_000_000 * tb.numerator)
         f0 = _first_at_or_after(src, -off)
     else:
         f0 = 0
@@ -269,34 +307,92 @@ def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
         # (out is clamped to the source); hold the last frame.
         return [last] * n
     base = src.pts(f0)
-    dur_tb = rescale(dur_us, _US, tb)
-    # Trim duration: frames with pts - first_kept >= duration end the stream.
-    qlast = 0
-    while f0 + qlast + 1 <= last and src.pts(f0 + qlast + 1) - base < dur_tb:
-        qlast += 1
-    div = _speed_divisor(speed)
-    if curve is not None:
-        retime = curve_retimer(curve, tb)
+    dur_tb = _rescale_int(dur_us, tb.denominator, 1_000_000 * tb.numerator)
+    # Trim duration: frames with pts - first_kept >= duration end the stream
+    # (a CFR pts rises with the index, so the first such frame bounds it).
+    if src.pts_table:
+        qlast = 0
+        while f0 + qlast + 1 <= last and src.pts(f0 + qlast + 1) - base < dur_tb:
+            qlast += 1
     else:
-        def retime(x: int) -> int:
-            return int(x / div) if div is not None else x
+        qlast = max(0, min(last, _first_at_or_after(src, base + dur_tb) - 1) - f0)
+    # One slot per kept frame, plus the frame after the last (its slot is
+    # the EOF the fps filter flushes to): `_clip_ticks` is the chain's
+    # retime, vectorised with the same double operations.
+    ticks, out_tb_num, out_tb_den = _clip_ticks(src, f0, qlast + 2, base=base, off=off,
+                                                seek_us=seek_us, r=r, speed=speed,
+                                                curve=curve, anchor=anchor)
+    # fps=R: each pts rounds (half away from zero) into an output slot.
+    slots = _rescale_vec(ticks, out_tb_num, out_tb_den, monotone=curve is None)
+    eof = int(slots[-1])
+    slots = slots[:-1]
+    # Slot s shows the latest frame whose slot is <= min(s, eof - 1), else
+    # the first. Slots never decrease (pts rise, and a constant retime, the
+    # truncation and the rounding are monotone; a curve's doubles are
+    # checked), so that is a count of the slots[1..] at or under the limit.
+    if slots.dtype == object or (curve is not None and slots.size > 1
+                                 and not bool((slots[1:] >= slots[:-1]).all())):
+        return _select_scan([int(v) for v in slots], eof, f0, qlast, n)
+    lims = np.arange(n, dtype=np.int64)
+    if eof - 1 < n - 1:
+        lims = np.minimum(lims, eof - 1)
+    q = slots[1:].searchsorted(lims, side="right")
+    q += f0
+    return q.tolist()
 
-    slots = [rescale(retime(src.pts(f0 + q) - base), tb, out_tb) for q in range(qlast + 1)]
-    eof = rescale(retime(src.pts(f0 + qlast + 1) - base), tb, out_tb)
-    out: list[int] = []
-    q = 0
-    for s in range(n):
-        lim = min(s, eof - 1)
-        while q < qlast and slots[q + 1] <= lim:
-            q += 1
-        out.append(f0 + q)
-    return out
+
+def _pts_vec(src: SourceInfo, i0: int, count: int) -> np.ndarray:
+    """``src.pts(i)`` for ``i`` in ``[i0, i0 + count)``, as int64."""
+    num, den = src.frame_ticks_ratio
+    if src.pts_table or 2 * (abs(src.start_ticks) + (i0 + count) * num) + den >= _I64_SAFE:
+        vals = [src.pts(i) for i in range(i0, i0 + count)]
+        big = any(abs(v) >= _I64_SAFE for v in vals)
+        return np.array(vals, dtype=object if big else np.int64)
+    idx = np.arange(i0, i0 + count, dtype=np.int64)
+    if den == 1:
+        return src.start_ticks + idx * num
+    return src.start_ticks + (2 * idx * num + den) // (2 * den)
+
+
+def _clip_ticks(src: SourceInfo, f0: int, count: int, *, base: int, off: int,
+                seek_us: int | None, r: Fraction, speed, curve, anchor
+                ) -> tuple[np.ndarray, int, int]:
+    """Output ticks (after the chain's retime) of source frames ``f0 …
+    f0+count-1``, and the ``(num, den)`` that rescale those ticks into
+    project slots (``av_rescale_q`` into ``1/R``)."""
+    tb = src.time_base
+    pts = _pts_vec(src, f0, count)
+    if curve is not None and anchor is not None:
+        TB = tb.numerator / tb.denominator
+        a_seek, a_in = float(anchor[0]), float(anchor[1])
+        # graph pts = file pts + off (the demuxer's shift); the chain adds
+        # round(seek/TB) back — the same integer for a 1/n time base — then
+        # settb multiplies by k, exactly.
+        back = (off if seek_us is not None else 0) + (
+            int(_sc.c_round(a_seek / TB)) if a_seek > 0 else 0)
+        ctb = _sc.curve_time_base(tb, r.numerator)
+        k = int(tb / ctb)
+        TBc = ctb.numerator / ctb.denominator
+        pf = (pts + back) * k
+        T = pf.astype(np.float64) * TBc - a_in
+        ticks = _trunc_i64((_out_seconds_vec(curve, T) + _sc.CURVE_TICK_BIAS) / TBc)
+        tb = ctb
+    elif curve is not None:
+        TB = tb.numerator / tb.denominator
+        T = (pts - base).astype(np.float64) * TB
+        ticks = _trunc_i64(_out_seconds_vec(curve, T) / TB)
+    else:
+        div = _speed_divisor(speed)
+        x = pts - base
+        ticks = _trunc_i64(x.astype(np.float64) / div) if div is not None else x
+    # a · tb / (1/R) = a · tb.num · R.num / (tb.den · R.den)
+    return ticks, tb.numerator * r.numerator, tb.denominator * r.denominator
 
 
 def _first_at_or_after(src: SourceInfo, ticks: int) -> int:
     """Smallest frame index whose pts >= ``ticks``."""
-    f = src.frame_ticks
-    i = max(0, math.floor((ticks - src.start_ticks) / f) - 1)
+    num, den = src.frame_ticks_ratio
+    i = max(0, ((ticks - src.start_ticks) * den) // num - 1)
     while src.pts(i) < ticks:
         i += 1
     while i > 0 and src.pts(i - 1) >= ticks:
@@ -316,14 +412,19 @@ def speed_curve_map(speed, in_: float, out: float) -> "_sc.CurveMap | None":
 
 def forward_clip_frames(src: SourceInfo, *, in_: float, out: float, speed,
                         n: int, fps) -> list[int]:
-    """``_build_clip_video_chain`` opened with ``clip_input_args``."""
-    pre = _tb.seek_preroll(in_, fps)
-    seek = max(0.0, float(in_) - pre)
+    """``_build_clip_video_chain`` opened with ``clip_input_args`` (a speed
+    CURVE: the in-anchored chain, seeking at ``speed_curve.curve_seek``)."""
+    curve = speed_curve_map(speed, in_, out)
+    if curve is not None:
+        seek = _sc.curve_seek(in_)
+    else:
+        pre = _tb.seek_preroll(in_, fps)
+        seek = max(0.0, float(in_) - pre)
     end = float(out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
     seek_us = ffmpeg_us(seek) if seek > 0 else None
     dur_us = ffmpeg_us(end) - (seek_us or 0)
     return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=n, fps=fps, speed=speed,
-                         curve=speed_curve_map(speed, in_, out))
+                         curve=curve, anchor=(seek, float(in_)) if curve is not None else None)
 
 
 def freeze_frame(src: SourceInfo, *, in_: float, fps) -> int:
@@ -394,7 +495,64 @@ def intermediate_source(m: int, fps) -> SourceInfo:
 
 def clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
     """Source frame for each clip-local output frame of v1 clip ``c`` (the
-    ORIGINAL clip, reversed or not, a freeze or not)."""
+    ORIGINAL clip, reversed or not, a freeze or not).
+
+    Memoised on exactly what decides it (the source's facts, in/out, speed,
+    reverse, freeze and the rate): an edit re-maps only the clips it
+    touched. A variable-rate source (a pts table, hashed element by element)
+    is not memoised."""
+    if src.pts_table:
+        return _clip_frame_list(c, src, fps)
+    key = (src, float(c.in_), float(c.out), _speed_key(c.speed), bool(getattr(c, "reverse", False)),
+           getattr(c, "freeze", None), fps if isinstance(fps, (int, float, Fraction)) else str(fps))
+    with _CLIP_FRAMES_LOCK:
+        got = _CLIP_FRAMES.get(key)
+    if got is None:
+        got = tuple(_clip_frame_list(c, src, fps))
+        _remember_clip_frames(key, got)
+    return list(got)
+
+
+#: `clip_frame_list` memo (insertion-ordered; the oldest entries go first),
+#: bounded by the frames it holds (~36 bytes each), not by entries.
+_CLIP_FRAMES: dict[tuple, tuple[int, ...]] = {}
+_CLIP_FRAMES_MAX_FRAMES = 500_000
+_CLIP_FRAMES_LOCK = threading.Lock()
+_clip_frames_held = 0
+
+
+def _remember_clip_frames(key: tuple, frames: tuple[int, ...]) -> None:
+    global _clip_frames_held
+    if len(frames) > _CLIP_FRAMES_MAX_FRAMES:
+        return
+    with _CLIP_FRAMES_LOCK:
+        old = _CLIP_FRAMES.pop(key, None)
+        if old is not None:
+            _clip_frames_held -= len(old)
+        while _CLIP_FRAMES and _clip_frames_held + len(frames) > _CLIP_FRAMES_MAX_FRAMES:
+            _clip_frames_held -= len(_CLIP_FRAMES.pop(next(iter(_CLIP_FRAMES))))
+        _CLIP_FRAMES[key] = frames
+        _clip_frames_held += len(frames)
+
+
+def clear_clip_frame_cache() -> None:
+    """Forget every memoised clip frame list (tests, benchmarks)."""
+    global _clip_frames_held
+    with _CLIP_FRAMES_LOCK:
+        _CLIP_FRAMES.clear()
+        _clip_frames_held = 0
+
+
+def _speed_key(speed):
+    """A hashable form of a clip's ``speed`` (a curve's points; its display
+    name does not change a frame)."""
+    pts = _sc.curve_points(speed)
+    if pts is not None:
+        return ("curve", tuple(pts))
+    return speed if not isinstance(speed, (dict, list)) else repr(speed)
+
+
+def _clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
     from .compositor import clip_frames
     if getattr(c, "freeze", None) is not None:
         return [freeze_frame(src, in_=c.in_, fps=fps)] * clip_frames(c, fps)
@@ -411,10 +569,10 @@ def clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
 
 def _reversed_view(c: Clip, fps) -> Clip:
     """``reverse.reversed_view`` without building the file: what the plan is
-    computed from (in 0, out = the intermediate's length)."""
-    m = reversed_frames(c, fps)
+    computed from (in 0, out = the clip's own span, ``reverse.view_out``)."""
+    from .reverse import view_out
     return c.model_copy(deep=True, update={
-        "in_": 0.0, "out": _tb.time_of(m, fps), "reverse": False})
+        "in_": 0.0, "out": view_out(c), "reverse": False})
 
 
 # ---------------------------------------------------------------- the map
@@ -447,27 +605,6 @@ class ProgramMap:
             d.update(b_clip=self.b_clip[k], b_frame=self.b_frame[k],
                      p=[self.p_num[k], self.p_den[k]], nested=self.nested[k])
         return d
-
-
-@dataclass(frozen=True)
-class _Leaf:
-    kind: int
-    clip: int
-    frame: int
-
-
-@dataclass(frozen=True)
-class _Blend:
-    a: object
-    b: _Leaf
-    j: int
-    d: int
-
-
-def _leaf_a(e) -> _Leaf:
-    while isinstance(e, _Blend):
-        e = e.a
-    return e
 
 
 def render_clips(edl: EDL) -> list[Clip]:
@@ -509,8 +646,8 @@ def build_program_map(edl: EDL, sources: SourceLookup | Mapping[str, SourceInfo]
         total_duration = max(1.0, total_duration)
     plan = _v1_frame_plan(planned, total_duration, fps)
 
-    # Per-segment leaves.
-    segs: list[list] = []
+    # Per-segment source frames (a gap: None).
+    segs: list[tuple[int, list[int] | None, int]] = []     # (clip index or -1, frames, n)
     seg_of_clip: dict[int, int] = {}
     per_clip: dict[int, list[int]] = {}
     for kind, ci, nfr in plan:
@@ -521,10 +658,13 @@ def build_program_map(edl: EDL, sources: SourceLookup | Mapping[str, SourceInfo]
             if frames is None:
                 frames = clip_frame_list(c, lookup(c.src), fps)
                 per_clip[ci] = frames
+            if len(frames) < nfr:
+                raise IndexError(f"clip {c.id}: {len(frames)} frames for a {nfr}-frame segment")
             seg_of_clip[ci] = len(segs)
-            segs.append([_Leaf(KIND_CLIP, ci, frames[j]) for j in range(nfr)])
+            segs.append((ci, frames[:nfr], nfr))
         else:
-            segs.append([_Leaf(KIND_GAP, -1, -1)] * nfr)
+            segs.append((-1, None, nfr))
+    clip_of_seg = {si: ci for ci, si in seg_of_clip.items()}
 
     # Seam → (segment index of the left clip, cost in frames), as the
     # compositor decides it (adjacent segments, cost from the table, the
@@ -546,48 +686,49 @@ def build_program_map(edl: EDL, sources: SourceLookup | Mapping[str, SourceInfo]
             seam_rows.append({"left": idx, "right": idx + 1, "frames": d,
                               "type": record.type})
 
-    # Fold segments exactly like the xfade/concat chain.
+    # Fold segments exactly like the xfade/concat chain, straight into the
+    # per-frame arrays: a seam of d frames turns the last d entries into
+    # blends with the incoming segment's first d (an entry that already is a
+    # blend keeps its outgoing leaf and becomes `nested`), the rest appends.
+    pm = ProgramMap(fps=r, total=0, clips=originals, seams=seam_rows)
+    kind_, clip_, frame_ = pm.kind, pm.clip, pm.frame
+    b_clip_, b_frame_, p_num_, p_den_, nested_ = pm.b_clip, pm.b_frame, pm.p_num, pm.p_den, pm.nested
     starts: dict[int, int] = {}
     lens: dict[int, int] = {}
-    cur: list = []
-    for i, seg in enumerate(segs):
+    for i, (ci, frames, nfr) in enumerate(segs):
         d = seg_trans.get(i - 1, 0) if i > 0 else 0
+        seg_kind = KIND_CLIP if frames is not None else KIND_GAP
+        seg_frames = frames if frames is not None else [-1] * nfr
+        start_new = len(kind_)
         if d > 0:
-            offset = max(0, len(cur) - d)
-            blended = [_Blend(cur[offset + j], seg[j], j, d) for j in range(d)]
+            offset = max(0, len(kind_) - d)
+            if offset + d > len(kind_) or d > nfr:
+                raise IndexError(f"a {d}-frame seam over a shorter segment")
+            for j in range(d):
+                x = offset + j
+                nested_[x] = kind_[x] == KIND_BLEND
+                kind_[x] = KIND_BLEND
+                b_clip_[x] = ci
+                b_frame_[x] = seg_frames[j]
+                # P = 1 − j/d, kept UNREDUCED (d = the seam's frames) so a
+                # whole seam is one RLE run.
+                p_num_[x] = d - j
+                p_den_[x] = d
             start_new = offset
-            cur = cur[:offset] + blended + seg[d:]
-        else:
-            start_new = len(cur)
-            cur = cur + seg
-        ci = next((c for c, s in seg_of_clip.items() if s == i), None)
-        if ci is not None:
-            starts[ci] = start_new
-            lens[ci] = len(seg)
-
-    pm = ProgramMap(fps=r, total=len(cur), clips=originals, seams=seam_rows)
-    for e in cur:
-        if isinstance(e, _Blend):
-            a = _leaf_a(e.a)
-            pm.kind.append(KIND_BLEND)
-            pm.clip.append(a.clip)
-            pm.frame.append(a.frame)
-            pm.b_clip.append(e.b.clip)
-            pm.b_frame.append(e.b.frame)
-            # P = 1 − j/d, kept UNREDUCED (d = the seam's frames) so a whole
-            # seam is one RLE run.
-            pm.p_num.append(e.d - e.j)
-            pm.p_den.append(e.d)
-            pm.nested.append(isinstance(e.a, _Blend))
-        else:
-            pm.kind.append(e.kind)
-            pm.clip.append(e.clip)
-            pm.frame.append(e.frame)
-            pm.b_clip.append(-1)
-            pm.b_frame.append(-1)
-            pm.p_num.append(0)
-            pm.p_den.append(0)
-            pm.nested.append(False)
+        m = nfr - d
+        kind_.extend([seg_kind] * m)
+        clip_.extend([ci] * m)
+        frame_.extend(seg_frames[d:])
+        b_clip_.extend([-1] * m)
+        b_frame_.extend([-1] * m)
+        p_num_.extend([0] * m)
+        p_den_.extend([0] * m)
+        nested_.extend([False] * m)
+        cj = clip_of_seg.get(i)
+        if cj is not None:
+            starts[cj] = start_new
+            lens[cj] = nfr
+    pm.total = len(kind_)
     pm.clip_start = [starts.get(i, -1) for i in range(len(originals))]
     pm.clip_len = [lens.get(i, 0) for i in range(len(originals))]
     pm.segments = [(kind, ci if ci is not None else -1, nfr, seg_cost.get(si - 1, 0.0) if si else 0.0)
@@ -639,9 +780,18 @@ def _clip_sample0(t: float, fps) -> int:
     the time; tests/test_audio_map_golden.py)."""
     pre = _tb.seek_preroll(t, fps)
     seek = max(0.0, float(t) - pre)
-    sr = Fraction(1, _SAMPLE_RATE)
-    j0 = rescale(ffmpeg_us(seek), _US, sr) if seek > 0 else 0
-    return j0 + (rescale(ffmpeg_us(pre), _US, sr) if pre > 1e-9 else 0)
+    j0 = _us_to_samples(ffmpeg_us(seek)) if seek > 0 else 0
+    return j0 + (_us_to_samples(ffmpeg_us(pre)) if pre > 1e-9 else 0)
+
+
+def _us_to_samples(us: int) -> int:
+    """``rescale(us, 1/1e6, 1/48000)`` in integers."""
+    return _rescale_int(us, _SAMPLE_RATE, 1_000_000)
+
+
+#: ``timebase.samples_for_frames`` memoised on (frames, fps): a segment's
+#: sound length, asked for per segment by the placement walk.
+_samples_for_frames = functools.lru_cache(maxsize=4096)(_tb.samples_for_frames)
 
 
 def _reversed_runs(c: Clip, src: SourceInfo | None, fps, n: int) -> tuple[tuple[int, int, int, int], ...]:
@@ -681,8 +831,8 @@ def audio_placements(edl: EDL, pm: ProgramMap, fps=None,
     cursor = 0
     last: int | None = None
     for kind, ci, nfr, cost in pm.segments:
-        m = _tb.samples_for_frames(nfr, fps)
-        ov = rescale(ffmpeg_us(cost), _US, Fraction(1, _SAMPLE_RATE)) if cost > 0 else 0
+        m = _samples_for_frames(nfr, fps)
+        ov = _us_to_samples(ffmpeg_us(cost)) if cost > 0 else 0
         start = cursor - ov
         if ov and last is not None:
             out[last] = dataclasses.replace(out[last], fade_out=ov)
@@ -733,55 +883,12 @@ def audio_total_samples(edl: EDL, pm: ProgramMap, fps=None) -> int:
     fps = edl.canvas.fps if fps is None else fps
     cursor = 0
     for _kind, _ci, nfr, cost in pm.segments:
-        ov = rescale(ffmpeg_us(cost), _US, Fraction(1, _SAMPLE_RATE)) if cost > 0 else 0
-        cursor += _tb.samples_for_frames(nfr, fps) - ov
+        ov = _us_to_samples(ffmpeg_us(cost)) if cost > 0 else 0
+        cursor += _samples_for_frames(nfr, fps) - ov
     return cursor
 
 
 # ---------------------------------------------------------------- RLE
-
-def _zigzag(v: int) -> int:
-    return (v << 1) if v >= 0 else ((-v << 1) - 1)
-
-
-def _varints(vals: Iterable[int]) -> str:
-    buf = bytearray()
-    for v in vals:
-        z = _zigzag(v)
-        while True:
-            b = z & 0x7F
-            z >>= 7
-            if z:
-                buf.append(b | 0x80)
-            else:
-                buf.append(b)
-                break
-    return base64.b64encode(bytes(buf)).decode("ascii")
-
-
-def _decode_varints(text: str) -> list[int]:
-    out, z, shift = [], 0, 0
-    for b in base64.b64decode(text):
-        z |= (b & 0x7F) << shift
-        if b & 0x80:
-            shift += 7
-            continue
-        out.append((z >> 1) if not (z & 1) else -((z + 1) >> 1))
-        z, shift = 0, 0
-    return out
-
-
-def _encode_seq(vals: Sequence[int]) -> dict:
-    """A frame sequence as ``{"f0", "step"}`` when arithmetic with an integer
-    step, else ``{"f0", "d"}`` — base64 zigzag varints of the deltas."""
-    f0 = vals[0]
-    if len(vals) == 1:
-        return {"f0": f0, "step": 1}
-    step = vals[1] - vals[0]
-    if all(vals[i + 1] - vals[i] == step for i in range(len(vals) - 1)):
-        return {"f0": f0, "step": step}
-    return {"f0": f0, "d": _varints(vals[i + 1] - vals[i] for i in range(len(vals) - 1))}
-
 
 def _decode_seq(d: Mapping, n: int) -> list[int]:
     if "step" in d:
@@ -796,32 +903,54 @@ def _decode_seq(d: Mapping, n: int) -> list[int]:
 def to_rle(pm: ProgramMap, src_key: Callable[[Clip], str] | None = None) -> list[dict]:
     """Runs ``{k0, n, kind, clip_id, src, a, [b_clip_id, b_src, b, p_den, p_j0, nested]}``
     of maximal stretches with the same kind and clip(s); ``a``/``b`` are
-    encoded frame sequences (``_encode_seq``). Blend progress of frame
-    ``k0+i`` is ``1 - (p_j0 + i)/p_den``."""
+    encoded frame sequences (``_encode_seq_np``: ``{f0, step}`` when
+    arithmetic, else ``{f0, d}``, base64 zigzag varints of the deltas). Blend progress of frame
+    ``k0+i`` is ``1 - (p_j0 + i)/p_den``.
+
+    A run breaks where kind, clip, incoming clip or nesting change, and
+    inside a blend where the seam (``p_den``) changes or the progress
+    numerator does not step down by one — found with array compares, then
+    each run's frames encoded at once (the output is the per-frame scan's,
+    byte for byte: ``tests/test_frame_map_perf.py``)."""
     key = src_key or (lambda c: c.src)
+    total = pm.total
+    if total <= 0:
+        return []
+    kind = _i64(pm.kind)
+    clip = _i64(pm.clip)
+    brk = (kind[1:] != kind[:-1]) | (clip[1:] != clip[:-1])
+    blends = KIND_BLEND in pm.kind
+    if blends:
+        # Outside a blend b_clip/nested/p are constant (-1/False/0).
+        bcl, pden, pnum = _i64(pm.b_clip), _i64(pm.p_den), _i64(pm.p_num)
+        nest = _i8(pm.nested)
+        brk |= ((bcl[1:] != bcl[:-1]) | (nest[1:] != nest[:-1])
+                | ((kind[1:] == KIND_BLEND)
+                   & ((pden[1:] != pden[:-1]) | (pnum[1:] != pnum[:-1] - 1))))
+    edges = [0] + (np.flatnonzero(brk) + 1).tolist() + [total]
+    frame = _i64(pm.frame)
+    b_frame = _i64(pm.b_frame) if blends else None
+    # A run [k, e) is arithmetic iff its deltas d[k..e-2] never change: a
+    # prefix count of the positions where the delta changes answers that per
+    # run in O(1) (``_arith``).
+    fa = _ArithIndex(frame)
+    fb = _ArithIndex(b_frame) if blends else None
+    clips, pk, pc, pbc, pden_l, pnum_l, pnest = (pm.clips, pm.kind, pm.clip, pm.b_clip,
+                                                 pm.p_den, pm.p_num, pm.nested)
     runs: list[dict] = []
-    k = 0
-    while k < pm.total:
-        kind, ci, bi, nest = pm.kind[k], pm.clip[k], pm.b_clip[k], pm.nested[k]
-        e = k + 1
-        while e < pm.total and pm.kind[e] == kind and pm.clip[e] == ci \
-                and pm.b_clip[e] == bi and pm.nested[e] == nest:
-            if kind == KIND_BLEND and (pm.p_den[e] != pm.p_den[k]
-                                       or pm.p_num[e] != pm.p_num[e - 1] - 1):
-                break
-            e += 1
-        run: dict = {"k0": k, "n": e - k, "kind": kind}
-        if kind != KIND_GAP:
-            c = pm.clips[ci]
-            run.update(clip_id=c.id, src=key(c), a=_encode_seq(pm.frame[k:e]))
-        if kind == KIND_BLEND:
-            b = pm.clips[bi]
-            den = pm.p_den[k]
-            j0 = den - pm.p_num[k] if den else 0
-            run.update(b_clip_id=b.id, b_src=key(b), b=_encode_seq(pm.b_frame[k:e]),
-                       p_den=den, p_j0=j0, nested=nest)
+    for k, e in zip(edges[:-1], edges[1:]):
+        kd = pk[k]
+        run: dict = {"k0": k, "n": e - k, "kind": kd}
+        if kd != KIND_GAP:
+            c = clips[pc[k]]
+            run.update(clip_id=c.id, src=key(c), a=fa.encode(k, e))
+        if kd == KIND_BLEND:
+            b = clips[pbc[k]]
+            den = pden_l[k]
+            j0 = den - pnum_l[k] if den else 0
+            run.update(b_clip_id=b.id, b_src=key(b), b=fb.encode(k, e),
+                       p_den=den, p_j0=j0, nested=pnest[k])
         runs.append(run)
-        k = e
     return runs
 
 

@@ -472,6 +472,10 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("freeze_held", "the frame is held", clip_id=None, duration=None, tol=0.05),
     # QA-037: the reverse flag the renderer reads, on the clip(s) named.
     _spec("clip_reversed", "the clip plays backwards", clip_id=None, reverse=True),
+    # Review RD3: a zoom IN ends larger than 100 %, a zoom OUT smaller (a
+    # static level, or the last key of a slow push) — "punch in 20%" once
+    # committed a 20 % scale and verified as "the step completed".
+    _spec("clip_zoomed", "the picture zooms the way asked", clip_id=None, direction="in"),
     _spec("transitions_count_geq", "transitions were added", n=1, type=None),
     _spec("export_preset_applied", "the export preset is set", name=None),
     # audio

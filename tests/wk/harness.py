@@ -22,6 +22,7 @@ interrupted (:meth:`WKHarness.close` kills stragglers).
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import mimetypes
 import os
@@ -200,6 +201,134 @@ class WKRun:
     elapsed_s: float
     stdout: str
     pid: int = 0
+    #: footprint samples when ``run(..., sample_every=…)`` asked for them
+    #: (:class:`FootprintSampler` rows), else empty
+    footprints: list[dict] = field(default_factory=list)
+    #: the WebKit helper pids the child reported: {"web", "gpu", "net"}
+    #: (``web`` changes if the WebContent process was relaunched: a crash)
+    helper_pids: list[dict] = field(default_factory=list)
+    #: wall-clock times (epoch s) of the JavaScript collections the child
+    #: forced when ``run(..., gc_every=…)`` asked for them
+    gcs: list[float] = field(default_factory=list)
+
+
+# ------------------------------------------------- process memory (§11.3)
+
+class _RUsageInfoV4(ctypes.Structure):
+    """``struct rusage_info_v4`` (<sys/resource.h>), the fields in order."""
+    _fields_ = [("ri_uuid", ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in (
+        "ri_user_time", "ri_system_time", "ri_pkg_idle_wkups", "ri_interrupt_wkups", "ri_pageins",
+        "ri_wired_size", "ri_resident_size", "ri_phys_footprint", "ri_proc_start_abstime",
+        "ri_proc_exit_abstime", "ri_child_user_time", "ri_child_system_time", "ri_child_pkg_idle_wkups",
+        "ri_child_interrupt_wkups", "ri_child_pageins", "ri_child_elapsed_abstime", "ri_diskio_bytesread",
+        "ri_diskio_byteswritten", "ri_cpu_time_qos_default", "ri_cpu_time_qos_maintenance",
+        "ri_cpu_time_qos_background", "ri_cpu_time_qos_utility", "ri_cpu_time_qos_legacy",
+        "ri_cpu_time_qos_user_initiated", "ri_cpu_time_qos_user_interactive", "ri_billed_system_time",
+        "ri_serviced_system_time", "ri_logical_writes", "ri_lifetime_max_phys_footprint", "ri_instructions",
+        "ri_cycles", "ri_billed_energy", "ri_serviced_energy", "ri_interval_max_phys_footprint",
+        "ri_runnable_time")]
+
+
+_RUSAGE_INFO_V4 = 4
+_libproc = None
+
+
+def _proc_lib():
+    global _libproc
+    if sys.platform != "darwin":
+        return None
+    if _libproc is None:
+        _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    return _libproc
+
+
+def process_path(pid: int) -> str | None:
+    """The executable of process ``pid`` (``proc_pidpath``), or None."""
+    lib = _proc_lib()
+    if lib is None or pid <= 0:
+        return None
+    buf = ctypes.create_string_buffer(4096)   # PROC_PIDPATHINFO_MAXSIZE
+    n = lib.proc_pidpath(int(pid), buf, ctypes.sizeof(buf))
+    return buf.raw[:n].decode("utf-8", "replace") if n > 0 else None
+
+
+def process_footprint(pid: int) -> dict | None:
+    """Memory of process ``pid`` as the kernel accounts it, or None.
+
+    ``phys_footprint`` is the number Activity Monitor calls "Memory" and the
+    one jetsam acts on (dirty + compressed + IOKit/GPU-mapped memory the
+    process owns), read with ``proc_pid_rusage(RUSAGE_INFO_V4)`` — the
+    task_info footprint without needing the task port (task_for_pid wants
+    root or an entitlement; proc_pid_rusage works on any same-user process,
+    the sandboxed WebKit helpers included). Keys: ``footprint``, ``peak``
+    (lifetime max footprint), ``resident``, all bytes.
+    """
+    lib = _proc_lib()
+    if lib is None or pid <= 0:
+        return None
+    # a buffer larger than v4, in case the kernel writes a newer layout
+    buf = (ctypes.c_uint8 * 1024)()
+    if lib.proc_pid_rusage(int(pid), _RUSAGE_INFO_V4, ctypes.byref(buf)) != 0:
+        return None
+    ri = _RUsageInfoV4.from_buffer(buf)
+    return {"footprint": int(ri.ri_phys_footprint), "peak": int(ri.ri_lifetime_max_phys_footprint),
+            "resident": int(ri.ri_resident_size)}
+
+
+class FootprintSampler:
+    """Samples the WebKit helpers of one harness child every ``every`` s.
+
+    The child writes the pids of its WKWebView's WebContent, GPU and
+    Networking processes to ``pids_file`` (JSON, rewritten when they change).
+    Each row: ``t`` (s since start), ``wall`` (epoch s), ``web_pid``,
+    ``web`` / ``web_peak`` / ``gpu`` / ``net`` (bytes; None when unreadable).
+    """
+
+    def __init__(self, pids_file: Path, every: float):
+        self.pids_file = pids_file
+        self.every = max(0.05, float(every))
+        self.rows: list[dict] = []
+        self.pids: list[dict] = []
+        self._stop = threading.Event()
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, name="wk-footprint", daemon=True)
+
+    def start(self) -> FootprintSampler:
+        self._thread.start()
+        return self
+
+    def _read_pids(self) -> dict | None:
+        try:
+            return json.loads(self.pids_file.read_text())
+        except (OSError, ValueError):
+            return None
+
+    def sample(self) -> dict | None:
+        pids = self._read_pids()
+        if not pids or not pids.get("web"):
+            return None
+        if not self.pids or {k: self.pids[-1].get(k) for k in pids} != pids:
+            # the executables, read while the helpers are alive (they exit
+            # with the view): proves which process the samples are of
+            self.pids.append({**pids, "paths": {k: process_path(int(v or 0)) for k, v in pids.items()}})
+        web = process_footprint(int(pids["web"]))
+        gpu = process_footprint(int(pids.get("gpu") or 0))
+        net = process_footprint(int(pids.get("net") or 0))
+        row = {"t": round(time.monotonic() - self._t0, 3), "wall": time.time(), "web_pid": int(pids["web"]),
+               "web": web and web["footprint"], "web_peak": web and web["peak"], "gpu": gpu and gpu["footprint"],
+               "net": net and net["footprint"]}
+        self.rows.append(row)
+        return row
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.every):
+            self.sample()
+
+    def stop(self) -> list[dict]:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(5)
+        return self.rows
 
 
 class WKHarness:
@@ -211,10 +340,18 @@ class WKHarness:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._procs: list[subprocess.Popen] = []
 
-    def run(self, path: str, query: dict[str, object] | None = None, timeout: float = 60.0) -> WKRun:
+    def run(self, path: str, query: dict[str, object] | None = None, timeout: float = 60.0,
+            sample_every: float | None = None, gc_every: float | None = None) -> WKRun:
+        """Load ``path`` and return what it posts. ``sample_every`` (s): also
+        sample the WebContent/GPU/Networking footprints while it runs
+        (``WKRun.footprints``, :class:`FootprintSampler`). ``gc_every`` (s):
+        the child forces a full JavaScript collection in the web view's
+        process pool that often (``WKRun.gcs``), so a footprint read a few
+        seconds later is memory that SURVIVES collection — what a leak is."""
         token = secrets.token_hex(8)
         done = self.work_dir / f"{token}.done"
         control = self.work_dir / f"{token}.ctl"
+        pids = self.work_dir / f"{token}.pids"
         with self.server.box.cond:
             self.server.box.done_files[token] = done
             self.server.box.control_files[token] = control
@@ -222,10 +359,12 @@ class WKHarness:
         t0 = time.monotonic()
         proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "--url", url, "--done", str(done),
-             "--timeout", str(timeout), "--control", str(control)],
+             "--timeout", str(timeout), "--control", str(control), "--pids", str(pids),
+             *(["--gc-every", str(gc_every)] if gc_every else [])],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
         )
         self._procs.append(proc)
+        sampler = FootprintSampler(pids, sample_every).start() if sample_every else None
         try:
             out, _ = proc.communicate(timeout=timeout + 15)
         except subprocess.TimeoutExpired:
@@ -233,6 +372,8 @@ class WKHarness:
             out, _ = proc.communicate()
         finally:
             self._procs.remove(proc)
+            footprints = sampler.stop() if sampler else []
+            helper_pids = sampler.pids if sampler else []
         elapsed = time.monotonic() - t0
         with self.server.box.cond:
             body = self.server.box.results.pop(token, None)
@@ -246,7 +387,9 @@ class WKHarness:
         result = json.loads(body)
         if isinstance(result, dict) and result.get("fatal"):
             raise WKPageError(f"{path} failed in the page: {result['fatal']}")
-        return WKRun(result=result, errors=errors, elapsed_s=elapsed, stdout=out, pid=proc.pid)
+        gcs = [float(ln.split()[1]) for ln in out.splitlines() if ln.startswith("gc ") and len(ln.split()) == 2]
+        return WKRun(result=result, errors=errors, elapsed_s=elapsed, stdout=out, pid=proc.pid,
+                     footprints=footprints, helper_pids=helper_pids, gcs=gcs)
 
     def close(self) -> None:
         for proc in list(self._procs):
@@ -258,7 +401,8 @@ class WKHarness:
 # ------------------------------------------------- the WebKit child process
 
 def _webview_main(url: str, done: Path, timeout: float,
-                  control: Path | None = None) -> int:  # pragma: no cover - runs in the child
+                  control: Path | None = None, pids: Path | None = None,
+                  gc_every: float | None = None) -> int:  # pragma: no cover - runs in the child
     import AppKit  # noqa: PLC0415
     import Foundation  # noqa: PLC0415
     import WebKit  # noqa: PLC0415
@@ -333,7 +477,42 @@ def _webview_main(url: str, done: Path, timeout: float,
             c.orderOut_(None)
             c.close()
 
+    reported: list = []
+
+    def report_pids():
+        # the WebKit helpers serving this web view (private WKWebView SPI,
+        # present on macOS 26 and 27): the parent samples their footprint
+        # (FootprintSampler). Rewritten when WebContent is relaunched.
+        try:
+            now = {"web": int(wv._webProcessIdentifier()), "gpu": int(wv._gpuProcessIdentifier()),
+                   "net": int(wv._networkProcessIdentifier())}
+        except Exception:  # noqa: BLE001 - SPI missing: no sampling, the run goes on
+            return
+        if now["web"] and (not reported or reported[-1] != now):
+            reported.append(now)
+            tmp = pids.with_suffix(".tmp")
+            tmp.write_text(json.dumps(now))
+            os.replace(tmp, pids)
+            _say(f"helpers web={now['web']} gpu={now['gpu']} net={now['net']}")
+
+    last_gc = [time.monotonic()]
+
+    def collect():
+        # WKProcessPool SPI (WebKit's own tests use it): a full, synchronous
+        # JavaScriptCore collection in every web process of the pool
+        if gc_every and time.monotonic() - last_gc[0] >= gc_every:
+            last_gc[0] = time.monotonic()
+            try:
+                wv.configuration().processPool()._garbageCollectJavaScriptObjectsForTesting()
+            except Exception as e:  # noqa: BLE001 - SPI missing: say so, the run goes on
+                _say(f"gc-unavailable {type(e).__name__}")
+                return
+            _say(f"gc {time.time():.3f}")
+
     def tick():
+        if pids is not None:
+            report_pids()
+        collect()
         if control is not None and control.exists():
             # hide/show on the page's request: an ordered-out window makes
             # WKWebView report the page hidden (WebKit then pauses muted media)
@@ -385,5 +564,7 @@ if __name__ == "__main__":  # pragma: no cover - child entry point
     ap.add_argument("--done", required=True, type=Path)
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--control", type=Path, default=None)
+    ap.add_argument("--pids", type=Path, default=None)
+    ap.add_argument("--gc-every", type=float, default=None)
     ns = ap.parse_args()
-    sys.exit(_webview_main(ns.url, ns.done, ns.timeout, ns.control))
+    sys.exit(_webview_main(ns.url, ns.done, ns.timeout, ns.control, ns.pids, ns.gc_every))

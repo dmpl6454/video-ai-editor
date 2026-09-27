@@ -3,7 +3,13 @@
 // in a byte-bounded LRU (128 MB of encoded samples, §11.3).
 //
 // * `202 Accepted` + `Retry-After` means the server is encoding that span on
-//   demand: the request is retried after the advertised delay.
+//   demand: the request is retried after the advertised delay — back in the
+//   queue, not waiting in its fetch slot, so a READY span behind it still
+//   gets the next free slot (review RD3).
+// * A span that fails transiently (5xx, a network error, a response that
+//   never completes within `spanTimeoutMs`) is retried by the store itself,
+//   backing off 250 ms → 1 s: a paused engine has nothing else that would
+//   ask again (review RD3).
 // * A COLD span needed right now (a paused seek into a span not yet fetched)
 //   is read with two HTTP Range requests — the pack's header, then just the
 //   one sample — so the first frame does not wait for the whole ~1.3 MB pack;
@@ -30,6 +36,14 @@ const MAX_PENDING_MS = 30_000
 const OPEN_RETRIES = 5
 const OPEN_BACKOFF_MS = 250
 const OPEN_BACKOFF_MAX_MS = 4000
+/** A transient span failure is retried after this, doubling up to the max
+ *  (1 s: a paused frame whose span failed 8 times shows within ~6 s, and a
+ *  span that keeps failing costs one request a second). */
+const SPAN_RETRY_MS = 250
+const SPAN_RETRY_MAX_MS = 1000
+/** A span request (a Range read or the pack) still unanswered after this is
+ *  abandoned and retried: a hung response must not hold a slot for good. */
+const DEFAULT_SPAN_TIMEOUT_MS = 15_000
 
 /** `index.json` fields the engine reads (ingest/proxy.py `static_index` +
  *  `live_index`). */
@@ -79,6 +93,8 @@ export interface ProxyStoreOptions {
   onError?: (key: string, error: string, permanent: boolean) => void
   now?: () => number
   sleep?: (ms: number) => Promise<void>
+  /** Abandon a span request after this many ms (default 15 s). */
+  spanTimeoutMs?: number
 }
 
 interface SpanEntry {
@@ -96,6 +112,19 @@ interface Job {
   priority: number
   /** Range-read just this frame first. */
   frame: number | null
+  /** Not before this time (`now()`): a 202's Retry-After or a back-off. */
+  notBefore?: number
+  /** When the span first answered 202 (MAX_PENDING_MS). */
+  pendingSince?: number
+}
+
+/** A span answered 202: try again after `afterMs`, out of the slot. */
+class SpanPending extends Error {
+  readonly afterMs: number
+  constructor(afterMs: number) {
+    super('span pending')
+    this.afterMs = afterMs
+  }
 }
 
 export class ProxyError extends Error {
@@ -126,6 +155,11 @@ export class ProxyStore {
   private readonly onError: ProxyStoreOptions['onError']
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
+  private readonly spanTimeoutMs: number
+  /** Transient failures in a row, per span (the back-off). */
+  private readonly spanFails = new Map<string, number>()
+  /** The earliest wake-up already scheduled for a waiting job. */
+  private wakeAt = Infinity
 
   private readonly handles = new Map<string, ProxyHandle>()
   private readonly opening = new Map<string, Promise<ProxyHandle>>()
@@ -136,8 +170,11 @@ export class ProxyStore {
   private readonly inFlight = new Set<string>()
   private active = 0
   private disposed = false
+  /** The page is hidden (§3.5): no new fetch starts until it is back. */
+  private suspended = false
   bytes = 0
-  readonly stats = { spanFetches: 0, rangeReads: 0, retries202: 0, evictions: 0, errors: 0, openRetries: 0 }
+  readonly stats = { spanFetches: 0, rangeReads: 0, retries202: 0, evictions: 0, errors: 0, openRetries: 0,
+    spanRetries: 0, timeouts: 0 }
 
   constructor(opts: ProxyStoreOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? '/api/proxies').replace(/\/$/, '')
@@ -148,20 +185,24 @@ export class ProxyStore {
     this.onError = opts.onError
     this.now = opts.now ?? (() => performance.now())
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)))
+    this.spanTimeoutMs = opts.spanTimeoutMs ?? DEFAULT_SPAN_TIMEOUT_MS
   }
 
   private url(key: string, path: string): string {
     return `${this.baseUrl}/${key}/${path}`
   }
 
-  /** GET with 202 retries until `deadline`; 410 → ProxyError. */
-  private async getOk(url: string, headers?: Record<string, string>): Promise<Awaited<ReturnType<FetchLike>>> {
+  /** GET with 202 retries until `deadline`; 410 → ProxyError. A span
+   *  request (`signal`) yields its slot on a 202 instead (SpanPending). */
+  private async getOk(url: string, headers?: Record<string, string>, signal?: AbortSignal): Promise<Awaited<ReturnType<FetchLike>>> {
     const start = this.now()
     for (;;) {
       if (this.disposed) throw new ProxyError('disposed')
-      const r = await this.fetchFn(url, headers ? { headers } : undefined)
+      const init = headers || signal ? { ...(headers ? { headers } : {}), ...(signal ? { signal } : {}) } : undefined
+      const r = await this.fetchFn(url, init)
       if (r.status === 202) {
         this.stats.retries202++
+        if (signal) throw new SpanPending(retryAfterMs(r.headers))
         if (this.now() - start > MAX_PENDING_MS) throw new ProxyError(`${url}: still pending after ${MAX_PENDING_MS} ms`)
         await this.sleep(retryAfterMs(r.headers))
         continue
@@ -273,7 +314,8 @@ export class ProxyStore {
     if (this.disposed) return
     const h = this.handles.get(key)
     if (!h) {
-      if (!this.failed.has(key)) void this.open(key).then(() => this.request(key, frame, priority, urgent), () => undefined)
+      // hidden: the engine asks again when the page is back
+      if (!this.failed.has(key) && !this.suspended) void this.open(key).then(() => this.request(key, frame, priority, urgent), () => undefined)
       return
     }
     if (frame < 0 || frame >= h.index.frames) return
@@ -308,39 +350,124 @@ export class ProxyStore {
     return this.queue.length + this.active
   }
 
+  /** Page hidden (true): queued requests wait and no new fetch starts
+   *  (those already on the wire finish). false: the queue drains again. */
+  suspend(on: boolean): void {
+    if (this.suspended === on) return
+    this.suspended = on
+    if (!on) this.drain()
+  }
+
+  get isSuspended(): boolean {
+    return this.suspended
+  }
+
+  /** Requests waiting to start (not on the wire). */
+  get queued(): number {
+    return this.queue.length
+  }
+
+  /** The most urgent job that is due now (index), or -1. */
+  private nextDue(t: number): number {
+    let best = -1
+    for (let i = 0; i < this.queue.length; i++) {
+      if ((this.queue[i].notBefore ?? 0) > t) continue
+      if (best < 0 || this.queue[i].priority < this.queue[best].priority) best = i
+    }
+    return best
+  }
+
   private drain(): void {
-    while (this.active < this.concurrency && this.queue.length && !this.disposed) {
-      this.queue.sort((a, b) => a.priority - b.priority)
-      const job = this.queue.shift()!
+    if (this.disposed || this.suspended) return
+    const t = this.now()
+    while (this.active < this.concurrency) {
+      const i = this.nextDue(t)
+      if (i < 0) break
+      const [job] = this.queue.splice(i, 1)
       const id = this.spanId(job.key, job.span)
       if (this.inFlight.has(id) || this.spans.get(id)?.samples) continue
       this.inFlight.add(id)
       this.active++
-      void this.run(job).catch((e: unknown) => {
-        this.stats.errors++
-        const msg = String((e as Error)?.message ?? e)
-        if (isPermanent(e)) {
-          this.failed.set(job.key, msg)
-          this.onError?.(job.key, msg, true)
-        }
-      }).finally(() => {
+      void this.run(job).catch((e: unknown) => this.jobFailed(job, e)).finally(() => {
         this.inFlight.delete(id)
         this.active--
         this.drain()
       })
     }
+    this.wake()
+  }
+
+  /** Drain again when the earliest waiting job is due. */
+  private wake(): void {
+    let due = Infinity
+    for (const j of this.queue) if ((j.notBefore ?? 0) > this.now()) due = Math.min(due, j.notBefore!)
+    if (due === Infinity || due >= this.wakeAt) return
+    this.wakeAt = due
+    void this.sleep(Math.max(0, due - this.now())).then(() => {
+      if (this.wakeAt === due) this.wakeAt = Infinity
+      // the wait is over (an injected sleep need not follow `now()`)
+      for (const j of this.queue) if ((j.notBefore ?? 0) <= due) j.notBefore = 0
+      this.drain()
+    })
+  }
+
+  /** Back in the queue after `ms` (merged with a request made meanwhile). */
+  private requeue(job: Job, ms: number): void {
+    job.notBefore = this.now() + ms
+    const same = this.queue.find((j) => j.key === job.key && j.span === job.span)
+    if (same) {
+      same.priority = Math.min(same.priority, job.priority)
+      same.frame ??= job.frame
+      same.notBefore = Math.max(same.notBefore ?? 0, job.notBefore)
+      same.pendingSince ??= job.pendingSince
+    } else {
+      this.queue.push(job)
+    }
+  }
+
+  private jobFailed(job: Job, e: unknown): void {
+    if (this.disposed) return
+    if (e instanceof SpanPending) {
+      // an on-demand encode: out of the slot, back after Retry-After; after
+      // MAX_PENDING_MS the frames stay PENDING and a later request starts over
+      job.pendingSince ??= this.now()
+      if (this.now() - job.pendingSince <= MAX_PENDING_MS) this.requeue(job, e.afterMs)
+      return
+    }
+    this.stats.errors++
+    const msg = String((e as Error)?.message ?? e)
+    if (isPermanent(e)) {
+      this.failed.set(job.key, msg)
+      this.onError?.(job.key, msg, true)
+      return
+    }
+    const id = this.spanId(job.key, job.span)
+    const n = (this.spanFails.get(id) ?? 0) + 1
+    this.spanFails.set(id, n)
+    this.stats.spanRetries++
+    this.requeue(job, Math.min(SPAN_RETRY_MAX_MS, SPAN_RETRY_MS * 2 ** (n - 1)))
   }
 
   private async run(job: Job): Promise<void> {
+    const ac = new AbortController()
+    const timer = setTimeout(() => { this.stats.timeouts++; ac.abort() }, this.spanTimeoutMs)
+    try {
+      await this.runSpan(job, ac.signal)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private async runSpan(job: Job, signal: AbortSignal): Promise<void> {
     const h = this.handles.get(job.key)!
     const url = this.url(job.key, `v/${pad4(job.span)}.bin`)
     if (job.frame !== null) {
-      const got = await this.rangeRead(h, job.span, job.frame, url)
+      const got = await this.rangeRead(h, job.span, job.frame, url, signal)
       if (got) this.onLoad?.(job.key, job.frame, 1)
     }
     if (this.spans.get(this.spanId(job.key, job.span))?.samples) return
     this.stats.spanFetches++
-    const buf = new Uint8Array(await (await this.getOk(url)).arrayBuffer())
+    const buf = new Uint8Array(await (await this.getOk(url, undefined, signal)).arrayBuffer())
     let pack
     try {
       pack = parseSpanPack(buf)
@@ -353,10 +480,10 @@ export class ProxyStore {
 
   /** Header, then one sample, by HTTP Range. A server that ignores Range
    *  (200) hands over the whole pack, which is kept as the full span. */
-  private async rangeRead(h: ProxyHandle, span: number, frame: number, url: string): Promise<boolean> {
+  private async rangeRead(h: ProxyHandle, span: number, frame: number, url: string, signal: AbortSignal): Promise<boolean> {
     this.stats.rangeReads++
     const headLen = 8 + 4 * h.spanFrames
-    const r1 = await this.getOk(url, { Range: `bytes=0-${headLen - 1}` })
+    const r1 = await this.getOk(url, { Range: `bytes=0-${headLen - 1}` }, signal)
     const head = new Uint8Array(await r1.arrayBuffer())
     if (r1.status === 200) {
       const pack = parseSpanPack(head)
@@ -372,7 +499,7 @@ export class ProxyStore {
     let off = 8 + 4 * count
     for (let j = 0; j < i; j++) off += dv.getUint32(8 + 4 * j)
     const size = dv.getUint32(8 + 4 * i)
-    const r2 = await this.getOk(url, { Range: `bytes=${off}-${off + size - 1}` })
+    const r2 = await this.getOk(url, { Range: `bytes=${off}-${off + size - 1}` }, signal)
     const body = new Uint8Array(await r2.arrayBuffer())
     if (r2.status === 200) {
       const pack = parseSpanPack(body)
@@ -391,6 +518,7 @@ export class ProxyStore {
 
   private put(key: string, span: number, entry: SpanEntry): void {
     const id = this.spanId(key, span)
+    this.spanFails.delete(id)
     const old = this.spans.get(id)
     if (old) {
       this.bytes -= old.bytes
@@ -414,6 +542,7 @@ export class ProxyStore {
   dispose(): void {
     this.disposed = true
     this.queue.length = 0
+    this.spanFails.clear()
     this.spans.clear()
     this.bytes = 0
   }

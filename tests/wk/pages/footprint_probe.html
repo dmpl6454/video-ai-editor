@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>wk footprint probe</title></head>
+<body style="margin:0">
+<script>
+// FootprintSampler self-test (tests/wk/test_wk_soak.py): the page idles
+// for `idle` ms, then allocates `mb` MB of ArrayBuffers and writes every
+// page of them (dirty memory in THIS WebContent process), holds them for
+// `hold` ms, and posts; with `after`, it then drops them and idles `after`
+// ms first. The harness's footprint series must show the rise (and the fall
+// once a forced collection runs).
+(function () {
+  var q = new URLSearchParams(location.search)
+  var token = q.get('token') || 'none'
+  var mb = Number(q.get('mb') || 256)
+  var idle = Number(q.get('idle') || 1500)
+  var hold = Number(q.get('hold') || 2000)
+  var after = Number(q.get('after') || 0)
+  var held = []
+  setTimeout(function () {
+    var t = performance.now()
+    for (var i = 0; i < mb; i++) {
+      var b = new Uint8Array(1 << 20)
+      for (var j = 0; j < b.length; j += 4096) b[j] = (i + j) & 255
+      held.push(b)
+    }
+    var allocMs = performance.now() - t
+    setTimeout(function () {
+      var sum = 0
+      for (var i = 0; i < held.length; i++) sum += held[i][4096]
+      var n = held.length
+      var heldAt = Date.now()
+      var post = function (droppedAt) {
+        fetch('/__result/' + token, { method: 'POST', body: JSON.stringify({
+          mb: n, allocMs: allocMs, sum: sum, heldAt: heldAt, droppedAt: droppedAt }) })
+      }
+      if (!after) { post(null); return }
+      // drop every reference (garbage now), idle `after` ms, then post
+      held = []
+      var droppedAt = Date.now()
+      setTimeout(function () { post(droppedAt) }, after)
+    }, hold)
+  }, idle)
+})()
+</script>
+</body>
+</html>

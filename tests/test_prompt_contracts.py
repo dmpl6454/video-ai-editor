@@ -279,7 +279,9 @@ def test_recipe_table_matches_the_grammar_intents():
                     # QA-018: the everyday one-liners (fades, levels, mutes, fitting the bed)
                     "fade", "volume", "mute", "fit_music", "remove_music",
                     "reverse",   # QA-037
-                    "freeze", "split"}   # wave D (review RD2)
+                    "freeze", "split",   # wave D (review RD2)
+                    # wave D3 (E3 key-free sweep): the CapCut clip edits
+                    "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust"}
     assert spec_intents | {"transcribe"} == set(recipes.RECIPE_NAMES)   # undo/redo are intents, not recipes
     offered = {c.name for c in recipes.cards()}
     assert "transcribe" not in offered and "ask" not in offered and "auto_edit" in offered

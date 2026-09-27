@@ -28,16 +28,21 @@ re-download gigabytes per session.
 """
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from video_ai_editor import platformutil
-from video_ai_editor.api import hardening as _hardening
-from video_ai_editor.api import pairing as _pairing
-
 _ISOLATED_DATA_ROOT = Path(tempfile.mkdtemp(prefix="vae-test-user-data-"))
+# The app's rotating log file is opened when `api.hardening` is IMPORTED,
+# before any proxy below can redirect it: name its directory first (review
+# RD3 — test runs appended to, and rotated, the owner's app.log).
+os.environ.setdefault("VAI_LOG_DIR", str(_ISOLATED_DATA_ROOT / "logs"))
+
+from video_ai_editor import platformutil  # noqa: E402
+from video_ai_editor.api import hardening as _hardening  # noqa: E402
+from video_ai_editor.api import pairing as _pairing  # noqa: E402
 
 
 class _PlatformutilProxy:

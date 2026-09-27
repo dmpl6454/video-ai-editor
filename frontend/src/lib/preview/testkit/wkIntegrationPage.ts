@@ -446,7 +446,94 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
       bakeState: r.engine.bakeState, expected: Array.from({ length: pm.total }, (_, k) => expectedBar(pm, k, r.srcIds)),
       before, after, srcUnchanged: video.src === srcAtStart, emptied, loadstarts,
       laneStats: r.engine.internals.lane!.stats, initsBefore, controllerStats: r.ctl.stats,
+      seekedEarly: r.engine.stats.seekedEarly, seeks: r.engine.stats.seeks,
     }
+  },
+
+  /** §11.1 "audio audible (playing) ≤ 250 ms": tone clips A (440 Hz) and B
+   *  (1320 Hz) alternate; while playing, the A clip under the playhead is
+   *  ripple-deleted, so B slides under it. From the commit (dispatch start)
+   *  to the first HEARD 5 ms window where B's tone dominates A's. */
+  async audible_edit(cfg) {
+    const a = await audioRig(cfg)
+    const { r, ctx, blocks } = a
+    await waitWindowFilled(r)
+    await sleep(300)
+    const src = (c: V1Clip) => cfg.srcIds[c.src] ?? 0
+    r.ctl.play(0)
+    const trials: Result[] = []
+    const sr = ctx.sampleRate
+    const win = Math.round(0.005 * sr)
+    const goertzel = (x: Float32Array, f: number) => {
+      const w = (2 * Math.PI * f) / sr
+      const c = 2 * Math.cos(w)
+      let s1 = 0
+      let s2 = 0
+      for (let i = 0; i < x.length; i++) { const s0 = x[i] + c * s1 - s2; s2 = s1; s1 = s0 }
+      return s1 * s1 + s2 * s2 - c * s1 * s2
+    }
+    const t00 = now()
+    const events: Result[] = []
+    r.engine.on('pause-external', (e) => events.push({ at: +(now() - t00).toFixed(0), ...e, vis: document.visibilityState }))
+    r.engine.on('buffering', (e) => events.push({ at: +(now() - t00).toFixed(0), ev: 'buffering', ...e }))
+    let restarts = 0
+    while (trials.length < (cfg.edits ?? 8) && now() - t00 < 90000) {
+      if (!r.engine.playing) {
+        // a pause this page did not make (the window hidden by another run
+        // on a busy machine): play on; a trial is only ever judged playing
+        if (restarts++ > 5) { trials.push({ stopped: r.engine.presentedK }); break }
+        await sleep(400)
+        if (!r.engine.playing) r.ctl.play()
+        await sleep(600)
+        continue
+      }
+      const pm = r.engine.program!
+      const fps = pm.R.num / pm.R.den
+      const k = r.engine.presentedK
+      const clips = v1(r.ctl.timeline!)
+      const tNow = k / fps
+      const under = clips.find((c) => c.start <= tNow && tNow < c.start + (c.out - c.in))
+      // an A clip 0.4 s in, with ≥ 0.8 s of it left
+      if (!under || src(under) !== 1 || tNow - under.start < 0.4 || under.start + (under.out - under.in) - tNow < 0.8) {
+        await sleep(20)
+        continue
+      }
+      const e = await edit(r, 'ripple_delete', { clip_id: under.id })
+      if (!e) { trials.push({ refused: refusals.ripple_delete }); break }
+      await sleep(700)
+      // heard time of context time c, on performance.now()
+      const tRef = now()
+      const cRef = heardCtxAt(ctx, tRef)
+      if (cRef === null) { trials.push({ noTimestamp: true }); continue }
+      const perfOf = (c: number) => tRef + (c - cRef) * 1000
+      let heardAt: number | null = null
+      let run = 0
+      const flat: number[] = []
+      for (const b of blocks) {
+        const bEnd = perfOf((b.frame + b.L.length) / sr)
+        if (bEnd < e.t0) continue
+        for (let i = 0; i + win <= b.L.length; i += win) {
+          const at = perfOf((b.frame + i) / sr)
+          if (at < e.t0) continue
+          const x = b.L.subarray(i, i + win)
+          const pa = goertzel(x, 440)
+          const pb = goertzel(x, 1320)
+          const bDominates = pb > 4 * pa && pb > 1e-3
+          run = bDominates ? run + 1 : 0
+          if (flat.length < 400) flat.push(+(pb / Math.max(1e-9, pa)).toFixed(1))
+          if (run >= 3 && heardAt === null) heardAt = at - 2 * (win / sr) * 1000
+        }
+        if (heardAt !== null) break
+      }
+      // the picture: the first frame of B drawn after the commit (the bar's
+      // source id), on the same performance.now() clock
+      const pic = r.draws.find((d) => d.playing && d.at >= e.t0 && d.bar >= 0 && barSrc(d.bar) === 2)
+      trials.push({ k, rttMs: +(e.tAnswer - e.t0).toFixed(1), heardMs: heardAt === null ? null : +(heardAt - e.t0).toFixed(1),
+        pictureMs: pic ? +(pic.at - e.t0).toFixed(1) : null, frameMs: +(1000 / fps).toFixed(2),
+        ratios: heardAt === null ? flat.slice(0, 80) : undefined })
+    }
+    r.ctl.pause()
+    return { trials, events, restarts, outputLatency: (ctx as { outputLatency?: number }).outputLatency ?? null, audioStats: a.audio.stats }
   },
 
   /** P1-A3: flash frames vs clicks through the real AudioEngine. */
@@ -565,6 +652,9 @@ function pickEdit(edl: EdlLike, rnd: () => number, srcs: string[]): { tool: stri
 interface AudioRigOut {
   r: Rig
   audio: AudioEngine
+  ctx: AudioContext
+  /** the tap's recording: left channel blocks on the context frame clock */
+  blocks: Array<{ frame: number; L: Float32Array }>
   startTrace(): void
   finish(): Result
 }
@@ -619,7 +709,7 @@ async function audioRig(cfg: Config): Promise<AudioRigOut> {
     video.requestVideoFrameCallback(onFrame)
   }
   return {
-    r, audio: audio!,
+    r, audio: audio!, ctx, blocks,
     startTrace() { tracing = true; video.requestVideoFrameCallback(onFrame) },
     finish() {
       tracing = false

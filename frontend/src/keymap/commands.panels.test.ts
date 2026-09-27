@@ -114,6 +114,26 @@ describe('panel commands drive the layout store', () => {
     }
   })
 
+  it('showing a panel puts focus on it, hiding it does not (review RD3)', () => {
+    const focused: string[] = []
+    vi.stubGlobal('requestAnimationFrame', (cb: () => void) => { cb(); return 0 })
+    vi.stubGlobal('document', {
+      activeElement: null,
+      getElementById: (id: string) => ({ id, hidden: false, contains: () => false,
+        focus: (o?: { preventScroll?: boolean }) => focused.push(`${id}:${o?.preventScroll}`) }),
+    })
+    try {
+      useLayoutStore.setState({ leftTab: 'media', leftOpen: true })
+      run('panelCaptions')
+      expect(focused).toEqual(['tool-panel-captions:true'])
+      run('panelCaptions')                       // the same chord hides it: focus is left alone
+      expect(focused).toHaveLength(1)
+    } finally {
+      vi.unstubAllGlobals()
+      vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} })
+    }
+  })
+
   it('⌥\\ toggles the tool panel and keeps the tab', () => {
     useLayoutStore.setState({ leftTab: 'effects', leftOpen: true })
     run('toggleToolPanel')

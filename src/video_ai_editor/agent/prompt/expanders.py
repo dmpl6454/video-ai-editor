@@ -29,6 +29,7 @@ from .presets import bed_for_mood, edit_templates, transition_entry, transition_
 from .recipes import (_PLATFORMS, _RATIOS, FILLERS_STRICT, RECIPE_SLOTS, Context, Expansion, Intent, ask,
                       download, normalize_slots, pc, placeholder, step)
 from .live import MIN_TRANSITION_NEIGHBOUR_S, seams_from_boundaries, smpte
+from . import clip_expanders as CX
 from ...edl.speed_presets import PRESET_BY_ID as _SPEED_PRESET_BY_ID, PRESETS as _SPEED_PRESETS
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
@@ -470,10 +471,14 @@ def _x_color_look(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     look = it.get("look") or "teal_orange.cube"
     intensity = float(it.get("intensity", 0.8))
     intensity = min(1.0, max(0.0, intensity))
+    clip, q = CX.bind_clip(it.get("clip_ref") or "$v1_all", f)
+    if q:
+        return Expansion(notes=(q,))
+    where = "every v1 clip" if clip == "$v1_all" else "the named clip"
     return Expansion(
-        steps=(step("apply_lut", STAGE_LOOK, f"apply the {look.replace('.cube', '')} look to every v1 clip",
-                    clip_id="$v1_all", src=look, intensity=intensity),),
-        postconditions=(pc("effect_present", "the look is applied", type="lut", track="v1", all=True),))
+        steps=(step("apply_lut", STAGE_LOOK, f"apply the {look.replace('.cube', '')} look to {where}",
+                    clip_id=clip, src=look, intensity=intensity),),
+        postconditions=(pc("effect_present", "the look is applied", type="lut", track="v1", all=clip == "$v1_all"),))
 
 
 def _x_clean_audio(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -508,15 +513,31 @@ def _x_loudness(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                         pc("loudness_within", "the render hits the loudness target", tol=1.0)))
 
 
+def _clip_targets(it: Intent, f: TimelineFacts, verb: str, default: str = "$v1_all"
+                  ) -> tuple[list[Step], list[str], str | None]:
+    """(split steps, clips, question) for an edit that names a clip, a range
+    ("the last 3 seconds") or neither (`default`). Wave D3 (E3): "speed up
+    the second clip" used to speed up EVERY clip (the ordinal was never read)."""
+    rng = it.get("_range")
+    if rng is not None and it.get("clip_ref") is None:
+        return CX.range_targets(rng, f, verb)
+    ref, q = CX.bind_clip(it.get("clip_ref") or default, f)
+    return [], ([ref] if ref else []), q
+
+
 def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
-    clip = it.get("clip_ref") or "$v1_all"
+    pre, clips, q = _clip_targets(it, f, "speed up" if (it.get("factor") or 1.25) >= 1 else "slow down")
+    if q:
+        return Expansion(notes=(q,))
     preset = it.get("preset")
     if preset:
         # a named speed curve (wave D): the preset itself, checked by name
         label = _SPEED_PRESET_BY_ID[preset].label
         return Expansion(
-            steps=(step("set_speed", STAGE_CUTS, f"play the {label} speed curve", clip_id=clip, preset=preset),),
-            postconditions=(pc("speed_equals", f"the clip plays the {label} curve", clip_id=clip, preset=preset),))
+            steps=tuple(pre) + tuple(step("set_speed", STAGE_CUTS, f"play the {label} speed curve", clip_id=c,
+                                          preset=preset) for c in clips),
+            postconditions=tuple(pc("speed_equals", f"the clip plays the {label} curve", clip_id=c, preset=preset)
+                                 for c in clips))
     if it.get("_curve") and not it.get("factor"):
         # "a speed ramp" with no name: ASK which curve (a pause, no default) —
         # never a constant factor (RD2). The check is bound from the answered
@@ -524,15 +545,17 @@ def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         opts = [(p.id, p.label, p.hint) for p in _SPEED_PRESETS if p.menu]
         return Expansion(
             questions=(ask("preset", "Which speed curve?", options=opts),),
-            steps=(step("set_speed", STAGE_CUTS, "play the chosen speed curve", clip_id=clip, preset=placeholder("preset")),))
+            steps=tuple(pre) + tuple(step("set_speed", STAGE_CUTS, "play the chosen speed curve", clip_id=c,
+                                          preset=placeholder("preset")) for c in clips))
     factor = float(it.get("factor") or 1.25)
     factor = min(4.0, max(0.25, factor))
-    steps = [step("set_speed", STAGE_CUTS, f"play at {factor:g}×", clip_id=clip, factor=factor)]
+    steps = list(pre) + [step("set_speed", STAGE_CUTS, f"play at {factor:g}×", clip_id=c, factor=factor)
+                         for c in clips]
     if factor < 1.0 and it.get("_smooth"):
-        steps.append(step("smooth_slow_motion", STAGE_CUTS, "interpolate frames for smooth slow motion",
-                          optional=True, clip_id=clip, factor=max(2, int(round(1 / factor)))))
-    pcs = [pc("speed_equals", "the speed matches", clip_id=clip, factor=factor)]
-    if clip == "$v1_all":
+        steps += [step("smooth_slow_motion", STAGE_CUTS, "interpolate frames for smooth slow motion",
+                       optional=True, clip_id=c, factor=max(2, int(round(1 / factor)))) for c in clips]
+    pcs = [pc("speed_equals", "the speed matches", clip_id=c, factor=factor) for c in clips]
+    if clips == ["$v1_all"]:
         pcs.append(pc("duration_between", "the duration matches", factor=factor, tol_ratio=0.05))
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs))
 
@@ -541,6 +564,9 @@ def _moment(it: Intent, f: TimelineFacts) -> float | None:
     """The moment a freeze or a split is at: the one the prompt names, else
     the playhead."""
     at = it.get("at")
+    if at is None and it.get("_at_end"):
+        # "freeze the last frame" / "freeze at the end": the final frame.
+        at = max(0.0, f.duration - 1.0 / max(1, f.fps))
     if at is None:
         at = f.playhead
     return None if at is None else round(float(at), 3)
@@ -550,8 +576,8 @@ def _x_freeze(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     """CapCut's Freeze (wave D, freeze_frame): hold the frame at a moment."""
     at = _moment(it, f)
     if at is None or at >= f.duration:
-        return Expansion(notes=(f"say when to freeze — the video is {f.duration:.1f}s long" if at is not None
-                                else "say when to freeze, like 'freeze frame at 3 seconds'",))
+        return Expansion(notes=(f"When should the frame freeze? {at:g}s is past the end of the {f.duration:.1f}s video."
+                                if at is not None else "When should the frame freeze? Say like 'freeze frame at 3 seconds'.",))
     dur = it.get("duration_s")
     args: dict[str, Any] = {"time": at}
     if dur is not None:
@@ -564,8 +590,9 @@ def _x_freeze(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 def _x_split(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     at = _moment(it, f)
     if at is None or not 0 < at < f.duration:
-        return Expansion(notes=("say where to split, like 'split at 3 seconds'" if at is None
-                                else f"{at:g}s is not inside the video ({f.duration:.1f}s)",))
+        return Expansion(notes=("Where should I split? Say like 'split at 3 seconds', or move the playhead and say 'split here'."
+                                if at is None else
+                                f"Where should I split? {at:g}s is not inside the video ({f.duration:.1f}s long).",))
     return Expansion(steps=(step("split_at", STAGE_CUTS, f"split at {at:g}s", track="v1", time=at),),
                      postconditions=(pc("tool_ok", "the split was made", tool="split_at"),))
 
@@ -579,6 +606,10 @@ def _x_reverse(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     rev = it.get("reverse")
     rev = True if rev is None else bool(rev)
     ref = it.get("clip_ref")
+    if isinstance(ref, str) and ref.startswith(("$v1_nth:", "$v1_at:")):
+        ref, q = CX.bind_clip(ref, f)
+        if q:
+            return Expansion(notes=(q,))
     if ref in (None, "$selected"):
         if f.selection and f.selection in f.clip_ids:
             ref = f.selection
@@ -786,6 +817,15 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     shortens the timeline and does not ripple overlays."""
     if not f.v1_boundaries and not (ctx.has_cut_steps and len(f.v1_clip_ids) >= 2):
         return Expansion(notes=("only one clip on v1 — there is no seam to put a transition on",))
+    seam_index = it.get("_seam_index")
+    if seam_index is not None and not ctx.has_cut_steps:
+        # "between the first and second clip" / "after clip 2" (wave D3, E3):
+        # the N-th seam, not every seam.
+        n = int(seam_index)
+        if not 1 <= n <= len(f.v1_boundaries):
+            return Expansion(notes=(f"Which cut? There {'is' if len(f.v1_boundaries) == 1 else 'are'} "
+                                    f"{len(f.v1_boundaries)} cut(s) between clips on the main track.",))
+        it = Intent(it.recipe, {**it.slots, "at": f.v1_boundaries[n - 1]}, it.score, it.clause)
     notes: list[str] = []
     if ctx.has_cut_steps:
         # The cuts earlier in this plan move every seam, so per-seam times
@@ -955,14 +995,18 @@ def _x_voiceover(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 
 def _x_stabilize(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
-    clip = it.get("clip_ref") or "$v1_all"
+    clip, q = CX.bind_clip(it.get("clip_ref") or "$v1_all", f)
+    if q:
+        return Expansion(notes=(q,))
     return Expansion(
         steps=(step("stabilize", STAGE_CUTS, "stabilise the footage", optional=True, clip_id=clip),),
         postconditions=(pc("clip_src_changed", "the clip was stabilized"),))
 
 
 def _x_upscale(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
-    clip = it.get("clip_ref") or "$v1_all"
+    clip, q = CX.bind_clip(it.get("clip_ref") or "$v1_all", f)
+    if q:
+        return Expansion(notes=(q,))
     factor = int(it.get("upscale_factor") or 2)
     return Expansion(
         steps=(step("upscale", STAGE_CUTS, f"upscale {factor}× with Real-ESRGAN", optional=True, clip_id=clip, factor=factor),),
@@ -1036,6 +1080,11 @@ def _picture_fade(it: Intent, edge: str, target: str, f: TimelineFacts) -> Expan
         return Expansion(notes=("there is no clip on the timeline to fade",))
     d = _fade_seconds(it, FADE_DEFAULT_S, f)
     ref = it.get("clip_ref")
+    if ref is not None:
+        ref, q = CX.bind_clip(ref, f)
+        if q:
+            return Expansion(notes=(q,))
+        ref = None if ref == "$v1_all" else ref
     picture = target == "video"
     steps: list[Step] = []
     pcs: list = []
@@ -1074,6 +1123,8 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     change = it.get("change")
     db = it.get("db")
     delta = float(it.get("_delta_db") or VOLUME_STEP_DB)
+    if it.get("clip_ref") is not None and target != "music":
+        return _clip_volume(it, f, change, db, delta)
     if target == "music":
         if _no_music(f, ctx):
             return Expansion(notes=("there is no music on the timeline to turn up or down",))
@@ -1087,6 +1138,11 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     else:
         level = float(db)
     level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
+    if db is not None and target == "music" and f.music_gain_db is not None and abs(level - current) < 0.05:
+        # "turn the music down to 20%" on a bed already at -14 dB (20 % IS
+        # -14 dB): say so instead of a step that changes nothing and verifies.
+        return Expansion(notes=(f"The music is already at {level:g} dB ({_pct(level)}) — what level should it be? "
+                                "Say like 'turn the music down to 10%'.",))
     notes = [f"{label} {current:g} dB → {level:g} dB"]
     if target == "music" and f.music_muted:
         notes.append("the music track is muted — say 'unmute the music' to hear it")
@@ -1094,6 +1150,33 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         steps=(step("set_volume", STAGE_AUDIO, f"set the {label} level to {level:g} dB", target=track, db=level),),
         postconditions=(pc("volume_db", "the level is set", target=track, db=level),),
         notes=tuple(notes))
+
+
+def _clip_volume(it: Intent, f: TimelineFacts, change: Any, db: Any, delta: float) -> Expansion:
+    """One clip's level ("lower the volume of the second clip", wave D3 E3):
+    `set_volume` on that clip id. Facts do not carry a clip's gain, so a
+    relative change is from its source level (0 dB)."""
+    cid, q = CX.bind_clip(it.get("clip_ref"), f)
+    if q:
+        return Expansion(notes=(q,))
+    if cid == "$v1_all":
+        cid = "v1"                                   # every clip: the main track's level
+    elif cid in ("$v1_first", "$v1_last", "$playhead"):
+        ids = list(f.v1_clip_ids)
+        cid = {"$v1_first": ids[:1], "$v1_last": ids[-1:]}.get(cid, [None])[0] if ids else None
+        if cid is None:
+            return Expansion(notes=("Which clip? Name it like 'the second clip'.",))
+    level = float(db) if db is not None else (delta if change == "up" else -delta)
+    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
+    who = "every clip's" if cid == "v1" else "the clip's"
+    return Expansion(
+        steps=(step("set_volume", STAGE_AUDIO, f"set {who} level to {level:g} dB", target=cid, db=level),),
+        postconditions=(pc("volume_db", f"{who} level is set", target=cid, db=level),),
+        notes=(f"{who} sound {level:+g} dB",))
+
+
+def _pct(db: float) -> str:
+    return f"{10 ** (db / 20.0) * 100:.0f}%"
 
 
 def _x_mute(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1110,11 +1193,15 @@ def _x_mute(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
             steps=(step("set_track_muted", STAGE_AUDIO, f"{verb} the music track", track="music", muted=muted),),
             postconditions=(pc("track_muted", "the music track is muted" if muted else "the music track plays",
                                track="music", muted=muted),))
+    pre, clips, q = _clip_targets(it, f, verb)
+    if q:
+        return Expansion(notes=(q,))
+    where = "every v1 clip" if clips == ["$v1_all"] else ("the named clip" if len(clips) == 1 else f"{len(clips)} clips")
     return Expansion(
-        steps=(step("set_clip_muted", STAGE_AUDIO, f"{verb} the original sound of every v1 clip",
-                    clip_id="$v1_all", muted=muted),),
-        postconditions=(pc("clips_muted", "the clip audio is muted" if muted else "the clip audio plays",
-                           clip_id="$v1_all", muted=muted),))
+        steps=tuple(pre) + tuple(step("set_clip_muted", STAGE_AUDIO, f"{verb} the original sound of {where}",
+                                      clip_id=c, muted=muted) for c in clips),
+        postconditions=tuple(pc("clips_muted", "the clip audio is muted" if muted else "the clip audio plays",
+                                clip_id=c, muted=muted) for c in clips))
 
 
 def _x_fit_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1166,6 +1253,9 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     "stabilize": _x_stabilize, "upscale": _x_upscale, "ask": _x_ask,
     "fade": _x_fade, "volume": _x_volume, "mute": _x_mute, "fit_music": _x_fit_music, "preview": _x_preview,
     "remove_music": _x_remove_music,
+    # Wave D3 (E3): the CapCut clip edits (agent/prompt/clip_expanders.py)
+    "delete_clip": CX.x_delete_clip, "duplicate": CX.x_duplicate, "move_clip": CX.x_move_clip,
+    "zoom": CX.x_zoom, "rotate": CX.x_rotate, "adjust": CX.x_adjust,
 }
 
 

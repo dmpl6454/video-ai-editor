@@ -265,6 +265,20 @@ PREVIEWS = LatestPerSession()
 PROXIES = LatestPerSession()
 
 
+def run_prioritised(args, **kwargs) -> subprocess.CompletedProcess:
+    """``subprocess.run`` at the ACTIVE PRIORITY (niced inside
+    `low_priority()`, like `run`) but outside any cancellation scope.
+
+    For the short probes a render makes along the way whose answers are
+    cached (encoder capability, has-audio, container duration) and for the
+    stream copy that files a finished preview's video-only twin: killing one
+    of those on a superseding edit would cache a wrong answer or lose a
+    finished file, yet under ``priority=low`` they must not run at the
+    server's own priority either (wave D3, INSTANT_PREVIEW_SPEC §9.4)."""
+    argv, kw = _prioritised(args, kwargs)
+    return subprocess.run(argv, **{**_pu.SUBPROCESS_FLAGS, **kw})
+
+
 def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
         ) -> subprocess.CompletedProcess:
     """``subprocess.run`` that honours the active cancellation scope."""

@@ -18,7 +18,7 @@
 //          preview gain and a −1 dBFS limiter.
 
 import {
-  effectiveDuration, isMediaClip, planView, reversedFrameCount, speedFactor, type EdlClip, type EdlLike, type EdlTrack,
+  effectiveDuration, freezeOf, isMediaClip, planView, reversedFrameCount, speedFactor, type EdlClip, type EdlLike, type EdlTrack,
 } from '../timeline/framePlan'
 import {
   audioPlacements, clipSample0, type AudioPlacement, type AudioRun, type ProgramMap, type SourceLookup,
@@ -281,8 +281,12 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
   }
   pips.sort((a, b) => (a.c.start ?? 0) - (b.c.start ?? 0))
   for (const { t, c } of pips) {
-    const dur = Math.max(0, (c.out ?? 0) - (c.in ?? 0))
-    const win = renderWindow(seams, c.start ?? 0, (c.start ?? 0) + dur)
+    // The window is the PIP's TIMELINE footprint and its sound follows its
+    // speed (wave D3, E2: render/pip.py `pip_retime` + `pip_audio_chain`,
+    // v1's rules): a freeze is silent, a curve reads its curve map, a
+    // constant speed resamples, a reverse reads its range backwards.
+    const eff = effectiveDuration(c)
+    const win = renderWindow(seams, c.start ?? 0, (c.start ?? 0) + eff)
     if (!win) continue
     const bus = `pip:${t.id}`
     if (!buses.some((b) => b.id === bus)) buses.push({ id: bus, kind: 'pip', gain: trackGain(t, anySolo) })
@@ -291,10 +295,30 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
     const n = samplesForFrames(nf, fps)
     const out0 = samplesForFrames(f0, fps)
     const s0 = clipSample0(c.in ?? 0, fps)
-    const map: SourceMap = { kind: 'runs', runs: [[0, n, s0, 1]] }
+    const pts = curvePoints(c.speed)
+    const sp = typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 ? c.speed : null
+    let map: SourceMap
+    if (freezeOf(c) !== null) {
+      map = { kind: 'runs', runs: [] }                                   // silence (exact)
+    } else if (c.reverse) {
+      // The reversed intermediate's sound: the range backwards from the
+      // last sample of its `reversed_frames` (as v1's retimed reverse).
+      map = { kind: 'rate', src0: s0 + samplesForFrames(reversedFrameCount(c, fps), fps) - 1,
+              rate: sp ?? (pts ? speedFactor(c.speed) : 1), reverse: true, end: Number.MAX_SAFE_INTEGER }
+      approx.add('varispeed')
+    } else if (pts) {
+      map = { kind: 'curve', src0: s0, points: pts, seconds: Math.max(0, (c.out ?? 0) - (c.in ?? 0)), end: Number.MAX_SAFE_INTEGER }
+      approx.add('speed-curve')
+    } else if (sp !== null) {
+      map = { kind: 'rate', src0: s0, rate: sp, reverse: false, end: Number.MAX_SAFE_INTEGER }
+      approx.add((audioOf(c).keep_pitch ?? true) ? 'tempo' : 'varispeed')
+    } else {
+      map = { kind: 'runs', runs: [[0, n, s0, 1]] }
+    }
+    const exact = map.kind === 'runs'
     clips.push({
       ...baseClip(c, bus, clips.length), out0, n, map, t0: out0,
-      fades: shift(clipFadeWindows(audioOf(c), effectiveDuration(c)), out0), xIn: 0, xOut: 0, exact: true,
+      fades: shift(clipFadeWindows(audioOf(c), eff), out0), xIn: 0, xOut: 0, exact,
       timing: JSON.stringify([bus, c.src, out0, n, map]),
       params: paramsKey(audioOf(c), String(effectiveDuration(c))),
     })

@@ -32,6 +32,7 @@ import numpy as np
 from video_ai_editor.edl.schema import EDL, Canvas, Clip, Effect, Keyframe, empty_edl
 from video_ai_editor.render import compositor
 from video_ai_editor.render.frame_map import SourceInfo
+from video_ai_editor.render.sar import display_width, parse_sar
 
 REPO = Path(__file__).resolve().parents[1]
 GOLDEN = REPO / "tests" / "goldens" / "geometry_cases.json"
@@ -54,6 +55,8 @@ class Src:
     h: int
     rate: Fraction = Fraction(30)
     frames: int = 90
+    #: sample aspect ratio (anamorphic: stored w x h, DISPLAYED w·sar x h)
+    sar: Fraction | None = None
 
 
 SOURCES: dict[str, Src] = {s.key: s for s in (
@@ -64,6 +67,12 @@ SOURCES: dict[str, Src] = {s.key: s for s in (
     Src("sq", 1000, 1000),
     Src("land25", 1280, 720, Fraction(25), 75),
     Src("odd25", 962, 540, Fraction(25), 75),
+    # anamorphic masters (Wave D3, lane E1a): PAL 4:3 (720x576 SAR 16:15,
+    # displayed 768x576), PAL 16:9 (SAR 64:45, 1024x576), HDV (1440x1080
+    # SAR 4:3, 1920x1080)
+    Src("pal43", 720, 576, Fraction(25), 50, Fraction(16, 15)),
+    Src("pal169", 720, 576, Fraction(25), 50, Fraction(64, 45)),
+    Src("hdv", 1440, 1080, Fraction(30), 60, Fraction(4, 3)),
 )}
 
 
@@ -82,10 +91,11 @@ def make_source(path: Path, s: Src) -> Path:
         f":color=0x{r:02x}{g:02x}{b:02x}:t=fill"
         for (u, v), (r, g, b) in MARKERS.values())
     rate = f"{s.rate.numerator}/{s.rate.denominator}"
+    sar = f",setsar={s.sar.numerator}/{s.sar.denominator}" if s.sar else ""
     subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
          "-i", f"color=0x{GREY:02x}{GREY:02x}{GREY:02x}:s={s.w}x{s.h}:r={rate}:d={float(s.frames / s.rate) + 1}",
-         "-vf", f"{boxes},format=yuv420p", "-frames:v", str(s.frames),
+         "-vf", f"{boxes}{sar},format=yuv420p", "-frames:v", str(s.frames),
          "-c:v", "libx264", "-qp", "0", "-preset", "veryfast", str(path)],
         check=True, capture_output=True)
     return path
@@ -94,8 +104,8 @@ def make_source(path: Path, s: Src) -> Path:
 def probe(path: Path) -> SourceInfo:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
-         "-show_entries", "stream=r_frame_rate,time_base,start_pts,nb_read_frames,width,height"
-         ":format=start_time", "-of", "json", str(path)],
+         "-show_entries", "stream=r_frame_rate,time_base,start_pts,nb_read_frames,width,height,"
+         "sample_aspect_ratio:format=start_time", "-of", "json", str(path)],
         check=True, capture_output=True, text=True).stdout
     d = json.loads(out)
     st = d["streams"][0]
@@ -104,7 +114,9 @@ def probe(path: Path) -> SourceInfo:
     return SourceInfo(rate=Fraction(st["r_frame_rate"]), time_base=tbase,
                       frames=int(st["nb_read_frames"]),
                       start_ticks=int(st.get("start_pts") or 0) - int(file_start / tbase),
-                      width=int(st["width"]), height=int(st["height"]))
+                      # the DISPLAYED size, as the proxy probe reports it
+                      width=display_width(int(st["width"]), parse_sar(st.get("sample_aspect_ratio"))),
+                      height=int(st["height"]))
 
 
 # ------------------------------------------------------------------ cases
@@ -115,13 +127,15 @@ class ClipSpec:
     start: float = 0.0
     in_: float = 0.0
     out: float = 1.0
-    speed: float | None = None
+    speed: float | dict | None = None
     fit: str = "contain"
     tx: dict[str, Any] = field(default_factory=dict)
     effects: tuple[str, ...] = ()
     fade_in: float = 0.0
     fade_out: float = 0.0
     measure: bool = True
+    freeze: float | None = None
+    reverse: bool = False
 
 
 @dataclass
@@ -165,6 +179,11 @@ def cases() -> list[Case]:
         Case("scale_05", [ClipSpec("port", tx={"scale": 0.5})], [0]),
         Case("scale_073_pan", [ClipSpec(L, tx={"scale": 0.73, "x": -33.4, "y": 12.6})], [0]),
         Case("zoom_137_pan", [ClipSpec(L, tx={"scale": 1.37, "x": 21.0})], [0]),
+        # review RD3: a static opacity < 1 must not move an odd pan (a gbrp
+        # downstream pulled pad/crop out of 4:2:0 and dropped its rounding)
+        Case("scale_05_pan1", [ClipSpec(L, tx={"scale": 0.5, "x": 1.0, "y": 1.0})], [0]),
+        Case("scale_05_pan1_opacity", [ClipSpec(L, tx={"scale": 0.5, "x": 1.0, "y": 1.0,
+                                                       "opacity": 0.9})], [0]),
         Case("pan_only", [ClipSpec(L, tx={"x": 100.0, "y": 40.0})], [0]),
         Case("pan_half_pixels", [ClipSpec(L, tx={"x": 12.5, "y": -7.5})], [0]),
         Case("zoom_cover_rotate", [ClipSpec("odd", fit="cover", tx={"scale": 1.2, "rotation": 7.0})], [0]),
@@ -178,6 +197,23 @@ def cases() -> list[Case]:
         Case("kf_speed2", [ClipSpec(L, out=2.0, speed=2.0, tx={"x": kf((0, 0), (2, 200)), "scale": 2.0})],
              [0, 10, 20, 29]),
         Case("kf_rotation", [ClipSpec(L, tx={"rotation": kf((0, 0), (1, 90))})], [0, 10, 20, 29]),
+        # the keyframe clock is the OUTPUT frame's clip-local time (Wave D3):
+        # a 0.5x clip animates every frame, a freeze animates over its still,
+        # a curve and a reversed 2x clip key on timeline time
+        Case("kf_speed_half", [ClipSpec(L, out=1.0, speed=0.5, tx={"x": kf((0, 0), (2, 200)), "scale": 2.0})],
+             [0, 1, 2, 3, 31, 59]),
+        Case("kf_freeze", [ClipSpec(L, in_=0.5, out=0.5 + 1 / 30, freeze=1.0,
+                                    tx={"rotation": kf((0, 0), (1, 30))})], [0, 1, 15, 29]),
+        Case("kf_freeze_opacity", [ClipSpec(L, in_=0.5, out=0.5 + 1 / 30, freeze=1.0,
+                                            tx={"opacity": kf((0, 1), (1, 0.3))})], [0, 1, 15, 29], gain_only=True),
+        Case("kf_opacity_speed_half", [ClipSpec(L, out=1.0, speed=0.5, tx={"opacity": kf((0, 1), (2, 0.2))},
+                                                fade_out=0.5)], [0, 1, 2, 3, 45, 50, 55, 59], gain_only=True),
+        Case("kf_curve", [ClipSpec(L, out=2.0, speed={"curve": [[0, 1], [0.5, 0.4], [1, 1]]},
+                                   tx={"y": kf((0, -60), (2.5, 60)), "scale": 1.6})], [0, 1, 20, 41, 60]),
+        Case("kf_reverse_2x", [ClipSpec(L, in_=0.5, out=2.5, speed=2.0, reverse=True,
+                                        tx={"x": kf((0, -100), (1, 100)), "scale": 1.5})], [0, 7, 15, 29]),
+        Case("kf_shrink_about_centre", [ClipSpec(L, tx={"scale": kf((0, 0.5), (1, 1.5)), "y": 20.0})],
+             [0, 15, 29]),
         Case("kf_single_key_ignored", [ClipSpec(L, tx={"x": kf((0, 300)), "rotation": kf((0, 45))})], [0]),
         Case("kf_ease_in_out", [ClipSpec(L, tx={"y": kf((0, -100), (1, 100), interp="ease-in-out"), "scale": 1.8})],
              [0, 8, 15, 23, 29]),
@@ -197,6 +233,18 @@ def cases() -> list[Case]:
         Case("fade_longer_than_clip", [ClipSpec(L, out=0.5, fade_in=3.0)], list(range(0, 15)), gain_only=True),
         Case("fade_and_opacity", [ClipSpec(L, out=1.0, fade_out=0.5, tx={"opacity": 0.8})], [0, 20, 25, 29],
              gain_only=True),
+        # ---- anamorphic sources: fitted by their DISPLAYED shape
+        Case("contain_pal43", [ClipSpec("pal43")], [0]),
+        Case("cover_pal43", [ClipSpec("pal43", fit="cover")], [0]),
+        Case("contain_pal169_portrait", [ClipSpec("pal169")], [0], canvas=(360, 640)),
+        Case("cover_pal169", [ClipSpec("pal169", fit="cover")], [0]),
+        Case("contain_hdv_portrait", [ClipSpec("hdv")], [0], canvas=(360, 640)),
+        Case("cover_pan_hdv", [ClipSpec("hdv", fit="cover", tx={"x": 40.0, "y": -30.0, "scale": 1.25})], [0],
+             canvas=(360, 640)),
+        Case("scale_pan_rotate_pal43", [ClipSpec("pal43", tx={"scale": 0.8, "x": 40.0, "y": -12.0, "rotation": 10.0})],
+             [0]),
+        Case("kf_pan_pal169", [ClipSpec("pal169", out=1.2, speed=0.5,
+                                        tx={"x": kf((0, -80), (2, 80)), "scale": 1.5})], [0, 1, 30, 59]),
         # ---- combined
         Case("combined_25fps_odd", [ClipSpec("odd25", fit="cover", out=2.0,
                                              tx={"scale": 1.2, "rotation": -12.0, "x": -40.0, "y": 25.0},
@@ -219,6 +267,10 @@ def build_edl(case: Case, paths: dict[str, str] | None = None) -> EDL:
         c.effects = [Effect(type=t) for t in cs.effects]
         c.video_fade_in = cs.fade_in
         c.video_fade_out = cs.fade_out
+        if cs.freeze is not None:
+            c.freeze = cs.freeze
+        if cs.reverse:
+            c.reverse = True
         v1.clips.append(c)
     e.recompute_duration()
     return e

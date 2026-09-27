@@ -81,6 +81,14 @@ describe('snapToFreeGap', () => {
 
 describe('resolveMediaTrim', () => {
   const clip = { in: 2, out: 8 } // 6s source span
+  it('shortening a speed CURVE reads the edge through the curve; lengthening uses the mean', () => {
+    const curve = { duration: 10, sourceAt: (t: number) => (t * t) / 10 * 0.6 }   // 6 s over 10 s
+    expect(resolveMediaTrim(clip, 'l', 2, 0.6, curve)).toEqual({ in: 2 + 0.24, out: 8 })
+    expect(resolveMediaTrim(clip, 'r', -3, 0.6, curve)).toEqual({ in: 2, out: 2 + 2.94 })
+    // Outward: no curve to read there.
+    expect(resolveMediaTrim(clip, 'r', 1, 0.6, curve)).toEqual({ in: 2, out: 8.6 })
+    expect(resolveMediaTrim(clip, 'l', -1, 0.6, curve)).toEqual({ in: 1.4, out: 8 })
+  })
   it('right-edge drag extends out', () => {
     expect(resolveMediaTrim(clip, 'r', 2)).toEqual({ in: 2, out: 10 })
   })

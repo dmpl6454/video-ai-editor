@@ -390,12 +390,14 @@ Nothing is lost. The only deletions are:
 
 | Command id | Chord | Scope | Behaviour |
 |---|---|---|---|
-| `panelMedia` … `panelAI` (8) | ⌥1 … ⌥8 | global | Show that panel, opening it if collapsed. **Its own chord again collapses it.** Focus is **not** moved, except by the focus-rescue rule (§5.3). |
+| `panelMedia` … `panelAI` (8) | ⌥1 … ⌥8 | global | Show that panel, opening it if collapsed. **Its own chord again collapses it.** Showing a panel puts focus **on the panel** (its `tabpanel`, `tabindex=-1`; as built, review RD3 — focus used to stay where it was, and "Generate captions" was 17 Tab stops from the timeline): Tab goes on into its controls and Space still plays. Hiding it leaves focus to the focus-rescue rule (§5.3). |
 | `toggleToolPanel` | ⌥\ | global | Collapse / expand the tool panel |
 | `showInspector` / `showChat` | ⌥9 / ⌥0 | global (+ text fields in `#right-panel`) | Expand the right panel on that tab; Chat focuses its input. As built (RD2): they also run from a text field inside the right panel, so ⌥0 then ⌥9 goes Chat → Inspector (focus lands on the Inspector tab) |
 | `openShortcuts` | ⌥⌘K | global | Opens ShortcutsSettings (Premiere's Keyboard Shortcuts chord) |
 | `exportVideo` | ⌘E | global | Opens the Export dialog (CapCut and Final Cut use ⌘E) |
-| `addText` | ⌥T | global | Adds a text clip with the default style at the playhead, selected (same path as the button) |
+| `addText` | ⌥T | global | Adds a text clip with the default style at the playhead, selected (same path as the button). As built (RD3): focus then goes to the new text's Inspector field with its words selected, so typing replaces them (it stayed on the timeline, where L shuttled and K stopped); Esc there returns to the timeline |
+| `selectClipAtPlayhead` | C (CapCut, Final Cut), D (Premiere) | default | Select the clip under the playhead (the selected clip's lane first, then the main track, then the other lanes); announced (review RD3) |
+| `selectNextClip` / `selectPrevClip` | ↓ / ↑ | default | Select the next / previous clip on the selected clip's lane (the main track when nothing is selected) and move the playhead to its first frame; announced (review RD3: a keyboard user could select only every clip) |
 | `cycleRegion` / `cycleRegionBack` | F6 / ⇧F6 | anywhere | Focus the next / previous region: top bar → rail (the selected tab) → tool panel → Prompt bar → timeline (the timeline canvas) → right panel → rail foot. As built (RD2): the centre is two stops; as one it always landed in the Prompt textarea and never reached the timeline |
 
 - **Collision check against `presets.ts`:**
@@ -414,8 +416,9 @@ Nothing is lost. The only deletions are:
   1. Text entry returns early, unless the command is `'anywhere'`, or a `'global'` ⌘ chord that is not a native text chord, or the field is inside the command's `alsoInText` region.
   2. `[data-keymap-ignore]` returns early, unless the command is `'global'` or `'anywhere'`.
   3. A `[data-keymap-own="…"]` target keeps exactly the keys it names, with any modifiers (a focused speed-curve point keeps Delete/Backspace, so ripple delete never fires there).
-  4. The `CONTROL_NAV_KEYS` guard is unchanged (a focused button, input or select keeps its arrows, Home/End, PageUp/PageDown).
+  4. The `CONTROL_NAV_KEYS` guard: a focused NAVIGABLE control — a slider, a select, a radio (input or role), a tab, a menu item, an option — keeps its arrows, Home/End, PageUp/PageDown. As built (review RD3): a plain button or checkbox has no arrow behaviour and no longer keeps them (Shift+→ from a toolbar button or the import drop zone did nothing).
   5. A focused `role="tab"` keeps unmodified Space and Enter (APG).
+  6. As built (review RD3): a button, checkbox, radio, switch, menu item or link focused WITHOUT the pointer keeps Space (it activates the control: Play backwards, Keep pitch, Mute, Solo, Snapping were out of a keyboard user's reach), and a native button Enter. Focus a pointer press gave (Chromium leaves it on a clicked button) does not: Space still plays there. `:focus-visible` cannot tell the two apart (the Space keydown itself turns it on before any listener runs), so the engine records focus that follows a `pointerdown` on the same control.
 - **Consequence:** the chord must be resolved to a command *before* the scope checks. Split this out as a pure `shouldRun(cmd, target)` so it can be unit-tested (§8.2).
 - **Why not "the ignore scope swallows only unmodified chords":** ⌘Z inside an AI form would then undo the timeline behind the user's back. Explicit per-command scope is the smaller behaviour change.
 
@@ -762,6 +765,16 @@ Measured in Chromium and Playwright WebKit (`tests/test_wave_d_rail_keys_ui.py`,
 5. **A disabled icon-only toolbar button looks disabled.** Split, Freeze frame, Delete and Duplicate in an empty project measured 1.17:1 luminance against an enabled icon; they now use `--icon-disabled` (#5c5c66), ≥ 2:1 dimmer than an enabled icon in both engines. WCAG exempts disabled controls; the name and tooltip still say why.
 6. **The Normal speed slider on a curve clip** starts at the curve's mean speed (0.93× for a curve that read 1.00×), so the first nudge keeps the clip's length near the curve's.
 7. **The key-free Prompt bar** reads "add a hero speed ramp" as the Hero curve (it committed a constant 1.25×), "freeze frame at 5 seconds" as a freeze (it became a title question) and "split at 3 seconds" as a split (it was not understood). A ramp with no name asks which curve. New grammar intents `freeze` and `split`; the `speed` recipe gains a `preset` slot.
+
+#### 10.2.6 R6 as built (wave D3, lane E3)
+
+`store.ts` no longer declares or initialises `leftW`, `rightW`, `rightPanelOpen` or `setRightPanelOpen`; `setPanelSize` takes `'timelineH'` only (the timeline splitter is its one caller). `lib/layoutStore.ts` is the only reader and writer of `vai.leftW` / `vai.rightW` / `vai.rightPanelOpen` (risk 8 closed). `frontend/src/index.css` and `frontend/src/App.css`, the Vite template's leftovers that nothing imported, are deleted. Exit check: `rg "leftW|rightPanelOpen" frontend/src/store.ts` finds nothing; `tsc -p tsconfig.app.json` and the full vitest suite (176 files) pass, and `tests/test_wave_d_rail_ui.py` + `tests/test_wave_d2_fixer_ui.py` pass in Chromium and Playwright WebKit against a real backend.
+
+**Exit check re-run by the fixer (review RD3):** `rg "leftW|rightPanelOpen" frontend/src/store.ts` finds nothing; `tsc` and vitest pass; the rail suites (`test_wave_d_rail_ui.py`, `test_wave_d_rail_keys_ui.py`, `test_wave_d_deeplinks_ui.py`) pass in Chromium and Playwright WebKit. The review's rail findings closed with it:
+1. **The back chip restores the origin panel's scroll for good**: WebKit revealed a partly hidden row one or two rendering updates after a `preventScroll` focus (the Text panel landed at 27 instead of 0 in 2 of 3 WK runs; one rAF re-apply was not enough); for 400 ms, while focus stays on the row and the user does nothing in the panel, any scroll is put back (`DeepLinkRow.holdScroll`). WK: 5/5.
+2. **⌥1 … ⌥8 put focus on the panel** (§4.1 as built above).
+3. **The Media panel's names below the app's 1100 px minimum** (a browser window only): one line with an ellipsis, never broken mid-word.
+4. **Tab reaches every control in the app window**: `desktop.enable_tab_to_all_controls` turns on WKPreferences.tabFocusesLinks (Safari's "Press Tab to highlight each item"); by default WebKit tabs only to text fields unless the Mac's Keyboard navigation is on, and the editor had six Tab stops (WK: `tests/wk/test_wk_tab_focus.py`, both ways).
 
 ---
 

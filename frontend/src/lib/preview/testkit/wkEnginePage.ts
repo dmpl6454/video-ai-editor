@@ -72,6 +72,11 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
     const offFrame = engine.on('frame', (f) => { if (f.playing) frameKs.push(f.k) })
     let waiting = 0
     engine.internals.video!.addEventListener('waiting', () => { waiting++ })
+    // why playback stopped early, if it did (a pause WebKit made: the window
+    // hidden or covered by another run on a busy machine)
+    const stopLog: Result[] = []
+    engine.on('pause-external', (e) => stopLog.push({ ev: 'pause-external', ...e, vis: document.visibilityState }))
+    document.addEventListener('visibilitychange', () => stopLog.push({ ev: 'visibility', vis: document.visibilityState, k: engine.presentedK }))
     const t0 = now()
     engine.play()
     const deadline = t0 + (pm.total * pm.R.den / pm.R.num) * 1000 + 8000
@@ -96,6 +101,7 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
       waiting, held: engine.stats.heldFrames, elapsedMs: +elapsed.toFixed(0), sizeMismatches: engine.stats.sizeMismatches,
       maxUploadMs: engine.internals.compositor?.stats.maxUploadMs, maxDrawMs: engine.internals.compositor?.stats.maxDrawMs,
       sinkCalls: p.sink.calls.map((c) => c.op),
+      externalPauses: engine.stats.externalPauses, stopLog,
     }
   },
 
@@ -357,6 +363,11 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
     await sleep(800)
     sink.calls.length = 0
     const kBefore = engine.presentedK
+    // the environment (another WK run's window landing on our 4 px slot)
+    // may hide the page BEFORE our own request: that run proves nothing
+    const hideAt = at()
+    const playingAtHide = engine.playing && !video.paused && document.visibilityState === 'visible'
+    const envBeforeHide = !playingAtHide || log.some((e) => e.ev === 'visibility' || e.ev === 'pause-external' || e.ev === 'video-pause')
     await fetch(`/__window/${token}/hide`, { method: 'POST' })
     for (let i = 0; i < 60 && document.visibilityState !== 'hidden'; i++) await sleep(50)
     await sleep(1200)
@@ -374,7 +385,7 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
       calls: sink.calls.map((c) => ({ op: c.op, k: c.k, sample: c.sample })),
     }
     engine.pause()
-    return { selfPause, log, whileHidden, afterShow, R: engine.program!.R }
+    return { selfPause, log, whileHidden, afterShow, R: engine.program!.R, hideAt, playingAtHide, envBeforeHide }
   },
 
   /** webglcontextlost → the 2D snapshot shows the last frame; restored →

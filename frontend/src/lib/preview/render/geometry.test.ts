@@ -11,10 +11,9 @@ import { describe, expect, it } from 'vitest'
 import type { EdlLike } from '../timeline/framePlan'
 import type { SourceInfoJson } from '../timeline/frameMap'
 import { buildProgramMap, lookupFromJson } from '../timeline/programMap'
-import { curveMap, outSeconds } from '../timeline/speedCurve'
 import {
   canvasPointOf, compose, computeGeometry, cropOffset, evenDown, fadeFactor, fitDims, frameGeometry, invert,
-  apply, kfTimeOf, lrint, padOffset, sourceUvAt, type ClipGeometry,
+  apply, hasKeyframes, kfPanFrame, lrint, padOffset, sourceUvAt, type ClipGeometry,
 } from './geometry'
 
 interface Frame { k: number; markers?: Record<string, [number, number] | null>; bbox?: number[] | null; gain?: number }
@@ -124,21 +123,41 @@ describe('geometry parity with real compositor renders', () => {
   }
 })
 
-describe('keyframe time mirrors the server', () => {
-  it('a clip that starts later is keyed at its clip-local time (review RD2; it was t − start)', () => {
-    const clip = { id: 'a', src: 's', in: 0, out: 2, start: 1, transform: { x: { keyframes: [[0, 0], [2, 300]] }, scale: 2 } }
-    const at = (tSrc: number) => computeGeometry({ canvas: { w: 640, h: 360 }, source: { w: 1280, h: 720 }, clip, tSrc })
-    expect(canvasPointOf(at(0), 0.5, 0.5)![0]).toBeCloseTo(320, 0)
-    // local 0.5 s → x = 75 → the picture moves 75 px left (74 on the chroma grid)
-    expect(canvasPointOf(at(0.5), 0.5, 0.5)![0]).toBeCloseTo(246, 0)
+describe('keyframes: the clock and the meaning the UI gives them (Wave D3)', () => {
+  const W = 640
+  const H = 360
+  const at = (clip: Record<string, unknown>, tClip: number, tSrc = 0) =>
+    computeGeometry({ canvas: { w: W, h: H }, source: { w: 1280, h: 720 }, clip: clip as never, tSrc, tClip })
+
+  it('keys at the OUTPUT frame\'s clip-local time, not the source frame\'s', () => {
+    // a 0.5x clip repeats each source frame: both output frames must differ
+    const clip = { id: 'a', src: 's', in: 0, out: 1, start: 2, speed: 0.5, transform: { x: { keyframes: [[0, 0], [2, 200]] }, scale: 2 } }
+    const k0 = canvasPointOf(at(clip, 0 / 30, 0), 0.5, 0.5)![0]
+    const k1 = canvasPointOf(at(clip, 1 / 30, 0), 0.5, 0.5)![0]
+    const k2 = canvasPointOf(at(clip, 2 / 30, 1 / 30), 0.5, 0.5)![0]
+    expect(k0).toBeCloseTo(320, 5)
+    expect(k1).toBeGreaterThan(k0)        // x = 3.33 → +2 on the chroma grid
+    expect(k2).toBeGreaterThan(k1)        // x = 6.67 → +6
   })
 
-  it('keys a retimed clip at TIMELINE time: t/speed, a curve\'s out_seconds', () => {
-    expect(kfTimeOf({ id: 'a', src: 's', in: 0, out: 2, speed: 2 }, 1)).toBe(0.5)
-    expect(kfTimeOf({ id: 'a', src: 's', in: 0, out: 2 }, 1)).toBe(1)
-    const curve = { id: 'a', src: 's', in: 0, out: 4, speed: { curve: [[0, 1], [0.5, 0.25], [1, 1]] } }
-    const cm = curveMap([[0, 1], [0.5, 0.25], [1, 1]], 4)!
-    expect(kfTimeOf(curve, 3)).toBe(outSeconds(cm, 3))
-    expect(kfTimeOf(curve, 3)).toBeGreaterThan(3)   // the slow middle stretches the timeline
+  it('+x moves the picture RIGHT, like a static pan and the UI', () => {
+    const clip = { id: 'a', src: 's', in: 0, out: 2, transform: { x: { keyframes: [[0, 0], [2, 300]] }, scale: 2 } }
+    expect(canvasPointOf(at(clip, 0.5), 0.5, 0.5)![0]).toBeCloseTo(394, 0)
+  })
+
+  it('a keyed zoom grows about the centre and a keyed scale < 1 shrinks', () => {
+    const grow = { id: 'a', src: 's', in: 0, out: 1, transform: { scale: { keyframes: [[0, 1], [1, 2]] } } }
+    for (const t of [0, 0.5, 1]) expect(canvasPointOf(at(grow, t), 0.5, 0.5)).toEqual([320, 180])
+    const shrink = { id: 'a', src: 's', in: 0, out: 1, transform: { scale: { keyframes: [[0, 0.5], [1, 1]] } } }
+    const g = at(shrink, 0)
+    expect(sourceUvAt(g, 100, 180)).toBeNull()          // black around the half-size picture
+    expect(canvasPointOf(g, 0, 0)![0]).toBeCloseTo(160, 5)
+  })
+
+  it('hasKeyframes and the pan frame follow compositor.kf_pan_frame', () => {
+    expect(hasKeyframes({ id: 'a', src: 's', transform: { opacity: { keyframes: [[0, 1], [1, 0]] } } } as never)).toBe(true)
+    expect(hasKeyframes({ id: 'a', src: 's', transform: { opacity: { keyframes: [[0, 1]] } } } as never)).toBe(false)
+    expect(kfPanFrame({ x: { keyframes: [[0, 0], [2, 100]] } }, 640, 360)).toEqual([842, 362])
+    expect(kfPanFrame({ scale: { keyframes: [[0, 0.5], [1, 1.8]] }, y: 20.5 }, 640, 360)).toEqual([1154, 692])
   })
 })

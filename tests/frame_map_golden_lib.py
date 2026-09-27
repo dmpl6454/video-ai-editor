@@ -458,6 +458,39 @@ def transition_cases() -> list[CaseSpec]:
                    ClipSpec(s, f(250), f(280), f(112))],
             transitions=[(f(30), 0.4), (f(42), 0.4), (f(72), 0.25), (f(112), 2.0)],
             live=R == Fraction(24000, 1001)))
+    return out + _retimed_seam_cases()
+
+
+def _retimed_seam_cases() -> list[CaseSpec]:
+    """A transition after a RETIMED clip whose exact end is off the grid
+    (review RD3): set_speed ripples the next clip to the frame the footprint
+    rounds to, so a clip that rounds UP leaves a sub-frame gap before its
+    neighbour — a seam on the frame grid, which the 1 ms rule called a gap
+    and never cross-faded (1.5x on 91 frames: +11.1 ms; Hero: +4.2 ms)."""
+    from video_ai_editor.edl.speed_curve import CURVE_PRESETS as P
+    out: list[CaseSpec] = []
+    for R in (Fraction(30), Fraction(25)):
+        s = _src_for(R)
+        other = _src_for(Fraction(25) if R != Fraction(25) else Fraction(30))
+        f = lambda n: _t(n, R)  # noqa: E731
+        a = ClipSpec(s, f(10), f(50), 0.0, id="a")
+        b = ClipSpec(s, f(100), f(191), 0.0, speed=1.5, id="b")        # 60.67 frames
+        c = ClipSpec(other, 1.0, 1.0 + f(30), 0.0, id="c")
+        n = 60
+        while True:   # a Hero clip whose footprint rounds UP
+            d = ClipSpec(s, f(300), f(300 + n), 0.0, speed={"curve": P["hero"], "name": "hero"}, id="d")
+            eff = Fraction(_planned_clip(d).effective_duration) * R
+            if Fraction(1, 20) < tb.frame_of(float(eff / R), R) - eff < Fraction(1, 2):
+                break
+            n += 1
+        e = ClipSpec(s, f(380), f(410), 0.0, id="e")
+        clips = _lay([a, b, c, d, e], R)
+        for x, y in ((b, c), (d, e)):
+            end = x.start + _planned_clip(x).effective_duration
+            assert 0.001 < y.start - end < float(1 / R), (x.id, y.start - end)
+        out.append(CaseSpec(name=f"xfade_retimed_p{rate_name(R)}", group="transitions", fps=R,
+                            clips=clips, transitions=[(c.start, 0.5), (e.start, 0.4)],
+                            live=R == Fraction(30)))
     return out
 
 

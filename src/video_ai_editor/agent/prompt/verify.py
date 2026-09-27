@@ -363,10 +363,17 @@ def _filler_set(ctx: VerifyCtx, words: Any) -> set[str]:
 
 def _clip_targets(ctx: VerifyCtx, clip_id: Any) -> list[str]:
     """The clip ids a `clip_id` arg means at verify time: a real id as-is, a
-    sentinel or None → every v1 clip (the executor fanned it out)."""
+    sentinel or None → every v1 clip (the executor fanned it out), except
+    `$v1_first` / `$v1_last`, which name ONE clip: "slow motion on the last
+    clip" was graded against every clip and failed (wave D3 prompt sweep)."""
     if clip_id and clip_id not in CLIP_SENTINELS:
         return [str(clip_id)]
-    return [c.id for c in v1_clips(ctx.edl)]
+    ids = [c.id for c in v1_clips(ctx.edl)]
+    if clip_id == "$v1_first":
+        return ids[:1]
+    if clip_id == "$v1_last":
+        return ids[-1:]
+    return ids
 
 
 def _ok(pc: Postcondition, passed: bool | None, measured: Any, expected: Any, *,
@@ -1054,6 +1061,30 @@ def c_clip_reversed(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         return _ok(pc, False, None, want, detail="no clip")
     states = [bool(c.reverse) for c in clips]
     return _ok(pc, all(st == want for st in states), states[0] if len(set(states)) == 1 else states, want)
+
+
+def c_clip_zoomed(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Review RD3: the clip(s) `clip_id` names end up zoomed the way asked —
+    IN: the scale (a static level, or the last key of a push) above 1; OUT:
+    below the start (a push out) or below 1 (a level)."""
+    from ...edl.keyframes import is_keyframed
+    clips = _clips_for_ref(ctx, _arg(pc, "clip_id"))
+    want = str(_arg(pc, "direction") or "in")
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    got = []
+    for c in clips:
+        v = c.transform.scale
+        if is_keyframed(v):
+            keys = sorted((float(t), float(x)) for t, x in v.keyframes)
+            first, last = keys[0][1], keys[-1][1]
+        else:
+            first, last = 1.0, float(v)
+        got.append(round(last, 3))
+        ok = last > first + 1e-6 if want == "in" else last < first - 1e-6
+        if not ok:
+            return _ok(pc, False, got[0] if len(clips) == 1 else got, f"zoom {want}")
+    return _ok(pc, True, got[0] if len(got) == 1 else got, f"zoom {want}")
 
 
 def c_beat_splits_geq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:

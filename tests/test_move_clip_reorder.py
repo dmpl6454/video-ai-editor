@@ -108,7 +108,7 @@ def test_cross_lane_drag_closes_the_hole_on_the_lane_it_left(tmp_path):
 def test_cross_lane_drop_does_not_repack_the_destination(tmp_path):
     """A v2 clip is placed against v1's picture at an absolute time. Repacking
     the destination pulled deliberately-gapped PIPs to t=0 — the same damage
-    test_set_speed_rejected_on_v2_pip pins down (8.0/20.0 -> 0.0/2.0)."""
+    test_set_speed_on_v2_pip_keeps_every_placement pins down (8.0/20.0 -> 0.0/2.0)."""
     s = _store(tmp_path)
     v2 = s.edl.get_track("v2")
     v2.clips.append(Clip(id="p0", src="/x/p0.mp4", in_=0, out=4, start=8.0))

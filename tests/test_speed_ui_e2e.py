@@ -127,7 +127,7 @@ def _open(browser, base_url, sid, width, height):  # noqa: F811
         f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});"
         for k, v in {"vai.sessionId": sid, "vai.rightTab": "inspect"}.items()) + " } catch (e) {}")
     page = ctx.new_page()
-    page.goto(base_url + "/")
+    page.goto(base_url + "/?vae-test")  # lib/testHook.ts: the store, in the built bundle too
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)
     return page

@@ -228,4 +228,91 @@ describe('ProxyStore', () => {
     expect(errors[0]).toMatch(/^K:/)
     expect(s.log.filter((l) => l.url.endsWith('index.json'))).toHaveLength(1)
   })
+
+  it('suspended (page hidden, §3.5): queued span requests wait, nothing new starts; resumed: they drain', async () => {
+    const s = server(240, 60)
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch })
+    await store.open('K')
+    store.suspend(true)
+    store.request('K', 5)
+    store.request('K', 70)
+    store.request('K', 130, 0, true)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(s.log.filter((l) => l.url.includes('/v/'))).toEqual([])
+    expect(store.pending).toBe(3)
+    // a proxy not opened yet is not opened while hidden either
+    store.request('L', 0)
+    await new Promise((r) => setTimeout(r, 5))
+    expect(s.log.filter((l) => l.url.includes('/L/'))).toEqual([])
+    store.suspend(false)
+    await settle(store)
+    for (const f of [5, 70, 130]) expect(store.sample('K', f)).not.toBeNull()
+    expect(store.isSuspended).toBe(false)
+  })
+
+  it('a span that fails transiently is retried by itself, backing off, and lands (review RD3)', async () => {
+    // paused, nothing else loading: no one would poke the store again
+    const s = server(120, 60, { fail: { 'v/0001.bin': 8 } })
+    const waits: number[] = []
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, sleep: (ms) => { waits.push(ms); return Promise.resolve() } })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(store.sample('K', 70)).not.toBeNull()
+    expect(s.log.filter((l) => l.url.endsWith('v/0001.bin')).map((l) => l.status)).toEqual([...new Array(8).fill(500), 200])
+    // each wait is the back-off less the few ms already spent getting there
+    const want = [250, 500, 1000, 1000, 1000, 1000, 1000, 1000]
+    expect(waits).toHaveLength(want.length)
+    waits.forEach((w, i) => { expect(w).toBeLessThanOrEqual(want[i]); expect(w).toBeGreaterThan(want[i] - 100) })
+    expect(store.failure('K')).toBeNull()
+  })
+
+  it('a span still being encoded (202) does not hold a fetch slot (review RD3)', async () => {
+    const s = server(600, 60, { pending: { 'v/0005.bin': 40 } })
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, concurrency: 1,
+      sleep: () => new Promise((r) => setTimeout(r, 1)) })
+    await store.open('K')
+    store.request('K', 300)                       // span 5: pending for a while
+    await new Promise((r) => setTimeout(r, 5))
+    store.request('K', 480)                       // span 8: ready
+    await settle(store)
+    const done = s.log.filter((l) => l.url.includes('/v/') && l.status === 200).map((l) => l.url.slice(-8, -4))
+    expect(done).toEqual(['0008', '0005'])
+    expect(store.sample('K', 300)).not.toBeNull()
+    expect(store.stats.retries202).toBe(40)
+  })
+
+  it('a span fetch that never answers is abandoned after spanTimeoutMs and retried (review RD3)', async () => {
+    const s = server(120, 60)
+    let hangs = 1
+    const hanging: FetchLike = (url, init) => {
+      if (url.endsWith('v/0001.bin') && hangs-- > 0) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+      }
+      return s.fetch(url, init)
+    }
+    const store = new ProxyStore({ baseUrl: '/px', fetch: hanging, spanTimeoutMs: 30, sleep: () => Promise.resolve() })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(store.sample('K', 70)).not.toBeNull()
+    expect(store.stats.timeouts).toBe(1)
+  })
+
+  it('a fetch already on the wire when the page hides still lands', async () => {
+    const s = server(120, 60)
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch })
+    await store.open('K')
+    store.request('K', 5)
+    store.suspend(true)
+    store.request('K', 70)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(store.sample('K', 5)).not.toBeNull()
+    expect(store.sample('K', 70)).toBeNull()
+    store.suspend(false)
+    await settle(store)
+    expect(store.sample('K', 70)).not.toBeNull()
+  })
 })

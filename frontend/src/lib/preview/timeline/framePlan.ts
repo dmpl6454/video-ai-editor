@@ -12,7 +12,7 @@
 import {
   floorToFrame, frameOf, timeOf, type FpsLike,
 } from './timebase'
-import { curvePoints, meanSpeed } from './speedCurve'
+import { curveMap, curvePoints, meanSpeed, sourceSeconds } from './speedCurve'
 
 /** A v1 media clip as the EDL JSON carries it (`GET /edl`, dispatch). */
 export interface EdlClip {
@@ -93,6 +93,21 @@ export function effectiveDuration(c: EdlClip): number {
   return Math.max(0, clipOut(c) - clipIn(c)) / speedFactor(c.speed)
 }
 
+/** `Clip.source_offset_at`: source seconds past `in` shown at clip-local
+ *  timeline seconds `t` — a speed curve's integral, `t · speed`, 0 for a
+ *  freeze. What a trim to a timeline point must ask `trim_clip` for: its
+ *  `in`/`out` are SOURCE seconds, and on a curve the mean speed is exact only
+ *  at the clip's edges (wave D3, E1b). */
+export function sourceOffsetAt(c: EdlClip, t: number): number {
+  if (freezeOf(c) !== null) return 0
+  const pts = curvePoints(c.speed)
+  if (pts) {
+    const cm = curveMap(pts, Math.max(0, clipOut(c) - clipIn(c)))
+    return cm ? sourceSeconds(cm, t) : 0
+  }
+  return Math.max(0, t) * speedFactor(c.speed)
+}
+
 /** `compositor.clip_frames`: frames the clip occupies (>= 1). */
 export function clipFrames(c: EdlClip, fps: FpsLike): number {
   return Math.max(1, frameOf(effectiveDuration(c), fps))
@@ -142,7 +157,8 @@ export interface SeamSpan { readonly start: number; readonly duration: number }
 export interface SeamCharge { boundary: number; cost: number }
 
 /** The ONE seam rule (spec R3): for clips ALREADY in timeline order, one
- *  entry per adjacent pair. A positive gap (> V1_GAP_EPS_S) is a hard cut —
+ *  entry per adjacent pair. A positive gap (a whole frame with `fps`, else
+ *  > V1_GAP_EPS_S) is a hard cut —
  *  the renderer inserts black and applies nothing; an overlap is not a gap.
  *  The FIRST record within SEAM_MATCH_TOL_S of the boundary is charged,
  *  clamped to the shorter side (and to whole frames with `fps`).
@@ -157,8 +173,17 @@ export function seamCharges(
     const nxt = ordered[i + 1]
     const boundary = cur.start + cur.duration
     let cost = 0
-    if (nxt.start - boundary <= V1_GAP_EPS_S) {
-      const match = seamMatching(transitions as EdlTransition[], boundary)
+    // With fps the gap is judged on the FRAME GRID, as `_v1_frame_plan`
+    // does (review RD3): only a whole frame between this clip's last frame
+    // and the next clip's first is a filler (a hard cut). A retimed clip's
+    // exact end is rarely on the grid, and the old 1 ms rule dropped the
+    // transition after it.
+    // (Seconds-adjacent pairs stay seams whatever the grid says, as before.)
+    const adjacent = nxt.start - boundary <= V1_GAP_EPS_S || (fps !== undefined && fps !== null
+      && frameOf(nxt.start, fps) - frameOf(cur.start, fps) - Math.max(1, frameOf(cur.duration, fps)) < 1)
+    if (adjacent) {
+      let match = seamMatching(transitions as EdlTransition[], boundary)
+      if (!match && nxt.start > boundary) match = seamMatching(transitions as EdlTransition[], nxt.start)
       if (match) cost = seamCost(match.duration, Math.min(cur.duration, nxt.duration), fps)
     }
     out.push({ boundary, cost })
@@ -207,9 +232,17 @@ export function reversedFrameCount(c: EdlClip, fps: FpsLike): number {
   return Math.max(1, frameOf(clipOut(c) - clipIn(c), fps))
 }
 
-/** `reverse.reversed_view` timing: in 0, out = the intermediate's length. */
-export function reversedView(c: EdlClip, fps: FpsLike): EdlClip {
-  return { ...c, in: 0, out: timeOf(reversedFrameCount(c, fps), fps), reverse: false }
+/** `reverse.view_out`: the reversed view's `out` — the clip's own span
+ *  `out − in`, the float `effectiveDuration` divides, so the view keeps the
+ *  original's footprint bit for bit (a reversed 2x clip with an odd frame
+ *  count sat on a .5-frame tie that `timeOf(M)` rounded the other way). */
+export function reversedViewOut(c: EdlClip): number {
+  return clipOut(c) - clipIn(c)
+}
+
+/** `reverse.reversed_view` timing: in 0, out = `reversedViewOut`. */
+export function reversedView(c: EdlClip, _fps?: FpsLike): EdlClip {
+  return { ...c, in: 0, out: reversedViewOut(c), reverse: false }
 }
 
 /** A seam the compositor cross-fades, between two ADJACENT clip segments. */

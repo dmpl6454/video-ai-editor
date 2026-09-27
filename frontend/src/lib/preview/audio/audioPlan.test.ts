@@ -208,6 +208,40 @@ describe('PiP sound', () => {
     expect(x.map).toEqual({ kind: 'runs', runs: [[0, 48000, clipSample0(0.51, 30), 1]] })
     expect(p.master.ceilingDb).toBeNull()                    // folded into the main sound: not "mixed"
   })
+
+  // Wave D3 (E2): a retimed PIP's sound follows its picture (render/pip.py
+  // `pip_audio_chain`, v1's rules; decoded clicks: test_b5_pip_frame_exact).
+  it('a 2x PIP fills its footprint and resamples at 2x', () => {
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 4 }],
+      v2: [{ id: 'p', start: 1, in: 0.5, out: 2.5, speed: 2, audio: { keep_pitch: false } }] })
+    const p = plan(e)
+    const x = one(p, 'p')
+    expect(x.n).toBe(samplesForFrames(30, 30))              // 2 s of source → 1 s
+    expect(x.map).toEqual({ kind: 'rate', src0: clipSample0(0.5, 30), rate: 2, reverse: false, end: Number.MAX_SAFE_INTEGER })
+    expect(x.exact).toBe(false)
+    expect(p.approx).toContain('varispeed')
+  })
+
+  it('a curve PIP reads its curve map over its integral', () => {
+    const curve = { curve: [[0, 1], [0.5, 0.25], [1, 1]] }
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 4 }],
+      v2: [{ id: 'p', start: 0, in: 0, out: 2, speed: curve as unknown as number }] })
+    const x = one(plan(e), 'p')
+    expect(x.n).toBe(samplesForFrames(96, 30))              // 2 / 0.625 = 3.2 s
+    expect(x.map).toMatchObject({ kind: 'curve', src0: 0, seconds: 2 })
+  })
+
+  it('a frozen PIP is silent for its hold, a reversed one runs backwards', () => {
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 4 }],
+      v2: [{ id: 'f', start: 0, in: 1, out: 1 + 1 / 30, freeze: 2 },
+           { id: 'r', start: 2.5, in: 0, out: 1, reverse: true }] })
+    const p = plan(e)
+    const f = one(p, 'f')
+    expect(f.n).toBe(samplesForFrames(60, 30))
+    expect(f.map).toEqual({ kind: 'runs', runs: [] })
+    const r = one(p, 'r')
+    expect(r.map).toMatchObject({ kind: 'rate', rate: 1, reverse: true, src0: samplesForFrames(30, 30) - 1 })
+  })
 })
 
 describe('duck and loudness (APPROX)', () => {

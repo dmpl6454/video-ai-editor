@@ -57,6 +57,36 @@ describe('planFreeze', () => {
   })
 })
 
+describe('planFreeze on an overlay (PIP) clip — wave D3, E2', () => {
+  function withPip(pips: object[], opts: { locked?: boolean; transitions?: object[] } = {}): EDL {
+    const e = edl([clip('a', 0), clip('b', 4)], { transitions: opts.transitions })
+    ;(e.tracks as unknown as object[]).push({ id: 'v2', type: 'video', z: 1, label: 'Overlay', clips: pips, locked: opts.locked })
+    return e
+  }
+
+  it('freezes the SELECTED overlay clip on its own lane', () => {
+    const e = withPip([clip('p', 2, { out: 2, speed: 0.5 })])        // footprint 2-6
+    expect(planFreeze(e, 'p', 5)).toEqual({ kind: 'freeze', args: { time: 5, clip_id: 'p', track: 'v2' } })
+    // the right-clicked clip wins over the selection
+    expect(planFreeze(e, 'a', 5, 'p')).toEqual({ kind: 'freeze', args: { time: 5, clip_id: 'p', track: 'v2' } })
+  })
+
+  it('refuses when the playhead is off the overlay clip or its lane is locked', () => {
+    expect(planFreeze(withPip([clip('p', 2, { out: 2 })]), 'p', 7)).toMatchObject({
+      kind: 'refuse', message: expect.stringContaining('Move the playhead over the clip') })
+    expect(planFreeze(withPip([clip('p', 2)], { locked: true }), 'p', 3)).toMatchObject({
+      kind: 'refuse', message: expect.stringContaining('locked') })
+  })
+
+  it('an overlay is placed in LAYOUT time: render time maps through v1 seams', () => {
+    // a 1 s dissolve at 4 pulls everything after it 1 s earlier on the render clock
+    const e = withPip([clip('p', 5, { out: 2 })], { transitions: [{ at: 4, type: 'fade', duration: 1 }] })
+    const p = planFreeze(e, 'p', 4.5)
+    expect(p).toMatchObject({ kind: 'freeze', args: { clip_id: 'p', track: 'v2' } })
+    if (p.kind === 'freeze') expect(p.args.time).toBeCloseTo(5.5, 9)
+  })
+})
+
 describe('freezeAtPlayhead', () => {
   it('dispatches ONE freeze_frame and selects the new still', async () => {
     const { freezeAtPlayhead } = await import('./freezeFrame')

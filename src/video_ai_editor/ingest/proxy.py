@@ -334,9 +334,9 @@ def probe_source(src: str | os.PathLike, key: str | None = None) -> SourceInfo:
                           pts=[], keyframes=[], has_audio=True,
                           extra={"audio_only": True})
     width, height = int(v.get("width") or 0), int(v.get("height") or 0)
-    sar = _frac(v.get("sample_aspect_ratio"))
-    if sar and sar > 0 and sar != 1:
-        width = int(round(width * sar / 2)) * 2       # displayed size
+    # The DISPLAYED size (render/sar.py: the export fits the same number).
+    from ..render.sar import display_width
+    width = display_width(width, _frac(v.get("sample_aspect_ratio")))
     rate = _tb.source_rate(v.get("avg_frame_rate"), v.get("r_frame_rate"))
     tb = _frac(v.get("time_base")) or Fraction(1, 90000)
     pts, keys = _packet_table(real)

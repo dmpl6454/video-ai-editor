@@ -24,8 +24,9 @@ export type EngineMode = 'client' | 'server'
 export interface EngineProxyRef {
   /** 24-hex proxy key: frames come from `${proxyBaseUrl}/${key}/…`. */
   key: string
-  /** The route's state; `failed` keeps the source's ranges on the last good
-   *  frame (the degraded <video> tier is a later milestone). */
+  /** The route's state; `failed`: the source's paused frames come from the
+   *  degraded <video> tier (`EngineSource.media`), its ranges are BAKED
+   *  while playing (§7). */
   state?: 'ready' | 'partial' | 'pending' | 'failed'
 }
 
@@ -37,6 +38,10 @@ export interface EngineSource {
   info: SourceInfo
   /** Null while no proxy exists yet: the source's frames are PENDING. */
   proxy: EngineProxyRef | null
+  /** URL of the normalised MASTER (`/api/sessions/{sid}/files/uploads/…`):
+   *  with the proxy failed, the degraded <video> tier shows its paused
+   *  frames from it (§7). Absent: those frames hold the last good frame. */
+  media?: string
 }
 
 /** `src` → source facts; null for an unknown source (its frames PENDING). */

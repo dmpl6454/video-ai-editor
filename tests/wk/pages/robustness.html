@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>wk preview engine robustness</title></head>
+<body style="margin:0;background:#111">
+<script>
+// Report uncaught errors so a failing page says why instead of timing out.
+(function () {
+  var token = new URLSearchParams(location.search).get('token') || 'none'
+  window.addEventListener('error', function (e) { navigator.sendBeacon('/__error/' + token, String(e.message)) })
+  window.addEventListener('unhandledrejection', function (e) { navigator.sendBeacon('/__error/' + token, String(e.reason)) })
+})()
+</script>
+<script type="module" src="/testkit/wkRobustnessPage.js"></script>
+</body>
+</html>

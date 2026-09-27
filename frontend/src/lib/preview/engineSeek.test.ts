@@ -1,8 +1,8 @@
 // ElementSeeker and PlayingSeekGate (engineSeek.ts) against a fake element
 // that behaves like WebKit measured in review RD2: an assignment of the SAME
 // time while that seek is still pending fires no second 'seeking'.
-import { describe, expect, it } from 'vitest'
-import { ElementSeeker, PlayingSeekGate } from './engineSeek'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ElementSeeker, PRESENT_WAIT_MS, PlayingSeekGate, SoughtFrame } from './engineSeek'
 import type { LaneA } from './media/laneA'
 
 class FakeVideo {
@@ -133,3 +133,75 @@ describe('PlayingSeekGate', () => {
     expect(new PlayingSeekGate().admits(5, 30)).toBe(true)
   })
 })
+
+describe('SoughtFrame (the end of a paused seek)', () => {
+  /** The element presents `shown` (a VideoFrame of it carries that frame's
+   *  pts), whatever currentTime says. */
+  function rig(shownAtSeeked: number) {
+    const st = { shown: shownAtSeeked, uploads: [] as number[], draws: [] as number[], retries: 0, early: 0, log: [] as string[] }
+    vi.stubGlobal('VideoFrame', class {
+      timestamp: number
+      constructor() { this.timestamp = Math.round((st.shown / 30) * 1e6) }
+      close() {}
+    })
+    const rafs: Array<() => void> = []
+    vi.stubGlobal('requestAnimationFrame', (cb: () => void) => { rafs.push(cb); return rafs.length })
+    vi.stubGlobal('cancelAnimationFrame', () => undefined)
+    const lane = {
+      hold: (on: boolean) => st.log.push(`hold:${on}`),
+      frameAt: (t: number) => Math.round(t * 30),
+    } as unknown as LaneA
+    const host = {
+      stillWanted: () => true,
+      upload: (k: number) => { st.log.push(`upload:${k}@${st.shown}`); st.uploads.push(st.shown); return true },
+      draw: (k: number) => { st.log.push(`draw:${k}`); st.draws.push(k) },
+      retry: () => { st.retries++; st.log.push('retry') },
+      early: () => { st.early++ },
+    }
+    const video = {} as HTMLVideoElement
+    const frame = () => { const cbs = rafs.splice(0); for (const cb of cbs) cb() }
+    return { st, lane, host, video, frame }
+  }
+  afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+
+  it('the element presents k at seeked: upload, THEN release the hold, then draw', () => {
+    const r = rig(110)
+    new SoughtFrame().complete(110, r.video, r.lane, r.host)
+    expect(r.st.log).toEqual(['upload:110@110', 'hold:false', 'draw:110'])
+  })
+
+  it('seeked while the PREVIOUS frame is still presented (Chromium under load): no upload of the neighbour; wait, then upload k', () => {
+    const r = rig(109)
+    const s = new SoughtFrame()
+    s.complete(110, r.video, r.lane, r.host)
+    expect(r.st.log).toEqual([])        // nothing read, appends still held
+    expect(r.st.early).toBe(1)
+    expect(s.k).toBe(110)
+    r.frame()
+    expect(r.st.log).toEqual([])
+    r.st.shown = 110
+    r.frame()
+    expect(r.st.log).toEqual(['upload:110@110', 'hold:false', 'draw:110'])
+    expect(r.st.uploads).toEqual([110])
+    expect(s.k).toBe(-1)
+  })
+
+  it('never presented within the wait: release, seek again, and never draw the neighbour', () => {
+    vi.useFakeTimers({ toFake: ['performance'] })
+    const r = rig(109)
+    const s = new SoughtFrame()
+    s.complete(110, r.video, r.lane, r.host)
+    vi.advanceTimersByTime(PRESENT_WAIT_MS + 1)
+    r.frame()
+    expect(r.st.log).toEqual(['hold:false', 'retry'])
+    expect(r.st.draws).toEqual([])
+  })
+
+  it('no VideoFrame (older engines): uploads at seeked as before', () => {
+    const r = rig(109)
+    vi.stubGlobal('VideoFrame', undefined)
+    new SoughtFrame().complete(110, r.video, r.lane, r.host)
+    expect(r.st.log).toEqual(['upload:110@109', 'hold:false', 'draw:110'])
+  })
+})
+

@@ -28,6 +28,7 @@ path for every consumer.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -133,13 +134,25 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("beat_sync", "Cut and pulse the picture on the music's beats.",
           subdivision="number", pulse=_YES_NO),
     _card("hook", "Add an attention hook in the first seconds.", text="text", duration_s="number"),
-    _card("color_look", "Apply a colour look.", look=_LOOKS, intensity="number"),
+    _card("color_look", "Apply a colour look.", look=_LOOKS, intensity="number", clip_ref="text"),
     _card("clean_audio", "Reduce noise and normalise loudness.", strength="number", lufs="number"),
     _card("loudness", "Set the loudness target.", lufs="number"),
     _card("speed", "Change playback speed: a constant factor, or a named speed curve (preset).",
           factor="number", preset=_SPEED_PRESETS, clip_ref="text"),
     _card("freeze", "Hold the frame at a moment for a few seconds (a freeze frame).", at="number", duration_s="number"),
     _card("split", "Split the clip in two at a moment.", at="number"),
+    # Wave D3 (E3): the CapCut clip edits. `clip_ref` names ONE clip ("the
+    # second clip", "this clip"); a destructive edit with no clip named asks.
+    _card("delete_clip", "Delete one clip and close the gap.", clip_ref="text"),
+    _card("duplicate", "Duplicate one clip right after itself.", clip_ref="text"),
+    _card("move_clip", "Move one clip to the start, the end, or before or after another clip; or swap two.",
+          clip_ref="text", to=("start", "end", "before", "after", "swap", "reverse"), anchor="text"),
+    _card("zoom", "Zoom a clip: a slow push in or out over the clip (Ken Burns), or a fixed zoom level.",
+          clip_ref="text", direction=("in", "out"), style=("slow", "static"), scale="number"),
+    _card("rotate", "Rotate a clip by some degrees.", clip_ref="text", degrees="number"),
+    _card("adjust", "Adjust the picture: brightness, contrast or saturation up or down.",
+          clip_ref="text", property=("brightness", "contrast", "saturation"), change=("up", "down"),
+          amount="number"),
     _card("reverse", "Play a clip backwards (reverse=no plays it forwards again).",
           clip_ref="text", reverse=_YES_NO),
     _card("trim", "Cut a time range out.", range="text"),
@@ -161,11 +174,11 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("fade", "Fade the picture and sound in at the start or out at the end, or fade the music bed.",
           target=("video", "audio", "music"), edge=("in", "out", "both"), duration_s="number",
           clip_ref="text"),
-    _card("volume", "Make the music bed or the original sound louder or quieter all the way through, "
-          "or set its level in dB.",
-          target=("music", "voice"), change=("up", "down"), db="number"),
-    _card("mute", "Mute or unmute the music bed or the original sound.",
-          target=("music", "voice"), muted=_YES_NO),
+    _card("volume", "Make the music bed or the original sound (of every clip, or one clip) louder or quieter "
+          "all the way through, or set its level in dB.",
+          target=("music", "voice"), change=("up", "down"), db="number", clip_ref="text"),
+    _card("mute", "Mute or unmute the music bed or the original sound (of every clip, or one clip).",
+          target=("music", "voice"), muted=_YES_NO, clip_ref="text"),
     _card("fit_music", "Trim the music so it ends with the video, with a fade-out.", duration_s="number"),
     _card("remove_music", "Take the music bed off the timeline."),
     _card("auto_edit", "Do the whole edit for a platform.",
@@ -313,6 +326,10 @@ def normalize_slots(recipe: str, raw: dict[str, Any]) -> dict[str, Any]:
             if e is not None:
                 out[key] = e
         elif kind == "number":
+            if recipe == "title" and key == "at" and str(value).strip().lower() in ("start", "end"):
+                # "a title at the end": the grammar's edge word (a number otherwise).
+                out[key] = str(value).strip().lower()
+                continue
             f = _as_float(value)
             if f is not None:
                 out[key] = f
@@ -333,8 +350,9 @@ def normalize_slots(recipe: str, raw: dict[str, Any]) -> dict[str, Any]:
                     if r is not None:
                         out[key] = r
             elif key == "clip_ref":
-                s = str(value).strip()
-                out[key] = s if s.startswith(("$", "c_")) else (S.extract(f"{s} clip").clip_ref or "$v1_all")
+                ref = _clip_ref_value(recipe, str(value))
+                if ref is not None:
+                    out[key] = ref
             elif key == "src":
                 out[key] = str(value).strip()
             elif key == "at" and recipe == "transitions":
@@ -348,6 +366,26 @@ def normalize_slots(recipe: str, raw: dict[str, Any]) -> dict[str, Any]:
                 if text:
                     out[key] = text
     return out
+
+
+#: Recipes that change ONE clip's place or existence (or its framing): a
+#: clip reference that names nothing is dropped, so the expander asks which
+#: clip — never the old `$v1_all` fallback, which read a model's "clip_ref":
+#: "the second clip" as EVERY clip (a delete of the whole timeline).
+ONE_CLIP_RECIPES: frozenset[str] = frozenset({"delete_clip", "duplicate", "move_clip", "zoom", "rotate"})
+
+
+def _clip_ref_value(recipe: str, raw: str) -> str | None:
+    s = raw.strip()
+    if not s:
+        return None
+    if s.startswith(("$", "c_")):
+        return s
+    from .grammar import clip_ref_of
+    ref = clip_ref_of(s if re.search(r"\b(?:clip|shot|one|segment|scene)s?\b", s) else f"{s} clip")
+    if ref is None and recipe not in ONE_CLIP_RECIPES:
+        return "$v1_all"
+    return ref
 
 
 # --------------------------------------------------------------------------

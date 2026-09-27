@@ -125,12 +125,14 @@ def _decode(c: Clip, fps) -> np.ndarray:
     """(2, N) float32: the clip's sound from its first sample, as the 1x
     chain feeds its speed stage."""
     from .audio_mix import input_seek
-    from .compositor import clip_input_args, source_has_audio
+    from .compositor import sound_input_args, source_has_audio
     if not source_has_audio(str(c.src)):
         return np.zeros((2, 0), dtype=np.float32)
     af = "aresample=async=1:first_pts=0,aformat=sample_fmts=flt:channel_layouts=stereo:sample_rates=48000"
     if fps is not None:
-        args = clip_input_args(c, fps)
+        # The 1x half-frame pre-roll (not the curve PICTURE's longer seek,
+        # compositor.clip_input_args): the atrim below drops exactly it.
+        args = sound_input_args(c, fps)
         pre = _tb.seek_preroll(c.in_, fps)
         if pre > 1e-9:
             af += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
@@ -360,14 +362,16 @@ def chain_source(c: Clip, fps) -> str:
 
 def prepare(edl, cache_dir: Path | None, fps) -> None:
     """Build every speed-curve intermediate `edl` needs into `cache_dir`
-    (v1 at the render rate; music/vo/audio lanes at their own extent), so the
-    graph only names files that exist. A no-op without curves."""
+    (v1 and PIP lanes at the render rate; music/vo/audio lanes at their own
+    extent), so the graph only names files that exist. A no-op without curves."""
     for t in edl.tracks:
         if t.type not in ("video", "audio", "music", "vo"):
             continue
         for c in t.clips:
             if isinstance(c, Clip) and has_curve(c):
-                if t.id == "v1":
+                if t.type == "video":
+                    # v1 and the PIP lanes (their chains cut the sound to
+                    # the same grid; pip.pip_audio_chain) at the render rate.
                     ensure(c, fps, cache_dir)
                 elif t.type in ("audio", "music", "vo"):
                     ensure(c, None, cache_dir)

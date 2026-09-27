@@ -532,3 +532,32 @@ def test_cloud_brain_maps_sdk_failures_and_bad_plans_to_reasons():
     empty._Block = lambda input: SimpleNamespace(type="text", text="hi")     # no tool_use block
     res = cloud_plan.CloudBrain(api_key="k", allowed=True, client_factory=empty).plan(req(), timeout_s=1)
     assert res.reason == "parse"
+
+
+def test_a_model_that_asks_what_the_grammar_already_read_loses_to_the_recipes_plan():
+    """review RD3: "take out everything between 2 and 4 seconds" — recipes
+    read cut_range 2.0-4.0 (confidence 0.5, below the confident bar), Apple
+    Intelligence came back asking "Which part should I cut?", and the user
+    got the question instead of the edit."""
+    cut = schema.Step(tool="cut_range", args={"track": "v1", "start": 2.0, "end": 4.0}, why="cut 2-4 s")
+    rp = schema.Plan.new(intent="trim", brain="recipes", steps=[cut], confidence=0.5, title="Trim")
+    asking = schema.Plan.new(intent="trim", brain="apple_intelligence", steps=[cut.model_copy(
+        update={"args": {"track": "v1", "start": "$ask:range", "end": "$ask:range"}})], confidence=0.8,
+        title="Trim", needs_input=[schema.NeedsInput(key="range", question="Which part should I cut?", kind="text", required=True)])
+    fm = Fake("apple_intelligence", result=asking)
+    out, events = run({"recipes": Fake("recipes", result=rp), "apple_intelligence": fm},
+                      req("take out everything between 2 and 4 seconds"))
+    assert out.brain == "recipes" and out.plan is not None, [(a.brain, a.status, a.reason) for a in out.attempts]
+    assert [s.args for s in out.plan.steps] == [{"track": "v1", "start": 2.0, "end": 4.0}]
+    assert fm.plans == 1
+
+
+def test_a_model_question_still_wins_when_the_grammar_had_to_ask_too():
+    rp = schema.Plan.new(intent="trim", brain="recipes", confidence=0.5, title="Trim", steps=[
+        schema.Step(tool="cut_range", args={"track": "v1", "start": "$ask:range", "end": "$ask:range"}, why="cut")],
+        needs_input=[schema.NeedsInput(key="range", question="Which part?", kind="text", required=True)])
+    asking = schema.Plan.new(intent="trim", brain="apple_intelligence", confidence=0.8, title="Trim", steps=[],
+                             needs_input=[schema.NeedsInput(key="range", question="Which part should I cut?", kind="text", required=True)])
+    out, _ = run({"recipes": Fake("recipes", result=rp), "apple_intelligence": Fake("apple_intelligence", result=asking)},
+                 req("trim a piece out of the video"))
+    assert out.brain == "apple_intelligence", [(a.brain, a.status, a.reason) for a in out.attempts]

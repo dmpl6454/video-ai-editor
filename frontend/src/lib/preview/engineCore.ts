@@ -4,49 +4,52 @@
 // context loss. The public contract is in engine.ts; the program → laneA
 // feed in engineFeed.ts; currentTime and WebKit's seek events in
 // engineSeek.ts; pauses WebKit makes on its own in engineExternal.ts; the
-// bake splice in engineBake.ts.
+// bake splice in engineBake.ts; proxy I/O and hidden-page suspension in
+// engineSources.ts; the degraded <video> tier in engineDegraded.ts; context
+// loss and decode errors in engineRecovery.ts; the events and the status a
+// caller reads in engineBase.ts.
 
 import type {
-  AudioSink, EngineClock, EngineEvents, EngineMode, EngineSourceLookup, EngineStatus, PreviewEngine, ProgramDiff,
+  AudioSink, EngineClock, EngineSourceLookup, PreviewEngine, ProgramDiff,
 } from './engine'
 import type { EdlLike } from './timeline/framePlan'
-import { KIND_GAP, type ProgramMap } from './timeline/programMap'
-import type { Support } from './timeline/support'
+import { KIND_GAP } from './timeline/programMap'
 import { rateOf, samplesForFrames, ticksPerFrameExact, type Rational } from './timeline/timebase'
 import { LaneA, browserMedia } from './media/laneA'
-import { ProxyStore } from './media/proxyIndex'
+import type { ProxyStore } from './media/proxyIndex'
 import { Compositor } from './render/compositor'
 import type { Size } from './render/geometry'
 import { PresentedClock } from './clock/presentedClock'
 import { AudioSync } from './clock/audioSync'
 import { ProgramFeed } from './engineFeed'
 import { layoutCanvas, mountEngineDom } from './engineDom'
-import { Emitter, NullAudioSink, engineUnsupportedReason, type EngineOptions } from './engineOptions'
-import { ElementSeeker, PlayingSeekGate } from './engineSeek'
-import { DelayedFlag, drawProgramFrame, uploadProgramFrame } from './engineDraw'
+import { NullAudioSink, engineUnsupportedReason, type EngineOptions } from './engineOptions'
+import { ElementSeeker, PlayingSeekGate, RunStartGate, SoughtFrame } from './engineSeek'
+import { drawProgramFrame, uploadProgramFrame } from './engineDraw'
 import { ExternalPauses, type ExternalCause } from './engineExternal'
 import { BakeSplice } from './engineBake'
-import { FrameLoop, type PresentedMeta } from './engineLoop'
+import { FrameLoop, StallWatch, type PresentedMeta } from './engineLoop'
+import { DegradedTier } from './engineDegraded'
+import { EngineRecovery } from './engineRecovery'
+import { EngineSources } from './engineSources'
+import { EngineBase } from './engineBase'
+import { editLeadFrames } from './clock/editLead'
 
 export { NullAudioSink, engineUnsupportedReason, type EngineOptions }
 
-const SPINNER_MS = 80
 const TOPUP_MS = 250
 const PAUSE_RAMP_MS = 5
-const CONTEXT_RESTORE_MS = 2000
-/** A proxy that failed to open for a transient reason is tried again after this. */
-const PROXY_REOPEN_MS = 10_000
 
 export function createPreviewEngine(opts: EngineOptions = {}): ClientPreviewEngine {
   return new ClientPreviewEngine(opts)
 }
 
-export class ClientPreviewEngine implements PreviewEngine {
+export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   readonly clock: EngineClock
   private readonly opts: EngineOptions
   private readonly store: ProxyStore
+  private readonly sources: EngineSources
   private sink: AudioSink
-  private readonly events = new Emitter<EngineEvents>()
 
   // DOM
   private host: HTMLElement | null = null
@@ -62,19 +65,12 @@ export class ClientPreviewEngine implements PreviewEngine {
   private R: Rational = { num: 30, den: 1 }
   private edl: EdlLike | null = null
   private renderHash = ''
-  private pm: ProgramMap | null = null
-  private support: Support | null = null
   private canvasEdl: Size = { w: 1080, h: 1920 }
   private readonly feed: ProgramFeed
   private readonly bake: BakeSplice
 
   // transport and display
-  private presented = 0
-  private target = 0
-  private _playing = false
   private intent: 'play' | 'pause' = 'pause'
-  private buffering = false
-  private readonly spinner = new DelayedFlag(SPINNER_MS, () => this.emitStatus())
   /** Frame the element was last seeked to (paused), −1 unknown. An append
    *  over it resets this: WebKit hands back black for an overwritten frame
    *  until a re-seek, so the only uploads are at a completed 'seeked' and in
@@ -83,10 +79,11 @@ export class ClientPreviewEngine implements PreviewEngine {
   private readonly seeker: ElementSeeker
   private readonly external: ExternalPauses
   private readonly playingSeek = new PlayingSeekGate()
-  private mode: EngineMode = 'client'
-  private reason: string | null = null
-  private contextTimer: ReturnType<typeof setTimeout> | null = null
-  private reopenTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly runStart = new RunStartGate()
+  private readonly stall = new StallWatch()
+  private readonly sought = new SoughtFrame()
+  private readonly degraded: DegradedTier
+  private readonly recovery: EngineRecovery
   private destroyed = false
 
   // clock / audio
@@ -97,30 +94,42 @@ export class ClientPreviewEngine implements PreviewEngine {
   /** Test and telemetry counters (not part of the stable API). */
   readonly stats = {
     framesDrawn: 0, blackFrames: 0, heldFrames: 0, externalPauses: 0,
-    sizeMismatches: 0, mediaElementsCreated: 0, seeks: 0, seekTimeouts: 0,
+    sizeMismatches: 0, mediaElementsCreated: 0, seeks: 0, seekTimeouts: 0, stallRestarts: 0,
+    /** Paused 'seeked' before the element presented the frame (waited for). */
+    seekedEarly: 0,
     /** rVFC handler time (upload + uniforms + draw), last 2048 frames, ms. */
     handlerMs: [] as number[],
   }
 
   constructor(opts: EngineOptions = {}) {
+    super()
     this.opts = opts
     this.sink = opts.audioSink ?? new NullAudioSink()
     this.pclock = new PresentedClock(this.R)
     this.clock = { now: () => this.pclock.now() }
-    this.store = new ProxyStore({
-      baseUrl: opts.proxyBaseUrl ?? '/api/proxies',
-      fetch: opts.fetch,
-      maxBytes: opts.spanCacheBytes,
-      onLoad: () => this.lane?.poke(),
-      onError: (key, _msg, permanent) => {
-        // degraded (§7) now; a transient failure is opened again later, and
-        // a proxy that opens then is readable again (feed.openProxies)
-        this.feed.markFailed(key)
-        this.reclassify()
-        if (!permanent) this.scheduleReopen()
+    this.sources = new EngineSources(opts, {
+      lane: () => this.lane,
+      hasProgram: () => !!this.pm,
+      destroyed: () => this.destroyed,
+      playhead: () => (this._playing && !this.runStart.pending ? this.presented : this.target),
+      rate: () => this.R,
+      support: () => this.support,
+      bakeStore: () => this.bake.store,
+      // a proxy that fails AFTER its paused frame was asked for: the
+      // degraded tier shows that frame now, not at the next seek (RD3)
+      failed: () => { this.reclassify(); if (!this._playing) this.showPaused() },
+      recovered: () => {
+        this.reclassify(false)
+        this.lane?.setProgram(this.feed.laneProgram())
+        this.sources.prefetch()
+        if (!this._playing) this.showPaused()
+        this.emitStatus()
       },
+      shown: () => { if (!this._playing) this.showPaused() },
     })
+    this.store = this.sources.store
     this.feed = new ProgramFeed(this.store)
+    this.sources.feed = this.feed
     this.bake = new BakeSplice({
       feed: this.feed,
       renderHash: () => this.renderHash,
@@ -129,7 +138,7 @@ export class ClientPreviewEngine implements PreviewEngine {
       usable: () => !this.destroyed && this.mode !== 'server',
       reclassify: () => this.reclassify(false),
       refreshWant: () => this.refreshWant(),
-      prefetch: () => this.prefetch(),
+      prefetch: () => this.sources.prefetch(),
       emitStatus: () => this.emitStatus(),
     }, opts)
     this.feed.bakeStore = this.bake.store
@@ -153,8 +162,35 @@ export class ClientPreviewEngine implements PreviewEngine {
       canDraw: () => !this.compositor?.lost,
       emitPause: (e) => { this.stats.externalPauses++; this.emit('pause-external', e) },
       emitStatus: () => this.emitStatus(),
-      onHidden: () => { if (!this._playing) this.lane?.suspend(true) },
-      onShown: () => { this.lane?.suspend(false); this.prefetch() },
+      onHidden: () => this.sources.suspend(true),
+      onShown: () => this.sources.suspend(false),
+    })
+    this.degraded = new DegradedTier({
+      root: () => this.root,
+      compositor: () => this.compositor,
+      wanted: (k, id) => !this._playing && this.target === k && this.want[k] === id && !this.destroyed,
+      draw: (k) => this.drawFrame(k, false),
+      created: () => { this.stats.mediaElementsCreated++ },
+      failed: (k, why) => { console.warn(`[preview engine] degraded frame ${k}: ${why}`) },
+    }, this.feed)
+    this.recovery = new EngineRecovery({
+      isPlaying: () => this._playing,
+      presentedK: () => this.presented,
+      live: () => !this.destroyed && this.mode === 'client' && !!this.lane,
+      compositorLost: () => !!this.compositor?.lost,
+      snapshotK: () => this.compositor?.snapshotK ?? -1,
+      clearSnapshot: () => this.compositor?.clearSnapshot(),
+      spinner: (on) => this.setSpinner(on),
+      pauseExternal: (cause) => this.external.pause(cause),
+      resumeAfterRestore: () => this.external.onContextRestored(),
+      forgetElementFrame: () => { this.elementFrame = -1 },
+      showSnapshot: (on) => this.compositor?.showSnapshot(on),
+      showPaused: () => this.showPaused(),
+      rebuildLane: () => { this.seeker.finish(); this.makeLane() },
+      stopPlayback: (why) => this.stopPlayback(why),
+      play: () => this.play(),
+      fallback: (r) => this.fallback(r),
+      emitStatus: () => this.emitStatus(),
     })
   }
 
@@ -167,49 +203,11 @@ export class ClientPreviewEngine implements PreviewEngine {
     return this.feed.want
   }
 
-  // ------------------------------------------------------------- events
-
-  on<E extends keyof EngineEvents>(event: E, cb: (e: EngineEvents[E]) => void): () => void {
-    return this.events.on(event, cb)
-  }
-
-  private emit<E extends keyof EngineEvents>(event: E, payload: EngineEvents[E]): void {
-    this.events.emit(event, payload)
-  }
-
-  get status(): EngineStatus {
-    return {
-      mode: this.mode, reason: this.reason, playing: this._playing, buffering: this.buffering,
-      spinner: this.spinner.on || this.buffering, presentedK: this.presented, total: this.pm?.total ?? 0,
-      ranges: this.support?.ranges ?? [],
-    }
-  }
-
-  private emitStatus(): void {
-    this.emit('status', this.status)
-  }
-
-  get presentedK(): number {
-    return this.presented
-  }
-
-  /** The frame a paused seek is waiting to show (additive; = presentedK when settled). */
-  get targetK(): number {
-    return this.target
-  }
-
-  get playing(): boolean {
-    return this._playing
-  }
-
-  get program(): ProgramMap | null {
-    return this.pm
-  }
-
   /** Internals for the WK test pages (not part of the stable API). */
   get internals() {
     return {
       lane: this.lane, compositor: this.compositor, store: this.store, video: this.video, canvas: this.canvas, want: this.feed.want,
+      degraded: this.degraded, recovery: this.recovery,
       /** Redraw the paused frame from the current texture. */
       redraw: () => this.redrawPaused(),
       /** Paused, and the target frame is on the canvas. */
@@ -253,8 +251,8 @@ export class ClientPreviewEngine implements PreviewEngine {
     try {
       this.compositor = new Compositor({
         canvas, snapshot: snap, mipmaps: this.opts.mipmaps,
-        onContextLost: () => this.onContextLost(),
-        onContextRestored: () => this.onContextRestored(),
+        onContextLost: this.recovery.onContextLost,
+        onContextRestored: this.recovery.onContextRestored,
       })
     } catch (e) {
       this.fallback(`no-webgl2: ${String((e as Error)?.message ?? e)}`)
@@ -285,6 +283,7 @@ export class ClientPreviewEngine implements PreviewEngine {
       },
     })
     this.lane = lane
+    if (this.sources.isSuspended) lane.suspend(true)
     if (this.pm) lane.setProgram(this.feed.laneProgram())
     lane.setPlayhead(this.target, this._playing)
     void lane.open()
@@ -339,7 +338,7 @@ export class ClientPreviewEngine implements PreviewEngine {
     // client frames in its BAKED ranges until its own bake lands
     if (this.feed.bakeKey !== renderHash) this.feed.setBake(null)
     this.feed.demote = this.bake.demotedFor(renderHash)
-    this.openProxies()
+    this.sources.open()
     // a paused seek issued for the OLD program would upload the old picture
     // under the new content id: drop it; showPaused() below re-seeks
     this.dropSeek()
@@ -351,34 +350,13 @@ export class ClientPreviewEngine implements PreviewEngine {
     else if (this.lane) this.lane.setProgram(this.feed.laneProgram())
     this.prepareSink()
     if (this._playing) {
-      this.sink.reschedule(diff, samplesForFrames(this.presented + 6, this.R))
+      this.sink.reschedule(diff, samplesForFrames(this.presented + editLeadFrames(this.R), this.R))
     }
     if (sizeChanged) this.layout()
-    this.prefetch()
+    this.sources.prefetch()
     if (!this._playing) this.showPaused()
     this.emitStatus()
     return diff
-  }
-
-  /** Open the program's proxies; one that failed transiently and opens now
-   *  is readable again (reclassified, its frames re-requested). */
-  private openProxies(): void {
-    this.feed.openProxies(() => this.lane?.poke(), () => {
-      if (this.destroyed || !this.pm) return
-      this.reclassify(false)
-      this.lane?.setProgram(this.feed.laneProgram())
-      this.prefetch()
-      if (!this._playing) this.showPaused()
-      this.emitStatus()
-    })
-  }
-
-  private scheduleReopen(): void {
-    if (this.reopenTimer || this.destroyed) return
-    this.reopenTimer = setTimeout(() => {
-      this.reopenTimer = null
-      if (!this.destroyed && this.pm) this.openProxies()
-    }, PROXY_REOPEN_MS)
   }
 
   private prepareSink(): void {
@@ -390,17 +368,6 @@ export class ClientPreviewEngine implements PreviewEngine {
     const s = this.feed.classify()
     if (s) this.support = s
     if (emit) this.emitStatus()
-  }
-
-  /** Ask for every span the laneA window needs, nearest first. */
-  private prefetch(): void {
-    const lane = this.lane
-    if (!lane) return
-    if (!this._playing && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-    const P = this._playing ? this.presented : this.target
-    const back = Math.round((10 * this.R.num) / this.R.den)
-    this.feed.prefetch(P, back, lane.lookAheadFrames)
-    this.feed.prefetchBake(this.support, P, back, lane.lookAheadFrames)
   }
 
   // ------------------------------------------------------- bake splice
@@ -430,7 +397,7 @@ export class ClientPreviewEngine implements PreviewEngine {
   private refreshWant(): void {
     this.feed.applyBake(this.support)
     this.lane?.setProgram(this.feed.laneProgram())
-    this.prefetch()
+    this.sources.prefetch()
     if (!this._playing) this.showPaused()
   }
 
@@ -464,7 +431,7 @@ export class ClientPreviewEngine implements PreviewEngine {
 
   /** The paused frame is not on the canvas yet. */
   private pendingDraw(): boolean {
-    return !this._playing && (this.presented !== this.target || this.seeker.inFlight >= 0
+    return !this._playing && (this.presented !== this.target || this.seeker.inFlight >= 0 || this.degraded.pending >= 0 || this.sought.k >= 0
       || (this.compositor?.textureContent !== this.want[this.target] && this.pm?.kind[this.target] !== KIND_GAP))
   }
 
@@ -477,9 +444,19 @@ export class ClientPreviewEngine implements PreviewEngine {
     if (this._playing || !pm || !lane || !video || this.mode === 'server' || pm.total === 0) return
     const k = this.target
     if (pm.kind[k] === KIND_GAP) {
+      this.degraded.cancel()
       this.drawFrame(k, false)
       return
     }
+    const dg = this.degraded.request(k)
+    if (dg) {
+      // proxy failed (§7): the master's paused frame, not laneA's
+      if (this.seeker.inFlight >= 0) this.dropSeek()
+      if (this.degraded.pending !== k) this.setSpinner(true)
+      this.degraded.show(k, dg)
+      return
+    }
+    this.degraded.cancel()
     if (!lane.isReady(k)) {
       if (this.seeker.inFlight >= 0) this.dropSeek()
       lane.hold(false)
@@ -491,7 +468,7 @@ export class ClientPreviewEngine implements PreviewEngine {
       this.drawFrame(k, false)
       return
     }
-    if (this.seeker.inFlight === k) return
+    if (this.seeker.inFlight === k || this.sought.k === k) return
     this.setSpinner(true)
     this.seekElement(k)
   }
@@ -505,6 +482,7 @@ export class ClientPreviewEngine implements PreviewEngine {
     const video = this.video
     const lane = this.lane
     if (!video || !lane) return
+    this.sought.cancel()
     this.stats.seeks++
     this.seeker.start(k, video, lane, () => this.lane === lane && !this._playing)
   }
@@ -519,6 +497,7 @@ export class ClientPreviewEngine implements PreviewEngine {
 
   /** Abandon a paused seek that no longer matters (a new target). */
   private dropSeek(): void {
+    if (this.sought.k >= 0) { this.sought.cancel(); this.lane?.hold(false) }
     if (this.seeker.inFlight < 0) return
     this.seeker.finish()
     this.lane?.hold(false)
@@ -560,14 +539,13 @@ export class ClientPreviewEngine implements PreviewEngine {
       this.showPaused()
       return
     }
-    // Upload BEFORE the hold is released: hold(false) pumps laneA, and an
-    // append issued synchronously in there makes WebKit re-enqueue, so a
-    // texImage2D after it read a neighbouring frame (measured in WK: a
-    // paused seek to k = 587 drew source frame 64 instead of 62 when the
-    // stale frame 590 was appended inside this handler).
-    const uploaded = this.uploadCurrent(k)
-    lane.hold(false)
-    if (uploaded) this.drawFrame(k, false)
+    this.sought.complete(k, video, lane, {
+      stillWanted: (j) => this.lane === lane && !this._playing && this.target === j && lane.isReady(j),
+      upload: (j) => this.uploadCurrent(j),
+      draw: (j) => this.drawFrame(j, false),
+      retry: () => { this.elementFrame = -1; this.showPaused() },
+      early: () => { this.stats.seekedEarly++ },
+    })
   }
 
   private onAppended(a: number, b: number): void {
@@ -588,6 +566,8 @@ export class ClientPreviewEngine implements PreviewEngine {
     this.intent = 'play'
     if (this._playing || !video || !lane || !pm || pm.total === 0 || this.mode === 'server') return
     this.external.reset()
+    this.degraded.cancel()
+    this.sought.cancel()
     if (this.target >= pm.total - 1) this.target = 0
     const k = this.target
     // the element must stand where the canvas does
@@ -600,6 +580,7 @@ export class ClientPreviewEngine implements PreviewEngine {
     this._playing = true
     this.buffering = false
     this.playingSeek.clear()
+    this.runStart.begin(k, this.presented)
     lane.setPlayhead(k, true)
     const playCalledAt = performance.now()
     const p = video.play()
@@ -615,6 +596,7 @@ export class ClientPreviewEngine implements PreviewEngine {
     }
     this.audio.play(playCalledAt, lane.seekTime(k))
     this.loop.start(video)
+    this.stall.arm(playCalledAt)
     this.emitStatus()
   }
 
@@ -660,14 +642,16 @@ export class ClientPreviewEngine implements PreviewEngine {
       this.audio.stop(PAUSE_RAMP_MS)
       this.audio.requestRestart()
       this.playingSeek.seeked(k)
+      this.runStart.begin(k, this.presented)
+      this.stall.arm(performance.now())
       this.lane?.setPlayhead(k, true)
       if (this.video && this.lane) this.seeker.assign(this.video, this.lane.seekTime(k))
-      this.prefetch()
+      this.sources.prefetch()
       return
     }
     if (this.seeker.inFlight >= 0 && this.seeker.inFlight !== k) this.dropSeek()
     this.lane?.setPlayhead(k, false)
-    this.prefetch()
+    this.sources.prefetch()
     this.showPaused()
     if (this.presented !== k) this.setSpinner(true)
   }
@@ -677,6 +661,7 @@ export class ClientPreviewEngine implements PreviewEngine {
     const lane = this.lane
     if (!pm || !lane) return
     const k = Math.round(meta.mediaTime * this.R.num / this.R.den)
+    if (this.runStart.stale(k, this.R.num / this.R.den)) return
     if (k >= pm.total) {
       this.stopPlayback('end')
       return
@@ -707,19 +692,41 @@ export class ClientPreviewEngine implements PreviewEngine {
    *  the watchdog catches a pause WebKit made without telling us. */
   private onTick(): void {
     if (!this._playing) return
-    this.lane?.setPlayhead(this.presented, true)
-    this.prefetch()
+    // (a run not yet presented at its start: the window belongs THERE)
+    this.lane?.setPlayhead(this.runStart.pending ? this.target : this.presented, true)
+    this.sources.prefetch()
     if (this.video) this.external.watch(this.video)
+    if (this.stall.check(this.presented, this.buffering, performance.now(), this.video?.currentTime)) this.restartStalled()
+  }
+
+  /** The stuck-play watchdog (review RD3): playing, no new frame for
+   *  STALL_MS and no 'waiting' — say what the run looked like, then start it
+   *  again from the presented frame (pause + play), as the user would. */
+  private restartStalled(): void {
+    const v = this.video
+    console.warn('[preview engine] playback stalled; restarting the run', {
+      presented: this.presented, target: this.target, runStartPending: this.runStart.pending,
+      element: v ? { t: v.currentTime, paused: v.paused, readyState: v.readyState, seeking: v.seeking } : null,
+      buffered: this.lane?.buffered, ready: this.lane?.isReady(this.presented + 1),
+    })
+    this.stats.stallRestarts++
+    this.stopPlayback('stall')
+    this.play()
   }
 
   private listenVideo(video: HTMLVideoElement): void {
     video.addEventListener('seeked', this.onSeeked)
     video.addEventListener('seeking', this.seeker.onSeeking)
+    // a MediaError leaves a MediaSource-backed element dead (§7 decode errors)
+    video.addEventListener('error', () => {
+      const code = video.error?.code ?? 0
+      if (code !== 1 && video.src) this.recovery.onMediaError(code)
+    })
     this.external.listen(video)
     video.addEventListener('waiting', () => {
       if (!this._playing) return
       const pm = this.pm
-      if (pm && this.presented >= pm.total - 2) {
+      if (pm && this.presented >= pm.total - 2 && !this.runStart.pending) {
         this.stopPlayback('end')
         return
       }
@@ -738,39 +745,6 @@ export class ClientPreviewEngine implements PreviewEngine {
     this.external.pause(cause)
   }
 
-  // ------------------------------------------------------ context loss
-
-  /** §7: WebKit dropped the WebGL context. The 2D snapshot stands in for the
-   *  canvas — but only while it holds the frame on screen: playing, it holds
-   *  the LAST PAUSE's frame, so picture and sound stop together at
-   *  presentedK (resumed on restore) and the snapshot goes black with the
-   *  spinner up rather than show another frame. Not restored in 2 s: the
-   *  server preview. */
-  private onContextLost(): void {
-    if (this.contextTimer) clearTimeout(this.contextTimer)
-    this.contextTimer = setTimeout(() => {
-      this.contextTimer = null
-      if (this.compositor?.lost) this.fallback('webgl-lost')
-    }, CONTEXT_RESTORE_MS)
-    if (this._playing) this.external.pause('context')
-    const comp = this.compositor
-    if (comp && comp.snapshotK !== this.presented) {
-      comp.clearSnapshot()
-      this.setSpinner(true)
-    }
-    this.emitStatus()
-  }
-
-  private onContextRestored(): void {
-    if (this.contextTimer) clearTimeout(this.contextTimer)
-    this.contextTimer = null
-    this.compositor?.showSnapshot(false)
-    // the texture is gone: re-seek (paused) or wait for the next rVFC
-    this.elementFrame = -1
-    if (!this._playing && !this.external.onContextRestored()) this.showPaused()
-    this.emitStatus()
-  }
-
   // ------------------------------------------------------------- teardown
 
   destroy(): void {
@@ -780,15 +754,17 @@ export class ClientPreviewEngine implements PreviewEngine {
     this.loop.stop()
     this.external.cancelResume()
     this.seeker.clearTimer()
+    this.sought.cancel()
     this.spinner.cancel()
-    for (const t of [this.contextTimer, this.reopenTimer]) if (t) clearTimeout(t)
+    this.recovery.destroy()
+    this.degraded.destroy()
     this.sink.stop(0)
     this.sink.dispose?.()
     document.removeEventListener('visibilitychange', this.external.onVisibility)
     this.resizeObs?.disconnect()
     this.lane?.destroy()
     this.compositor?.destroy()
-    this.store.dispose()
+    this.sources.destroy()
     this.bake.dispose()
     this.root?.remove()
     this.lane = null

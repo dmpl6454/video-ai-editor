@@ -59,7 +59,13 @@ def normalize(text: str) -> str:
     t = _WS_RE.sub(" ", t).strip().lower()
     t = t.rstrip(" .!?;,")
     t = _HINGLISH_RE.sub(lambda m: HINGLISH_VERBS[m.group(1)], t)
+    # "lose the first second" / "the last minute" is a length of ONE (review
+    # RD3: a bare unit made the trim ask "Which part should I cut?").
+    t = _ONE_UNIT_RE.sub(r"\1 1 \2", t)
     return _WS_RE.sub(" ", t).strip()
+
+
+_ONE_UNIT_RE = re.compile(r"\b(first|last|final|opening|closing)\s+(second|minute)\b(?!\s+(?:clip|shot|half|part|one))")
 
 
 # --------------------------------------------------------------------------
@@ -294,7 +300,9 @@ COUNT_RE = re.compile(
 
 UPSCALE_RE = re.compile(r"\b(2|4)\s*x\s*(?:upscale|upscaling|resolution|res)\b|\bupscal\w*\s*(?:to|by|at)?\s*(2|4)\s*x\b")
 SPEED_X_RE = re.compile(rf"{_NUM}\s*x(?![\dx:])\b")
-SPEED_PCT_RE = re.compile(r"\b(\d{2,3})\s*(?:%|percent)\s*(?:speed|faster)?\b")
+# (no `\b` after a bare "%": at the end of the prompt there is no word
+# boundary there, so "slow it down to 75%" read no speed — review RD3)
+SPEED_PCT_RE = re.compile(r"\b(\d{2,3})\s*(?:%|percent\b)(?:\s*(?:speed|faster)\b)?")
 SPEED_WORD_PATTERNS: tuple[tuple[str, float], ...] = (
     (r"\bslow[- ]?mo(?:tion)?\b|\bslowmo\b", 0.5),
     (r"\bhalf speed\b|\bhalf the speed\b|\bhalve the speed\b", 0.5),

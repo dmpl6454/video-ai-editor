@@ -31,6 +31,7 @@
 
 import { Fmp4Writer, type FrameEntry, type FrameSample, type Segment } from './fmp4Writer'
 import type { Rational } from '../timeline/timebase'
+import { EDIT_LEAD_S } from '../clock/editLead'
 
 /** `want[k]` of a timeline gap. */
 export const GAP = -1
@@ -212,7 +213,7 @@ export class LaneA {
     this.aheadMax = Math.round((opts.aheadSeconds ?? 30) * fps)
     this.ahead = this.aheadMax
     this.pausedNear = opts.pausedNearFrames ?? 5
-    this.playingLead = Math.ceil((opts.playingLeadSeconds ?? 0.15) * fps)
+    this.playingLead = Math.ceil((opts.playingLeadSeconds ?? EDIT_LEAD_S) * fps - 1e-9)
     this.now = opts.now ?? (() => performance.now())
   }
 

@@ -26,6 +26,7 @@ against them concurrently.
 """
 from __future__ import annotations
 
+import functools
 from fractions import Fraction
 
 #: The rates a real camera, phone or NLE produces. A measured or stored fps
@@ -54,7 +55,17 @@ def rate_of(fps: float | int | Fraction | None) -> Fraction:
     NTSC-style rate and exact for integers). Non-positive or missing values
     fall back to ``DEFAULT_RATE`` rather than raising: this is called on EDLs
     that already exist, and an unloadable timeline is worse than a 30 fps one.
+
+    Memoised (a pure function of a hashable value; the program map calls it
+    thousands of times per timeline — wave D3, frame_map_json at 300 clips).
     """
+    try:
+        return _rate_of_cached(fps)
+    except TypeError:          # an unhashable value: the uncached rule
+        return _rate_of(fps)
+
+
+def _rate_of(fps) -> Fraction:
     if fps is None:
         return DEFAULT_RATE
     try:
@@ -74,6 +85,9 @@ def rate_of(fps: float | int | Fraction | None) -> Fraction:
     return value
 
 
+_rate_of_cached = functools.lru_cache(maxsize=256)(_rate_of)
+
+
 def fps_float(fps: float | int | Fraction | None) -> float:
     """The rate as a float for storage/display (29.97002997…, 30.0)."""
     return float(rate_of(fps))
@@ -87,7 +101,15 @@ def ffmpeg_rate(fps: float | int | Fraction | None) -> str:
 
 
 def frame_duration(fps: float | int | Fraction | None) -> float:
-    """Seconds per frame."""
+    """Seconds per frame (memoised, like ``rate_of``)."""
+    try:
+        return _frame_duration_cached(fps)
+    except TypeError:          # an unhashable value
+        return float(1 / rate_of(fps))
+
+
+@functools.lru_cache(maxsize=256)
+def _frame_duration_cached(fps) -> float:
     return float(1 / rate_of(fps))
 
 

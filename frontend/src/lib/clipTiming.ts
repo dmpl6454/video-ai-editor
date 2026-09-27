@@ -13,6 +13,9 @@
 // Out through the speed. Overlays (text, stickers) answer set_clip_timing;
 // media answers trim_clip / move_clip — the same three verbs either way.
 
+import { effectiveDuration, freezeOf, sourceOffsetAt, type EdlClip } from './preview/timeline/framePlan'
+import { curvePoints } from './preview/timeline/speedCurve'
+
 export type TimelineField = 'start' | 'end' | 'duration'
 export type MediaField = TimelineField | 'in' | 'out'
 
@@ -20,7 +23,14 @@ export type MediaField = TimelineField | 'in' | 'out'
 export const MIN_SPAN_S = 0.1
 
 export interface OverlaySpan { start: number; end: number }
-export interface MediaSpan { in: number; out: number; start: number; speed: number }
+/** A speed-CURVE clip's clock: its footprint and the source seconds past
+ *  `in` at a clip-local timeline time (framePlan.sourceOffsetAt) — the same
+ *  shape as dragResolve's CurveTrimClock. */
+export interface CurveClock { duration: number; sourceAt: (localT: number) => number }
+
+/** `speed`: the scalar (a curve's MEAN) speed; `curve` for a curve clip,
+ *  whose timeline length is its integral, not (out − in) / mean. */
+export interface MediaSpan { in: number; out: number; start: number; speed: number; curve?: CurveClock | null }
 
 export interface TimingEdit { tool: 'set_clip_timing' | 'trim_clip' | 'move_clip'; args: Record<string, number> }
 
@@ -47,6 +57,7 @@ export function overlayTimingEdit(span: OverlaySpan, field: TimelineField, value
 
 /** A media clip's span on the timeline: its source range at its speed. */
 export function mediaTimelineDuration(m: MediaSpan): number {
+  if (m.curve) return m.curve.duration
   const speed = m.speed > 0 ? m.speed : 1
   return Math.max(0, m.out - m.in) / speed
 }
@@ -66,7 +77,23 @@ export function mediaTimingEdit(m: MediaSpan, field: MediaField, value: number):
     case 'duration': {
       const len = field === 'end' ? value - m.start : value
       if (len < MIN_SPAN_S - 1e-9) return null
+      // A curve clip SHORTENED: the source time the curve reaches at `len`
+      // (review RD3 — through the mean speed, 00:00:02:00 on a Hero clip
+      // became 00:00:02:07); the server keeps exactly that piece of the
+      // curve (dispatch._trim_curve). Longer: the mean speed, as before.
+      if (m.curve && len < m.curve.duration - 1e-9) {
+        return { tool: 'trim_clip', args: { out: m.in + m.curve.sourceAt(len) } }
+      }
       return { tool: 'trim_clip', args: { out: m.in + len * speed } }
     }
   }
+}
+
+/** The curve clock of a speed-curve media clip, or null (a constant speed or
+ *  a freeze): what the Inspector's End / Duration and a timeline edge drag
+ *  trim through (review RD3). */
+export function curveClockOf(c: unknown): CurveClock | null {
+  const e = c as EdlClip
+  if (!e || freezeOf(e) !== null || !curvePoints(e.speed)) return null
+  return { duration: effectiveDuration(e), sourceAt: (t) => sourceOffsetAt(e, t) }
 }

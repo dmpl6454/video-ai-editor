@@ -83,8 +83,9 @@ def test_panel_chords_run_inside_ignore_scopes_and_not_in_text(engine, base_url,
     page.keyboard.press("Alt+8")
     _wait_selected(page, "ai")
     assert page.locator("#tool-panel-ai").is_visible()
-    # Focus was inside the Media panel that hid: rescued to the new tab (§5.3).
-    assert _active(page)["id"] == "rail-tab-ai", _active(page)
+    # Focus goes onto the panel the chord showed (review RD3: one Tab from its
+    # first control; it used to stay put, or be rescued to the tab, §5.3).
+    page.wait_for_function("() => document.activeElement?.id === 'tool-panel-ai'")
     # 2. Inside the AI panel (also an ignore scope), ⌥1 selects Media.
     tool = page.locator("#tool-panel-ai [data-keymap-ignore] button:visible").first
     tool.focus()
@@ -126,7 +127,7 @@ def test_panel_chords_run_inside_ignore_scopes_and_not_in_text(engine, base_url,
     page.context.close()
 
 
-def test_a_panel_chord_toggles_and_never_moves_focus(engine, base_url, sessions):  # noqa: F811
+def test_a_panel_chord_toggles_and_puts_focus_on_the_panel(engine, base_url, sessions):  # noqa: F811
     page = _open(engine, base_url, sessions["full"], 1280, 800)
     timeline = page.get_by_role("application", name="Timeline")
     timeline.focus()
@@ -137,6 +138,8 @@ def test_a_panel_chord_toggles_and_never_moves_focus(engine, base_url, sessions)
         page.keyboard.press(f"Alt+{DIGIT[rid]}")
         _wait_selected(page, rid)
         assert page.locator(f"#tool-panel-{rid}").is_visible(), rid
+        # review RD3: the panel takes focus (Tab goes on into its controls)
+        page.wait_for_function("id => document.activeElement?.id === id", arg=f"tool-panel-{rid}")
         assert _tab(page, page.locator(f"#rail-tab-{rid} .rail-label").inner_text()).get_attribute(
             "aria-keyshortcuts") == f"Alt+{DIGIT[rid]}"
     page.keyboard.press("Alt+2")
@@ -152,7 +155,9 @@ def test_a_panel_chord_toggles_and_never_moves_focus(engine, base_url, sessions)
     page.keyboard.press("Alt+Backslash")
     page.wait_for_function("() => !document.getElementById('tool-panel').hidden")
     assert _selected(page) == "audio"
-    assert _active(page)["label"] == "Timeline", _active(page)
+    # hiding the panel with focus in it rescued focus to its rail tab (§5.3),
+    # and ⌥\ showing it again leaves focus there
+    assert _active(page)["id"] == "rail-tab-audio", _active(page)
     page.context.close()
 
 
@@ -235,6 +240,7 @@ def _pick_speed_preset(page, preset: str):
 def test_global_shortcuts_work_with_focus_anywhere(engine, base_url, sessions, where):  # noqa: F811
     sid = sessions["full"]
     page = _open(engine, base_url, sid, 1440, 900)
+    page.on("filechooser", lambda fc: None)              # Space on "Add music…" (review RD3)
     _tab(page, "Audio").click()                          # the panel whose control we focus
     timeline = page.get_by_role("application", name="Timeline")
     timeline.focus()
@@ -299,6 +305,11 @@ def test_global_shortcuts_work_with_focus_anywhere(engine, base_url, sessions, w
         page.wait_for_timeout(300)
         assert not _playing(page)
         assert _tab(page, "Inspector").get_attribute("aria-selected") == "true"
+    elif where == "panel":
+        # review RD3: Space presses a KEYBOARD-focused button (here "Add
+        # music…", whose file picker the page answers) instead of playing
+        page.wait_for_timeout(300)
+        assert not _playing(page)
     else:
         page.wait_for_function(playing, timeout=3000)
         assert _panel_open(page)

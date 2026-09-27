@@ -125,6 +125,16 @@ describe('PreviewController', () => {
     expect(engine().lastLookup!('A')?.info.frames).toBe(300)
   })
 
+  it('names each source\'s master for the degraded tier (§7): the session file URL of its upload', async () => {
+    const { ctl, engine } = setup({ '/proxy?': () => ({ status: 200, body: { key: 'k'.repeat(24), state: 'failed' } }), '/frame_map': () => ({ status: 409, body: {} }) })
+    const src = `/wd/${SID}/uploads/clip one/clip one.normalized.mp4`
+    ctl.applyTimeline(edl([[src, 0, 2, 0]]), H1)
+    await settle()
+    const s = engine().lastLookup!(src)
+    expect(s?.proxy?.state).toBe('failed')
+    expect(s?.media).toBe(`/api/sessions/${SID}/files/uploads/clip%20one/clip%20one.normalized.mp4`)
+  })
+
   it('absorbs the frame_map sources BEFORE comparing, so a match is a match', async () => {
     const e = edl([['A', 0.5, 2, 0], ['A', 3, 4, 1.5]])
     const lookup = () => ({ rate: { num: 30, den: 1 }, tb: { num: 1, den: 15360 }, frames: 300, startTicks: 0, w: 1280, h: 720 })
