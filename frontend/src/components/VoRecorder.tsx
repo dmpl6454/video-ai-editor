@@ -3,7 +3,7 @@ import { useStore, errorMessage } from '../store'
 import { api } from '../api'
 import { toast } from '../toast'
 import { Icon } from './Icon'
-import { CANCELLED, COUNTDOWN_S, PERMISSION_HINT_MS, cancellable, levelOf, recordStart } from '../lib/voCapture'
+import { CANCELLED, COUNTDOWN_S, PERMISSION_HINT_MS, cancellable, levelOf, recordStart, voLayoutStart } from '../lib/voCapture'
 import { MIC_UNAVAILABLE, micErrorMessage } from '../lib/micErrors'
 import { useActivityStore } from '../lib/activityStore'
 
@@ -163,8 +163,11 @@ export function VoRecorder() {
   // Capture started: the clip lands on the frame-snapped record point, and
   // the timeline PLAYS from there so the narration is to picture.
   const beginTake = () => {
-    const at = recordStart(useStore.getState().playhead, useStore.getState().edl?.canvas?.fps)
-    startedAtRef.current = at
+    const { playhead: ph, edl: cur } = useStore.getState()
+    // Playback restarts from the frame-snapped RENDER point; the clip is
+    // stored at the matching LAYOUT time so it plays against that picture.
+    const at = recordStart(ph, cur?.canvas?.fps)
+    startedAtRef.current = voLayoutStart(cur, ph)
     setPlayhead(at)
     setPlaying(true)
     takeWallStartRef.current = Date.now()
@@ -380,7 +383,7 @@ export function VoRecorder() {
     if (!sid) return
     setSubmitting(true)
     try {
-      const res = await api.voRecord(sid, file, playhead, 0)
+      const res = await api.voRecord(sid, file, voLayoutStart(useStore.getState().edl, playhead), 0)
       await refresh()
       const cid = (res as { clip_id?: string } | undefined)?.clip_id
       if (cid) {

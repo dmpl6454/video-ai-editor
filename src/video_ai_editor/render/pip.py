@@ -338,6 +338,16 @@ def pip_audio_chain(c: Clip, input_label: str, label_out: str, *, rs: float,
 #: decodes the picture with before `mix-blend-mode` combines it.
 _TO_RGB = "scale=in_color_matrix=bt709:in_range=tv:out_range=pc"
 _TO_YUV = "scale=out_color_matrix=bt709:out_range=tv"
+#: The blended element's conversion, when the CALLER already made it RGB
+#: (`blend_overlay_parts(elem_rgb=True)`): a no-op `format`. Final QA (round
+#: 3): a size-animated element (Zoom In, Spin, Bounce, keyed scale) leaves
+#: the per-frame `scale=…:eval=frame` stage with a different size every
+#: frame, and a `scale` filter after it — `_TO_RGB` here, or the converter
+#: ffmpeg inserts behind a `setparams` — keeps the size of its FIRST frame:
+#: every blended PiP with a size animation exported frozen at its first
+#: size. So the PiP chain converts such an element to RGB BEFORE its
+#: animated stage (`scale` handles gbrap per frame) and passes it in as RGB.
+_ELEM_IS_RGB = "format=gbrap"
 
 
 def base_tags_filter(edl: EDL) -> str:
@@ -347,15 +357,17 @@ def base_tags_filter(edl: EDL) -> str:
     layer is converted through RGB with explicit BT.709 and must carry the
     base's tags again, or ffmpeg 8's colorspace negotiation converts one
     side of the final `overlay` (render/canvas_bg.tags_filter)."""
-    from .canvas_bg import tags_filter
-    v1 = edl.get_track("v1")
-    first = next((c for c in sorted(v1.clips if v1 else [], key=lambda c: c.start) if isinstance(c, Clip)), None)
-    return tags_filter(first.src) if first is not None else "setparams=colorspace=unknown:range=unknown"
+    # Final QA (round 3): every main-track segment is made BT.709 limited
+    # before assembly (`canvas_bg.segment_to_709`), so the base always is.
+    del edl
+    from .canvas_bg import BASE_709
+    return BASE_709
 
 
 def blend_overlay_parts(i: int, base: str, elem: str, *, x_expr: str, y_expr: str,
                         enable: str, mode: str, out: str,
-                        base_tags: str = "setparams=colorspace=unknown:range=unknown") -> list[str]:
+                        base_tags: str = "setparams=colorspace=unknown:range=unknown",
+                        elem_rgb: bool = False) -> list[str]:
     """Filter chains that composite PiP element `elem` onto `base` at
     (x_expr, y_expr) inside `enable` with blend `mode` (edl/canvas_blend.py),
     ending on `out`. Same placement and gate as the plain `overlay`.
@@ -375,12 +387,16 @@ def blend_overlay_parts(i: int, base: str, elem: str, *, x_expr: str, y_expr: st
     b = blend_of(mode)
     e = lut2_expr(mode)
     u = f"{i}"
+    # `elem_rgb`: the element is already full-range RGB (gbrap) — the PiP
+    # chain converts a size-animated element before its per-frame scale
+    # (`_ELEM_IS_RGB`); a static one is converted here as always.
+    to_rgb = _ELEM_IS_RGB if elem_rgb else f"{_TO_RGB},format=gbrap"
     place = f"x='{x_expr}':y='{y_expr}':enable='{enable}'"
     if not b.porter_duff:
         parts = [
             f"{base}split=3[pbt{u}][pbg{u}][pbk{u}]",
             f"[pbt{u}]{_TO_RGB},format=gbrap,colorchannelmixer=aa=0[pbz{u}]",
-            f"{elem}{_TO_RGB},format=gbrap[pbe{u}]",
+            f"{elem}{to_rgb}[pbe{u}]",
             f"[pbz{u}][pbe{u}]overlay={place}:format=gbrp[pbl{u}]",
             f"[pbl{u}]split=2[pbc{u}][pba{u}]",
             f"[pbg{u}]{_TO_RGB},format=gbrp[pbb{u}]",
@@ -395,10 +411,13 @@ def blend_overlay_parts(i: int, base: str, elem: str, *, x_expr: str, y_expr: st
         parts = [
             f"{base}split=4[pbt{u}][pbg{u}][pbk{u}][pbn{u}]",
             f"[pbt{u}]{_TO_RGB},format=gbrap,colorchannelmixer=aa=0[pbz{u}]",
-            f"{elem}{_TO_RGB},format=gbrap,split=2[pbe{u}][pbf{u}]",
+            f"{elem}{to_rgb},split=2[pbe{u}][pbf{u}]",
             f"[pbz{u}][pbe{u}]overlay={place}:format=gbrp[pba{u}]",
             f"[pbn{u}]{_TO_RGB},format=gbrp,colorchannelmixer=rr=0:gg=0:bb=0[pbo{u}]",
-            f"[pbf{u}]format=rgba,{neg}format=gbrap[pbq{u}]",
+            # lutrgb runs on planar gbrap as is: an `rgba` round trip here
+            # was a converter after a size-animated element, which froze it
+            # at its first size (final QA round 3, `_ELEM_IS_RGB`)
+            f"[pbf{u}]{neg}format=gbrap[pbq{u}]",
             f"[pbo{u}][pbq{u}]overlay={place}:format=gbrp,format=gbrp[pbs{u}]",
             f"[pbg{u}]{_TO_RGB},format=gbrp[pbb{u}]",
         ]
@@ -628,6 +647,15 @@ def build_pip_overlay_chain(
             else:
                 box_w, box_h = max(2, round(target_long * canvas.w / max(1, canvas.h))), target_long
         scaled_label = f"[pip{i}]"
+        # A VIDEO element is made BT.709 limited first, like every main-track
+        # segment (final QA round 3, `canvas_bg.segment_to_709`): the base is
+        # BT.709 now, and `overlay` negotiates colour tags, so an untagged
+        # element would be converted BT.601 -> BT.709 on its way in. Here, at
+        # the head, the size is still fixed (a sized conversion after the
+        # animated scale froze it). A picture (PNG / JPEG) is RGB: `overlay`
+        # converts it with the base's BT.709.
+        from .canvas_bg import is_picture_source, segment_to_709
+        col = "" if is_picture_source(c.src) else f"{segment_to_709(c.src)},"
         if box_w and box_h:
             # Even dimensions: the element is later encoded in a yuv420p graph,
             # and an odd size there is the same chroma-parity trap the v1 chain
@@ -681,7 +709,7 @@ def build_pip_overlay_chain(
                 # crop clear of the corners.
                 inner_rot = f"rotate={math.radians(f_rot):.6f}:c=black@0,"
             parts.append(
-                f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{square_pixels_filter(c.src)}"
+                f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{col}{square_pixels_filter(c.src)}"
                 f"scale={cover_w}:{cover_h}:force_original_aspect_ratio=increase,"
                 f"{inner_rot}"
                 f"crop={box_w}:{box_h}:'{x_expr}':'{y_expr}'{scaled_label}"
@@ -690,7 +718,7 @@ def build_pip_overlay_chain(
             # We don't know the source aspect; -1 preserves it
             # (an anamorphic source is squared first, lane E1a: `h=-1` and
             # the UI's box, <video>.videoWidth, use its DISPLAYED aspect)
-            parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{square_pixels_filter(c.src)}"
+            parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{col}{square_pixels_filter(c.src)}"
                          f"scale=w={target_long}:h=-1{scaled_label}")
 
         # MIRROR / FLIP (Transform.flip_h/v, wave E): the element's picture,
@@ -757,7 +785,11 @@ def build_pip_overlay_chain(
             if an_rot:
                 re_ = f"({re_})+({an.expr('rotation', kt)})"
             rotated = f"[pipr{i}]"
-            parts.append(f"{scaled_label}rotate=a='({re_})*PI/180':c=black@0"
+            # `format=yuva420p` first: `c=black@0` is only transparent on a
+            # format with alpha, and an element with no alpha stage before
+            # (a plain Spin In) exported its corners as a black square
+            # turning with it (final QA, round 3)
+            parts.append(f"{scaled_label}format=yuva420p,rotate=a='({re_})*PI/180':c=black@0"
                          f":ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'{rotated}")
             scaled_label = rotated
         else:
@@ -804,14 +836,21 @@ def build_pip_overlay_chain(
         # at `rs` via -itsoffset, so the local clock is (t - rs). LAST stage,
         # so every filter before it (shape geq, rotate, opacity) sees a fixed
         # frame size.
+        blend = str(getattr(c, "blend", "normal") or "normal")
+        elem_rgb = False
         if (scale_kf or an_scale) and sc_static > 0:
             se = frame_exact_expr(tx.scale, kt) if scale_kf else f"{sc_static:.6f}"
             if an_scale:
                 se = f"({se})*({an.expr('scale', kt)})"
             ratio = f"(({se})/{sc_build:.6f})"
             animated = f"[pips{i}]"
+            # A BLENDED element goes to RGB first (final QA round 3,
+            # `_ELEM_IS_RGB`): nothing after this per-frame stage may be a
+            # sized conversion, or the element freezes at its first size.
+            elem_rgb = blend != "normal"
+            pre_rgb = f"{_TO_RGB},format=gbrap," if elem_rgb else ""
             parts.append(
-                f"{scaled_label}scale=w='max(2\\,trunc(iw*{ratio}/2)*2)'"
+                f"{scaled_label}{pre_rgb}scale=w='max(2\\,trunc(iw*{ratio}/2)*2)'"
                 f":h='max(2\\,trunc(ih*{ratio}/2)*2)':eval=frame{animated}")
             scaled_label = animated
 
@@ -840,14 +879,13 @@ def build_pip_overlay_chain(
         # The last BAKED clip, not the last clip — see `_last_baked` above.
         is_last = i == _last_baked
         next_label = out_label if is_last else f"[pip_post{i}]"
-        blend = str(getattr(c, "blend", "normal") or "normal")
         if blend != "normal":
             # CapCut blend mode (wave E, F2): the same placement, composited
             # with the W3C formula instead of `over` — `blend_overlay_parts`.
             parts.extend(blend_overlay_parts(
                 i, cur, scaled_label, x_expr=x_expr, y_expr=y_expr,
                 enable=enable_expr(rs, re, fps), mode=blend, out=next_label,
-                base_tags=base_tags_filter(edl)))
+                base_tags=base_tags_filter(edl), elem_rgb=elem_rgb))
         else:
             # review RE: a PICTURE element (PNG / JPEG) is converted with the
             # project's BT.709 on an untagged base, like the blend path

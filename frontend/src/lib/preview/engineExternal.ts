@@ -40,6 +40,8 @@ export interface ExternalHost {
   /** The page went hidden / visible (laneA appends and prefetch, §3.5). */
   onHidden(): void
   onShown(): void
+  /** The element played by itself: where it stands is unknown now. */
+  elementMoved(): void
 }
 
 export class ExternalPauses {
@@ -76,6 +78,10 @@ export class ExternalPauses {
       if (this.host.isPlaying() || this.host.isDestroyed()) return
       this.expectOwnPause()
       video.pause()
+      // parked is not still: on an occluded window's visible flips WebKit
+      // went on presenting frames 178 → 223 with `paused` true (measured),
+      // so the next play or paused show must seek it, not trust it
+      this.host.elementMoved()
       if (this.paused && this.host.intent() === 'play' && this.cause !== 'context') this.scheduleResume()
     })
   }

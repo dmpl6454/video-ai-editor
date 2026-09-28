@@ -94,6 +94,11 @@ def file_identity(path: str | os.PathLike) -> list[int] | None:
     return [int(st.st_size), int(st.st_mtime_ns), int(st.st_ino)]
 
 
+def _rate_frames(c: Clip, fps) -> int | None:
+    from .compositor import rate_span_override
+    return rate_span_override(c, fps)
+
+
 def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
                      encoder_args: list[str]) -> str:
     payload = {
@@ -113,6 +118,11 @@ def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
         # in/out render a different chunk with and without it. Only present
         # when set, so every existing chunk key is unchanged.
         **({"freeze": float(c.freeze)} if getattr(c, "freeze", None) is not None else {}),
+        # An export at a rate other than the project's resamples a v1 clip's
+        # span (compositor.v1_rate_scope): the chunk is cut to that many
+        # frames. Only present when it differs from the clip's own rounded
+        # length, so every existing chunk key is unchanged.
+        **({"frames": n_rate} if (n_rate := _rate_frames(c, fps)) is not None else {}),
         # The chunk bakes gain/fade/mute (build_audio_chain runs at chunk
         # render time), so audio props are part of the chunk's identity —
         # omitting them served stale audio on every volume/fade edit.
@@ -189,14 +199,6 @@ def _video_packets(p: Path) -> int | None:
         return int(txt[0].rstrip(",")) if txt and txt[0].strip() else 0
     except Exception:  # noqa: BLE001 — cannot check: keep the chunk
         return None
-
-
-def evict_old_chunks(cache_dir: Path, keep: int = 200) -> None:
-    if not cache_dir.exists():
-        return
-    files = sorted(cache_dir.glob("chunk_*.mp4"), key=lambda p: p.stat().st_mtime)
-    for f in files[:-keep]:
-        f.unlink(missing_ok=True)
 
 
 def render_clip_to_chunk(
@@ -415,5 +417,9 @@ def get_or_build_chunks(
     from .cache_budget import touch as _touch
     for p in chunk_paths:
         _touch(p)
-    evict_old_chunks(cache_dir, keep=200)
+    # No count cap here (final QA, 0.8.0): a `keep=200` sweep ran HERE, after
+    # this render's chunks were built and before its concat opened them, so a
+    # timeline of more than 200 distinct clips deleted its own inputs and
+    # every preview and export failed ("a clip's source file is missing").
+    # The byte-budget LRU above owns eviction, after the render.
     return chunk_paths

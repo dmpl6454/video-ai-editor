@@ -41,6 +41,13 @@ const OPEN_BACKOFF_MAX_MS = 4000
  *  span that keeps failing costs one request a second). */
 const SPAN_RETRY_MS = 250
 const SPAN_RETRY_MAX_MS = 1000
+/** Transient failures of one span in a row before the engine hears of it —
+ *  the open path's rule applied to spans (Final QA): a span route that keeps
+ *  answering 5xx left paused frames on the previous clip under a spinner and
+ *  playback buffering for good, never reaching the degraded tier (§7). The
+ *  report repeats every this-many further failures while the streak lasts, so
+ *  a reopen that cleared the degraded mark (EngineSources) is re-marked. */
+export const SPAN_DEGRADE_AFTER = 5
 /** A span request (a Range read or the pack) still unanswered after this is
  *  abandoned and retried: a hung response must not hold a slot for good. */
 const DEFAULT_SPAN_TIMEOUT_MS = 15_000
@@ -87,14 +94,30 @@ export interface ProxyStoreOptions {
   concurrency?: number
   /** A span (or a Range-read sample) landed: its frames are readable now. */
   onLoad?: (key: string, first: number, count: number) => void
-  /** A proxy could not be opened. `permanent`: 410 or `index.failed` (the
+  /** A proxy could not be opened (or one of its spans failed
+   *  SPAN_DEGRADE_AFTER times in a row). `permanent`: 410 or `index.failed` (the
    *  store will not ask again); otherwise the open failed OPEN_RETRIES times
    *  in a row and a later `open(key)` tries afresh. */
   onError?: (key: string, error: string, permanent: boolean) => void
+  /** A span of `key` landed after `key` had been reported through onError
+   *  for a span streak (SPAN_DEGRADE_AFTER): its proxy is readable again, so
+   *  the owner can undo the degraded tier NOW instead of at its next reopen
+   *  (Final QA r2: a source stayed degraded ~10 s after a short hiccup, and
+   *  Play waited on it). Once per report. */
+  onRecovered?: (key: string) => void
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   /** Abandon a span request after this many ms (default 15 s). */
   spanTimeoutMs?: number
+  /** Report a span failing SPAN_DEGRADE_AFTER times in a row through
+   *  onError(…, false) (default true: the source's degraded tier). The bake
+   *  store opts out — its onError drops the whole bake. */
+  reportSpanFailures?: boolean
+  /** The page is hidden NOW, its 'visibilitychange' dispatched or not
+   *  (WebKit flips visibilityState a task before the event, §3.5): no fetch
+   *  or open starts; the owner suspends now and resumes (suspend(false))
+   *  when the page is back. */
+  hiddenNow?: () => boolean
 }
 
 interface SpanEntry {
@@ -153,9 +176,14 @@ export class ProxyStore {
   private readonly concurrency: number
   private readonly onLoad: ProxyStoreOptions['onLoad']
   private readonly onError: ProxyStoreOptions['onError']
+  private readonly onRecovered: ProxyStoreOptions['onRecovered']
+  /** Keys reported through onError for a span streak, not landed since. */
+  private readonly spanDegraded = new Set<string>()
   private readonly now: () => number
   private readonly sleep: (ms: number) => Promise<void>
   private readonly spanTimeoutMs: number
+  private readonly reportSpanFailures: boolean
+  private readonly hiddenNow: () => boolean
   /** Transient failures in a row, per span (the back-off). */
   private readonly spanFails = new Map<string, number>()
   /** The earliest wake-up already scheduled for a waiting job. */
@@ -183,9 +211,12 @@ export class ProxyStore {
     this.concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY
     this.onLoad = opts.onLoad
     this.onError = opts.onError
+    this.onRecovered = opts.onRecovered
     this.now = opts.now ?? (() => performance.now())
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)))
     this.spanTimeoutMs = opts.spanTimeoutMs ?? DEFAULT_SPAN_TIMEOUT_MS
+    this.reportSpanFailures = opts.reportSpanFailures ?? true
+    this.hiddenNow = opts.hiddenNow ?? (() => false)
   }
 
   private url(key: string, path: string): string {
@@ -315,7 +346,7 @@ export class ProxyStore {
     const h = this.handles.get(key)
     if (!h) {
       // hidden: the engine asks again when the page is back
-      if (!this.failed.has(key) && !this.suspended) void this.open(key).then(() => this.request(key, frame, priority, urgent), () => undefined)
+      if (!this.failed.has(key) && !this.paused()) void this.open(key).then(() => this.request(key, frame, priority, urgent), () => undefined)
       return
     }
     if (frame < 0 || frame >= h.index.frames) return
@@ -377,8 +408,13 @@ export class ProxyStore {
     return best
   }
 
+  /** Suspended, or the page is hidden before its event said so. */
+  private paused(): boolean {
+    return this.suspended || this.hiddenNow()
+  }
+
   private drain(): void {
-    if (this.disposed || this.suspended) return
+    if (this.disposed || this.paused()) return
     const t = this.now()
     while (this.active < this.concurrency) {
       const i = this.nextDue(t)
@@ -445,6 +481,12 @@ export class ProxyStore {
     const n = (this.spanFails.get(id) ?? 0) + 1
     this.spanFails.set(id, n)
     this.stats.spanRetries++
+    // Degraded now (not failed for good): the span keeps retrying with its
+    // back-off, and one that lands clears the streak (put()).
+    if (this.reportSpanFailures && n % SPAN_DEGRADE_AFTER === 0) {
+      this.spanDegraded.add(job.key)
+      this.onError?.(job.key, msg, false)
+    }
     this.requeue(job, Math.min(SPAN_RETRY_MAX_MS, SPAN_RETRY_MS * 2 ** (n - 1)))
   }
 
@@ -519,6 +561,8 @@ export class ProxyStore {
   private put(key: string, span: number, entry: SpanEntry): void {
     const id = this.spanId(key, span)
     this.spanFails.delete(id)
+    // A landed span undoes a span-streak report of its key (onRecovered).
+    if (this.spanDegraded.delete(key) && !this.disposed) this.onRecovered?.(key)
     const old = this.spans.get(id)
     if (old) {
       this.bytes -= old.bytes
@@ -543,6 +587,7 @@ export class ProxyStore {
     this.disposed = true
     this.queue.length = 0
     this.spanFails.clear()
+    this.spanDegraded.clear()
     this.spans.clear()
     this.bytes = 0
   }

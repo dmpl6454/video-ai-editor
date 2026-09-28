@@ -30,6 +30,7 @@ import json
 import logging
 import re
 import time
+import errno as _errno
 import uuid
 from collections import OrderedDict, defaultdict, deque
 from typing import Any, Awaitable, Callable
@@ -384,6 +385,12 @@ def _safe_validation_errors(errors: Any) -> list[dict]:
     return out
 
 
+#: errnos that mean "the disk (or the user's quota) is full".
+_DISK_FULL_ERRNOS = frozenset(e for e in (getattr(_errno, "ENOSPC", None),
+                                          getattr(_errno, "EDQUOT", None)) if e is not None)
+DISK_FULL_MESSAGE = "The disk is full — free some space and try again. Nothing was changed."
+
+
 def install(app: FastAPI) -> None:
     """Wire all hardening middleware + exception handlers + ops endpoints
     into an existing FastAPI app. Idempotent — safe to call multiple times."""
@@ -421,6 +428,22 @@ def install(app: FastAPI) -> None:
         rid = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
         return _envelope(status=400, code="BAD_REQUEST", message=str(exc),
                          request_id=rid)
+
+    @app.exception_handler(OSError)
+    async def _os_exc(request: Request, exc: OSError) -> Response:
+        # Final QA r2: a full disk (or quota) on ANY route — New project,
+        # Import, Rename, Open, Save — used to fall through to the generic
+        # "internal server error". Say what happened and that nothing
+        # changed; every other OSError is still the 500 it always was.
+        rid = getattr(request.state, "request_id", uuid.uuid4().hex[:12])
+        if getattr(exc, "errno", None) in _DISK_FULL_ERRNOS:
+            _logger.warning("disk full", extra={"request_id": rid})
+            return _envelope(status=507, code="DISK_FULL", message=DISK_FULL_MESSAGE,
+                             request_id=rid,
+                             details={"error": "disk_full", "message": DISK_FULL_MESSAGE})
+        _logger.exception("unhandled", extra={"request_id": rid})
+        return _envelope(status=500, code="INTERNAL",
+                         message="internal server error", request_id=rid)
 
     @app.exception_handler(Exception)
     async def _generic_exc(request: Request, exc: Exception) -> Response:

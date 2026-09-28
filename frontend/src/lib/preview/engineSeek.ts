@@ -248,7 +248,8 @@ export class RunStartGate {
   private k = -1
   private at = 0
 
-  /** A run starts at `k` while `shown` is on screen. */
+  /** A run starts at `k` from an element standing on `shown` (-1: not
+   *  known — sought elsewhere, or moved by WebKit while parked). */
   begin(k: number, shown: number, now = performance.now()): void {
     this.k = k === shown ? -1 : k
     this.at = now

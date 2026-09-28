@@ -267,6 +267,33 @@ def test_long_narration_is_not_truncated_to_the_video(env, media):
     assert body["clip_id"] == clip["id"] and body["video_end"] == pytest.approx(3.0, abs=0.05)
 
 
+def test_trim_to_video_measures_the_picture_on_the_render_clock(env, media):
+    """Final QA (round 3): a sound lane plays whole from render_time(start),
+    and the picture ends at its layout end minus the transitions' overlap.
+    Two 3 s clips with a 0.5 s fade render 5.5 s, so a 30 s narration at 0
+    runs 24.5 s past the video and "Trim to video" must end it at 5.5 s of
+    source — the v1 LAYOUT end (6.0) left it running half a second past the
+    picture."""
+    main, client = env
+    sid = _new(client)
+    for _ in range(2):
+        assert _post(client, sid, "upload", media["video"]).status_code == 200
+    r = client.post(f"/api/sessions/{sid}/dispatch",
+                    json={"tool": "add_transition", "args": {"at": 3.0, "type": "fade", "duration": 0.5}})
+    assert r.status_code == 200, r.text
+    r = _post(client, sid, "audio_upload", media["narration"], mime="audio/wav", start="0")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["video_end"] == pytest.approx(5.5, abs=0.05)
+    assert body["past_video_s"] == pytest.approx(24.5, abs=0.1)
+    assert body["trim_out"] == pytest.approx(5.5, abs=0.05)
+    [clip] = _track(_edl(client, sid), "music")["clips"]
+    r = client.post(f"/api/sessions/{sid}/dispatch",
+                    json={"tool": "trim_clip", "args": {"clip_id": clip["id"], "out": body["trim_out"]}})
+    assert r.status_code == 200, r.text
+    assert _edl(client, sid)["duration"] == pytest.approx(5.5, abs=0.05), "the bed now ends with the picture"
+
+
 def test_chat_add_music_without_start_goes_after_the_lane(env, media):
     main, client = env
     sid = _new(client)

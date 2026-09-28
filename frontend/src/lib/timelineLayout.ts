@@ -260,6 +260,49 @@ function v1InputsOf(
   return { clips, transitions: trs.map((tr) => ({ at: tr.at, duration: tr.duration })) }
 }
 
+/**
+ * The SOUND lanes (`schema.sound_lane`): the "music" and "vo" tracks and
+ * every type "audio" track — what `audio_mix.build_audio_mix` mixes. Their
+ * clips keep their whole length across v1 seams (`drawnSpan`).
+ */
+export function isSoundLane(trackId: string, trackType?: string): boolean {
+  return trackId === 'music' || trackId === 'vo' || trackType === 'audio'
+}
+
+/** schema.SOUND_RUN_TOL_S: two sound clips this close are one run. */
+const SOUND_RUN_TOL = 1e-3
+
+/**
+ * How much earlier than its layout `start` a SOUND clip plays
+ * (`schema.sound_pulls`): a run of abutting clips on its lane (a split
+ * voiceover, a looped bed) moves as ONE block, pulled by the overlap before
+ * the run's first clip — pulling each piece by its own start would overlap
+ * the pieces at every seam between them. Without `laneClips` the clip is
+ * its own run: `start − renderTime(start)`.
+ */
+export function soundPull(
+  seams: SeamLayout[], clip: AnyClip, laneClips?: readonly AnyClip[],
+): number {
+  const own = clip.start - renderTime(seams, clip.start)
+  if (!laneClips?.length) return own
+  // `clip` stands in for the lane's copy of itself (a what-if position:
+  // the Inspector's typed Start, a drag preview)
+  const lane = laneClips.some((c) => c.id === clip.id)
+    ? laneClips.map((c) => (c.id === clip.id ? clip : c)) : [...laneClips, clip]
+  let runEnd: number | null = null
+  let runPull = 0
+  for (const c of lane.filter(isMediaClip).sort((a, b) => a.start - b.start)) {
+    if (runEnd === null || c.start > runEnd + SOUND_RUN_TOL) {
+      runPull = c.start - renderTime(seams, c.start)
+      runEnd = c.start + clipDuration(c)
+    } else {
+      runEnd = Math.max(runEnd, c.start + clipDuration(c))
+    }
+    if (c.id === clip.id) return runPull
+  }
+  return own
+}
+
 export interface DrawnSpan {
   /** Left edge in OUTPUT time. */
   start: number
@@ -277,13 +320,24 @@ export interface DrawnSpan {
  * like); every other lane gets the `renderWindow` of its `[start, end)`.
  */
 export function drawnSpan(
-  trackId: string, clip: AnyClip, layout: V1Layout,
+  trackId: string, clip: AnyClip, layout: V1Layout, trackType?: string,
+  laneClips?: readonly AnyClip[],
 ): DrawnSpan {
   if (trackId === 'v1') {
     return {
       start: clip.start - (layout.shift.get(clip.id) ?? 0),
       duration: clipDuration(clip),
       dropped: false,
+    }
+  }
+  if (isSoundLane(trackId, trackType)) {
+    // A sound lane plays WHOLE from render_time(start) (`clock.sound_window`):
+    // a transition overlaps main-track pictures only. The picture window
+    // below shrank a voiceover's block by every seam it crossed, and the
+    // export cut its last words by the same amount (final QA, round 3).
+    return {
+      start: clip.start - soundPull(layout.seams, clip, laneClips),
+      duration: clipDuration(clip), dropped: false,
     }
   }
   const w = renderWindow(layout.seams, clip.start, clipEnd(clip))
@@ -362,7 +416,8 @@ export interface RenderSpan {
  * rs)`), on StickerLayer (`renderLocal`) and on the composited v1 picture.
  */
 export function renderSpanOf(edl: EDL | null | undefined, trackId: string, clip: AnyClip): RenderSpan {
-  const span = drawnSpan(trackId, clip, v1LayoutOf(edl))
+  const track = (edl?.tracks ?? []).find((t) => t.id === trackId)
+  const span = drawnSpan(trackId, clip, v1LayoutOf(edl), track?.type, track?.clips)
   return { start: span.start, end: span.start + span.duration, dropped: span.dropped }
 }
 
@@ -382,6 +437,64 @@ export function clipLocalTime(
 ): number {
   const span = renderSpanOf(edl, trackId, clip)
   return Math.min(Math.max(0, playhead - span.start), Math.max(0, span.end - span.start))
+}
+
+/**
+ * The Inspector's Timing clock for one clip: its Start / End / Duration are
+ * shown on the RULER's clock (render time, where the playhead and the export
+ * put the clip), and a typed value is decoded back to the EDL time the
+ * timing tools take — with the same per-lane rule as the Timeline's drop
+ * (`dropStart`): v1 decodes its per-clip pull (`edlTimeFromOutput`) for a
+ * Start and the clip's own pull for an End; every other lane the overlay
+ * inverse (`layoutTime`).
+ *
+ * Before, the section showed and wrote the raw EDL `start`: after three
+ * 0.5 s dissolves a voiceover imported at the playhead (06:00 on the ruler,
+ * 6.000 s in the export) read Start 00:00:06:15, and typing 00:00:08:00
+ * landed it at 07:15 on the ruler. The identity without transitions.
+ */
+export interface TimingClock {
+  /** EDL (layout) instant of this clip → where the ruler shows it. */
+  show: (layoutT: number) => number
+  /** A typed Start (ruler time) → the EDL start a move takes. */
+  start: (r: number) => number
+  /** A typed End (ruler time) → the EDL end a trim takes. */
+  end: (r: number) => number
+}
+
+export const LAYOUT_CLOCK: TimingClock = { show: (t) => t, start: (r) => r, end: (r) => r }
+
+export function timingClockOf(edl: EDL | null | undefined, trackId: string, clip: AnyClip): TimingClock {
+  const layout = v1LayoutOf(edl)
+  if (!layout.seams.length) return LAYOUT_CLOCK
+  if (trackId === 'v1') {
+    const pull = layout.shift.get(clip.id) ?? 0
+    const v1 = v1InputsOf(edl)
+    return {
+      show: (t) => t - pull,
+      start: (r) => (v1 ? edlTimeFromOutput(r, v1.clips, layout.shift) : r),
+      end: (r) => r + pull,
+    }
+  }
+  const seams = layout.seams
+  const track = (edl?.tracks ?? []).find((t) => t.id === trackId)
+  if (isSoundLane(trackId, track?.type)) {
+    // A sound clip keeps its length (`drawnSpan`): the whole clip is pulled
+    // by its run's overlap (`soundPull`), so End / Duration read its real
+    // length and a typed End trims by what the ruler shows. A typed Start is
+    // decoded with the overlay inverse, as the Timeline's drop does.
+    const pull = soundPull(seams, clip, track?.clips)
+    return {
+      show: (t) => t - pull,
+      start: (r) => layoutTime(seams, r),
+      end: (r) => r + pull,
+    }
+  }
+  return {
+    show: (t) => renderTime(seams, t),
+    start: (r) => layoutTime(seams, r),
+    end: (r) => layoutTime(seams, r),
+  }
 }
 
 /**

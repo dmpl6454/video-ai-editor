@@ -120,14 +120,43 @@ def list_template_names() -> list[str]:
 
 # ---------- Show templates (per-user recurring shows) ----------
 
+def _frozen() -> bool:
+    import sys
+    return bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+
+
+def bundled_shows_dir() -> Path:
+    """The shows that ship with the app (read-only in a packaged build)."""
+    return PRESETS_DIR / "shows"
+
+
 def shows_dir() -> Path:
-    p = PRESETS_DIR / "shows"
+    """Where the user's OWN shows are saved.
+
+    Final QA: in the packaged app PRESETS_DIR is `sys._MEIPASS/presets` —
+    inside the signed bundle (config.py calls it "read-only bundled assets").
+    `save_show_template` wrote `<app>/Contents/Frameworks/presets/shows/
+    <name>.json` there, which broke the code signature ("a sealed resource is
+    missing or invalid") and fails outright on a read-only install. Frozen, a
+    user's shows live in the app's user data folder; in a dev checkout they
+    stay beside the bundled ones (tests redirect PRESETS_DIR)."""
+    if _frozen():
+        from .. import platformutil as _pu
+        p = _pu.user_data_dir("Video AI Editor") / "shows"
+    else:
+        p = bundled_shows_dir()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
+def _show_dirs() -> list[Path]:
+    """User shows first (a saved show of the same name wins), then bundled."""
+    user, bundled = shows_dir(), bundled_shows_dir()
+    return [user] if user == bundled else [user, bundled]
+
+
 def list_shows() -> list[str]:
-    return sorted(p.stem for p in shows_dir().glob("*.json"))
+    return sorted({p.stem for d in _show_dirs() if d.is_dir() for p in d.glob("*.json")})
 
 
 class ShowSnapshot:
@@ -198,7 +227,7 @@ class ShowSnapshot:
 _SAFE_SHOW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
-def _show_path(name: str) -> Path:
+def _show_path(name: str, directory: Path | None = None) -> Path:
     """`shows_dir()/<name>.json`, or a ValueError if `name` is not a leaf.
 
     WHY A WHITELIST AND NOT A TRAVERSAL CHECK
@@ -230,7 +259,7 @@ def _show_path(name: str) -> Path:
     # fires if the pattern above is ever loosened.
     if safe != Path(safe).name:
         raise ValueError(f"show template name {name!r} is not a plain name")
-    return shows_dir() / f"{safe}.json"
+    return (directory or shows_dir()) / f"{safe}.json"
 
 
 def save_show(name: str, edl: EDL) -> Path:
@@ -241,7 +270,8 @@ def save_show(name: str, edl: EDL) -> Path:
 
 
 def load_show(name: str) -> dict:
-    p = _show_path(name)
-    if not p.exists():
-        raise ValueError(f"show template {name!r} not found in {shows_dir()}")
-    return json.loads(p.read_text(encoding="utf-8"))
+    for d in _show_dirs():
+        p = _show_path(name, d)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    raise ValueError(f"show template {name!r} not found (see list_shows)")

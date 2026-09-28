@@ -24,14 +24,15 @@ Pure functions `(Intent, TimelineFacts, Context) -> Expansion`, registered in
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ...edl import speed_curve as SC
 from ...edl import timebase as tb
 from .clip_expanders import _label, bind_clip, one_clip, other_cuts
 from .facts import ClipFact, TextFact, TimelineFacts, TransitionFact
-from .recipes import Context, Expansion, Intent, pc, step
-from .schema import STAGE_CAPTIONS, STAGE_CUTS, STAGE_LOOK, STAGE_TEXT, STAGE_TRANSITIONS
+from .recipes import Context, Expansion, Intent, ask, pc, placeholder, step
+from .schema import STAGE_AUDIO, STAGE_CAPTIONS, STAGE_CUTS, STAGE_LOOK, STAGE_TEXT, STAGE_TRANSITIONS
 
 #: The effect types "the filter" and "the colour grade" name.
 FILTER_TYPES: tuple[str, ...] = ("lut",)
@@ -83,6 +84,10 @@ def x_remove_feature(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         return _remove_transition(it, f, ctx)
     if what == "text":
         return _remove_text(it, f)
+    if it.get("_glitch"):
+        return _remove_glitch(it, f, ctx)
+    if it.get("_voiceover"):
+        return _remove_voiceover(f)
     from .planner import unsupported_removal_reply
     return _ask(unsupported_removal_reply(it.clause or ""))
 
@@ -107,6 +112,9 @@ def _remove_filter(it: Intent, f: TimelineFacts) -> Expansion:
     types = GRADE_TYPES if it.get("_grade") else FILTER_TYPES
     look = it.get("_look")
     fx = [t for t in (it.get("_fx") or []) if t in FX_LABELS]
+    if it.get("_all_fx"):
+        # "clear all effects from clip 2": every effect the clip carries
+        types = tuple(sorted({e for c in f.clips for e in c.effects})) or FILTER_TYPES
     # review RE: a named EFFECT ("the vintage filter", "the vignette") is
     # looked for in each clip's effect chain first; the LUT look of the same
     # name ("vintage" → faded.cube) only when no clip carries the effect
@@ -117,7 +125,7 @@ def _remove_filter(it: Intent, f: TimelineFacts) -> Expansion:
         if fx and not look:
             return _ask(f"There is no {' or '.join(FX_LABELS[t] for t in fx)} effect on any clip to remove.")
         word = "colour grade" if it.get("_grade") else (f"{LOOK_WORDS.get(look, look.rsplit('.', 1)[0])} filter"
-                                                         if look else "filter")
+                                                         if look else "effects" if it.get("_all_fx") else "filter")
 
     def carries(c: ClipFact) -> bool:
         # a NAMED look ("the black and white filter") is only on the clips
@@ -145,6 +153,41 @@ def _remove_filter(it: Intent, f: TimelineFacts) -> Expansion:
         notes=(f"removed the {word} from {who}",))
 
 
+#: A voice-over recorded or imported onto another audio lane keeps its name.
+_VO_NAME_RE = re.compile(r"voice[ _-]?over|narration|^vo_\d", re.I)
+
+
+def _remove_voiceover(f: TimelineFacts) -> Expansion:
+    """"remove the voiceover" / "delete the narration" (Final QA: it offered
+    a NEW spoken voice-over): every clip on the voice-over lane, plus a take
+    named as one on another audio lane, in one step."""
+    ids = [c.id for c in f.clips
+           if c.track == "vo" or (c.track not in ("v1",) and not c.track.startswith("v")
+                                  and _VO_NAME_RE.search(c.name or ""))]
+    if not ids:
+        return _ask("There is no voice-over on the timeline to remove.")
+    n = len(ids)
+    return Expansion(
+        steps=(step("bulk_delete", STAGE_AUDIO, f"remove the voice-over ({n} clip{'s' if n != 1 else ''})",
+                    clip_ids=ids),),
+        postconditions=(pc("clips_absent", "the voice-over is gone", clip_ids=ids),),
+        notes=(f"removed the voice-over ({n} clip{'s' if n != 1 else ''})",))
+
+
+def _remove_glitch(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """"remove the glitch effect" (Final QA): the Glitch TRANSITION(s) when
+    the timeline has one, else the RGB Split effect (the glitchy look in the
+    Effects panel), else an honest "there is none"."""
+    from ...render.transitions import canonical
+    from dataclasses import replace
+    if any(canonical(tr.type) == "glitch" for tr in f.transitions):
+        return _remove_transition(replace(it, slots={**it.slots, "what": "transition", "_type": "glitch",
+                                                     "all": True}), f, ctx)
+    if any("rgb_split" in c.effects for c in f.clips):
+        return _remove_filter(replace(it, slots={**it.slots, "what": "filter", "_fx": ["rgb_split"]}), f)
+    return _ask("There is no Glitch transition or RGB Split effect on the timeline to remove.")
+
+
 def _transition_label(tr: TransitionFact, f: TimelineFacts) -> str:
     seams = list(f.v1_boundaries)
     k = next((i + 1 for i, b in enumerate(seams) if abs(b - tr.at) < SEAM_TOL_S), None)
@@ -153,6 +196,13 @@ def _transition_label(tr: TransitionFact, f: TimelineFacts) -> str:
 
 def _pick_transition(it: Intent, f: TimelineFacts) -> tuple[list[TransitionFact], str | None]:
     trs = list(f.transitions)
+    look = it.get("_type")
+    if look:
+        # A named look ("take the glitch transition out") picks only those.
+        from ...render.transitions import canonical, display_name
+        trs = [tr for tr in trs if canonical(tr.type) == look]
+        if not trs:
+            return [], f"There is no {display_name(look)} transition on the timeline to remove."
     seam, which, at = it.get("_seam"), it.get("_which"), it.get("_at")
     if seam is not None:
         seams = list(f.v1_boundaries)
@@ -222,6 +272,99 @@ def _remove_text(it: Intent, f: TimelineFacts) -> Expansion:
         steps=(step("bulk_delete", STAGE_TEXT, f"delete {who}", clip_ids=ids),),
         postconditions=(pc("clips_absent", f"the {noun} is gone", clip_ids=ids),),
         notes=(f"deleted {who}",))
+
+
+def _norm_words(s: str) -> str:
+    return " ".join(re.sub(r"[^\w\s']", " ", s.lower()).split())
+
+
+def x_retext(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    """Change what an EXISTING text says (Final QA): "change the Summer Trip
+    text to Winter Trip" ADDED a new title reading "to Winter Trip" in the
+    Anton 140 px pop preset and deleted the user's own one as an "overlap
+    replace". The text is found by its current words (or is the only one /
+    the selected one); `set_text` changes only its words."""
+    texts = [t for t in f.texts if t.role not in ("watermark", "caption")]
+    if it.get("_role"):
+        texts = [t for t in texts if t.role == it.get("_role")] or texts
+    if not texts:
+        return _ask("There is no text on the timeline to change. To add one, say like "
+                    "\"add a title saying 'Summer Trip'\".")
+    old = (it.get("old") or "").strip()
+    if old:
+        want = _norm_words(old)
+        cand = [t for t in texts if want and want in _norm_words(t.text)]
+        if not cand:
+            listing = "; ".join(_text_label(t) for t in texts[:4])
+            return _ask(f"There is no text saying '{old}'. The texts are: {listing}. Which one should change?")
+    else:
+        cand = [t for t in texts if t.id == f.selection] or texts
+    if len(cand) > 1:
+        listing = "; ".join(_text_label(t) for t in cand[:4])
+        return _ask(f"Which text? There are {len(cand)}: {listing}. Say like \"change the "
+                    f"'{cand[0].text.split(chr(10))[0][:16]}' text to …\", or select it first.")
+    target = cand[0]
+    new = (it.get("text") or "").strip()
+    if not new:
+        return Expansion(
+            questions=(ask("text", f"What should '{target.text[:40]}' say instead?", kind="text"),),
+            steps=(step("set_text", STAGE_TEXT, f"change the words of {_text_label(target)}",
+                        clip_id=target.id, text=placeholder("text")),))
+    if new == target.text:
+        return _ask(f"The text {_text_label(target)} already says '{new}'.")
+    return Expansion(
+        steps=(step("set_text", STAGE_TEXT, f"change {_text_label(target)} to '{new}'",
+                    clip_id=target.id, text=new),),
+        postconditions=(pc("text_present", "the text says the new words", contains=new),),
+        notes=(f"'{target.text[:40]}' now says '{new}'",))
+
+
+def x_retime_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> Expansion:
+    """Move / lengthen / shorten an EXISTING text (Final QA r3): "make the
+    title longer" (×1.5), "move the title to 4 seconds" (same length),
+    "title from 1s to 4s", "make the title last 5 seconds". It used to DELETE
+    the user's title and add one saying "longer" / "to 4 seconds"."""
+    texts = [t for t in f.texts if t.role not in ("watermark", "caption")]
+    if not texts:
+        return _ask("There is no text on the timeline to move or lengthen. To add one, say like "
+                    "\"add a title saying 'Summer Trip' for 5 seconds\".")
+    cand = [t for t in texts if t.id == f.selection] or texts
+    if len(cand) > 1:
+        listing = "; ".join(_text_label(t) for t in cand[:4])
+        return _ask(f"Which text? There are {len(cand)}: {listing}. Select it first, then say it again.")
+    t = cand[0]
+    r = dict(it.get("_retime") or {})
+    s0, e0 = float(t.start), float(t.end)
+    dur = max(0.1, e0 - s0)
+    if "start" in r and "end" in r:
+        s, e = float(r["start"]), float(r["end"])
+    elif "start" in r:
+        s = float(r["start"])
+        e = s + dur
+    elif "end" in r:
+        s, e = s0, float(r["end"])
+    elif "dur" in r:
+        s, e = s0, s0 + float(r["dur"])
+    else:
+        s, e = s0, s0 + dur * float(r.get("factor") or 1.0)
+    vend = float(f.video_end or f.duration or e)
+    notes: list[str] = []
+    if vend > 0 and e > vend + 1e-3:
+        e = vend
+        notes.append(f"it ends with the video at {vend:g}s")
+    s = max(0.0, s)
+    if e - s < 0.1:
+        return _ask(f"{_text_label(t).capitalize()} would not be on screen at all — say like "
+                    f"'show the title from {s:g}s to {s + 3:g}s'.")
+    s, e = round(s, 3), round(e, 3)
+    if abs(s - s0) < 1e-3 and abs(e - e0) < 1e-3:
+        return _ask(f"{_text_label(t).capitalize()} is already on screen {s0:g}–{e0:g}s — nothing to change.")
+    return Expansion(
+        steps=(step("set_clip_timing", STAGE_TEXT, f"{_text_label(t)} on screen {s:g}–{e:g}s",
+                    clip_id=t.id, start=s, end=e),),
+        postconditions=(pc("text_present", "the text is on screen at its new time", contains=t.text[:60],
+                           start_geq=round(s - 0.01, 3)),),
+        notes=tuple([f"{_text_label(t)} now shows {s:g}–{e:g}s"] + notes))
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +455,41 @@ _AXES: dict[str, tuple[str, ...]] = {"horizontal": ("horizontal",), "vertical": 
 _FIELD = {"horizontal": "flip_h", "vertical": "flip_v"}
 
 
+def _flip_sticker(it: Intent, f: TimelineFacts) -> Expansion:
+    """Final QA r3: "flip the sticker horizontally" answered "Want a sticker?
+    … cannot place one" although a sticker was there and `flip_clip` flips
+    stickers (the release notes: Mirror and Flip for any clip, overlay or
+    sticker)."""
+    ids = list(f.sticker_ids)
+    if not ids:
+        return _ask("There is no sticker on the timeline to flip — add one from the Stickers panel first.")
+    if len(ids) == 1:
+        sid = ids[0]
+    elif f.selection in ids:
+        sid = f.selection
+    else:
+        return _ask(f"Which sticker? There are {len(ids)} — select one and say 'flip this sticker'.")
+    axes = _AXES.get(it.get("axis") or "horizontal", ("horizontal",))
+    on = it.get("on")
+    cur_flags = f.sticker_flips.get(sid, "")
+    want: dict[str, bool] = {}
+    steps = []
+    for axis in axes:
+        cur = ("h" if axis == "horizontal" else "v") in cur_flags
+        value = (not cur) if on is None else bool(on)
+        if value == cur:
+            continue
+        want[_FIELD[axis]] = value
+        steps.append(step("flip_clip", STAGE_LOOK, f"{'mirror' if value else 'unmirror'} the sticker {axis}ly",
+                          clip_id=sid, axis=axis, value=value))
+    if not steps:
+        return _ask(f"The sticker is already {'flipped' if on else 'not flipped'} that way — flip it the other way?")
+    return Expansion(steps=tuple(steps),
+                     postconditions=(pc("clip_flipped", "the sticker is flipped as asked", clip_id=sid, **want),),
+                     notes=(f"the sticker {'flipped' if any(want.values()) else 'unflipped'} "
+                            f"{' and '.join(a for a in axes if _FIELD[a] in want)}ly",))
+
+
 def x_flip(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     """CapCut's Mirror (horizontal) / Flip (vertical) as `flip_clip` with an
     EXPLICIT value — the toggle is resolved here from the clip's current
@@ -321,8 +499,7 @@ def x_flip(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         return _ask("Flipping is not in this build — want it turned upside down instead (a 180° rotation)?")
     target = it.get("_target")
     if target == "sticker":
-        return _ask("Mirror a sticker from the Inspector: select it and press Flip horizontal in Transform. "
-                    "Which clip should I flip instead?")
+        return _flip_sticker(it, f)
     if target == "overlay" and it.get("clip_ref") is None:
         ov = [c.id for c in f.clips if (c.track or "").startswith("v") and c.track != "v1"
               and (c.track or "")[1:].isdigit()]
@@ -369,4 +546,4 @@ def x_flip(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs), notes=tuple(notes))
 
 
-__all__ = ["FILTER_TYPES", "GRADE_TYPES", "x_remove_feature", "x_clip_length", "x_flip"]
+__all__ = ["FILTER_TYPES", "GRADE_TYPES", "x_remove_feature", "x_clip_length", "x_flip", "x_retime_text"]

@@ -70,3 +70,30 @@ describe('targetCut', () => {
     expect(formatCutTime(12.345)).toBe('12.35 s')
   })
 })
+
+// Final QA: the panel's playhead is RENDER time (the ruler / the <video>),
+// while `at` is EDL time. After upstream dissolves the two differ, and the
+// target used to be the cut whose EDL time happened to equal the playhead.
+describe('render-time seams', () => {
+  // 4 × 2 s clips with a 1 s dissolve on cut 1 (at 2) and cut 2 (at 4).
+  const e = edl(
+    [media('a', 0, 2), media('b', 2, 2), media('c', 4, 2), media('d', 6, 2)],
+    [{ at: 2, type: 'fade', duration: 1 }, { at: 4, type: 'fade', duration: 1 }],
+  )
+  const cuts = v1CutPoints(e)
+
+  it('each cut knows where its seam is drawn (clip B starts in render time)', () => {
+    expect(cuts.map((c) => c.at)).toEqual([2, 4, 6])
+    expect(cuts.map((c) => c.renderAt)).toEqual([1, 2, 4])
+  })
+
+  it('a playhead on the third drawn seam targets the third cut', () => {
+    expect(targetCut(cuts, null, 4)).toMatchObject({ index: 2, reason: 'playhead' })
+    expect(targetCut(cuts, null, 2)).toMatchObject({ index: 1, reason: 'playhead' })
+  })
+
+  it('renderAt equals at without transitions', () => {
+    const plain = v1CutPoints(edl([media('a', 0, 10), media('b', 10, 10)]))
+    expect(plain[0].renderAt).toBe(10)
+  })
+})

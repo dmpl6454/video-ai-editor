@@ -467,6 +467,30 @@ describe('page hidden (§3.5)', () => {
   })
 })
 
+describe('page hidden before its visibilitychange (§3.5, WebKit)', () => {
+  // WebKit flips document.visibilityState, then dispatches the event a task
+  // later: a seek or a landed span in that gap must not append or remove
+  // (the WK hidden test lost laneA's window to a 'reset' remove there)
+  it('hiddenNow() stops every append and remove the owner has not suspended yet', async () => {
+    let hidden = false
+    const program = new TestProgram(clip(1, 0, 900))
+    const { lane, sb } = await openLane(R30, program, 0, { hiddenNow: () => hidden })
+    const interval = [...sb().interval]
+    const before = sb().log.length
+    hidden = true
+    lane.setPlayhead(420, false)       // outside the interval: a reset remove when visible
+    await new Promise((r) => setTimeout(r, 30))
+    expect(sb().log.length).toBe(before)
+    expect(sb().interval).toEqual(interval)
+    expect(lane.stats.removes).toBe(0)
+    hidden = false
+    lane.poke()                        // the owner's resume
+    await settle(lane)
+    expect(lane.isReady(420)).toBe(true)
+    expect(lane.stats.removes).toBeGreaterThan(0)
+  })
+})
+
 describe('stale frames without bytes', () => {
   it('are cut out of the interval (so playback stalls, never shows old content) and come back when loaded', async () => {
     const base = new TestProgram(clip(1, 0, 900))

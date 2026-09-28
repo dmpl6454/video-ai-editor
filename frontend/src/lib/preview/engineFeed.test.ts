@@ -109,4 +109,12 @@ describe('ProgramFeed', () => {
     feed.laneProgram().request(feed.want[0], 0, false)
     expect(store.requests).toHaveLength(1)
   })
+
+  it('a loudness gain not measured for this render makes every frame APPROX (Final QA r3)', () => {
+    const feed = new ProgramFeed(fakeStore() as unknown as ProxyStore)
+    feed.build(edl([['A', 0, 1, 0]], 1), lookup, R30, CANVAS)
+    expect(feed.classify()!.ranges).toEqual([{ k0: 0, k1: 30, mode: 0, reasons: [] }])
+    expect(feed.classify(undefined, true)!.ranges).toEqual([{ k0: 0, k1: 30, mode: 0, reasons: [] }])
+    expect(feed.classify(undefined, false)!.ranges).toEqual([{ k0: 0, k1: 30, mode: 1, reasons: ['audio:loudness'] }])
+  })
 })

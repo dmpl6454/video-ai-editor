@@ -78,14 +78,42 @@ def clip_source_to_timeline(c: Clip, t_source: float) -> float:
     need that guarantee use `source_to_timeline` / `source_range_to_timeline`,
     which walk the track. Kept unguarded so `remove_silences` can convert an
     offset it already knows is inside the slice without a redundant search.
+
+    Final QA r2: exact on a speed CURVE (the clip's own integral,
+    `Clip.timeline_offset_at`, not its mean speed — a Hero caption for source
+    second 4 sat 1 s early) and on a REVERSED clip (source `out` plays first:
+    the reversed view reads `out - t`, `render/reverse.view_range`). A
+    constant-speed forward clip keeps the linear form bit for bit, which is
+    what the identity case (`in 0, start 0, 1x`) relies on. A freeze shows
+    one frame and maps everything to its start (it plays no source range —
+    `_overlap` never matches it).
     """
+    if c.freeze is not None:
+        return c.start
+    if c.reverse:
+        return c.start + c.timeline_offset_at(c.out - t_source)
+    if c.speed_curve is not None:
+        return c.start + c.timeline_offset_at(t_source - c.in_)
     return c.start + (t_source - c.in_) / c.speed_factor
 
 
 def clip_timeline_to_source(c: Clip, t_timeline: float) -> float:
     """Inverse of `clip_source_to_timeline`: the source instant clip `c`
     shows at timeline `t_timeline`. Unguarded for the same reason."""
+    if c.freeze is not None:
+        return c.in_
+    if c.reverse:
+        return c.out - c.source_offset_at(t_timeline - c.start)
+    if c.speed_curve is not None:
+        return c.in_ + c.source_offset_at(t_timeline - c.start)
     return c.in_ + (t_timeline - c.start) * c.speed_factor
+
+
+def _clip_span_to_timeline(c: Clip, s0: float, s1: float) -> tuple[float, float]:
+    """Source span [s0, s1] of `c` as an ORDERED timeline span (a reversed
+    clip plays its later source first)."""
+    a, b = clip_source_to_timeline(c, s0), clip_source_to_timeline(c, s1)
+    return (a, b) if a <= b else (b, a)
 
 
 # ---------------------------------------------------------------- track walk
@@ -135,8 +163,8 @@ def _overlap(c: Clip, s_start: float, s_end: float) -> tuple[float, float] | Non
     point query at the exact seam between two consecutive clips resolves to
     the clip that begins there, not the one that just ended.
     """
-    if s_end < s_start:
-        return None
+    if s_end < s_start or c.freeze is not None:
+        return None     # a freeze holds one frame: it plays no source range
     if s_end == s_start:
         return (s_start, s_start) if c.in_ <= s_start < c.out else None
     lo = max(s_start, c.in_)
@@ -166,7 +194,7 @@ def source_to_timeline(edl: EDL, track_id: str, t_source: float, *,
     `out` (a region reused twice) the first in timeline order wins, matching
     the open-interval rule above.
     """
-    clips = media_clips(edl, track_id, src=src)
+    clips = [c for c in media_clips(edl, track_id, src=src) if c.freeze is None]
     for c in clips:
         if c.in_ <= t_source < c.out:
             return clip_source_to_timeline(c, t_source)
@@ -201,7 +229,7 @@ def source_range_to_timeline(edl: EDL, track_id: str, s_start: float, s_end: flo
         ov = _overlap(c, s_start, s_end)
         if ov is None:
             continue
-        out.append((clip_source_to_timeline(c, ov[0]), clip_source_to_timeline(c, ov[1])))
+        out.append(_clip_span_to_timeline(c, ov[0], ov[1]))
     return out
 
 
@@ -217,9 +245,11 @@ def _map_words_through_clip(c: Clip, words: list[dict]) -> list[dict]:
         ov = _overlap(c, float(w["start"]), float(w["end"]))
         if ov is None:
             continue
-        out.append({**w,
-                    "start": clip_source_to_timeline(c, ov[0]),
-                    "end": clip_source_to_timeline(c, ov[1])})
+        a, b = _clip_span_to_timeline(c, ov[0], ov[1])
+        out.append({**w, "start": a, "end": b})
+    if c.reverse:
+        # A reversed clip speaks its words last-first: timeline order.
+        out.sort(key=lambda w: w["start"])
     return out
 
 
@@ -283,8 +313,9 @@ def _map_segment_through_clip(c: Clip, seg: dict) -> dict | None:
         lo = kept[0]["start"]
         hi = kept[-1]["end"]
         if span_ov is not None:
-            lo = min(lo, clip_source_to_timeline(c, span_ov[0]))
-            hi = max(hi, clip_source_to_timeline(c, span_ov[1]))
+            a, b = _clip_span_to_timeline(c, *span_ov)
+            lo = min(lo, a)
+            hi = max(hi, b)
         all_kept = len(kept) == len(words)
         text = seg.get("text") if all_kept else " ".join(
             t for t in ((w.get("word") or "").strip() for w in kept) if t)
@@ -292,10 +323,8 @@ def _map_segment_through_clip(c: Clip, seg: dict) -> dict | None:
     if span_ov is None:
         return None
     text, _all = _tokens_surviving(str(seg.get("text") or ""), s, e, *span_ov)
-    return {**seg,
-            "start": clip_source_to_timeline(c, span_ov[0]),
-            "end": clip_source_to_timeline(c, span_ov[1]),
-            "text": text}
+    a, b = _clip_span_to_timeline(c, *span_ov)
+    return {**seg, "start": a, "end": b, "text": text}
 
 
 def map_segments_to_timeline(edl: EDL, track_id: str, segments: list[dict], *,
@@ -308,10 +337,11 @@ def map_segments_to_timeline(edl: EDL, track_id: str, segments: list[dict], *,
     """
     out: list[dict] = []
     for c in media_clips(edl, track_id, src=src):
-        for seg in segments:
-            piece = _map_segment_through_clip(c, seg)
-            if piece is not None:
-                out.append(piece)
+        pieces = [p for p in (_map_segment_through_clip(c, seg) for seg in segments)
+                  if p is not None]
+        if c.reverse:
+            pieces.sort(key=lambda p: p["start"])     # heard last-first
+        out.extend(pieces)
     return out
 
 

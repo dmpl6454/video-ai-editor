@@ -175,8 +175,15 @@ export interface AudioSink {
    *  audio/limiting.ts). Optional: a sink without it has none. */
   limitingFrames?(): ReadonlyArray<readonly [number, number]>
   /** Set by the engine: called when limitingFrames() changes by itself (a
-   *  source's recorded peaks landed after prepare). */
+   *  source's recorded peaks landed after prepare), or loudnessCurrent() /
+   *  the loudness gain did (refreshLoudness). */
   onLimitingChange?: (() => void) | null
+  /** The master loudness gain the sink plays was measured for the current
+   *  program's render (true) or not (false: APPROX 'audio:loudness', §7);
+   *  undefined: nothing to say (no target). Optional. */
+  loudnessCurrent?(): boolean | undefined
+  /** The loudness gain source changed: re-plan with it. Optional. */
+  refreshLoudness?(): void
   dispose?(): void
 }
 

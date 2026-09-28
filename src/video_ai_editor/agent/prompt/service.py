@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -335,6 +336,32 @@ def model_question_plan(plan: Plan) -> Plan | None:
                       needs_input=[ask(MODEL_QUESTION_KEY, _question_of(reply), kind="text")])
 
 
+def _same_question(a: str, b: str) -> bool:
+    def norm(x: str) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", (x or "").lower()).split())
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _one_line_example(joined: str) -> str:
+    """"split clip 2 — at 7 seconds" → "split clip 2 at 7 seconds"."""
+    return " ".join((joined or "").replace(ANSWER_JOIN, " ").split())[:120]
+
+
+def _replan_prompt(original: str) -> str:
+    """The first prompt as the answer re-plans it (Final QA r3): with its typos
+    fixed when the grammar reads nothing in it as typed but does once fixed
+    ("delet clip 3" stayed in every retry, so the same question came back)."""
+    from . import grammar as G
+    from .planner import _typo_fixed
+    try:
+        fixed = _typo_fixed(original)
+        if G.detect(original).hits or not G.detect(fixed).hits:
+            return original
+        return fixed
+    except Exception:  # noqa: BLE001 — never block a resume on the fixer
+        return original
+
+
 def is_model_question(plan: Plan) -> bool:
     return plan.intent == MODEL_QUESTION_INTENT and any(q.key == MODEL_QUESTION_KEY for q in plan.needs_input)
 
@@ -439,7 +466,7 @@ def apply_history_step(store: Any, verb: str) -> tuple[str, dict[str, Any] | Non
     about an edit that did not. The desktop and the phone only use an `op`
     frame as "the EDL changed, refresh", but the record they get should say
     what actually changed: the undone op mirrored, hashes swapped. Redo
-    appends its own `redo` entry, which is streamed as-is. Nothing to undo /
+    re-appends the undone op itself (marked `redo: true`), streamed as-is. Nothing to undo /
     redo → no op payload, so no client refresh for a no-op.
 
     Must be called under `api.locks.session_lock(sid)` (the caller does).
@@ -490,14 +517,38 @@ async def _history_step(store: Any, plan: Plan, *, history: list[dict]) -> Async
         yield {"type": "done"}
         return
 
-    def _work() -> tuple[str, dict[str, Any] | None]:
+    m = re.match(r"^(?:Undo|Redo) (\d+) edits$", plan.title or "")
+    count = int(m.group(1)) if m else 1
+
+    def _work() -> tuple[str, list[dict[str, Any]]]:
         with locks.session_lock(sid):
             # Re-resolve inside the lock, as the executor does: the app's LRU
             # may have evicted the object the route captured.
-            return apply_history_step(_resolver_for(store)(sid), verb)
+            live = _resolver_for(store)(sid)
+            if count == 1:
+                reply, op = apply_history_step(live, verb)
+                return reply, [op] if op is not None else []
+            # Final QA r3: "undo the last 3 edits" undid ONE and said nothing
+            # of the other two. Each step is its own ⌘Z, one reply for all.
+            done: list[str] = []
+            ops: list[dict[str, Any]] = []
+            for _ in range(count):
+                undone = live.ops.last() if verb == "undo" else None
+                reply, op = apply_history_step(live, verb)
+                if op is None:
+                    break
+                ops.append(op)
+                done.append(undone.summary if undone is not None else "an edit")
+            if not ops:
+                return f"Nothing to {verb}.", []
+            past = "Undid" if verb == "undo" else "Redid"
+            short = "" if len(ops) == count else f" (only {len(ops)} to {verb})"
+            listing = "; ".join(d[:60] for d in done)
+            return (f"{past} {len(ops)} edit{'s' if len(ops) != 1 else ''}{short}: {listing}. "
+                    f"{_REDO_HINT if verb == 'undo' else _UNDO_HINT}"), ops
 
     try:
-        reply, op = await asyncio.to_thread(_work)
+        reply, ops = await asyncio.to_thread(_work)
     except Exception as e:  # noqa: BLE001 — the turn must end with a frame, not a traceback
         text = via(label) + f"{verb.title()} failed: {type(e).__name__}: {e}"
         history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
@@ -506,7 +557,7 @@ async def _history_step(store: Any, plan: Plan, *, history: list[dict]) -> Async
         return
     text = via(label) + reply
     history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
-    if op is not None:
+    for op in ops:
         yield {"type": "op", "op": op}
     yield {"type": "text_delta", "text": text}
     yield {"type": "done"}
@@ -595,7 +646,7 @@ async def _replay(store: Any, run_id: str, *, from_index: int = 0) -> AsyncItera
 async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
                       ui_state: dict | None = None, brain: str | None = None,
                       resume_run: str | None = None, from_index: int = 0,
-                      history_text: str | None = None) -> AsyncIterator[dict]:
+                      history_text: str | None = None, asked_before: str | None = None) -> AsyncIterator[dict]:
     """One prompt turn as an SSE event stream (§4.6): facts → pending check →
     router.plan (emits `brain` events) → clarify-intent or `plan` → start_run
     → subscribe → yield until `done`.
@@ -681,6 +732,17 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         pre_events.append(evt)
         yield evt
     asked = model_question_plan(plan)
+    if asked is not None and asked_before and _same_question(asked.needs_input[0].question, asked_before):
+        # Final QA r3: the answer re-planned into the SAME question ("Where
+        # should I split?" → "at 7 seconds" → "Where should I split?" …).
+        # Asking a third time helps nobody: say what to type instead.
+        text = via(BRAIN_LABELS.get(plan.brain, plan.brain)) + (
+            "I still could not do that from your answer. Type the whole request in one line instead, like "
+            f"'{_one_line_example(user_message)}' — or use the timeline tools.")
+        history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "done"}
+        return
     if asked is not None:
         plan = asked
     if notes:
@@ -754,13 +816,28 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
             yield {"type": "error", "message": "That question needs an answer — type it, or ask again."}
             yield {"type": "done"}
             return
-        async for evt in prompt_turn(store, f"{record.get('prompt', '')}{ANSWER_JOIN}{answer}", history,
-                                     ui_state=ui_state or record.get("ui_state") or None,
-                                     history_text=user_message or answer):
+        asked_before = next((q.question for q in plan.needs_input if q.key == MODEL_QUESTION_KEY), None)
+        async for evt in prompt_turn(store, f"{_replan_prompt(record.get('prompt', ''))}{ANSWER_JOIN}{answer}",
+                                     history, ui_state=ui_state or record.get("ui_state") or None,
+                                     history_text=user_message or answer, asked_before=asked_before):
             yield evt
         if own_history:
             HISTORY.save(sid, history)
         return
+    if (plan.intent in ("clarify", "ask") and not plan.steps and answers.get("intent")
+            and any(q.key == "intent" for q in plan.needs_input)):
+        # Final QA r2: a pick from "I did not catch that. Which of these did
+        # you mean?" re-plans the ORIGINAL prompt as that intent. Binding the
+        # answer into the step-less clarify plan ended on "Nothing to change".
+        from .planner import plan_as
+        try:
+            plan = await asyncio.to_thread(plan_as, record.get("prompt", ""), str(answers["intent"]), facts)
+        except Exception as e:  # noqa: BLE001 — planning failures reach the user as text
+            pending.clear_pending(session_dir)
+            yield {"type": "error", "message": f"Planning failed: {type(e).__name__}: {e}"}
+            yield {"type": "done"}
+            return
+        answers = {k: v for k, v in answers.items() if k != "intent"}
     # Consent (§1.4): a **download** answer names the tools whose artefacts
     # the executor may fetch on THIS run — the only place that set is built.
     consented: frozenset[str] = frozenset()
@@ -780,7 +857,7 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         from .planner import apply_answers as _apply
         plan = await asyncio.to_thread(_apply, plan, answers, facts)
     except ImportError:
-        plan, notes = pending.apply_answers(plan, answers, duration=facts.duration)
+        plan, notes = pending.apply_answers(plan, answers, duration=facts.video_end or facts.duration)
         if notes:
             plan = plan.with_(reply=" ".join(([plan.reply] if plan.reply else []) + notes))
     except ValueError as e:      # PlanRejected — the answer made a plan the boundary refuses

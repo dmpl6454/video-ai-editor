@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from .tools import list_tools
 from .dispatch import dispatch as _dispatch, DISPATCH
+from .guarded import PromptRunning
 
 # MCP protocol version we advertise. We echo the client's version when it sends
 # a known one, else fall back to this.
@@ -79,12 +80,16 @@ def handle_message(
     msg: dict,
     *,
     resolve_store: Callable[[str | None], tuple[Any, str]],
+    dispatch_fn: Callable[[Any, str, str, dict], dict] | None = None,
 ) -> dict | None:
     """Handle one JSON-RPC message. Returns a response dict, or None for
     notifications (which must not produce a response).
 
     `resolve_store(session_id)` → (EDLStore, resolved_session_id). When
     session_id is None it returns the active MCP session (creating it lazily).
+    `dispatch_fn(store, sid, tool, args)` runs the tool; main passes
+    `agent.guarded.guarded_dispatch` (the `/dispatch` prompt-run refusal and
+    session lock — Final QA). Without it the bare `dispatch` runs (tests).
     """
     method = msg.get("method")
     id_ = msg.get("id")
@@ -121,13 +126,21 @@ def handle_message(
         session_id = args.pop("session_id", None)
         try:
             store, resolved = resolve_store(session_id)
-            result = _dispatch(store, name, args)
+            result = (dispatch_fn(store, resolved, name, args) if dispatch_fn is not None
+                      else _dispatch(store, name, args))
             text = json.dumps(result, default=str, ensure_ascii=False)
             return _ok(id_, {
                 "content": [{"type": "text", "text": text}],
                 "isError": False,
                 # Surface which session was edited so the agent can track it.
                 "_meta": {"session_id": resolved},
+            })
+        except PromptRunning as e:
+            # The /dispatch 409, in MCP's terms: a tool error the agent reads.
+            return _ok(id_, {
+                "content": [{"type": "text", "text": str(e)}],
+                "isError": True,
+                "_meta": {"code": e.code},
             })
         except Exception as e:  # tool errors → MCP tool error, not protocol error
             return _ok(id_, {
@@ -141,14 +154,16 @@ def handle_message(
     return _err(id_, -32601, f"method not found: {method}")
 
 
-def handle_request(body: Any, *, resolve_store) -> Any:
+def handle_request(body: Any, *, resolve_store, dispatch_fn=None) -> Any:
     """Top-level entry: handle a single message or a JSON-RPC batch.
 
     Returns the response object/array, or None if everything was a
     notification (caller should then return HTTP 202 with no body).
+    Synchronous (a tool may run for minutes): main calls it on the threadpool.
     """
     if isinstance(body, list):
-        responses = [r for r in (handle_message(m, resolve_store=resolve_store)
+        responses = [r for r in (handle_message(m, resolve_store=resolve_store,
+                                                dispatch_fn=dispatch_fn)
                                  for m in body) if r is not None]
         return responses or None
-    return handle_message(body, resolve_store=resolve_store)
+    return handle_message(body, resolve_store=resolve_store, dispatch_fn=dispatch_fn)

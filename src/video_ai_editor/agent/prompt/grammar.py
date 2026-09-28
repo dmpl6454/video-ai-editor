@@ -51,6 +51,14 @@ INTENTS: tuple[str, ...] = (
     # sliders (brightness, contrast, saturation) — and stickers, which a plan
     # may not place (add_sticker fetches artwork), so they get an honest reply.
     "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust", "sticker",
+    # Final QA: change what an existing text SAYS ("change the Summer Trip
+    # text to Winter Trip") — it ADDED a new title reading "to Winter Trip".
+    "retext",
+    # Final QA: an overlay's opacity or position ("make the overlay 50%
+    # transparent", "move the overlay to the top right corner") — no plan
+    # tool sets them yet, so the reply says where (Apple Intelligence asked
+    # "cannot remove that" / "which blend mode?" instead).
+    "transform",
     # "remove the captions / the filter / the transitions": no plan tool can
     # find those by name, so the reply says where to do it — it used to ADD
     # captions and apply a LUT (the E3 sweep's wrong edits).
@@ -133,6 +141,9 @@ class Detection:
 # --------------------------------------------------------------------------
 
 _QUOTE_RE = re.compile(r"[\"“”']([^\"“”']{1,200})[\"“”']")
+_LOWER_THIRD_TWO_LINES_RE = re.compile(
+    r"(?<=lower third)(?:\s*[:—-]\s*|\s+(?:saying|that says|reading|showing|for|with)\s+)"
+    r"[^,;:]{1,40},\s*[^,;]{1,40}?(?=\s*(?:[,;]|\band\b|\bthen\b|$))")
 _SPLIT_RE = re.compile(r"\s*(?:,|;|\bthen\b|\band then\b|\band also\b|\band\b|\bplus\b|\bafter that\b)\s*")
 
 #: `and` inside these phrases joins words, not clauses.
@@ -155,7 +166,9 @@ CLIP_PHRASE = (rf"(?:(?:the\s+|that\s+|this\s+)?(?:{ORDINAL}|selected|current|th
                rf"|(?:the\s+)?{CLIP_NOUN}\s+(?:#\s*|number\s+|no\.?\s*)?(?:\d{{1,2}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
                rf"|(?:the\s+|this\s+|that\s+|all\s+(?:the\s+|of\s+the\s+)?|every\s+|each\s+){CLIP_NOUN}\b)")
 #: "the first and second clip", "clips 1 and 2": one reference, not two clauses.
-_ORDINAL_PAIR_RE = re.compile(rf"\b({ORDINAL})\s+and\s+((?:the\s+)?{ORDINAL})\b|\b({CLIP_NOUN}\s+\d{{1,2}})\s+and\s+(\d{{1,2}})\b")
+_ORDINAL_PAIR_RE = re.compile(rf"\b({ORDINAL})\s+and\s+((?:the\s+)?{ORDINAL})\b|\b({CLIP_NOUN}\s+\d{{1,2}})\s+and\s+(\d{{1,2}})\b"
+                              # Final QA r3: "between clip 1 and clip 2" is one seam, not two edits
+                              rf"|\bbetween\s+(?:the\s+)?{CLIP_NOUN}\s+\d{{1,2}}\s+and\s+(?:the\s+)?{CLIP_NOUN}\s+\d{{1,2}}\b")
 
 
 def split_clauses(prompt: str) -> list[str]:
@@ -172,6 +185,9 @@ def split_clauses(prompt: str) -> list[str]:
         return key
 
     text = _QUOTE_RE.sub(_stash, text)
+    # Final QA: "add a lower third saying Jane Doe, Producer" — the comma is
+    # the card's second line, not a second edit.
+    text = _LOWER_THIRD_TWO_LINES_RE.sub(_stash, text)
     # "swap the first and second clip" / "between clips 2 and 3" name clips,
     # not two edits: the pair is stashed like a quote so `and` cannot split it.
     text = _ORDINAL_PAIR_RE.sub(_stash, text)
@@ -363,7 +379,12 @@ FX_NOUN = (r"(?:vignett(?:e|ing)|film grain|grain|vintage effect|vhs(?: effect| 
            r"|rgb[- ]split|chromatic aberration|sharpen(?:ing)?(?: effect)?|blur effect|flip [hv] effect)")
 REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|hide|drop|lose|kill|strip|undo)"
                   r"\s+(?:the\s+|all\s+(?:of\s+)?(?:the\s+|my\s+)?|my\s+|every\s+|that\s+|this\s+|those\s+|these\s+|both\s+)?"
-                  r"(?:black and white\s+|b ?& ?w\s+|teal (?:and |& )?orange\s+|[\"'“”][^\"'“”]{1,60}[\"'“”]\s+|[\w'-]+\s+)?"
+                  r"(?:black and white\s+|b ?& ?w\s+|teal (?:and |& )?orange\s+|[\"'“”][^\"'“”]{1,60}[\"'“”]\s+|[\w'-]+\s+"
+                  # Final QA: a NAME of up to four words ("delete the Summer
+                  # Trip title" asked what a NEW title should say) — never a
+                  # clip / position word, so "remove the clip with the title"
+                  # stays a clip delete.
+                  r"|(?:(?!(?:clips?|shots?|video|from|on|in|with|that|which|at|and|of)\b)[\w'-]+\s+){2,4})?"
                   r"(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading|effects?"
                   r"|transitions?|cross[- ]?fades?|dissolves?|text|titles?|lower thirds?|hooks?|keyframes?|zoom|ken burns"
                   r"|stickers?|emojis?|watermark|end ?card|speed ramp|speed curve|freeze(?: frame)?)\b"
@@ -372,11 +393,14 @@ REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn o
                   r"\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|that\s+|this\s+)?" + FX_NOUN + r"\b"
                   r"|\b(?:take|turn|switch|strip|get)\s+(?:the\s+|that\s+|this\s+)?" + FX_NOUN + r"\s+off\b"
                   # the particle after the object: "take the warm filter off"
-                  # (it APPLIED the warm look), "turn the captions off"
+                  # (it APPLIED the warm look), "turn the captions off";
+                  # Final QA: or `out`, with up to four words before the noun
+                  # ("take the glitch transition out", "take the transitions
+                  # out" ADDED transitions and said done).
                   r"|\b(?:take|turn|switch|strip|get|lose)\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|that\s+|this\s+)?"
-                  r"(?:black and white\s+|b ?& ?w\s+|[\w'-]+\s+)?"
+                  r"(?:black and white\s+|b ?& ?w\s+|(?:[\w'-]+\s+){1,4})?"
                   r"(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|grades?|grading|transitions?"
-                  r"|cross[- ]?fades?|dissolves?|text|titles?|lower thirds?|hooks?)\s+off\b")
+                  r"|cross[- ]?fades?|dissolves?|text|titles?|lower thirds?|hooks?)\s+(?:off|out)\b")
 #: A clip's LENGTH on the timeline (wave E, F4b): "trim the second clip to 2
 #: seconds", "make the first clip 3 seconds long", "clip 2 should be 1.5 s".
 #: Never "trim 2 seconds off the second clip" (a range) nor "make it 30s" (the
@@ -407,6 +431,40 @@ _ZOOM = (r"^(?!.*\btransitions?\b)(?!.*\bhook\b)(?!.*\b(?:music|volume|audio|sou
          r"|\b(?:zoom|scale|enlarge|magnify)\b[^%]*?\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)"
          r"|\bzoom (?:it|this|that|the [\w ]{0,20}?clip)\b)")
 
+#: The overlay nouns a retext / a removal by name may name.
+_TEXT_NOUN = r"(?:text|title|heading|headline|lower[- ]?third|name\s+(?:card|tag|plate)|label|super)"
+#: What an existing text should SAY (Final QA): "change the Summer Trip text
+#: to Winter Trip", "rename the title to Winter Trip", "edit the text so it
+#: says Hello World", "change the title to say Winter Trip", "fix the typo in
+#: the title, it should say Summer Trips", "replace 'Summer Trip' with
+#: 'Winter Trip'". Never a look change ("change the title font / colour /
+#: size") and never "replace the title with a lower third".
+_RETEXT_MARKER = (r"(?:to\s+say|to\s+read|so\s+(?:that\s+)?it\s+(?:says|reads)|(?:it\s+|that\s+)?should\s+(?:say|read)"
+                  r"|(?:and\s+)?make\s+it\s+(?:say|read)|with|into|to)")
+RETEXT = (r"^(?!.*\b(?:font|colou?r|size|bigger|smaller|larger|bold|italic|style|position|animation|opacity"
+          r"|transparent|move|placement)\b)"
+          r".*?\b(?:change|rename|edit|replace|fix|update|correct|retype|reword|swap|alter)\s+"
+          r"(?:[\w'’-]+\s+){0,6}?" + _TEXT_NOUN + r"s?\b"
+          r"[^\n]*?\b" + _RETEXT_MARKER + r"\s+"
+          r"(?!(?:a|an|some|the|my)\s+(?:new\s+)?(?:lower|title|text|caption|sticker|hook|animation|effect"
+          r"|transition|font|colou?r|different\s+(?:font|colou?r|style))\b)\S"
+          r"|\breplace\s+[\"'“‘][^\"'“”‘’]{1,60}[\"'”’]\s+with\s+[\"'“‘]"
+          r"|\b(?:change|rename|edit|fix|update|correct)\s+[\"'“‘][^\"'“”‘’]{1,60}[\"'”’]\s+(?:to|into)\s+\S")
+
+#: An overlay's opacity or its place on the canvas (Final QA) — never the
+#: captions (their position is a caption look) and never a CLIP's order on
+#: the timeline ("move the second clip to the end" is move_clip).
+_OVERLAY_NOUN = (r"(?:overlays?|pips?|picture[- ]in[- ]pictures?|stickers?|emojis?|logos?|watermarks?|text|titles?"
+                 r"|lower[- ]?thirds?|top\s+(?:clip|layer|video)|images?|photos?|pictures?)")
+TRANSFORM_REQUEST = (
+    rf"^(?!.*\b(?:captions?|subtitles?|subs)\b)(?=.*\b{_OVERLAY_NOUN}\b)"
+    r".*(?:\b\d{1,3}\s*(?:%|percent)\s+(?:transparen(?:t|cy)|opacity|opaque|see[- ]through)"
+    r"|\b(?:transparen(?:t|cy)|opacity|see[- ]through|translucent|semi[- ]?transparent)\b)"
+    rf"|\b(?:move|put|place|position|drag|shift|slide|push)\s+(?:the\s+|my\s+|that\s+|this\s+)?{_OVERLAY_NOUN}\s+"
+    r"(?:(?:to|into|in|at|on|towards?)\s+)(?:the\s+)?(?:(?:top|bottom|upper|lower)(?:[- ](?:left|right))?|left|right"
+    r"|(?:top|bottom|upper|lower)?\s*(?:left|right)?\s*corner|cent(?:er|re)|middle)\b"
+)
+
 #: (regex, intent, score) checked in order BEFORE the phrase table (§2.3).
 CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # QA-018: a fade to/from black anchored at the END / START of the video is
@@ -417,6 +475,9 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
      r"|\bfade (?:in |up )?from black (?:at|in|for) (?:the )?(?:very )?(?:start|beginning|opening|intro)\b"
      r"|\b(?:end|finish|close) (?:it |the video |everything )?(?:with|on) a fade(?: out| to black)?\b", "fade", EXACT),
     (r"\bcut(?:s|ting)?\s+(?:it\s+|this\s+|the\s+video\s+)?(?:to|on|with|along)\s+the\s+(?:beat|music|rhythm|drums?|bpm)\b|\bcut to the beat\b|\bon the beat\b|\bbeat[- ]sync\b|\bsync(?:ed)?\s+to\s+the\s+(?:beat|music)\b|\bbeat[- ]match\b", "beat_sync", EXACT),
+    # Final QA: a text's new wording before the voiceover "say" row and the
+    # title row that ADDED a second title.
+    (RETEXT, "retext", EXACT),
     # Wave E (F3): taking a VOICE effect off ("remove the voice effect", "turn
     # off the echo") before the generic "remove the ___ effect" row.
     (_VV.VOICE_OFF_PHRASE, "voice_effect", EXACT),
@@ -424,7 +485,17 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # sticker bounce in", "slide the last clip out", "remove the animation")
     # before the remove-feature and Ken Burns zoom rows.
     (_AV.ANIM_PHRASE, "animation", EXACT),
+    (TRANSFORM_REQUEST, "transform", EXACT),
     (REMOVE_FEATURE, "remove_feature", EXACT),
+    # Final QA: taking the VOICE-OVER itself away ("remove the voiceover",
+    # "delete the narration", "take the voiceover out") offered a NEW spoken
+    # voice-over. Never "remove the voiceover's echo" (a voice effect) or a
+    # level/noise clause about it.
+    (r"\b(?:remove|delete|get rid of|take out|take off|drop|lose|kill|clear|scrap|ditch|trash)\s+"
+     r"(?:the\s+|my\s+|that\s+|this\s+|all\s+(?:of\s+)?(?:the\s+|my\s+)?|every\s+)?"
+     r"(?:voice[- ]?overs?|narrations?|vo|voice\s+track|voice[- ]?over\s+(?:track|clips?|recordings?))\b"
+     r"(?!['’]s)(?!\s+(?:effects?|filters?|changer|volume|level|gain|noise|echo|reverb|sound)\b)"
+     r"|\b(?:take|get)\s+(?:the\s+|my\s+|that\s+)?(?:voice[- ]?overs?|narration|vo)\s+out\b", "remove_feature", EXACT),
     (CLIP_LENGTH, "clip_length", EXACT),
     (_ZOOM, "zoom", EXACT),
     # "export in 4k" is the 4K export preset, not an AI upscale of every clip.
@@ -435,7 +506,10 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # CapCut's "cut" at a moment is its Split: "cut it at 6s", "cut here";
     # "chop / slice / snip it at 00:06" too (review RD3: those asked which
     # part to cut).
-    (r"\b(?:cut|chop|slice|snip)\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+)?"
+    # Final QA r2: with a clip named first too — "cut clip 2 at 7 seconds"
+    # planned a range cut and asked "Which part should I cut?" forever.
+    (rf"\b(?:cut|chop|slice|snip)\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+"
+     rf"|{CLIP_PHRASE}\s+)?"
      r"(?:(?:right\s+)?(?:at|@)\s+(?:\d|the playhead\b|the cursor\b|this point\b)|here\b|in (?:two|half) at\b)", "split", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:ums?|uhs?|umms?|filler(?:s| words?)|hesitations?|stutters?)\b", "remove_fillers", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:silences?|pauses?|dead air|gaps?|quiet parts?)\b", "remove_silences", EXACT),
@@ -456,11 +530,18 @@ _FADE_OBJECT = (r"video|clip|clips|first clip|last clip|opening clip|final clip|
 
 #: intent → list of (regex, score). First match per pattern; best score wins.
 PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
-    "undo": ((r"^(?:undo|undo that|undo it|undo the last(?: one| edit| change)?|go back|revert(?: that| it)?|take that back|ctrl ?z|cmd ?z|wapas karo|wapas)$", EXACT),
+    "undo": ((r"^(?:undo|undo that|undo it|undo the last(?: one| edit| change)?|go back|revert(?: that| it)?|take that back|ctrl ?z|cmd ?z|wapas karo|wapas)$"
+              # Final QA r3: a count ("undo the last 3 edits", "undo twice")
+              r"|^(?:undo|revert)\s+(?:the\s+)?(?:last\s+)?(?:\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\s+"
+              r"(?:edits?|changes?|steps?|things?|actions?)$|^undo\s+(?:that\s+)?(?:twice|(?:\d{1,2}|two|three|four|five)\s+times)$", EXACT),
              (r"\bundo\b|\brevert\b", SYNONYM)),
     "redo": ((r"^(?:redo|redo that|redo it|redo the last(?: one| edit)?)$", EXACT), (r"\bredo\b", SYNONYM)),
     "auto_edit": ((r"\b(?:auto[- ]?edit|full edit|complete (?:the )?(?:video|edit)|finish (?:the |this )?(?:video|edit)|do (?:the|a) (?:whole|full|complete) (?:edit|thing)|edit (?:the|this) (?:whole )?video|make (?:it|this) (?:ready|good|great|perfect|nice)|make it pop|polish (?:it|this|the video)|do everything|clean this up for|get (?:it|this) ready for|prepare (?:it|this) for|optimi[sz]e (?:it|this) for|turn this into a (?:reel|tiktok|short|youtube video)|make (?:a|this a|it a) (?:reel|tiktok|short))\b", EXACT),
-                  (r"\b(?:for|ready for|good for|great for|fit for)\s+(?:instagram|reels|tiktok|youtube|shorts|linkedin|a reel|a short)\b", SYNONYM),
+                  # Final QA: never when the clause names a frame shape — an
+                  # explicit ratio is a reframe, not an automatic edit.
+                  (r"^(?!.*(?:\b(?:9:16|16:9|1:1|4:5|4:3|21:9|vertical|square|portrait|landscape|widescreen|horizontal"
+                   r"|aspect|ratio)\b|\b\d{3,4}\s*x\s*\d{3,4}\b))"
+                   r".*\b(?:for|ready for|good for|great for|fit for)\s+(?:instagram|reels|tiktok|youtube|shorts|linkedin|a reel|a short)\b", SYNONYM),
                   (r"\bedit (?:it|this)\b|\bfix (?:it|this) up\b|\bmake it better\b|\bimprove (?:it|this)\b", WEAK)),
     "translate_captions": ((r"\btranslate\b|\btranslation\b|\banuvad\b", EXACT),
                            (r"\bcaptions?\s+(?:in|into|to)\s+(?:hindi|hinglish|english|spanish|hi|en|es)\b|\b(?:hindi|hinglish|english|spanish)\s+(?:captions?|subtitles?)\b", SYNONYM)),
@@ -475,7 +556,10 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 (r"\bsnappier\b|\bpacier\b|\bfaster paced\b|\bless rambling\b|\bconcise\b", SYNONYM)),
     "shorts": ((r"\b(?:make|create|generate|give me|produce|extract|pull|find|get)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some|a couple of)?\s*(?:short|vertical|quick|viral|best)?\s*(?:shorts?|clips?|highlights?|reels?|snippets?|teasers?|moments)\b(?! (?:transitions?|captions?))(?!\s+(?:#\s*|number\s+)?(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b)|\bhighlights? reel\b|\bbest (?:bits|moments|parts)\b|\bsplit (?:it|this) into (?:\d+|shorts|clips)\b|\bchop (?:it|this) (?:up )?into\b|\bmake shorts\b|\bshorts out of (?:this|it)\b", EXACT),
                (r"\bhighlights?\b|\bclip (?:it|this) up\b|\bviral moments?\b", SYNONYM)),
-    "reframe": ((r"\b(?:make|turn|flip|convert|reframe|crop|resize|change)\s+(?:it|this|the video|the canvas|the aspect(?: ratio)?)?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b"
+    "reframe": ((r"\b(?:make|turn|flip|convert|reframe|crop|resize|change|set|switch|put)\s+(?:it|this|the video|the canvas|the aspect(?: ratio)?"
+                 # Final QA: "set it to 4:5 for instagram", "change the ratio to
+                 # 9:16 for youtube shorts" ran a whole automatic edit
+                 r"|the (?:(?:aspect )?ratio|format|size|shape|frame|canvas size|video size|dimensions))?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b"
                  # QA-018 live pass: "make it fit a phone screen", "turn this into a phone video"
                  r"|\b(?:fit|for|into|onto)\s+(?:a\s+|the\s+)?(?:phone|mobile)(?:\s+(?:screen|video|format))?\b", EXACT),
                 (r"\bvertical\b|\bportrait\b|\blandscape\b|\bsquare\b|\b9:16\b|\b16:9\b|\b1:1\b|\b4:5\b", SYNONYM)),
@@ -564,6 +648,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"(?:volume|level|gain|audio|sound)\s+(?:of|on|for|in)\s+{CLIP_PHRASE}"
                 rf"|\bmake\s+{CLIP_PHRASE}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?(?:louder|quieter|softer)\b"
                 rf"|\b(?:turn|bring)\s+{CLIP_PHRASE}\s+(?:up|down)\b"
+                # Final QA r2: "turn down clip 2 by 6 decibels" (particle first)
+                # was unread and went to Apple Intelligence, which raised the MUSIC.
+                rf"|\b(?:turn|bring)\s+(?:up|down)\s+{CLIP_PHRASE}"
                 # Review RE: "raise the first clip's volume by 3 db" moved the
                 # PROJECT loudness target; "lower clip 2 by 4 dB" was unread.
                 rf"|\b(?:lower|raise|reduce|increase|boost|drop|decrease|lift|turn\s+(?:up|down)|bring\s+(?:up|down))\s+"
@@ -601,7 +688,12 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               (r"\bmusic\b|\bsoundtrack\b|\bsong\b|\btune\b", WEAK)),
     "hook": ((r"\b(?:add|put|write|create|give (?:it|me)|make|need|i want|generate|open with)\s+(?:a\s+|an\s+|the\s+|some\s+|a\s+\w+\s+)?(?:hook|opener|opening (?:line|text|title|hook)|cold open|scroll[- ]stopper|attention grabber|punchy (?:intro|opening|start))\b|\bhook (?:it|this|them|the viewer)\b|\b(?:a |the )?hook\b|\bstop the scroll\b|\bgrab attention\b|\bpunchy (?:intro|opening|start)\b|\bfirst (?:3|three) seconds\b", EXACT),
              (r"\bintro text\b|\bopening text\b|\bopener\b|\battention\b", SYNONYM)),
-    "color_look": ((r"\b(?:give|make|apply|add|put|use|grade|colou?r[- ]grade|slap on|throw on|set)\s+(?:it|this|the video|the footage|the clips?)?\s*(?:a\s+|an\s+|the\s+|some\s+)?(?:\w+[- ])?(?:look|grade|lut|filter|tone|vibe|feel|colou?r(?:s| grade| grading| correction| look)?|preset|teal[- ]orange|black and white|b ?and ?w)\b|\b(?:cinematic|warm(?:er)?|cool(?:er)?|cold|punchy|vivid|faded|vintage|retro|film|moody|teal(?: and orange| orange)?|black and white|monochrome|b ?and ?w|greyscale|grayscale)\s+(?:look|grade|lut|filter|tone|vibe|feel|colou?rs?|preset|footage)\b|\bmake (?:it|this|everything|the (?:video|footage|colou?rs?)) (?:more )?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w|pop)\b|\bapply (?:a |the )?lut\b|\bcolou?r[- ]?grad(?:e|ing)\b|\blut\b", EXACT),
+    "color_look": ((r"\b(?:give|make|apply|add|put|use|grade|colou?r[- ]grade|slap on|throw on|set)\s+(?:it|this|the (?:(?:whole|entire|full) )?(?:video|footage|thing)|the clips?)?\s*(?:a\s+|an\s+|the\s+|some\s+)?(?:\w+[- ])?(?:look|grade|lut|filter|tone|vibe|feel|colou?r(?:s| grade| grading| correction| look)?|preset|teal[- ]orange|black and white|b ?and ?w)\b|\b(?:cinematic|warm(?:er)?|cool(?:er)?|cold|punchy|vivid|faded|vintage|retro|film|moody|teal(?: and orange| orange)?|black and white|monochrome|b ?and ?w|greyscale|grayscale)\s+(?:look|grade|lut|filter|tone|vibe|feel|colou?rs?|preset|footage)\b|\bmake (?:it|this|everything|the (?:(?:whole|entire|full) )?(?:video|footage|thing|clips?|colou?rs?)) (?:more )?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w|pop)\b|\bapply (?:a |the )?lut\b|\bcolou?r[- ]?grad(?:e|ing)\b|\blut\b"
+                    # Final QA r2: a look on a NAMED clip ("make the second clip
+                    # black and white" was unread; Apple Intelligence then graded it)
+                    rf"|\b(?:make|turn)\s+{CLIP_PHRASE}\s+(?:more\s+)?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?"
+                    r"|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w"
+                    r"|gr[ae]yscale)\b", EXACT),
                    (r"\bcinematic\b|\bwarm\b|\bvintage\b|\bcolou?rs?\b|\bfilter\b|\bmoody\b", SYNONYM)),
     "clean_audio": ((r"\b(?:clean(?: up)?|fix|improve|enhance|de-?noise|denoise|reduce (?:the )?(?:background )?noise (?:in|on|of))\s+(?:up\s+)?(?:the\s+|my\s+|this\s+)?(?:audio|sound|voice|speech|mic|recording|hiss|hum|background noise|noise)\b|\bnoise (?:reduction|removal|cancel\w*)\b|\bremove (?:the )?(?:background )?(?:noise|hiss|hum|buzz|static)\b|\bdenois\w+\b|\baudio (?:clean ?up|enhance\w*|repair)\b|\bmake (?:the )?(?:audio|sound|voice) (?:clearer|cleaner|better|crisper)\b|\bbackground noise\b", EXACT),
                     (r"\bnoisy\b|\bhiss\b|\bhum\b|\bmuffled\b|\baudio\b", SYNONYM)),
@@ -614,7 +706,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                r"|\bspeed[- ]?(?:ramp|curve)s?\b|\bspeed[- ]?ramp(?:ing|ed)?\b|\bbullet[- ]?time\b"
                # "the intro drags": too slow, said as a complaint (wave D3, E3)
                r"|^(?!.*\b(?:music|song|track|beat)\b).*\b(?:drags?|dragging|feels? (?:too )?(?:slow|long)|(?:is|are|feels?) too slow)\b", EXACT),
-              (r"\b(?:slow|speed)\s+(?:that|the\s+[\w ]{0,20}?(?:clip|video|footage|shot|part|bit|section))\s+(?:down|up)\b|\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
+              (r"\b(?:slow|speed)\s+(?:that|the\s+[\w ]{0,20}?(?:clip|video|footage|shot|part|bit|section))\s+(?:down|up)\b"
+               # Final QA r3: "slow clip 3 down", "speed clip two up"
+               rf"|\b(?:slow|speed)\s+{CLIP_PHRASE}\s+(?:(?:a\s+)?(?:little|bit|lot|touch)\s+)?(?:down|up)\b|\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
               (r"\bspeed\b|\bquick(?:er)?\b|\btempo of the video\b", SYNONYM)),
     # CapCut's Freeze (wave D): hold the frame at a moment. "freeze frame"
     # used to reach the on-device model and come back as a title (RD2).
@@ -627,7 +721,11 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                r"|\bsplit (?:it |the clip )?(?:at|on) the playhead\b|\bcut (?:it|the clip) in (?:two|half) at\b"
                # CapCut's Split button: "split here", "split this clip" = at the playhead
                r"|\bsplit\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?clip\s+)?(?:right\s+)?(?:here|now|at the cursor)\b"
-               r"|^split(?:\s+(?:it|this|that|the (?:\w+ )?clip|this clip))?$", EXACT),),
+               r"|^split(?:\s+(?:it|this|that|the (?:\w+ )?clip|this clip))?$"
+               # Final QA r3: "split clip 2", "split the third clip at 7s",
+               # "cut clip one in half" (a named clip; its time, or a question)
+               rf"|\bsplit\s+{CLIP_PHRASE}"
+               rf"|\b(?:cut|split|chop|slice)\s+(?:{CLIP_PHRASE}|it|this|that)\s+(?:in|into)\s+(?:half|two|2)\b", EXACT),),
     # --- Wave D3 (E3): the CapCut clip edits ------------------------------
     "delete_clip": ((_DELETE_CLIP, EXACT),),
     "duplicate": ((rf"\b(?:duplicate|copy|clone|repeat)\s+{CLIP_PHRASE}(?!\s*'s\b)"
@@ -655,6 +753,8 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 r"|\b(?:it'?s|it is|looks?|the (?:video|clip|footage|picture) (?:is|looks))\s+(?:way |far |a bit |a little |too |very |so )*(?:too )?(?:dark|bright|dull|washed out|flat|oversaturated)\b", EXACT),
                (r"\bbrighter\b|\bdarker\b|\bbrightness\b|\bcontrast\b|\bsaturation\b|\bexposure\b", SYNONYM)),
     "remove_feature": ((REMOVE_FEATURE, EXACT),),
+    "retext": ((RETEXT, EXACT),),
+    "transform": ((TRANSFORM_REQUEST, EXACT),),
     # Stickers are placed from the Stickers panel: `add_sticker` fetches its
     # artwork from a CDN, so a plan may not name it (schema.PLAN_DENY).
     "sticker": ((r"\bstickers?\b|\bemojis?\b|\bgifs?\b|\bheart (?:icon|emoji|sticker)\b", EXACT),),
@@ -765,6 +865,9 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("adjust", "color_look"), ("adjust", "loudness"), ("duplicate", "trim"), ("move_clip", "trim"),
     ("move_clip", "reverse"), ("rotate", "transitions"), ("sticker", "title"), ("sticker", "brand"),
     ("rotate", "flip"),
+    # Final QA r3: "flip the sticker horizontally" is a flip of the sticker
+    # there, not a request to ADD one ("Want a sticker?")
+    ("flip", "sticker"),
     # Wave E (F2): a canvas / blend clause names the background or the
     # overlay; the look, colour and title readings of its words lose.
     ("canvas", "color_look"), ("canvas", "adjust"), ("canvas", "transitions"), ("canvas", "title"),
@@ -785,8 +888,23 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: A speed curve BY NAME ("flash in speed curve", "jump cut speed ramp") and
+#: taking a speed curve off (Final QA r2). Checked before every other row:
+#: the transitions row read "flash … on the second clip" as a Flash
+#: transition at every cut, the cut/trim rows read "jump CUT", and the
+#: remove-feature row refused "remove the speed curve" (telling the user to
+#: press Delete, which deletes the clip).
+_SPEED_CURVE_FIRST_RE = re.compile(
+    r"\b(?:montage|hero|bullet|jump[- ]?cut|flash[- ]?(?:in|out)|ramp[- ]?(?:up|down))\s+(?:speed\s+)?"
+    r"(?:ramp|curve|preset)s?\b"
+    r"|\b(?:remove|reset|clear|delete|drop|undo|lose|kill|strip|take\s+(?:off|out)|get\s+rid\s+of|turn\s+off)\s+"
+    r"(?:the\s+|its\s+|any\s+|this\s+|that\s+)?speed[- ]?(?:ramp|curve)s?\b")
+
+
 def _resolve_clause(clause: str) -> tuple[str, float] | None:
     """The single best intent for one clause."""
+    if _SPEED_CURVE_FIRST_RE.search(clause):
+        return "speed", EXACT
     for rx, intent, score in _CUT_COMPILED:
         if rx.search(clause):
             return intent, score
@@ -859,6 +977,24 @@ def _clause_slots(clause: str, whole: S.Slots) -> S.Slots:
     return own
 
 
+_RETEXT_RX = re.compile(RETEXT)
+
+
+def _whole_prompt_retext(prompt: str, hits: list[IntentHit], whole: S.Slots) -> list[IntentHit]:
+    """"fix the typo in the title, it should say Summer Trips" (Final QA): the
+    clause split puts the noun and the new words in different clauses, so the
+    title clause asked what to ADD and the "say" clause planned a spoken
+    voice-over. When the whole prompt reads as a retext, the clauses inside
+    the match become ONE retext hit."""
+    text = S.normalize(prompt)
+    m = _RETEXT_RX.search(text)
+    if not m:
+        return hits
+    span = text[m.start():]
+    keep = [h for h in hits if h.clause not in span or h.intent not in ("title", "voiceover", "ask", "remove_feature")]
+    return keep + [IntentHit(intent="retext", score=EXACT, clause=span, slots=_clause_slots(span, whole))]
+
+
 def detect(prompt: str) -> Detection:
     clauses = tuple(split_clauses(prompt))
     whole = S.extract(prompt)
@@ -890,6 +1026,8 @@ def detect(prompt: str) -> Detection:
         intent, score = resolved
         hits.append(IntentHit(intent=intent, score=score, clause=clause,
                               slots=_clause_slots(clause, whole), template=template))
+    if not any(h.intent == "retext" for h in hits):
+        hits = _whole_prompt_retext(prompt, hits, whole)
     # undo/redo are whole-prompt intents: "undo that and add music" is a
     # sequence the executor cannot honour in one op, so undo alone wins.
     if hits and hits[0].intent in ("undo", "redo") and _UNDO_ONLY.match(S.normalize(prompt)):

@@ -275,11 +275,43 @@ _FX_TYPES: tuple[tuple[re.Pattern, str], ...] = (
 _SAYS_RE = re.compile(r"\b(?:that|which)\s+(?:says|reads|said|read)\s+(.{1,60})$|\bsaying\s+(.{1,60})$")
 
 
+#: Transition words that name the NOUN, not one look ("remove the dissolve"
+#: is any transition; a stored "crossdissolve" must not make it miss).
+_GENERIC_TRANSITION_WORDS = frozenset({"fade", "dissolve", "crossfade", "crossdissolve", "cut", "none"})
+
+
+def _transition_type_in(clause: str) -> str | None:
+    """The one transition LOOK a removal names ("take the glitch transition
+    out", "remove the wipe"), canonical, or None (Final QA: the look was
+    ignored, so a named transition asked "which one?" or took them all)."""
+    from ...render import transitions as T
+    for name in sorted(T.all_names(), key=len, reverse=True):
+        if name in _GENERIC_TRANSITION_WORDS:
+            continue
+        if re.search(rf"\b{re.escape(name)}\b", clause):
+            return T.canonical(name)
+    return None
+
+
 def _remove(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     clause = hit.clause
     what = next((v for rx, v in _REMOVE_WHAT if rx.search(clause)), "other")
     fx = [t for rx, t in _FX_TYPES if rx.search(clause)]
     said = _SAYS_RE.search(clause)
+    if what == "other" and not fx and re.search(r"\bglitch(?:es|y)?\b", clause):
+        # Final QA: "remove the glitch effect" (a 0.8.0 release-notes phrase)
+        # refused — Glitch is a TRANSITION in the app (TransitionsPanel
+        # "Glitch/Stylised"), or the RGB Split effect; the expander picks the
+        # one the timeline has.
+        return {"what": "other", "_glitch": True, "all": True}
+    if what == "other" and not fx and re.search(r"\b(?:all|every|any)\s+(?:the\s+|of\s+the\s+)?effects\b"
+                                               r"|\beffects\s+(?:from|off|on)\b", clause):
+        # Final QA r2: "clear all effects from clip 2" was refused (and told
+        # the user to press Delete) although remove_effects exists.
+        return {"what": "filter", "_all_fx": True, "clip_ref": G.clip_ref_of(clause), "all": True}
+    if what == "other" and not fx and re.search(r"\b(?:voice[- ]?overs?|narrations?|vo|voice\s+track)\b", clause):
+        # Final QA: "remove the voiceover" — the voice-over lane's clips.
+        return {"what": "other", "_voiceover": True, "all": True}
     if fx and what in ("filter", "other"):
         what = "filter"                       # an Effects-panel effect by name
     out: dict[str, Any] = {"what": what, "all": bool(_PLURAL_REMOVE_RE.search(clause))}
@@ -295,6 +327,7 @@ def _remove(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
         w = _WHICH_TR_RE.search(clause)
         out["_which"] = {"first": "first", "opening": "first"}.get(w.group(1), "last") if w else None
         out["_at"] = _at_seconds(clause)
+        out["_type"] = _transition_type_in(clause)
     elif what == "text":
         out["_role"] = ("lower_third" if re.search(r"\blower thirds?\b", clause)
                         else "hook" if re.search(r"\bhooks?\b", clause) else None)
@@ -302,7 +335,19 @@ def _remove(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
             out["text"] = c.quoted_text[0]
         elif said:
             out["text"] = (said.group(1) or said.group(2)).strip(" .!?")   # "the text that says subscribe"
+        else:
+            # Final QA: "delete the Summer Trip title" — the words before the
+            # noun are the text's own (not an ordinal or a position).
+            m = _NAMED_TEXT_RE.search(clause)
+            if m and not _NOT_A_TEXT_NAME.search(m.group(1)):
+                out["text"] = m.group(1).strip()
     return out
+
+
+_NAMED_TEXT_RE = re.compile(r"\b(?:the|my|that|this)\s+((?:[\w'-]+\s+){1,4}?)(?:text|title|heading|headline"
+                            r"|lower[- ]?third|label|hook|super)s?\b")
+_NOT_A_TEXT_NAME = re.compile(r"\b(?:first|second|third|last|final|opening|closing|main|big|small|top|bottom|new"
+                              r"|old|current|only|all|every|both|black|white|and|b|w|on|in|of|at|from)\b")
 
 
 def _flip(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
@@ -382,9 +427,30 @@ def _ord_num(word: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+#: Final QA r3: "between the first two clips" (1) / "the last two clips" (-1),
+#: "between clip 1 and clip 2", "between the 2nd and 3rd" (no noun).
+_SEAM_FIRST_TWO_RE = re.compile(rf"\bbetween\s+(?:the\s+)?(?:first|opening)\s+(?:two|2)\s+{G.CLIP_NOUN}")
+_SEAM_LAST_TWO_RE = re.compile(rf"\bbetween\s+(?:the\s+)?(?:last|final|closing)\s+(?:two|2)\s+{G.CLIP_NOUN}")
+_SEAM_CLIP_CLIP_RE = re.compile(rf"\bbetween\s+(?:the\s+)?{G.CLIP_NOUN}\s+(\d{{1,2}})\s+(?:and|&)\s+"
+                                rf"(?:the\s+)?(?:{G.CLIP_NOUN}\s+)?(\d{{1,2}})\b")
+_SEAM_ORD_ORD_RE = re.compile(rf"\bbetween\s+(?:the\s+)?({G.ORDINAL})\s+(?:{G.CLIP_NOUN}\s+)?(?:and|&)\s+"
+                              rf"(?:the\s+)?({G.ORDINAL})\b")
+
+
 def seam_index(clause: str) -> int | None:
     """The seam a transition clause names: "between the first and second
-    clip" → 1, "between clips 2 and 3" → 2, "after the second clip" → 2."""
+    clip" → 1, "between clips 2 and 3" → 2, "after the second clip" → 2,
+    "between the first two clips" → 1, "between the last two clips" → -1."""
+    if _SEAM_FIRST_TWO_RE.search(clause):
+        return 1
+    if _SEAM_LAST_TWO_RE.search(clause):
+        return -1
+    for rx in (_SEAM_CLIP_CLIP_RE, _SEAM_ORD_ORD_RE):
+        pm = rx.search(clause)
+        if pm:
+            a, b = _ord_num(pm.group(1)), _ord_num(pm.group(2))
+            if a is not None and b is not None:
+                return min(a, b) if abs(a - b) == 1 else None
     m = _SEAM_PAIR_RE.search(clause)
     if not m:
         return None

@@ -42,6 +42,13 @@ export function videoFingerprintOf(edl: EDL | null): string {
       id: t.id,
       z: t.z,
       muted: t.muted,
+      // Solo and a music duck change only the SOUND: the server takes its
+      // cheap audio remux for them. They were missing, so neither was heard
+      // until the next picture edit, and the Instant preview's loudness gain
+      // (render/preview_loudness.audio_key, which has them) never became
+      // current again after one (Final QA r3).
+      solo: (t as unknown as { solo?: unknown }).solo,
+      duck: (t as unknown as { duck?: unknown }).duck,
       transitions: (t as unknown as { transitions?: unknown }).transitions,
       // A PIP lane's clips are reduced to what still affects the RENDER: its
       // audio (pip.py keeps mixing that) and the timing that positions it.

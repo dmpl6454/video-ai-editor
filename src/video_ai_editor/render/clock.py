@@ -103,5 +103,38 @@ def render_window(src: EDL | SeamTable, start: float, end: float
     return rs, re
 
 
+def sound_window(src: EDL | SeamTable, start: float, length: float
+                 ) -> tuple[float, float] | None:
+    """`[render_time(start), render_time(start) + length)` for a SOUND lane
+    (`schema.sound_lane`: music, voiceover, audio tracks), or None for a clip
+    with no length.
+
+    Final QA (round 3): unlike `render_window` it never shrinks. A
+    transition overlaps the main-track PICTURES; a voiceover running across
+    it is not two pictures sharing frames, and shrinking its window cut its
+    last words by every seam it crossed (a 7 s voiceover over a dissolve and
+    a clock wipe lost 0.9 s of speech). It still starts where its start
+    plays, so a bed authored under a word dips where the word is heard."""
+    if length <= SEAM_EPS:
+        return None
+    rs = render_time(src, start)
+    return rs, rs + float(length)
+
+
+def sound_windows(clips, seams: SeamTable) -> dict[str, tuple[float, float]]:
+    """`sound_window`s of every clip of ONE sound lane, by id — a run of
+    abutting clips (a split voiceover, a looped bed) placed as one block,
+    pulled by the overlap before its first clip (`schema.sound_pulls`), so
+    the pieces stay back to back instead of overlapping at every seam."""
+    from ..edl.schema import Clip, sound_pulls
+    pulls = sound_pulls(list(clips), list(seams))
+    out: dict[str, tuple[float, float]] = {}
+    for c in clips:
+        if isinstance(c, Clip) and c.effective_duration > SEAM_EPS:
+            rs = float(c.start) - pulls.get(c.id, 0.0)
+            out[c.id] = (rs, rs + float(c.effective_duration))
+    return out
+
+
 __all__ = ["SeamTable", "SEAM_EPS", "seam_table", "overlap_before",
-           "render_time", "render_window"]
+           "render_time", "render_window", "sound_window", "sound_windows"]

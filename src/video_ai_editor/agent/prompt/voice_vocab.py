@@ -60,6 +60,14 @@ VOICE_OFF_PHRASE = (
     rf"(?:the\s+|my\s+|that\s+|this\s+|all\s+(?:the\s+)?)?(?:{STRONG_WORD}\s+)?(?:voice[- ]?(?:effects?|changer|filters?)|{STRONG_WORD})\b"
     r"|\b(?:normal|natural|original|regular)\s+voice\s+(?:again|back)\b|\bvoice\s+back\s+to\s+normal\b"
     r"|\bno\s+(?:more\s+)?voice\s+effects?\b"
+    # Final QA: the particle AFTER the object — "turn the robot voice off",
+    # "switch the voice changer off" — used to fall through to the ADD row
+    # and turn Robot ON while replying "done". A named effect, or the voice
+    # effect/changer/filter noun, then `off`/`out` ("turn the voice off"
+    # alone stays a mute).
+    rf"|\b(?:turn|switch|take|shut|knock)\s+(?:the\s+|my\s+|that\s+|this\s+|all\s+(?:the\s+)?)?"
+    rf"(?:{STRONG_WORD}(?:\s+(?:voice|sound))?(?:\s+(?:effects?|filters?|changer))?|voice[- ]?(?:effects?|changer|filters?))"
+    r"\s+(?:off|out)\b"
 )
 
 #: The grammar row (EXACT).

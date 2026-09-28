@@ -288,13 +288,15 @@ export class ProgramFeed {
     return 'ready'
   }
 
-  /** Fidelity classes of the program (§7), Phase 1 capabilities. */
-  classify(limiting?: ReadonlyArray<readonly [number, number]>): Support | null {
+  /** Fidelity classes of the program (§7), Phase 1 capabilities.
+   *  `loudnessCurrent` false: the sound plays a last-known (or no) loudness
+   *  gain — every frame APPROX 'audio:loudness' (AudioSink.loudnessCurrent). */
+  classify(limiting?: ReadonlyArray<readonly [number, number]>, loudnessCurrent?: boolean): Support | null {
     if (!this.pm || !this.edl) return null
     try {
       return classify(this.pm, this.edl, {
         phase: 1, proxyState: (src) => this.proxyState(src), demote: this.demote,
-        canvasImagePending: this.canvasImagePending ?? undefined, limiting,
+        canvasImagePending: this.canvasImagePending ?? undefined, limiting, loudnessCurrent,
       })
     } catch (e) {
       console.error('[preview engine] classify failed', e)

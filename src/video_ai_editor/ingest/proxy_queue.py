@@ -31,6 +31,7 @@ module (every test that imports main.py does) starts nothing.
 from __future__ import annotations
 
 import contextlib
+import errno
 import heapq
 import itertools
 import logging
@@ -51,6 +52,25 @@ MAX_EAGER = 1
 ONDEMAND_SPANS = 2
 PRIORITY_URGENT = 0
 PRIORITY_NORMAL = 10
+#: After a job of a key failed because the disk is full (ENOSPC), requests
+#: for its spans / audio answer "disk full" at once for this long instead of
+#: queueing another encode (Final QA r2: every 202 poll started a fresh full
+#: span encode that failed on write — 102 failed jobs in two minutes — and
+#: the route said "pending" for good, so the engine never degraded).
+DISK_FULL_HOLD_S = 10.0
+
+
+def _is_disk_full(e: BaseException | None) -> bool:
+    """ENOSPC anywhere in the exception chain (or in an ffmpeg message)."""
+    seen = 0
+    while e is not None and seen < 8:
+        if isinstance(e, OSError) and e.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1)):
+            return True
+        if "No space left on device" in str(e):
+            return True
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return False
 
 
 @dataclass(order=True)
@@ -80,7 +100,8 @@ class ProxyManager:
         self._export_event = threading.Event()      # set while an export runs
         self._gen = 0                               # worker generation
         self._busy = 0
-        self.stats = {"eager_builds": 0, "span_jobs": 0, "failures": 0, "paused": 0}
+        self._disk_full: dict[str, float] = {}      # key → monotonic time of the ENOSPC
+        self.stats = {"eager_builds": 0, "span_jobs": 0, "failures": 0, "paused": 0, "disk_full": 0}
 
     # ---- public API -------------------------------------------------------------
 
@@ -108,13 +129,24 @@ class ProxyManager:
             return info
         return self._probe(key, src)
 
+    def disk_full(self, key: str) -> bool:
+        """A job of ``key`` failed for a full disk within DISK_FULL_HOLD_S."""
+        at = self._disk_full.get(key)
+        if at is None:
+            return False
+        if time.monotonic() - at < DISK_FULL_HOLD_S:
+            return True
+        self._disk_full.pop(key, None)
+        return False
+
     def request_span(self, key: str, n: int, *, timeout: float = 2.0) -> Path | None:
-        """Path of span ``n`` once it exists; None if not ready in ``timeout``."""
+        """Path of span ``n`` once it exists; None if not ready in ``timeout``
+        (or while its key is held for a full disk — see ``disk_full``)."""
         p = P.span_path(key, n)
         if p.is_file():
             return p
         info = P.load_source(key)
-        if info is None or not (0 <= n < info.spans) or self._failed(key):
+        if info is None or not (0 <= n < info.spans) or self._failed(key) or self.disk_full(key):
             return None
         job = self._queue_spans(key, info, n)
         deadline = time.monotonic() + max(0.0, timeout)
@@ -144,7 +176,7 @@ class ProxyManager:
         if ready():
             return True
         info = P.load_source(key)
-        if info is None or self._failed(key):
+        if info is None or self._failed(key) or self.disk_full(key):
             return False
         self._queue_audio(key, info)
         deadline = time.monotonic() + max(0.0, timeout)
@@ -308,7 +340,15 @@ class ProxyManager:
                     self._run_spans(job)
             except Exception as e:           # never let a worker die
                 job.error = str(e)
-                _log.warning("proxy job failed", exc_info=True)
+                if _is_disk_full(e):
+                    # held (disk_full): the routes answer 507 instead of
+                    # queueing the same doomed encode on every poll
+                    with self._cv:
+                        self._disk_full[job.key] = time.monotonic()
+                    self.stats["disk_full"] += 1
+                    _log.warning("proxy job failed: disk full (%s)", job.key)
+                else:
+                    _log.warning("proxy job failed", exc_info=True)
             finally:
                 with self._cv:
                     self._busy -= 1

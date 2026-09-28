@@ -57,14 +57,59 @@ describe('EngineSources', () => {
     expect(r.log).toEqual(['lane:true', 'lane:false', 'shown'])
   })
 
-  it('a page reported hidden without a visibility event still prefetches nothing', () => {
+  it('a page reported hidden without a visibility event still prefetches nothing, until the event brings it back', () => {
     const r = rig()
     r.setVisibility('hidden')
     r.src.prefetch()
     expect(r.feed.prefetch).not.toHaveBeenCalled()
     r.setVisibility('visible')
+    r.src.suspend(true)          // the queued 'hidden' event lands late
     r.src.prefetch()
+    expect(r.feed.prefetch).not.toHaveBeenCalled()
+    r.src.suspend(false)         // 'visible': resumes and prefetches
     expect(r.feed.prefetch).toHaveBeenCalledTimes(1)
+    r.src.prefetch()
+    expect(r.feed.prefetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('hiddenNow(): a page reported hidden before its event suspends laneA and both stores at once; the events resume them', () => {
+    const r = rig()
+    expect(r.src.hiddenNow()).toBe(false)
+    expect(r.log).toEqual([])
+    r.setVisibility('hidden')
+    expect(r.src.hiddenNow()).toBe(true)
+    expect(r.log).toEqual(['lane:true'])
+    expect(r.src.store.isSuspended).toBe(true)
+    expect(r.bake.isSuspended).toBe(true)
+    // the queued 'hidden' event, then WebKit flips back before 'visible'
+    r.src.suspend(true)
+    r.setVisibility('visible')
+    expect(r.src.hiddenNow()).toBe(true)          // latched until the event says visible
+    r.src.suspend(false)
+    expect(r.src.hiddenNow()).toBe(false)
+    expect(r.src.store.isSuspended).toBe(false)
+    expect(r.bake.isSuspended).toBe(false)
+    expect(r.log).toEqual(['lane:true', 'lane:false', 'shown'])
+  })
+
+  it('resumeIfVisible(): hidden seen before the engine listened, visible since, resumes; still hidden stays', () => {
+    const r = rig()
+    r.setVisibility('hidden')
+    r.src.hiddenNow()
+    r.src.resumeIfVisible()
+    expect(r.src.isSuspended).toBe(true)
+    r.setVisibility('visible')
+    r.src.resumeIfVisible()
+    expect(r.src.isSuspended).toBe(false)
+    expect(r.log).toEqual(['lane:true', 'lane:false', 'shown'])
+  })
+
+  it('the proxy store asks hiddenNow() before it starts a fetch', () => {
+    const r = rig()
+    r.setVisibility('hidden')
+    r.src.store.request('K', 0)
+    expect(r.src.isSuspended).toBe(true)
+    expect(r.log).toEqual(['lane:true'])
   })
 
   it('a transient open failure reopens after 10 s — deferred to the page coming back when hidden', async () => {
@@ -77,6 +122,25 @@ describe('EngineSources', () => {
     expect(r.feed.openProxies).not.toHaveBeenCalled()
     r.src.suspend(false)
     expect(r.feed.openProxies).toHaveBeenCalledTimes(1)
+  })
+
+  it('a span landing after a span-streak report re-opens at once, not 10 s later (Final QA r2)', () => {
+    const r = rig()
+    const store = r.src.store as unknown as {
+      onError: (k: string, m: string, p: boolean) => void; onRecovered: (k: string) => void }
+    store.onError('K', 'HTTP 500', false)        // 5 span failures in a row: degraded
+    expect(r.log).toEqual(['markFailed:K', 'failed'])
+    store.onRecovered('K')                       // …then one of its spans landed
+    expect(r.feed.openProxies).toHaveBeenCalledTimes(1)
+    // while hidden, the reopen waits for the page to come back
+    const h = rig()
+    const hs = h.src.store as unknown as { onError: (k: string, m: string, p: boolean) => void; onRecovered: (k: string) => void }
+    hs.onError('K', 'HTTP 500', false)
+    h.src.suspend(true)
+    hs.onRecovered('K')
+    expect(h.feed.openProxies).not.toHaveBeenCalled()
+    h.src.suspend(false)
+    expect(h.feed.openProxies).toHaveBeenCalledTimes(1)
   })
 
   it('a permanent failure (410) is never reopened', () => {

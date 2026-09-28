@@ -100,6 +100,10 @@ export const IIR_WARMUP = 4096
 export const VIBRATO_BUF = 240
 /** render/audio_mix.VOICE_PRIME_S (0.05 s) at 48 kHz (review RE). */
 export const VOICE_PRIME_SAMPLES = 2400
+/** render/audio_mix.PRIMED_STAGES: the stages primed with real sound before
+ *  a clip's head — latency (pitch, vibrato) and, since final QA round 3, the
+ *  IIR filters (biquad), which restarted from zero state at every split. */
+export const PRIMED_STAGES: readonly string[] = ['pitch', 'vibrato', 'biquad']
 
 export interface ReverbParams { dry: number; tail: number; rt60: number; predelay_ms: number }
 
@@ -114,9 +118,9 @@ export interface VoicePlan {
   /** Clip-local samples the offline stages read before / after a block. */
   back: number
   ahead: number
-  /** Samples of REAL sound before the clip head the export primes a
-   *  latency-bearing effect with (a pitch or vibrato stage; render/audio_mix.
-   *  VOICE_PRIME_S, review RE) — the stages then run from that far before
+  /** Samples of REAL sound before the clip head the export primes an
+   *  effect with (a pitch, vibrato or biquad stage, `PRIMED_STAGES`;
+   *  render/audio_mix.VOICE_PRIME_S, review RE) — the stages then run from that far before
    *  the head, so their state (and the vibrato / ring LFO phase) at the head
    *  is the export's. 0 for every other effect. */
   prime: number
@@ -160,7 +164,7 @@ export function voicePlan(effect: unknown, intensity: unknown): VoicePlan | null
     reverb: rv ? { dry: rv.p.dry as number, tail: rv.p.tail as number, rt60: rv.p.rt60 as number,
                    predelay_ms: rv.p.predelay_ms as number } : null,
     back, ahead, key: JSON.stringify([effect, i]),
-    prime: offline.some((s) => s.kind === 'pitch' || s.kind === 'vibrato') ? VOICE_PRIME_SAMPLES : 0,
+    prime: offline.some((s) => PRIMED_STAGES.includes(s.kind)) ? VOICE_PRIME_SAMPLES : 0,
   }
 }
 

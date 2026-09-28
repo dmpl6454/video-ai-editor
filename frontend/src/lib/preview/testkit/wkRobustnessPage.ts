@@ -242,12 +242,19 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
     const tHide = now()
     await windowCmd('hide')
     const hid = await until(() => document.visibilityState === 'hidden', 4000, 10)
+    // WebKit flips visibilityState before it dispatches 'visibilitychange'
+    // (a queued task): the engine must not act on the stale 'visible' in
+    // that gap. Recorded, not waited out — the gap is what this checks.
+    const sawHiddenAt = +now().toFixed(1)
+    const laneFlags = () => ({ lane: (lane as unknown as { suspended: boolean }).suspended, store: store.isSuspended })
     const atHide = snap()
     // an append or remove already running finishes; nothing new starts
     await lane.idle()
     const atHideIdle = snap()
     const requestedBefore = new Set(proxyLog.filter((r) => !r.hidden).map((r) => r.url.split('?')[0]))
     const target = Math.min(pm.total - 1, 420)
+    const suspendedAtSeek = laneFlags()
+    const eventsAtSeek = vis.length
     engine.seek(target)
     await sleep(1500)
     const whileHidden = snap()
@@ -261,6 +268,7 @@ const scenarios: Record<string, (fx: Fixture) => Promise<Result>> = {
     const after = snap()
     return {
       hid, back, stillHidden, vis, beforeHide, atHide, atHideIdle, whileHidden, after, shown, hiddenReqs, newWhileHidden,
+      sawHiddenAt, suspendedAtSeek, eventsAtSeek,
       hideMs: +(now() - tHide).toFixed(0), total: pm.total,
     }
   },

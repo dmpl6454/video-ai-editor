@@ -64,6 +64,12 @@ CANVAS_PHRASE = (
     rf"|\b(?:{HEX}|{COLOUR_WORDS})\s+(?:colou?r(?:ed)?\s+)?(?:canvas|back\s*ground|backdrop|bg)\s+"
     r"(?:behind|for|on|under|to|in)\b"
 )
+#: Taking a blend OFF (Final QA r3): whatever mode it names, the result is Normal.
+BLEND_OFF = (r"\b(?:remove|delete|clear|reset|drop|undo|kill|disable|take\s+(?:off|out|away)|turn\s+off"
+             r"|switch\s+off|get\s+rid\s+of)\s+(?:the\s+|its\s+|that\s+|this\s+|any\s+)?(?:[\w-]+\s+)?"
+             r"blend(?:ing)?(?:[- ]?mode)?s?\b"
+             r"|\bno\s+(?:more\s+)?blend(?:ing)?(?:[- ]?mode)?\b|\bwithout\s+(?:the\s+|a\s+)?blend(?:ing)?\b"
+             r"|\bblend(?:ing)?(?:[- ]?mode)?\s+(?:back\s+)?(?:to\s+)?(?:off|normal)\b")
 BLEND_PHRASE = (
     rf"\b(?:set|make|change|switch|turn|put)\s+(?:the\s+|this\s+|that\s+|my\s+)?{OVERLAY_NOUN}\s+(?:back\s+)?(?:to|into|on|as|in)\s+"
     rf"(?:a\s+|the\s+)?{BLEND_WORDS}\b"
@@ -78,8 +84,11 @@ BLEND_PHRASE = (
     rf"|\b{OVERLAY_NOUN}(?:'s|s)?\s+blend(?:ing)?(?:[- ]mode)?\s+(?:back\s+)?(?:to|into|as)\s+(?:a\s+|the\s+)?{BLEND_WORDS}\b"
     rf"|\b(?:set|change|switch|make|put|turn)\s+(?:the\s+|its\s+|a\s+)?blend(?:ing)?\s+(?:back\s+)?(?:to|as|into)\s+"
     rf"(?:a\s+|the\s+)?{BLEND_WORDS}\b"
+    # Final QA r3: "remove the screen blend (mode)", "turn off the blend
+    # mode", "remove the blend" — back to Normal
+    rf"|{BLEND_OFF}"
 )
 
 
-__all__ = ["BLEND_WORDS", "OVERLAY_NOUN", "BG_NOUN", "CANVAS_PHRASE", "BLEND_PHRASE", "COLOUR_WORDS", "HEX",
+__all__ = ["BLEND_OFF", "BLEND_WORDS", "OVERLAY_NOUN", "BG_NOUN", "CANVAS_PHRASE", "BLEND_PHRASE", "COLOUR_WORDS", "HEX",
            "PICTURE"]

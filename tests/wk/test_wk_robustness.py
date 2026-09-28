@@ -242,7 +242,8 @@ def test_hidden_page_suspends_appends_and_span_fetches_then_resumes(wk_robust, r
         finally:
             robust_server.clear()
         print(json.dumps({"hidden": {k: r[k] for k in ("hid", "back", "stillHidden", "vis", "atHideIdle", "whileHidden",
-                                                       "after", "shown", "newWhileHidden")}, "attempt": attempt,
+                                                       "after", "shown", "newWhileHidden", "sawHiddenAt", "suspendedAtSeek",
+                                                       "eventsAtSeek")}, "attempt": attempt,
                           "load": _load()}))
         # another WK run on this machine can cover or reveal our 4 px window
         # (a hide/show we did not ask for): that run says nothing; try again

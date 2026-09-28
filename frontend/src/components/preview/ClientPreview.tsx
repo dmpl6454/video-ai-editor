@@ -35,6 +35,7 @@ import { MODE_APPROX } from '../../lib/preview/timeline/support'
 import { approxSummary } from '../../lib/preview/fidelityLabels'
 import { useLiveApprox } from '../../lib/preview/liveApprox'
 import './clientPreview.css'
+import { playheadSeek } from './playheadSeek'
 
 /** Background render cadence (§4.1 step 8). */
 export const BAKE_RENDER_DELAY_MS = 250
@@ -134,8 +135,9 @@ export function ClientPreview() {
       if (Math.abs(t - playhead) > 1e-9) setPlayhead(t)
       return
     }
-    if (isPlaying && lastWrittenRef.current !== null && Math.abs(playhead - lastWrittenRef.current) < 1e-9) return
-    ctl.seekTime(playhead)
+    const step = playheadSeek(isPlaying, playhead, lastWrittenRef.current)
+    lastWrittenRef.current = step.lastWritten
+    if (step.seek) ctl.seekTime(playhead)
   }, [playhead, isPlaying, setPlayhead])
 
   // The background render (bakes). Text and sticker edits never need one.

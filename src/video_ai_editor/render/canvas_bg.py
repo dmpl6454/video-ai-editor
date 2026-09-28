@@ -228,6 +228,40 @@ def pad_colour(fit_decrease: str, W: int, H: int, hexv: str, src) -> str:
             f"setsar=1")
 
 
+#: ffprobe color_space -> the swscale matrix it was encoded with; anything
+#: else (bt709, unknown, untagged) is read as BT.709 — the proxies' table
+#: (`ingest/proxy._SWS_MATRIX`, INSTANT_PREVIEW_SPEC R12).
+_SWS_MATRIX = {"smpte170m": "bt601", "bt470bg": "bt601", "bt2020nc": "bt2020",
+               "bt2020c": "bt2020", "smpte240m": "smpte240m", "fcc": "fcc"}
+
+#: What every main-track segment is labelled before assembly.
+BASE_709 = "setparams=colorspace=bt709:range=tv"
+
+
+def segment_to_709(src) -> str:
+    """The filter fragment that makes one main-track SEGMENT (a clip whose
+    source is `src`, or a black filler for None) BT.709 limited before
+    `concat` / `xfade` (final QA, round 3).
+
+    ffmpeg 8 negotiates colour tags across those inputs, so the FIRST
+    clip's tag decided the lane and every other clip was CONVERTED to it:
+    an untagged clip after a BT.709 one went BT.601 -> BT.709 (red 81,90,240
+    exported 62,102,239), a tagged one after an untagged one the other way —
+    in the export only (the preview and the proxies read untagged as BT.709).
+    Now nothing is left to negotiate: an untagged or BT.709-limited segment
+    is only LABELLED (its bytes pass as they are), and any other matrix or
+    full range is converted as the proxies convert it
+    (`ingest/proxy.scale_filter`). The composed base, and so the exported
+    file, is BT.709 limited."""
+    space, rng = source_color_tags(src) if src else ("unknown", "unknown")
+    mtx = _SWS_MATRIX.get(space, "bt709")
+    r = "pc" if rng == "pc" else "tv"
+    if mtx == "bt709" and r == "tv":
+        return BASE_709
+    return (f"scale=in_range={r}:out_range=tv:in_color_matrix={mtx}:out_color_matrix=bt709,"
+            f"{BASE_709}")
+
+
 def tags_filter(src) -> str:
     """`setparams` putting back `src`'s own colour tags on a stream this
     module converted through RGB. ffmpeg 8 negotiates colorspace/range per
@@ -254,12 +288,12 @@ def picture_overlay_tags(base_src) -> tuple[str, str]:
     PNG differed by 16 levels. An untagged base is labelled BT.709 for the
     overlay alone and its own tags are put back after it (the file's tags do
     not change). A tagged base keeps its tag — the viewer decodes it so."""
-    space, rng = source_color_tags(base_src) if base_src else ("unknown", "unknown")
-    if space not in ("unknown", "unspecified", "reserved", ""):
-        return "", ""
-    pre = "setparams=colorspace=bt709" + (":range=tv" if rng not in ("tv", "pc") else "")
-    post = "setparams=colorspace=unknown" + (":range=unknown" if rng not in ("tv", "pc") else "")
-    return pre, post
+    # Final QA (round 3): the composed base is ALWAYS BT.709 limited now
+    # (`segment_to_709` labels or converts every main-track segment before
+    # assembly), so `overlay` already converts with BT.709 and nothing needs
+    # relabelling around it. Kept as the one place that says so.
+    del base_src
+    return "", ""
 
 
 def base_src_of(edl) -> str | None:
@@ -464,5 +498,6 @@ def composite_block(c, *, canvas_w: int, canvas_h: int, fit_decrease: str, cover
     )
 
 
-__all__ = ["IMAGE_VERSION", "active", "source_color_tags", "pad_colour", "tags_filter", "image_file", "blur_dims",
+__all__ = ["IMAGE_VERSION", "active", "source_color_tags", "pad_colour", "tags_filter",
+           "segment_to_709", "BASE_709", "image_file", "blur_dims",
            "blur_sigma_small", "fit_block", "background_chain", "composite_block"]

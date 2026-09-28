@@ -14,13 +14,17 @@ class Op(BaseModel):
     edl_hash_before: str
     edl_hash_after: str
     by: str = "user"  # "user" | "claude"
+    # True when this entry re-applies an op that was undone (Final QA: redo
+    # brings back the op's own tool/args/summary, not a generic "Redo").
+    redo: bool = False
 
 
 class OpsLog(BaseModel):
     ops: list[Op] = Field(default_factory=list)
 
     def append(self, tool: str, args: dict[str, Any], summary: str,
-               edl_hash_before: str, edl_hash_after: str, by: str = "user") -> Op:
+               edl_hash_before: str, edl_hash_after: str, by: str = "user",
+               redo: bool = False) -> Op:
         op = Op(
             seq=len(self.ops),
             ts=time.time(),
@@ -30,6 +34,7 @@ class OpsLog(BaseModel):
             edl_hash_before=edl_hash_before,
             edl_hash_after=edl_hash_after,
             by=by,
+            redo=redo,
         )
         self.ops.append(op)
         return op

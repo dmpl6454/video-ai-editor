@@ -73,6 +73,18 @@
   flex-shrink: 0;
 }
 
+.effects-panel .fx-lut-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 4px;
+}
+.effects-panel .fx-lut-actions button {
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
 .effects-panel .fx-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

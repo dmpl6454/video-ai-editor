@@ -97,24 +97,43 @@ def display_name_for(session_dir: Path | None, src: str) -> str:
     return name
 
 
-def missing_media(session_dir: Path | None, edl) -> list[dict[str, Any]]:
+def clip_effect_files(clip) -> list[tuple[str, str]]:
+    """`(path, kind)` for every FILE a clip's look reads besides its src: a
+    colour LUT's `.cube` (`effects[].params.src`, render/effects.py) and a
+    matte. Save bundles them and reports them missing (Final QA r2)."""
+    out: list[tuple[str, str]] = []
+    for e in getattr(clip, "effects", None) or []:
+        src = (getattr(e, "params", None) or {}).get("src")
+        if isinstance(src, str) and src:
+            out.append((src, "lut" if getattr(e, "type", "") == "lut" else "effect"))
+    matte = getattr(clip, "matte_src", None)
+    if isinstance(matte, str) and matte:
+        out.append((matte, "matte"))
+    return out
+
+
+def missing_media(session_dir: Path | None, edl, *, effects: bool = False) -> list[dict[str, Any]]:
     """Every source the timeline references that is not on disk, once each,
-    in timeline order: `{src, name, clip_ids, track_ids, kind}`."""
+    in timeline order: `{src, name, clip_ids, track_ids, kind}`. With
+    `effects`, a missing LUT / matte file counts too (kind `lut`/`matte`) —
+    what Save must warn about; export has its own LUT refusal."""
     out: dict[str, dict[str, Any]] = {}
     for track in getattr(edl, "tracks", []) or []:
         for clip in track.clips:
             src = getattr(clip, "src", None)
-            if not isinstance(src, str) or not src or _exists(src):
-                continue
-            row = out.get(src)
-            if row is None:
-                kind = ("sticker" if track.type == "sticker" else
-                        "audio" if track.type in ("music", "vo", "audio") else "video")
-                row = out[src] = {"src": src, "name": display_name_for(session_dir, src),
-                                  "clip_ids": [], "track_ids": [], "kind": kind}
-            row["clip_ids"].append(clip.id)
-            if track.id not in row["track_ids"]:
-                row["track_ids"].append(track.id)
+            kind = ("sticker" if track.type == "sticker" else
+                    "audio" if track.type in ("music", "vo", "audio") else "video")
+            refs = [(src, kind)] + (clip_effect_files(clip) if effects else [])
+            for ref, ref_kind in refs:
+                if not isinstance(ref, str) or not ref or _exists(ref):
+                    continue
+                row = out.get(ref)
+                if row is None:
+                    row = out[ref] = {"src": ref, "name": display_name_for(session_dir, ref),
+                                      "clip_ids": [], "track_ids": [], "kind": ref_kind}
+                row["clip_ids"].append(clip.id)
+                if track.id not in row["track_ids"]:
+                    row["track_ids"].append(track.id)
     return list(out.values())
 
 

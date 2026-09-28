@@ -250,6 +250,24 @@ describe('ProxyStore', () => {
     expect(store.isSuspended).toBe(false)
   })
 
+  it('hiddenNow() (the page hidden before its visibilitychange): no fetch and no open starts', async () => {
+    const s = server(240, 60)
+    let hidden = false
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, hiddenNow: () => hidden })
+    await store.open('K')
+    hidden = true
+    store.request('K', 5)
+    store.request('L', 0)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(s.log.filter((l) => l.url.includes('/v/') || l.url.includes('/L/'))).toEqual([])
+    expect(store.queued).toBe(1)
+    hidden = false
+    store.suspend(true)                // the owner's hidden, then shown
+    store.suspend(false)
+    await settle(store)
+    expect(store.sample('K', 5)).not.toBeNull()
+  })
+
   it('a span that fails transiently is retried by itself, backing off, and lands (review RD3)', async () => {
     // paused, nothing else loading: no one would poke the store again
     const s = server(120, 60, { fail: { 'v/0001.bin': 8 } })
@@ -265,6 +283,67 @@ describe('ProxyStore', () => {
     expect(waits).toHaveLength(want.length)
     waits.forEach((w, i) => { expect(w).toBeLessThanOrEqual(want[i]); expect(w).toBeGreaterThan(want[i] - 100) })
     expect(store.failure('K')).toBeNull()
+  })
+
+  it('a span that keeps failing (5xx) reports a TRANSIENT error after 5 in a row, keeps retrying, and still lands (Final QA)', async () => {
+    // Every GET of the span 500s while index/init are fine: the engine must
+    // hear of it (degraded tier, §7) instead of waiting on it for good.
+    const s = server(120, 60, { fail: { 'v/0001.bin': 12 } })
+    const errors: Array<[string, boolean, number]> = []
+    const spanGets = () => s.log.filter((l) => l.url.endsWith('v/0001.bin')).length
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, sleep: () => Promise.resolve(),
+      onError: (k, _e, permanent) => errors.push([k, permanent, spanGets()]) })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    expect(errors[0]).toEqual(['K', false, 5])          // after the 5th failure in a row, not permanent
+    expect(errors.every(([, p]) => p === false)).toBe(true)
+    expect(store.sample('K', 70)).not.toBeNull()          // …and the span still lands when the server recovers
+    expect(store.failure('K')).toBeNull()
+  })
+
+  it('a span that lands after being reported tells the owner its key recovered — once (Final QA r2)', async () => {
+    // The report degrades the whole SOURCE (EngineSources marks the key
+    // failed until a reopen 10 s later); a span landing is proof the proxy is
+    // readable again, so the owner must hear of it at once — the WK test
+    // "[8] failures while paused" showed nothing for 12 s though the span had
+    // answered 206 at 6.8 s.
+    const s = server(120, 60, { fail: { 'v/0001.bin': 8 } })
+    const events: string[] = []
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, sleep: () => Promise.resolve(),
+      onError: (k) => events.push(`error:${k}`), onRecovered: (k) => events.push(`recovered:${k}`) })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(store.sample('K', 70)).not.toBeNull()
+    expect(events).toEqual(['error:K', 'recovered:K'])
+    // another span landing later is not a second recovery
+    store.request('K', 10)
+    await settle(store)
+    expect(events).toEqual(['error:K', 'recovered:K'])
+  })
+
+  it('a span that never got reported lands without a recovery event', async () => {
+    const s = server(120, 60, { fail: { 'v/0001.bin': 4 } })
+    const events: string[] = []
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, sleep: () => Promise.resolve(),
+      onError: (k) => events.push(`error:${k}`), onRecovered: (k) => events.push(`recovered:${k}`) })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(events).toEqual([])
+  })
+
+  it('a span that fails fewer than 5 times in a row is never reported', async () => {
+    const s = server(120, 60, { fail: { 'v/0001.bin': 4 } })
+    const errors: string[] = []
+    const store = new ProxyStore({ baseUrl: '/px', fetch: s.fetch, sleep: () => Promise.resolve(), onError: (k) => errors.push(k) })
+    await store.open('K')
+    store.request('K', 70)
+    await settle(store)
+    expect(errors).toEqual([])
+    expect(store.sample('K', 70)).not.toBeNull()
   })
 
   it('a span still being encoded (202) does not hold a fetch slot (review RD3)', async () => {

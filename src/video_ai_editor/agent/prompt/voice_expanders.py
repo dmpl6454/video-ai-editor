@@ -42,7 +42,10 @@ _WORD_RE = [(w, re.compile(r"\b" + re.escape(w).replace(r"\ ", r"[\s-]+") + r"\b
 _VOICE_CONTEXT = re.compile(r"\bvoice|\bvocal|\bsound(?:s|ing)?\s+(?:like|as if)|\beffect|\bfilter")
 _OFF_RE = re.compile(
     r"\b(?:remove|delete|turn\s+off|switch\s+off|take\s+(?:off|out)|get\s+rid\s+of|drop|clear|disable|kill|undo|lose)\b"
-    r"|\b(?:normal|natural|original|regular)\s+voice\b|\bback\s+to\s+normal\b|\bno\s+(?:more\s+)?voice\s+effects?\b")
+    r"|\b(?:normal|natural|original|regular)\s+voice\b|\bback\s+to\s+normal\b|\bno\s+(?:more\s+)?voice\s+effects?\b"
+    # Final QA: a split particle — "turn the robot voice off", "switch the
+    # chipmunk voice off on clip 2" (it APPLIED the effect and said done).
+    r"|\b(?:turn|switch|take|shut|knock)\s+(?:\S+\s+){1,5}?(?:off|out)\b")
 _LANE_VO = re.compile(r"\b(?:voice[- ]?overs?|vo|narration|narrator|voice\s+track)\b")
 _LANE_MUSIC = re.compile(r"\b(?:music|song|bed|soundtrack|backing\s+track|bgm)\b")
 #: review RE: the singular only, so "add echo to the overlays" / "put reverb

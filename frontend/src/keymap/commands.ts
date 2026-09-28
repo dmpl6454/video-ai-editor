@@ -14,6 +14,7 @@ import { cycleRegion } from './regions'
 import { pressControl, type UiTarget } from './uiTargets'
 import { adjacentClip, clipAtPlayhead, type ClipPick } from '../lib/clipSelect'
 import { announce } from '../lib/announce'
+import { focusTextField, textClipId, type TextFieldEnv } from '../lib/textEdit'
 
 /**
  * Editor command registry — the actions keyboard shortcuts can trigger,
@@ -101,24 +102,42 @@ const laneOf = (s: Store, id: string | null): string | null =>
  *  insert to land and select the clip; Escape in the field returns to the
  *  timeline (Properties.tsx). */
 async function focusNewText(before: string | null): Promise<void> {
-  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined') return
+  const env = textFieldEnv()
+  if (!env) return
   const t0 = performance.now()
   while (performance.now() - t0 < 3000) {
-    await new Promise((r) => requestAnimationFrame(() => r(null)))
-    const s = useStore.getState()
-    const id = s.selection
+    await env.frame()
+    const id = useStore.getState().selection
     if (!id || id === before) continue
-    if (!s.edl?.tracks.some((t) => t.clips.some((c) => c.id === id && 'text' in c))) return
-    if (useLayoutStore.getState().rightTab !== 'inspect' || !useLayoutStore.getState().rightOpen) {
-      useLayoutStore.getState().showRight('inspect')
-      continue
-    }
-    const field = document.querySelector<HTMLTextAreaElement>('.props textarea[aria-label="Text"]')
-    if (!field) continue
-    field.focus()
-    field.select()
+    if (!textClipId(useStore.getState().edl, id)) return
+    await focusTextField(id, env)
     return
   }
+}
+
+/** The live page for lib/textEdit (null outside a browser). */
+function textFieldEnv(): TextFieldEnv | null {
+  if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined') return null
+  return {
+    frame: () => new Promise((r) => requestAnimationFrame(() => r(null))),
+    selection: () => useStore.getState().selection,
+    inspectorOpen: () => useLayoutStore.getState().rightTab === 'inspect' && useLayoutStore.getState().rightOpen,
+    openInspector: () => useLayoutStore.getState().showRight('inspect'),
+    field: () => document.querySelector<HTMLTextAreaElement>('.props textarea[aria-label="Text"]'),
+  }
+}
+
+/** Double-click on a title — in the preview (StickerLayer) or on the
+ *  timeline — starts editing its words, as in CapCut: select it and put the
+ *  caret in the Inspector's Text box with the words selected (lib/textEdit).
+ *  False for anything that is not a text or caption clip. */
+export function editTextClip(id: string): boolean {
+  const s = useStore.getState()
+  if (!textClipId(s.edl, id)) return false
+  if (s.selection !== id) s.setSelection(id)
+  const env = textFieldEnv()
+  if (env) void focusTextField(id, env)
+  return true
 }
 
 /** Focus a rail panel once the switch has committed (unless focus is

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useStore, errorMessage } from '../store'
 import { isMediaClip, type Clip } from '../types'
@@ -20,6 +20,7 @@ import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import { renderSpanOf } from '../lib/timelineLayout'
 import { canvasBgOf } from '../lib/canvasBlend/catalog'
 import { displaySeekTime, frameDuration } from '../lib/frameStep'
+import { createExactPresenter, exactVideoCopyWanted } from '../lib/videoColour'
 import { Icon } from './Icon'
 
 /**
@@ -203,6 +204,25 @@ function ServerPreview() {
   // onLoadedData), with a 4 s net for a load that never completes.
   const freezeRef = useRef<HTMLCanvasElement>(null)
   const [frozen, setFrozen] = useState(false)
+  // WebKit only: the server <video>'s frames drawn colour-exact onto a WebGL
+  // canvas laid over it (lib/videoColour createExactPresenter). WebKit
+  // presents an untagged <video> colour-managed (~1.96 gamma): a flat
+  // 100-grey clip read 109 on screen while the same grey as a PiP — drawn
+  // exact — read 98, as in the export and in Chromium. `exactShown` flips
+  // once the canvas has painted; only then is the <video> hidden under it
+  // (never a blank canvas over a good picture, the srcDrawn rule).
+  const exactWanted = useMemo(() => exactVideoCopyWanted(), [])
+  // A callback ref (state), so the loop starts whenever the canvas MOUNTS —
+  // the preview body is not rendered for an empty project, and a later import
+  // mounts it with an unchanged box size.
+  const [exactEl, setExactEl] = useState<HTMLCanvasElement | null>(null)
+  const exactRef = useRef<HTMLCanvasElement | null>(null)
+  const setExactCanvas = useCallback((el: HTMLCanvasElement | null) => {
+    exactRef.current = el
+    setExactEl(el)
+  }, [])
+  const exactShownRef = useRef(false)
+  const [exactShown, setExactShown] = useState(false)
   const awaitingRestoreSeekRef = useRef(false)
   const freezeTimerRef = useRef<number | null>(null)
   const unfreeze = () => {
@@ -222,7 +242,10 @@ function ServerPreview() {
       const dpr = window.devicePixelRatio || 1
       cv.width = Math.max(1, Math.round(r.width * dpr))
       cv.height = Math.max(1, Math.round(r.height * dpr))
-      cv.getContext('2d')!.drawImage(v, 0, 0, cv.width, cv.height)
+      // In WebKit the picture on screen is the colour-exact canvas, not the
+      // <video> (see exactRef) — copy what is actually being shown.
+      const shown = exactShownRef.current && exactRef.current ? exactRef.current : v
+      cv.getContext('2d')!.drawImage(shown, 0, 0, cv.width, cv.height)
       // Carry the live CSS stand-in (transform / opacity / filter) the frame
       // is being shown with, so the cover matches what was on screen.
       cv.style.transform = v.style.transform
@@ -407,6 +430,40 @@ function ServerPreview() {
     draw()
     return () => cancelAnimationFrame(raf)
   }, [srcPreview, boxSize, playhead, edl])
+  // The colour-exact presenter's loop (see exactRef). Draws when the frame
+  // can have changed — a new time, a new render, a finished seek, playback —
+  // and keeps the last frame while the <video> has none (a render swap: the
+  // freeze cover is up then anyway).
+  useEffect(() => {
+    const cv = exactEl
+    if (!exactWanted || !cv) return
+    const presenter = createExactPresenter(cv)
+    if (!presenter) return
+    let raf = 0
+    let last = ''
+    const tick = () => {
+      raf = requestAnimationFrame(tick)
+      const v = ref.current
+      if (!v || v.seeking) return
+      const dpr = window.devicePixelRatio || 1
+      const w = Math.max(1, Math.round(boxSize.w * dpr))
+      const h = Math.max(1, Math.round(boxSize.h * dpr))
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; last = '' }
+      const key = `${v.currentSrc}|${v.currentTime}|${v.readyState}`
+      if (key === last && v.paused) return
+      if (!presenter.draw(v)) return
+      last = key
+      if (!exactShownRef.current) { exactShownRef.current = true; setExactShown(true) }
+    }
+    tick()
+    return () => {
+      cancelAnimationFrame(raf)
+      // A new canvas starts blank: the <video> shows until it has painted.
+      exactShownRef.current = false
+      setExactShown(false)
+    }
+  }, [exactWanted, exactEl, boxSize.w, boxSize.h])
+
   // WebCodecs scrubber: shown during seek, hidden during playback so frames
   // come from <video> at full smoothness.
   const scrubberRef = useRef<FrameScrubberHandle>(null)
@@ -894,6 +951,21 @@ function ServerPreview() {
     && framing?.clipId === selectedV1Clip.id
     && !isPlaying && !v1TransformKeyframed
 
+  // The server picture's live CSS stand-ins — shared by the <video> and, in
+  // WebKit, the colour-exact canvas over it (see the <video>'s style notes).
+  const videoTransform = srcPreview && srcDrawn
+    ? undefined
+    : liveCss && edl
+      ? `translate(${liveCss.dx * (boxSize.w / edl.canvas.w)}px, `
+        + `${liveCss.dy * (boxSize.h / edl.canvas.h)}px) `
+        + `scale(${liveCss.scaleMul}) rotate(${liveCss.rotateDeg}deg)`
+      : undefined
+  const videoOpacity = srcPreview && srcDrawn ? 0 : (liveCss?.opacityMul ?? 1)
+  const videoTransition = liveTransform ? 'none' : 'transform 60ms linear'
+  const videoFilter = liveFx
+    ? `brightness(${liveFx.brightnessMul}) contrast(${liveFx.contrastMul}) saturate(${liveFx.saturateMul})`
+    : undefined
+
   return (
     <div ref={wrapRef} style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       {/* `overflow: hidden` because this box IS the canvas: nothing may paint
@@ -946,19 +1018,15 @@ function ServerPreview() {
             // composited preview stays visible with its CSS stand-in — slightly
             // wrong in angle, which is the whole reason the source view exists,
             // but a picture rather than a black rectangle.
-            transform: srcPreview && srcDrawn
-              ? undefined
-              : liveCss
-                ? `translate(${liveCss.dx * (boxSize.w / edl.canvas.w)}px, `
-                  + `${liveCss.dy * (boxSize.h / edl.canvas.h)}px) `
-                  + `scale(${liveCss.scaleMul}) rotate(${liveCss.rotateDeg}deg)`
-                : undefined,
+            transform: videoTransform,
             // Hidden (not unmounted) under the source canvas: unmounting would
             // drop the loaded render and make the release flash black while it
             // re-loads, and it is still the element the playback clock and the
             // scrubber talk to.
-            opacity: srcPreview && srcDrawn ? 0 : (liveCss?.opacityMul ?? 1),
-            transition: liveTransform ? 'none' : 'transform 60ms linear',
+            // Also hidden under the colour-exact canvas once it paints (WebKit,
+            // see exactRef) — the same "hidden, not unmounted" reasons.
+            opacity: exactShown ? 0 : videoOpacity,
+            transition: videoTransition,
             // Live color preview: same idea for the Color panel's brightness/
             // contrast/saturation drags. liveFilter carries the backend's eq
             // params (render/effects.py _color): eq brightness is ADDITIVE in
@@ -966,9 +1034,7 @@ function ServerPreview() {
             // multiplicative around 1 → CSS contrast(v)/saturate(v). Clamped
             // ≥0 to stay CSS-valid. Applies to the whole preview video — a
             // per-clip approximation, same caveat class as liveTransform.
-            filter: liveFx
-              ? `brightness(${liveFx.brightnessMul}) contrast(${liveFx.contrastMul}) saturate(${liveFx.saturateMul})`
-              : undefined,
+            filter: videoFilter,
           }}
           onTimeUpdate={(e) => {
             // While playing, the rAF clock loop above is the sole owner of
@@ -1090,6 +1156,18 @@ function ServerPreview() {
             }
           }}
         />
+        {/* WebKit: the <video>'s picture, colour-exact (see exactRef). It
+            carries the <video>'s live CSS stand-ins so a drag or a grade
+            preview looks the same whichever of the two is showing. */}
+        {exactWanted && (
+          <canvas
+            ref={setExactCanvas}
+            data-layer="exact-video"
+            style={{ position: 'absolute', left: 0, top: 0, width: '100%', height: '100%',
+                     pointerEvents: 'none', display: exactShown ? 'block' : 'none',
+                     transform: videoTransform, opacity: videoOpacity,
+                     transition: videoTransition, filter: videoFilter }} />
+        )}
         {/* Last-good-frame cover while a new render swaps in (see freezeRef). */}
         <canvas
           ref={freezeRef}

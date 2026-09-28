@@ -597,8 +597,11 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
       for (let i = 0; i < 80 && !a.r.engine.playing; i++) await sleep(25)
       const resumedAt = now()
       await sleep(2500)
+      // the first frame drawn playing after the stop: where picture and
+      // sound came back (none is drawn while away: drawsWhileOff)
+      const resumedK = a.r.draws.find((d) => d.playing && d.at > stoppedAt + 50)?.k ?? null
       phases.push({
-        off, on, tOff, stoppedAt, resumedAt, hiddenState, stopMs: +(stoppedAt - tOff).toFixed(0),
+        off, on, tOff, stoppedAt, resumedAt, endAt: now(), resumedK, hiddenState, stopMs: +(stoppedAt - tOff).toFixed(0),
         after: { visibility: document.visibilityState, playing: a.r.engine.playing, storePlaying: a.r.playingLog.at(-1)?.playing },
       })
     }
@@ -659,6 +662,10 @@ interface AudioRigOut {
   finish(): Result
 }
 
+/** An element presentation and the engine's draw of it (its rVFC handler)
+ *  are the same callback turn; a busy machine delays one, never by this. */
+const DRAWN_MATCH_MS = 50
+
 /** The AudioContext time HEARD at `perfMs` (performance.now() ms): the output
  *  timestamp, minus the device latency when the timestamp is of the
  *  RENDERED time (WebKit: contextTime = currentTime − one quantum). A click
@@ -694,7 +701,7 @@ async function audioRig(cfg: Config): Promise<AudioRigOut> {
     patch: { x: cfg.canvas[0] * 0.25, y: cfg.canvas[1] * 0.6, w: cfg.canvas[0] * 0.5, h: cfg.canvas[1] * 0.2 },
   })
   const video = r.engine.internals.video!
-  const frames: Array<{ k: number; E: number; ctxAt: number | null; at: number; cbNow?: number; pt?: number }> = []
+  const frames: Array<{ k: number; E: number; ctxAt: number | null; at: number; cbNow?: number; pt?: number; playing: boolean }> = []
   let tracing = false
   const displayBase = new DisplayTimeBase()
   const onFrame: VideoFrameRequestCallback = (cbNow, meta) => {
@@ -705,7 +712,7 @@ async function audioRig(cfg: Config): Promise<AudioRigOut> {
     if (!r.engine.playing || frames.length === 0 || frames[frames.length - 1].at < now() - 200) displayBase.reset()
     const E = displayBase.fix(cbNow, meta.expectedDisplayTime)
     frames.push({ k: Math.round(meta.mediaTime * pm.R.num / pm.R.den), E, ctxAt: heardCtxAt(ctx, E), at: now(), cbNow,
-      pt: meta.expectedDisplayTime })
+      pt: meta.expectedDisplayTime, playing: r.engine.playing })
     video.requestVideoFrameCallback(onFrame)
   }
   return {
@@ -737,11 +744,19 @@ async function audioRig(cfg: Config): Promise<AudioRigOut> {
           if (v > 0.02) lastAbs = (b.frame + i) / sr
         }
       }
+      // the frames the ENGINE drew while playing (its rVFC handler, the same
+      // presentation): what the user saw. The <video> under the canvas also
+      // presents frames the engine never draws — WebKit playing it for a
+      // moment by itself on an occluded window's visible flip, before the
+      // engine parks it (engineExternal.ts), or re-presenting the stop frame
+      // — and those carry no sound by design (review C1)
+      const playingDraws = r.draws.filter((d) => d.playing)
+      const drewAt = (k: number, at: number) => playingDraws.some((d) => d.k === k && Math.abs(d.at - at) <= DRAWN_MATCH_MS)
       const flashes = frames.filter((f) => flashK.has(f.k) && f.ctxAt !== null).map((f) => {
         let best: number | null = null
         for (const o of onsets) if (best === null || Math.abs(o - f.ctxAt!) < Math.abs(best - f.ctxAt!)) best = o
         return { k: f.k, cut: cuts.has(f.k), at: f.at, offsetMs: best === null ? null : +((f.ctxAt! - best) * 1000).toFixed(2),
-          level: drawnLevel.get(f.k) ?? null }
+          level: drawnLevel.get(f.k) ?? null, playing: f.playing, drawn: drewAt(f.k, f.at) }
       })
       const nonFlash = [...drawnLevel.entries()].filter(([k]) => !flashK.has(k)).map(([, v]) => v)
       // every click must sound where the picture is: the frame on screen at

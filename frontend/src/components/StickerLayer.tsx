@@ -55,6 +55,8 @@ import {
   type StickerClip, type OverlayBox, type LiveDrag,
 } from '../lib/overlay'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
+import { transformCommitArgs } from '../lib/overlayCommit'
+import { editTextClip } from '../keymap/commands'
 import {
   pipVideo, syncPipClipVideo, pipDrawGeom, clipToShape, pipIsClientDrawn,
   pausePipVideosExcept, drawPipVideoFrame, pipInnerPlan, flipScale,
@@ -1117,6 +1119,16 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
       }
     }
 
+    // Every gesture commit carries the playhead's clip-local `time`
+    // (lib/overlayCommit), exactly as the Inspector's Transform fields do.
+    // Without it the backend flattens an ANIMATED property to the dropped
+    // value, so dragging a keyframed PiP deleted its whole animation; with it,
+    // a keyed property gains (or replaces) a key at the playhead and an
+    // un-keyed one is set as before. The playhead, not `now()`, because it is
+    // the instant the Inspector's keyframe diamonds and fields are measured at.
+    const commitArgs = (id: string, fields: Record<string, unknown>) =>
+      transformCommitArgs(stateRef.current.edl, id, fields, useStore.getState().playhead)
+
     const holdRotate = (id: string, deg: number) => {
       heldRotRef.current = { id, deg, at: performance.now() }
     }
@@ -1133,7 +1145,7 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
         holdRotate(d.id, deg)
         dragRef.current = null
         if (deg !== Math.round(d.rot0)) {
-          dispatch('set_clip_transform', { clip_id: d.id, rotation: deg })
+          dispatch('set_clip_transform', commitArgs(d.id, { rotation: deg }))
         }
         return
       }
@@ -1147,9 +1159,9 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
         const moved = Math.round(d.live.x) !== Math.round(d.x0)
           || Math.round(d.live.y) !== Math.round(d.y0)
         if (!moved) { setLiveTransform(null); return }
-        dispatch('set_clip_transform', {
-          clip_id: d.id, x: Math.round(d.live.x), y: Math.round(d.live.y),
-        })
+        dispatch('set_clip_transform', commitArgs(d.id, {
+          x: Math.round(d.live.x), y: Math.round(d.live.y),
+        }))
         return
       }
       // Do NOT clear the drag override here — see `holdDrag` below. Nine lines
@@ -1220,10 +1232,10 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
         const cx = unsentinel(Math.round(d.live.x), d.xSentinels)
         const cy = unsentinel(Math.round(d.live.y), d.ySentinels)
         holdDrag({ id: d.id, x: cx, y: cy })
-        dispatch('set_clip_transform', {
-          clip_id: d.id, x: cx, y: cy,
+        dispatch('set_clip_transform', commitArgs(d.id, {
+          x: cx, y: cy,
           ...(raise ? { raise_to_front: true } : {}),
-        })
+        }))
       } else if (d.kind === 'text') {
         // Text resizes by its style.size (EDL-canvas px) — the same field the
         // Properties panel drives and the server's resolve_size_override reads.
@@ -1235,11 +1247,30 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
       } else {
         const scale = Math.round(d.live.scale * 100) / 100
         holdDrag({ id: d.id, scale })
-        dispatch('set_clip_transform', { clip_id: d.id, scale })
+        dispatch('set_clip_transform', commitArgs(d.id, { scale }))
+      }
+    }
+
+    // Double-click a title (or a caption) to edit its words, as in CapCut:
+    // it is selected and the Inspector's Text box takes the caret with the
+    // words selected (keymap/commands editTextClip — the ⌥T path). The
+    // top-most text under the pointer, not the pointerdown cycle's pick: the
+    // second click of a double-click on a stack has already walked one down.
+    const onDbl = (e: MouseEvent) => {
+      const r = cv.getBoundingClientRect()
+      const px = e.clientX - r.left
+      const py = e.clientY - r.top
+      const boxes = allBoxes(now())
+      for (let i = boxes.length - 1; i >= 0; i--) {
+        const b = boxes[i]
+        if (b.kind !== 'text' || !hitsBody(px, py, b)) continue
+        if (editTextClip(b.id)) e.preventDefault()
+        return
       }
     }
 
     cv.addEventListener('pointerdown', onDown)
+    cv.addEventListener('dblclick', onDbl)
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
     return () => {
@@ -1248,6 +1279,7 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
       publishLiveApprox([])
       releaseHold()          // also kills the pending safety-net timer
       cv.removeEventListener('pointerdown', onDown)
+      cv.removeEventListener('dblclick', onDbl)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
     }

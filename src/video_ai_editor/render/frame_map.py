@@ -674,8 +674,14 @@ def planned_frames(edl: EDL, fps=None) -> int:
     map's total (the 500-EDL corpus and every golden render); at another
     rate a seam that is not whole frames there removes 18 or 19 frames by
     where its offset lands (tests/test_render_frame_count.py)."""
-    from .compositor import _v1_frame_plan
+    from .compositor import v1_rate_scope
     fps = edl.canvas.fps if fps is None else fps
+    with v1_rate_scope(edl, fps):           # another rate: the renderer's spans
+        return _planned_frames(edl, fps)
+
+
+def _planned_frames(edl: EDL, fps) -> int:
+    from .compositor import _v1_frame_plan
     r = _tb.rate_of(fps)
     view, planned, _originals = _plan_view(edl, fps)
     v1 = view.get_track("v1")
@@ -718,9 +724,15 @@ def build_program_map(edl: EDL, sources: SourceLookup | Mapping[str, SourceInfo]
                       fps=None) -> ProgramMap:
     """The program map of ``edl`` as the compositor renders it at ``fps``
     (default: the canvas rate — what ``render_preview`` and export use)."""
+    from .compositor import v1_rate_scope
+    fps = edl.canvas.fps if fps is None else fps
+    with v1_rate_scope(edl, fps):           # another rate: the renderer's spans
+        return _build_program_map(edl, sources, fps)
+
+
+def _build_program_map(edl: EDL, sources, fps) -> ProgramMap:
     from .compositor import _v1_frame_plan
     lookup = sources.__getitem__ if isinstance(sources, Mapping) else sources
-    fps = edl.canvas.fps if fps is None else fps
     r = _tb.rate_of(fps)
     view, planned, originals = _plan_view(edl, fps)
     v1 = view.get_track("v1")

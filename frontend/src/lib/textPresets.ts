@@ -81,11 +81,23 @@ export function defaultTextArgs(start: number, end: number, edl?: EDL | null): R
     // Never replace an existing overlay from the UI tool (see the header note).
     allow_stack: true,
   }
-  if (edl && captionsOverlap(edl, start, end)) {
-    args.x = Math.round(edl.canvas.w / 2)
-    args.y = Math.round(edl.canvas.h * UPPER_THIRD)
-  }
-  return args
+  return { ...args, ...captionClearPlacement(edl, start, end, 'super') }
+}
+
+/** Roles the renderer anchors in the lower band (`_y_for_role` → 0.75·h),
+ *  the band captions occupy. hook (mid), lower_third and watermark differ. */
+const LOWER_BAND_ROLES = new Set(['super', 'label', 'default'])
+
+/** x/y that keep a new overlay off the captions: the upper third when a cue
+ *  is on screen during [start, end) and the role would land in the caption
+ *  band; `{}` (the role places it) otherwise. One rule for the default text
+ *  and the style gallery (Final QA: five gallery looks landed on captions). */
+export function captionClearPlacement(
+  edl: EDL | null | undefined, start: number, end: number, role: unknown,
+): { x?: number; y?: number } {
+  if (!edl || !LOWER_BAND_ROLES.has(typeof role === 'string' ? role : 'default')) return {}
+  if (!captionsOverlap(edl, start, end)) return {}
+  return { x: Math.round(edl.canvas.w / 2), y: Math.round(edl.canvas.h * UPPER_THIRD) }
 }
 
 /** Where the default text sits when captions hold the lower band. */
@@ -121,7 +133,10 @@ export function insertDefaultText(deps: TextInsertDeps) {
 
 /** A gallery look: ONE add_text carrying its whole style (one undo step, QA-078). */
 export function insertTextStyle(deps: TextInsertDeps, p: TextStylePreset, fieldText: string) {
-  return insert(deps, 'add_text', (s, e) => textStyleArgs(p, fieldText, s, e))
+  const { edl } = deps.state()
+  return insert(deps, 'add_text', (s, e) => ({
+    ...textStyleArgs(p, fieldText, s, e), ...captionClearPlacement(edl, s, e, p.args.role),
+  }))
 }
 
 /** A template, filled from the field. */

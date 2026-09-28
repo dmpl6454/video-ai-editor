@@ -289,7 +289,9 @@ def test_recipe_table_matches_the_grammar_intents():
                     # wave E (F3): CapCut's voice changer
                     "voice_effect",
                     # wave E (F1): CapCut clip animations (In / Out / Combo)
-                    "animation"}
+                    "animation",
+                    # Final QA: an existing text's new wording
+                    "retext"}
     assert spec_intents | {"transcribe"} == set(recipes.RECIPE_NAMES)   # undo/redo are intents, not recipes
     offered = {c.name for c in recipes.cards()}
     assert "transcribe" not in offered and "ask" not in offered and "auto_edit" in offered

@@ -326,7 +326,7 @@ def test_focus_rescue_moves_only_focus_that_was_stranded(engine, base_url, sessi
     page.wait_for_timeout(150)
     assert _active(page)["label"] == "Undo", _active(page)
 
-    # e. A media row (a data-keymap-ignore scope) → AI shows: AI selected and
+    # e. A media row (a data-keymap-own scope) → AI shows: AI selected and
     #    focus on its tab. (The ⌥8 half of this case is R4's keymap scope.)
     _js_click(_tab(page, "Media"))
     page.locator("[data-media-row]").first.focus()

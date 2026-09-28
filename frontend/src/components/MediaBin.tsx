@@ -235,7 +235,7 @@ function BreakableName({ name }: { name: string }) {
   return <>{parts.map((p, i) => <span key={i}>{i > 0 && <wbr />}{p}</span>)}</>
 }
 
-function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
+export function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
   row: BinRow; sid: string | null; onRemove: () => void; onInsert: () => void; onRelinked: () => void
 }) {
   const relinkRef = useRef<HTMLInputElement>(null)
@@ -274,12 +274,14 @@ function MediaRow({ row, sid, onRemove, onInsert, onRelinked }: {
       data-offline={row.missing || undefined}
       title={hint}
       // A focusable control (wave-B review): Enter inserts at the playhead,
-      // like a double-click. data-keymap-ignore keeps Enter/Space here from
-      // reaching the timeline shortcuts.
+      // like a double-click. data-keymap-own keeps Enter, and Delete /
+      // Backspace (no ripple delete of the timeline's clip behind the row),
+      // from the timeline shortcuts; ⌘Z, J/K/L, N and Space still run (Final
+      // QA r3: an ignore scope here made ⌘Z after "+" do nothing).
       tabIndex={0}
       role="group"
       aria-label={`${row.name}, ${binMeta(row)}`}
-      data-keymap-ignore
+      data-keymap-own="Enter Delete Backspace"
       onDoubleClick={() => { if (!row.missing) onInsert() }}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget || row.missing) return

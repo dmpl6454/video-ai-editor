@@ -20,12 +20,22 @@ very render that plays (no extra pass):
 
 A brick-wall limiter at −1 dBFS follows the gain, the same true-peak ceiling
 the export's loudnorm is given (`TP=-1`), so a +20 dB lift cannot clip.
+
+The Instant preview (client engine) plays the same master stage in the
+browser (audioPlan.ts: gain × 10^(gain_db/20), then its limiter), so it needs
+the gain each server preview really applied: `matched` records it per
+`audio_key` — the sound of the render, not its whole hash, so a title or a
+sticker (no sound) keeps it current — and `preview_gain` answers
+GET /preview_loudness (Final QA r3: the Instant preview played the raw mix,
+~11 dB under the export, and said EXACT).
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Iterator
 
@@ -41,26 +51,106 @@ TOLERANCE_LU = 1.0
 MAX_GAIN_DB = 30.0
 _STATE = "preview_loudness.json"
 _I_RE = re.compile(r"lavfi\.r128\.I=(-?[\d.]+)")
+#: Applied gains kept per session (one per distinct sound; oldest dropped).
+GAINS_KEPT = 64
+#: Track types whose clips make sound (a text, sticker, effect or captions
+#: track never does).
+_SOUND_TRACK_TYPES = ("video", "audio", "music", "vo")
+#: What of an overlay (non-v1 video) clip reaches the SOUND — the same
+#: reduction the frontend's preview fingerprint (lib/previewFingerprint.ts)
+#: makes, so an edit that changes this key always fires the background
+#: render that measures it (a moved PiP must not leave the gain stale for
+#: good).
+_PIP_SOUND_FIELDS = ("id", "src", "start", "in", "out", "speed", "audio")
+_STATE_LOCK = threading.Lock()
 
 
 def _state_path(session_dir: Path) -> Path:
     return Path(session_dir) / "cache" / _STATE
 
 
+def _read_state(session_dir: Path) -> dict:
+    try:
+        d = json.loads(_state_path(session_dir).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_state(session_dir: Path, d: dict) -> None:
+    p = _state_path(session_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d), encoding="utf-8")
+    _pu.replace_with_retry(tmp, p)
+
+
 def _last_pre_gain_lufs(session_dir: Path) -> float | None:
     try:
-        v = json.loads(_state_path(session_dir).read_text(encoding="utf-8")).get("pre_gain_lufs")
+        v = _read_state(session_dir).get("pre_gain_lufs")
         return float(v) if v is not None else None
     except Exception:
         return None
 
 
 def _remember(session_dir: Path, pre_gain_lufs: float) -> None:
-    p = _state_path(session_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"pre_gain_lufs": round(pre_gain_lufs, 2)}), encoding="utf-8")
-    _pu.replace_with_retry(tmp, p)
+    with _STATE_LOCK:
+        d = _read_state(session_dir)
+        d["pre_gain_lufs"] = round(pre_gain_lufs, 2)
+        _write_state(session_dir, d)
+
+
+def _record_gain(session_dir: Path, key: str, gain_db: float) -> None:
+    """The gain a preview of the sound `key` was rendered with."""
+    with _STATE_LOCK:
+        d = _read_state(session_dir)
+        gains = d.get("gains") if isinstance(d.get("gains"), dict) else {}
+        gains.pop(key, None)
+        gains[key] = round(float(gain_db), 2)
+        while len(gains) > GAINS_KEPT:
+            gains.pop(next(iter(gains)))
+        d["gains"] = gains
+        _write_state(session_dir, d)
+
+
+def audio_key(edl: EDL) -> str:
+    """A hash of what the preview's SOUND is made of: the canvas (its
+    loudness target, its rate) and every sound-bearing track — track-level
+    id, z, mute, solo, duck and transitions, v1 and lane clips whole, overlay
+    clips reduced to `_PIP_SOUND_FIELDS`. Text, stickers, effects and
+    captions are not in it: a title does not change the gain."""
+    from ..edl.schema import RENDER_BEHAVIOR_VERSION
+    d = edl.model_dump(by_alias=True, mode="json")
+    tracks = []
+    for t in d.get("tracks") or []:
+        if t.get("type") not in _SOUND_TRACK_TYPES:
+            continue
+        clips = t.get("clips") or []
+        if t.get("type") == "video" and t.get("id") != "v1":
+            clips = [{k: c.get(k) for k in _PIP_SOUND_FIELDS} for c in clips]
+        tracks.append({k: t.get(k) for k in ("id", "type", "z", "muted", "solo", "duck", "transitions")}
+                      | {"clips": clips})
+    blob = {"v": RENDER_BEHAVIOR_VERSION, "canvas": d.get("canvas"), "tracks": tracks}
+    return hashlib.sha256(json.dumps(blob, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def preview_gain(edl: EDL, session_dir: Path) -> dict:
+    """What GET /preview_loudness answers for `edl` (the session's preview
+    EDL): `gain_db` — the master gain the server preview of this sound was
+    rendered with (`current` true), else the session's last-known gain
+    (`current` false; None before any measurement) — and `target_lufs`.
+    No target: nothing to apply (`gain_db` None) and nothing to wait for."""
+    target = getattr(edl.canvas, "loudness_lufs", None)
+    if target is None:
+        return {"gain_db": None, "current": True, "target_lufs": None}
+    state = _read_state(Path(session_dir))
+    gains = state.get("gains") if isinstance(state.get("gains"), dict) else {}
+    g = gains.get(audio_key(edl))
+    if isinstance(g, (int, float)):
+        return {"gain_db": float(g), "current": True, "target_lufs": float(target)}
+    pre = _last_pre_gain_lufs(Path(session_dir))
+    last = round(_gain_for(target, pre), 2) if pre is not None else None
+    return {"gain_db": last, "current": False, "target_lufs": float(target)}
 
 
 def _gain_for(target: float, pre_gain_lufs: float | None) -> float:
@@ -123,11 +213,17 @@ def matched(edl: EDL, session_dir: Path, dst: Path) -> Iterator[None]:
         raise
     try:
         pre = read_integrated(meas)
-        if pre is None or not dst.exists():
+        if not dst.exists():
             return
-        _remember(session_dir, pre)
-        wanted = _gain_for(target, pre)
-        if abs(wanted - applied) > TOLERANCE_LU:
-            regain(dst, wanted - applied)
+        effective = applied
+        if pre is not None:
+            _remember(session_dir, pre)
+            wanted = _gain_for(target, pre)
+            if abs(wanted - applied) > TOLERANCE_LU:
+                regain(dst, wanted - applied)
+                effective = round(applied, 2) + round(wanted - applied, 2)
+        # what this preview's sound really carries (the Instant preview
+        # plays the same master gain: GET /preview_loudness)
+        _record_gain(session_dir, audio_key(edl), effective)
     finally:
         _pu.unlink_with_retry(meas)

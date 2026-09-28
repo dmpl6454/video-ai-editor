@@ -594,6 +594,38 @@ def c_captions_style(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, current == style, current, style)
 
 
+def c_caption_look(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """The stored caption LOOK and every cue carry what was asked (Final QA:
+    "make the captions yellow" re-laid white cues and still passed 4/4)."""
+    track = ctx.edl.get_track("captions")
+    cues = caption_clips(ctx.edl)
+    if track is None or track.config is None or not cues:
+        return _ok(pc, False, 0, "captions", unit="cues", detail="there are no captions")
+    look = track.config.look
+    want = {k: _arg(pc, k) for k in ("color", "size", "upper", "stroke_w", "background")}
+    bad: list[str] = []
+    for key, value in want.items():
+        if value is None:
+            continue
+        stored = getattr(look, key, None) if look is not None else None
+        same = (abs(float(stored) - float(value)) < 0.5) if key in ("size", "stroke_w") and stored is not None \
+            else (str(stored).upper() == str(value).upper() if isinstance(value, str) else stored == value)
+        if not same:
+            bad.append(f"{key}={stored!r}")
+            continue
+        off = [c for c in cues if getattr(c.style, key, None) is not None and not (
+            abs(float(getattr(c.style, key)) - float(value)) < 0.5 if key in ("size", "stroke_w")
+            else (str(getattr(c.style, key)).upper() == str(value).upper() if isinstance(value, str)
+                  else getattr(c.style, key) == value))]
+        if off:
+            bad.append(f"{len(off)} cue(s) without {key}")
+    position = _arg(pc, "position")
+    if position is not None and track.config.position != position:
+        bad.append(f"position={track.config.position!r}")
+    return _ok(pc, not bad, ", ".join(bad) or "as asked", "as asked",
+               detail=None if not bad else "the look did not land on the captions")
+
+
 def _fit_trim_source_start(ctx: VerifyCtx, src: str | None) -> float | None:
     """The source second the kept timeline STARTS on, when this run applied a
     best-window target-length trim (`$fit_best:`, wave C QA-069) — the words
@@ -700,8 +732,31 @@ def c_fillers_remaining_leq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, len(remaining) <= cap, len(remaining), f"≤ {cap}", unit="fillers")
 
 
+def _main_lane_len(edl: EDL | None, fallback: float) -> float:
+    """How long the PICTURE runs on the main lane (layout seconds) — what a
+    v1 cut / speed / duplicate / delete changes (Final QA). `edl.duration`
+    is a max over every track: with a 40 s music bed under 15 s of video, a
+    correct "delete clip 3" measured 13 s against an expected 36 s (the bed,
+    trimmed to the new video on the ripple, dropped out of the maths) and
+    reported "done with issues". A timeline with no main-lane clips keeps
+    measuring `edl.duration`."""
+    if edl is None:
+        return fallback
+    try:
+        ve = float(edl.video_extent())
+    except Exception:
+        return fallback
+    return ve if ve > 0 else fallback
+
+
+def _durations(ctx: VerifyCtx) -> tuple[float, float]:
+    before_edl = getattr(ctx.exec_result, "edl_before", None)
+    before = _main_lane_len(before_edl, ctx.exec_result.duration_before)
+    return before, _main_lane_len(ctx.edl, ctx.edl.duration)
+
+
 def c_duration_shrank(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
-    before, after = ctx.exec_result.duration_before, ctx.edl.duration
+    before, after = _durations(ctx)
     min_ratio, min_seconds = _arg(pc, "min_ratio"), _arg(pc, "min_seconds")
     need = 0.01
     if min_ratio is not None:
@@ -713,7 +768,7 @@ def c_duration_shrank(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 
 def c_duration_between(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
-    before, after = ctx.exec_result.duration_before, ctx.edl.duration
+    before, after = _durations(ctx)
     target, start, end, factor = (_arg(pc, k) for k in ("target", "start", "end", "factor"))
     if target is not None:
         expected = float(target)
@@ -942,23 +997,35 @@ def _measured_duck_db(ctx: VerifyCtx, probe: Path) -> tuple[float | None, str]:
     return ordered[max(0, len(ordered) // 10 - 1)], "deepest tenth of the timeline (no transcript)"
 
 
+def _music_render_spans(edl: EDL) -> list[tuple[float, float]]:
+    """The music clips' `(start, end)` on the RENDER clock (final QA round 3:
+    a bed plays whole from where its run starts, `schema.sound_pulls`)."""
+    from ...edl.schema import sound_pulls
+    clips = music_clips(edl)
+    pulls = sound_pulls(clips, edl.v1_seam_table())
+    return [(c.start - pulls.get(c.id, 0.0), c.start - pulls.get(c.id, 0.0) + c.effective_duration)
+            for c in clips]
+
+
 def c_music_within_video_extent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
-    clips = music_clips(ctx.edl)
-    extent = ctx.edl.video_extent()
-    if not clips:
+    # Both ends on the render clock: the bed plays whole across transitions,
+    # the picture ends at `render_video_end` (layout vs layout passed a bed
+    # that ran past the picture into black by the transitions' overlap).
+    spans = _music_render_spans(ctx.edl)
+    extent = ctx.edl.render_video_end()
+    if not spans:
         return _ok(pc, None, None, f"≤ {extent:.2f}", detail="no music")
-    last = max(c.start + c.effective_duration for c in clips)
+    last = max(e for _s, e in spans)
     return _ok(pc, last <= extent + _EXTENT_SLACK_S, round(last, 3), f"≤ {extent:.2f}", unit="s")
 
 
 def c_music_covers(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     min_ratio = float(_arg(pc, "min_ratio") or 0.95)
-    extent = ctx.edl.video_extent()
-    clips = music_clips(ctx.edl)
+    extent = ctx.edl.render_video_end() if ctx.edl.video_extent() > 0 else 0.0
     if extent <= 0:
         return _ok(pc, None, None, f"≥ {min_ratio:.0%}", detail="no video extent")
-    covered = _span_total(_merge_spans([(c.start, min(extent, c.start + c.effective_duration))
-                                        for c in clips], gap=0.0))
+    covered = _span_total(_merge_spans([(s, min(extent, e)) for s, e in _music_render_spans(ctx.edl)],
+                                       gap=0.0))
     ratio = covered / extent
     return _ok(pc, ratio >= min_ratio, round(ratio, 3), f"≥ {min_ratio:.0%}", unit="ratio")
 
@@ -1178,6 +1245,15 @@ def c_vo_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 def c_effect_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     etype, track_id, want_all = _arg(pc, "type"), _arg(pc, "track") or "v1", _arg(pc, "all")
+    cid = _arg(pc, "clip_id")
+    if isinstance(cid, str) and cid and cid != "$v1_all" and not cid.startswith("$ask:"):
+        # Final QA r2: the clip the step named, not every clip on the lane.
+        ids = _clip_targets(ctx, cid)
+        found = [ctx.edl.get_clip(x) for x in ids]
+        have = [r for r in found if r and isinstance(r[1], Clip)
+                and any((e.type == etype) if etype else True for e in r[1].effects)]
+        return _ok(pc, bool(ids) and len(have) == len(ids), f"{len(have)}/{len(ids)}", "the named clip",
+                   unit="clips")
     t = ctx.edl.get_track(str(track_id))
     clips = [c for c in (t.clips if t else []) if isinstance(c, Clip)]
     if not clips:
@@ -1311,7 +1387,11 @@ def c_clip_duration(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 
 def c_clip_flipped(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
-    clips = _named_clips(ctx, _arg(pc, "clip_id"))
+    clips: list[Any] = _named_clips(ctx, _arg(pc, "clip_id"))
+    if not clips and isinstance(_arg(pc, "clip_id"), str):
+        # a sticker (Final QA r3): flip_clip mirrors stickers too
+        hit = ctx.edl.get_clip(str(_arg(pc, "clip_id")))
+        clips = [hit[1]] if hit and hasattr(hit[1], "transform") else []
     want = {k: _arg(pc, k) for k in ("flip_h", "flip_v") if _arg(pc, k) is not None}
     if not clips:
         return _ok(pc, False, None, want, detail="no clip")

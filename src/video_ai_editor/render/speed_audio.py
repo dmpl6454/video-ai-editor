@@ -113,6 +113,13 @@ def key(c: Clip, fps) -> str:
         "pitch": bool(getattr(c.audio, "keep_pitch", True)),
         "fps": _tb.ffmpeg_rate(fps) if fps is not None else None,
     }
+    if fps is not None:
+        # Its length is the clip's frame span, which an export at another
+        # rate resamples (compositor.v1_rate_scope); keyed only then.
+        from .compositor import rate_span_override
+        n = rate_span_override(c, fps)
+        if n is not None:
+            payload["frames"] = n
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:20]
 
 

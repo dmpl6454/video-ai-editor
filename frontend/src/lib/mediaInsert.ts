@@ -33,3 +33,14 @@ export function insertAtPlayhead(row: InsertableRow, edl: EDL | null | undefined
   const dur = row.still ? STILL_SECONDS : (row.duration && row.duration > 0 ? row.duration : STILL_SECONDS)
   return { tool: 'add_clip', args: { track, src: row.src, in: 0, out: dur, start: toFrameGrid(Math.max(0, at), fps) } }
 }
+
+/** What a drop / insert at layout time `at` does on the MAIN track (Final
+ *  QA): the main track is magnetic, so a time inside it INSERTS there — the
+ *  clip under `at` is split (add_clip's server rule) — and a time at or past
+ *  its end appends. `under` is the clip that gets split, if any. */
+export function mainLaneInsert<C extends { start: number }>(clips: readonly C[], at: number,
+  footprint: (c: C) => number): { insert: boolean; under: C | null } {
+  const end = clips.reduce((m, c) => Math.max(m, c.start + footprint(c)), 0)
+  const under = clips.find((c) => c.start + 1e-6 < at && at < c.start + footprint(c) - 1e-6) ?? null
+  return { insert: clips.length > 0 && at < end - 1e-6, under }
+}

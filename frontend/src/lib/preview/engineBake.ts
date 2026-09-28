@@ -29,6 +29,8 @@ export interface BakeHost {
   refreshWant(): void
   prefetch(): void
   emitStatus(): void
+  /** The page is hidden now, event or not (EngineSources.hiddenNow). */
+  hiddenNow?(): boolean
 }
 
 export class BakeSplice {
@@ -55,6 +57,10 @@ export class BakeSplice {
         const ranges = m ? this.rangesText.get(m[1]) : undefined
         return f(ranges ? `${url}?ranges=${ranges}` : url, init)
       },
+      hiddenNow: () => this.host.hiddenNow?.() ?? false,
+      // a bake span that keeps failing retries by itself; onError here would
+      // drop the whole bake (proxyIndex SPAN_DEGRADE_AFTER is for sources)
+      reportSpanFailures: false,
       onLoad: () => this.onLoaded(),
       onError: (key) => {
         if (this.host.feed.bakeKey === key) this.host.feed.setBake(null)

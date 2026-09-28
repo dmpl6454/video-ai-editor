@@ -23,6 +23,7 @@ every press with "Nothing to undo".
 from __future__ import annotations
 import json
 import logging
+import os
 import re
 import shutil
 import zipfile
@@ -31,6 +32,7 @@ from .config import WORKDIR
 from .edl import EDL, EDLStore
 from .edl.schema import Clip, Sticker
 from .storage import session_dir, session_path, new_session_id
+from .media_offline import clip_effect_files
 
 _log = logging.getLogger("video_ai_editor")
 
@@ -63,6 +65,11 @@ def _media_srcs(edl: EDL) -> set[str]:
             bg = getattr(c, "canvas_bg", None)
             if isinstance(c, Clip) and bg is not None and bg.image:
                 out.add(bg.image)
+            # A custom LUT (.cube, the Effects panel's import) and a matte are
+            # files the render reads too (Final QA r2): unbundled, a project
+            # opened elsewhere failed every preview and export.
+            if isinstance(c, Clip):
+                out.update(path for path, _kind in clip_effect_files(c))
     if edl.brand_kit and edl.brand_kit.end_card:
         out.add(edl.brand_kit.end_card)
     return out
@@ -73,7 +80,8 @@ def _media_srcs(edl: EDL) -> set[str]:
 _SNAPSHOT_NAME = re.compile(r"^\d{5}_[0-9a-f]{1,64}\.json$")
 
 #: Session-level state files, in addition to edl.json.
-_STATE_FILES = ("ops.json", "meta.json", "chat.json", "transcript.json", "redo_stack.json")
+_STATE_FILES = ("ops.json", "meta.json", "chat.json", "transcript.json", "redo_stack.json",
+                "redo_ops.json")
 
 
 def _history_edls(sd: Path) -> list[EDL]:
@@ -140,15 +148,46 @@ def save_project(session_id: str, dst: Path, report: dict | None = None) -> Path
     # instead of vanishing from the reopened project's bin.
     from .media_library import list_media
     library = [it["src"] for it in list_media(sd, edl)]
-    media_paths = sorted(set().union(_media_srcs(edl), library,
-                                     *(_media_srcs(h) for h in _history_edls(sd))))
+    live = set().union(_media_srcs(edl), library)
+    history = set().union(*(_media_srcs(h) for h in _history_edls(sd))) - live
+    # Final QA r2 (defence in depth): a path only the undo history names is
+    # bundled only when it lies where this app keeps media. A crafted .vae
+    # hid ~/.ssh/id_rsa in one snapshot, and the next Save zipped it.
+    media_paths = sorted(live | {h for h in history if _app_owned(h)})
     from .media_offline import missing_media
-    missing = missing_media(sd, edl)
+    missing = missing_media(sd, edl, effects=True)
     if report is not None:
         report["missing"] = missing
     manifest = {"media": [], "session_id": session_id,
                 "load_state": store.load_state,
                 "missing": [{"src": m["src"], "name": m["name"]} for m in missing]}
+    # Final QA r2 (disk full): write beside `dst` and move into place only
+    # once the archive is complete. Writing straight to `dst` left a
+    # truncated .vae on ENOSPC — over the previous good save of the same
+    # name — and took the last free space with it.
+    part = dst.with_name(f".{dst.name}.part")
+    try:
+        _write_archive(part, sd, edl, media_paths, manifest)
+        os.replace(part, dst)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return dst
+
+
+def _app_owned(path: str) -> bool:
+    """True for a file under a directory this app writes media to: the
+    sessions (WORKDIR), the bundled presets, the emoji artwork cache."""
+    from . import storage as _storage
+    try:
+        p = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    return p.is_relative_to(Path(_storage.WORKDIR).resolve()) or _app_asset(p)
+
+
+def _write_archive(dst: Path, sd: Path, edl: EDL,
+                   media_paths: list[str], manifest: dict) -> None:
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zf:
         # edl.json comes from the LIVE store, not the file on disk: after a
         # snapshot recovery the on-disk copy is still the unreadable one, and
@@ -167,7 +206,7 @@ def save_project(session_id: str, dst: Path, report: dict | None = None) -> Path
         seen_names: dict[str, int] = {}
         for src in media_paths:
             sp = Path(src)
-            if not sp.exists():
+            if not sp.is_file():
                 continue
             base = sp.name
             n = seen_names.get(base, 0)
@@ -182,7 +221,6 @@ def save_project(session_id: str, dst: Path, report: dict | None = None) -> Path
             manifest["media"].append(entry)
 
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
-    return dst
 
 
 def _inside(base: Path, relative: object) -> Path | None:
@@ -431,12 +469,160 @@ def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> Non
             for ascii_only in (True, False):
                 text = text.replace(json.dumps(old, ensure_ascii=ascii_only)[1:-1],
                                     json.dumps(new, ensure_ascii=ascii_only)[1:-1])
+        text = _vetted_state_text(name, text, sd)
+        if text is None:
+            _log.warning("load_project: dropping %s — not the shape this app writes", name)
+            continue
         out = sd / name
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
 
 
-def load_project(src: Path) -> str:
+#: Top-level JSON type of each state file this app writes. One of another
+#: shape (a crafted or damaged archive) is dropped on open rather than
+#: materialised: a meta.json of `[1,2,3]` broke the project list for good.
+_STATE_SHAPES: dict[str, type] = {"meta.json": dict, "redo_stack.json": list,
+                                  "redo_ops.json": list}
+
+
+def _vetted_state_text(name: str, text: str, sd: Path) -> str | None:
+    """`text` as it may be written into the new session, or None to drop it.
+
+    Final QA r2: an imported project's timeline, snapshots and redo stack
+    may name media only inside the new session (the remapped bundle) or
+    among this app's own read-only assets. Anything else — an absolute path
+    to ~/.ssh/id_rsa hidden in one snapshot — becomes an offline placeholder
+    under `uploads/imported/_missing/`, so it shows as missing media (and
+    can be relinked) instead of being bundled by the next Save."""
+    is_edl = name == "edl.json" or name.startswith("snapshots/")
+    shape = _STATE_SHAPES.get(name)
+    if not is_edl and shape is None and name != "redo_stack.json":
+        return text
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None if shape is not None else text
+    if shape is not None and not isinstance(data, shape):
+        return None
+    edls = [data] if is_edl else (data if name == "redo_stack.json" else [])
+    changed = False
+    for e in edls:
+        changed |= _confine_media_refs(e, sd)
+    return json.dumps(data) if changed else text
+
+
+def _confine_media_refs(edl: object, sd: Path) -> bool:
+    """Rewrite every media path in one EDL dict that is not the new
+    session's own (or an app asset) to its offline placeholder. True when
+    anything changed."""
+    if not isinstance(edl, dict):
+        return False
+    missing_dir = sd / "uploads" / "imported" / "_missing"
+    root = sd.resolve()
+    changed = False
+
+    def fix(holder: object, key: str) -> None:
+        nonlocal changed
+        if not isinstance(holder, dict):
+            return
+        v = holder.get(key)
+        if not isinstance(v, str) or not v:
+            return
+        try:
+            p = Path(v).resolve()
+        except (OSError, ValueError):
+            p = None
+        if p is not None and (p.is_relative_to(root) or _app_asset(p)):
+            return
+        # The file name on either OS's separators (a Windows-authored .vae
+        # holds `C:\\…\\interview.mp4`), so the bin still names it.
+        leaf = re.split(r"[\\/]", v.rstrip("\\/"))[-1] or "media"
+        holder[key] = str(missing_dir / leaf)
+        changed = True
+
+    for t in edl.get("tracks") or []:
+        for c in (t.get("clips") or []) if isinstance(t, dict) else []:
+            if not isinstance(c, dict):
+                continue
+            fix(c, "src")
+            fix(c, "matte_src")
+            fix(c.get("canvas_bg"), "image")
+            for fx in c.get("effects") or []:
+                if isinstance(fx, dict):
+                    fix(fx.get("params"), "src")
+    fix(edl.get("brand_kit"), "end_card")
+    return changed
+
+
+def _app_asset(p: Path) -> bool:
+    """A read-only asset of this app (bundled presets, the emoji cache)."""
+    from .config import PRESETS_DIR
+    roots = [PRESETS_DIR]
+    try:
+        from .ai.emoji import _EMOJI_CACHE_ROOT
+        roots.append(_EMOJI_CACHE_ROOT)
+    except Exception:
+        pass
+    return any(p.is_relative_to(Path(r).resolve()) for r in roots)
+
+
+#: An archive may unpack to at most this many times its own size (Final QA,
+#: zip bomb) — a project is video (already compressed, ~1:1) plus a little
+#: JSON. With a floor, so a tiny all-JSON project is never refused by it.
+MAX_UNPACK_RATIO = 200
+UNPACK_RATIO_FLOOR_BYTES = 64 * 1024 * 1024
+_COPY_CHUNK = 1024 * 1024
+
+
+class ProjectTooLarge(ValueError):
+    """The archive would unpack past its byte budget (ratio or free space)."""
+
+
+def _unpack_budget(src: Path, infos: list[zipfile.ZipInfo], max_unpacked_bytes: int | None) -> int:
+    declared = sum(max(0, i.file_size) for i in infos)
+    ratio_cap = max(UNPACK_RATIO_FLOOR_BYTES, MAX_UNPACK_RATIO * max(1, src.stat().st_size))
+    if declared > ratio_cap:
+        raise ProjectTooLarge(
+            f"That project file would unpack to {declared / 1e6:,.0f} MB from a "
+            f"{src.stat().st_size / 1e6:,.1f} MB file — far more than any real project, "
+            "so it was not opened.")
+    if max_unpacked_bytes is not None and declared > max_unpacked_bytes:
+        raise ProjectTooLarge(
+            f"Not enough free space to open that project: it unpacks to about "
+            f"{declared / 1e6:,.0f} MB and there is room for {max(0, max_unpacked_bytes) / 1e6:,.0f} MB. "
+            "Free some space and open it again.")
+    return min(ratio_cap, max_unpacked_bytes) if max_unpacked_bytes is not None else ratio_cap
+
+
+def _extract_within(zf: zipfile.ZipFile, infos: list[zipfile.ZipInfo], dest: Path, budget: int) -> None:
+    """Extract member by member, counting the bytes actually written — a
+    header's size is checked above, and the running count stops a member
+    that decompresses past what it declared."""
+    root = dest.resolve()
+    written = 0
+    for info in infos:
+        name = info.filename.replace("\\", "/")
+        parts = [p for p in name.split("/") if p not in ("", ".")]
+        if not parts or ".." in parts or name.startswith("/") or ":" in parts[0]:
+            raise ValueError(f"unsafe path in project file: {info.filename!r}")
+        out = root.joinpath(*parts)
+        if info.is_dir():
+            out.mkdir(parents=True, exist_ok=True)
+            continue
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info) as fin, open(out, "wb") as fout:
+            while True:
+                chunk = fin.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > budget:
+                    raise ProjectTooLarge("That project file unpacks to more than it declared, "
+                                          "so it was not opened.")
+                fout.write(chunk)
+
+
+def load_project(src: Path, *, max_unpacked_bytes: int | None = None) -> str:
     """Load a .vae into a fresh session. Returns the new session_id.
 
     THE ORDER IS THE POINT: extract to a private directory, validate there,
@@ -465,7 +651,11 @@ def load_project(src: Path) -> str:
     try:
         unpack.mkdir(parents=True)
         with zipfile.ZipFile(src, "r") as zf:
-            zf.extractall(unpack)
+            # Final QA (zip bomb): budget first, then a counted extraction —
+            # `extractall` had no limit, so a 1 MB file wrote 1 GiB of zeros.
+            infos = zf.infolist()
+            budget = _unpack_budget(src, infos, max_unpacked_bytes)
+            _extract_within(zf, infos, unpack, budget)
         manifest = _read_manifest(unpack)
         _assert_timeline_importable(unpack)
         return _materialise_session(sid, manifest, unpack)

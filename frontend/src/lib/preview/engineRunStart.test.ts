@@ -31,6 +31,16 @@ describe('RunStartGate', () => {
     expect(g.stale(7, 30, 200)).toBe(false)
   })
 
+  it('an element whose position is unknown arms the gate: a frame from where WebKit moved it is refused', () => {
+    // WKWebView, occluded window: parked at 175, the element presented up
+    // to 213 by itself; the resume re-seeks it to 175 (review C1)
+    const g = new RunStartGate()
+    g.begin(175, -1, 0)
+    expect(g.pending).toBe(true)
+    expect(g.stale(213, 30, 64)).toBe(true)
+    expect(g.stale(175, 30, 80)).toBe(false)
+  })
+
   it('a new begin replaces the old one', () => {
     const g = new RunStartGate()
     g.begin(0, 2879, 0)

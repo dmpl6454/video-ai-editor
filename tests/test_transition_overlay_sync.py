@@ -410,17 +410,23 @@ def test_a_probe_covering_exactly_the_consumed_tail_is_dropped(tmp_path, fx):
     assert clock.render_window(faded, *TAIL) is None
     out = _export(faded, tmp_path / "faded")            # must still render cleanly
     assert _seen_window(out, _is_magenta) is None
-    assert _tone_window(_band_levels(out, TONE_HZ)) is None
+    # A SOUND lane is never dropped (final QA round 3, `clock.sound_window`):
+    # the voiceover on the same window is heard whole where its start plays.
+    heard = _tone_window(_band_levels(out, TONE_HZ))
+    assert _close(heard, TAIL, AUDIO_TOL), heard
 
 
-def test_a_lane_clip_straddling_the_seam_ends_where_the_picture_does(tmp_path, fx):
-    """A music clip at layout 1.5–2.5 covers A's tail AND B's head; on screen
-    those are the same 0.5 s, so the bed is heard for 1.5–2.0 and stops there
-    — it does not run on past the frame authored under its end."""
+def test_a_lane_clip_straddling_the_seam_plays_its_whole_length(tmp_path, fx):
+    """A music clip at layout 1.5–2.5 covers A's tail AND B's head. On screen
+    those are the same 0.5 s, but a sound lane is not a picture: it starts at
+    render 1.5 and is heard for its whole 1.0 s (final QA round 3; it used to
+    stop at 2.0, which cut a voiceover's last words by every seam it
+    crossed). Only a PICTURE window shrinks."""
     edl = _plant(_base(fx, fade=True), "music", fx, (1.5, 2.5))
     assert _expected(edl, (1.5, 2.5)) == pytest.approx((1.5, 2.0))
+    assert clock.sound_window(edl, 1.5, 1.0) == pytest.approx((1.5, 2.5))
     heard = _tone_window(_band_levels(_export(edl, tmp_path), TONE_HZ))
-    assert _close(heard, (1.5, 2.0), AUDIO_TOL), heard
+    assert _close(heard, (1.5, 2.5), AUDIO_TOL), heard
 
 
 # ------------------------------------------------------------------ ducking

@@ -211,12 +211,19 @@ def dense_bed(tmp_path_factory) -> dict[str, Path]:
         out[name] = d / f"{name}.wav"
         _ff(["-f", "lavfi", "-i", f"aevalsrc='{expr}':s=48000:d=12:c=stereo",
              "-c:a", "pcm_s24le", str(out[name])])
-    pic = d / "pic.mp4"
-    _ff(["-f", "lavfi", "-i", "color=c=gray:s=320x180:d=12:r=30",
-         "-f", "lavfi", "-i", "anoisesrc=a=0.02:c=pink:d=12:r=48000", "-shortest",
-         "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-ac", "2",
-         str(pic)])
-    return {**out, "pic": pic}
+    # The picture's room noise sits ~40 dB under the bed, yet it decides
+    # WHICH AAC frame overshoots: unseeded (anoisesrc's default), this test
+    # failed ~1 run in 8 on the fix-up's loudness. Seeds 8 and 3 are takes
+    # that put one +0.6 dBTP spot in the hats encode and a -0.8 one in the
+    # clicks encode (C2 sweep, 30 seeds x 2 beds x 2 targets) — pinned, so
+    # the hard case runs every time instead of by chance.
+    for key, seed in (("pic", 8), ("pic3", 3)):
+        out[key] = d / f"{key}.mp4"
+        _ff(["-f", "lavfi", "-i", "color=c=gray:s=320x180:d=12:r=30",
+             "-f", "lavfi", "-i", f"anoisesrc=a=0.02:c=pink:d=12:r=48000:seed={seed}", "-shortest",
+             "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+             "-ac", "2", str(out[key])])
+    return out
 
 
 @pytest.mark.parametrize("bed", ["hats", "clicks"])
@@ -242,6 +249,99 @@ def test_dense_undocked_music_holds_the_ceiling_after_the_aac_encode(tmp_path, d
     v = next(st for st in pr["streams"] if st["codec_type"] == "video")
     assert (v["width"], v["height"]) == (256, 144)
     assert abs(float(pr["format"]["duration"]) - 12.0) < 0.1
+
+
+@pytest.mark.parametrize("bed,pic", [("hats", "pic"), ("clicks", "pic"), ("clicks", "pic3")])
+def test_one_aac_overshoot_spot_is_dipped_not_the_whole_programme(tmp_path, dense_bed, bed, pic,
+                                                                 monkeypatch):
+    """C2: the encode's overshoot is a spot (one 5 ms hat at +0.6 dBTP over a
+    file otherwise at -1.2), and the fix-up used to answer it by lowering the
+    WHOLE ceiling by the full overshoot: -14.6 -> -15.3 LUFS on a -14 target
+    (hats), or, re-rolling the encode each pass, never getting under at all
+    (clicks: -0.8 -> -0.9 -> -0.9 -> 0.0 dBTP). Now only the spots are dipped:
+    the delivered mp4 is under the ceiling and within 0.2 LU of what the
+    encode delivered."""
+    s = _store(tmp_path / "s", w=640, h=360)
+    dispatch(s, "add_clip", {"track": "v1", "src": str(dense_bed[pic]), "in": 0, "out": 12, "start": 0})
+    dispatch(s, "add_music", {"src": str(dense_bed[bed]), "start": 0, "in": 0, "out": 12,
+                              "duck": False, "volume_db": 0})
+    dispatch(s, "apply_export_preset", {"name": "youtube_16x9"})
+    seen: dict[str, tuple[float, float]] = {}
+    real = compositor._hold_delivery_true_peak
+
+    def spy(dst, **kw):
+        seen["encoded"] = _loudness(dst)
+        real(dst, **kw)
+    monkeypatch.setattr(compositor, "_hold_delivery_true_peak", spy)
+    mp4 = render_export(s.edl, s.dir, height=144).path
+    i, tp = _loudness(mp4)
+    i_enc, tp_enc = seen["encoded"]
+    assert tp_enc > audio_mix.EXPORT_TRUE_PEAK_DBTP, ("this take must overshoot", i_enc, tp_enc)
+    assert tp <= audio_mix.EXPORT_TRUE_PEAK_DBTP, (i_enc, tp_enc, i, tp)
+    assert i == pytest.approx(i_enc, abs=0.2), (i_enc, tp_enc, i, tp)
+    assert i == pytest.approx(s.edl.canvas.loudness_lufs, abs=1.0), (i, tp)
+    assert not list((s.dir / "exports").glob("*.tpfix*")), "no fix-up candidate left behind"
+
+
+def test_overshoot_everywhere_falls_back_to_lowering_the_ceiling(tmp_path, dense_bed, monkeypatch):
+    """More hot spots than `MAX_DIPS` is not a spot problem: the fix-up
+    lowers the whole ceiling instead (the pre-C2 behaviour), which still
+    brings the file under — at a loudness cost the dips avoid."""
+    from video_ai_editor.render import delivery_peak as dp
+    monkeypatch.setattr(dp, "MAX_DIPS", 0)
+    s = _store(tmp_path / "s", w=640, h=360)
+    dispatch(s, "add_clip", {"track": "v1", "src": str(dense_bed["pic"]), "in": 0, "out": 12, "start": 0})
+    dispatch(s, "add_music", {"src": str(dense_bed["hats"]), "start": 0, "in": 0, "out": 12,
+                              "duck": False, "volume_db": 0})
+    dispatch(s, "apply_export_preset", {"name": "youtube_16x9"})
+    seen: dict[str, tuple[float, float]] = {}
+    real = compositor._hold_delivery_true_peak
+
+    def spy(dst, **kw):
+        seen["encoded"] = _loudness(dst)
+        real(dst, **kw)
+    monkeypatch.setattr(compositor, "_hold_delivery_true_peak", spy)
+    m4a = render_export(s.edl, s.dir, container="m4a").path
+    i, tp = _loudness(m4a)
+    assert tp <= audio_mix.EXPORT_TRUE_PEAK_DBTP, (i, tp)
+    # Against what the encode delivered, not an absolute level: the master
+    # now lands its target through the limiter (final QA, 0.8.0), so this
+    # take starts at -14.0 where it used to start 0.6 LU short.
+    i_enc, _tp_enc = seen["encoded"]
+    assert i < i_enc - 0.2, ("the whole ceiling came down", i_enc, i, tp)
+
+
+def test_the_dip_envelope_is_local_smooth_and_as_deep_as_asked(tmp_path):
+    """The fix-up's gain envelope, rendered by ffmpeg on a steady tone: -d dB
+    at a dip's centre, untouched a half-width away, and two overshooting
+    scan blocks closer than a half-width are one spot."""
+    from video_ai_editor.render import delivery_peak as dp
+    tone = tmp_path / "tone.wav"
+    _ff(["-f", "lavfi", "-i", "sine=f=1000:r=48000:d=2", "-ac", "2", "-c:a", "pcm_f32le", str(tone)])
+    dips = [(0.5, 3.0), (1.5, 1.2)]
+    raw = subprocess.run([_pu.FFMPEG, "-v", "error", "-i", str(tone), "-af", dp.dip_filter(dips),
+                          "-f", "f32le", "-ac", "2", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32).reshape(-1, 2)[:, 0].astype(np.float64)
+    flat = _rms_db(np.frombuffer(subprocess.run(
+        [_pu.FFMPEG, "-v", "error", "-i", str(tone), "-f", "f32le", "-ac", "2", "-"],
+        capture_output=True, check=True).stdout, np.float32).reshape(-1, 2)[:, 0].astype(np.float64))
+
+    def level(t: float) -> float:                # dB against the undipped tone
+        return _rms_db(x[int((t - 0.004) * SR):int((t + 0.004) * SR)]) - flat
+    assert level(0.5) == pytest.approx(-3.0, abs=0.15)
+    assert level(1.5) == pytest.approx(-1.2, abs=0.15)
+    for t in (0.2, 0.5 - dp.DIP_HALF_S - 0.01, 1.0, 1.5 + dp.DIP_HALF_S + 0.01, 1.8):
+        assert level(t) == pytest.approx(0.0, abs=0.05), t
+    # Scan -> spots -> dips.
+    peaks = np.full(400, -3.0)
+    peaks[100], peaks[104], peaks[300] = -0.5, 0.4, -0.9      # 5 ms blocks
+    spots = dp.hot_spots(peaks, -1.15)
+    assert [round(t, 4) for t, _ in spots] == [0.5225, 1.5025]
+    assert [round(o, 2) for _, o in spots] == [1.55, 0.25]
+    deeper = dp.merge_dips(spots, [(0.53, 0.3), (1.0, 0.2)])
+    assert [(round(t, 4), round(o, 2)) for t, o in deeper] == [(0.5225, 1.85), (1.0, 0.2), (1.5025, 0.25)]
+    assert spots == dp.hot_spots(peaks, -1.15), "merge_dips returns a new list"
+    assert dp.dip_filter([]) == ""
 
 
 # ---------------------------------------------------------------- QA-122

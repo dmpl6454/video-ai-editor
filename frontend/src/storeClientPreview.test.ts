@@ -58,6 +58,7 @@ vi.stubGlobal('localStorage', {
 })
 
 const { useStore, previewController } = await import('./store')
+const { useToasts } = await import('./toast')
 const { api } = await import('./api')
 const flush = (ms = 0) => new Promise((r) => setTimeout(r, ms))
 const ctl = () => (globalThis as Record<string, unknown>).__ctl as { opts: Record<string, (...a: unknown[]) => void> }
@@ -218,5 +219,74 @@ describe('the setting', () => {
     await setPreviewEngineSetting('server')
     expect(useStore.getState().previewEngine).toBe('server')
     expect(previewController()).toBeNull()
+  })
+})
+
+// Final QA: with Instant preview on the shuttle's rates are Phase 4 — the
+// client engine plays at 1× and never in reverse. The store used to CLAIM 2×
+// (and StickerLayer animated at it) while the picture ran at 1×, and J did
+// nothing at all, with no word to the user.
+describe('client mode: the shuttle says what it cannot do yet', () => {
+  beforeEach(() => {
+    toMode('client')
+    calls.length = 0
+    useToasts.setState({ toasts: [] })
+  })
+  const shuttleToasts = () => useToasts.getState().toasts.filter((t) => /Instant preview/.test(t.message))
+
+  it('L L keeps the rate at 1× (what actually plays) and says why', () => {
+    useStore.getState().setPlaybackRate(1)
+    useStore.getState().setPlaying(true)
+    useStore.getState().setPlaybackRate(2)
+    expect(useStore.getState().playbackRate).toBe(1)
+    expect(useStore.getState().isPlaying).toBe(true)
+    expect(shuttleToasts()).toHaveLength(1)
+  })
+
+  it('J says why it does not play backwards; repeated presses do not stack toasts', () => {
+    useStore.getState().setPlaybackRate(-1)
+    useStore.getState().setPlaying(true)
+    expect(useStore.getState().isPlaying).toBe(false)
+    useStore.getState().setPlaybackRate(-2)
+    expect(shuttleToasts()).toHaveLength(1)
+  })
+
+  it('server mode honours the rate with no toast', () => {
+    toMode('server')
+    useStore.getState().setPlaybackRate(2)
+    expect(useStore.getState().playbackRate).toBe(2)
+    expect(shuttleToasts()).toHaveLength(0)
+  })
+})
+
+// Final QA: switching Instant preview ON while the server preview plays left
+// the store saying Playing over an engine that never started (frozen picture,
+// and the next Space only "paused").
+describe('switching engines while playing', () => {
+  it('server → client while playing: the transport agrees with the engine (stopped)', () => {
+    useStore.getState().setPlaying(true)
+    expect(useStore.getState().isPlaying).toBe(true)
+    toMode('client')
+    expect(calls.some((c) => c[0] === 'play')).toBe(false)
+    expect(useStore.getState().isPlaying).toBe(false)
+    // and the next Space plays
+    useStore.getState().setPlaying(true)
+    expect(calls.at(-1)?.[0]).toBe('play')
+    expect(useStore.getState().isPlaying).toBe(true)
+  })
+
+  it('J in server mode, then Instant preview on: the Play button plays (Final QA r2)', () => {
+    // shuttleReverse in server mode: the server preview really plays backwards
+    useStore.getState().setPlaybackRate(-1)
+    useStore.getState().setPlaying(true)
+    expect(useStore.getState().playbackRate).toBe(-1)
+    toMode('client')
+    // The leftover -1 made setPlaying refuse every Play click and the first
+    // Space, silently — and a voice-over take would start over a stopped
+    // timeline (VoRecorder.beginTake calls setPlaying only).
+    expect(useStore.getState().playbackRate).toBe(1)
+    useStore.getState().setPlaying(true)                // the timeline's Play button
+    expect(calls.at(-1)?.[0]).toBe('play')
+    expect(useStore.getState().isPlaying).toBe(true)
   })
 })

@@ -86,9 +86,23 @@ def ffmpeg_filter_path(path: Path | str) -> str:
          only escaping that survives ffmpeg's two-pass filtergraph parser
          (single-backslash and single-quoting both fail).
     On POSIX a normal path has no backslashes and no colon, so it passes
-    through unchanged (a rare stray colon is still escaped defensively)."""
+    through unchanged (a rare stray colon is still escaped defensively).
+
+    Final QA (0.8.0): that was only the colon. ffmpeg parses such a value at
+    TWO levels — the option value (`\\ ' :`) and then the filtergraph
+    (`\\ ' [ ] , ;`) — so a LUT named "Tom's grade, v2.cube" lost its quote
+    and was split at the comma, and every preview and export failed with a
+    message blaming the clip. Each level is now escaped in turn (verified
+    against ffmpeg for lut3d= and movie=filename=); the drive colon comes
+    out exactly as before (`\\\\:`)."""
     s = str(path).replace("\\", "/")
-    return s.replace(":", "\\\\:")
+    level1 = _FILTER_OPTION_SPECIALS.sub(r"\\\1", s)
+    return _FILTER_GRAPH_SPECIALS.sub(r"\\\1", level1)
+
+
+#: Characters `ffmpeg_filter_path` escapes at each parser level.
+_FILTER_OPTION_SPECIALS = re.compile(r"([\\':])")
+_FILTER_GRAPH_SPECIALS = re.compile(r"([\\'\[\],;])")
 
 
 def find_binary(name: str, extra_dirs: list[Path]) -> str | None:
@@ -193,6 +207,58 @@ def part_path(dst: Path) -> Path:
     """
     return dst.with_name(
         f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part{dst.suffix}")
+
+
+def pid_alive(pid: int) -> bool:
+    """Is process `pid` still running? False for a non-positive pid.
+
+    POSIX: `kill(pid, 0)` (EPERM means it exists under another user).
+    Windows: OpenProcess + GetExitCodeProcess — never `os.kill(pid, 0)`,
+    which on Windows TERMINATES the process (signal 0 is passed to
+    TerminateProcess as the exit code)."""
+    if pid <= 0:
+        return False
+    if IS_WINDOWS:  # pragma: no cover - exercised on the Windows CI runner
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))    # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def list_processes() -> list[tuple[int, str]]:
+    """`(pid, full command line)` of every process this user can see, for
+    finding a crashed backend's orphaned encoder. POSIX through `ps`; an
+    empty list on Windows (no command lines without WMI) or when `ps` fails —
+    callers treat that as "nothing found"."""
+    if IS_WINDOWS:  # pragma: no cover
+        return []
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace",
+                             timeout=10, **SUBPROCESS_FLAGS).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    procs: list[tuple[int, str]] = []
+    for line in out.splitlines():
+        head, _sp, cmd = line.strip().partition(" ")
+        if head.isdigit():
+            procs.append((int(head), cmd.strip()))
+    return procs
 
 
 def replace_with_retry(src: Path | str, dst: Path | str,

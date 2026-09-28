@@ -97,3 +97,33 @@ export function curveClockOf(c: unknown): CurveClock | null {
   if (!e || freezeOf(e) !== null || !curvePoints(e.speed)) return null
   return { duration: effectiveDuration(e), sourceAt: (t) => sourceOffsetAt(e, t) }
 }
+
+// ---------------------------------------------------------------- the ruler's clock
+
+/** The clock the fields speak (lib/timelineLayout `timingClockOf`): shows an
+ *  EDL instant on the ruler's clock and decodes a typed one back. */
+export interface FieldClock {
+  show: (layoutT: number) => number
+  start: (r: number) => number
+  end: (r: number) => number
+}
+
+/** A clip's EDL span as the fields show it: on the ruler's clock, where the
+ *  playhead, the Timeline and the export put it. */
+export function shownTiming(span: OverlaySpan, clock: FieldClock): OverlaySpan {
+  return { start: clock.show(span.start), end: clock.show(span.end) }
+}
+
+/** A value typed into Start / End / Duration (ruler time) → the EDL-time
+ *  field edit `overlayTimingEdit` / `mediaTimingEdit` take. A Duration is an
+ *  End measured from the SHOWN start, so it too goes through the clock. */
+export function clockedEdit(
+  field: TimelineField, value: number, shownStart: number, clock: FieldClock,
+): { field: 'start' | 'end'; value: number } | null {
+  if (!finite(value)) return null
+  switch (field) {
+    case 'start': return { field: 'start', value: clock.start(value) }
+    case 'end': return { field: 'end', value: clock.end(value) }
+    case 'duration': return { field: 'end', value: clock.end(shownStart + value) }
+  }
+}

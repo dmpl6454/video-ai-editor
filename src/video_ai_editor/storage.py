@@ -84,6 +84,11 @@ def list_sessions() -> list[dict]:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        if not isinstance(meta, dict):
+            # Final QA r2: a meta.json that parses to a list/null/number (a
+            # crafted or damaged .vae) made `meta.get` raise here, and every
+            # project-list, New project and Open call 500'd from then on.
+            meta = {}
         mtime = d.stat().st_mtime
         sessions.append({
             "id": d.name,
@@ -261,5 +266,9 @@ def write_meta(session_id: str, meta: dict) -> None:
 
 
 def read_meta(session_id: str) -> dict:
+    """The session's meta.json as a dict — {} when it is absent or is not a
+    JSON object (Final QA r2: rename and save used to 500 on `[1,2,3]`).
+    Unreadable JSON still raises, as it always has."""
     p = session_dir(session_id) / "meta.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    meta = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    return meta if isinstance(meta, dict) else {}

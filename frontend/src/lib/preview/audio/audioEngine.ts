@@ -46,8 +46,13 @@ export interface AudioEngineOptions {
   /** Where the mix goes (default the context's destination; a test tap). */
   destination?: (ctx: AudioContext) => AudioNode
   /** The last known preview loudness gain (dB), for a canvas with a
-   *  loudness target (APPROX, §7). */
+   *  loudness target (APPROX, §7): the server preview's master gain, from
+   *  GET /preview_loudness (PreviewController). */
   loudnessGainDb?: () => number | null
+  /** Whether that gain was measured for the sound of `renderHash` (else the
+   *  frames are APPROX 'audio:loudness'). Without it the sink says nothing
+   *  about loudness (test harnesses that set the gain themselves). */
+  loudnessCurrent?: (renderHash: string) => boolean
   /** The context stopped without us (suspended/interrupted by the system).
    *  The engine should pause the picture at the same k. */
   onInterrupted?: (state: string) => void
@@ -87,6 +92,14 @@ export class AudioEngine implements AudioSink {
   private running = false
   private timer: unknown = null
   private stopToken = 0
+  /**
+   * A suspend() WE issued (stop's idle suspend, the limiter warm-up) that has
+   * not finished yet — through the resume that follows it when a start()
+   * landed meanwhile. Its statechange is not an interruption (Final QA: a
+   * restart a few ms after a stop saw 'running', skipped resume(), and the
+   * late 'suspended' of our own suspend paused playback five frames in).
+   */
+  private ownSuspend: Promise<void> | null = null
   private readonly opts: AudioEngineOptions
   private keys = new Map<string, string | null>()
   /** The context whose output timestamps are of the RENDERED time (WebKit). */
@@ -127,6 +140,36 @@ export class AudioEngine implements AudioSink {
     } finally {
       this.planning = null
     }
+  }
+
+  /** The planned master stage (gain × loudness, limiter ceiling) of the
+   *  newest program; null before the first prepare. */
+  plannedMaster(): AudioPlan['master'] | null {
+    return (this.pending ?? this.program)?.plan.master ?? null
+  }
+
+  /** For the engine's classify (§7): the loudness gain the newest program
+   *  plays is the one measured for its render (true), or a last-known /
+   *  missing one (false: APPROX 'audio:loudness'). Undefined when the
+   *  project has no loudness target, or no loudness source was given. */
+  loudnessCurrent(): boolean | undefined {
+    const p = this.pending ?? this.program
+    const current = this.opts.loudnessCurrent
+    if (!p || !current) return undefined
+    const lufs = (p.edl.canvas as { loudness_lufs?: number | null } | undefined)?.loudness_lufs
+    if (lufs === null || lufs === undefined) return undefined
+    return current(p.info.renderHash) && (this.opts.loudnessGainDb?.() ?? null) !== null
+  }
+
+  /** The loudness gain (or whether it is current) changed: re-plan the newest
+   *  program with it — while playing, the master gain ramps to it at once —
+   *  and have the engine reclassify. */
+  refreshLoudness(): void {
+    const p = this.pending ?? this.program
+    if (!p) return
+    this.prepare(p.edl, p.placements, p.info)
+    if (this.running && this.pending) this.apply(Math.ceil(this.schedSample()))
+    this.onLimitingChange?.()
   }
 
   /** Output frame ranges where the master limiter may work (APPROX). */
@@ -203,8 +246,23 @@ export class AudioEngine implements AudioSink {
     void ctx.resume().catch(() => { /* needs a gesture here */ })
     const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
     later(() => {
-      if (token === this.stopToken && !this.running && ctx.state === 'running') void ctx.suspend().catch(() => { /* closed */ })
+      if (token === this.stopToken && !this.running && ctx.state === 'running') this.suspendOwn(ctx)
     }, Math.round((LIMITER_WARMUP_S + 0.05) * 1000))
+  }
+
+  /** Suspend `ctx` ourselves. If a start() lands before the suspend does,
+   *  resume once it has — start() cannot, since the state still read
+   *  'running' when it looked. */
+  private suspendOwn(ctx: AudioContext): void {
+    const p: Promise<void> = ctx.suspend()
+      .catch(() => { /* closed */ })
+      .then(async () => {
+        if (this.running && this.ctx === ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+          await ctx.resume().catch(() => { /* reported by statechange */ })
+        }
+      })
+      .finally(() => { if (this.ownSuspend === p) this.ownSuspend = null })
+    this.ownSuspend = p
   }
 
   /** The output sample an edit while playing lands on: the picture's lead
@@ -262,7 +320,10 @@ export class AudioEngine implements AudioSink {
   private onState(): void {
     const st = this.ctx?.state as string | undefined
     if (this.running && st && st !== 'running') {
-      // Not ours: stop() clears `running` before it suspends.
+      // Ours: a suspend we issued landing after a start() — suspendOwn()
+      // resumes it. Anything else is not ours (stop() clears `running`
+      // before it suspends).
+      if (st === 'suspended' && this.ownSuspend) return
       this.stats.interrupted++
       this.halt(RAMP_S * 1000)
       this.opts.onInterrupted?.(st)
@@ -371,9 +432,7 @@ export class AudioEngine implements AudioSink {
     const ctx = this.ctx
     const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
     later(() => {
-      if (token === this.stopToken && !this.running && ctx && ctx.state === 'running') {
-        void ctx.suspend().catch(() => { /* closed */ })
-      }
+      if (token === this.stopToken && !this.running && ctx && ctx.state === 'running') this.suspendOwn(ctx)
     }, rampMs + SUSPEND_AFTER_MS)
   }
 

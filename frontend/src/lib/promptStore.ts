@@ -21,6 +21,7 @@
 //     (§3.1 honesty rules). `brains` is `/api/prompt/brains` verbatim after
 //     normalisation; nothing here invents availability.
 
+import { promptOpRef } from './promptUndo'
 import { create } from 'zustand'
 import { api, type PromptBody, type PromptPending, type PromptRunEnvelope, type PromptRunRecord } from '../api'
 import { useStore, errorMessage } from '../store'
@@ -256,7 +257,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       // it is the same turn, answered.
       const signal = freshSignal()
       set({ status: 'planning', clarify: null, reply: '', steps: [], verify: null, lastError: null,
-            opSeen: false, connectionDropped: false, logOpen: true })
+            opSeen: false, opRef: null, connectionDropped: false, logOpen: true })
       let res: Response
       try {
         res = await api.promptAnswer(sid, token, payload)
@@ -466,6 +467,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
         verify,
         reply: typeof record.reply === 'string' ? record.reply : '',
         opSeen: !!record.op,
+        opRef: record.op ? promptOpRef(record.op) : null,
         lastError,
         logOpen: steps.length > 0 || !!verify || !!record.reply || mapped === 'error' || mapped === 'cancelled',
       })

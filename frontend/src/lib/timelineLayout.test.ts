@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  clipLocalTime, drawnSpan, edlTimeFromOutput, layoutPlayhead, layoutTime, outStart,
+  clipLocalTime, drawnSpan, edlTimeFromOutput, isSoundLane, layoutPlayhead, layoutTime, outStart, soundPull,
   renderTime, renderWindow, seamTable, v1ClipAt, v1Layout, v1LayoutOf, v1SeamsOf,
   v1TimeFromOutput, type LayoutClip,
 } from './timelineLayout'
@@ -335,6 +335,51 @@ describe('drawnSpan (Timeline.tsx overlay lanes)', () => {
     const span = drawnSpan('captions', hugging, layout)
     expect(span.dropped).toBe(true)
     expect(span.duration).toBe(0)
+  })
+})
+
+describe('drawnSpan (sound lanes keep their length)', () => {
+  it('draws a voiceover across a seam at render_time(start) for its whole duration', () => {
+    // Final QA (round 3): the block was drawn shrunk by the seam it crossed
+    // (and the export cut the voiceover's tail by the same amount).
+    const edl = edlWith([{ at: 13.73, type: 'zoomin', duration: 0.3 }])
+    const layout = { shift: new Map<string, number>(), seams: v1SeamsOf(edl) }
+    const vo = { id: 'vo1', track: 'vo', src: 'vo.m4a', in: 0, out: 7, start: 10 } as unknown as AnyClipLike
+    for (const [id, type] of [['vo', 'vo'], ['music', 'music'], ['a1', 'audio']]) {
+      const span = drawnSpan(id, vo, layout, type)
+      expect(span.start).toBeCloseTo(10, 9)
+      expect(span.duration).toBeCloseTo(7, 9)
+      expect(span.dropped).toBe(false)
+    }
+    // a picture lane keeps the shrinking rule
+    expect(drawnSpan('v2', vo, layout, 'video').duration).toBeCloseTo(6.7, 9)
+    expect(isSoundLane('vo', 'vo') && isSoundLane('a2', 'audio') && !isSoundLane('v2', 'video')).toBe(true)
+  })
+
+  it('never drops a sound clip living inside a consumed span', () => {
+    const edl = edlWith([{ at: 13.73, type: 'zoomin', duration: 0.3 }])
+    const layout = { shift: new Map<string, number>(), seams: v1SeamsOf(edl) }
+    const hug = { id: 'm', track: 'music', src: 'm.m4a', in: 0, out: 0.2, start: 13.6 } as unknown as AnyClipLike
+    const span = drawnSpan('music', hug, layout, 'music')
+    expect(span.dropped).toBe(false)
+    expect(span.start).toBeCloseTo(13.6, 9)
+    expect(span.duration).toBeCloseTo(0.2, 9)
+  })
+})
+
+describe('soundPull (a run of abutting sound clips moves as one block)', () => {
+  it('pulls a split voiceover by its first piece, keeping the pieces back to back', () => {
+    const edl = edlWith([{ at: 13.73, type: 'zoomin', duration: 0.3 }])
+    const layout = { shift: new Map<string, number>(), seams: v1SeamsOf(edl) }
+    const mk = (id: string, start: number, inn: number, out: number) =>
+      ({ id, track: 'vo', src: 'vo.m4a', in: inn, out, start }) as unknown as AnyClipLike
+    const lane = [mk('p1', 12, 0, 3), mk('p2', 15, 3, 7), mk('late', 20, 0, 1)]
+    const s1 = drawnSpan('vo', lane[0], layout, 'vo', lane)
+    const s2 = drawnSpan('vo', lane[1], layout, 'vo', lane)
+    expect(s1.start).toBeCloseTo(12, 9)
+    expect(s2.start).toBeCloseTo(s1.start + s1.duration, 9)        // no overlap at the seam
+    expect(drawnSpan('vo', lane[2], layout, 'vo', lane).start).toBeCloseTo(19.7, 9)
+    expect(soundPull(layout.seams, lane[1])).toBeCloseTo(0.3, 9)   // alone it would be pulled
   })
 })
 

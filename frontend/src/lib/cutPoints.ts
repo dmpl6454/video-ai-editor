@@ -13,12 +13,20 @@
 // earlier ones, so "last wins" is what actually renders.
 
 import { clipEnd, isMediaClip, type Clip, type EDL } from '../types'
+import { v1LayoutOf } from './timelineLayout'
 
 export interface TransitionRecord { at: number; type: string; duration: number }
 
 export interface CutPoint {
-  /** EDL seconds of the boundary. */
+  /** EDL seconds of the boundary — what add/remove_transition take. */
   at: number
+  /**
+   * RENDER seconds where the seam is drawn: clip B's first frame on the
+   * ruler (`after.start − shift(after)`). The playhead lives on this clock,
+   * so targeting and "go to cut" use it; equal to `at` with no upstream
+   * transitions.
+   */
+  renderAt: number
   /** The clip ending here and the clip starting here. */
   before: Clip
   after: Clip
@@ -37,13 +45,15 @@ export function v1CutPoints(edl: EDL | null | undefined): CutPoint[] {
   // incomplete on purpose) — read via the repo's established cast pattern.
   const trs = (v1 as unknown as { transitions?: TransitionRecord[] }).transitions ?? []
   const media = v1.clips.filter(isMediaClip).slice().sort((a, b) => a.start - b.start)
+  const { shift } = v1LayoutOf(edl)
   const cuts: CutPoint[] = []
   for (let i = 0; i < media.length - 1; i++) {
     const end = clipEnd(media[i])
     if (Math.abs(media[i + 1].start - end) > SEAM_TOL) continue
     let match: TransitionRecord | null = null
     for (const tr of trs) if (Math.abs(tr.at - end) < SEAM_TOL) match = tr
-    cuts.push({ at: end, before: media[i], after: media[i + 1], tr: match })
+    const after = media[i + 1]
+    cuts.push({ at: end, renderAt: after.start - (shift.get(after.id) ?? 0), before: media[i], after, tr: match })
   }
   return cuts
 }
@@ -53,7 +63,10 @@ export function v1CutPoints(edl: EDL | null | undefined): CutPoint[] {
  * targets the cut it STARTS at (its leading edge; for the first clip, its
  * trailing edge). With nothing selected the nearest cut to the playhead is
  * the target — the CapCut model, where a transition drops onto the seam
- * the playhead sits on. `null` when there is no cut at all.
+ * the playhead sits on. `playhead` is RENDER time, so it is compared with
+ * each cut's drawn seam (`renderAt`), never its EDL `at` — after upstream
+ * dissolves those differ by the accumulated overlap. `null` when there is
+ * no cut at all.
  */
 export function targetCut(
   cuts: CutPoint[], selection: string | null, playhead: number,
@@ -66,7 +79,7 @@ export function targetCut(
   }
   let best = 0
   for (let i = 1; i < cuts.length; i++) {
-    if (Math.abs(cuts[i].at - playhead) < Math.abs(cuts[best].at - playhead)) best = i
+    if (Math.abs(cuts[i].renderAt - playhead) < Math.abs(cuts[best].renderAt - playhead)) best = i
   }
   return { cut: cuts[best], index: best, reason: 'playhead' }
 }

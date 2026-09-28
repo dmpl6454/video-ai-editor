@@ -23,6 +23,7 @@ import { undoTitle } from '../lib/undoHorizon'
 import { contentTransform, spanVisible, viewportCanvasSize, visibleColumns } from '../lib/timelineViewport'
 import { cssToken, uiFont } from '../lib/themeTokens'
 import { itemsFor, namesBySrc, offlineSrcs, useMediaNames } from '../lib/mediaNames'
+import { mainLaneInsert } from '../lib/mediaInsert'
 import { clipGainAt, waveColumn, type ClipAudio, type WaveData } from '../lib/waveformDraw'
 import { channelColumns, channelMode } from '../lib/audioChannels'
 import { isHeard, laneNameBaseline, monitorButtons, monitorLabels } from '../lib/trackMonitor'
@@ -43,10 +44,10 @@ import { isMarqueeDrag, marqueeHits, marqueeRect } from '../lib/marquee'
 import { wheelAction } from '../lib/timelineWheel'
 import { drawnCuts, hoveredCut } from '../lib/cutHover'
 import { uploadGhosts } from '../lib/uploadGhosts'
-import { collides, fitLabel, LABEL_PLATE_ALPHA, labelPlate, laneTooltipHead, markerChips, stickyLabelX } from '../lib/timelineLabels'
+import { clearOfBowtie, collides, fitLabel, LABEL_PLATE_ALPHA, labelPlate, laneTooltipHead, markerChips, stickyLabelX } from '../lib/timelineLabels'
 import { claimFileDrop, isFileDrag, setTimelineFileDragOver } from '../lib/fileDrop'
 import { dropFilesOnLane } from '../lib/laneDrop'
-import { COMMAND_BY_ID } from '../keymap/commands'
+import { COMMAND_BY_ID, editTextClip } from '../keymap/commands'
 import { TimelineIcon } from './TimelineIcons'
 import { drawIcon } from '../lib/icons'
 import { curveClockOf } from '../lib/clipTiming'
@@ -531,7 +532,7 @@ export function Timeline() {
       // neighbor: clicks selected the wrong clip, trim handles hit-tested at
       // invisible positions) and a 0.5x clip's right half fell through the
       // hit-test entirely (clicks seeked instead).
-      const span = drawnSpan(t.id, c, v1LayoutAll)
+      const span = drawnSpan(t.id, c, v1LayoutAll, t.type, t.clips)
       hits.push({
         trackId: t.id, clip: c,
         x: labelWidth + span.start * zoom,
@@ -621,7 +622,7 @@ export function Timeline() {
         // that crosses a seam shrinks by that seam's overlap; one the renderer
         // will drop outright (`span.dropped`) is drawn as a flagged sliver so
         // it can still be selected and dragged out, never as a negative width.
-        const span = drawnSpan(t.id, c, v1LayoutAll)
+        const span = drawnSpan(t.id, c, v1LayoutAll, t.type, t.clips)
         const start = span.start
         const dur = span.duration
         // The overlap WARNING is about the EDL invariant "two clips must not
@@ -785,12 +786,16 @@ export function Timeline() {
         const label = isOffline ? `Offline · ${clipLabel(c, mediaNames)}` : clipLabel(c, mediaNames)
         // Measured and ellipsized, not sliced at a guessed 6 px a glyph, and
         // pinned to the visible start of a clip scrolled off the left (QA-118).
-        let lx = Math.min(stickyLabelX(x, viewL + labelWidth), x + w)
-        // Clear of a transition bowtie sitting on this clip's head.
-        if (t.id === 'v1' && cutMarks.some((cm) => cm.hasTransition && Math.abs(cm.cx - x) < 9)) {
-          lx = Math.min(Math.max(lx, x + 13), x + w)
-        }
-        const txt = fitLabel(label, Math.min(x + w - lx - 8, badge ? badge.nameMaxRight - lx : Infinity),
+        // Clear of the transition bowties on this clip's own cuts (the one it
+        // starts at and the one it ends at), wherever in the overlap they sit
+        // — lib/timelineLabels.clearOfBowtie.
+        const bowtieAt = (at: number) => (t.id === 'v1' && isMediaClip(c)
+          ? cutMarks.find((cm) => cm.hasTransition && Math.abs(cm.at - at) < 1e-3)?.cx ?? null
+          : null)
+        const clear = clearOfBowtie(Math.min(stickyLabelX(x, viewL + labelWidth), x + w), x, w,
+                                    bowtieAt(c.start), bowtieAt(c.start + clipDuration(c)))
+        const lx = clear.lx
+        const txt = fitLabel(label, Math.min(clear.maxRight - lx, badge ? badge.nameMaxRight - lx : Infinity),
                              (s) => ctx.measureText(s).width)
         if (txt) {
           // A plate behind the name, always (QA-118 remainder): over a
@@ -1254,13 +1259,19 @@ export function Timeline() {
         }
         const name = t ? laneName(t) : 'a new track'
         const where = `${formatTimecode(tAt, fps)}`
+        // The main lane is magnetic (Final QA): a drop inside it INSERTS,
+        // splitting the clip under the line — say so, as CapCut does.
+        const { insert, under } = mainLaneInsert(t && t.id === 'v1' ? t.clips.filter(isMediaClip) : [],
+          tAt, clipDuration)
         const caption = dnd.kind === 'sticker'
           ? 'Drop to add sticker'
           : !t
             ? 'No empty lane left — will import the usual way'
-            : ok
-              ? `${isGhostLane(row) ? 'New track: ' : 'Add to '}${name}${t.type === 'video' && t.id !== 'v1' ? ' (PIP overlay)' : ''} · ${where}`
-              : `Media can't go on "${name}" — will land on Main video`
+            : ok && insert
+              ? `Insert at ${where}${under ? ` (splits ${clipLabel(under, mediaNames)})` : ''}`
+              : ok
+                ? `${isGhostLane(row) ? 'New track: ' : 'Add to '}${name}${t.type === 'video' && t.id !== 'v1' ? ' (PIP overlay)' : ''} · ${where}`
+                : `Media can't go on "${name}" — will land on Main video`
         drawCaption(ctx2, caption, lx + 8, ty + 3, ok ? dv.ACCENT : dv.ACCENT_BAD)
       }
       ctx2.restore()
@@ -1381,7 +1392,7 @@ export function Timeline() {
       drawCaption(ctx, label, ex + 4, ty + 3, dv.ACCENT)
     }
     ctx.restore()
-  }, [dragTick, tracks, zoom, contentW, contentH, dpr, v1Seams, scrollX, scrollY, edl, snapEnabled, playhead, fps])
+  }, [dragTick, tracks, zoom, contentW, contentH, dpr, v1Seams, scrollX, scrollY, edl, snapEnabled, playhead, fps, mediaNames])
 
   // Escape cancels an in-progress clip drag with NO commit (mousedown captured
   // state, but we simply drop it and repaint to clear the ghost). Only active
@@ -2064,6 +2075,18 @@ export function Timeline() {
     })
   }
 
+  // Double-click a text or caption clip to edit its words (CapCut): it is
+  // selected and the Inspector's Text box takes the caret with the words
+  // selected — the ⌥T focus path (keymap/commands editTextClip). Focus used
+  // to stay on this canvas, where the next letters ran as shortcuts.
+  function onDoubleClick(e: React.MouseEvent) {
+    const rect = contentRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const hit = hits.find((h) => x >= h.x && x <= h.x + h.w && y >= h.y + 4 && y <= h.y + h.h - 4)
+    if (hit && editTextClip(hit.clip.id)) e.preventDefault()
+  }
+
   function onContextMenu(e: React.MouseEvent) {
     const rect = contentRect()
     const x = e.clientX - rect.left
@@ -2503,6 +2526,7 @@ export function Timeline() {
               onMouseLeave={onMouseLeave}
               onMouseUp={onMouseUp}
               onContextMenu={onContextMenu}
+              onDoubleClick={onDoubleClick}
               onKeyDown={onCanvasKeyDown}
               tabIndex={0}
               role="application"

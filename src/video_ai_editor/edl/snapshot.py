@@ -2,11 +2,12 @@
 from __future__ import annotations
 import json
 import logging
+import os
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterator, Literal
 from .schema import EDL, Clip, empty_edl
-from .ops_log import OpsLog
+from .ops_log import Op, OpsLog
 
 # How this store's EDL came to be, recorded by _load_edl(). Callers that export
 # the project (storage_project.save_project) must not treat "corrupt" like
@@ -50,6 +51,9 @@ class EDLStore:
         self.edl: EDL = self._load_edl()
         self.ops: OpsLog = self._load_ops()
         self._redo_stack: list[EDL] = self._load_redo_stack()
+        # The op each redo entry re-applies, aligned with `_redo_stack` (None
+        # for an entry written before Final QA — it redoes as a plain "Redo").
+        self._redo_ops: list[Op | None] = self._load_redo_ops()
         # >0 while inside batch(): commit() then records nothing (see batch).
         self._batch_depth = 0
         # Seed snapshot 0 = initial state so undo can walk back to it.
@@ -78,14 +82,38 @@ class EDLStore:
         except Exception:
             return []
 
+    @property
+    def redo_ops_path(self) -> Path:
+        return self.dir / "redo_ops.json"
+
+    def _load_redo_ops(self) -> list[Op | None]:
+        """The undone ops, aligned with the redo stack (Final QA). A stack
+        written before this file existed — or a file that no longer lines
+        up — pads the OLDEST entries with None rather than guessing."""
+        ops: list[Op | None] = []
+        if self.redo_ops_path.exists():
+            try:
+                raw = json.loads(self.redo_ops_path.read_text(encoding="utf-8"))
+                ops = [Op.model_validate(o) if o else None for o in raw]
+            except Exception:
+                ops = []
+        n = len(self._redo_stack)
+        ops = ops[-n:] if n else []
+        return [None] * (n - len(ops)) + ops
+
     def _save_redo_stack(self) -> None:
         if self._redo_stack:
             payload = json.dumps([e.model_dump(by_alias=True, mode="json") for e in self._redo_stack])
             self.redo_stack_path.write_text(payload, encoding="utf-8")
+            ops = getattr(self, "_redo_ops", [])
+            self.redo_ops_path.write_text(
+                json.dumps([o.model_dump(mode="json") if o else None for o in ops]),
+                encoding="utf-8")
         else:
             # Nothing to redo — remove the file rather than persist "[]" so a
             # stale file left behind doesn't need special-casing on load.
             self.redo_stack_path.unlink(missing_ok=True)
+            self.redo_ops_path.unlink(missing_ok=True)
 
     @property
     def redo_available(self) -> bool:
@@ -226,13 +254,37 @@ class EDLStore:
             return None
 
         payload = self.edl.to_json()
-        self._assert_reloadable(payload, tool)
-        self._snapshot(new_hash, payload)
-        self.edl_path.write_text(payload, encoding="utf-8")
-
+        try:
+            self._assert_reloadable(payload, tool)
+        except ValueError:
+            self._restore_last_good()
+            raise
+        # Final QA (disk full): all-or-nothing. Every file is written to a
+        # temp first — that is where ENOSPC lands — and only then moved into
+        # place; a failed write drops the temps, takes the op back and puts
+        # the in-memory tree back to the last good edl.json. It used to keep
+        # the failed edit in memory: /head, /edl, preview and export showed
+        # it, and the next edit's single Undo removed both.
+        snap = self.snapshots_dir / f"{len(self.ops.ops) + 1:05d}_{new_hash}.json"
         op = self.ops.append(tool, args, summary, prev_hash, new_hash, by=by)
-        self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
+        temps: list[tuple[Path, Path]] = []
+        try:
+            for dst, text in ((snap, payload), (self.edl_path, payload),
+                              (self.ops_path, self.ops.model_dump_json())):
+                tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+                temps.append((tmp, dst))
+                tmp.write_text(text, encoding="utf-8")
+        except OSError:
+            for tmp, _dst in temps:
+                tmp.unlink(missing_ok=True)
+            self.ops.pop()
+            self._restore_last_good()
+            raise
+        for tmp, dst in temps:
+            os.replace(tmp, dst)
+        self._prune_snapshots()
         self._redo_stack.clear()
+        self._redo_ops.clear()
         self._save_redo_stack()
         return op
 
@@ -277,6 +329,18 @@ class EDLStore:
             raise
         finally:
             self._batch_depth -= 1
+
+    def _restore_last_good(self) -> None:
+        """Put the in-memory tree back to what is durable on disk (a refused
+        or failed commit): edl.json, else the newest readable snapshot. A
+        store with neither keeps its tree — there is nothing better to hold."""
+        for src in [self.edl_path, *reversed(self._snapshot_files())]:
+            try:
+                self.edl = EDL.model_validate_json(src.read_text(encoding="utf-8"))
+                self.edl.recompute_duration()
+                return
+            except (OSError, ValueError):
+                continue
 
     def _assert_reloadable(self, payload: str, tool: str) -> None:
         """Refuse to persist an EDL that could not be read back.
@@ -335,14 +399,16 @@ class EDLStore:
         if not self.undo_available:
             return False
         snaps = self._snapshot_files()
-        # Push current onto redo stack
+        # Push current onto redo stack, with the op it came from (Final QA:
+        # redo used to re-append a generic "Redo" and the name was lost).
         self._redo_stack.append(self.edl.model_copy(deep=True))
+        self._redo_ops.append(self.ops.last())
         self._save_redo_stack()
         # Restore previous snapshot
         prev = snaps[-2]
         self.edl = EDL.model_validate_json(prev.read_text(encoding="utf-8"))
         self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
-        # Pop the last op (it's now undone)
+        # Pop the last op (it's now undone; the redo stack keeps it)
         if self.ops.pop():
             self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         # Remove the snapshot we just left
@@ -356,11 +422,19 @@ class EDLStore:
         if not self._redo_stack:
             return False
         self.edl = self._redo_stack.pop()
+        op = self._redo_ops.pop() if self._redo_ops else None
         self._save_redo_stack()
         self.edl.recompute_duration()
         new_hash = self.edl.hash()
+        prev_hash = self._last_hash()
         self._snapshot(new_hash)
         self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
-        self.ops.append("redo", {}, "Redo", "", new_hash, by="user")
+        if op is not None:
+            # The redone op itself, so History and the preview's changed-range
+            # logic see what came back ("Animation — In Zoom In", not "Redo").
+            self.ops.append(op.tool, op.args, op.summary, prev_hash, new_hash,
+                            by=op.by, redo=True)
+        else:
+            self.ops.append("redo", {}, "Redo", prev_hash, new_hash, by="user", redo=True)
         self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
         return True

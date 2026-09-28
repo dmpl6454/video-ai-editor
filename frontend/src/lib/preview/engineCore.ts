@@ -144,6 +144,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
       refreshWant: () => this.refreshWant(),
       prefetch: () => this.sources.prefetch(),
       emitStatus: () => this.emitStatus(),
+      hiddenNow: () => this.sources.hiddenNow(),
     }, opts)
     this.feed.bakeStore = this.bake.store
     this.audio = new AudioSync(() => this.sink)
@@ -168,6 +169,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
       emitStatus: () => this.emitStatus(),
       onHidden: () => this.sources.suspend(true),
       onShown: () => this.sources.suspend(false),
+      elementMoved: () => { this.elementFrame = -1 },
     })
     this.degraded = new DegradedTier({
       root: () => this.root,
@@ -265,6 +267,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     }
     this.listenVideo(video)
     document.addEventListener('visibilitychange', this.external.onVisibility)
+    this.sources.resumeIfVisible()
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObs = new ResizeObserver(() => this.layout())
       this.resizeObs.observe(host)
@@ -281,6 +284,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     this.compositor?.invalidateTexture()
     const lane = new LaneA({
       rate: this.R, media: browserMedia(this.video),
+      // §3.5: hidden before WebKit dispatched 'visibilitychange' counts
+      hiddenNow: () => this.sources.hiddenNow(),
       events: {
         appended: (a, b) => this.onAppended(a, b),
         degraded: (r) => { this.reason = `degraded:${r}`; this.emitStatus() },
@@ -382,7 +387,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   }
 
   private reclassify(emit = true): void {
-    const s = this.feed.classify(this.sink.limitingFrames?.())
+    const s = this.feed.classify(this.sink.limitingFrames?.(), this.sink.loudnessCurrent?.())
     if (s) this.support = s
     if (emit) this.emitStatus()
   }
@@ -589,7 +594,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     const k = this.target
     // the element must stand where the canvas does
     lane.hold(false)
-    if (this.elementFrame !== k || this.seeker.inFlight >= 0) {
+    const elementAt = this.seeker.inFlight >= 0 ? -1 : this.elementFrame
+    if (elementAt !== k) {
       this.seeker.finish()
       this.seeker.assign(video, lane.seekTime(k))
       this.elementFrame = k
@@ -597,7 +603,10 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     this._playing = true
     this.buffering = false
     this.playingSeek.clear()
-    this.runStart.begin(k, this.presented)
+    // gated on where the ELEMENT stood, not the canvas: after WebKit moved
+    // the parked element (elementMoved) the canvas still shows k, and the
+    // element's first presentation came from 1.3 s on and was drawn (C1)
+    this.runStart.begin(k, elementAt)
     lane.setPlayhead(k, true)
     const playCalledAt = performance.now()
     const p = video.play()

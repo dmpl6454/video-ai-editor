@@ -18,6 +18,12 @@
 // * Bakes (§4.1 step 8, §5.3). When a preview render of the CURRENT hash
 //   lands, the engine splices its bake spans over the RAW frames of the
 //   BAKED ranges.
+// * Loudness (§3.6, §7). For a project with a loudness target the sound
+//   plays the server preview's master gain (`GET /preview_loudness?h=`),
+//   asked for with every hashed timeline and again when a preview of the
+//   current hash lands. Until the gain was measured for this render's sound
+//   the frames are APPROX 'audio:loudness' (Final QA r3: the sound played
+//   the raw mix, ~11 dB under the export, marked EXACT).
 // * Transport. `play()` is synchronous: the store calls it inside the key or
 //   click handler, so the engine's `laneA.play()` and `AudioContext.resume()`
 //   run in the user's gesture (§3.5).
@@ -56,8 +62,9 @@ export interface ControllerOptions {
   fetch?: FetchFn
   /** Tests inject the engine factory (a fake, or one with a tapped sink). */
   createEngine?: (opts: EngineOptions) => ClientPreviewEngine
-  /** The sound: an AudioEngine by default; false for none (NullAudioSink). */
-  audio?: false | ((onInterrupted: () => void) => AudioSink)
+  /** The sound: an AudioEngine by default; false for none (NullAudioSink).
+   *  `loudness` is the project loudness gain the sink should play. */
+  audio?: false | ((onInterrupted: () => void, loudness: LoudnessSource) => AudioSink)
   engineOptions?: EngineOptions
   /** The engine cannot run here after all (§7): switch the app to server mode. */
   onFallback?(reason: string): void
@@ -72,6 +79,16 @@ export interface ControllerOptions {
   /** Retry delay while a source's proxy is still being probed (ms). */
   sourceRetryMs?: number
 }
+
+/** The project loudness gain for the sound (§3.6): the server preview's
+ *  master gain (dB, null: none known) and whether it was measured for the
+ *  sound of a render hash. */
+export interface LoudnessSource {
+  gainDb(): number | null
+  current(renderHash: string): boolean
+}
+
+interface LoudnessAnswer { hash: string; gainDb: number | null; current: boolean }
 
 interface ProxySummary {
   key?: string
@@ -113,6 +130,11 @@ export class PreviewController {
   private disposed = false
   private lastPlaying = false
   private lastView = ''
+  private sinkRef: AudioSink | null = null
+  /** The last /preview_loudness answer, and the hash being asked for. */
+  private loud: LoudnessAnswer | null = null
+  private loudPending: string | null = null
+  private loudGen = 0
   /** One-shot answers the divergence checker reads instead of the network. */
   private readonly served = new Map<string, FrameMapBody>()
   /** The EDL object last handed over (the store's subscription skips it). */
@@ -165,8 +187,10 @@ export class PreviewController {
     if (this.engineRef) this.detach()
     let engine: ClientPreviewEngine | null = null
     const audio = this.opts.audio === false ? undefined
-      : (this.opts.audio ?? ((onInt: () => void) => new AudioEngine({ onInterrupted: onInt })))(
-        () => engine?.pauseExternal())
+      : (this.opts.audio ?? ((onInt: () => void, l: LoudnessSource) => new AudioEngine({
+        onInterrupted: onInt, loudnessGainDb: () => l.gainDb(), loudnessCurrent: (h) => l.current(h),
+      })))(() => engine?.pauseExternal(), this.loudness)
+    this.sinkRef = audio ?? null
     const eo: EngineOptions = { bakeBaseUrl: `${this.base}/bake`, canvasBgBaseUrl: `${this.base}/canvas-bg`,
       ...this.opts.engineOptions, audioSink: audio }
     engine = (this.opts.createEngine ?? createPreviewEngine)(eo)
@@ -187,6 +211,7 @@ export class PreviewController {
     this.offs = []
     this.engineRef?.destroy()
     this.engineRef = null
+    this.sinkRef = null
     this.lastPlaying = false
   }
 
@@ -196,6 +221,7 @@ export class PreviewController {
     this.checker.cancel()
     this.verifyGen++
     this.syncGen++
+    this.loudGen++
   }
 
   // ------------------------------------------------------------ timelines
@@ -208,9 +234,13 @@ export class PreviewController {
     this.appliedEdl = edl
     this.hash = renderHash
     this.stats.applied++
+    // before the engine classifies the new program: its loudness answer is
+    // on the way, and the last verdict holds meanwhile
+    if (renderHash && this.hasLoudnessTarget()) this.loudPending = renderHash
     this.pushTimeline()
     if (renderHash) {
       void this.verify(renderHash)
+      void this.fetchLoudness(renderHash)
       if (this.previewHash === renderHash) this.splice()
     } else {
       void this.syncHash()
@@ -402,7 +432,69 @@ export class PreviewController {
   /** A preview render landed (store.previewHash). */
   onPreviewLanded(previewHash: string | null): void {
     this.previewHash = previewHash
-    if (previewHash && previewHash === this.hash) this.splice()
+    if (previewHash && previewHash === this.hash) {
+      this.splice()
+      // that render measured this sound: its gain is current now
+      void this.fetchLoudness(previewHash)
+    }
+  }
+
+  // ------------------------------------------------------------ loudness
+
+  /** What the sink reads (§3.6). A hash whose answer is still on the way
+   *  keeps the last verdict, so a title edit does not flash "≈ Loudness". */
+  readonly loudness: LoudnessSource = {
+    gainDb: () => this.loud?.gainDb ?? null,
+    current: (h) => !!this.loud && (h === this.loud.hash || h === this.loudPending) && this.loud.current,
+  }
+
+  private hasLoudnessTarget(): boolean {
+    const lufs = (this.edl?.canvas as { loudness_lufs?: number | null } | undefined)?.loudness_lufs
+    return lufs !== null && lufs !== undefined
+  }
+
+  private async fetchLoudness(h: string): Promise<void> {
+    if (!this.hasLoudnessTarget() || this.disposed) return
+    const gen = ++this.loudGen
+    this.loudPending = h
+    const url = `${this.base}/preview_loudness?h=${encodeURIComponent(h)}`
+    for (let i = 0; i < MAX_MAP_TRIES; i++) {
+      let r: Response
+      try {
+        r = await this.fetchFn(url, { headers: { Accept: 'application/json' } })
+      } catch {
+        break
+      }
+      if (gen !== this.loudGen || this.disposed) return
+      if (r.status === 202) {
+        const ra = Number.parseFloat(r.headers.get('Retry-After') ?? '')
+        await new Promise((res) => setTimeout(res, Number.isFinite(ra) && ra >= 0 ? Math.min(2000, ra * 1000) : 200))
+        if (gen !== this.loudGen || this.disposed) return
+        continue
+      }
+      if (!r.ok) break   // 409: a newer hash is on its way and asks for itself
+      let body: { gain_db?: unknown; current?: unknown }
+      try {
+        body = await r.json() as typeof body
+      } catch {
+        break
+      }
+      if (gen !== this.loudGen || this.disposed) return
+      const g = body.gain_db
+      this.setLoudness({ hash: h, gainDb: typeof g === 'number' && Number.isFinite(g) ? g : null, current: body.current === true })
+      return
+    }
+    // no answer: the carried-over verdict no longer holds for this hash
+    if (gen === this.loudGen && this.loudPending === h) this.setLoudness(this.loud, null)
+  }
+
+  private setLoudness(next: LoudnessAnswer | null, pending: string | null = null): void {
+    const h = this.hash ?? ''
+    const before = [this.loudness.gainDb(), this.loudness.current(h)]
+    this.loud = next
+    this.loudPending = pending
+    const after = [this.loudness.gainDb(), this.loudness.current(h)]
+    if (before[0] !== after[0] || before[1] !== after[1]) this.sinkRef?.refreshLoudness?.()
   }
 
   private splice(): void {

@@ -67,9 +67,26 @@ from .agent.loop import chat_turn
 from .api.uploads import (assert_room_for as _assert_room_for,
                           stream_upload_to as _stream_upload_to)
 
+def _sweep_crashed_renders() -> None:
+    """Final QA (round 3): what a crashed or force-quit backend left behind —
+    an encoder still writing its export, and the hidden `.part` file it
+    writes — stopped and removed at startup (`render/cache_budget`). Never
+    raises: a sweep that fails must not stop the app from starting."""
+    from .render import cache_budget
+    try:
+        stopped = cache_budget.stop_orphan_encoders(WORKDIR)
+        freed = cache_budget.sweep_stale_parts(WORKDIR)
+        if stopped or freed:
+            get_logger().info("startup sweep: stopped %d orphaned encoder(s), freed %d bytes of "
+                              "interrupted renders", len(stopped), freed)
+    except Exception as e:  # noqa: BLE001
+        get_logger().warning("startup sweep of interrupted renders failed: %s", e)
+
+
 @asynccontextmanager
 async def _lifespan(_app: "FastAPI"):
     _validate_ai_config()
+    _sweep_crashed_renders()
     yield
     # Wave D: no proxy encode may outlive the app (they are niced background
     # ffmpegs a daemon thread would otherwise orphan).
@@ -600,7 +617,14 @@ async def mcp_endpoint(request: Request):
              "error": {"code": -32700, "message": "parse error"}},
             status_code=400,
         )
-    resp = _mcp.handle_request(body, resolve_store=_mcp_resolve_store)
+    # Final QA: on the threadpool (a transcribe over MCP froze /api/health for
+    # its whole run), behind the /dispatch guards (a Prompt-bar run refuses
+    # the edit; the session lock serialises it with every other writer).
+    from starlette.concurrency import run_in_threadpool
+    from .agent.guarded import guarded_dispatch
+    resp = await run_in_threadpool(_mcp.handle_request, body,
+                                   resolve_store=_mcp_resolve_store,
+                                   dispatch_fn=guarded_dispatch)
     if resp is None:
         # All notifications → MCP spec says return 202 with no body.
         return Response(status_code=202)
@@ -781,6 +805,15 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     except Exception as e:
         raise HTTPException(422, {"error": str(e)})
 
+    # Final QA: a PICKED file ("Import audio file as voiceover") keeps its
+    # own name in the media library, on the timeline and in the Inspector —
+    # it read `vo_<timestamp>.m4a` everywhere. A live take arrives as the
+    # recorder's generic `vo.<ext>` and keeps the generated name.
+    picked = (file.filename or "").strip()
+    display_name = None if _is_generic_take_name(picked) else picked
+    if display_name:
+        _remember_display_name(sd, norm, display_name)
+
     store = _store(sid)
     from .edl.schema import Track, Clip, AudioProps
 
@@ -807,12 +840,27 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
             audio=AudioProps(gain_db=float(gain_db), fade_in=0.05, fade_out=0.1),
         )
         track.clips.append(clip)
-        summary = f"Voiceover {p.duration:.1f}s @ {start:.1f}s ({float(gain_db):+.1f} dB)"
+        # History names the RULER's time (render_time), not the EDL start:
+        # behind a 0.5 s v1 dissolve a take imported at the playhead 06:00 is
+        # stored at 6.5 and read "@ 6.5s" (00:00:06:15) for a voiceover that
+        # the Timeline and the export put at 6.000 s (final QA).
+        from .render.clock import render_time as _render_time
+        summary = (f"Voiceover {p.duration:.1f}s @ {_render_time(store.edl, at):.2f}s "
+                   f"({float(gain_db):+.1f} dB)")
         store.commit("vo_record", {"start": start, "gain_db": gain_db}, summary)
         return {"clip_id": clip.id, "src": str(norm), "duration": p.duration, "track": track.id,
-                "summary": summary, "edl_hash": store.edl.hash()}
+                "summary": summary, "edl_hash": store.edl.hash(), "display_name": display_name}
 
     return await _locked_edit(sid, _edit)
+
+
+#: What a live recording is uploaded as (`api.voRecord` names the blob by its
+#: type) — anything else is a file the user picked, whose name is kept.
+_GENERIC_TAKE_NAMES = frozenset({"", "blob", "vo.webm", "vo.wav", "vo.m4a", "vo.ogg", "vo.mp4"})
+
+
+def _is_generic_take_name(name: str) -> bool:
+    return name.lower() in _GENERIC_TAKE_NAMES
 
 
 @app.post("/api/sessions/{sid}/sticker_upload")
@@ -954,14 +1002,32 @@ def _add_uploaded_music(store, dst: Path, duration: float, duck: bool | None,
     if duck is not None:
         args["duck"] = duck
     result = dispatch(store, "add_music", args)
-    video_extent = store.edl.video_extent()
+    # On the RENDER clock (final QA round 3): the bed starts at
+    # render_time(start) and plays whole (`clock.sound_window`), while the
+    # picture ends at its layout end minus every transition's overlap. The
+    # v1 layout end (`video_extent`) overstated how far the video runs by
+    # that overlap, so "Trim to video" left the bed running past the picture.
+    from .edl.schema import sound_pulls
+    edl = store.edl
+    video_extent = edl.video_extent()
+    video_end = edl.render_video_end()
     clip_id = result.get("clip_id") if isinstance(result, dict) else None
-    placed = next((c for c in store.edl.get_track("music").clips if c.id == clip_id), None)
-    end = (float(placed.start) + placed.effective_duration) if placed is not None else at + duration
-    past = end - video_extent if video_extent > 0.05 else 0.0
-    return {"clip_id": clip_id, "start": at,
-            "past_video_s": round(past, 3) if past > 0.05 else 0.0,
-            "video_end": round(video_extent, 3)}
+    lane = edl.get_track("music")
+    placed = next((c for c in lane.clips if c.id == clip_id), None)
+    lay_start = float(placed.start) if placed is not None else at
+    eff = placed.effective_duration if placed is not None else duration
+    # where it plays: its run's pull (a song appended after another moves
+    # with it, `schema.sound_pulls`)
+    r_start = lay_start - sound_pulls(lane.clips, edl.v1_seam_table()).get(clip_id, 0.0)
+    past = r_start + eff - video_end if video_extent > 0.05 else 0.0
+    answer = {"clip_id": clip_id, "start": at,
+              "past_video_s": round(past, 3) if past > 0.05 else 0.0,
+              "video_end": round(video_end, 3)}
+    if placed is not None and past > 0.05 and video_end - r_start > 0.05:
+        sp = placed.speed_factor if placed.speed_factor and placed.speed_factor > 0 else 1.0
+        # the source `out` that ends the bed on the picture's last frame
+        answer["trim_out"] = round(float(placed.in_) + (video_end - r_start) * sp, 3)
+    return answer
 
 
 _SUBTITLE_SUFFIXES = frozenset({".srt", ".vtt", ".ass"})
@@ -995,6 +1061,41 @@ async def subtitle_upload(sid: str, request: Request, file: UploadFile = File(..
     _assert_room_for(request, uploads)
     dst = _unique_upload_path(uploads, safe_name)   # QA-001: never overwrite
     await _stream_upload_to(file, dst)
+    return {"path": str(dst), "name": dst.name}
+
+
+@app.post("/api/sessions/{sid}/lut_upload")
+async def lut_upload(sid: str, request: Request, file: UploadFile = File(...)):
+    """Store a user's .cube LUT in the session so the Effects panel can apply
+    it without anyone typing a path (Final QA: the panel only knew the bundled
+    looks). Same contract as subtitle_upload: no dispatch here — the panel
+    follows up with dispatch("apply_lut", {src: path, ...}) itself, so the edit
+    lands in the op log / undo like every other one. `apply_lut` validates the
+    path again through the allowlist."""
+    busy = _prompt_running_response(sid)
+    if busy is not None:
+        return busy
+    _store(sid)                                  # 404 on an unknown session
+    safe_name = _safe_filename(file.filename, "look.cube")
+    if Path(safe_name).suffix.lower() != ".cube":
+        raise HTTPException(422, {
+            "error": "unsupported_lut",
+            "message": f"expected a .cube LUT file, got {safe_name!r}",
+        })
+    luts = session_dir(sid) / "uploads" / "luts"
+    luts.mkdir(parents=True, exist_ok=True)
+    _assert_room_for(request, luts)
+    dst = _unique_upload_path(luts, safe_name)   # never overwrite
+    await _stream_upload_to(file, dst)
+    # Final QA (0.8.0): the extension alone let a 1D or truncated .cube in, and
+    # then every preview and export failed blaming the clip. Parse it the way
+    # ffmpeg's lut3d will (a 256^3 table is ~16M rows: off the event loop).
+    from starlette.concurrency import run_in_threadpool
+    from .render.lut_cube import cube_problem
+    problem = await run_in_threadpool(cube_problem, dst, display_name=safe_name)
+    if problem is not None:
+        dst.unlink(missing_ok=True)
+        raise HTTPException(422, {"error": "invalid_lut", "message": problem})
     return {"path": str(dst), "name": dst.name}
 
 
@@ -1536,6 +1637,15 @@ def _dispatch_sync(sid: str, store: EDLStore, body: DispatchRequest, *,
         _require_media_tools()                   # QA-108: say "install ffmpeg"
         raise HTTPException(422, str(e))
     except (OSError, subprocess.SubprocessError) as e:
+        import errno as _errno
+        if isinstance(e, OSError) and getattr(e, "errno", None) == _errno.ENOSPC:
+            # Final QA: the disk is full — the edit was NOT saved (commit is
+            # all-or-nothing now), so say that, not "an external tool failed".
+            raise HTTPException(507, {
+                "error": "disk_full",
+                "message": ("That edit wasn't saved — the disk is full. Free some space on this "
+                            "Mac and try again; the timeline is as it was before the edit."),
+            })
         _require_media_tools()                   # QA-108
         # There are ~20 `check=True` subprocess sites under ai/, so a missing
         # binary (FileNotFoundError) or a non-zero exit (CalledProcessError)
@@ -1773,7 +1883,46 @@ def _render_error_types() -> tuple[type[BaseException], ...]:
 RENDER_ERRORS = _render_error_types()
 
 
-def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: str = "preview") -> str:
+#: ffmpeg's own words for a full disk (ENOSPC), on any error line.
+_DISK_FULL_RE = re.compile(r"No space left on device|ENOSPC")
+#: A render whose ffmpeg was KILLED by a signal (compositor raises
+#: "ffmpeg render failed (rc=-9)"): SIGKILL is what macOS memory pressure
+#: sends a large export. A crash signal (SIGSEGV -11, SIGBUS -10, SIGABRT -6)
+#: is ffmpeg dying on its input and stays a media problem.
+_KILLED_RC_RE = re.compile(r"\(rc=-(?:1|2|9|15)\)")
+
+
+def _render_failure_error_code(full: str) -> str:
+    """The `error` code of a failed render's 422: `disk_full` when ffmpeg
+    ran out of space (as the upload route reports it), else `render_failed`."""
+    return "disk_full" if _DISK_FULL_RE.search(full or "") else "render_failed"
+
+
+def _broken_luts(edl) -> list[tuple[str, str]]:
+    """(file name, reason) for each LUT on the timeline that exists but that
+    ffmpeg's lut3d cannot render (render/lut_cube.py). A MISSING LUT file is
+    left to the "No such file" branch of `_render_failure_message`."""
+    from .render.lut_cube import cube_problem
+    seen: dict[str, tuple[str, str]] = {}
+    for track in getattr(edl, "tracks", None) or []:
+        for clip in getattr(track, "clips", None) or []:
+            for eff in getattr(clip, "effects", None) or []:
+                src = str((getattr(eff, "params", None) or {}).get("src") or "")
+                if getattr(eff, "type", None) != "lut" or not src or src in seen:
+                    continue
+                try:
+                    if not Path(src).is_file():
+                        continue
+                except (OSError, ValueError):
+                    continue
+                problem = cube_problem(src)
+                if problem is not None:
+                    seen[src] = (Path(src).name, problem)
+    return list(seen.values())
+
+
+def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: str = "preview",
+                            edl=None) -> str:
     """Pick a user-facing message for a render_failed 422.
 
     `ffmpeg_tail` is what gets SHOWN; `full` (when given) is the complete
@@ -1808,6 +1957,16 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: 
                 f"if it happens again on an unchanged timeline, it is a bug in the app.")
     if "The render produced no picture, only sound" in hay:
         return hay[hay.index("The render produced no picture"):].splitlines()[0]
+    # Final QA (0.8.0): a full disk and a KILLED encoder both fell through to
+    # "a clip may have corrupt frames … convert it to MP4" — the ffmpeg tail
+    # right under that message said "No space left on device".
+    if _DISK_FULL_RE.search(hay):
+        what = "export" if kind == "export" else "render a preview"
+        return (f"The disk is full — free up space and {what} again. Your media is fine.")
+    if _KILLED_RC_RE.search(hay):
+        return ("The render was interrupted before it finished — the video encoder was "
+                "stopped (macOS does this when memory runs low). Nothing is wrong with your "
+                "media; close other apps or export at a lower resolution, then try again.")
     if re.search(r"received signal \d+", hay) or "Exiting normally" in hay:
         return ("The render was interrupted before it finished — something "
                 "stopped the video encoder (for example closing a terminal "
@@ -1824,6 +1983,19 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: 
         return ("Couldn't render a preview — a cached text/sticker overlay "
                 "image was corrupted. Retrying will regenerate it; your "
                 "media is fine.")
+
+    # 2b. A colour look (LUT) ffmpeg's lut3d cannot read — Final QA (0.8.0 LUT
+    # import): a 1D or truncated .cube failed every render with "a clip may
+    # have corrupt frames". ffmpeg fails at filter init and often says only
+    # "Error initializing filters", never the file, so the timeline's own LUTs
+    # are checked (`edl`: what was rendered) and the bad one is named.
+    what = "export" if kind == "export" else "render a preview"
+    broken = _broken_luts(edl) if edl is not None else []
+    if broken:
+        names = ", ".join(n for n, _ in broken)
+        return (f"Couldn't {what} — the look {names} applied to a clip can't be read. "
+                f"{broken[0][1]} Remove that look from the clip in Properties (or undo "
+                f"it) and try again; your media is fine.")
 
     # 3. Filtergraph / dimension inconsistency: the app built an internally
     # contradictory graph. Never the user's fault, and "corrupt frames" sent
@@ -1856,6 +2028,12 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: 
         which = f" ({Path(missing[0]).name})" if missing else ""
         return (f"Couldn't render — a clip's source file{which} is missing. It "
                 f"may have been moved or deleted since you added it.")
+
+    # 4b. lut3d's own error with no timeline to name the file from.
+    if re.search(r"\[Parsed_lut3d_\d+ @", hay):
+        return (f"Couldn't {what} — a colour look (LUT) applied to a clip can't be "
+                f"read. Remove that look from the clip in Properties (or undo it) and "
+                f"try again; your media is fine.")
 
     # 5. A stream specifier that binds to nothing means a clip's source doesn't
     # have the stream its lane requires — overwhelmingly an audio-only file
@@ -2135,8 +2313,8 @@ async def make_preview(sid: str, request: Request, wait: int = 1,
             tail = msg[-400:] if len(msg) > 400 else msg
             # Classify on the FULL message, display the tail — the decisive
             # ffmpeg line is routinely further back than 400 chars.
-            raise HTTPException(422, {"error": "render_failed",
-                                      "message": _render_failure_message(tail, msg),
+            raise HTTPException(422, {"error": _render_failure_error_code(msg),
+                                      "message": _render_failure_message(tail, msg, edl=store.edl),
                                       "ffmpeg": tail})
         return _preview_payload(sid, res)
     from .api.jobs import JOB_MANAGER
@@ -2281,8 +2459,8 @@ async def stream_preview(sid: str, request: Request, h: str | None = None):
             _require_media_tools()      # QA-108
             msg = str(e)
             tail = msg[-400:]
-            raise HTTPException(422, {"error": "render_failed",
-                                      "message": _render_failure_message(tail, msg),
+            raise HTTPException(422, {"error": _render_failure_error_code(msg),
+                                      "message": _render_failure_message(tail, msg, edl=store.edl),
                                       "ffmpeg": tail}) from e
         # Only serve what the caller ASKED for. This used to return whatever
         # the current EDL rendered to, even when `h` named a different render:
@@ -2352,8 +2530,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             msg = str(e)
             tail = msg[-400:]
             raise HTTPException(422, {
-                "error": "render_failed",
-                "message": _render_failure_message(tail, msg, kind="export"),
+                "error": _render_failure_error_code(msg),
+                "message": _render_failure_message(tail, msg, kind="export", edl=snap),
                 "ffmpeg": tail,
             })
         return _export_payload(sid, res, timeline_hash)
@@ -2391,7 +2569,8 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             # UI shows it verbatim — so raise something whose str() is already
             # user-facing instead of a 2000-char ffmpeg stderr dump.
             msg = str(e)
-            raise RuntimeError(_render_failure_message(msg[-400:], msg, kind="export")) from e
+            raise RuntimeError(_render_failure_message(msg[-400:], msg, kind="export",
+                                                     edl=edl_snapshot)) from e
         return _export_payload(sid, res, timeline_hash)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
@@ -2694,11 +2873,21 @@ def _not_a_project_message(sent_name: str) -> str:
 
 def _open_project_archive(tmp: Path, sent_name: str) -> str:
     """Content probe, then load. The caller owns `tmp` and unlinks it."""
-    from .storage_project import is_project_archive, load_project
+    from .api import uploads as _uploads
+    from .storage_project import ProjectTooLarge, is_project_archive, load_project
     if not is_project_archive(tmp):
         raise HTTPException(415, _not_a_project_message(sent_name))
     try:
-        return load_project(tmp)
+        # What the volume can take (Final QA, zip bomb): the upload guard only
+        # budgeted the COMPRESSED file.
+        return load_project(tmp, max_unpacked_bytes=_uploads.free_space_limit(WORKDIR))
+    except ProjectTooLarge as e:
+        raise HTTPException(507, {"error": "project_too_large", "message": str(e)})
+    except OSError as e:
+        import errno as _errno
+        if getattr(e, "errno", None) in (_errno.ENOSPC, getattr(_errno, "EDQUOT", -1)):
+            raise       # api/hardening answers 507 disk_full (Final QA r2)
+        raise HTTPException(422, f"failed to load project: {e}")
     except Exception as e:
         # A genuine project archive that still failed to import — a different
         # failure from "not a project at all", and it keeps its own status.
@@ -2717,6 +2906,13 @@ async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
     see. The filename is now only a hint for the temp file's name — sanitised
     to its last component, and an empty/missing one still works.
     """
+    from .api.settings_routes import _same_origin
+    if not _same_origin(request):
+        # Final QA: a page on another 127.0.0.1 port POSTed a project blind
+        # (a multipart form needs no CORS preflight, and `same-site` passed
+        # the cross-site refusal). Opening a project is the app's own page.
+        raise HTTPException(403, {"error": "not_same_origin",
+                                  "message": "Only the editor's own window can open a project."})
     name = Path(_client_filename(file.filename) or "").name or "project.vae"
     # Unique per request: two projects opened at once under the same name
     # used to stream into the same temp file (QA-001).
@@ -2776,13 +2972,21 @@ def serve_emoji_png(seq: str):
         emoji = "".join(chr(int(p, 16)) for p in seq.split("-"))
     except ValueError:
         raise HTTPException(400, "bad emoji sequence")
-    from .ai.emoji import fetch_emoji_png
-    path = fetch_emoji_png(emoji)
-    if not path or not Path(path).is_file():
+    from .ai import emoji as _emoji
+    path = _emoji.fetch_emoji_png(emoji)
+    if path and Path(path).is_file():
+        # Immutable: the bytes for a codepoint never change, and TextLayer asks
+        # for them on every text clip that contains one.
+        return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    # Final QA (round 3): offline and uncached, the same Apple artwork drawn
+    # from the installed emoji font (`local_emoji_png`, what the export and
+    # `add_sticker` use offline) instead of a 404 that blanked the preview and
+    # the picker. A stand-in, so never cached for good: the browser asks again
+    # and gets the pinned bytes once the network is back.
+    local = _emoji.local_emoji_png(emoji)
+    if not local or not Path(local).is_file():
         raise HTTPException(404, "no artwork for that emoji")
-    # Immutable: the bytes for a codepoint never change, and TextLayer asks
-    # for them on every text clip that contains one.
-    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return FileResponse(local, headers={"Cache-Control": "no-cache"})
 
 
 class PrewarmRequest(BaseModel):

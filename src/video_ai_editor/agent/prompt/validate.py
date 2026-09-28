@@ -169,6 +169,7 @@ ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
 #: half sentence.
 TEXT_LIMITS: dict[tuple[str, str], int] = {
     ("tts_voiceover", "text"): 600, ("add_text", "text"): 120, ("add_super_text", "text"): 120,
+    ("set_text", "text"): 120,
     ("apply_hook_stack", "text"): 60, ("add_hook_overlay", "text"): 60,
     ("add_lower_third", "name"): 60, ("add_lower_third", "handle"): 40,
     ("apply_brand_kit", "handle"): 40, ("add_marker", "label"): 80,

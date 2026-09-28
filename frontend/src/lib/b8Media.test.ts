@@ -56,6 +56,17 @@ describe('import follow-ups (QA-083 / QA-092)', () => {
     expect(f?.action).toEqual({ label: 'Trim to video', tool: 'trim_clip', args: { clip_id: 'm1', out: 14 } })
   })
 
+  it('trims to the server\'s render-clock answer when it gives one (transitions)', () => {
+    // Final QA (round 3): with transitions the picture ends before the v1
+    // layout end, and the bed plays from render_time(start); the server
+    // measures both and sends the source `out` that ends it on the picture.
+    // A bed at layout 4.0 after a 0.5 s fade at 3.0 plays from render 3.5;
+    // the picture ends at 5.5, so 2.0 s of it (not 5.5 − 4.0 = 1.5) stays.
+    const f = importFollowUp({ clip_id: 'm1', start: 4, past_video_s: 26, video_end: 5.5,
+                               trim_out: 2, display_name: 'n.wav' }, 'n.wav')
+    expect(f?.action?.args).toEqual({ clip_id: 'm1', out: 2 })
+  })
+
   it('says where an audio-only video file went', () => {
     const f = importFollowUp({ kind: 'audio', routed_to: 'music', display_name: 'podcast.mp4',
                                past_video_s: 0 }, 'podcast.mp4')

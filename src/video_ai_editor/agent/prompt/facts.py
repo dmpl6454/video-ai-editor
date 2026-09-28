@@ -141,6 +141,9 @@ class TransitionFact(BaseModel):
 
     at: float
     type: str
+    #: Seconds the record asks for (Final QA r2: "make the transitions
+    #: longer" needs the current length). None = the type's own default.
+    duration: float | None = None
 
 
 class TimelineFacts(BaseModel):
@@ -148,6 +151,11 @@ class TimelineFacts(BaseModel):
 
     session_id: str
     duration: float
+    #: Where the main lane's picture ends (layout seconds, `EDL.video_extent`)
+    #: — NOT `duration`, which a music bed longer than the video stretches
+    #: (Final QA: "deleted the last clip (31.0s)" for a 6 s clip). None = no
+    #: main-lane clips.
+    video_end: float | None = None
     canvas_w: int
     canvas_h: int
     fps: int
@@ -168,8 +176,14 @@ class TimelineFacts(BaseModel):
     filler_count: int = 0        # FILLERS_STRICT tokens that survive on the timeline
     has_music: bool = False
     music_ducked: bool = False
+    #: How deep the ducking dips the music (dB), when it ducks (Final QA r3:
+    #: "duck the music more" has to move from the CURRENT depth).
+    music_duck_db: float | None = None
     has_captions: bool = False
     caption_style: str | None = None
+    #: The captions' current text size (the track look, else the first cue's)
+    #: — "make the subtitles bigger" is relative (Final QA).
+    caption_size: float | None = None
     v1_boundaries: list[float] = Field(default_factory=list)
     hook_axes: dict[str, Any] = Field(default_factory=dict)
     brand_handle: str | None = None
@@ -204,6 +218,9 @@ class TimelineFacts(BaseModel):
     #: `in:<id>,out:<id>` / `combo:<id>` ("remove the animation").
     sticker_ids: list[str] = Field(default_factory=list)
     animations: dict[str, str] = Field(default_factory=dict)
+    #: Final QA r3: the stickers that are mirrored, id → "h" / "v" / "hv"
+    #: ("flip the sticker" toggles from what is there).
+    sticker_flips: dict[str, str] = Field(default_factory=dict)
 
     def clip(self, cid: str | None) -> ClipFact | None:
         """The media clip `cid` names, or None."""
@@ -520,14 +537,23 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         caption_clips = [c for t in edl.tracks if t.type == "text"
                          for c in t.clips if isinstance(c, TextClip) and c.role == "caption"]
     caption_style = None
+    caption_size = None
     if caption_clips and captions is not None and captions.config is not None:
         caption_style = captions.config.style
+        look = captions.config.look
+        caption_size = look.size if look is not None and look.size else None
+    if caption_clips and caption_size is None:
+        first = caption_clips[0]
+        caption_size = float(getattr(getattr(first, "style", None), "size", 0) or 0) or None
 
     # --- files a plan may read ----------------------------------------
     uploads = sdir / "uploads"
     audio_files = _files_under(uploads / "audio", _AUDIO_EXT)
-    image_files = (_files_under(uploads / "stickers", _IMAGE_EXT) + _files_under(uploads / "images", _IMAGE_EXT)
-                   + _still_pictures(uploads))
+    # Final QA r3: only the user's own pictures. `uploads/stickers` holds the
+    # emoji artwork the Stickers panel fetched — "use my photo as the
+    # background" filled every clip's bars with the 🔥 sticker. Sticker files
+    # stay in `allowed_paths`, so naming one explicitly still resolves.
+    image_files = _files_under(uploads / "images", _IMAGE_EXT) + _still_pictures(uploads)
     allowed: set[str] = set()
     allowed.update(_resolved(p) for p in _files_under(uploads))
     allowed.update(_resolved(b.path) for b in music_beds())
@@ -550,6 +576,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
     return TimelineFacts(
         session_id=sdir.name,
         duration=round(float(edl.duration), 4),
+        video_end=(round(float(edl.video_extent()), 4) or None),
         canvas_w=int(canvas.w), canvas_h=int(canvas.h), fps=int(canvas.fps),
         aspect=aspect_of(canvas.w, canvas.h), source_aspect=source_aspect,
         v1_clip_ids=[c.id for c in v1_clips], clip_ids=clip_ids,
@@ -560,11 +587,12 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         transcript_backend=backend, language=language, words=words_total,
         speech_spans=speech_spans, speech_seconds=speech_seconds, filler_count=filler_count,
         has_music=bool(music_clips), music_ducked=bool(music and music.duck is not None),
+        music_duck_db=(float(music.duck.to_db) if music is not None and music.duck is not None else None),
         music_clip_ids=[c.id for c in sorted(music_clips, key=lambda c: c.start)],
         spoken_language=spoken_language,
         music_gain_db=(float(music_clips[0].audio.gain_db) if music_clips else None),
         music_muted=bool(music and music.muted),
-        has_captions=bool(caption_clips), caption_style=caption_style,
+        has_captions=bool(caption_clips), caption_style=caption_style, caption_size=caption_size,
         v1_boundaries=v1_boundaries, hook_axes=_hook_axes(edl),
         brand_handle=(edl.brand_kit.handle if edl.brand_kit and edl.brand_kit.handle else None),
         loudness_lufs=canvas.loudness_lufs,
@@ -598,7 +626,10 @@ def _anim_facts(edl: Any) -> dict[str, Any]:
             parts = [f"{k}:{v}" for k, v in (("in", c.anim_in), ("out", c.anim_out), ("combo", c.anim_combo)) if v]
             if parts:
                 anims[c.id] = ",".join(parts)
-    return {"sticker_ids": [s.id for s in stickers], "animations": anims}
+    flips = {s.id: ("h" if getattr(s.transform, "flip_h", False) else "")
+             + ("v" if getattr(s.transform, "flip_v", False) else "") for s in stickers}
+    return {"sticker_ids": [s.id for s in stickers], "animations": anims,
+            "sticker_flips": {k: v for k, v in flips.items() if v}}
 
 
 def _fx_count(c: Any, etype: str) -> int:
@@ -643,7 +674,8 @@ def _edit_facts(store: Any, edl: Any) -> tuple[list[ClipFact], list[TextFact], l
                     for c in t.clips if isinstance(c, TextClip) and c.role != "caption"),
                    key=lambda x: (x.start, x.id))
     v1 = edl.get_track("v1")
-    transitions = sorted((TransitionFact(at=round(float(tr.at), 4), type=str(tr.type))
+    transitions = sorted((TransitionFact(at=round(float(tr.at), 4), type=str(tr.type),
+                                         duration=float(tr.duration) if tr.duration is not None else None)
                           for tr in (v1.transitions if v1 else [])), key=lambda x: x.at)
     return clips, texts, transitions
 

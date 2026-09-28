@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { approxLabel, approxSummary } from './fidelityLabels'
 import { liveApproxReasons, publishLiveApprox } from './liveApprox'
@@ -25,5 +26,40 @@ describe('the ≈ chip words', () => {
     expect(liveApproxReasons()).toBe(a)          // unchanged: the same array, no re-render
     publishLiveApprox([])
     expect(liveApproxReasons()).toEqual([])
+  })
+})
+
+// Final QA r3: a moved or scaled clip over a Canvas background showed
+// "Approximate preview: canvas:blur:moved" — the raw code. Every reason code
+// support.ts can emit (read from its source, so a new one cannot slip by)
+// must come back as words.
+describe('every support.ts reason code has words', () => {
+  const src = readFileSync(new URL('./timeline/support.ts', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  const codes = new Set<string>()
+  // any literal shaped like a code with a colon: 'audio:duck', `canvas:${t}:moved`
+  for (const m of src.matchAll(/(['`])([a-z][a-z-]*:[^'`\s]*)\1/g)) codes.add(m[2])
+  // and the colon-less ones: the reason slot of a (mode, reason) pair
+  for (const m of src.matchAll(/\[(?:MODE_\w+|caps\.\w+|[A-Z_]+_MODE), (['`])([a-z][a-z-]*)\1\]/g)) codes.add(m[2])
+  const sample = [...codes].map((c) => c.replace(/\$\{[^}]*\}/g, 'blur'))
+
+  it('finds the codes', () => {
+    for (const c of ['canvas:blur:moved', 'canvas:blur:rotated', 'audio:varispeed', 'chromakey', 'motion-track', 'audio:loudness']) {
+      expect(sample).toContain(c)
+    }
+  })
+  it('turns each into words, never the code', () => {
+    for (const c of sample) {
+      const w = approxLabel(c)
+      expect(w, c).not.toBe(c)
+      expect(w, c).not.toMatch(/[a-z]:[a-z]/)
+    }
+  })
+  it('names the moved canvas and Keep-pitch-off sound as the chip says them', () => {
+    expect(approxLabel('canvas:blur:moved')).toBe('Canvas behind a moved or resized clip')
+    expect(approxLabel('canvas:color:moved')).toBe('Canvas behind a moved or resized clip')
+    expect(approxLabel('audio:varispeed')).toBe('Speed change without Keep pitch (sound)')
+    expect(approxSummary(['canvas:blur:moved'])).toBe(
+      'Approximate preview: Canvas behind a moved or resized clip. The export is exact.')
   })
 })

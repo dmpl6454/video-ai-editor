@@ -67,15 +67,20 @@ describe('check values as prose', () => {
 })
 
 describe('the rendered run log', () => {
-  const seed = async (status: 'done' | 'error' | 'running') => {
+  const seed = async (status: 'done' | 'error' | 'running', after?: string) => {
     vi.resetModules()
     const { usePromptStore } = await import('../lib/promptStore')
     const init = usePromptStore.getInitialState()
     Object.assign(init, {
       status, prompt: 'make it 9:16', runId: 'r1', opSeen: true, logOpen: true,
+      // the prompt's op is the newest state of the timeline (Final QA: Undo
+      // is offered only then — lib/promptUndo)
+      opRef: { seq: 3, hashAfter: 'h3' },
       plan: null, steps: [{ index: 0, tool: 'auto_reframe', status: 'ok', summary: 'reframed 1 clip' }],
       verify: { type: 'verify', plan_id: 'p', checks: CHECKS, passed: 3, total: 3, rendered: false },
     })
+    const { useStore } = await import('../store')
+    Object.assign(useStore.getInitialState(), { edlHash: after ?? 'h3' })
     const { PromptRunLog } = await import('./PromptRunLog')
     return renderToStaticMarkup(createElement(PromptRunLog))
   }
@@ -87,6 +92,12 @@ describe('the rendered run log', () => {
     expect(html).toMatch(/>Details</)
     expect(html).toMatch(/>Undo</)
     expect(html).not.toContain('prompt-checks')          // the table is folded away
+  })
+
+  it('withdraws Undo once a later edit is the newest state (it would undo that instead)', async () => {
+    const html = await seed('done', 'h4')
+    expect(html).toMatch(/>Details</)
+    expect(html).not.toMatch(/>Undo</)
   })
 
   it('shows a failed run in full, with prose values and no JSON', async () => {

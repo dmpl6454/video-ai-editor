@@ -92,3 +92,35 @@ describe('the inserts send what the old Text tool sent', () => {
     expect(selected).toEqual([])
   })
 })
+
+// Final QA: five of the six gallery looks anchor in the lower band (super,
+// label, default → 0.75·h), exactly where captions sit. With a cue on screen
+// they go to the upper third like the default text; the hook (0.5·h) stays.
+describe('a gallery look clears the captions', () => {
+  const capsEdl = {
+    version: 3, duration: 10, canvas: { w: 1080, h: 1920, fps: 30, bg: '#000' },
+    tracks: [
+      { id: 'v1', type: 'video', clips: [{ id: 'c1', src: '/a.mp4', in: 0, out: 10, start: 0 }] },
+      { id: 'captions', type: 'captions', clips: [{ id: 'k', start: 0, end: 2, text: 'today I am' }] },
+    ],
+  } as unknown as EDL
+
+  for (const id of ['title_box', 'subtitle_band', 'side_label', 'quote', 'neon']) {
+    it(`${id} goes to the upper third over a caption cue`, async () => {
+      const { d, sent } = deps(capsEdl, 0)
+      await insertTextStyle(d, TEXT_STYLE_PRESETS.find((p) => p.id === id)!, 'Hi')
+      expect(sent[0].args).toMatchObject({ x: 540, y: 576 })
+    })
+    it(`${id} keeps its role placement with no caption on screen`, async () => {
+      const { d, sent } = deps(capsEdl, 5)
+      await insertTextStyle(d, TEXT_STYLE_PRESETS.find((p) => p.id === id)!, 'Hi')
+      expect(sent[0].args).not.toHaveProperty('y')
+    })
+  }
+
+  it('yellow_pop (hook, mid-screen) is already clear of the captions', async () => {
+    const { d, sent } = deps(capsEdl, 0)
+    await insertTextStyle(d, TEXT_STYLE_PRESETS.find((p) => p.id === 'yellow_pop')!, 'Hi')
+    expect(sent[0].args).not.toHaveProperty('y')
+  })
+})

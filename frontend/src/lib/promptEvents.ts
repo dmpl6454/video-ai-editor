@@ -15,6 +15,7 @@
 // understand, and a test can drive the whole state machine from a recorded
 // stream without a DOM or a network.
 
+import { promptOpRef, type PromptOpRef } from './promptUndo'
 import type { Op } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,8 @@ export interface PromptRunState {
   clarify: ClarifyState | null
   lastError: string | null
   opSeen: boolean
+  /** Which op the run made (the run log's Undo checks it is still newest). */
+  opRef: PromptOpRef | null
   unknownEvents: number
   /** Projects the run created and finished, in order (QA-068: Open buttons). */
   children: ChildRun[]
@@ -151,7 +154,7 @@ export interface PromptRunState {
 
 export const EMPTY_RUN: PromptRunState = {
   status: 'idle', brain: null, attempts: [], plan: null, steps: [], verify: null,
-  reply: '', clarify: null, lastError: null, opSeen: false, unknownEvents: 0, children: [],
+  reply: '', clarify: null, lastError: null, opSeen: false, opRef: null, unknownEvents: 0, children: [],
 }
 
 /** The state a fresh turn starts from: everything cleared, status `planning`. */
@@ -287,7 +290,7 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
                clarify: { token: e.token, planId: e.plan_id, questions: e.questions, expiresInS: e.expires_in_s } }
     }
     case 'op':
-      return { ...state, opSeen: true }
+      return { ...state, opSeen: true, opRef: promptOpRef((evt as Extract<PromptEvent, { type: 'op' }>).op) }
     case 'error': {
       const e = evt as Extract<PromptEvent, { type: 'error' }>
       const cancelled = isPromptCancelMessage(e.message)

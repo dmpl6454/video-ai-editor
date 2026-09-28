@@ -331,7 +331,10 @@ def test_xfade_inputs_share_a_one_frame_clock():
     e.recompute_duration()
     fc = _fc_for(e)
     assert "settb=AVTB" not in fc
-    assert fc.count("settb=1001/30000") == 4
+    # two per xfade (both inputs), plus the assembled picture put back on
+    # the frame grid before the overlays (final QA round 3)
+    assert fc.count("settb=1001/30000") == 5
+    assert fc.endswith("settb=1001/30000[vout];[xa2]anull[aout]")
 
 
 def test_segments_need_a_source_at_the_project_rate(tmp_path):

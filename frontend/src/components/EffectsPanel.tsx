@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { useStore } from '../store'
+import { errorMessage, useStore } from '../store'
+import { toast } from '../toast'
+import { isCubeFile, lutApplyArgs, lutSrcFor } from '../lib/lutActions'
+import { lutDisplayName } from '../lib/lutName'
 import { api } from '../api'
 import { isMediaClip, clipEnd, type Clip } from '../types'
 import { useSliderCommit } from '../lib/useSliderCommit'
@@ -48,14 +51,6 @@ function baseName(path: string): string {
   // Handles both POSIX and Windows separators (params.src is an absolute path).
   const parts = path.split(/[\\/]/)
   return parts[parts.length - 1] ?? ''
-}
-
-function lutDisplayName(fileOrPath: string): string {
-  const stem = baseName(fileOrPath).replace(/\.cube$/i, '')
-  return stem
-    .split(/[_-]+/)
-    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-    .join(' ')
 }
 
 function chipLabel(e: EffectEntry): string {
@@ -177,6 +172,30 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
     await dispatch('apply_lut', { clip_id: clip.id, src: name, intensity: localIntensity / 100 })
   }
 
+  // Final QA: the user's own .cube (uploaded into the session, never a typed
+  // path) onto the target clip, and the look on the target clip onto every
+  // main-track clip — both swapping an existing LUT rather than stacking.
+  const cubeInput = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
+  const importLut = async (file: File) => {
+    if (!clip || !sid) return
+    if (!isCubeFile(file.name)) { toast.error('Pick a .cube LUT file.'); return }
+    setImporting(true)
+    try {
+      const up = await api.uploadLut(sid, file)
+      await dispatch('apply_lut', lutApplyArgs({ src: up.path, intensity: localIntensity / 100, clipId: clip.id }))
+    } catch (e) {
+      toast.error(`Couldn't import the LUT: ${errorMessage(e)}`)
+    } finally {
+      setImporting(false)
+    }
+  }
+  const v1Count = ((edl?.tracks ?? []).find((t) => t.id === 'v1')?.clips ?? []).filter(isMediaClip).length
+  const applyLookToAll = async () => {
+    if (!appliedLutSrc) return
+    await dispatch('apply_lut', lutApplyArgs({ src: lutSrcFor(appliedLutSrc, luts), intensity: localIntensity / 100 }))
+  }
+
   const removeEffect = async (index: number) => {
     if (!clip) return
     await dispatch('remove_effect', { clip_id: clip.id, index })
@@ -270,6 +289,21 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
       {luts !== null && luts.length === 0 && (
         <div className="fx-hint">No bundled LUTs found.</div>
       )}
+      <div className="fx-lut-actions">
+        <input ref={cubeInput} type="file" accept=".cube" hidden
+               onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void importLut(f) }} />
+        <button type="button" disabled={disabled || importing || !sid}
+                title="Apply your own 3D LUT (.cube) to this clip — it replaces any look already on it"
+                onClick={() => cubeInput.current?.click()}>
+          {importing ? 'Importing…' : 'Import LUT (.cube)…'}
+        </button>
+        <button type="button" disabled={disabled || !appliedLutSrc || v1Count < 2}
+                title={!appliedLutSrc ? 'Apply a look to this clip first, then copy it to every clip'
+                  : `Put ${lutDisplayName(appliedLutSrc)} on all ${v1Count} main-track clips (replaces their looks)`}
+                onClick={() => void applyLookToAll()}>
+          Apply look to all clips
+        </button>
+      </div>
 
       <div className="fx-subhead section-label" style={{ marginTop: 10 }}>Effects</div>
       <div className="fx-grid">

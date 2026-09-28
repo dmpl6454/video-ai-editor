@@ -26,24 +26,39 @@ const clip = (e: EdlLike, i: number) => v1(e).clips[i] as Record<string, unknown
 describe('support.classify (§7)', () => {
   const gaps = byName('structure', 'gaps_p30')
 
-  it('plain cuts, gaps, speed, curves and reverse are EXACT in phase 1', () => {
+  it('plain cuts, gaps and reverse are EXACT in phase 1; retimed sound is not', () => {
     const { edl, pm } = mapOf(byName('rates', 'rates_p30_s30'))
     const s = classify(pm, edl, { phase: 1 })
     expect(s.engine).toEqual({ ok: true })
-    // Varispeed clips (keep_pitch false in the goldens) are sample-exact;
-    // only the speed curve's sound (a warped intermediate) and the reversed
-    // 2x clip's (a resampled intermediate) are not. Their PICTURES are exact.
+    // Every PICTURE here is exact. The sound of a retimed clip is not: the
+    // speed curve's (a warped intermediate), the reversed 2x clip's (a
+    // resampled intermediate) and — Final QA r3 — every constant-speed clip's
+    // with Keep pitch off (keep_pitch false in the goldens), which the client
+    // plays as a playbackRate resample, not ffmpeg's (audioPlan.ts marks it
+    // 'varispeed'; tests/wk/audio_fixture.py measures it at the APPROX 1 dB).
+    // This test used to call those clips sample-exact, from before the D2
+    // audio engine existed.
     const span = (i: number) => [pm.clipStart[i], pm.clipStart[i] + pm.clipLen[i]]
-    const [c0, c1] = span(pm.clips.findIndex((c) => typeof c.speed === 'object' && c.speed !== null))
-    const [a, b] = span(pm.clips.findIndex((c) => c.reverse && c.speed === 2))
-    expect(c1 < a).toBe(true)
-    expect(s.ranges).toEqual([
-      { k0: 0, k1: c0, mode: MODE_EXACT, reasons: [] },
-      { k0: c0, k1: c1, mode: MODE_APPROX, reasons: ['audio:curve'] },
-      { k0: c1, k1: a, mode: MODE_EXACT, reasons: [] },
-      { k0: a, k1: b, mode: MODE_APPROX, reasons: ['audio:reverse-speed'] },
-      { k0: b, k1: pm.total, mode: MODE_EXACT, reasons: [] },
-    ])
+    const expected: Array<{ k0: number; k1: number; mode: number; reasons: string[] }> = []
+    let k = 0
+    const push = (k0: number, k1: number, mode: number, reasons: string[]) => {
+      const last = expected[expected.length - 1]
+      if (last && last.k1 === k0 && last.mode === mode && last.reasons.join() === reasons.join()) last.k1 = k1
+      else expected.push({ k0, k1, mode, reasons })
+    }
+    pm.clips.forEach((c, i) => {
+      const [a, b] = span(i)
+      const why = typeof c.speed === 'object' && c.speed !== null ? 'audio:curve'
+        : typeof c.speed === 'number' && c.speed !== 1 ? (c.reverse ? 'audio:reverse-speed' : 'audio:varispeed') : null
+      if (!why) return
+      if (a > k) push(k, a, MODE_EXACT, [])
+      push(a, b, MODE_APPROX, [why])
+      k = b
+    })
+    if (k < pm.total) push(k, pm.total, MODE_EXACT, [])
+    expect(expected.map((r) => r.reasons[0] ?? '')).toEqual(['', 'audio:varispeed', 'audio:curve', '',
+      'audio:reverse-speed', 'audio:varispeed', ''])
+    expect(s.ranges).toEqual(expected)
     expect(classify(mapOf(gaps).pm, mapOf(gaps).edl, { phase: 1 }).ranges.every((r) => r.mode === MODE_EXACT)).toBe(true)
   })
 
@@ -121,6 +136,27 @@ describe('support.classify (§7)', () => {
     const k = pm.clipStart[2]
     expect(classify(pm, edl, { phase: 1 }).mode[k]).toBe(MODE_APPROX)
     expect(classify(pm, edl, { phase: 4 }).mode[k]).toBe(MODE_EXACT)
+  })
+
+  it('Keep pitch off: a retimed clip\'s sound is a resample, APPROX in every phase (v1 and overlays)', () => {
+    // Final QA r3: support.ts only named keep-pitch speed, while the audio
+    // plan plays these as a playbackRate resample (audioPlan approx
+    // 'varispeed') — no ≈ over a 2x v1 clip or a 0.5x overlay.
+    const { edl, pm } = mapOf(gaps, (e) => {
+      Object.assign(clip(e, 2), { speed: 2, audio: { keep_pitch: false } })
+      e.tracks!.push({ id: 'v2', type: 'video', clips: [
+        { id: 'slow', src: 'bar30', start: 0, in: 0, out: 0.2, speed: 0.5, audio: { keep_pitch: false } },
+        { id: 'back', src: 'bar30', start: 2.2, in: 1, out: 1.3, reverse: true },
+      ] } as unknown as NonNullable<EdlLike['tracks']>[number])
+    })
+    for (const phase of [1, 4, 5] as Phase[]) {
+      const s = classify(pm, edl, { phase })
+      const at = (k: number) => s.ranges.find((r) => k >= r.k0 && k < r.k1)!
+      expect(at(pm.clipStart[2])).toMatchObject({ mode: MODE_APPROX, reasons: ['audio:varispeed'] })
+      expect(at(5)).toMatchObject({ mode: MODE_APPROX, reasons: ['audio:varispeed'] })     // the 0.5x overlay
+      expect(at(70)).toMatchObject({ mode: MODE_APPROX, reasons: ['audio:reverse'] })      // the reversed overlay (1x)
+      expect(at(pm.clipStart[1]).mode).toBe(MODE_EXACT)
+    }
   })
 
   it('a retimed REVERSED clip has no sample-exact sound: APPROX in every phase', () => {

@@ -4,7 +4,8 @@ in Chromium AND WebKit (docs/design/LEFT_RAIL_SPEC.md §4, §8.3 case 5).
 What each test pins:
 
 * Case 5 (critique H1): a panel chord is ``global`` — ⌥8 switches from a media
-  row and ⌥1 from inside the AI panel, both ``[data-keymap-ignore]`` scopes;
+  row (an own-scope since Final QA r3: it keeps Enter and Delete only) and ⌥1
+  from inside the AI panel (a ``[data-keymap-ignore]`` scope);
   ⌘E opens Export from the right panel's tablist (another ignore scope); in
   the Prompt textarea ⌥1 is left to typing.
 * §2.4 restored (review RD1 → R4): Space and Enter on the FOCUSED rail tab
@@ -76,10 +77,11 @@ def _panel_open(page) -> bool:
 def test_panel_chords_run_inside_ignore_scopes_and_not_in_text(engine, base_url, sessions):  # noqa: F811
     page = _open(engine, base_url, sessions["full"], 1440, 900)
     assert _selected(page) == "media"
-    # 1. A media row is a [data-keymap-ignore] scope: ⌥8 still selects AI.
+    # 1. A media row keeps its own keys (Enter, Delete: data-keymap-own, Final
+    #    QA r3 — it was an ignore scope that also swallowed ⌘Z): ⌥8 selects AI.
     row = page.locator("[data-media-row]").first
     row.focus()
-    assert row.evaluate("el => !!el.closest('[data-keymap-ignore]')")
+    assert row.evaluate("el => el.closest('[data-keymap-own]')?.dataset.keymapOwn === 'Enter Delete Backspace'")
     page.keyboard.press("Alt+8")
     _wait_selected(page, "ai")
     assert page.locator("#tool-panel-ai").is_visible()
@@ -319,6 +321,63 @@ def test_global_shortcuts_work_with_focus_anywhere(engine, base_url, sessions, w
         page.keyboard.press("Space")
         page.wait_for_function(stopped, timeout=3000)
     assert _active(page) == at, (where, _active(page))
+    page.context.close()
+
+
+def _v1(base_url, sid) -> tuple[int, int]:  # noqa: F811
+    """(clips, transitions) on the main track."""
+    edl = httpx.get(f"{base_url}/api/sessions/{sid}/edl", timeout=10).json()
+    v1 = next(t for t in edl.get("tracks") or [] if t.get("id") == "v1")
+    return len(v1.get("clips") or []), len(v1.get("transitions") or [])
+
+
+def _click_keeping_focus(page, locator) -> None:
+    """A mouse click that leaves focus on the clicked control, as Chromium
+    does (WebKit focuses nothing on click: the finding's repro focused the
+    control there, within the engine's pointer-focus window)."""
+    locator.click()
+    locator.evaluate("el => { if (!el.contains(document.activeElement)) el.focus() }")
+
+
+def test_undo_right_after_adding_media_or_applying_a_transition(engine, base_url, sessions):  # noqa: F811
+    """Final QA r3: the media rows and the Transitions panel were
+    [data-keymap-ignore] scopes, so ⌘Z (and J/K/L, N, Space) did nothing with
+    focus left on a row's + button or on the tile just applied."""
+    sid = sessions["full"]
+    page = _open(engine, base_url, sid, 1440, 900)
+    clips0, tr0 = _v1(base_url, sid)
+
+    # + on a media row adds a clip; ⌘Z with focus still there removes it.
+    row = page.locator("[data-media-row]").first
+    row.hover()
+    _click_keeping_focus(page, row.locator(".media-add"))
+    assert _until(lambda: _v1(base_url, sid)[0], clips0 + 1) == clips0 + 1, "+ added nothing"
+    assert page.evaluate("() => !!document.activeElement?.closest('[data-media-row]')"), _active(page)
+    page.keyboard.press("ControlOrMeta+z")
+    assert _until(lambda: _v1(base_url, sid)[0], clips0) == clips0, f"⌘Z on the media row did not undo: {_active(page)}"
+
+    # A second clip makes a cut; a click on a tile applies a transition there,
+    # ⌘Z with focus on the tile takes it off, and Space then plays.
+    row.hover()
+    _click_keeping_focus(page, row.locator(".media-add"))
+    assert _until(lambda: _v1(base_url, sid)[0], clips0 + 1) == clips0 + 1
+    _tab(page, "Transitions").click()
+    page.locator(".trp-target-at").wait_for(timeout=5000)
+    tile = page.locator(".trp-tile").first
+    _click_keeping_focus(page, tile)
+    assert _until(lambda: _v1(base_url, sid)[1], tr0 + 1) == tr0 + 1, "the tile applied nothing"
+    assert page.evaluate("() => document.activeElement?.classList.contains('trp-tile')"), _active(page)
+    page.keyboard.press("ControlOrMeta+z")
+    assert _until(lambda: _v1(base_url, sid)[1], tr0) == tr0, f"⌘Z on the tile did not undo: {_active(page)}"
+    page.keyboard.press("Space")
+    page.wait_for_function("() => document.querySelector('.timeline-toolbar button[aria-keyshortcuts=Space]')"
+                           ".getAttribute('aria-label') === 'Pause'", timeout=3000)
+    page.keyboard.press("Space")
+    page.wait_for_function("() => document.querySelector('.timeline-toolbar button[aria-keyshortcuts=Space]')"
+                           ".getAttribute('aria-label') !== 'Pause'", timeout=3000)
+    # the shared session as it was: the added clip goes too
+    page.keyboard.press("ControlOrMeta+z")
+    assert _until(lambda: _v1(base_url, sid), (clips0, tr0)) == (clips0, tr0)
     page.context.close()
 
 

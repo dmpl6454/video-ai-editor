@@ -13,7 +13,9 @@ export function announce(text: string): void {
     region.setAttribute('aria-live', 'polite')
     region.setAttribute('aria-atomic', 'true')
     region.dataset.announcer = ''
-    region.style.cssText = 'position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;'
+    // Fixed at the viewport's corner: an absolute box with no top/left sat
+    // at its static position below the shell and made the page 1 px taller.
+    region.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;'
     document.body.appendChild(region)
   }
   region.textContent = text

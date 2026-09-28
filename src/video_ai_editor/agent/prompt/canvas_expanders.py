@@ -31,6 +31,7 @@ from .clip_expanders import _label, bind_clip
 from .facts import TimelineFacts
 from .recipes import Context, Expansion, Intent, ask, pc, placeholder, step
 from .schema import STAGE_LOOK, STAGE_REFRAME
+from . import canvas_vocab as _CV
 from .canvas_vocab import BLEND_WORDS, OVERLAY_NOUN, COLOUR_WORDS as _COLOUR_WORDS, PICTURE as _PICTURE
 
 # --------------------------------------------------------------------------
@@ -149,6 +150,10 @@ def read_blend(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     clause = hit.clause
     out: dict[str, Any] = {}
     mode = blend_mode_in(clause)
+    if re.search(_CV.BLEND_OFF, clause):
+        # Final QA r3: "remove the screen blend" re-applied Screen and said
+        # "the overlay now blends as Screen" — a removal is Normal.
+        mode = "normal"
     if mode is not None:
         out["mode"] = mode
     m = _NTH_OVERLAY.search(clause)

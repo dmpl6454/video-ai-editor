@@ -256,6 +256,61 @@ describe('PreviewController', () => {
     expect(engine().named('pauseExternal')).toHaveLength(1)
   })
 
+  // Final QA r3: the Instant preview played ~11 dB under the server preview
+  // and the export (the project's −16 LUFS target was never applied) and
+  // called it EXACT. The controller asks /preview_loudness for each render
+  // hash, hands the gain to the sound, and says whether it is current.
+  it('plays the server preview\'s loudness gain for each hash, current once that preview has landed', async () => {
+    const loud = edl([['A', 0, 4, 0]])
+    loud.canvas = { ...loud.canvas, loudness_lufs: -16 }
+    const answers: Record<string, unknown> = { [H1]: { gain_db: 9.5, current: false, target_lufs: -16 } }
+    let source: { gainDb(): number | null; current(h: string): boolean } | null = null
+    const refresh = vi.fn()
+    const { ctl, srv, engine } = setup({
+      '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }),
+      '/preview_loudness': (url) => ({ status: 200, body: answers[new URL(url, 'http://x').searchParams.get('h')!] }),
+    }, {
+      audio: (_onInt: () => void, l: typeof source) => {
+        source = l
+        return { prepare() {}, start() {}, stop() {}, reschedule() {}, setParams() {}, ctxTimeAt: () => null, refreshLoudness: refresh }
+      },
+    })
+    ctl.applyTimeline(loud, H1)
+    await settle()
+    expect(srv.log).toContain(`GET /api/sessions/${SID}/preview_loudness?h=${H1}`)
+    expect(source!.gainDb()).toBe(9.5)                 // the last-known gain: played…
+    expect(source!.current(H1)).toBe(false)            // …but APPROX
+    expect(refresh).toHaveBeenCalledTimes(1)
+    // the server preview of H1 lands: its measured gain is current
+    answers[H1] = { gain_db: 10.8, current: true, target_lufs: -16 }
+    ctl.onPreviewLanded(H1)
+    await settle()
+    expect(source!.gainDb()).toBe(10.8)
+    expect(source!.current(H1)).toBe(true)
+    expect(source!.current(H2)).toBe(false)
+    expect(refresh).toHaveBeenCalledTimes(2)
+    // a new hash keeps the verdict while its answer is on the way (no ≈
+    // flash after a title edit), then takes the answer
+    answers[H2] = { gain_db: 10.8, current: true, target_lufs: -16 }
+    let seenByEngine: boolean | null = null
+    const eng = engine()
+    const setTimeline = eng.setTimeline.bind(eng)
+    eng.setTimeline = (e, h, l) => { seenByEngine = source!.current(h); return setTimeline(e, h, l) }
+    ctl.applyTimeline(loud, H2)
+    expect(seenByEngine).toBe(true)                    // what the engine classified the new program with
+    expect(source!.current(H2)).toBe(true)
+    await settle()
+    expect(source!.current(H2)).toBe(true)
+    expect(refresh).toHaveBeenCalledTimes(2)           // nothing changed: no re-plan
+  })
+
+  it('asks for no loudness gain on a project without a target', async () => {
+    const { ctl, srv } = setup({ '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }) })
+    ctl.applyTimeline(edl([['A', 0, 4, 0]]), H1)
+    await settle()
+    expect(srv.log.some((l) => l.includes('/preview_loudness'))).toBe(false)
+  })
+
   it('keeps the timeline across a remount and destroys the engine on detach', () => {
     const { ctl, engine } = setup({ '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }) })
     ctl.applyTimeline(edl([['A', 0, 5, 0]]), H1)

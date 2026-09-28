@@ -187,10 +187,18 @@ def decode(path: Path, ks: list[int], w: int = W, h: int = H) -> tuple[np.ndarra
         else:
             runs.append([k, k])
     sel = "+".join(f"between(n\\,{a}\\,{b})" for a, b in runs)
-    rgb = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-vf", f"select='{sel}'",
+    # RGB with the matrix the SOURCE was encoded with (`make_source`: lavfi's
+    # BT.601, untagged). The export is tagged BT.709 since final QA round 3
+    # (untagged reads as BT.709, INSTANT_PREVIEW_SPEC R12), so a default
+    # decode would convert the markers' colours with another matrix than the
+    # one that made them; the geometry measured here does not depend on it.
+    rgb = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-vf",
+                          f"select='{sel}',scale=in_color_matrix=bt601:in_range=tv:out_range=pc,format=rgb24",
                           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                          capture_output=True, check=True).stdout
-    yuv = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-vf", f"select='{sel}'",
+    # luma the same way (swscale's gray output follows the matrix too)
+    yuv = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-vf",
+                          f"select='{sel}',scale=in_color_matrix=bt601:in_range=tv,format=gray",
                           "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                          capture_output=True, check=True).stdout
     n = len(ks)

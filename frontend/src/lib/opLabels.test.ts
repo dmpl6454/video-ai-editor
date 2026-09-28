@@ -59,6 +59,19 @@ describe('History in project terms (QA-101 remainder)', () => {
     // an unlisted upload still loses its disk suffix
     expect(editorSummary('Add music vo8_49bd5f30.wav @ 2.5s', ctx)).toBe('Add music vo8.wav at 00:00:02:15')
   })
+  it('drops the upload suffix from an imported .cube LUT (final QA)', () => {
+    // History read "Apply LUT warm_teal_81e3e270.cube (×1.00) to 4 clips".
+    expect(editorSummary('Apply LUT warm_teal_81e3e270.cube (×1.00) to 4 clips', ctx))
+      .toBe('Apply LUT warm_teal.cube (×1.00) to 4 clips')
+  })
+  it('an added clip reads as its place on the timeline, not its source range (Final QA r2)', () => {
+    const at = (t: number) => opLabel({ tool: 'add_clip', summary: `Add clip c_12cab508 to v1 at ${t.toFixed(2)}s (5.00s long)` }, {
+      ...ctx, tracks: [{ id: 'v1', type: 'video', z: 1, clips: [] }] as never,
+    }).detail
+    const rows = [0, 5, 10, 15].map(at)
+    expect(new Set(rows).size).toBe(4)
+    expect(rows[1]).toMatch(/^to .*video at 00:00:05:00 \(5.00s long\)$/i)
+  })
   it('drops canvas pixel coordinates (QA-101 sweep: "Sticker — 😁 @ (960,594)")', () => {
     // Verbatim add_sticker summary from a live backend.
     const l = opLabel({ tool: 'add_sticker', summary: 'Sticker 😁 @ (960,594) 1.03–4.03s' }, ctx)
@@ -107,5 +120,37 @@ describe('wave E (F4b) ops read like an editor', () => {
     const rm = opLabel({ tool: 'remove_effects', summary: 'Remove the filter from 2 clips' })
     expect(rm.title).toBe('Remove filter')
     expect(`${rm.title} ${rm.detail}`).not.toMatch(/remove_effects|\blut\b|\(s\)/)
+  })
+})
+
+// Final QA: labels read in History that still leaked internals or broke.
+describe('History labels, final sweep', () => {
+  it('drops a clip-id clause whole instead of leaving a dangling "from"', () => {
+    const l = opLabel({ tool: 'remove_effect', summary: 'Remove effect lut from c_682eda22' })
+    expect(`${l.title} — ${l.detail}`).toBe('Remove effect — LUT')
+  })
+
+  it('names transitions as the Transitions panel does', () => {
+    expect(opLabel({ tool: 'add_transition', summary: 'Add radial transition at 5.00s (0.50s)' }, { fps: 30 }).detail)
+      .toBe('Add Clock Wipe transition at 00:00:05:00 (0.50s)')
+    expect(opLabel({ tool: 'add_transition', summary: 'Add slideleft transition at 5.00s (0.35s)' }).detail)
+      .toBe('Add Slide Left transition at 5.00s (0.35s)')
+    expect(opLabel({ tool: 'add_transition', summary: 'Replace fade transition at 4.00s (1.00s)' }).detail)
+      .toBe('Replace Fade transition at 4.00s (1.00s)')
+    // an alias the backend resolved: the look that renders
+    expect(opLabel({ tool: 'add_transition', summary: 'Add wipe → wipeleft transition at 2.00s (0.40s)' }).detail)
+      .toBe('Add Wipe Left transition at 2.00s (0.40s)')
+  })
+
+  it('names caption styles and models as the Captions form does', () => {
+    const l = opLabel({ tool: 'auto_caption',
+      summary: 'Auto-captioned (large-v3, en): 11 ig_chunky cues. e.g. “today I am taking a close look”' }, { fps: 30 })
+    expect(l.detail).toBe('Auto-captioned (Most accurate, en): 11 cues, Chunky (Instagram) style. e.g. “today I am taking a close look”')
+    expect(l.detail).not.toMatch(/_|V3/)
+  })
+
+  it('does not say "Text" twice for a text edit', () => {
+    const l = opLabel({ tool: 'set_property', summary: 'Text: “Hello there”', args: { path: 'text', value: 'Hello there' } })
+    expect(`${l.title} — ${l.detail}`).toBe('Text — “Hello there”')
   })
 })

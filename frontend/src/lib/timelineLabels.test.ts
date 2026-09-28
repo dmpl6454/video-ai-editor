@@ -1,6 +1,6 @@
 // QA-118: labels are fitted, never cut mid-glyph, and never print on each other.
 import { describe, expect, it } from 'vitest'
-import { collides, fitLabel, laneTooltipHead, markerChips, stickyLabelX } from './timelineLabels'
+import { BOWTIE_R, clearOfBowtie, collides, fitLabel, laneTooltipHead, markerChips, stickyLabelX } from './timelineLabels'
 
 const m = (s: string) => s.length * 6   // 6 px per character
 
@@ -50,5 +50,31 @@ describe('clip name plate (QA-118 remainder)', () => {
     const p = labelPlate(106, 80, 40, 36)
     expect(p).toEqual({ x: 102, y: 50, w: 88, h: 16 })
     expect(LABEL_PLATE_ALPHA).toBeGreaterThanOrEqual(0.6)
+  })
+})
+
+// Final QA (editor-ux): with a dissolve on every cut, the bowtie sits at the
+// MIDDLE of the overlap — 9.4 px into the incoming clip at 37.5 px/s, 50 px at
+// 200 px/s — and the name was only moved when the bowtie was within 9 px of
+// the clip's edge, so it read "y.mp4", "rtical_street.mp4", "c◉.mp4".
+describe('clearOfBowtie', () => {
+  it('starts the name past a head bowtie, wherever in the overlap it sits', () => {
+    // 37.5 px/s, 0.5 s overlap: bowtie 9.4 px in — the old 9 px test missed it.
+    const a = clearOfBowtie(100 + 6, 100, 187, 109.4, null)
+    expect(a.lx).toBeGreaterThanOrEqual(109.4 + BOWTIE_R)
+    // Zoomed in: bowtie 50 px in, over what used to be the name's 2nd glyph.
+    expect(clearOfBowtie(106, 100, 1000, 150, null).lx).toBeGreaterThanOrEqual(150 + BOWTIE_R)
+  })
+  it('ends the name before a tail bowtie', () => {
+    const r = clearOfBowtie(106, 100, 187, null, 277.6)
+    expect(r.maxRight).toBeLessThanOrEqual(277.6 - BOWTIE_R)
+    expect(r.lx).toBe(106)
+  })
+  it('changes nothing without transitions, and never leaves the clip', () => {
+    expect(clearOfBowtie(106, 100, 187, null, null)).toEqual({ lx: 106, maxRight: 100 + 187 - 8 })
+    // A sticky title already right of the bowtie stays where it is.
+    expect(clearOfBowtie(400, 100, 900, 109, null).lx).toBe(400)
+    // A clip narrower than its bowtie: clamped to the clip.
+    expect(clearOfBowtie(106, 100, 10, 105, null).lx).toBeLessThanOrEqual(110)
   })
 })

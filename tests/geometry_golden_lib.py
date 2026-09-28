@@ -335,8 +335,14 @@ def edl_json(edl: EDL) -> dict:
 # --------------------------------------------------------------- measuring
 
 def decode_rgb(path: Path, w: int, h: int) -> np.ndarray:
-    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-f", "rawvideo",
-                          "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    # RGB with the matrix the SOURCE was encoded with (`make_source`: lavfi's
+    # BT.601, untagged): the export is tagged BT.709 since final QA round 3
+    # (untagged reads as BT.709, INSTANT_PREVIEW_SPEC R12), and a default
+    # decode would convert the markers' colours with another matrix than the
+    # one that made them. The geometry measured here does not depend on it.
+    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
+                          "-vf", "scale=in_color_matrix=bt601:in_range=tv:out_range=pc,format=rgb24",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
     return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3)
 
 

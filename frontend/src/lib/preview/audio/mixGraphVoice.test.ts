@@ -88,6 +88,12 @@ describe('a voice clip in the mix graph', () => {
     // a block at the head reads back its margin, into the priming
     expect(sourceRange(chip, chip.out0, chip.out0 + 10)![0]).toBe(48000 - Math.min(2400, chip.voice!.back))
     expect(primeOf(planOf(edl({ voice_effect: 'echo' })).clips[0])).toBe(0)      // no latency, no priming
+    // final QA round 3 (`audio_mix.PRIMED_STAGES`): the filter presets' IIR
+    // state is primed too, or every split clicks; the ring / echo are not
+    for (const fx of ['telephone', 'radio', 'megaphone', 'underwater', 'monster']) {
+      expect(primeOf(planOf(edl({ voice_effect: fx })).clips[0])).toBe(2400)
+    }
+    expect(primeOf(planOf(edl({ voice_effect: 'robot' })).clips[0])).toBe(0)
     const atHead = planFromProgram(edl({ voice_effect: 'vibrato' }, { in: 0.02, out: 3.02 }),
       buildProgramMap(edl({ voice_effect: 'vibrato' }, { in: 0.02, out: 3.02 }), () => SRC), () => SRC).clips[0]
     expect(primeOf(atHead)).toBe(960)                                          // clamped at the file head

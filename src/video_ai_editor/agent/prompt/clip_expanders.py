@@ -52,7 +52,9 @@ def v1_spans(f: TimelineFacts) -> list[tuple[str, float, float]] | None:
     ids = list(f.v1_clip_ids)
     if not ids:
         return None
-    bounds = [0.0, *f.v1_boundaries, float(f.duration)]
+    # The last clip ends where the PICTURE ends (Final QA: with a music bed
+    # longer than the video it "ended" at the bed's end).
+    bounds = [0.0, *f.v1_boundaries, float(f.video_end if f.video_end else f.duration)]
     if len(bounds) != len(ids) + 1:
         return None
     return [(cid, round(bounds[i], 3), round(bounds[i + 1], 3)) for i, cid in enumerate(ids)]
@@ -92,6 +94,10 @@ def bind_clip(ref: Any, f: TimelineFacts) -> tuple[str | None, str | None]:
         if 0 <= idx < len(ids):
             return ids[idx], None
         return None, f"Which clip did you mean? {_count(len(ids)).capitalize()}."
+    if ref.startswith("$second_half:"):
+        at = ref.split(":", 1)[1]
+        return None, (f"The second half is made by the split in this same prompt, so it has no name yet — "
+                      f"split first, then say it again for 'the clip at {at}s'.")
     if ref.startswith(AT_REF):
         t = float(ref[len(AT_REF):])
         hit = next((cid for cid, a, b in (v1_spans(f) or []) if a - _TOL_S <= t < b), None)
@@ -162,7 +168,7 @@ def x_delete_clip(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     pcs = [pc("tool_ok", "the clip was deleted", tool="ripple_delete")]
     if span and not other_cuts(ctx, "delete_clip"):
         pcs.insert(0, pc("duration_between", "the timeline closed the gap",
-                         target=round(max(0.0, f.duration - (span[1] - span[0])), 3), tol=0.1))
+                         target=round(max(0.0, (f.video_end or f.duration) - (span[1] - span[0])), 3), tol=0.1))
     what = _label(ref, f)
     return Expansion(steps=(step("ripple_delete", STAGE_CUTS, f"delete {what} and close the gap", clip_id=ref),),
                      postconditions=tuple(pcs),
@@ -179,7 +185,7 @@ def x_duplicate(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     pcs = [pc("tool_ok", "the clip was duplicated", tool="duplicate_clip")]
     if span and not other_cuts(ctx, "duplicate"):
         pcs.insert(0, pc("duration_between", "the copy sits right after the original",
-                         target=round(f.duration + (span[1] - span[0]), 3), tol=0.1))
+                         target=round((f.video_end or f.duration) + (span[1] - span[0]), 3), tol=0.1))
     what = _label(ref, f)
     return Expansion(steps=(step("duplicate_clip", STAGE_CUTS, f"duplicate {what} right after itself", clip_id=ref),),
                      postconditions=tuple(pcs), notes=(f"duplicated {what}",))

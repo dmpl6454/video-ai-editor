@@ -293,8 +293,8 @@ export function isTextEntry(t: KeyTarget | null | undefined): boolean {
  *    not a native text chord (⌘A/C/V/X/Z, ⌘-arrows, ⌘⌫), and a command whose
  *    `alsoInText` region holds the field (⌥9/⌥0 from the Chat box: a keyboard
  *    user can go back to the Inspector without leaving the panel first).
- * 3. A `[data-keymap-ignore]` scope (the AI panel's forms, the media rows,
- *    the Prompt bar…) keeps its keys from `'default'`
+ * 3. A `[data-keymap-ignore]` scope (the AI panel's forms, the Prompt
+ *    bar…) keeps its keys from `'default'`
  *    commands; `'global'` ones (⌥1…⌥8, ⌘E…) still run there (critique H1).
  *    Per-command scope rather than "the scope swallows only unmodified keys":
  *    ⌘Z inside an AI form must not undo the timeline behind the user's back.
@@ -310,6 +310,9 @@ export function isTextEntry(t: KeyTarget | null | undefined): boolean {
  *    it names, with any modifiers, from every command: a focused curve point
  *    removes itself on Delete, and ripple delete never fires there, while ⌘Z,
  *    Space, J/K/L and N still do (review RD2: an ignore scope silenced them).
+ *    The Transitions panel (its grid keys) and the media rows (Enter, Delete)
+ *    are own-scopes too (Final QA r3: ⌘Z after applying a transition or
+ *    adding a clip did nothing while they were ignore scopes).
  * 5. A focused tab keeps Space and Enter: they activate the tab (APG). This
  *    is what makes Space on the selected rail tab collapse / re-open the tool
  *    panel (§2.4) while every other global shortcut — ⌘Z, J/K/L, N — still

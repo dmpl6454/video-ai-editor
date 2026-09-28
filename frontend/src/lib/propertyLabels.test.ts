@@ -13,7 +13,10 @@ describe('set_property in editor language', () => {
     for (const { path, value, group, phrase } of fixture.cases) {
       const l = opLabel({ tool: 'set_property', summary: `${group}: ${phrase}`, args: { clip_id: 't_1a2b3c4d', path, value } })
       expect(l.title).toBe(group)
-      expect(l.detail).toBe(phrase)
+      // History never says the group twice ("Text — Text: “Hi”", Final QA):
+      // a phrase that opens with its own group name drops that lead.
+      const lead = `${group}: `
+      expect(l.detail).toBe(phrase.startsWith(lead) ? phrase.slice(lead.length) : phrase)
     }
   })
 

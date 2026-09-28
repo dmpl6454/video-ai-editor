@@ -35,6 +35,29 @@ export function stickyLabelX(clipX: number, viewLeft: number, pad = 6): number {
   return Math.max(clipX, viewLeft) + pad
 }
 
+/** The radius of a v1 cut's transition bowtie (Timeline.drawBowtie). */
+export const BOWTIE_R = 7
+const BOWTIE_GAP = 5
+const TAIL_PAD = 8
+
+/** A clip's name span `[lx, maxRight]` kept clear of the transition bowties
+ *  on its own cuts: `headCx` is the bowtie of the cut this clip STARTS at,
+ *  `tailCx` of the one it ends at (null: no transition there).
+ *
+ *  A transition's bowtie sits at the middle of the overlap, not at the drawn
+ *  clip edge, so the old "within 9 px of the edge" test missed it as soon as
+ *  the overlap was wider than ~18 px (a 0.5 s dissolve at 37.5 px/s) and the
+ *  name ran underneath ("y.mp4", "rtical_street.mp4"). Tied to the cut, not a
+ *  distance, it holds at every zoom. Never past the clip's own right edge. */
+export function clearOfBowtie(
+  lx: number, clipX: number, clipW: number, headCx: number | null, tailCx: number | null,
+): { lx: number; maxRight: number } {
+  const right = clipX + clipW
+  const x = headCx === null ? lx : Math.min(Math.max(lx, headCx + BOWTIE_R + BOWTIE_GAP), right)
+  const maxRight = Math.min(right - TAIL_PAD, tailCx === null ? Infinity : tailCx - BOWTIE_R - BOWTIE_GAP)
+  return { lx: x, maxRight }
+}
+
 export interface Chip { x: number; w: number; text: string; color?: string }
 
 /** Marker chips along the ruler, left to right; a chip that would overlap the

@@ -50,7 +50,10 @@ const info: AudioProgramInfo = {
   lookup: (src) => ({ info: SRC, proxy: { key: src === '/bed.m4a' ? 'bbbb' : 'aaaa' } }),
 }
 
-function setup(opts: { interrupted?: (s: string) => void; peak?: number } = {}) {
+function setup(opts: {
+  interrupted?: (s: string) => void; peak?: number
+  loudnessGainDb?: () => number | null; loudnessCurrent?: (renderHash: string) => boolean
+} = {}) {
   const ctx = new FakeContext()
   const timers: Array<{ fn: () => void; ms: number }> = []
   const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
@@ -60,6 +63,7 @@ function setup(opts: { interrupted?: (s: string) => void; peak?: number } = {}) 
     setInterval: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h },
     clearInterval: (h) => { (h as { cleared: boolean }).cleared = true },
     onInterrupted: opts.interrupted,
+    loudnessGainDb: opts.loudnessGainDb, loudnessCurrent: opts.loudnessCurrent,
   })
   const prepare = (e: EdlLike) => engine.prepare(e, audioPlacements(buildProgramMap(e, () => SRC), () => SRC), info)
   return { ctx, engine, timers, intervals, prepare }
@@ -283,5 +287,103 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     expect(engine.limitingFrames()).toEqual([[56, 184]])
     await settle()
     expect(told).toBe(1)
+  })
+})
+
+// Final QA r3: the Instant preview played the raw mix — ~11 dB under the
+// server preview and the export on a project with the default −16 LUFS
+// target — and marked it EXACT. The engine plays the server preview's master
+// gain (GET /preview_loudness) and tells the engine whether that gain was
+// measured for this render's sound (else the frames are APPROX 'loudness').
+describe('the project loudness gain', () => {
+  const target: EdlLike = { ...base, canvas: { fps: 30, loudness_lufs: -16 } }
+
+  it('plays the preview gain it is given, re-plans when it changes, and says if it is current', () => {
+    let gain: number | null = null
+    let measuredFor: string | null = null
+    const { engine, prepare } = setup({ loudnessGainDb: () => gain, loudnessCurrent: (h) => h === measuredFor })
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    prepare(target)
+    expect(engine.plannedMaster()).toEqual({ gain: 1, ceilingDb: null })    // nothing known yet: raw
+    expect(engine.loudnessCurrent()).toBe(false)                           // …and APPROX
+    gain = 10.8
+    measuredFor = info.renderHash
+    engine.refreshLoudness()
+    expect(engine.plannedMaster()!.gain).toBeCloseTo(10 ** (10.8 / 20), 9)
+    expect(engine.plannedMaster()!.ceilingDb).not.toBeNull()              // the limiter follows the lift
+    expect(engine.loudnessCurrent()).toBe(true)
+    expect(told).toBe(1)                                                   // the engine reclassifies
+  })
+
+  it('says nothing without a target, or without a loudness source (test harnesses)', () => {
+    const a = setup({ loudnessGainDb: () => 6, loudnessCurrent: () => false })
+    a.prepare(base)                                                        // no loudness_lufs
+    expect(a.engine.loudnessCurrent()).toBeUndefined()
+    expect(a.engine.plannedMaster()!.gain).toBe(1)
+    const b = setup()
+    b.prepare(target)
+    expect(b.engine.loudnessCurrent()).toBeUndefined()
+  })
+})
+
+// Final QA (engine): Play right after a seek sometimes stopped by itself five
+// frames later in WKWebView. stop()'s suspend timer fired while the context
+// was 'running', a start() a few ms later saw 'running' and did not resume,
+// and the statechange of OUR OWN suspend then landed while playing — read as
+// a system interruption, so the engine paused itself.
+class DeferredContext extends FakeContext {
+  private queue: Array<() => void> = []
+  resume() { this.resumes++; return new Promise<void>((r) => this.queue.push(() => { this.setState('running'); r() })) }
+  suspend() { this.suspends++; return new Promise<void>((r) => this.queue.push(() => { this.setState('suspended'); r() })) }
+  /** Land the oldest pending state change (as the audio thread would). */
+  land(): boolean { const f = this.queue.shift(); if (f) f(); return !!f }
+}
+
+describe('our own suspend is never an interruption', () => {
+  it('a restart between the suspend call and its statechange keeps playing', async () => {
+    const seen: string[] = []
+    const ctx = new DeferredContext()
+    const timers: Array<{ fn: () => void; ms: number }> = []
+    const engine = new AudioEngine({
+      chunks: fakeChunks(), createContext: () => asCtx(ctx), now: () => 1000 * ctx.currentTime,
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+      setInterval: () => 0, clearInterval: () => {},
+      onInterrupted: (s) => seen.push(s),
+    })
+    engine.prepare(base, audioPlacements(buildProgramMap(base, () => SRC), () => SRC), info)
+    await loaded(engine)
+    engine.start(0.05, 0)              // play: resume() requested
+    ctx.land()                         // → running
+    engine.stop(5)                     // the redundant seek-after-play
+    timers.find((x) => x.ms === 25)!.fn()   // suspend() requested while 'running'
+    expect(ctx.state).toBe('running')
+    engine.start(0.2, 4800)            // play again before the suspend lands
+    ctx.land()                         // our suspend lands while playing
+    expect(seen).toEqual([])
+    expect(engine.stats.interrupted).toBe(0)
+    expect(engine.isRunning).toBe(true)
+    // …and the engine resumes the context it suspended
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    ctx.land()
+    expect(ctx.state).toBe('running')
+    expect(engine.isRunning).toBe(true)
+  })
+
+  it('a real suspend while playing is still reported', async () => {
+    const seen: string[] = []
+    const ctx = new DeferredContext()
+    const engine = new AudioEngine({
+      chunks: fakeChunks(), createContext: () => asCtx(ctx), now: () => 1000 * ctx.currentTime,
+      setTimeout: () => 0, setInterval: () => 0, clearInterval: () => {},
+      onInterrupted: (s) => seen.push(s),
+    })
+    engine.prepare(base, audioPlacements(buildProgramMap(base, () => SRC), () => SRC), info)
+    await loaded(engine)
+    engine.start(0.05, 0)
+    ctx.land()
+    ctx.setState('suspended')          // the system, not us
+    expect(seen).toEqual(['suspended'])
+    expect(engine.isRunning).toBe(false)
   })
 })

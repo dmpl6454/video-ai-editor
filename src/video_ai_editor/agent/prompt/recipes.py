@@ -143,7 +143,7 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("speed", "Change playback speed: a constant factor, or a named speed curve (preset).",
           factor="number", preset=_SPEED_PRESETS, clip_ref="text"),
     _card("freeze", "Hold the frame at a moment for a few seconds (a freeze frame).", at="number", duration_s="number"),
-    _card("split", "Split the clip in two at a moment.", at="number"),
+    _card("split", "Split the clip in two at a moment.", at="number", clip_ref="text"),
     # Wave D3 (E3): the CapCut clip edits. `clip_ref` names ONE clip ("the
     # second clip", "this clip"); a destructive edit with no clip named asks.
     _card("delete_clip", "Delete one clip and close the gap.", clip_ref="text"),
@@ -160,6 +160,9 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     # text or all=yes narrows / widens it (the expander asks when unclear).
     _card("remove_feature", "Remove the captions, a filter (LUT look), a transition or a text overlay.",
           what=("captions", "filter", "transition", "text"), clip_ref="text", text="text", all=_YES_NO),
+    # Final QA: an existing text's new wording (its style and place stay).
+    _card("retext", "Change what an EXISTING text overlay says (old = its current words, text = the new ones).",
+          text="text", old="text"),
     _card("clip_length", "Trim or extend ONE clip to a length in seconds (its end moves).",
           clip_ref="text", seconds="number"),
     _card("flip", "Mirror a clip horizontally or flip it vertically (on=no removes it). Upside down is rotate.",

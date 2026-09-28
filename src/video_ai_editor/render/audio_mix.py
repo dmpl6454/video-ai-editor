@@ -101,6 +101,10 @@ PREVIEW_LIMITER = "alimiter=limit=0.891251:level=0:latency=1,aresample=48000"
 #      (`export_gain_scope`) and a TRUE-PEAK limiter: the mix is upsampled 4x,
 #      brick-walled at `EXPORT_TP_LIMIT_DB` there (so what it holds is the
 #      inter-sample peak, not the sample peak) and brought back to 48 kHz.
+#      When that gain drives peaks into the limiter, the MASTERED mix is
+#      measured too and the gain topped up to land the target through it
+#      (`compositor._mastering_gain`, final QA 0.8.0: dynamic music came out
+#      1.1-1.7 LU short).
 # A static gain keeps the mix's dynamics (loudnorm's LRA=11 squeezed them) and
 # keeps a duck exactly as deep as `to_db` says.
 
@@ -109,8 +113,8 @@ EXPORT_TRUE_PEAK_DBTP = -1.0
 #: What the 4x-oversampled limiter holds: under the ceiling by a typical AAC
 #: overshoot. That overshoot is NOT bounded by this margin — dense, limited
 #: music re-added 0.8-2.6 dB at 192k with PNS — so the delivered file is
-#: measured and, if over, re-limited after the encode
-#: (`compositor._hold_delivery_true_peak`, QA-121).
+#: measured and, if over, the spots it overshot are dipped and the audio
+#: re-encoded (`compositor._hold_delivery_true_peak` -> `delivery_peak`, QA-121).
 EXPORT_TP_LIMIT_DB = -1.6
 _TP_OVERSAMPLE = 192000
 #: The most an export lifts or cuts to reach its target. Wider than the
@@ -463,15 +467,29 @@ def _stage_filters(kind: str, p: dict, tag: str, idx: int) -> str:
 VOICE_PRIME_S = 0.05
 
 
+#: Voice-effect stages primed with `VOICE_PRIME_S` of real sound: the ones
+#: with a latency (pitch, vibrato) and, since final QA round 3, the IIR
+#: filters (biquad: Telephone, Radio, Megaphone, Underwater, Monster), which
+#: restarted from zero state at every split and put a click there (a hard
+#: step, then ~4 ms of settling; 50 ms of real input settles them far below
+#: the noise floor; Telephone, Radio and Megaphone split exactly like the
+#: unsplit clip now). NOT the echo / reverb (a prime as long as their memory
+#: would put echoes of TRIMMED-away sound into a clip's head). OPEN: a prime
+#: does not align an LFO's phase or WSOLA's grid, so Underwater / Vibrato
+#: (af_vibrato has no phase option), Robot (ring) and the pitch presets still
+#: step at a split. The client mirrors this set (`voiceFx.voicePlan(...).prime`).
+PRIMED_STAGES = ("pitch", "vibrato", "biquad")
+
+
 def voice_prime_s(audio) -> float:
-    """`VOICE_PRIME_S` when the clip's voice effect has a latency (a pitch or
-    a vibrato stage), else 0."""
+    """`VOICE_PRIME_S` when the clip's voice effect has a stage in
+    `PRIMED_STAGES`, else 0."""
     from ..edl import voice_effects as _vfx
     if audio is None:
         return 0.0
     stages = _vfx.stages_at(getattr(audio, "voice_effect", None),
                             float(getattr(audio, "voice_intensity", _vfx.DEFAULT_INTENSITY)))
-    return VOICE_PRIME_S if any(kind in ("pitch", "vibrato") for kind, _p in (stages or ())) else 0.0
+    return VOICE_PRIME_S if any(kind in PRIMED_STAGES for kind, _p in (stages or ())) else 0.0
 
 
 def latency_prime_s(clip) -> float:
@@ -615,10 +633,9 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
         from ..edl import timebase as _tb
         primed = _tb.edit_sample(clip.in_) - _tb.edit_sample(float(clip.in_) - prime)
         parts[-1] += voice_prime_cut(primed / 48000.0 / sp)
-    # A clip straddling a seam is SHORTER on the render clock by what the
-    # seam consumed — its end must land where the v1 frame at its layout end
-    # lands, not run on past it. A retimed clip is cut to its exact length
-    # too (atempo's lag pads its head). Trimmed before the delay so the cut
+    # A window shorter than the clip is cut to it (a sound lane's window is
+    # its whole length since final QA round 3, `clock.sound_window`). A
+    # retimed clip is cut to its exact length too (atempo's lag pads its head). Trimmed before the delay so the cut
     # is measured from the clip's own first sample. A voice effect is padded
     # and cut to it (a pitch stage's rounding may leave it a few samples off).
     if retime or voice or re - rs < eff - 0.0005:
@@ -663,15 +680,15 @@ def _lane_prime(c: Clip) -> float:
 
 def _on_render_clock(clips: list[Clip], seams: clock.SeamTable
                      ) -> list[tuple[Clip, tuple[float, float]]]:
-    """`(clip, render_window)` for the clips the seams leave audible, in the
-    order given. The layout window is `[start, start + effective_duration)`:
-    an audio-lane clip is retimed by its speed like v1 (QA-086)."""
-    placed: list[tuple[Clip, tuple[float, float]]] = []
-    for c in clips:
-        win = clock.render_window(seams, c.start, c.start + c.effective_duration)
-        if win is not None:
-            placed.append((c, win))
-    return placed
+    """`(clip, window)` on the render clock for every audible clip of ONE
+    sound lane, in the order given: `clock.sound_windows` — it starts where
+    its run's start plays and lasts its whole `effective_duration` (an
+    audio-lane clip is retimed by its speed like v1, QA-086). Final QA
+    (round 3): it was `render_window(start, start + eff)`, the PICTURE rule,
+    which shrank a voiceover by every seam it crossed and cut its last words
+    off in the export."""
+    wins = clock.sound_windows(clips, seams)
+    return [(c, wins[c.id]) for c in clips if c.id in wins]
 
 
 def build_audio_mix(
@@ -700,6 +717,11 @@ def build_audio_mix(
     vo_track = edl.get_track("vo")
     music_clips = [c for c in (music_track.clips if music_track and not music_track.muted else []) if isinstance(c, Clip)]
     vo_clips = [c for c in (vo_track.clips if vo_track and not vo_track.muted else []) if isinstance(c, Clip)]
+    # Every lane below is positioned on the RENDER clock, each lane on its
+    # own (`_on_render_clock`: a run of abutting clips moves as one block).
+    seams = clock.seam_table(edl)
+    music_placed = _on_render_clock(music_clips, seams)
+    vo_placed = _on_render_clock(vo_clips, seams)
     # Plain audio lanes (the stock `a1` "Main audio" track, plus any other
     # type=="audio" track) were read by NO render path: clips dropped there were
     # silent, yet still extended `edl.duration`. The UI shows the lane and
@@ -707,14 +729,7 @@ def build_audio_mix(
     # Folded in with the voiceover group — same per-clip filter, same mix stage.
     for t in edl.tracks:
         if t.type == "audio" and not t.muted:
-            vo_clips += [c for c in t.clips if isinstance(c, Clip)]
-
-    # Every lane below is positioned on the RENDER clock. A clip the v1
-    # cross-fades consumed entirely is left out here — no input, no filter —
-    # so an all-consumed lane is the same as an empty one.
-    seams = clock.seam_table(edl)
-    music_placed = _on_render_clock(music_clips, seams)
-    vo_placed = _on_render_clock(vo_clips, seams)
+            vo_placed += _on_render_clock([c for c in t.clips if isinstance(c, Clip)], seams)
 
     if not music_placed and not vo_placed:
         # Still master the speech-only path when a target is set AND we're in

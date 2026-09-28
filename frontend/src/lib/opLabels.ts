@@ -2,6 +2,8 @@ import { formatTimecode } from './timecode'
 import { laneName } from './timelineLanes'
 import { prettyDiskName } from './mediaNames'
 import type { Track } from '../types'
+import { cachedTransitionCatalog, displayNameFor, lookupTransition } from './transitionCatalog'
+import { aiOptionLabel } from './aiOptionLabels'
 
 // Editor-language labels for dispatch tools and their summaries (QA-101).
 //
@@ -37,7 +39,7 @@ export const TOOL_TITLES: Record<string, string> = {
   save_show_template: 'Save show template', set_aspect_ratio: 'Aspect ratio', set_canvas: 'Canvas',
   set_clip_fit: 'Fit', set_clip_muted: 'Mute', set_clip_reverse: 'Reverse', set_clip_timing: 'Timing', set_clip_transform: 'Transform',
   set_clip_z: 'Layer order', set_duck: 'Ducking', set_loudness_target: 'Loudness', set_pip_framing: 'Framing',
-  set_property: 'Edit', set_speed: 'Speed', set_track_locked: 'Lock track', set_track_muted: 'Mute track',
+  set_property: 'Edit', set_speed: 'Speed', set_text: 'Text', set_track_locked: 'Lock track', set_track_muted: 'Mute track',
   set_track_solo: 'Solo track', detach_audio: 'Detach audio', freeze_frame: 'Freeze frame',
   set_voice_effect: 'Voice effect',
   set_video_fade: 'Fade', set_volume: 'Volume', smooth_slow_motion: 'Smooth slow motion',
@@ -61,9 +63,35 @@ export function toolTitle(tool: string): string {
 // RD3: those leaked into History whole).
 const ID_RE = /\s*(?:→\s*)?\b[a-z]{1,3}_[0-9a-f]{6,}(?:_[0-9a-f]{4,})*\b/g
 
+// "… from c_682eda22": a clause whose only content is an internal id goes
+// whole — removing just the id left "Remove effect lut from" (Final QA).
+const ID_CLAUSE_RE = /\s+(?:from|on|to|for|of)\s+[a-z]{1,3}_[0-9a-f]{6,}(?:_[0-9a-f]{4,})*\b/g
+
+/** A transition type as the Transitions panel names it ("radial" → "Clock Wipe"). */
+function transitionName(type: string): string {
+  const cat = cachedTransitionCatalog()
+  return (cat && lookupTransition(cat, type)?.display) || displayNameFor(type)
+}
+
+// add_transition's summary: "Add radial transition …", or with an alias the
+// backend resolved "Add wipe → wipeleft transition …" (the look that renders).
+const TRANSITION_RE = /\b(Add|Replace)\s+([a-z0-9_]+)(?:\s+→\s+([a-z0-9_]+))?\s+transition\b/g
+// auto_caption's summary: "Auto-captioned (large-v3, en): 11 ig_chunky cues."
+const AUTO_CAPTION_RE = /\bAuto-captioned \(([^,()]+),\s*([^()]*)\):\s*(\d+)\s+([a-z0-9_]+)\s+cues\b/
+const captionStyleName = (v: string) => {
+  const l = aiOptionLabel('style', v)
+  return l === v ? v.replace(/_/g, ' ') : l
+}
+
 /** A dispatch summary with internal ids and Python reprs taken out. */
 export function cleanSummary(summary: string): string {
   let s = summary ?? ''
+  s = s.replace(TRANSITION_RE, (_m, verb: string, type: string, resolved?: string) =>
+    `${verb} ${transitionName(resolved ?? type)} transition`)
+  s = s.replace(AUTO_CAPTION_RE, (_m, model: string, how: string, n: string, style: string) =>
+    `Auto-captioned (${aiOptionLabel('model', model.trim())}, ${how.trim()}): ${n} cues, ${captionStyleName(style)} style`)
+  s = s.replace(/\blut\b/g, 'LUT')
+  s = s.replace(ID_CLAUSE_RE, '')
   s = s.replace(ID_RE, '')
   // "clip(s)" → "clip" / "clips" from the count in front of it.
   s = s.replace(/(\d+)\s+([a-z]+)\(s\)/gi, (_m, n: string, w: string) => `${n} ${Number(n) === 1 ? w : `${w}s`}`)
@@ -81,7 +109,8 @@ export function cleanSummary(summary: string): string {
   // key=value pairs → "key value"
   s = s.replace(/\b([a-z_]+)=(-?[\w.]+)/gi, (_m, k: string, v: string) => `${k.replace(/_/g, ' ')} ${v}`)
   // Lane ids read the way the timeline labels them.
-  s = s.replace(/\b(v|a)(\d)\b/g, (_m, l: string, n: string) => `${l.toUpperCase()}${n}`)
+  // (not inside a model name: "large-v3" is not lane V3)
+  s = s.replace(/(^|[^\w-])(v|a)(\d)\b/g, (_m, pre: string, l: string, n: string) => `${pre}${l.toUpperCase()}${n}`)
   s = s.replace(/\s+([:,)])/g, '$1').replace(/\(\s+/g, '(').replace(/\s{2,}/g, ' ').trim()
   // what a hidden id leaves: "()" and a dangling arrow ("Speed → 2.00x")
   s = s.replace(/\s*\(\s*\)/g, '').replace(/^([A-Z][\w ]*?)\s+→\s+/, '$1 ').trim()
@@ -110,7 +139,8 @@ export interface LabelContext {
   tracks?: readonly Track[]
 }
 
-const MEDIA_FILE_RE = /\b[\w.\-]+\.(?:mp4|mov|m4v|mkv|webm|wav|mp3|m4a|aac|flac|ogg|png|jpe?g|heic|gif|webp)\b/gi
+// `.cube`: an imported LUT is an upload too (`warm_teal_81e3e270.cube`).
+const MEDIA_FILE_RE = /\b[\w.\-]+\.(?:mp4|mov|m4v|mkv|webm|wav|mp3|m4a|aac|flac|ogg|png|jpe?g|heic|gif|webp|cube)\b/gi
 const SPAN_RE = /(\d+(?:\.\d+)?)s?\s*[–-]\s*(\d+(?:\.\d+)?)s?(?=[)\s,]|$)/g
 const AT_RE = /(^|\s)(?:@|at)\s+(\d+(?:\.\d+)?)s\b/g
 const INOUT_RE = /\b(in|out)\s+(\d+(?:\.\d+)?)(?=\s|$|,)/g
@@ -247,7 +277,13 @@ export function opLabel(op: { tool: string; summary?: string | null; args?: Reco
   ctx?: LabelContext): OpLabel {
   if (op.tool === 'set_property') {
     const pl = setPropertyLabel(op)
-    if (pl) return { title: pl.group, detail: pl.phrase, raw: `${op.tool} — ${op.summary ?? ''}` }
+    if (pl) {
+      // "Text — Text: “Hi”" → "Text — “Hi”" (the phrase is shared with the
+      // backend's property_label, so the dedupe happens here, as below).
+      const lead = `${pl.group.toLowerCase()}: `
+      const detail = pl.phrase.toLowerCase().startsWith(lead) ? pl.phrase.slice(lead.length) : pl.phrase
+      return { title: pl.group, detail, raw: `${op.tool} — ${op.summary ?? ''}` }
+    }
   }
   const title = toolTitle(op.tool)
   let detail = ctx ? editorSummary(op.summary ?? '', ctx) : cleanSummary(op.summary ?? '')

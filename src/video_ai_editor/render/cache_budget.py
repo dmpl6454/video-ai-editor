@@ -34,6 +34,8 @@ it has not opened yet.
 from __future__ import annotations
 
 import os
+import re
+import signal
 import threading
 import time
 from dataclasses import dataclass
@@ -120,9 +122,115 @@ def entries(session_dir: Path) -> list[Entry]:
     return out
 
 
+# ---- final QA (round 3): staged .part files a dead writer left behind -------
+#
+# `compositor._part_path` / `platformutil.part_path` stage every render as
+# `.{stem}.{pid}.{tid}.part{suffix}` next to its destination. When the backend
+# died mid-render (Force Quit, an out-of-memory kill, a crash of the in-process
+# app) that file stayed for good — 340 MB for one interrupted 1080p export,
+# dot-named so Finder hid it, invisible to the readout and to "Clear render
+# cache" — and its ffmpeg kept encoding on its own. A part whose writer PID is
+# dead is stale: counted and cleared with the caches and swept at startup; an
+# encoder still writing one is stopped at startup. A LIVE writer's part (this
+# process's own render in flight) is never touched.
+
+#: `.{stem}.{pid}.{tid}.part{suffix}` (the stem may contain dots).
+_PART_RE = re.compile(r"^\..+\.(\d+)\.(\d+)\.part(?:\.[A-Za-z0-9]+)?$")
+#: Where renders stage their output inside a session.
+PART_DIRS: tuple[str, ...] = ("exports", "previews", "cache/videos", "cache/chunks",
+                              "cache/reversed", "cache/speed_audio", "cache/verify")
+
+
+def part_writer_pid(name: str) -> int | None:
+    """The writer PID embedded in a staged file's name, or None."""
+    m = _PART_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
+def _is_stale(pid: int) -> bool:
+    return pid != os.getpid() and not _pu.pid_alive(pid)
+
+
+def stale_parts(session_dir: Path) -> list[Path]:
+    """Staged `.part` files of one session whose writer is dead."""
+    out: list[Path] = []
+    for sub in PART_DIRS:
+        d = Path(session_dir) / sub
+        if not d.is_dir():
+            continue
+        for p in d.glob(".*.part*"):
+            pid = part_writer_pid(p.name)
+            if pid is not None and p.is_file() and _is_stale(pid):
+                out.append(p)
+    return out
+
+
+def _size(p: Path) -> int:
+    try:
+        return int(p.stat().st_size)
+    except OSError:
+        return 0
+
+
+def _drop(paths: Iterable[Path]) -> int:
+    freed = 0
+    for p in paths:
+        n = _size(p)
+        try:
+            _pu.unlink_with_retry(p)
+        except OSError:
+            continue
+        if not p.exists():
+            freed += n
+    return freed
+
+
+def sweep_stale_parts(workdir: Path) -> int:
+    """Delete every session's stale `.part` files (startup). Bytes freed."""
+    freed = 0
+    for sd in Path(workdir).glob("s_*"):
+        if sd.is_dir():
+            freed += _drop(stale_parts(sd))
+    return freed
+
+
+def stop_orphan_encoders(workdir: Path) -> list[int]:
+    """SIGTERM every ffmpeg still writing a `.part` file under `workdir` for a
+    writer that is dead — the encoder a crashed backend left running (it
+    kept encoding for ~15-25 s, longer for a long export). Only processes
+    whose executable is an ffmpeg AND whose command line names such a file
+    under `workdir` are touched. POSIX only (`platformutil.list_processes`).
+    Returns the PIDs signalled."""
+    root = str(Path(workdir).resolve())
+    stopped: list[int] = []
+    for pid, cmd in _pu.list_processes():
+        # the executable is everything before the first option (its path may
+        # hold spaces: the app bundle's own ffmpeg)
+        if pid == os.getpid() or not re.search(r"(?:^|/)ffmpeg(?:\.exe)?$", cmd.split(" -", 1)[0]):
+            continue
+        at = cmd.find(root + os.sep)
+        if at < 0:
+            continue
+        # the output path runs to the end of its `.part.<ext>` name
+        m = re.search(r"/(\.[^/]+\.(\d+)\.\d+\.part(?:\.[A-Za-z0-9]+)?)(?:\s|$)", cmd[at:])
+        if not m or not _is_stale(int(m.group(2))):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except OSError:
+            continue
+    return stopped
+
+
 def usage(session_dir: Path) -> dict:
-    """Bytes held per cache area, for the UI's cache readout."""
+    """Bytes held per cache area, for the UI's cache readout — including the
+    stale `.part` files a crashed render left (`stale_parts`), which "Clear
+    render cache" removes."""
     by_area: dict[str, int] = {}
+    for p in stale_parts(session_dir):
+        area = p.parent.relative_to(session_dir).as_posix()
+        by_area[area] = by_area.get(area, 0) + _size(p)
     for e in entries(session_dir):
         area = e.path.parent.relative_to(session_dir).as_posix()
         by_area[area] = by_area.get(area, 0) + e.size
@@ -221,7 +329,7 @@ def clear(session_dir: Path, *, protect: Iterable = (), protect_recent_s: float 
     for the same reason `_evict` always does: a concurrent render may have
     resolved a path (a concat list's chunk) it has not opened yet."""
     keep = _resolved(protect)
-    freed = 0
+    freed = _drop(stale_parts(Path(session_dir)))       # a dead writer's .part (final QA r3)
     now = time.time()
     for e in entries(Path(session_dir)):
         if e.path in keep:

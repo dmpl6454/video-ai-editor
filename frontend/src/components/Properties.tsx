@@ -4,13 +4,15 @@ import {
   NORMAL_SPEED_RANGE, clipDuration, clipFreeze, clipSpeedFactor, isMediaClip, normalSpeedOf, type AnyClip,
 } from '../types'
 import { sampleKF, keyEps, type KFNum } from '../lib/overlay'
-import { clipLocalTime, renderSpanOf } from '../lib/timelineLayout'
+import { clipLocalTime, renderSpanOf, timingClockOf, type TimingClock } from '../lib/timelineLayout'
 import { chordLabel } from '../keymap/engine'
 import { CommandKey } from './CommandKey'
 import { setLivePipFraming } from '../lib/pipDraw'
 import { lockedTrackOf, lockedNotice } from '../lib/trackLock'
 import { MediaTiming, OverlayTiming } from './TimingSection'
 import { curveClockOf } from '../lib/clipTiming'
+import { framingNote } from '../lib/framingNote'
+import { itemsFor, useMediaNames } from '../lib/mediaNames'
 import { MediaName } from './MediaName'
 import { SliderScope, useSliderCommit } from '../lib/useSliderCommit'
 import { formatDb } from '../lib/dbFormat'
@@ -47,6 +49,10 @@ import { SectionIndex, sectionId } from './inspector/SectionIndex'
  *  use) re-seeds on undo / chat edits / timeline drags WITHOUT remounting, so
  *  the caret is never dropped mid-edit.
  */
+/** Transform x/y inputs: "-1920" plus WebKit's spin buttons (56 px showed
+ *  "96" for 960 — Final QA). */
+const POSITION_FIELD_W = 72
+
 function NumberField({ value, dp = 2, min, max, step = 0.1, width, onCommit, title, ariaLabel }: {
   value: number
   dp?: number
@@ -231,6 +237,8 @@ function PropertiesPanel() {
   const framing = useStore((s) => s.framing)
   const setFraming = useStore((s) => s.setFraming)
   const sessionId = useStore((s) => s.sessionId)   // wave E (F3): the voice audition
+  // The media library's probed sizes — Framing names where the bars are.
+  const mediaItems = useMediaNames((s) => itemsFor(s, sessionId))
 
   if (!sel || !edl) return (
     <div className="props">
@@ -270,6 +278,7 @@ function PropertiesPanel() {
         canRaise={canRaise}
         canLower={canLower}
         localT={clipLocalTime(edl, clip.t.id, c, playhead)}
+        clock={timingClockOf(edl, clip.t.id, c)}
         dispatch={dispatch}
       />
     )
@@ -282,6 +291,7 @@ function PropertiesPanel() {
         trackLabel={laneName(clip.t)}
         canvas={edl.canvas}
         localT={clipLocalTime(edl, clip.t.id, c, playhead)}
+        clock={timingClockOf(edl, clip.t.id, c)}
         dispatch={dispatch}
       />
     )
@@ -450,7 +460,7 @@ function PropertiesPanel() {
           Start moves, End and Duration trim; plus the source In / Out. */}
       <Section label="Timing">
         <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed: meanSpeed, curve: curveClockOf(c) }}
-                     send={dispatch} />
+                     clock={timingClockOf(edl, clip.t.id, c as AnyClip)} send={dispatch} />
       </Section>
 
       {/* Audio lanes too (QA-086, wave C): the audio mix retimes a music/VO
@@ -737,7 +747,15 @@ function PropertiesPanel() {
                 >Letterbox</button>
               )}
               <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                {fitCover ? 'Filling the frame (cropped).' : 'Letterboxed — bars top/bottom.'}
+                {(() => {
+                  // Where the bars really are (lib/framingNote): a vertical
+                  // clip in a 16:9 frame is PILLARboxed, a clip with the
+                  // frame's shape has none — this line said "bars
+                  // top/bottom" for both.
+                  const m = mediaItems.find((it) => it.src === c.src)
+                  const dims = m && m.width && m.height ? { w: m.width, h: m.height } : null
+                  return framingNote(fitCover, dims, edl.canvas, scale)
+                })()}
               </span>
             </div>
           )
@@ -942,13 +960,13 @@ function PropertiesPanel() {
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <label style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 80, display: 'flex', alignItems: 'center', gap: 4 }}>
             x:
-            <NumberField value={xVal} dp={0} step={1} width={56}
+            <NumberField value={xVal} dp={0} step={1} width={POSITION_FIELD_W}
               onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, x: n, time: localT })} />
             {isKeyframed(tx?.x) ? '· animated' : ''}
           </label>
           <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
             y:
-            <NumberField value={yVal} dp={0} step={1} width={56}
+            <NumberField value={yVal} dp={0} step={1} width={POSITION_FIELD_W}
               onCommit={(n) => dispatch('set_clip_transform', { clip_id: c.id, y: n, time: localT })} />
             {isKeyframed(tx?.y) ? '· animated' : ''}
           </label>
@@ -978,13 +996,15 @@ interface StickerLike {
   transform?: { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
 }
 
-function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
+function StickerProps({ c, trackLabel, canRaise, canLower, localT, clock, dispatch }: {
   c: StickerLike
   trackLabel: string
   canRaise: boolean
   canLower: boolean
   /** Clip-local RENDER time at the playhead — `clipLocalTime`, computed by the parent. */
   localT: number
+  /** The Timing fields' ruler clock — `timingClockOf`, computed by the parent. */
+  clock: TimingClock
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   const tx = c.transform ?? {}
@@ -1052,7 +1072,7 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
       </Section>
 
       <Section label="Timing">
-        <OverlayTiming clipId={c.id} span={{ start, end: start + duration }} send={dispatch} />
+        <OverlayTiming clipId={c.id} span={{ start, end: start + duration }} clock={clock} send={dispatch} />
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>
@@ -1117,12 +1137,14 @@ interface TextClipLike {
   transform?: { x?: unknown; y?: unknown; opacity?: unknown; scale?: unknown; rotation?: unknown }
 }
 
-function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
+function TextProps({ c, trackLabel, canvas, localT, clock, dispatch }: {
   c: TextClipLike
   trackLabel: string
   canvas: { w: number; h: number }
   /** Clip-local RENDER time at the playhead — `clipLocalTime`, computed by the parent. */
   localT: number
+  /** The Timing fields' ruler clock — `timingClockOf`, computed by the parent. */
+  clock: TimingClock
   dispatch: ReturnType<typeof useStore.getState>['dispatch']
 }) {
   // Sampled at the playhead, and transform writes go through set_clip_transform
@@ -1469,7 +1491,7 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
       {/* The same Start / End / Duration as a sticker or a clip (QA-048):
           Start MOVES the text now — it used to trim it. */}
       <Section label="Timing">
-        <OverlayTiming clipId={c.id} span={{ start, end }} send={dispatch} />
+        <OverlayTiming clipId={c.id} span={{ start, end }} clock={clock} send={dispatch} />
       </Section>
 
       <div className="row" style={{ marginTop: 8 }}>

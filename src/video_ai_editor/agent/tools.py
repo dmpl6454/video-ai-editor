@@ -682,6 +682,15 @@ TEXT_TOOLS = [
                                           "window overlaps. Pass true to keep both."},
        },
        ["text", "start", "end"]),
+    _t("set_text",
+       "Change what an existing text overlay (title, lower third, label) SAYS. Its style, "
+       "position, timing and animation stay as they are.",
+       "text",
+       {
+           "clip_id": {"type": "string", "description": "The text clip's id"},
+           "text": {"type": "string", "description": "The new wording"},
+       },
+       ["clip_id", "text"]),
     _t("apply_text_template",
        "Render a text overlay from a named preset bundle. Options: hashtag_chunky, "
        "callout_arrow, big_question, end_card_handle, countdown_3_2_1, watermark_handle.",
@@ -1023,7 +1032,9 @@ EFFECT_TOOLS = [
                                "path to an existing .cube file"},
         "lut_path": {"type": "string",
                      "description": "Alias of src; prefer src. Read only when src is omitted."},
-        "intensity": {"type": "number", "default": 1.0, "description": "0..1 blend amount"}},
+        "intensity": {"type": "number", "default": 1.0, "description": "0..1 blend amount"},
+        "replace": {"type": "boolean", "default": False,
+                    "description": "Swap out any LUT already on the clip(s) instead of stacking a second one"}},
        ["src"]),
     _t("add_transition",
        "Add a transition at a timeline boundary (t in seconds, between two adjacent V1 clips). "

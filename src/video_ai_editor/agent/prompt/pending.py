@@ -218,13 +218,19 @@ def try_parse_answer(message: str, record: dict[str, Any]) -> dict[str, Any] | N
     """`{key: value}` for the FIRST unanswered blocking question the whole
     message answers, else None (→ the caller drops the pending plan)."""
     plan = pending_plan(record)
-    if plan.intent == "model_question" and _is_a_request(message):
+    questions = blocking_questions(record)
+    if (plan.intent == "model_question" or any(q.kind == "text" for q in questions)) \
+            and _is_a_request(message):
         # Item 23: a model's free-text question takes any message as its
         # answer; a message that is a complete request on its own ("add
         # captions") is that request, planned fresh — never glued onto the
         # earlier prompt as its "answer".
+        # Final QA r2: the same for EVERY free-text question. "add a title"
+        # asked what it should say, and the next request ("mute the music")
+        # became the title's text, replacing the user's own; "trim it" then
+        # "delete clip 3" re-asked "Which part should I cut?" forever.
         return None
-    for q in blocking_questions(record):
+    for q in questions:
         value = parse_answer_for(q, message)
         if value is not None:
             return {q.key: value}

@@ -526,6 +526,16 @@ export const api = {
     return res.json() as Promise<{ path: string; name: string }>
   },
 
+  // Final QA: the Effects panel's "Import LUT (.cube)…". Stores the file in
+  // the session; the panel then dispatches apply_lut with the returned path.
+  uploadLut: async (sid: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${BASE}/sessions/${sid}/lut_upload`, { method: 'POST', body: fd })
+    if (!res.ok) throw await apiError(res)
+    return res.json() as Promise<{ path: string; name: string }>
+  },
+
   // Review RE: whether a clip has sound a voice effect can change (a
   // picture-only source or a freeze frame does not).
   voiceSound: (sid: string, clipId: string) =>
@@ -562,9 +572,12 @@ export const api = {
 
   voRecord: async (sid: string, blob: Blob, start: number, gainDb = 0) => {
     const fd = new FormData()
-    const filename = blob.type.includes('webm') ? 'vo.webm'
+    // A picked file keeps its own name (Final QA: an imported voiceover.wav
+    // showed as vo_<timestamp>.m4a everywhere); a live take is named by type.
+    const picked = blob instanceof File && blob.name ? blob.name : ''
+    const filename = picked || (blob.type.includes('webm') ? 'vo.webm'
                    : blob.type.includes('wav')  ? 'vo.wav'
-                   : 'vo.m4a'
+                   : 'vo.m4a')
     fd.append('file', new File([blob], filename, { type: blob.type || 'audio/webm' }))
     fd.append('start', String(start))
     fd.append('gain_db', String(gainDb))

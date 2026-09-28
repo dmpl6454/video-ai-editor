@@ -115,7 +115,13 @@ EDL_VERSION = 3
 # 26: (wave E gate, RX) the picture is capped at the plan by `trim=end_frame` inside the graph, not
 #     `-frames:v`, which closed the file before the AAC flush: an NTSC export or single-pass preview
 #     lost its last ~10 ms of sound (a render cached under 25 is short).
-RENDER_BEHAVIOR_VERSION = 26
+# 27: (final QA round 3, render-audio) a music / voiceover / audio-track clip plays its WHOLE length across
+#     v1 seams (`clock.sound_window`; it was cut by every seam it crossed); the assembled v1 picture is put
+#     back on the 1/R grid before overlays (a cut main track made PiPs and keyed text a frame late); every
+#     v1 segment and PiP video element is BT.709 limited before assembly / overlay (the first clip's tag
+#     converted the others) and the export is tagged BT.709; a blended PiP's size animation plays (it froze
+#     at its first size) and a turning PiP has no black corners; biquad voice effects are primed.
+RENDER_BEHAVIOR_VERSION = 27
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -530,6 +536,14 @@ class Clip(_ClipAnimFields):
     audio: AudioProps = Field(default_factory=AudioProps)
     matte_src: str | None = None
     track_to: str | None = None  # motion-tracking target id
+    # A DETACHED sound's picture clip (detach_audio, Final QA r2). The sound
+    # keeps its offset from that picture across every main-lane edit
+    # (dispatch._follow_pictures) — trimming, deleting, slowing, freezing or
+    # dragging an EARLIER clip used to leave it at its old time, up to 2 s out
+    # of sync. Moving or trimming the sound itself still changes the offset
+    # (an L/J cut). Not read by any render; omitted from the JSON while unset,
+    # so an EDL written before the field existed hashes exactly as it did.
+    linked_to: str | None = Field(None, exclude_if=lambda v: v is None)
 
     model_config = ConfigDict(populate_by_name=True, validate_assignment=True)
 
@@ -877,6 +891,65 @@ class Track(_EDLModel):
     solo: bool = False
 
 
+def sound_lane(track: Track) -> bool:
+    """True for the lanes `render/audio_mix.build_audio_mix` mixes as SOUND
+    only: the "music" and "vo" tracks and every type=="audio" track.
+
+    Final QA (round 3): such a clip starts at `render_time(start)` like every
+    lane but plays its WHOLE effective duration across the v1 seams
+    (`render/clock.sound_window`) — a transition overlaps main-track pictures
+    only, as in CapCut. Shrinking it like a picture window cut a voiceover's
+    last words by every seam it crossed. The desktop mirrors this set in
+    `timelineLayout.isSoundLane`."""
+    return track.id in ("music", "vo") or track.type == "audio"
+
+
+#: Two sound clips closer than this (seconds) are ABUTTING: one run.
+SOUND_RUN_TOL_S = 1e-3
+
+
+def _overlap_before(seams: list[tuple[float, float]], t: float) -> float:
+    # render/clock.overlap_before, repeated here because render/ imports this
+    # module (the dependency cannot point back); same 1 µs epsilon.
+    return sum(d for s, d in seams if s <= float(t) + 1e-6)
+
+
+def sound_pulls(clips: list, seams: list[tuple[float, float]]) -> dict[str, float]:
+    """Seconds each clip of ONE sound lane plays EARLIER than its layout
+    `start` (`render start = start − pull`), by clip id.
+
+    Final QA (round 3): a sound clip keeps its whole length across the v1
+    seams (`sound_lane`), so a RUN of abutting clips — a split voiceover, a
+    looped bed, a song appended after another — moves as one block, pulled
+    by the overlap before the run's FIRST clip. Pulling each piece by its own
+    start instead would overlap the pieces (the later one pulled left while
+    the earlier one plays whole) and double the sound at every seam between
+    them. A lone clip is pulled by `overlap_before(start)`, as every lane."""
+    pulls: dict[str, float] = {}
+    run_end: float | None = None
+    run_pull = 0.0
+    for c in sorted((c for c in clips if isinstance(c, Clip)), key=lambda c: c.start):
+        if run_end is None or c.start > run_end + SOUND_RUN_TOL_S:
+            run_pull = _overlap_before(seams, c.start)
+            run_end = c.start + c.effective_duration
+        else:
+            run_end = max(run_end, c.start + c.effective_duration)
+        pulls[c.id] = run_pull
+    return pulls
+
+
+def sound_pull_at(clips: list, seams: list[tuple[float, float]], start: float) -> float:
+    """The pull a NEW clip placed at layout `start` on a sound lane holding
+    `clips` would get (`sound_pulls`): the run it abuts, else its own."""
+    pull = _overlap_before(seams, start)
+    for c in sorted((c for c in clips if isinstance(c, Clip)), key=lambda c: c.start):
+        if c.start > start + SOUND_RUN_TOL_S:
+            break
+        if c.start + c.effective_duration >= start - SOUND_RUN_TOL_S:
+            return sound_pulls(clips, seams).get(c.id, pull)
+    return pull
+
+
 # Canvas bounds. The lower bound is not cosmetic: `set_canvas {w:0, h:-10}`
 # was accepted verbatim (QA round 5, VAI-05) and every downstream consumer —
 # scale/pad filters, overlay rescaling, the preview's aspect box — divides by
@@ -1069,6 +1142,23 @@ class EDL(_EDLModel):
                     for c in (t.clips if t else []) if isinstance(c, Clip)),
                    default=0.0)
 
+    def render_video_end(self) -> float:
+        """Where the main-track picture ENDS in the rendered file: its layout
+        extent minus every transition's overlap (all seams lie inside it).
+        What a sound clip must end on to "end with the video" (final QA round
+        3: sound lanes play whole, so sizing one to the LAYOUT extent ran it
+        past the picture into a black tail by the total overlap)."""
+        return max(0.0, self.video_extent() - self.transition_overlap())
+
+    def sound_cover(self, track_id: str, start: float) -> float:
+        """Seconds a sound clip placed at layout `start` on `track_id` has
+        until the picture ends (`render_video_end`), on the render clock —
+        its pull is the run it would join (`sound_pull_at`)."""
+        t = self.get_track(track_id)
+        seams = self.v1_seam_table()
+        pull = sound_pull_at(t.clips if t else [], seams, start)
+        return self.render_video_end() - (float(start) - pull)
+
     def v1_seam_table(self) -> list[tuple[float, float]]:
         """The v1 seams the renderer will cross-fade, as `(seam, seconds)` in
         LAYOUT time, ascending: `seam` is the boundary (left clip's start +
@@ -1117,7 +1207,10 @@ class EDL(_EDLModel):
 
     def recompute_duration(self) -> None:
         end = 0.0
+        seams = self.v1_seam_table()
+        total_overlap = sum(d for _s, d in seams)
         for t in self.tracks:
+            pulls = sound_pulls(t.clips, seams) if sound_lane(t) else {}
             if t.id == "v1":
                 # v1 is ASSEMBLED, not just laid out: `_v1_segments` walks the
                 # clips with `cursor = max(cursor, start) + effective_duration`,
@@ -1129,14 +1222,39 @@ class EDL(_EDLModel):
                 # MCP both reach it. For every non-overlapping timeline — which
                 # is all of them in practice — this cursor equals the plain max,
                 # so nothing moves.
-                cursor = 0.0
+                #
+                # Final QA (0.8.0): and it is assembled in WHOLE FRAMES
+                # (`compositor._v1_frame_plan`: each clip starts at
+                # frame_of(start), after the one before, and lasts
+                # max(1, frame_of(effective_duration)) frames). A retimed clip
+                # ending a third of a frame past its rippled neighbour's start
+                # carried that sliver into this float (189.81 frames → 190)
+                # while the plan packed 189, so the renderer padded a black,
+                # silent last frame — a flash at every loop of a Reel. When the
+                # float lands on another frame than the packing, the packing
+                # wins; every other timeline keeps its exact float.
+                from . import timebase as _tb
+                fps = getattr(self.canvas, "fps", None)
+                cursor, cur_f = 0.0, 0
                 for c in sorted((c for c in t.clips if isinstance(c, Clip)),
                                 key=lambda c: c.start):
                     cursor = max(cursor, c.start) + c.effective_duration
+                    if fps:
+                        cur_f = (max(cur_f, _tb.frame_of(c.start, fps))
+                                 + max(1, _tb.frame_of(c.effective_duration, fps)))
+                if fps and cur_f and _tb.frame_of(cursor, fps) != cur_f:
+                    cursor = _tb.time_of(cur_f, fps)
                 end = max(end, cursor)
                 continue
             for c in t.clips:
-                if isinstance(c, Clip):
+                if isinstance(c, Clip) and sound_lane(t):
+                    # A sound-lane clip plays whole from start − pull
+                    # (`sound_pulls`): its RENDER end, lifted back to the
+                    # layout clock the subtraction below undoes, so a bed
+                    # that now outlives the picture is not cut at the file end.
+                    rs = c.start - pulls.get(c.id, 0.0)
+                    end = max(end, rs + c.effective_duration + total_overlap)
+                elif isinstance(c, Clip):
                     # Every other lane is placed at an absolute time (music via
                     # adelay, PIP via overlay+itsoffset), so its extent is the
                     # plain maximum.
@@ -1147,7 +1265,7 @@ class EDL(_EDLModel):
         # What the renderer will actually produce — see transition_overlap().
         # Subtracted from the whole timeline, not just v1's own extent: the
         # output IS the v1 assembly, and every other lane is mixed onto it.
-        self.duration = max(0.0, end - self.transition_overlap())
+        self.duration = max(0.0, end - total_overlap)
 
 
 #: Two Transition records within this many seconds of one boundary are "the

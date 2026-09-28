@@ -339,9 +339,18 @@ export function clipFeatures(c: EdlClip, caps: Capabilities): Array<[Mode, strin
     out.push([MODE_APPROX, 'audio:reverse-speed'])
   } else if (retimed && (c.audio?.keep_pitch ?? true)) {
     out.push([caps.tempoAudio, 'audio:tempo'])
+  } else if (retimed) {
+    out.push([VARISPEED_AUDIO_MODE, 'audio:varispeed'])
   }
   return out
 }
+
+/** Sound retimed with Keep pitch off (and an overlay's reversed sound): the
+ *  client plays a playbackRate resample of the source where the export runs
+ *  ffmpeg's resampler — never sample-exact (audioPlan.ts `approx`
+ *  'varispeed', measured at the APPROX 1 dB in tests/wk/test_wk_audio.py).
+ *  Final QA r3: it was left EXACT, so no ≈ showed over a 2x or 0.5x clip. */
+export const VARISPEED_AUDIO_MODE: Mode = MODE_APPROX
 
 /** Classify every output frame of `pm` (built from `edl`). */
 export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Support {
@@ -435,10 +444,17 @@ export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Su
       if (freezeOf(c) !== null) continue
       const voice = voiceFxReason(c)
       if (voice) bump(a, b, MODE_APPROX, voice)
-      if (isCurve(c.speed)) {
+      const retimed = typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1
+      if (t.type === 'video' && c.reverse) {
+        // an overlay's reversed sound reads its range backwards at its rate
+        // (audioPlan's PiP branch: a resample, curve or not, even at 1x)
+        bump(a, b, VARISPEED_AUDIO_MODE, retimed || isCurve(c.speed) ? 'audio:reverse-speed' : 'audio:reverse')
+      } else if (isCurve(c.speed)) {
         bump(a, b, caps.curveAudio, 'audio:curve')
-      } else if (typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 && (c.audio?.keep_pitch ?? true)) {
+      } else if (retimed && (c.audio?.keep_pitch ?? true)) {
         bump(a, b, caps.tempoAudio, 'audio:tempo')
+      } else if (retimed) {
+        bump(a, b, VARISPEED_AUDIO_MODE, 'audio:varispeed')
       }
     }
   }

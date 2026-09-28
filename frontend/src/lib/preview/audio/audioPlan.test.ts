@@ -12,7 +12,7 @@ import type { SourceInfo, SourceInfoJson } from '../timeline/frameMap'
 import { buildProgramMap, clipSample0 } from '../timeline/programMap'
 import { samplesForFrames } from '../timeline/timebase'
 import {
-  buildAudioPlan, clipGainAt, diffPlans, mergeIntervals, planFromProgram, renderWindow, totalSamples,
+  buildAudioPlan, clipGainAt, diffPlans, mergeIntervals, planFromProgram, renderWindow, soundWindow, totalSamples,
   MIX_LIMIT, type AudioPlan, type ClipAudio,
 } from './audioPlan'
 import { afadeGainAt } from './curves'
@@ -162,17 +162,40 @@ describe('lanes (music / voice-over / audio)', () => {
     expect(p.master.ceilingDb).toBe(0)
   })
 
-  it('are pulled left and cut by a v1 cross-fade before them', () => {
+  it('are pulled left by a v1 cross-fade before them, and keep their whole length across one', () => {
+    // Final QA (round 3): a sound lane plays whole (`clock.sound_window`);
+    // the picture rule (`renderWindow`) shrank a voiceover by every seam it
+    // crossed and cut its last words.
     const e = edl({ v1: [{ id: 'a', start: 0, out: 2 }, { id: 'b', start: 2, out: 2 }],
       transitions: [{ at: 2, duration: 0.5 }],
       vo: [{ id: 'v', start: 1.8, in: 0, out: 1 }, { id: 'late', start: 3, in: 0, out: 1 }] })
     const p = plan(e)
     const seams: Array<[number, number]> = [[2, 0.5]]
-    expect(renderWindow(seams, 1.8, 2.8)).toEqual([1.8, 2.3])
+    expect(renderWindow(seams, 1.8, 2.8)).toEqual([1.8, 2.3])   // a picture window shrinks
+    expect(soundWindow(seams, 1.8, 1)).toEqual([1.8, 2.8])      // a sound window does not
     const v = one(p, 'v')
     expect(v.out0).toBe(1800 * 48)
-    expect(v.n).toBe(Math.round(0.5 * 48000))              // atrim=end_sample: the seam shortened it
+    expect(v.n).toBe(48000)                                  // all of its 1 s
     expect(one(p, 'late').out0).toBe(2500 * 48)
+  })
+
+  it('a split voice-over across a seam stays back to back (one run, one pull)', () => {
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 2 }, { id: 'b', start: 2, out: 2 }],
+      transitions: [{ at: 2, duration: 0.5 }],
+      vo: [{ id: 'p1', start: 1, in: 0, out: 1.5 }, { id: 'p2', start: 2.5, in: 1.5, out: 3 }] })
+    const p = plan(e)
+    expect(one(p, 'p1').out0).toBe(1000 * 48)
+    expect(one(p, 'p2').out0).toBe(one(p, 'p1').out0 + one(p, 'p1').n)
+  })
+
+  it('a voiceover across two seams is heard whole, its fade-out at its own end', () => {
+    const e = edl({ v1: [0, 2, 4, 6].map((s, i) => ({ id: `c${i}`, start: s, out: 2 })),
+      transitions: [{ at: 2, duration: 0.5 }, { at: 4, duration: 0.4 }],
+      vo: [{ id: 'v', start: 1, in: 0, out: 3.5, audio: { fade_out: 0.1 } }] })
+    const v = one(plan(e), 'v')
+    expect(v.out0).toBe(1000 * 48)
+    expect(v.n).toBe(3.5 * 48000)
+    expect(v.fades.map((f) => [f.type, f.start])).toEqual([['out', 4400 * 48]])
   })
 
   it('retimed lanes resample; muted lanes are not mixed at all', () => {

@@ -16,6 +16,10 @@ export interface ImportAnswer {
   start?: number
   past_video_s?: number
   video_end?: number
+  /** The source `out` that ends the clip on the picture's last frame, on the
+   *  render clock (final QA round 3). Preferred over `video_end − start`,
+   *  which is only right without transitions. */
+  trim_out?: number
 }
 
 export interface FollowUp {
@@ -36,7 +40,9 @@ export function importFollowUp(answer: ImportAnswer | null | undefined, fileName
   const past = Number(answer.past_video_s ?? 0)
   const lead = answer.routed_to === 'music' ? `${name} has no picture, so it went on the Music lane.` : ''
   if (past > 0.05 && answer.clip_id && answer.video_end !== undefined) {
-    const out = Number(answer.video_end) - Number(answer.start ?? 0)
+    const out = answer.trim_out !== undefined
+      ? Number(answer.trim_out)
+      : Number(answer.video_end) - Number(answer.start ?? 0)
     const runs = `${lead ? `${lead} It` : name} runs ${shortDuration(past)} past the end of the video.`
     if (out > 0.05) {
       return { message: runs, action: { label: 'Trim to video', tool: 'trim_clip',

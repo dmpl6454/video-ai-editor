@@ -193,13 +193,41 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
         mentioned |= _GROUND_RELATIVES.get(word, frozenset())
     named = [it for it in draft.intents if it.recipe in mentioned]
     intents = list(draft.intents) if ("auto_edit" in mentioned or not named) else named
+    from .. import slots as S
+    if S.look_of(prompt or "") and not _SOUND_WORD_RE.search((prompt or "").lower()):
+        # Final QA r3: "make the whole video black and white" came back as
+        # noise_reduce + a loudness target — every clip's sound was replaced
+        # and the reply said "Clean audio: done". A prompt that names a
+        # colour look and no sound keeps no audio recipe.
+        intents = [it for it in intents if it.recipe not in _AUDIO_RECIPES]
     said_not = set(G.detect(prompt or "").exclusions)
     exclusions = [x for x in draft.exclusions if x in said_not]
     text = " ".join((prompt or "").lower().split())
     says_a_number = bool(_NUMBER_RE.search(text))
+    named_clip = G.clip_ref_of(prompt or "")
     fixed = []
     for it in intents:
         slots = dict(it.slots)
+        if (it.recipe in _ONE_CLIP_CAPABLE and named_clip and named_clip != "$v1_all"
+                and str(slots.get("clip_ref") or "").strip().lower() in _ALL_CLIP_WORDS):
+            # Final QA: "revers clip 1 pls" / "revrse the 2nd clip" (the
+            # grammar misses the typo, Apple Intelligence answers) came back
+            # with no clip_ref and reversed EVERY clip: the prompt names one
+            # clip, so the draft edits that one.
+            slots["clip_ref"] = named_clip
+        if (it.recipe == "volume" and named_clip and named_clip != "$v1_all"
+                and not _BED_WORD_RE.search(text)
+                and str(slots.get("target") or "music").lower() in ("music", "")):
+            # Final QA r2: "turn down clip 2 by 6 decibels" came back as
+            # set_volume target=music db=-6 — the music got 6 dB LOUDER and
+            # clip 2 was untouched. The prompt names a clip and no bed: it is
+            # that clip's level, read the way the grammar reads a level
+            # ("by N" is a change from its current gain).
+            from ..planner import _volume_slots
+            level = _volume_slots(text, False)
+            slots = {k: v for k, v in slots.items() if k not in ("target", "db", "change", "_delta_db")}
+            slots.update({k: v for k, v in level.items() if k in ("db", "change", "_delta_db")})
+            slots.update({"target": "voice", "clip_ref": named_clip})
         if not says_a_number:
             # "let the ending melt to black" came back with duration_s=85 (the
             # timeline length), "lower the music" with db=-20: a number the
@@ -218,6 +246,18 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
         if it.recipe == "duck" and slots.get("enabled") is False and not G.duck_off(prompt or ""):
             # "I want the backing track to sit lower" came back as ducking OFF.
             slots.pop("enabled")
+        if it.recipe == "transitions":
+            # Final QA r3: "add a wipe between clip 1 and clip 2" came back as
+            # Cross Dissolves — the type the prompt names wins.
+            named_type = S.transition_type_of(text)
+            if named_type and slots.get("type") != named_type:
+                slots["type"] = named_type
+                slots.pop("look", None)
+        if it.recipe == "title" and _LOWER_THIRD_RE.search(text) and slots.get("text"):
+            # Final QA: "add a lower third saying Jane Doe, Producer" came back
+            # as a SUPER title with that text — a lower-third prompt's words
+            # are the card's name (the expander splits the second line off).
+            slots["_lower_third"] = True
         if (it.recipe == "title" and slots.get("name") and not slots.get("text")
                 and not _LOWER_THIRD_RE.search((prompt or "").lower())):
             # "slap LAUNCH DAY across the top" came back as a NAME card
@@ -232,6 +272,24 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
     return draft.model_copy(update={"intents": fixed, "exclusions": exclusions,
                                     "needs_input": [], "reply": ""})
 
+
+#: Recipes that change the SOUND (Final QA r3: dropped when the prompt names
+#: a colour look and no sound).
+_AUDIO_RECIPES = frozenset({"clean_audio", "loudness", "volume", "mute", "duck", "music", "fit_music",
+                            "remove_music", "voice_effect", "voiceover", "remove_silences", "remove_fillers",
+                            "tighten"})
+_SOUND_WORD_RE = re.compile(r"\b(?:audio|sound|sounds|noise|noisy|voice|volume|loud|louder|quiet|quieter|music"
+                            r"|song|mute|hiss|hum|speech|mic|silence|silences|filler|fillers)\b")
+
+
+#: Recipes whose clip_ref DEFAULTS to every clip, so a draft that names no
+#: clip edits them all. (The one-clip recipes — delete, duplicate, move,
+#: length, flip, zoom, rotate — already ask "which clip?" instead.)
+_ONE_CLIP_CAPABLE = frozenset({"reverse", "speed", "voice_effect", "animation", "adjust", "color_look",
+                               "stabilize", "upscale", "canvas"})
+#: A draft's clip_ref that means "no particular clip".
+_ALL_CLIP_WORDS = frozenset({"", "none", "$v1_all", "all", "all clips", "every clip", "everything",
+                             "the whole video", "whole video", "all the clips"})
 
 #: The bed, named (the grammar's own music nouns).
 _BED_WORD_RE = re.compile(r"\b(?:music|song|track|bed|bgm|soundtrack|tune|score|beat|backing track)\b")

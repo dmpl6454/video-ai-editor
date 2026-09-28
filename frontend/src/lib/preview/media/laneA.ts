@@ -125,6 +125,12 @@ export interface LaneOptions {
   /** While playing, stale frames nearer than this are left (≈ 150 ms). */
   playingLeadSeconds?: number
   now?: () => number
+  /** The page is hidden NOW, its 'visibilitychange' dispatched or not
+   *  (WebKit flips visibilityState a task before it dispatches the event,
+   *  §3.5). Asked before every append and remove: true stops the pump like
+   *  suspend(true), and the owner must suspend now and resume later (the
+   *  lane itself latches nothing, so the owner's resume always pokes). */
+  hiddenNow?: () => boolean
 }
 
 export type LaneAction =
@@ -174,6 +180,7 @@ export class LaneA {
   private readonly pausedNear: number
   private readonly playingLead: number
   private readonly now: () => number
+  private readonly hiddenNow: () => boolean
 
   private ms: MediaSourceLike | null = null
   private sb: SourceBufferLike | null = null
@@ -215,6 +222,7 @@ export class LaneA {
     this.pausedNear = opts.pausedNearFrames ?? 5
     this.playingLead = Math.ceil((opts.playingLeadSeconds ?? EDIT_LEAD_S) * fps - 1e-9)
     this.now = opts.now ?? (() => performance.now())
+    this.hiddenNow = opts.hiddenNow ?? (() => false)
   }
 
   get video(): VideoLike {
@@ -456,18 +464,24 @@ export class LaneA {
       do {
         this.again = false
         for (let guard = 0; guard < 10_000; guard++) {
-          if (this.destroyed || this.held || this.suspended || this.now() < this.stalledUntil) break
+          if (this.stopped() || this.now() < this.stalledUntil) break
           const action = this.plan()
           if (!action) break
           await this.execute(action)
         }
-      } while (this.again && !this.destroyed && !this.held && !this.suspended)
+      } while (this.again && !this.stopped())
     } finally {
       this.pumping = false
       const waiters = this.idleWaiters
       this.idleWaiters = []
       for (const w of waiters) w()
     }
+  }
+
+  /** No append or remove may start now (hidden is asked last: it may
+   *  suspend the page's loaders). */
+  private stopped(): boolean {
+    return this.destroyed || this.held || this.suspended || this.hiddenNow()
   }
 
   /** Stop starting appends/removes (a paused seek is reading the element:

@@ -12,7 +12,6 @@ Tools that need network / heavy AI weights / external models / audio sources
 are SKIP-listed — those have their own targeted tests.
 """
 from __future__ import annotations
-import os
 import subprocess
 from pathlib import Path
 
@@ -176,7 +175,10 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "set_animation": {"clip_id": "c1", "in": "zoom_in"},
         "set_voice_effect": {"clip_id": "c1", "effect": "robot"},
         "color_grade": {"clip_id": "c1", "brightness": 0.05, "contrast": 1.1, "saturation": 1.1},
-        "apply_lut": {"clip_id": "c1", "lut_path": os.devnull, "intensity": 0.5},
+        # A real .cube by PATH (the lut_path alias): /dev/null used to stand in, but
+        # apply_lut now parses the file the way ffmpeg's lut3d will (Final QA 0.8.0).
+        "apply_lut": {"clip_id": "c1", "intensity": 0.5,
+                      "lut_path": str(Path(__file__).resolve().parents[1] / "presets" / "luts" / "warm.cube")},
         "add_mask": {"clip_id": "c1", "type": "circle", "feather": 8.0},
         "remove_mask": {"clip_id": "c1"},
         "set_pip_framing": {"clip_id": "c1", "x": 0.2, "y": -0.1, "zoom": 1.4},
@@ -281,6 +283,10 @@ def test_tool_smoke(tool: str, session: EDLStore, tmp_path: Path):
         saved = shows_dir() / "test_show.json"
         if not saved.exists():
             dispatch(session, "save_show_template", {"name": "test_show"})
+    if tool == "set_text":
+        # Final QA: retext an overlay that exists.
+        tid = dispatch(session, "add_text", {"text": "OLD", "start": 0.0, "end": 1.0})["id"]
+        args = {"clip_id": tid, "text": "NEW"}
     if tool == "set_blend_mode":
         src = session.edl.tracks[0].clips[0].src
         cid = dispatch(session, "add_clip", {"track": "v2", "src": src, "in": 0.0, "out": 1.0,

@@ -54,6 +54,7 @@ export class EngineSources {
       baseUrl: opts.proxyBaseUrl ?? '/api/proxies',
       fetch: opts.fetch,
       maxBytes: opts.spanCacheBytes,
+      hiddenNow: () => this.hiddenNow(),
       onLoad: () => this.host.lane()?.poke(),
       onError: (key, _msg, permanent) => {
         // degraded (§7) now; a transient failure is opened again later, and
@@ -61,6 +62,16 @@ export class EngineSources {
         this.feed.markFailed(key)
         this.host.failed()
         if (!permanent) this.scheduleReopen()
+      },
+      // One of its spans landed after a span-streak report: the proxy is
+      // readable, so reopen now (feed.openProxies clears the degraded mark
+      // and host.recovered() re-feeds laneA) rather than at PROXY_REOPEN_MS.
+      // A pending reopen timer stays: other keys may still need it, and a
+      // second open() of a readable proxy is a no-op.
+      onRecovered: () => {
+        if (this.host.destroyed() || !this.host.hasProgram()) return
+        if (this.suspended || pageHidden()) this.reopenDue = true
+        else this.open()
       },
     })
   }
@@ -87,11 +98,32 @@ export class EngineSources {
     }, PROXY_REOPEN_MS)
   }
 
+  /** Whether the page is hidden now. WebKit flips `visibilityState` a
+   *  task BEFORE it dispatches 'visibilitychange' (measured in WKWebView):
+   *  a seek or a landed span in that gap found laneA not suspended and
+   *  removed its whole window while the page was hidden (§3.5). Seeing it
+   *  hidden first suspends everything at once; only the event resumes
+   *  (suspend(false)), so the reopen/prefetch/re-show on return stay in
+   *  one place. laneA and the stores ask this before they start work. */
+  hiddenNow(): boolean {
+    if (this.suspended) return true
+    if (!pageHidden()) return false
+    this.suspend(true)
+    return true
+  }
+
+  /** The engine starts listening for 'visibilitychange': a hidden page
+   *  seen before that (hiddenNow) and visible again by now has no event
+   *  left to resume it. */
+  resumeIfVisible(): void {
+    if (this.suspended && !pageHidden()) this.suspend(false)
+  }
+
   /** Ask for every span the laneA window needs, nearest first (nothing
    *  while the page is hidden). */
   prefetch(): void {
     const lane = this.host.lane()
-    if (!lane || this.suspended || pageHidden()) return
+    if (!lane || this.hiddenNow()) return
     const P = this.host.playhead()
     const R = this.host.rate()
     const back = Math.round((10 * R.num) / R.den)

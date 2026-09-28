@@ -9,6 +9,8 @@
 // permission request; these helpers are the parts that can be unit-tested.
 
 import { toFrameGrid } from './frameStep'
+import { layoutPlayhead } from './timelineLayout'
+import type { EDL } from '../types'
 
 /** Seconds of count-in before capture and playback start. */
 export const COUNTDOWN_S = 3
@@ -19,6 +21,20 @@ export const PERMISSION_HINT_MS = 8000
 /** Where the clip lands: the playhead on the project's frame grid. */
 export function recordStart(playhead: number, fps: unknown): number {
   return toFrameGrid(Math.max(0, playhead), fps)
+}
+
+/**
+ * The `start` a voiceover clip is stored with when it is recorded or imported
+ * "at the playhead". The playhead is RENDER time (the ruler, the <video>);
+ * a VO clip's `start` is LAYOUT time — audio_mix plays it at
+ * `render_time(start)`, like every overlay. Posting the raw playhead put the
+ * clip earlier than the picture by every upstream transition's overlap, so
+ * this decodes with the overlay inverse (`layoutPlayhead`, the one
+ * StickerPanel / textPresets / mediaInsert use) and lands on the frame grid.
+ */
+export function voLayoutStart(edl: EDL | null | undefined, playhead: number): number {
+  const fps = edl?.canvas?.fps
+  return toFrameGrid(layoutPlayhead(edl, recordStart(playhead, fps)), fps)
 }
 
 /** The meter floor: anything quieter reads as silence. */

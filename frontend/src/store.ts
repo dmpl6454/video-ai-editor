@@ -4,7 +4,7 @@
 
 import { create } from 'zustand'
 import { api, clientFetch } from './api'
-import { toast } from './toast'
+import { toast, useToasts } from './toast'
 import { type EDL, type Op } from './types'
 import { splitTargets } from './lib/splitTargets'
 import { deletedLabel } from './lib/deletedLabel'
@@ -543,7 +543,7 @@ export const useStore = create<State>((set, get) => ({
       // the key/click handler, so laneA.play() and AudioContext.resume() run
       // synchronously in the user's gesture (spec §3.5). The shuttle's rates
       // are Phase 4: forward plays at 1x, reverse does not start.
-      if (p && get().playbackRate < 0) return
+      if (p && (get().playbackRate < 0 || reverseAsked)) { reverseAsked = false; return }
       if (p) set({ isPlaying: ctl.play(get().playhead) })
       else {
         ctl.pause()
@@ -564,11 +564,24 @@ export const useStore = create<State>((set, get) => ({
     return false
   },
   setPlaybackRate: (r) => {
-    // Client engine: no reverse until Phase 4 — a reverse rate while it plays
-    // forward stops it (inside the same key handler), never left running.
-    if (r < 0 && get().isPlaying && get().previewEngine === 'client' && previewCtl) {
-      previewCtl.pause()
-      set({ playbackRate: r, isPlaying: false })
+    // Client engine: the shuttle's rates are Phase 4 — it plays forward at 1×
+    // only. The store keeps the rate it ACTUALLY plays (1), so nothing claims
+    // 2× while the picture runs at 1× (StickerLayer animates at this rate),
+    // and says why once (Final QA: L L and J were silently wrong). A reverse
+    // request while playing stops it (inside the same key handler), and the
+    // setPlaying(true) J sends right after is refused via `reverseAsked`.
+    if (get().previewEngine === 'client' && previewCtl) {
+      if (r !== 1) noteShuttleUnsupported()
+      if (r < 0) {
+        reverseAsked = true
+        queueMicrotask(() => { reverseAsked = false })
+        if (get().isPlaying) {
+          previewCtl.pause()
+          set({ playbackRate: 1, isPlaying: false })
+          return
+        }
+      }
+      if (get().playbackRate !== 1) set({ playbackRate: 1 })
       return
     }
     set({ playbackRate: r })
@@ -1263,6 +1276,19 @@ function applyPreviewMode(): void {
   }
 }
 
+// The J that setPlaybackRate(<0) refused, until the setPlaying(true) the
+// shuttle command sends right after it (same handler; cleared next microtask).
+let reverseAsked = false
+
+const SHUTTLE_UNSUPPORTED =
+  'Instant preview plays forward at 1× for now — turn it off in Settings for reverse and fast shuttle.'
+
+/** Say once (not a stack per key press) why J / L L did not do more. */
+function noteShuttleUnsupported(): void {
+  if (useToasts.getState().toasts.some((t) => t.message === SHUTTLE_UNSUPPORTED)) return
+  toast.info(SHUTTLE_UNSUPPORTED)
+}
+
 function syncPreviewController(): void {
   const s = useStore.getState()
   const want = s.previewEngine === 'client' && s.sessionId ? s.sessionId : null
@@ -1273,6 +1299,16 @@ function syncPreviewController(): void {
     if (s.clientView) useStore.setState({ clientView: null })
     return
   }
+  // A new engine starts paused. Switching Instant preview on while the server
+  // preview played left isPlaying true over an engine that never started — a
+  // frozen picture under a Pause button, and the next Space only "paused"
+  // (Final QA). The Settings click is not a transport gesture: stop.
+  if (s.isPlaying) useStore.setState({ isPlaying: false })
+  // …and at 1×. The engine plays forward only, and its setPlaybackRate never
+  // writes a negative rate, so a J left over from the server preview (rate
+  // -1) made setPlaying refuse every Play click and the first Space with no
+  // word — a voice-over take would start over a stopped timeline (Final QA r2).
+  if (s.playbackRate !== 1) useStore.setState({ playbackRate: 1 })
   const ctl = new PreviewController({
     sessionId: want,
     fetch: (url, init) => clientFetch(url, init),

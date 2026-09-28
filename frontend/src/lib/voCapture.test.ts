@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { CANCELLED, cancellable, levelOf, recordStart } from './voCapture'
+import { CANCELLED, cancellable, levelOf, recordStart, voLayoutStart } from './voCapture'
+import type { EDL } from '../types'
 
 describe('voiceover capture helpers (QA-085)', () => {
   it('places the clip on the frame grid', () => {
@@ -31,5 +32,25 @@ describe('voiceover capture helpers (QA-085)', () => {
   it('an answered request is passed through untouched', async () => {
     const c = cancellable(Promise.resolve('stream-2'), () => { throw new Error('not late') })
     expect(await c.promise).toBe('stream-2')
+  })
+})
+
+// Final QA: the playhead is RENDER time; a voiceover clip's `start` is LAYOUT
+// time (audio_mix plays it at render_time(start)). Posting the raw playhead
+// put a VO imported at 00:00:05:00 after a 0.5 s dissolve at 4.5 s.
+describe('voiceover start on the layout clock', () => {
+  const media = (id: string, start: number, len: number) => ({ id, src: `/m/${id}.mp4`, in: 0, out: len, start })
+  const edl = (transitions: unknown[]): EDL => ({
+    version: 2, duration: 20, canvas: { w: 1920, h: 1080, fps: 30, bg: '#000' },
+    tracks: [{ id: 'v1', type: 'video', z: 0, clips: [media('a', 0, 5), media('b', 5, 5), media('c', 10, 5)], transitions }],
+  } as unknown as EDL)
+
+  it('an import at render 5.0 after a 0.5 s dissolve at 5 s lands at layout 5.5', () => {
+    expect(voLayoutStart(edl([{ at: 5, type: 'fade', duration: 0.5 }]), 5.0)).toBeCloseTo(5.5, 9)
+  })
+
+  it('is the frame-snapped playhead without transitions', () => {
+    expect(voLayoutStart(edl([]), 5.957641)).toBeCloseTo(179 / 30, 9)
+    expect(voLayoutStart(null, -1)).toBe(0)
   })
 })

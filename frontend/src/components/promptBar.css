@@ -609,3 +609,12 @@
   border-bottom: 1px solid var(--line);
   box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5);
 }
+/* The FOLDED one-line summary is the exception (Final QA): as a drawer it
+   covered the top ~22 px of the picture — where hook titles and a timecode
+   burn-in live — until "Clear", across reloads. It takes its own ~38 px row
+   instead, so the preview is laid out below it rather than under it. */
+.prompt-bar > .prompt-log.is-collapsed {
+  position: static;
+  box-shadow: none;
+  border-bottom: 0;
+}

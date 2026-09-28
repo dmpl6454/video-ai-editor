@@ -408,3 +408,46 @@ def test_the_proxies_root_is_not_a_session(client, tmp_path, path):
     r = client.get(path)
     assert r.status_code in (400, 404), (path, r.status_code)
     assert sorted(p.name for p in root.iterdir()) == before
+
+
+def test_a_full_disk_answers_507_and_stops_re_encoding_until_it_clears(client, tmp_path, monkeypatch):
+    """Final QA r2 (robustness): with the disk full every span encode failed
+    on write (OSError ENOSPC), the route answered 202 'pending' for good and
+    each poll started a fresh full encode — 102 failed jobs in two minutes,
+    the engine under a spinner, never reaching its degraded tier. Now the
+    failure answers 507 {code: disk_full} (a 5xx the engine counts toward
+    SPAN_DEGRADE_AFTER), a repeat poll inside the hold starts no encode, and
+    index.json says why."""
+    import errno
+    from video_ai_editor.ingest import proxy_queue as Q
+    sid, src = _session_with_master(client, tmp_path, frames=60, audio=False)
+    key = _proxy(client, sid, src)["key"]
+    MANAGER.wait_idle(30)
+    encodes = {"n": 0}
+    real_encode = P.run_encode
+    real_write = P.write_span
+
+    def counting_encode(*a, **k):
+        encodes["n"] += 1
+        return real_encode(*a, **k)
+
+    def full(*_a, **_k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(P, "run_encode", counting_encode)
+    monkeypatch.setattr(P, "write_span", full)
+    r = client.get(f"/api/proxies/{key}/v/0.bin")
+    assert r.status_code == 507, r.text
+    assert r.json()["error"]["details"]["code"] == "disk_full"
+    n = encodes["n"]
+    assert n >= 1
+    for _ in range(5):
+        assert client.get(f"/api/proxies/{key}/v/0.bin").status_code == 507
+    assert encodes["n"] == n                 # no re-encode per poll while the disk is full
+    assert client.get(f"/api/proxies/{key}/index.json").json().get("span_error") == "disk_full"
+    # space freed: once the hold is over, the span encodes and is served
+    monkeypatch.setattr(P, "write_span", real_write)
+    monkeypatch.setattr(Q, "DISK_FULL_HOLD_S", 0.0)
+    r = client.get(f"/api/proxies/{key}/v/0.bin")
+    assert r.status_code == 200, r.text
+    assert "span_error" not in client.get(f"/api/proxies/{key}/index.json").json()

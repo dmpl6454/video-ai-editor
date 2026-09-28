@@ -308,9 +308,36 @@ SPEED_WORD_PATTERNS: tuple[tuple[str, float], ...] = (
     (r"\bhalf speed\b|\bhalf the speed\b|\bhalve the speed\b", 0.5),
     (r"\bdouble speed\b|\bdouble the speed\b|\btwice as fast\b|\btwice the speed\b", 2.0),
     (r"\bquarter speed\b", 0.25),
-    (r"\bspeed (?:it |this |the video |the clip )?up\b|\bfaster\b|\bquicker\b|\bspeed up\b", 1.25),
-    (r"\bslow (?:it |this |the video |the clip )?down\b|\bslower\b", 0.8),
+    # Final QA r3: any object between the verb and its particle ("slow the
+    # whole video down", "slow clip 3 down") — only four fillers were read,
+    # and the rest fell to the speed recipe's 1.25x default: a speed-UP.
+    (r"\bspeed\s+(?:[\w']+\s+){0,5}?up\b|\bfaster\b|\bquicker\b|\bspeed up\b", 1.25),
+    (r"\bslow\s+(?:[\w']+\s+){0,5}?down\b|\bslower\b", 0.8),
 )
+
+_PCT_FASTER_RE = re.compile(r"%?\s*(?:percent\s+)?(?:faster|quicker)\b")
+_PCT_SLOWER_RE = re.compile(r"%?\s*(?:percent\s+)?slower\b")
+_SPEED_UP_WORDS_RE = re.compile(r"\bspeed\s+(?:\w+\s+){0,4}?up\b|\bspeed up\b|\bfaster\b|\bquicker\b")
+_SLOW_DOWN_WORDS_RE = re.compile(r"\bslow\s+(?:\w+\s+){0,4}?down\b|\bslow down\b|\bslower\b")
+
+
+def _speed_from_percent(text: str, m: re.Match) -> float | None:
+    """A speed FACTOR from a percentage (Final QA r2), or None when the
+    change would stop the clip ("100% slower").
+
+    "at/to 80% speed" is the speed itself (0.8x). A DIRECTION is a change
+    from 1x: "50% faster" / "speed up … by 50%" is 1.5x, "25% slower" /
+    "slow it down by 20%" 0.75x / 0.8x. Every one of those used to read as
+    N/100 — "50% faster" halved the speed and "25% slower" played at 0.25x."""
+    n = float(m.group(1))
+    after = text[m.start():m.end() + 16]
+    by = bool(re.search(r"\bby\s*$", text[:m.start()]))
+    if _PCT_FASTER_RE.search(after[len(m.group(1)):]) or (by and _SPEED_UP_WORDS_RE.search(text)):
+        return 1.0 + n / 100.0
+    if _PCT_SLOWER_RE.search(after[len(m.group(1)):]) or (by and _SLOW_DOWN_WORDS_RE.search(text)):
+        return 1.0 - n / 100.0 if n < 100 else None
+    return n / 100.0
+
 
 LUFS_RE = re.compile(r"(-?\d{1,2}(?:\.\d+)?)\s*lufs\b")
 COLOR_HEX_RE = re.compile(r"#([0-9a-f]{6}|[0-9a-f]{3})\b")
@@ -399,6 +426,11 @@ class Slots:
 # --------------------------------------------------------------------------
 # 4. Extraction
 # --------------------------------------------------------------------------
+
+def look_of(text: str) -> str | None:
+    """The bundled colour look (a .cube name) the words name, or None."""
+    return _first(LOOK_PATTERNS, normalize(text or ""))
+
 
 def _first(patterns: tuple[tuple[str, str], ...], text: str) -> str | None:
     for pat, value in patterns:
@@ -539,11 +571,13 @@ def extract(prompt: str) -> Slots:
     m = SPEED_X_RE.search(t_speed)
     if m:
         speed = float(m.group(1))
+    speed_refused = False
     if speed is None:
         m = SPEED_PCT_RE.search(t_speed)
-        if m and re.search(r"\bspeed|fast|slow", t_speed):
-            speed = float(m.group(1)) / 100.0
-    if speed is None:
+        if m and re.search(r"\bspeed|fast|slow|quick", t_speed):
+            speed = _speed_from_percent(t_speed, m)
+            speed_refused = speed is None
+    if speed is None and not speed_refused:
         for pat, value in SPEED_WORD_PATTERNS:
             if re.search(pat, t_speed):
                 speed = value

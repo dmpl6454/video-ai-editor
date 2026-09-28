@@ -20,6 +20,10 @@ proxy span on demand is a cache fill, like /thumb rendering a tile):
   GET /api/sessions/{sid}/frame_map?h=<hash>     the reference program map of
                                                  the CURRENT render hash (409
                                                  when `h` is stale), §8
+  GET /api/sessions/{sid}/preview_loudness?h=    {gain_db, current,
+                                                 target_lufs}: the server
+                                                 preview's master gain for
+                                                 the CURRENT hash's sound
   GET /api/sessions/{sid}/bake/{h}/index.json    bake of previews/<h>.mp4
       [?ranges=k0-k1,...]                        (§5.3; queues those spans)
   GET /api/sessions/{sid}/bake/{h}/init.mp4      its init (its own avcC class)
@@ -51,7 +55,7 @@ Posture:
     the session resolved by the same store resolver every route uses).
 
 The duck_curve / LUT routes of spec §5.2 are Phase 2 and mount here when
-they land.
+they land (preview_loudness landed in Final QA r3).
 """
 from __future__ import annotations
 
@@ -292,6 +296,12 @@ def _gone_if_failed(key: str) -> None:
     if idx.get("failed"):
         raise HTTPException(410, {"code": "proxy_failed",
                                   "message": idx.get("error") or "proxy build failed"})
+    # Not failed for good, but its last encode could not be written: a 5xx
+    # the engine counts toward its degraded tier, not an endless "pending"
+    # (Final QA r2). Held DISK_FULL_HOLD_S, then a request encodes again.
+    if MANAGER.disk_full(key):
+        raise HTTPException(507, {"code": "disk_full",
+                                  "message": "the disk is full — free some space for the preview"})
 
 
 def _serve(path: Path, media_type: str) -> FileResponse:
@@ -308,6 +318,8 @@ def proxy_index(key: str):
         if (P.read_index(key) or {}).get("failed"):
             _gone_if_failed(key)
         return _pending("index")
+    if MANAGER.disk_full(key):
+        idx = {**idx, "span_error": "disk_full"}
     return JSONResponse(idx, headers=_NO_STORE)
 
 
@@ -529,6 +541,34 @@ def session_frame_map(sid: str, h: str = Query(..., min_length=1, max_length=64)
     # Immutable for this hash + these files, but the key the client asks by
     # (the hash) does not cover the files, so: no shared caching.
     return JSONResponse(body, headers=_NO_STORE)
+
+
+# ---- preview loudness (spec §3.6, §5.2, §7) --------------------------------------------
+
+@router.get("/api/sessions/{sid}/preview_loudness")
+def session_preview_loudness(sid: str, h: str = Query(..., min_length=1, max_length=64)):
+    """`{gain_db, current, target_lufs}` for the session's CURRENT render
+    hash: the master gain the server preview applies to this sound
+    (render/preview_loudness.preview_gain) — the Instant preview's master
+    gain. `current` false: the session's last-known gain (None before any
+    preview was measured), which the client plays marked APPROX until a
+    preview of this sound lands. 409 `stale_render_hash` when `h` is not the
+    current hash; 202 while an edit holds the session (Final QA r3: there was
+    no such route, and the Instant preview played ~11 dB under the export)."""
+    from ..render import bake as _bake
+    from ..render import preview_loudness as _pl
+    if not _bake.is_valid_hash(h):
+        raise HTTPException(400, {"code": "invalid_hash", "message": "h must be a render hash"})
+    store = _store(sid)
+    view = _snapshot_view(sid, store)
+    if view is None:
+        return _pending("session busy")
+    current = view.render_hash()
+    if h != current:
+        raise HTTPException(409, {"code": "stale_render_hash",
+                                  "message": "The timeline changed; ask for the current render hash.",
+                                  "render_hash": current})
+    return JSONResponse(_pl.preview_gain(view, store.dir), headers=_NO_STORE)
 
 
 # ---- bakes (spec §5.3, R13) ----------------------------------------------------------

@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import threading
 import time
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -431,8 +433,90 @@ _DECODE_SLACK_FRAMES = 2
 
 
 def clip_frames(c: Clip, fps) -> int:
-    """Frames clip `c` occupies on the timeline at rate `fps` (≥ 1)."""
+    """Frames clip `c` occupies on the timeline at rate `fps` (≥ 1) — on v1,
+    inside a `v1_rate_scope` at a rate other than the project's, its
+    resampled span (see there)."""
+    span = _rate_span(c, fps)
+    return span[1] if span is not None else _natural_clip_frames(c, fps)
+
+
+def _natural_clip_frames(c: Clip, fps) -> int:
     return max(1, _tb.frame_of(c.effective_duration, fps))
+
+
+# ---- v1 at a rate other than the project's (final QA, 0.8.0) ---------------
+#
+# `_v1_frame_plan` rounds each clip's START and its LENGTH separately, which
+# tiles exactly on the project grid (clips abut on it) but not on another:
+# a 30 fps project's cut at 2.5 s is frame 62.5 at 25 fps — the start rounds
+# to 62, a 23.33-frame length to 23, and the next clip (85.83) to 86, so the
+# export carried a black frame and a 40 ms dropout at the cut (or pushed later
+# clips a frame late when the rounding went the other way). Inside this scope
+# the plan at rate R is the PROJECT-grid plan resampled at its boundaries:
+# clip i starts at round(S_i·R/P) and lasts round(E_i·R/P) − that, so
+# neighbours share a boundary frame and tile exactly. `clip_frames` and
+# `_v1_frame_plan` read it, so the picture chain's trim, the audio chain's
+# sample count, the chunk key and `frame_map` (which enters the same scope)
+# all agree. At the project rate the scope is empty: nothing changes there.
+
+_V1_RATE_SPANS: "contextvars.ContextVar[tuple[object, dict] | None]" = contextvars.ContextVar(
+    "vae_v1_rate_spans", default=None)
+
+
+def _rate_key(c: Clip) -> tuple[str, float]:
+    return (str(c.id), float(c.start))
+
+
+def _rate_span(c: Clip, fps) -> tuple[int, int] | None:
+    """(start frame, frames) of v1 clip `c` in the active rate scope at
+    `fps`, or None (no scope, another rate, or not one of its v1 clips)."""
+    cur = _V1_RATE_SPANS.get()
+    if cur is None or fps is None or _tb.rate_of(fps) != cur[0]:
+        return None
+    return cur[1].get(_rate_key(c))
+
+
+def rate_span_override(c: Clip, fps) -> int | None:
+    """The frames clip `c` spans at `fps` when the rate scope makes that
+    differ from its own rounded length, else None. A cache keyed on a clip's
+    rendered length (chunks, the speed-curve audio) adds this to its key."""
+    span = _rate_span(c, fps)
+    if span is None or span[1] == _natural_clip_frames(c, fps):
+        return None
+    return span[1]
+
+
+def v1_rate_spans(clips: list[Clip], fps, project_fps) -> dict | None:
+    """{(id, start): (start frame, frames)} for `clips` (v1, sorted by start)
+    at `fps`, from the project-grid packing; None at the project rate."""
+    if fps is None or project_fps is None:
+        return None
+    rr, rp = _tb.rate_of(fps), _tb.rate_of(project_fps)
+    if rr == rp or not clips:
+        return None
+    scale = rr / rp
+    spans: dict = {}
+    cursor = 0
+    for c in clips:
+        s = max(cursor, _tb.frame_of(c.start, project_fps))
+        e = s + _natural_clip_frames(c, project_fps)
+        a, b = round(s * scale), round(e * scale)
+        spans[_rate_key(c)] = (a, max(1, b - a))
+        cursor = e
+    return spans
+
+
+@contextmanager
+def v1_rate_scope(edl: EDL, fps):
+    """Plan and render `edl`'s v1 at `fps` with the resampled spans above
+    (a no-op at the project rate). Re-entrant; thread pools that copy the
+    context (chunks, segments, reverse) inherit it."""
+    spans = v1_rate_spans(_video_clips(edl), fps, getattr(edl.canvas, "fps", None))
+    tok = _V1_RATE_SPANS.set(None if spans is None else (_tb.rate_of(fps), spans))
+    try:
+        yield
+    finally:
+        _V1_RATE_SPANS.reset(tok)
 
 
 def freeze_input_span(in_: float, fps) -> tuple[float, float]:
@@ -592,7 +676,8 @@ def _v1_frame_plan(clips: list[Clip], total_duration: float,
     plan: list[tuple[str, int | None, int]] = []
     cursor = 0
     for i, c in enumerate(clips):
-        sf = _tb.frame_of(c.start, fps)
+        span = _rate_span(c, fps)           # another rate: the resampled start
+        sf = span[0] if span is not None else _tb.frame_of(c.start, fps)
         if sf - cursor >= 1:
             plan.append(("gap", None, sf - cursor))
             cursor = sf
@@ -1444,10 +1529,18 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
     seg_a: list[str] = []
     seg_dur: list[float] = []
     seg_of_clip: dict[int, int] = {}
+    from .canvas_bg import segment_to_709
     for kind, ci, nfr in segments:
         if kind == "clip":
             seg_of_clip[ci] = len(seg_v)
-            seg_v.append(v_labels[ci])
+            # BT.709 limited before assembly (final QA, round 3;
+            # `canvas_bg.segment_to_709`): `concat` / `xfade` negotiate
+            # colour tags, and the first clip's tag used to decide the lane
+            # and convert every other clip. Pinned at the NODE, like the
+            # xfade timebase below, so the chunk cache keys stay valid.
+            col = f"[vcol{len(seg_v)}]"
+            fc_parts.append(f"{v_labels[ci]}{segment_to_709(clips[ci].src)}{col}")
+            seg_v.append(col)
             seg_a.append(a_labels[ci])
             seg_dur.append(_tb.time_of(nfr, fps))
         else:
@@ -1457,8 +1550,9 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
             vf, af = _gap_filler_chains(canvas_w, canvas_h, fps, nfr)
             # format/setsar/aformat pin the filler to the same parameters the
             # clip chains produce — concat refuses inputs whose link params
-            # differ (it does not auto-convert).
-            fc_parts.append(vf + vg)
+            # differ (it does not auto-convert). Labelled BT.709 as every
+            # segment is (`segment_to_709`; black is the same bytes in both).
+            fc_parts.append(f"{vf},{segment_to_709(None)}{vg}")
             fc_parts.append(af + ag)
             seg_v.append(vg)
             seg_a.append(ag)
@@ -1500,10 +1594,23 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
             seg_trans[si] = (record.type, cost)
 
     # ---- Timeline assembly ----
+    # The assembled picture is put back on the FRAME grid (settb=1/R) before
+    # anything is overlaid on it (final QA, round 3). `concat` outputs on a
+    # 1/1000000 time base and truncates each segment's offset to whole µs:
+    # after a 76-frame clip at 30 fps frame 107 sat at 3566666 µs, not
+    # 107/30 s. PiPs and the looped text / sticker inputs are exactly on the
+    # 1/R grid and `overlay` takes the newest overlay frame with pts <= the
+    # main pts, so a main frame 1 µs early got the PREVIOUS overlay frame:
+    # cutting the main track made a PiP lag a frame (repeat, then skip) and
+    # a keyframed title animate a frame late. `settb` rounds to the nearest
+    # tick, so every frame lands back on its own number.
+    grid_tb = _tb.rate_of(fps)
+    grid_tb = f"{grid_tb.denominator}/{grid_tb.numerator}"
     if not seg_trans:
         # Plain concat (interleaved [v0][a0][v1][a1]...)
         interleaved = "".join(f"{v}{a}" for v, a in zip(seg_v, seg_a))
-        fc_parts.append(f"{interleaved}concat=n={len(seg_v)}:v=1:a=1[vout][aout]")
+        fc_parts.append(f"{interleaved}concat=n={len(seg_v)}:v=1:a=1[vcat][aout]")
+        fc_parts.append(f"[vcat]settb={grid_tb}[vout]")
     else:
         # Chain xfade for video, acrossfade for audio between adjacent segments.
         # cur_dur tracks the accumulated OUTPUT stream length: each clip's
@@ -1604,7 +1711,8 @@ def _build_filter_complex(clips: list[Clip], canvas_w: int, canvas_h: int,
             cur_v = new_v
             cur_a = new_a
         # Rename the final accumulators to [vout]/[aout] for downstream code
-        fc_parts.append(f"{cur_v}null[vout]")
+        # (on the frame grid: a hard cut after a seam is a µs `concat` again)
+        fc_parts.append(f"{cur_v}settb={grid_tb}[vout]")
         fc_parts.append(f"{cur_a}anull[aout]")
 
     return ";".join(fc_parts), inputs, ["[vout]", "[aout]"], extra_inputs
@@ -1684,16 +1792,17 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             raise JobCancelled() from None
     # Cancel-aware acquire: a superseded preview (render.cancel) gives up its
     # place in the queue instead of waiting for a slot it will never use.
-    _cancel.acquire(_RENDER_SLOTS)
-    try:
-        out = _render_locked(edl, dst, height=height, fps=fps, preview=preview,
-                             cache_dir=cache_dir, on_progress=on_progress,
-                             cancel_event=cancel_event, crf=crf,
-                             bitrate_kbps=bitrate_kbps,
-                             bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
-    finally:
-        _RENDER_SLOTS.release()
-    _check_picture(edl, Path(out), fps)
+    with v1_rate_scope(edl, fps):      # another rate: v1 tiles exactly there too
+        _cancel.acquire(_RENDER_SLOTS)
+        try:
+            out = _render_locked(edl, dst, height=height, fps=fps, preview=preview,
+                                 cache_dir=cache_dir, on_progress=on_progress,
+                                 cancel_event=cancel_event, crf=crf,
+                                 bitrate_kbps=bitrate_kbps,
+                                 bitrate_peak_cap=bitrate_peak_cap, chunked=chunked)
+        finally:
+            _RENDER_SLOTS.release()
+        _check_picture(edl, Path(out), fps)
     return out
 
 
@@ -1932,7 +2041,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             out_label="[vtxt_final]",
             first_input_index=next_idx,
             out_w=w_out, out_h=h_out,
-            preview=preview,
+            preview=preview, fps=fps,
         )
         if chain:
             overlay_chain = chain
@@ -2620,17 +2729,30 @@ def measure_mix_loudness(edl: EDL, *, fps, cache_dir: Path | None) -> float | No
     minute of speech + bed on an M-series Mac, under a tenth of the video
     encode it precedes). Runs through `render.cancel`, so a cancelled export
     stops it."""
+    got = _measure_mix(edl, fps=fps, cache_dir=cache_dir)
+    return None if got is None else got[0]
+
+
+_EBUR128_TP_RE = re.compile(r"True peak:\s*\n\s*Peak:\s*(-?[\d.]+|-inf)\s*dBFS")
+
+
+def _measure_mix(edl: EDL, *, fps, cache_dir: Path | None,
+                 gain_db: float | None = None) -> tuple[float, float | None] | None:
+    """(integrated LUFS, true peak dBTP or None) of the timeline's mix: the
+    RAW mix (pass 1), or with `gain_db` the MASTERED one — that static gain
+    and the export's true-peak limiter, exactly the render's master stage."""
     if getattr(edl.canvas, "loudness_lufs", None) is None:
         return None
-    from .audio_mix import apply_solo, export_measure_scope
+    from .audio_mix import apply_solo, export_gain_scope, export_measure_scope
     from .reverse import with_reversed_sources
     edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
     from .speed_audio import prepare as _prepare_curve_audio
     _prepare_curve_audio(edl, cache_dir, fps)
-    with export_measure_scope():
+    scope = export_measure_scope() if gain_db is None else export_gain_scope(gain_db)
+    with scope:
         a_inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
                                                 apply_loudnorm=True)
-    fc += f";{label}ebur128=framelog=quiet[meas]"
+    fc += f";{label}ebur128=peak=true:framelog=quiet[meas]"
     args = [_pu.FFMPEG, "-hide_banner", "-nostats", "-v", "info", *a_inputs,
             "-filter_complex", fc, "-map", "[meas]", "-f", "null", "-"]
     proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8",
@@ -2640,7 +2762,10 @@ def measure_mix_loudness(edl: EDL, *, fps, cache_dir: Path | None) -> float | No
     hits = _EBUR128_I_RE.findall(proc.stderr or "")
     if not hits:
         return None
-    return -70.0 if hits[-1] == "-inf" else max(-70.0, float(hits[-1]))
+    i = -70.0 if hits[-1] == "-inf" else max(-70.0, float(hits[-1]))
+    tps = _EBUR128_TP_RE.findall(proc.stderr or "")
+    tp = None if not tps else (float("-inf") if tps[-1] == "-inf" else float(tps[-1]))
+    return i, tp
 
 
 #: Characters an export file name may not carry: path separators and the
@@ -2776,9 +2901,10 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
                 from ..api.jobs import JobCancelled
                 raise JobCancelled()
         try:
-            _render_audio_export(edl, dst, fps=fps or edl.canvas.fps,
-                                 cache_dir=session_dir / "cache",
-                                 on_progress=on_progress, cancel_event=cancel_event)
+            with v1_rate_scope(edl, fps or edl.canvas.fps):
+                _render_audio_export(edl, dst, fps=fps or edl.canvas.fps,
+                                     cache_dir=session_dir / "cache",
+                                     on_progress=on_progress, cancel_event=cancel_event)
         finally:
             lock.release()
         _cache_budget.enforce(session_dir)
@@ -2800,9 +2926,10 @@ def render_export(edl: EDL, session_dir: Path, *, height: int | None = None,
             from ..api.jobs import JobCancelled
             raise JobCancelled()
     try:
-        res = _render_export_to(edl, dst, h, height=h_out, fps=f_out, crf=crf,
-                                target=target, session_dir=session_dir,
-                                on_progress=on_progress, cancel_event=cancel_event)
+        with v1_rate_scope(edl, f_out):     # the mastering measure plans v1 too
+            res = _render_export_to(edl, dst, h, height=h_out, fps=f_out, crf=crf,
+                                    target=target, session_dir=session_dir,
+                                    on_progress=on_progress, cancel_event=cancel_event)
     finally:
         lock.release()
     # A many-clip export builds chunks (QA-097); keep the caches in budget.
@@ -2850,87 +2977,16 @@ def _render_export_to(edl: EDL, dst: Path, h: str, *, height: int, fps, crf: int
     return RenderResult(path=dst, cached=False, edl_hash=h)
 
 
-#: Re-encode attempts `_hold_delivery_true_peak` makes before keeping the best.
-_TP_FIX_PASSES = 3
-#: Aim this far under the ceiling, so ebur128's 0.1 dB rounding cannot land
-#: a corrected file exactly on it.
-_TP_FIX_MARGIN_DB = 0.15
-
-
-def delivered_true_peak(path: Path) -> float | None:
-    """True peak (dBTP) of `path`'s first audio stream, measured the way a
-    platform does (ebur128 peak=true, 4x oversampled); None if unmeasurable."""
-    try:
-        proc = _cancel.run_prioritised(
-            [_pu.FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-map", "0:a:0",
-             "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=600, **_pu.SUBPROCESS_FLAGS)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    err = proc.stderr or ""
-    tail = err[err.rfind("Summary:"):] if "Summary:" in err else ""
-    m = re.search(r"Peak:\s+(-?[\d.]+|-inf) dBFS", tail)
-    if proc.returncode != 0 or m is None:
-        return None
-    return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
-
-
 def _hold_delivery_true_peak(dst: Path, *, cancel_event=None) -> None:
     """QA-121: the delivered file, not the PCM master, must be under
-    `EXPORT_TRUE_PEAK_DBTP`. The encoder re-adds inter-sample peak the
-    master's limiter could not see; when it pushed the file over, the audio
-    alone is re-encoded through a lower true-peak limiter (the picture is
-    stream-copied — no re-render) and measured again. A limiter, not a gain
-    cut: only the peaks come down, so the loudness target still holds.
-
-    Each pass starts from the ORIGINAL delivered audio, so passes do not
-    stack generations; the lowest-peak result is kept."""
+    `EXPORT_TRUE_PEAK_DBTP`. When the AAC encode pushed it over, the spots it
+    overshot are dipped and the audio alone re-encoded (the picture is
+    stream-copied — no re-render) until it is under, keeping its loudness
+    (`render.delivery_peak`)."""
     from .audio_mix import EXPORT_TP_LIMIT_DB, EXPORT_TRUE_PEAK_DBTP
-    tp = delivered_true_peak(dst)
-    if tp is None or tp <= EXPORT_TRUE_PEAK_DBTP:
-        return
-    ext = dst.suffix.lower()
-    audio_only = ext == ".m4a"
-    best: tuple[float, Path] | None = None
-    limit_db, seen = EXPORT_TP_LIMIT_DB, tp
-    try:
-        for n in range(_TP_FIX_PASSES):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            # Lower the ceiling by exactly how far the encode overshot it.
-            limit_db -= seen - EXPORT_TRUE_PEAK_DBTP + _TP_FIX_MARGIN_DB
-            lin = 10.0 ** (limit_db / 20.0)
-            cand = dst.with_name(f"{dst.stem}.tpfix{n}{dst.suffix}")
-            maps = ["-map", "0:a:0"] if audio_only else ["-map", "0:v?", "-map", "0:a:0", "-c:v", "copy"]
-            args = [_pu.FFMPEG, "-y", "-v", "error", "-i", str(dst), *maps,
-                    "-map_metadata", "0",
-                    "-af", f"aresample=192000,alimiter=limit={lin:.6f}:level=0:latency=1"
-                           f":attack=1:release=50,aresample=48000",
-                    *_AAC_DELIVERY_OUT, "-movflags", "+faststart", str(cand)]
-            proc = _cancel.run_prioritised(args, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=1800, **_pu.SUBPROCESS_FLAGS)
-            seen = delivered_true_peak(cand) if proc.returncode == 0 else None
-            if seen is None:
-                _pu.unlink_with_retry(cand)
-                break
-            if best is None or seen < best[0]:
-                if best is not None:
-                    _pu.unlink_with_retry(best[1])
-                best = (seen, cand)
-            else:
-                _pu.unlink_with_retry(cand)
-            if seen <= EXPORT_TRUE_PEAK_DBTP:
-                break
-        if best is not None and best[0] < tp:
-            _pu.replace_with_retry(best[1], dst)
-            best = None
-            import logging
-            logging.getLogger("video_ai_editor").info(
-                "export true peak %.1f dBTP after the encode; re-limited below the ceiling", tp)
-    finally:
-        if best is not None:
-            _pu.unlink_with_retry(best[1])
+    from . import delivery_peak
+    delivery_peak.hold(dst, ceiling_db=EXPORT_TRUE_PEAK_DBTP, limit_db=EXPORT_TP_LIMIT_DB,
+                       aac_args=_AAC_DELIVERY_OUT, cancel_event=cancel_event)
 
 
 def _export_mastering_gain(edl: EDL, *, fps, cache_dir: Path,
@@ -2942,21 +2998,72 @@ def _export_mastering_gain(edl: EDL, *, fps, cache_dir: Path,
     target = getattr(edl.canvas, "loudness_lufs", None)
     if target is None:
         return None
-    from .audio_mix import export_gain_for
     try:
         if cancel_event is not None and _cancel.current() is None:
             with _cancel.scope(cancel_event):
-                measured = measure_mix_loudness(edl, fps=fps, cache_dir=cache_dir)
-        else:
-            measured = measure_mix_loudness(edl, fps=fps, cache_dir=cache_dir)
+                return _mastering_gain(edl, target, fps=fps, cache_dir=cache_dir)
+        return _mastering_gain(edl, target, fps=fps, cache_dir=cache_dir)
     except _cancel.RenderCancelled:
         from ..api.jobs import JobCancelled
         raise JobCancelled() from None
-    if measured is None:
+
+
+#: Mastered re-measures `_mastering_gain` makes at most, the error (LU) it
+#: stops under, the most make-up it adds over the static gain, and the least
+#: loudness (LU per dB of gain) the limiter must still let through for more
+#: gain to be worth it.
+_LOUDNESS_FIX_PASSES = 3
+_LOUDNESS_TOL_LU = 0.2
+_LOUDNESS_MAX_MAKEUP_DB = 4.0
+_LOUDNESS_MIN_SLOPE = 0.3
+
+
+def _mastering_gain(edl: EDL, target: float, *, fps, cache_dir: Path) -> float | None:
+    """The static gain that lands `target` AFTER the true-peak limiter.
+
+    Final QA (0.8.0): the gain was `target − I(raw mix)` alone, and on music
+    whose peaks sit ~16 dB over its loudness (the bench's 100 bpm bed) the
+    limiter then shaved 2-4 dB of peaks and the export came out 1.1-1.7 LU
+    short (shorts −15.7 for −14). When the gained peaks reach the limiter,
+    the MASTERED mix is measured and the gain corrected — a fixed-point step,
+    then secant steps (the limiter is monotone), at most
+    `_LOUDNESS_FIX_PASSES` audio-only renders; the ceiling still holds
+    because the limiter still ends the chain.
+
+    Bounded both ways: at most `_LOUDNESS_MAX_MAKEUP_DB` of make-up, and none
+    at all when the limiter swallows the extra gain (under
+    `_LOUDNESS_MIN_SLOPE`) — sparse clicks over a quiet bed gained +0.1 LU for
+    +5.6 dB, and chasing the target there only lifts the bed until it buries
+    the transients (tests/test_c5_render_audio.py, QA-120's claps)."""
+    from .audio_mix import EXPORT_TP_LIMIT_DB, export_gain_for
+    got = _measure_mix(edl, fps=fps, cache_dir=cache_dir)
+    if got is None:
         return None
+    measured, tp = got
     # A gated-silent mix gets 0 dB (`export_gain_for`) — never a loudnorm of
     # silence, which emits NaN below its 3 s window and aborts the AAC encoder.
-    return export_gain_for(target, measured)
+    base = export_gain_for(target, measured)
+    if measured <= -69.0 or tp is None or tp + base <= EXPORT_TP_LIMIT_DB:
+        return base                       # the limiter never engages: exact
+    lo, hi = base, base + _LOUDNESS_MAX_MAKEUP_DB
+    gain, prev = base, None               # prev: (gain, mastered I)
+    for _ in range(_LOUDNESS_FIX_PASSES):
+        m = _measure_mix(edl, fps=fps, cache_dir=cache_dir, gain_db=gain)
+        if m is None:
+            return prev[0] if prev is not None else base
+        slope = 1.0
+        if prev is not None:
+            slope = (m[0] - prev[1]) / (gain - prev[0]) if abs(gain - prev[0]) > 1e-6 else 0.0
+            if slope < _LOUDNESS_MIN_SLOPE:
+                return prev[0]            # the limiter eats it: keep the lesser gain
+        err = float(target) - m[0]
+        if abs(err) < _LOUDNESS_TOL_LU:
+            return gain
+        nxt = max(lo, min(hi, gain + err / slope))
+        if abs(nxt - gain) < 1e-6:
+            return gain
+        prev, gain = (gain, m[0]), nxt
+    return gain
 
 
 def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,

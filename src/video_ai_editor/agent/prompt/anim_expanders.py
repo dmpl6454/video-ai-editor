@@ -113,6 +113,14 @@ def read_animation(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if ANIM_OFF.search(clause):
         out["off"] = True
+        # Final QA r3: "remove all animations" / "remove the zoom animation"
+        # asked "Which clip should I animate?" — they name WHICH animations.
+        if re.search(r"\b(?:all|every|any|each)\s+(?:the\s+|of\s+the\s+)?(?:clip\s+)?animations?\b"
+                     r"|\banimations?\s+(?:from|off)\s+(?:everything|every(?:thing)?|all)\b", clause):
+            out["_off_all"] = True
+        m = re.search(r"\b([a-z]+)(?:[\s-]+(?:in|out))?\s+animations?\b", clause)
+        if m and m.group(1) not in _NOT_A_MOTION:
+            out["_off_type"] = m.group(1)
     else:
         out.update(motion_in(clause))
     if _STICKER_RE.search(clause):
@@ -166,6 +174,29 @@ def _overlay_ids(f: TimelineFacts) -> list[str]:
 def _nth(ids: list[str], n: int) -> str | None:
     idx = n - 1 if n > 0 else len(ids) + n
     return ids[idx] if 0 <= idx < len(ids) else None
+
+
+#: Words before "animation" that do not name a motion.
+_NOT_A_MOTION = frozenset({"all", "every", "any", "each", "the", "my", "this", "that", "these", "those", "its",
+                           "clip", "sticker", "overlay", "an", "a", "remove", "delete", "clear", "no", "off"})
+
+
+def _off_targets(it: Intent, f: TimelineFacts) -> list[tuple[str, dict[str, str]]] | None:
+    """(id, the sides to switch off) for "remove all animations" / "remove the
+    zoom animation" when no clip is named (Final QA r3), or None to target as
+    usual."""
+    if not it.get("off") or it.get("clip_ref") or it.get("target") or it.get("all"):
+        return None
+    kind = it.get("_off_type")
+    if not (it.get("_off_all") or kind):
+        return None
+    out: list[tuple[str, dict[str, str]]] = []
+    for cid, desc in f.animations.items():
+        sides = dict(part.split(":", 1) for part in desc.split(",") if ":" in part)
+        hit = {side: "none" for side, pid in sides.items() if not kind or kind in pid}
+        if hit:
+            out.append((cid, hit))
+    return out
 
 
 def _targets(it: Intent, f: TimelineFacts) -> tuple[list[str], str] | Expansion:
@@ -233,6 +264,18 @@ def _targets(it: Intent, f: TimelineFacts) -> tuple[list[str], str] | Expansion:
 
 def x_animation(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     """CapCut In / Out / Combo on the clip(s) or sticker the prompt names."""
+    offs = _off_targets(it, f)
+    if offs is not None:
+        if not offs:
+            what = f"no {it.get('_off_type')} animation" if it.get("_off_type") else "no animation"
+            return _ask(f"There is {what} on the timeline — nothing to take off.")
+        steps, pcs = [], []
+        for cid, sides in offs:
+            who = "the sticker" if cid in f.sticker_ids else _label(cid, f)
+            steps.append(step("set_animation", STAGE_LOOK, f"take the animation off {who}", clip_id=cid, **sides))
+            pcs.append(pc("animation_is", f"{who} no longer animates that way", clip_id=cid, **sides))
+        return Expansion(steps=tuple(steps), postconditions=tuple(pcs),
+                         notes=(f"animation taken off {len(offs)} clip(s)/sticker(s)",))
     got = _targets(it, f)
     if isinstance(got, Expansion):
         return got

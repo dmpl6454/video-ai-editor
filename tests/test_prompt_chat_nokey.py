@@ -164,7 +164,12 @@ def test_undo_reverts_the_whole_previous_run_and_redo_restores_it(session, nokey
     types = _types(events)
     assert types.count("op") == 1 and "error" not in types and types[-1] == "done", types
     assert next(e for e in events if e["type"] == "plan")["plan"]["intent"] == "redo"
-    assert events[types.index("op")]["op"]["tool"] == "redo"
+    # Final QA: the redone op is the prompt run itself (marked redo), so
+    # History reads "Prompt — tighten + look", not "Redo — Redo".
+    redone = events[types.index("op")]["op"]
+    assert redone["tool"] == "prompt" and redone["redo"] is True
+    assert redone["summary"] == "Prompt: tighten + look (2 steps)"
+    assert redone["edl_hash_before"] == h0 and redone["edl_hash_after"] == h1
     text = next(e for e in events if e["type"] == "text_delta")["text"]
     assert text == "via Recipes — Redid the last undone edit. Undo with ⌘Z."
     assert store.edl.hash() == h1 and len(store.ops.ops) == n0 + 1 and not store.redo_available

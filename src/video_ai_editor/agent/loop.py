@@ -31,6 +31,7 @@ from anthropic import Anthropic, BadRequestError
 from ..config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 from ..edl import EDLStore
 from .dispatch import dispatch, get_timeline as _get_timeline
+from .guarded import PromptRunning, guarded_dispatch, session_id_of
 from .tools import list_tools as _list_tools
 from .system_prompt import SYSTEM_PROMPT
 
@@ -424,10 +425,17 @@ async def chat_turn(
                 assistant_blocks.append({
                     "type": "tool_use", "id": block.id, "name": tool_name, "input": tool_args,
                 })
-                # Dispatch
+                # Dispatch — behind the /dispatch guards (a Prompt-bar run
+                # refuses it; the session lock serialises it) and OFF the event
+                # loop: a transcribe here froze /api/health, the UI and the
+                # preview for its whole run (Final QA).
                 try:
-                    result = dispatch(store, tool_name, tool_args)
+                    op_before = store.ops.last()
+                    result = await asyncio.to_thread(
+                        guarded_dispatch, store, session_id_of(store), tool_name, tool_args)
                     op = store.ops.last()
+                    if op is op_before:
+                        op = None       # a read-only tool, or one that changed nothing
                     yield {"type": "tool_result", "name": tool_name, "result": result, "id": block.id}
                     if op:
                         yield {"type": "op", "op": op.model_dump()}
@@ -443,6 +451,8 @@ async def chat_turn(
                     assistant_blocks = []  # reset; next turn starts fresh
                 except Exception as e:
                     err = {"error": str(e)}
+                    if isinstance(e, PromptRunning):
+                        err["code"] = e.code
                     yield {"type": "tool_result", "name": tool_name, "result": err, "id": block.id, "is_error": True}
                     history.append({"role": "assistant", "content": assistant_blocks})
                     history.append({

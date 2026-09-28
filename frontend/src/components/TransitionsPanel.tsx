@@ -24,8 +24,10 @@
 // transition joins a cut" hint. A `disabled` tile takes no focus and no
 // mouse events in WebKit, which froze the whole grid on a fresh project.
 //
-// Keys inside the grid (scoped with data-keymap-ignore so Space/arrows/
-// Backspace stay here instead of driving the transport):
+// Keys inside the grid (the panel OWNS them — data-keymap-own — so they
+// stay here instead of driving the timeline; every other editor key, ⌘Z,
+// J/K/L, N, still runs from a tile: Final QA r3, ⌘Z right after applying a
+// transition did nothing while the panel was a data-keymap-ignore scope):
 //   ← → ↑ ↓ Home End   move between tiles (roving tabindex, two columns)
 //   Enter / Space       apply the focused look to the target cut
 //   Backspace / Delete  remove the transition on the target cut
@@ -34,7 +36,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useStore } from '../store'
 import { usePromptStore, isBusy } from '../lib/promptStore'
-import { formatCutTime, targetCut, v1CutPoints } from '../lib/cutPoints'
+import { targetCut, v1CutPoints } from '../lib/cutPoints'
+import { formatTimecode } from '../lib/timecode'
 import {
   FAMILY_ORDER, FALLBACK_CATALOG, MAX_DURATION_S, MIN_DURATION_S, cachedTransitionCatalog, clampDuration,
   everyCutPrompt, loadTransitionCatalog, lookupTransition, type Family, type TransitionCatalog, type TransitionEntry, transitionCountText,
@@ -44,6 +47,11 @@ import './transitionsPanel.css'
 import { Icon } from './Icon'
 
 const COLS = 2
+/** The keys the panel keeps from the editor's commands (any modifiers): the
+ *  grid's arrows, Home / End, Backspace / Delete and [ / ]. Space and Enter on
+ *  a keyboard-focused tile apply it (the engine's button rule); after a click
+ *  on a tile, Space plays. */
+const TRANSITIONS_OWN_KEYS = 'ArrowLeft ArrowRight ArrowUp ArrowDown Home End Backspace Delete BracketLeft BracketRight'
 const TAB_KEY = 'vai.transitionsTab'
 
 const NO_ENTRIES: TransitionEntry[] = []
@@ -152,8 +160,9 @@ export function TransitionsPanel({ active }: Props) {
     const next = Math.max(0, Math.min(cuts.length - 1, target.index + delta))
     setPinned({ index: next, edl })
     // Put the playhead on the seam so the preview shows the frames the
-    // transition will join.
-    setPlayhead(cuts[next].at)
+    // transition will join — the DRAWN seam (render time, the playhead's
+    // clock), not the EDL `at`, which sits later by every upstream overlap.
+    setPlayhead(cuts[next].renderAt)
   }
 
   const [hint, setHint] = useState<string | null>(null)
@@ -199,7 +208,7 @@ export function TransitionsPanel({ active }: Props) {
   const placeholder = focused ? `${focused.duration}` : '0.5'
 
   return (
-    <section className="transitions-panel" aria-label="Transitions" data-keymap-ignore>
+    <section className="transitions-panel" aria-label="Transitions" data-keymap-own={TRANSITIONS_OWN_KEYS}>
       <div className="trp-target" aria-live="polite">
         {!cuts.length ? (
           <span className="trp-target-none">
@@ -213,7 +222,7 @@ export function TransitionsPanel({ active }: Props) {
                     aria-label="Previous cut" title="Previous cut ([ in the grid)"><Icon name="chevronLeft" /></button>
             <div className="trp-target-body">
               <span className="trp-target-at">
-                Cut at <b>{target ? formatCutTime(target.cut.at) : '—'}</b>
+                Cut at <b>{target ? formatTimecode(target.cut.renderAt, edl?.canvas?.fps) : '—'}</b>
                 <small> · {target ? target.index + 1 : 0} of {cuts.length}</small>
               </span>
               <span className="trp-target-why">

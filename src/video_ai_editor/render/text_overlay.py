@@ -16,6 +16,7 @@ import math
 import os
 import re
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
@@ -227,19 +228,65 @@ def _emoji_words(text: str) -> list[tuple[bool, str]]:
     return units
 
 
+#: Set while a text PNG renders (`_render_marking`): True once an emoji in
+#: it could not be drawn from the downloaded artwork (drawn from the local
+#: stand-in, or not at all). Such a PNG is never stored under its cache key.
+_EMOJI_DEGRADED: ContextVar[list[bool] | None] = ContextVar("_EMOJI_DEGRADED", default=None)
+
+
+def _mark_degraded() -> None:
+    flag = _EMOJI_DEGRADED.get()
+    if flag is not None:
+        flag[0] = True
+
+
 def _emoji_image(cluster: str, box: int) -> Image.Image | None:
-    """Fetched emoji artwork for one cluster, scaled to `box` px. None if
-    unavailable (offline and uncached) — the caller then skips it, which is
-    the old strip-it behaviour for that one emoji rather than a broken render."""
+    """Emoji artwork for one cluster, scaled to `box` px: the downloaded
+    artwork (`fetch_emoji_png`) or, when that is unavailable (offline and
+    uncached), the same Apple artwork drawn from the installed emoji font
+    (`local_emoji_png`, what `add_sticker` uses offline). Final QA (round 3):
+    it used only the download, so an offline export left every emoji out as
+    a blank gap, silently. Either fallback marks the PNG degraded
+    (`_EMOJI_DEGRADED`) so it is re-rendered once the network is back. None
+    when neither has it — the caller then skips that one emoji."""
+    from ..ai import emoji as _emoji
+    p = None
     try:
-        from ..ai.emoji import fetch_emoji_png
-        p = fetch_emoji_png(cluster)
-        if not p:
-            return None
+        p = _emoji.fetch_emoji_png(cluster)
+    except Exception:  # noqa: BLE001 — a failed download is the offline case
+        p = None
+    if not p:
+        _mark_degraded()
+        try:
+            p = _emoji.local_emoji_png(cluster)
+        except Exception:  # noqa: BLE001
+            p = None
+    if not p:
+        return None
+    try:
         with Image.open(p) as im:
             return im.convert("RGBA").resize((box, box), Image.LANCZOS)
-    except Exception:
+    except Exception:  # noqa: BLE001 — unreadable art: skip that one emoji
+        _mark_degraded()
         return None
+
+
+def _render_marking(fn, *args, **kwargs):
+    """`(fn(*args, **kwargs), degraded)`: whether any emoji in that render
+    fell back from the downloaded artwork (`_emoji_image`)."""
+    flag = [False]
+    token = _EMOJI_DEGRADED.set(flag)
+    try:
+        return fn(*args, **kwargs), flag[0]
+    finally:
+        _EMOJI_DEGRADED.reset(token)
+
+
+def _degraded_path(png: Path) -> Path:
+    """Where a degraded text PNG is written instead of its cache key's path:
+    never looked up, so the next render tries the downloaded artwork again
+    (final QA round 3 — the offline PNG was reused by every later export)."""
+    return png.with_name(f"{png.stem}.degraded{png.suffix}")
 
 
 # Per-role rendering style.
@@ -1248,15 +1295,18 @@ def cache_text_pngs(edl: EDL, cache_dir: Path) -> list[tuple[TextClip, str, Path
         ).hexdigest()[:16]
         png = cache_dir / f"text_{key}.png"
         if not _png_is_valid(png):
-            img = render_text_png(c.text, role, canvas.w, canvas.h,
-                                  fill=fill, font_file=font_file,
-                                  size=size, anchor_x=anchor_x, anchor_y=anchor_y,
-                                  stroke=stroke, stroke_w=stroke_w,
-                                  opacity=opacity, upper=caps,
-                                  scale=k_scale, rotation=rotation,
-                                  background=blk["background"], align=blk["align"],
-                                  line_spacing=blk["line_spacing"], shadow=blk["shadow"],
-                                  letter_spacing=blk["letter_spacing"])
+            img, degraded = _render_marking(
+                render_text_png, c.text, role, canvas.w, canvas.h,
+                fill=fill, font_file=font_file,
+                size=size, anchor_x=anchor_x, anchor_y=anchor_y,
+                stroke=stroke, stroke_w=stroke_w,
+                opacity=opacity, upper=caps,
+                scale=k_scale, rotation=rotation,
+                background=blk["background"], align=blk["align"],
+                line_spacing=blk["line_spacing"], shadow=blk["shadow"],
+                letter_spacing=blk["letter_spacing"])
+            if degraded:
+                png = _degraded_path(png)
             _save_png_atomic(img, png)
         paired.append((c, role, png))
     return paired
@@ -1320,9 +1370,11 @@ def cache_xform_text_pngs(edl: EDL, cache_dir: Path) -> list[dict]:
             # the real one: its half-diagonal x k bounds the block at ANY
             # rotation, so nothing is clipped however it is turned.
             pw, ph = canvas.w * 2, canvas.h * 2
-            probe = render_text_png(c.text, role, canvas.w, canvas.h,
-                                    anchor_x=pw / 2, anchor_y=ph / 2,
-                                    surface=(pw, ph), **style_kw)
+            probe, degraded = _render_marking(
+                render_text_png, c.text, role, canvas.w, canvas.h,
+                anchor_x=pw / 2, anchor_y=ph / 2, surface=(pw, ph), **style_kw)
+            if degraded:
+                png = _degraded_path(png)       # never reused (`_emoji_image`)
             bb = probe.getbbox()
             if bb is None:
                 continue
@@ -1594,7 +1646,7 @@ def _picture_overlay(cur: str, elem: str, opts: str, nxt: str, i: int,
 
 
 def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
-                      canvas, out_w: int, out_h: int, rs: float, re: float,
+                      canvas, rate, out_w: int, out_h: int, rs: float, re: float,
                       relabel: tuple[str, str] = ("", "")) -> list[str]:
     """Filters for an animated-transform text clip (QA-036).
 
@@ -1663,7 +1715,7 @@ def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
     elif a_out == "slide_down":
         y_terms.append(f"+{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
     parts.extend(_picture_overlay(
-        cur, pre, f"x='{x_c}-overlay_w/2':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, canvas.fps)}'",
+        cur, pre, f"x='{x_c}-overlay_w/2':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, rate)}'",
         next_label, i, relabel))
     return parts
 
@@ -1716,8 +1768,16 @@ def build_overlay_chain(
     out_w: int,
     out_h: int,
     preview: bool = False,
+    fps=None,
 ) -> tuple[str, list[str], str]:
     """Return (filter_str, extra_inputs, final_label).
+
+    `fps` is the RENDER rate (default: the project's). Final QA (0.8.0): the
+    enable gates and looped inputs used the project rate, so a 60 fps export
+    of a 30 fps project opened every text and sticker half a PROJECT frame
+    early — one export frame, over the last frame of the previous shot —
+    and animated keyed ones at 30 fps. Placement (`rs`/`re`) stays on the
+    project clock; only the frame grid it is gated on is the export's.
 
     `first_input_index` is the index of the first overlay input we'll add (after
     the existing video clip inputs). Each PNG is added as a new `-i` input.
@@ -1751,6 +1811,7 @@ def build_overlay_chain(
     # via x/y expressions. Text with keyframed opacity or anim_in/anim_out
     # presets uses an "anim_text" path (looped input + per-frame filters).
     canvas = edl.canvas
+    rate = canvas.fps if fps is None else fps
 
     # Track z per clip id: compositing order is the track z index (the design
     # rule CLAUDE.md states). Items are sorted by z below — appending text
@@ -1848,7 +1909,7 @@ def build_overlay_chain(
         rs, re = float(item["rs"]), float(item["re"])
         if item["kind"] == "anim" and _clip_anim.has_animation(item["sticker"]):
             # A clip animation moves every frame: a frame per OUTPUT frame
-            # (the project rate), placed at `rs` like an animated text — and
+            # (the render rate), placed at `rs` like an animated text — and
             # no longer than its window (+ one frame): the half-second of
             # slack the keyed paths add outlives v1 at the timeline's end and
             # the render grows by it (measured: 255 frames for a 240-frame
@@ -1856,30 +1917,30 @@ def build_overlay_chain(
             # of slack still made it 961 of 960).
             dur = max(0.0, re - rs)
             extra_inputs += ["-itsoffset", f"{rs:.6f}",
-                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(rate),
                              "-t", f"{dur:.6f}", "-i", str(item["png"])]
         elif item["kind"] == "anim" and is_keyframed(item["sticker"].transform.opacity):
             # Exactly the window (wave E gate, X2), like the animated sticker
             # above: the old window + 0.5 s outlived v1 at the timeline's end
             # and drove `overlay` 0.5 s past the plan (255 of 240 frames) —
-            # and at the PROJECT rate: a 30 fps input's last frame sits past
+            # and at the RENDER rate: a 30 fps input's last frame sits past
             # a 24 fps timeline's last frame (193 of 192), and a keyed value
             # is sampled on the output grid, where the editor samples it.
             dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
-                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(rate),
                              "-t", f"{dur:.6f}", "-i", str(item["png"])]
         elif item["kind"] == "anim_text":
             dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
-                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(rate),
                              "-t", f"{dur:.6f}", "-i", str(item["png"])]
         elif item["kind"] == "xform_text":
-            # At the PROJECT rate: a transform that moves every frame must
+            # At the RENDER rate: a transform that moves every frame must
             # have a frame for every output frame, or a 60 fps project steps.
             dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
-                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(rate),
                              "-t", f"{dur:.6f}", "-i", str(item["png"])]
         else:
             extra_inputs += ["-i", str(item["png"])]
@@ -1897,10 +1958,10 @@ def build_overlay_chain(
                 # static item whose PNG doesn't carry its own opacity.
                 pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
             parts.append(pre + scaled)
-            parts.extend(_picture_overlay(cur, scaled, f"enable='{enable_expr(rs, re, canvas.fps)}'",
+            parts.extend(_picture_overlay(cur, scaled, f"enable='{enable_expr(rs, re, rate)}'",
                                           next_label, i, relabel))
         elif item["kind"] == "xform_text":
-            parts.extend(_xform_text_parts(item, idx, i, cur, next_label, canvas,
+            parts.extend(_xform_text_parts(item, idx, i, cur, next_label, canvas, rate,
                                            out_w, out_h, rs, re, relabel))
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
@@ -1977,7 +2038,7 @@ def build_overlay_chain(
             else:
                 x_expr = f"{cx:.2f}*(1-overlay_w/main_w)"
             parts.extend(_picture_overlay(
-                cur, preprocessed, f"x='{x_expr}':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, canvas.fps)}'",
+                cur, preprocessed, f"x='{x_expr}':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, rate)}'",
                 next_label, i, relabel))
         else:
             s: Sticker = item["sticker"]
@@ -2050,7 +2111,7 @@ def build_overlay_chain(
                 parts.append(f"{preprocessed}{_sticker_anim_zoom(an, tvar, _sticker_anim_peak(s))}[ovz{i}]")
                 preprocessed = f"[ovz{i}]"
             parts.extend(_picture_overlay(
-                cur, preprocessed, f"x='{xexpr}':y='{yexpr}':enable='{enable_expr(rs, re, canvas.fps)}'",
+                cur, preprocessed, f"x='{xexpr}':y='{yexpr}':enable='{enable_expr(rs, re, rate)}'",
                 next_label, i, relabel))
         cur = next_label
     return ";".join(parts), extra_inputs, cur

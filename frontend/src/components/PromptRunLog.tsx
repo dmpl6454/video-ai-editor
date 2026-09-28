@@ -13,6 +13,7 @@
 // a clip and Clip.fit defaults to contain") and the tool id is internal: both
 // are only the row's hover title.
 
+import { promptUndoAvailable } from '../lib/promptUndo'
 import { useState } from 'react'
 import { useStore } from '../store'
 import { toast } from '../toast'
@@ -86,6 +87,10 @@ export function PromptRunLog() {
   const reply = usePromptStore((s) => s.reply)
   const lastError = usePromptStore((s) => s.lastError)
   const opSeen = usePromptStore((s) => s.opSeen)
+  const opRef = usePromptStore((s) => s.opRef)
+  // Only while the prompt's op is still the newest state: a plain `undo`
+  // after a later edit undid THAT edit (lib/promptUndo, Final QA).
+  const canUndo = useStore((s) => promptUndoAvailable(opSeen, opRef, { edlHash: s.edlHash, ops: s.ops }))
   const connectionDropped = usePromptStore((s) => s.connectionDropped)
   const reconnecting = usePromptStore((s) => s.reconnecting)
   const cancelling = usePromptStore((s) => s.cancelling)
@@ -133,7 +138,7 @@ export function PromptRunLog() {
           <span className="spacer" />
           <button type="button" className="prompt-log-expand" aria-expanded={false}
                   onClick={() => setOpenFor(runKey)} title="Show the steps and what the verifier measured">Details</button>
-          {opSeen && (
+          {canUndo && (
             <button type="button" onClick={() => void dispatch('undo')} title="Undo the whole prompt (one history step)">Undo</button>
           )}
           <button type="button" className="ghost" onClick={dismiss}>Clear</button>
@@ -228,7 +233,7 @@ export function PromptRunLog() {
       )}
 
       <div className="prompt-log-actions">
-        {opSeen && !busy && (
+        {canUndo && !busy && (
           <button type="button" onClick={() => void dispatch('undo')} title="Undo the whole prompt (one history step)">Undo</button>
         )}
         {plan && (

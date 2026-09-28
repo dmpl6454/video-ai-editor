@@ -192,6 +192,39 @@ export function renderWindow(seams: Array<[number, number]>, start: number, end:
   return re - rs <= SEAM_EPS ? null : [rs, re]
 }
 
+/** `clock.sound_window`: a SOUND lane (music, voice-over, audio) starts at
+ *  `render_time(start)` and keeps its whole length across the seams (final
+ *  QA, round 3 — the picture rule above cut a voiceover's last words by
+ *  every seam it crossed). Null only for a clip with no length. */
+export function soundWindow(seams: Array<[number, number]>, start: number, length: number,
+                            pull?: number): [number, number] | null {
+  if (length <= SEAM_EPS) return null
+  const rs = pull === undefined ? renderTime(seams, start) : start - pull
+  return [rs, rs + length]
+}
+
+/** `schema.sound_pulls`: per clip of ONE sound lane, how much earlier than
+ *  its start it plays — a run of abutting clips (a split voice-over, a looped
+ *  bed) is pulled as one block by the overlap before its first clip, so the
+ *  pieces stay back to back instead of doubling at every seam between them. */
+export function soundPulls(clips: EdlClip[], seams: Array<[number, number]>): Map<EdlClip, number> {
+  const out = new Map<EdlClip, number>()
+  let runEnd: number | null = null
+  let runPull = 0
+  for (const c of [...clips].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
+    const s = c.start ?? 0
+    const e = s + effectiveDuration(c)
+    if (runEnd === null || s > runEnd + 1e-3) {
+      runPull = s - renderTime(seams, s)
+      runEnd = e
+    } else {
+      runEnd = Math.max(runEnd, e)
+    }
+    out.set(c, runPull)
+  }
+  return out
+}
+
 const speedOf = (c: EdlClip): number | null => {
   const sp = c.speed
   return typeof sp === 'number' && sp > 0 && sp !== 1 ? sp : null
@@ -371,10 +404,11 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
   for (const t of laneTracks) {
     const kind: BusKind = t.id === 'music' ? 'music' : t.id === 'vo' ? 'vo' : 'audio'
     const bus = t.id
+    const pulls = soundPulls(t.clips.filter(isMediaClip), seams)
     for (const c of t.clips) {
       if (!isMediaClip(c)) continue
       const eff = effectiveDuration(c)
-      const win = renderWindow(seams, c.start ?? 0, (c.start ?? 0) + eff)
+      const win = soundWindow(seams, c.start ?? 0, eff, pulls.get(c))
       if (!win) continue
       if (!buses.some((b) => b.id === bus)) buses.push({ id: bus, kind, gain: trackGain(t, anySolo) })
       const lane = laneClip(c, bus, clips.length, win, eff)
@@ -423,8 +457,8 @@ function laneClip(c: EdlClip, bus: string, n: number, win: [number, number], eff
   const pts = curvePoints(c.speed)
   const frozen = typeof c.freeze === 'number' && c.freeze > 0
   const srcLen = Math.max(0, sOut - sIn)
-  // atrim=end_sample for a retimed clip (speed, curve, freeze) or one a
-  // seam shortened.
+  // atrim=end_sample for a retimed clip (speed, curve, freeze) or a window
+  // shorter than the clip (a sound window never is since final QA round 3).
   const cut = sp !== null || pts !== null || frozen || re - rs < eff - 0.0005
   const len = cut ? Math.max(0, pyRound(Math.min(re - rs, eff) * SR)) : srcLen
   const delayMs = Math.max(0, pyRound(rs * 1000))

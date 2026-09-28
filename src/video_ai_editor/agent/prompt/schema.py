@@ -378,7 +378,7 @@ TOOL_STAGE: dict[str, int] = {
     "set_caption_style": 7,
     # 8 — text (hook, title, brand, end card, voiceover)
     "apply_hook_stack": 8, "add_hook_overlay": 8, "generate_hook": 8,
-    "add_text": 8, "add_super_text": 8, "add_lower_third": 8,
+    "add_text": 8, "add_super_text": 8, "add_lower_third": 8, "set_text": 8,
     "apply_text_template": 8, "apply_brand_kit": 8, "tts_voiceover": 8,
     # 9 — music (add, duck, beats)
     "add_music": 9, "set_duck": 9, "auto_cut_to_beats": 9, "fit_music_to_video": 9,
@@ -425,6 +425,8 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("captions_sync", "captions stay in sync across cuts", tol=0.1),
     _spec("captions_language", "captions are in the requested language", target=None),
     _spec("captions_style", "captions use the requested style", style=None),
+    _spec("caption_look", "the captions have the requested look", color=None, size=None, upper=None,
+          stroke_w=None, background=None, position=None),
     _spec("speech_preserved", "no kept word was cut"),
     _spec("fillers_remaining_leq", "filler words are gone", words=None, max=0),
     # duration
@@ -469,7 +471,9 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("brand_kit_set", "the brand kit is recorded"),
     _spec("vo_present", "the voiceover is on the timeline"),
     # effects / clips
-    _spec("effect_present", "the effect is applied", type=None, track="v1", all=True),
+    # `clip_id` (Final QA r2): the one clip the step applied it to — a
+    # correct one-clip look was graded against EVERY clip ("1/3, expected all").
+    _spec("effect_present", "the effect is applied", type=None, track="v1", all=True, clip_id=None),
     _spec("clip_src_changed", "the clip was re-rendered", clip_id=None),
     # `factor` (a constant) or `preset` (a curve by id, wave D lane S2).
     _spec("speed_equals", "the speed matches", clip_id=None, factor=None, preset=None),
@@ -565,7 +569,8 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "remove_transition": [_pc("transitions_absent", "the transition is gone", at=f"{ARG_REF}at")],
     "remove_effects": [_pc("effect_absent", "the effect is off", clip_id=f"{ARG_REF}clip_ids",
                            types=f"{ARG_REF}types")],
-    "apply_lut": [_pc("effect_present", "the look is applied", type="lut", track="v1")],
+    "apply_lut": [_pc("effect_present", "the look is applied", type="lut", track="v1",
+                      clip_id=f"{ARG_REF}clip_id")],
     "auto_reframe": [_pc("canvas_aspect", "the canvas has the requested aspect",
                          ratio=f"{ARG_REF}ratio"),
                      _pc("reframe_effective", "the reframe changed the picture")],
@@ -612,6 +617,7 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "add_hook_overlay": [_pc("hook_text_starts_leq", "the hook starts immediately", t=0.5)],
     "add_text": [_pc("text_present", "the text is on screen", contains=f"{ARG_REF}text"),
                  _pc("overlays_inside_safe_zone", "text stays clear of the platform UI")],
+    "set_text": [_pc("text_present", "the text says the new words", contains=f"{ARG_REF}text")],
     "add_super_text": [_pc("text_present", "the text is on screen"),
                        _pc("overlays_inside_safe_zone", "text stays clear of the platform UI")],
     "apply_text_template": [_pc("text_present", "the text is on screen"),
