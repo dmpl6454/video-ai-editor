@@ -7,11 +7,12 @@ import { AudioChunkError, AudioChunks, chunkReader, parseLayout } from './audioC
 
 const CS = 1000                                           // chunk samples (tests)
 
-function fakeServer(opts: { samples?: number; pending?: number; gains?: Record<string, number>; status?: number; silent?: boolean } = {}) {
+function fakeServer(opts: { samples?: number; pending?: number; gains?: Record<string, number>; status?: number; silent?: boolean; peaks?: number[] } = {}) {
   const samples = opts.samples ?? 2500
   const hits: string[] = []
   let pending = opts.pending ?? 0
-  const index = { audio: { rate: 48000, chunk_samples: CS, samples, chunks: Math.ceil(samples / CS), silent: !!opts.silent, chunk_gain: opts.gains ?? {} } }
+  const index = { audio: { rate: 48000, chunk_samples: CS, samples, chunks: Math.ceil(samples / CS), silent: !!opts.silent, chunk_gain: opts.gains ?? {},
+    ...(opts.peaks ? { chunk_peak: opts.peaks } : {}) } }
   const fetch = async (url: string): Promise<Response> => {
     hits.push(url)
     if (url.endsWith('index.json')) return new Response(JSON.stringify(index))
@@ -90,11 +91,34 @@ describe('AudioChunks', () => {
 
   it('parses a layout with defaults', () => {
     expect(parseLayout({ audio: { chunk_gain: { 2: 2, x: 'no' }, silent: true } })).toEqual({
-      rate: 48000, chunkSamples: 240000, samples: null, chunks: null, silent: true, chunkGain: { 2: 2 } })
+      rate: 48000, chunkSamples: 240000, samples: null, chunks: null, silent: true, chunkGain: { 2: 2 }, chunkPeak: null })
+  })
+
+  it('parses the recorded chunk peaks (gate RX), and drops a malformed list', () => {
+    expect(parseLayout({ audio: { chunk_peak: [0.5, 1.7, 0] } }).chunkPeak).toEqual([0.5, 1.7, 0])
+    expect(parseLayout({ audio: { chunk_peak: [0.5, 'x'] } }).chunkPeak).toBeNull()
+    expect(parseLayout({ audio: { chunk_peak: [-1] } }).chunkPeak).toBeNull()
   })
 })
 
 describe('chunkReader', () => {
+  it('bounds a source range by its chunks\' recorded peaks (gate RX)', async () => {
+    const s = fakeServer({ samples: 3500, peaks: [0.25, 0.9, 0.5, 0.125] })
+    const ch = new AudioChunks({ fetch: s.fetch, decode: s.decode })
+    const r = chunkReader(ch, (src) => (src === 'none' ? null : 'k'))
+    expect(r.peak!('a', 0, 10)).toBeNull()                 // layout not loaded: unknown
+    await ch.layout('k')
+    expect(r.peak!('a', 0, CS)).toBe(0.25)
+    expect(r.peak!('a', CS - 1, CS + 1)).toBe(0.9)         // straddles chunks 0 and 1
+    expect(r.peak!('a', 2 * CS, 3500)).toBe(0.5)
+    expect(r.peak!('none', 0, 10)).toBe(0)                 // no proxy: silence
+    const quiet = fakeServer({ samples: 2500 })
+    const ch2 = new AudioChunks({ fetch: quiet.fetch, decode: quiet.decode })
+    const r2 = chunkReader(ch2, () => 'k')
+    await ch2.layout('k')
+    expect(r2.peak!('a', 0, 10)).toBeNull()                // an index without peaks: unknown
+  })
+
   async function reader(samples = 2500) {
     const s = fakeServer({ samples })
     const ch = new AudioChunks({ fetch: s.fetch, decode: s.decode })

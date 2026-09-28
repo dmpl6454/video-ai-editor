@@ -1773,7 +1773,7 @@ def _render_error_types() -> tuple[type[BaseException], ...]:
 RENDER_ERRORS = _render_error_types()
 
 
-def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
+def _render_failure_message(ffmpeg_tail: str, full: str | None = None, *, kind: str = "preview") -> str:
     """Pick a user-facing message for a render_failed 422.
 
     `ffmpeg_tail` is what gets SHOWN; `full` (when given) is the complete
@@ -1796,6 +1796,18 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
     # is wrong with the media. This is what a Windows tester hit by closing the
     # console window that used to appear behind the app: the render died, and
     # the app told them their footage had "corrupt frames or an unusual codec".
+    # 0. Our OWN post-render checks (compositor._check_picture): the render
+    # finished but does not match the timeline. Review RE: an export rejected
+    # for its frame count told the user "Couldn't render a preview for this
+    # clip — it may have corrupt frames": wrong on both counts.
+    m = re.search(r"came out (\d+) frames long where the timeline plans (\d+)", hay)
+    if m:
+        what = "export" if kind == "export" else "preview"
+        return (f"The {what} came out {m.group(1)} frames long where the timeline plans {m.group(2)}, so it "
+                f"was not kept. If the timeline changed while it rendered, {what} again. Your media is fine; "
+                f"if it happens again on an unchanged timeline, it is a bug in the app.")
+    if "The render produced no picture, only sound" in hay:
+        return hay[hay.index("The render produced no picture"):].splitlines()[0]
     if re.search(r"received signal \d+", hay) or "Exiting normally" in hay:
         return ("The render was interrupted before it finished — something "
                 "stopped the video encoder (for example closing a terminal "
@@ -1859,6 +1871,9 @@ def _render_failure_message(ffmpeg_tail: str, full: str | None = None) -> str:
         return (f"Couldn't render — the timeline contains {which}. "
                 f"Move that clip to the Music lane (or delete it) and try again.")
 
+    if kind == "export":
+        return ("Couldn't export — a clip may have corrupt frames or an unusual codec. "
+                "Check the clip named in the details, or convert it to MP4 and try again.")
     return ("Couldn't render a preview for this clip — it may have corrupt "
              "frames or an unusual codec.")
 
@@ -1904,18 +1919,51 @@ class _PreviewTicket:
             _rcancel.PREVIEWS.end(self.sid, ev, abandoned=self.abandoned)
 
 
-def _preview_edl(store):
-    """The EDL a preview renders: the live one, or — when media is missing —
-    a copy with slates in its place (media_offline.render_edl, QA-095)."""
-    from .media_offline import render_edl
+#: How long a render waits for an in-flight edit before copying the EDL
+#: without the session lock (a Prompt run holds it for its whole run).
+_RENDER_SNAPSHOT_WAIT_S = 2.0
+
+
+def _edl_snapshot(sid: str, store):
+    """A PRIVATE deep copy of the session's EDL, taken under its dispatch lock.
+
+    Review RE: renders read the live, mutable `store.edl` — dispatch edits it
+    IN PLACE (`track.clips.remove(c)`) — so a delete landing while a render
+    ran made the hash, the filtergraph and the frame-count check (`_check_
+    picture`, fatal since wave E) describe three different timelines: an
+    export failed at 99.8 % ("660 video frames, the timeline plans 480"), a
+    Cmd+B/Delete in the UI answered POST /preview 422, and a preview of the
+    EDITED timeline was cached under the PRE-edit hash (Undo then served it).
+    Hash, render and check now all read this one object."""
+    lock = _session_lock(sid)
+    got = lock.acquire(timeout=_RENDER_SNAPSHOT_WAIT_S)
     try:
-        return render_edl(store.edl, store.dir)
+        for _ in range(3):
+            try:
+                return store.edl.model_copy(deep=True)
+            except RuntimeError:            # a list changed under an unlocked copy: try again
+                if got:
+                    raise
+        return store.edl.model_copy(deep=True)
+    finally:
+        if got:
+            lock.release()
+
+
+def _preview_edl(store, sid: str | None = None):
+    """The EDL a preview renders: the live one (a private snapshot when `sid`
+    is given — every RENDER passes it), or — when media is missing — a copy
+    with slates in its place (media_offline.render_edl, QA-095)."""
+    from .media_offline import render_edl
+    base = _edl_snapshot(sid, store) if sid is not None else store.edl
+    try:
+        return render_edl(base, store.dir)
     except Exception:
         # A slate that cannot be made must not take the preview down with it;
         # the render then reports the missing file as it always did.
         import logging
         logging.getLogger("video_ai_editor").warning("offline slate failed", exc_info=True)
-        return store.edl
+        return base
 
 
 def _export_edl(edl, height: int | None, *, dry_run: bool = False,
@@ -1972,7 +2020,9 @@ def _render_preview_latest(sid: str, store, ticket: _PreviewTicket | None = None
     from .render import cancel as _rcancel
     # QA-095: missing media previews as a "Media offline" slate; the other
     # clips still play, and the render's key reflects the offline state.
-    edl = _preview_edl(store)
+    # Review RE: a private snapshot, so an edit during the render can neither
+    # fail it nor be cached under this hash.
+    edl = _preview_edl(store, sid)
     ev = _rcancel.PREVIEWS.begin(sid, edl.render_hash())
     if ticket is not None:
         ticket.joined(ev)
@@ -2093,7 +2143,7 @@ async def make_preview(sid: str, request: Request, wait: int = 1,
     # The offline-aware view (QA-095), exactly what wait=1 and GET
     # preview.mp4 render: missing media is slated, not a failed job, and the
     # hash agrees with the file the <video> is served.
-    edl_snapshot = await run_in_threadpool(_preview_edl, store)
+    edl_snapshot = await run_in_threadpool(_preview_edl, store, sid)
     session_dir_snapshot = store.dir
 
     def _job(cancel_event=None) -> dict:
@@ -2284,13 +2334,16 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
         # Mirror the preview path's RuntimeError→422 handling. Without it an
         # ffmpeg failure fell through to hardening's generic handler as an
         # opaque HTTP 500 with the reason discarded into the server log.
-        timeline_hash = store.edl.hash()
+        # Review RE: one private snapshot for the hash, the render and its
+        # frame-count check (an edit during the export used to fail it).
+        snap = _edl_snapshot(sid, store)
+        timeline_hash = snap.hash()
         # An audio-only export (QA-100) renders no picture, so it never waits
         # for full-quality video masters (QA-089).
         audio_only = body.container in ("m4a", "wav")
         try:
             with _proxy_export_in_progress():      # wave D: eager proxies pause
-                res = render_export(store.edl if audio_only else _export_edl(store.edl, body.height),
+                res = render_export(snap if audio_only else _export_edl(snap, body.height),
                                     store.dir, height=body.height,
                                     fps=body.fps, crf=body.crf, container=body.container,
                                     bitrate_kbps=body.bitrate_kbps,
@@ -2300,12 +2353,14 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             tail = msg[-400:]
             raise HTTPException(422, {
                 "error": "render_failed",
-                "message": _render_failure_message(tail, msg),
+                "message": _render_failure_message(tail, msg, kind="export"),
                 "ffmpeg": tail,
             })
         return _export_payload(sid, res, timeline_hash)
     from .api.jobs import JOB_MANAGER
-    edl_snapshot = store.edl
+    # Review RE: `store.edl` was a REFERENCE — ripple_delete mutates it in
+    # place, and the export failed at 99.8 % on its frame-count check.
+    edl_snapshot = _edl_snapshot(sid, store)
     session_dir_snapshot = store.dir
     height, fps, crf, container = body.height, body.fps, body.crf, body.container
     bitrate_kbps = body.bitrate_kbps
@@ -2336,7 +2391,7 @@ def make_export(sid: str, body: ExportRequest | None = None, wait: int = 1):
             # UI shows it verbatim — so raise something whose str() is already
             # user-facing instead of a 2000-char ffmpeg stderr dump.
             msg = str(e)
-            raise RuntimeError(_render_failure_message(msg[-400:], msg)) from e
+            raise RuntimeError(_render_failure_message(msg[-400:], msg, kind="export")) from e
         return _export_payload(sid, res, timeline_hash)
 
     job = JOB_MANAGER.submit(kind="export", fn=_job, session_id=sid)
@@ -2432,6 +2487,26 @@ app.include_router(_preview_routes.router)
 # `edl/speed_presets.py` that set_speed and the agent tool also read.
 from .api.speed_routes import router as _speed_router
 app.include_router(_speed_router)
+
+# Clip animations (wave E, F1): the preset table `edl/clip_animations.py`
+# that set_animation, the agent tool and every renderer also read.
+from .api.animation_routes import router as _animation_router
+app.include_router(_animation_router)
+
+# Voice effects (wave E, F3): the preset table `edl/voice_effects.py` that
+# set_voice_effect and the agent tool also read, and the Inspector's
+# server-rendered audition of one clip through an effect.
+from .api import voice_routes as _voice_routes
+_voice_routes.configure(resolve_store=_store)
+app.include_router(_voice_routes.router)
+
+# CapCut Canvas backgrounds and overlay blend modes (wave E, F2): the table
+# `edl/canvas_blend.py` that set_canvas_background / set_blend_mode, the agent
+# tools and both renderers also read, and an image background's cover-fitted
+# picture for the engine (the render's own function).
+from .api import canvas_blend_routes as _canvas_blend_routes
+_canvas_blend_routes.configure(resolve_store=_store)
+app.include_router(_canvas_blend_routes.router)
 
 
 @app.get("/api/sessions/{sid}/waveform")

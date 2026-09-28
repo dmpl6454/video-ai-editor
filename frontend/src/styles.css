@@ -716,13 +716,21 @@ span.menu-check { display: inline-flex; width: 16px; flex: 0 0 16px; color: var(
 .timeline-pane { container-type: inline-size; }
 @container (max-width: 760px) { .timeline-toolbar .tb-clock-dur { display: none; } }
 @container (max-width: 640px) { .timeline-toolbar .tb-zoom { display: none; } }
-/* The toolbar's full content is 519 px since Freeze (wave D S2; 485 before);
-   the R1 grid leaves the centre 484 px at the 1024 default (it was 512 before
-   the rail), so the zoom steps drop below 522 px — before "Zoom to fit" would
-   be pushed out of the bar. Below 460 px (a 900-990 px window) the gaps
-   tighten too: without the steps the bar is 451 px, 417 at the tight gaps. */
-@container (max-width: 522px) { .timeline-toolbar .tb-zoomstep { display: none; } }
-@container (max-width: 460px) { .timeline-toolbar { gap: 4px; } .timeline-toolbar .tb-sep { margin: 0; } }
+/* The toolbar's full content is 521 px since Freeze (wave D S2; 485 before);
+   the R1 grid leaves the centre 484 px at the 1024 default and 440 px at its
+   floor (any window under ~1000 px). Item 27 (wave E, F4b): the zoom −/+
+   steps used to drop out below 522 px, so a browser window under 1100 px
+   had no way to zoom by a step. They stay: the bar tightens instead — gaps
+   6 → 3 px, the separators lose their margin, every icon button 28 → 24 px
+   wide (still a 24×24 target, WCAG 2.5.8) — 521 → 424 px, inside the
+   440 px floor (measured, Chromium and WebKit). Only a pane narrower than the
+   grid ever makes (≤ 430 px) drops the steps, before "Zoom to fit". */
+@container (max-width: 522px) {
+  .timeline-toolbar { gap: 3px; }
+  .timeline-toolbar .tb-sep { margin: 0; }
+  .timeline-toolbar .tb-icon { min-width: 22px; padding: 0 3px; }
+}
+@container (max-width: 430px) { .timeline-toolbar .tb-zoomstep { display: none; } }
 
 .timeline-canvas-wrap {
   flex: 1;

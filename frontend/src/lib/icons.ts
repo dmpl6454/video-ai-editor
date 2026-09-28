@@ -21,6 +21,11 @@ import {
   SquareSplitHorizontal, WandSparkles, PanelLeftClose, SlidersHorizontal, MessageSquare,
   Square, Clapperboard,
   Snowflake, Spline, Gauge,
+  Squirrel, ArrowDownNarrowWide, Skull, Bot, Repeat, Church, Phone, Megaphone, Radio, Waves, AudioWaveform, Ban, MicVocal,
+  FlipHorizontal2, FlipVertical2,
+  LogIn, LogOut, Sunrise, Sunset, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, RotateCw, Activity, Rotate3d,
+  Anchor, Vibrate, Scaling,
+  Palette, CopyCheck, Layers,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -116,6 +121,53 @@ export const ICONS = {
   freeze: Snowflake,
   speedNormal: Gauge,
   speedCurve: Spline,
+  // Wave E F3: the Inspector's Voice effects grid (edl/voice_effects.py names
+  // these in its table's `icon`; voiceFx.test.ts pins that every one exists)
+  voiceEffects: MicVocal,
+  voiceNone: Ban,
+  voiceChipmunk: Squirrel,
+  voiceDeep: ArrowDownNarrowWide,
+  voiceMonster: Skull,
+  voiceRobot: Bot,
+  voiceEcho: Repeat,
+  voiceHall: Church,
+  voicePhone: Phone,
+  voiceMegaphone: Megaphone,
+  voiceRadio: Radio,
+  voiceUnderwater: Waves,
+  voiceVibrato: AudioWaveform,
+  // Wave E F4b: the Inspector's Mirror toggles (Transform flip_h / flip_v).
+  // Lucide 1.x draws each by its AXIS: FlipVertical2 is the left-right mirror
+  // (a vertical axis, arrows either side) — measured in the screenshot.
+  mirrorH: FlipVertical2,
+  mirrorV: FlipHorizontal2,
+  // Wave E F1: clip animations — the Inspector's In | Out | Combo tabs and
+  // each preset's static glyph (shown in place of its looping preview when
+  // the viewer asks for reduced motion). Names from edl/clip_animations.py.
+  animIn: LogIn,
+  animOut: LogOut,
+  animCombo: Repeat,
+  animFadeIn: Sunrise,
+  animFadeOut: Sunset,
+  animLeft: ArrowLeft,
+  animRight: ArrowRight,
+  animUp: ArrowUp,
+  animDown: ArrowDown,
+  animRotate: RotateCw,
+  animSpin: RefreshCw,
+  animBounce: Activity,
+  animRock: Rotate3d,
+  animSwing: MoveHorizontal,
+  animPendulum: Anchor,
+  animShake: Vibrate,
+  animBreathe: Scaling,
+  // Canvas background and blend modes (wave E, F2)
+  canvasNone: Ban,
+  canvasColor: Palette,
+  canvasBlur: Droplets,
+  canvasImage: Image,
+  applyAll: CopyCheck,
+  blendMode: Layers,
 } satisfies Record<string, LucideIcon>
 
 export type IconName = keyof typeof ICONS

@@ -12,8 +12,9 @@ report lands under `<user cache>/Video AI Editor/bench/reports/` (or
 `VAI_BENCH_REPORT`); docs/BENCHMARK.md quotes it verbatim.
 
 A case is one pytest item so `-k`, `-m slow`, `-x` and the per-case ids work;
-the session-scoped `bench` fixture holds the app and the fixture sessions and
-writes the report when the session ends — including the skipped cases and
+the module-scoped `bench` fixture holds the app and the fixture sessions and
+writes the report when this module ends (and takes every guard and patch down
+with it, so no later test inherits them) — including the skipped cases and
 the reason, because "skipped" is a fact the headline numbers must carry.
 
 Every case also gets the harness-level assertions of §6.2's last line:
@@ -42,7 +43,14 @@ pytestmark = pytest.mark.benchmark
 _COMMON_REQUIREMENTS: tuple[str, ...] = ("whisper_small", "validate_module")
 
 
-@pytest.fixture(scope="session")
+# MODULE scope, never session: `open_bench` arms a process-wide socket
+# EgressGuard, sets BENCH_ENV and monkeypatches WORKDIR / the download entry
+# points for as long as it is open. Session-scoped, that state outlived this
+# module whenever a marker expression (`-m "not wk"` replaces addopts'
+# `not benchmark`) collected it — and every later test in the run inherited a
+# network ban and a redirected WORKDIR (7 unrelated failures, gate X3).
+# tests/benchmark/conftest.py fails the package if any of it leaks again.
+@pytest.fixture(scope="module")
 def bench(tmp_path_factory) -> tuple[BenchEnv, Report]:
     brain = (os.environ.get("VAI_BRAIN") or "").strip().lower() or None
     if brain == "auto":

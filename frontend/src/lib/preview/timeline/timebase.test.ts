@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
-  ceilToFrame, enableWindow, ffmpegMicros, ffmpegRate, floorToFrame, fpsFloat, frameDuration,
+  ceilToFrame, editSample, enableWindow, ffmpegMicros, ffmpegRate, floorToFrame, fpsFloat, frameDuration,
   frameOf, framesBetween, mulDivRoundAway, quantize, rateOf, rescale, samplesForFrames,
   seekPreroll, sourceRate, timeOf, _internal,
 } from './timebase'
@@ -23,6 +23,7 @@ interface Golden {
   enable_window: [number, number, Fps, [number, number]][]
   source_rate: [number | string | null, number | string | null, [number, number]][]
   ffmpeg_us: [number, number][]
+  edit_sample: [number, number][]
 }
 
 const G: Golden = JSON.parse(readFileSync(fileURLToPath(
@@ -88,6 +89,12 @@ describe('timebase.ts reproduces edl/timebase.py on every golden case', () => {
     // The trap in one line: toFixed rounds this exact tie up, Python down.
     expect((0.0078125).toFixed(6)).toBe('0.007813')
     expect(ffmpegMicros(0.0078125)).toBe(7812)
+  })
+
+  it('edit_sample: R9\'s one audio start rule, the nearest sample to the printed time', () => {
+    expect(G.edit_sample.length).toBeGreaterThan(600)
+    const bad = G.edit_sample.filter(([x, n]) => editSample(x) !== n).map(([x, n]) => `${x}: ${editSample(x)} ≠ ${n}`)
+    expect(bad.slice(0, 10)).toEqual([])
   })
 })
 

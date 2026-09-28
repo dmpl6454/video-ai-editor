@@ -98,3 +98,14 @@ describe('review RD3: split-descendant ids and what they leave behind', () => {
     expect(cleanSummary('Freeze frame at 3.83s for 2.00s (c_a674b046_51af85)')).toBe('Freeze frame at 3.83s for 2.00s')
   })
 })
+
+describe('wave E (F4b) ops read like an editor', () => {
+  it('flip and remove-filter titles and details carry no ids or jargon', () => {
+    const flip = opLabel({ tool: 'flip_clip', summary: 'Flip c_243538e3_03c462 horizontally' })
+    expect(flip.title).toBe('Flip')
+    expect(`${flip.title} ${flip.detail}`).not.toMatch(/c_[0-9a-f]{6}|flip_clip/)
+    const rm = opLabel({ tool: 'remove_effects', summary: 'Remove the filter from 2 clips' })
+    expect(rm.title).toBe('Remove filter')
+    expect(`${rm.title} ${rm.detail}`).not.toMatch(/remove_effects|\blut\b|\(s\)/)
+  })
+})

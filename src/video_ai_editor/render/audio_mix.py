@@ -258,15 +258,30 @@ def duck_gain_chain(key_label: str, to_db: float, out_label: str) -> str:
 # rule lives; the v1 chain, the PIP fold and the audio lanes all call it.
 
 def gain_env_filter(audio) -> str:
-    """`volume=…:eval=frame` for a clip's volume automation (`AudioProps.
-    gain_env`, dB offsets on clip-local timeline seconds), or "" when there is
-    none. Must sit where the stream's `t` IS clip-local time (before any
-    `adelay` that places it on the timeline)."""
+    """The filter applying a clip's volume automation (`AudioProps.gain_env`,
+    dB offsets on clip-local timeline seconds), or "" when there is none.
+    Must sit where the stream's `t` IS clip-local time (before any `adelay`
+    that places it on the timeline).
+
+    PER SAMPLE (wave E, item 25): `aeval`, whose `t` is each sample's own
+    time. It was `volume=…:eval=frame`, one gain per audio FRAME: a
+    staircase with a step every packet (1024 samples at 1x, 2048 after a
+    0.5x atempo — 21-43 ms), measured by E1a as the envelope lagging up to a
+    packet; the preview (lib/preview/audio/curves.ts) plays the continuous
+    curve, which is now what the export plays too. Cost: ~11 ms of CPU per
+    second of stereo sound for a five-key eased envelope (measured, 60 s in
+    0.66 s), paid only by clips that carry automation."""
     env = getattr(audio, "gain_env", None) if audio is not None else None
     if env is None or not getattr(env, "keyframes", None):
         return ""
-    from ..edl.keyframes import to_ffmpeg_expr
-    return f"volume=volume=pow(10\\,({to_ffmpeg_expr(env)})/20):eval=frame"
+    # The picture's key rule (`frame_exact_expr`): key times to 9 digits and
+    # the segment picked 1 µs past the sample's `t`, so a key on a sample
+    # (0.4 s = sample 19200) switches ON that sample whatever the packet
+    # boundaries (aeval's `t` is the packet's pts plus i/48000, a last-ulp
+    # tie otherwise); key and sample grids are >= 4 µs apart elsewhere.
+    from ..edl.keyframes import frame_exact_expr
+    return (f"aeval=exprs=val(ch)*pow(10\\,({frame_exact_expr(env, 't')})/20)"
+            f":channel_layout=same")
 
 
 def varispeed_filter(speed: float) -> str:
@@ -364,6 +379,157 @@ def channel_filter(audio) -> str:
     return f",{pan}" if pan else ""
 
 
+# ------------------------------------------------------- voice effects
+#
+# Wave E (F3): CapCut's voice changer. The presets and what each stage means
+# are `edl/voice_effects.py`; this is their ffmpeg realisation, placed by
+# every lane's chain after the retime and the channel mode and before the
+# gain, automation, fades and the exact-length cut (see that module).
+
+def _pitch_filters(semitones: float) -> str:
+    """Shift by `semitones` keeping the duration: varispeed by the integer
+    rate R = round(48000 · 2^(st/12)) (pitch exact to 1/48000) and a WSOLA
+    stretch by exactly 48000/R, each atempo stage centred by `ATEMPO_LAG`
+    and restamped like keep-pitch speed. Up: stretch, then resample (the
+    stretch's jitter is compressed by the ratio); down: resample, then
+    stretch — the order with the smaller measured timing spread each way."""
+    ratio = 2.0 ** (float(semitones) / 12.0)
+    rate = max(1, int(round(48000 * ratio)))
+    tempo = 48000.0 / rate
+    stretch = ""
+    remaining = tempo
+    while remaining > 2.0:
+        stretch += f",{ATEMPO_LAG},atempo=2.0,{ATEMPO_RESTAMP}"
+        remaining /= 2.0
+    while remaining < 0.5:
+        stretch += f",{ATEMPO_LAG},atempo=0.5,{ATEMPO_RESTAMP}"
+        remaining /= 0.5
+    stretch += f",{ATEMPO_LAG},atempo={remaining:.8f},{ATEMPO_RESTAMP}"
+    resample = f",asetrate={rate},aresample=48000"
+    return stretch + resample if rate > 48000 else resample + stretch
+
+
+def _reverb_ir_expr(k: dict, channel: int) -> str:
+    """`voice_effects` reverb IR for one channel, as an aevalsrc expression
+    (the closed form `voice_effects.reverb_ir` / voiceFx.ts `reverbIr`)."""
+    x = f"(sin((n+{7919 * channel})*12.9898)*43758.5453)"
+    return (f"{k['dry']:.17g}*eq(n,0)+{k['tail']:.17g}*gte(n,{int(k['P'])})"
+            f"*exp(-{k['a']:.17g}*(n-{int(k['P'])}))*(2*({x}-floor({x}))-1)")
+
+
+def _stage_filters(kind: str, p: dict, tag: str, idx: int) -> str:
+    from ..edl import voice_effects as _vfx
+    if kind == "pitch":
+        return _pitch_filters(p["semitones"])
+    if kind == "biquad":
+        name = "equalizer" if p["type"] == "peaking" else p["type"]
+        g = f":g={float(p['gain_db']):.6g}" if p["type"] == "peaking" else ""
+        one = f",{name}=f={float(p['f']):.6g}:t=q:w={float(p['q']):.6g}{g}:m={float(p['mix']):.6g}"
+        return one * int(p.get("passes", 1))
+    if kind == "echo":
+        delays = "|".join(f"{float(d):.6g}" for d in p["delays_ms"])
+        decays = "|".join(f"{float(d):.6g}" for d in p["decays"])
+        return f",aecho={float(p['in_gain']):.6g}:{float(p['out_gain']):.6g}:{delays}:{decays}"
+    if kind == "drive":
+        k = float(p["k"])
+        return f",aeval='tanh({k:.6g}*val(ch))/tanh({k:.6g})':c=same"
+    if kind == "ring":
+        d = float(p["depth"])
+        return f",aeval='val(ch)*({1 - d:.6g}+{d:.6g}*sin(2*PI*{float(p['freq']):.6g}*t))':c=same"
+    if kind == "vibrato":
+        return f",vibrato=f={float(p['f']):.6g}:d={float(p['d']):.6g}"
+    if kind == "gain":
+        return f",volume={float(p['db']):.4f}dB"
+    if kind == "reverb":
+        k = _vfx.reverb_constants(p)
+        b = f"{tag}_vfx{idx}"
+        irs = "|".join(_reverb_ir_expr(k, c) for c in (0, 1))
+        # The IR is a second input, so the chain is cut here and resumed
+        # after `afir` (no auto gain, no norm: the IR's own levels are the
+        # effect's, and the preview convolves with the same samples).
+        return (f"[{b}_x];aevalsrc=exprs='{irs}':s=48000:d={_vfx.REVERB_IR_SECONDS:g}[{b}_ir];"
+                f"[{b}_x][{b}_ir]afir=gtype=none:irnorm=-1:irgain=1:dry=1:wet=1")
+    raise ValueError(f"unknown voice-effect stage {kind!r}")
+
+
+#: Seconds of REAL sound a latency-bearing voice effect is primed with
+#: (review RE): the pitch presets' atempo stages start behind `ATEMPO_LAG`
+#: (20 ms of zeros) and the vibrato / underwater delay line starts empty, so
+#: every clip head — and so every split, cut and trim seam — had 5-19 ms of
+#: digital silence mid-word that the unsplit clip did not. The clip's sound is
+#: opened this much BEFORE `in`, run through the retime and the effect, and
+#: the primed head is cut off again (`voice_prime_cut`). 50 ms covers every
+#: stage (the deepest measured: 913 samples, 19 ms).
+VOICE_PRIME_S = 0.05
+
+
+def voice_prime_s(audio) -> float:
+    """`VOICE_PRIME_S` when the clip's voice effect has a latency (a pitch or
+    a vibrato stage), else 0."""
+    from ..edl import voice_effects as _vfx
+    if audio is None:
+        return 0.0
+    stages = _vfx.stages_at(getattr(audio, "voice_effect", None),
+                            float(getattr(audio, "voice_intensity", _vfx.DEFAULT_INTENSITY)))
+    return VOICE_PRIME_S if any(kind in ("pitch", "vibrato") for kind, _p in (stages or ())) else 0.0
+
+
+def latency_prime_s(clip) -> float:
+    """Seconds of real sound a clip's chain is primed with before `in`:
+    `VOICE_PRIME_S` when it has a latency-bearing voice effect, else 0.
+
+    NOT for a plain keep-pitch retime, although its atempo stages start
+    behind `ATEMPO_LAG` too (review RE measured a 10 ms hole at -224 dB on a
+    keep-pitch 1.37x split seam, older than wave E): priming it closes the
+    hole but moves WSOLA's grid over the clip, and at 2x a 4 ms click then
+    falls into a skipped fragment (tests/test_frame_timing.py::test_speed_
+    changed_clip_keeps_picture_on_sound[2.0] lost its 8.5 s click). Open."""
+    if getattr(clip, "freeze", None) is not None:
+        return 0.0
+    return VOICE_PRIME_S if voice_prime_s(getattr(clip, "audio", None)) > 0 else 0.0
+
+
+def latency_prime_samples(clip) -> int:
+    """`latency_prime_s` in 48 kHz samples (2400 for a primed effect, as the
+    client's `VOICE_PRIME_SAMPLES`)."""
+    return int(round(latency_prime_s(clip) * 48000))
+
+
+def head_trim(samples: int) -> str:
+    """`,atrim` cutting the first `samples` samples of a clip's input (its
+    pre-roll before `in`, `compositor.clip_head_samples`), or "". Counted in
+    SAMPLES: a `start=` in seconds rounds on its own, which is how one source
+    frame's sound came to start on different samples in different chains
+    (INSTANT_PREVIEW_SPEC R9, `timebase.edit_sample`)."""
+    if samples <= 0:
+        return ""
+    return f",atrim=start_sample={int(samples)},asetpts=PTS-STARTPTS"
+
+
+def voice_prime_cut(prime_out: float) -> str:
+    """`,atrim` dropping `prime_out` output seconds of priming (after the
+    effect), or ""."""
+    if prime_out <= 1e-9:
+        return ""
+    return f",atrim=start={prime_out:.6f},asetpts=PTS-STARTPTS"
+
+
+def voice_filters(audio, tag: str) -> str:
+    """`,…` fragment rendering a clip's voice effect (`AudioProps.
+    voice_effect` at `voice_intensity`), or "" when it has none. `tag` must be
+    unique in the graph (the chain's own output label, bracket-free): a
+    reverb cuts the chain to feed its impulse response into `afir`."""
+    from ..edl import voice_effects as _vfx
+    if audio is None:
+        return ""
+    stages = _vfx.stages_at(getattr(audio, "voice_effect", None),
+                            float(getattr(audio, "voice_intensity", _vfx.DEFAULT_INTENSITY)))
+    if not stages:
+        return ""
+    safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(tag)) or "vfx"
+    return "".join(_stage_filters(kind, p, safe, i) for i, (kind, p) in enumerate(stages))
+
+
 def apply_solo(edl: EDL) -> EDL:
     """The EDL the audio renders hear: while any track is soloed, every clip on
     an audio-bearing track that is NOT soloed is muted (clip `audio.mute`,
@@ -433,14 +599,31 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
         retime = ",anull"
     if retime:
         parts.append(retime.lstrip(","))
+    # Wave E (F3): the voice effect, after the retime and the channel mode
+    # (v1's order, `compositor._audio_props_filters`). Appended to the last
+    # part: a reverb's fragment starts with a label, not a comma.
+    voice = voice_filters(clip.audio, out_label.strip("[]"))
+    if voice:
+        parts[-1] += voice
+    # the primed head (review RE: `_lane_prime`) goes after the retime and the
+    # effect, before the exact-length cut
+    prime = _lane_prime(clip)
+    if prime > 0:
+        sp = clip.speed_factor if clip.speed_factor and clip.speed_factor > 0 else 1.0
+        # S(in) − S(in − prime) samples, so the lane's first sample is S(in)
+        # (R9's rule) whatever the seek's own rounding
+        from ..edl import timebase as _tb
+        primed = _tb.edit_sample(clip.in_) - _tb.edit_sample(float(clip.in_) - prime)
+        parts[-1] += voice_prime_cut(primed / 48000.0 / sp)
     # A clip straddling a seam is SHORTER on the render clock by what the
     # seam consumed — its end must land where the v1 frame at its layout end
     # lands, not run on past it. A retimed clip is cut to its exact length
     # too (atempo's lag pads its head). Trimmed before the delay so the cut
-    # is measured from the clip's own first sample.
-    if retime or re - rs < eff - 0.0005:
+    # is measured from the clip's own first sample. A voice effect is padded
+    # and cut to it (a pitch stage's rounding may leave it a few samples off).
+    if retime or voice or re - rs < eff - 0.0005:
         n = max(0, int(round(min(re - rs, eff) * 48000)))
-        parts.append(f"atrim=end_sample={n}")
+        parts.append(f"apad=whole_len={n},atrim=end_sample={n}" if voice else f"atrim=end_sample={n}")
     # Volume automation in the clip's OWN time — before the adelay below
     # moves `t` onto the render clock (QA-086).
     env = gain_env_filter(clip.audio)
@@ -466,6 +649,16 @@ def _audio_clip_filter(in_label: str, clip: Clip, out_label: str,
     if clip.audio and clip.audio.mute:
         parts.append("volume=0")
     return f"{in_label}{','.join(parts)}{out_label}"
+
+
+def _lane_prime(c: Clip) -> float:
+    """Source seconds an audio-lane clip's input opens before `in` to prime
+    its voice effect (`voice_prime_s`, clamped at the file head); 0 for a
+    speed curve (its sound is a cached intermediate) or a freeze."""
+    from . import speed_audio as _speed_audio
+    if getattr(c, "freeze", None) is not None or _speed_audio.has_curve(c):
+        return 0.0
+    return min(float(c.in_), latency_prime_s(c))
 
 
 def _on_render_clock(clips: list[Clip], seams: clock.SeamTable
@@ -541,8 +734,9 @@ def build_audio_mix(
 
     music_labels: list[str] = []
     for c, win in music_placed:
-        # Read source from `c.in` to `c.out`
-        extra_inputs += [*input_seek(float(c.in_)), "-to", f"{c.out:.6f}", "-i", c.src]
+        # Read source from `c.in` to `c.out` (a latency-bearing voice effect:
+        # from a little before `in`, `_lane_prime`)
+        extra_inputs += [*input_seek(float(c.in_) - _lane_prime(c)), "-to", f"{c.out:.6f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[m{next_idx}]"
         parts.append(_audio_clip_filter(in_label, c, out, window=win))
@@ -551,7 +745,7 @@ def build_audio_mix(
 
     vo_labels: list[str] = []
     for c, win in vo_placed:
-        extra_inputs += [*input_seek(float(c.in_)), "-to", f"{c.out:.6f}", "-i", c.src]
+        extra_inputs += [*input_seek(float(c.in_) - _lane_prime(c)), "-to", f"{c.out:.6f}", "-i", c.src]
         in_label = f"[{next_idx}:a]"
         out = f"[vo{next_idx}]"
         parts.append(_audio_clip_filter(in_label, c, out, window=win))

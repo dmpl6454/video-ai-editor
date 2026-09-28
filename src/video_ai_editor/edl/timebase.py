@@ -260,6 +260,27 @@ def samples_for_frames(frames: int, fps: float | int | Fraction | None,
     return int(round(Fraction(frames) * sample_rate / rate_of(fps)))
 
 
+def edit_sample(t: float | None, sample_rate: int = 48000) -> int:
+    """``S(t)``: the sample an edit point ``t`` (seconds) starts on — the ONE
+    audio start rule (INSTANT_PREVIEW_SPEC §6 R9) every chain that opens a
+    source's sound at a clip's ``in`` obeys (the v1 and PiP chains, the audio
+    lanes, the reversed and speed-curve intermediates) and the program map
+    (``frame_map.audio_placements``, ``programMap.clipSample0``) models: the
+    NEAREST sample to ``t`` as ffmpeg reads it — ``t`` printed ``%.6f`` (how
+    every time reaches ffmpeg), rounded to ``1/sample_rate`` (ties up, like
+    ``av_rescale``). It is the rule the output side already follows (frame
+    ``k`` starts on ``samples_for_frames(k)``, the nearest sample to its start),
+    so the sample nearest a source frame's start plays on the sample nearest
+    the output frame's start. Chains reach it exactly by cutting
+    ``S(in) − S(seek)`` samples after an input opened at ``seek``
+    (``atrim=start_sample``; the demuxer starts that input on ``S(seek)``)."""
+    if t is None or not t > 0 or t == float("inf"):
+        return 0
+    whole, frac = f"{float(t):.6f}".split(".")
+    us = int(whole) * 1_000_000 + int(frac)
+    return (2 * us * sample_rate + 1_000_000) // 2_000_000
+
+
 def seek_preroll(t: float, fps: float | int | Fraction | None) -> float:
     """How far BEFORE edit point ``t`` an input-side seek should land: half a
     frame (never below 0). Seeking to exactly ``t`` lets float formatting or a
@@ -278,7 +299,7 @@ __all__ = [
     "frame_of", "time_of", "quantize", "frames_between",
     "source_rate",
 ]
-__all__ += ["floor_to_frame", "ceil_to_frame", "samples_for_frames", "seek_preroll"]
+__all__ += ["floor_to_frame", "ceil_to_frame", "samples_for_frames", "seek_preroll", "edit_sample"]
 
 
 def enable_window(start: float, end: float,

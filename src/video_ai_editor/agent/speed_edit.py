@@ -49,7 +49,17 @@ def source_cut(c: Clip, local_t: float, snap) -> float:
     off its parent's — enough to flip a frame sitting on a rounding tie."""
     if c.speed_curve is not None:
         return float(c.in_) + source_offset(c, local_t)
-    return snap(float(c.in_) + source_offset(c, local_t))
+    # Review RE: the TIMELINE offset is quantised, not the absolute source
+    # time — `in + speed · q(local_t)`. Snapping `in + speed · local_t` on the
+    # source's absolute clock left the left piece 0.02 s short when `in` is
+    # off the project grid (25 fps, in 0.5, split at 1.2: pieces 0.5-1.68 and
+    # 1.7…, 100 frames became 101). The pieces now cover exactly the frames
+    # the whole clip did (the chain is in-anchored, compositor.v1_const_
+    # speed). A result within float noise of the grid is stored ON it, so a
+    # 1x clip whose `in` is on the grid keeps every value quantised.
+    v = float(c.in_) + source_offset(c, snap(float(local_t)))
+    q = snap(v)
+    return q if abs(q - v) < 1e-9 else v
 
 
 def cut_point(c: Clip, local_t: float, snap) -> float:
@@ -58,8 +68,9 @@ def cut_point(c: Clip, local_t: float, snap) -> float:
     shows source `out - offset` at offset `local_t` (`render/reverse.py`:
     its intermediate's frame j is the range's frame M-1-j), so the cut is
     mirrored from `out`; the curve still lives on the OUTPUT clock, so the
-    offset is the same integral a forward clip uses. Snapped like
-    `source_cut` (a constant speed snaps, a curve keeps the exact value)."""
+    offset is the same integral a forward clip uses. A reversed constant
+    speed snaps the absolute cut (its intermediate is built on the range's own
+    grid), a curve keeps the exact value."""
     if not getattr(c, "reverse", False):
         return source_cut(c, local_t, snap)
     v = float(c.out) - source_offset(c, local_t)

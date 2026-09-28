@@ -102,7 +102,7 @@ describe('acrossfade (real v1 seams)', () => {
   })
 })
 
-describe('gain envelope (volume=…:eval=frame)', () => {
+describe('gain envelope (per-sample aeval)', () => {
   it.each(DOC.gain_env.map((e, i) => [`${i} ${e.interp}`, e] as const))('%s', (_n, e) => {
     const env = compileEnv({ keyframes: e.keyframes, interp: e.interp })!
     let worst = 0
@@ -110,18 +110,17 @@ describe('gain envelope (volume=…:eval=frame)', () => {
     expect(worst).toBeLessThanOrEqual(TOL)
   })
 
-  it("evaluates at ffmpeg's t = i·(1/48000): a step at 0.4 s lands one sample late", () => {
+  it('switches a step ON the sample its key sits on, whatever the last bit of t', () => {
     const env = compileEnv({ keyframes: [[0, 0], [0.4, -6], [0.8, -2]], interp: 'step' })!
     expect(sampleTime(19200)).toBeLessThan(0.4)
-    expect(envDbAt(env, sampleTime(19200))).toBe(0)
-    expect(envDbAt(env, sampleTime(19201))).toBe(-6)
+    expect(envDbAt(env, sampleTime(19199))).toBe(0)
+    expect(envDbAt(env, sampleTime(19200))).toBe(-6)
+    expect(envDbAt(env, 0.4 + 1e-15)).toBe(-6)
   })
 
-  it('uses the %.4f constants of the filter text, not the keyframes', () => {
-    // A 0.12345 s knot is 0.1235 in the filter: at t = 0.1234 the curve still
-    // holds its first value.
+  it('uses the constants of the filter text (%.9f times, %.4f values), not the keyframes', () => {
     const env = compileEnv({ keyframes: [[0.12345, -3], [0.67891, -12.34567]], interp: 'linear' })!
-    expect(envDbAt(env, 0.1234)).toBe(-3)
+    expect(envDbAt(env, 0.12344)).toBe(-3)
     expect(envDbAt(env, 10)).toBe(-12.3457)
     expect(compileEnv({ keyframes: [] })).toBeNull()
   })

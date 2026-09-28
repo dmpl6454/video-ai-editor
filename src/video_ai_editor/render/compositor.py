@@ -35,7 +35,9 @@ from . import clock
 from . import cancel as _cancel
 from . import cache_budget as _cache_budget
 from ..edl.keyframes import is_keyframed, to_ffmpeg_expr
+from ..edl import clip_animations as _clip_anim
 from .sar import fit_dims, source_anamorphic
+from . import canvas_bg as _canvas_bg
 from ..edl import timebase as _tb
 
 
@@ -454,29 +456,56 @@ def _v1_curve_map(c: Clip):
     return _sc.curve_map(pts, c.duration) if pts is not None else None
 
 
+def v1_const_speed(c: Clip, fps) -> float | None:
+    """The CONSTANT speed (1.0 for 1x) a v1 / PiP chain runs on the file clock
+    anchored at `in` (`speed_curve.anchored_const_setpts_expr`, review RE), or
+    None: no project rate, a freeze (its own recipe) or a speed curve (the
+    curve's own anchored retime)."""
+    if fps is None or getattr(c, "freeze", None) is not None or _v1_curve_map(c) is not None:
+        return None
+    sp = c.speed
+    if isinstance(sp, bool) or not isinstance(sp, (int, float)) or not sp or sp <= 0:
+        return 1.0
+    return float(sp)
+
+
+def _anchored_seek(c: Clip, fps) -> float | None:
+    """The input seek of an in-anchored chain (a curve or a constant speed):
+    `speed_curve.curve_seek` — or None for a clip opened the 1x way."""
+    if fps is None or getattr(c, "freeze", None) is not None:
+        return None
+    if _v1_curve_map(c) is not None or v1_const_speed(c, fps) is not None:
+        from ..edl.speed_curve import curve_seek
+        return curve_seek(c.in_)
+    return None
+
+
 def clip_input_args(c: Clip, fps) -> list[str]:
-    """`-ss/-to/-i` for clip `c`: seek half a frame early, decode a little past
-    `out`. Precision is µs, not the old `%.3f` (which alone could land a seek
-    after the frame it meant to keep). A speed-CURVE clip seeks further back,
-    on a 1/5 s grid (`speed_curve.curve_seek`): its chain is anchored at `in`
-    on the source's own clock, and a slow curve can show the frame before
-    `in` in its first slot."""
+    """`-ss/-to/-i` for clip `c`, decoding a little past `out`. Precision is
+    µs, not the old `%.3f` (which alone could land a seek after the frame it
+    meant to keep). Every clip with a project rate except a freeze runs on
+    the FILE clock anchored at `in` (a speed curve since wave D3, a constant
+    speed and 1x since review RE — `v1_const_speed`), and seeks on a 1/5 s
+    grid at least 0.5 s early (`speed_curve.curve_seek`): the frame before
+    `in` that slot 0 may show is always decoded, whatever the source rate.
+    The clip's sound reads the same input and drops exactly that pre-roll
+    (`clip_head_samples`)."""
     if getattr(c, "freeze", None) is not None:
         seek, end = freeze_input_span(c.in_, fps)
         from .audio_mix import input_seek
         return [*input_seek(seek), "-to", f"{end:.6f}", "-i", str(c.src)]
-    if fps is not None and _v1_curve_map(c) is not None:
-        from ..edl.speed_curve import curve_seek
+    seek = _anchored_seek(c, fps)
+    if seek is not None:
         from .audio_mix import input_seek
         end = float(c.out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
-        return [*input_seek(curve_seek(c.in_)), "-to", f"{end:.6f}", "-i", str(c.src)]
+        return [*input_seek(seek), "-to", f"{end:.6f}", "-i", str(c.src)]
     return sound_input_args(c, fps)
 
 
 def sound_input_args(c: Clip, fps) -> list[str]:
     """`clip_input_args` of a 1x clip at `c`'s in/out: the half-frame
-    pre-roll seek every sound chain drops with `atrim=start=pre`
-    (`_clip_preroll`). The speed-curve sound intermediate
+    pre-roll seek a sound chain drops with `atrim=start_sample`
+    (`clip_head_samples`). The speed-curve sound intermediate
     (`render/speed_audio.py`) decodes through this, whatever its picture's
     input does."""
     pre = _tb.seek_preroll(c.in_, fps)
@@ -489,7 +518,37 @@ def sound_input_args(c: Clip, fps) -> list[str]:
 
 
 def _clip_preroll(c: Clip, fps) -> float:
-    return _tb.seek_preroll(c.in_, fps) if fps is not None else 0.0
+    """Seconds of the clip's input BEFORE `in` (what its sound chain drops):
+    `in` minus the input seek `clip_input_args` printed."""
+    if fps is None:
+        return 0.0
+    seek = _anchored_seek(c, fps)
+    if seek is not None:
+        return float(c.in_) - seek
+    return _tb.seek_preroll(c.in_, fps)
+
+
+def clip_head_samples(c: Clip, fps) -> int:
+    """Samples of the clip's input BEFORE `in` — what its sound chain cuts
+    (`atrim=start_sample`, less a voice effect's priming) so its first sample
+    is `S(in)`, INSTANT_PREVIEW_SPEC R9's one start rule
+    (`timebase.edit_sample`): the input opens on `S(seek)`, `seek` being what
+    `clip_input_args` printed.
+
+    It was `atrim=start=<pre>` in seconds, which rounds `pre` on its own: the
+    half-frame pre-roll of the old 1x seek played `S(seek) + S(pre)` — one
+    sample past `S(in)` about a third of the time at 29.97. Review RE's
+    in-anchored seek (a 1/5 s grid, `S(seek)` exact) moved the v1 and PiP
+    chains to `S(in)` while the program map, the client and the reversed and
+    speed-curve intermediates kept the two roundings, so one source frame's
+    sound started on different samples in different places (in = frame 319 at
+    29.97: 510910 vs 510911; wave E gate, X1)."""
+    if fps is None:
+        return 0
+    seek = _anchored_seek(c, fps)
+    if seek is None:                    # the 1x half-frame seek (`sound_input_args`)
+        seek = max(0.0, float(c.in_) - _tb.seek_preroll(c.in_, fps))
+    return max(0, _tb.edit_sample(c.in_) - _tb.edit_sample(seek))
 
 
 @lru_cache(maxsize=512)
@@ -578,11 +637,13 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     opened with `clip_input_args`.
     """
     curve_cm = _v1_curve_map(c) if fps is not None else None
-    if curve_cm is not None:
-        # A speed CURVE runs on the FILE's clock, anchored at `in` by its
-        # setpts below, not at the first decoded frame (edl/speed_curve.py,
-        # "the v1 chain's clock"), so a split piece continues its parent's
-        # curve exactly.
+    const_sp = v1_const_speed(c, fps)
+    if curve_cm is not None or const_sp is not None:
+        # A speed CURVE — and, since review RE, a CONSTANT speed and 1x — runs
+        # on the FILE's clock, anchored at `in` by its setpts below, not at
+        # the first decoded frame (edl/speed_curve.py, "the v1 chain's
+        # clock"), so a split piece continues its parent's frames exactly
+        # whatever the source rate.
         from ..edl.speed_curve import curve_seek, file_clock_expr
         fc = file_clock_expr(curve_seek(c.in_))
         if fc:
@@ -601,6 +662,8 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
                             + (f"tpad=stop={hold - 1}:stop_mode=clone," if hold > 1 else "")
                             + "setpts=PTS-STARTPTS,")
     tx = c.transform
+    flip_h = bool(getattr(tx, "flip_h", False))
+    flip_v = bool(getattr(tx, "flip_v", False))
     rot_static = float(tx.rotation) if isinstance(tx.rotation, (int, float)) else 0.0
     sc_static = float(tx.scale) if isinstance(tx.scale, (int, float)) else 1.0
     rot_animated = is_keyframed(tx.rotation)
@@ -623,7 +686,16 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # freeze. Time-independent chains keep the old order, so every clip
     # without keyframes renders byte-identically (Wave D3, lane E1a).
     opa_animated = is_keyframed(tx.opacity)
-    kf_clip = rot_animated or sc_animated or x_animated or y_animated or opa_animated
+    # CLIP ANIMATION (wave E, F1; edl/clip_animations.py): an In / Out /
+    # Combo composes ON TOP of the keyed pose — scale ×, x/y/rotation +,
+    # opacity as `fade` ramps, blur as a mixed blurred copy — on the SAME
+    # clock as the keys (after the grid, `t` = clip-local timeline seconds),
+    # so an animated clip is a `kf_clip`. None for a clip without one: its
+    # filter text is unchanged, byte for byte.
+    an = _clip_anim.plan_of(c, c.effective_duration)
+    an_rot = an is not None and an.animates("rotation")
+    an_geo = an is not None and any(an.animates(k) for k in ("scale", "x", "y"))
+    kf_clip = rot_animated or sc_animated or x_animated or y_animated or opa_animated or an is not None
     # Key TIMES printed to the nanosecond, and the SEGMENT picked 1 µs past
     # `t`: ffmpeg's `t` of frame 23 at 1/30 is 0.76666…66, a hair under the
     # key 23/30 the UI authors at that playhead (and %.4f printed it 0.7667),
@@ -656,9 +728,11 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # untouched by this — see `cover_needs_real_pan` below.
     cover_needs_real_pan = (
         getattr(c, "fit", "contain") == "cover"
-        and not (sc_animated or x_animated or y_animated)
+        and not (sc_animated or x_animated or y_animated or an_geo)
         and (x_static != 0 or y_static != 0)
     )
+    # A CapCut Canvas background (contain fit only): see `canvas_on` below.
+    canvas_on = getattr(c, "fit", "contain") != "cover" and _canvas_bg.active(c)
     def _fit_scale(mode: str) -> str:
         # force_original_aspect_ratio sizes from the STORED width, so a
         # 720x576 SAR 16:15 clip was fitted as 5:4 instead of its displayed
@@ -694,15 +768,43 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
             extra_zoom = max(1.0, sc_static)
             if extra_zoom > 1.001:
                 geo += f",scale=w='iw*{extra_zoom:.4f}':h='ih*{extra_zoom:.4f}'"
+            # A FLIPPED clip (Transform.flip_h/v) mirrors this canvas-sized
+            # window next; the window is taken at the mirrored pan (+x) so the
+            # mirrored picture still moves RIGHT by x (geometry.ts fitStage).
+            xs_ = f"+{x_static:.2f}" if flip_h else f"-{x_static:.2f}"
+            ys_ = f"+{y_static:.2f}" if flip_v else f"-{y_static:.2f}"
             geo += (
                 f",crop={canvas_w}:{canvas_h}:"
-                f"'(in_w-out_w)/2-{x_static:.2f}':'(in_h-out_h)/2-{y_static:.2f}'"
+                f"'(in_w-out_w)/2{xs_}':'(in_h-out_h)/2{ys_}'"
             )
         else:
             geo = f"{_fit_scale('increase')},crop={canvas_w}:{canvas_h},setsar=1"
     else:
-        geo = (f"{_fit_scale('decrease')},"
-               f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+        if canvas_on:
+            # CapCut Canvas (wave E, F2; review RE): the background is its own
+            # static layer (`_canvas_bg.composite_block`, assembled after the
+            # geometry below); the geometry runs from the fitted picture on
+            # the black pad, and a matte of the same geometry lays it on top.
+            bw_, bh_ = _canvas_bg.blur_dims(canvas_w, canvas_h)
+            if ana is None:
+                cover_small = f"scale={bw_}:{bh_}:force_original_aspect_ratio=increase"
+            else:
+                cw_, ch_ = fit_dims(ana.display_w, ana.display_h, bw_, bh_, "increase")
+                cover_small = f"scale={cw_}:{ch_}"
+            geo = f"format=yuv420p,pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        else:
+            geo = (f"{_fit_scale('decrease')},"
+                   f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+
+    # MIRROR / FLIP (Transform.flip_h/v, wave E): the fitted canvas-sized
+    # frame, mirrored BEFORE the rotation, scale and pan — CapCut's order: the
+    # picture is mirrored, then turned and placed as set. An exact pixel
+    # mirror (geometry.ts mirrors F1 about the frame centre); no filter at all
+    # when unflipped, so every other chain is byte-identical.
+    if flip_h:
+        geo += ",hflip"
+    if flip_v:
+        geo += ",vflip"
 
     # Rotation happens IN PLACE: the frame keeps its canvas size and the corners
     # that swing outside it are cut, exactly like the browser's `rotate()` and
@@ -719,15 +821,17 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # preview gets changed". Two renderers of the same property have to agree,
     # and in-place is the one users expect. `rotate`'s default ow/oh IS iw/ih,
     # so simply not overriding them gives in-place rotation with black corners.
-    if rot_animated:
-        re = kf_expr(tx.rotation)
+    if rot_animated or an_rot:
+        re = kf_expr(tx.rotation) if rot_animated else f"{rot_static:.4f}"
+        if an_rot:
+            re = f"({re})+({an.expr('rotation', tvar)})"
         re_rad = f"({re})*PI/180"
         geo += f",rotate=a='{re_rad}':c=black"
     elif abs(rot_static) > 0.001:
         rad = rot_static * 3.14159265 / 180.0
         geo += f",rotate={rad}:c=black"
 
-    if sc_animated or x_animated or y_animated:
+    if sc_animated or x_animated or y_animated or an_geo:
         # KEYFRAMED scale/pan: the static branch below, per frame. scale to
         # (W·s, H·s) on the chroma grid, centre it in a fixed frame big
         # enough for every keyed size and pan, then cut the canvas at
@@ -744,7 +848,13 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
               else f"{float(tx.x) if isinstance(tx.x, (int, float)) else 0:.2f}")
         ye = (kf_expr(tx.y) if y_animated
               else f"{float(tx.y) if isinstance(tx.y, (int, float)) else 0:.2f}")
-        fw, fh = kf_pan_frame(tx, canvas_w, canvas_h)
+        if an is not None and an.animates("scale"):
+            sexpr = f"({sexpr})*({an.expr('scale', tvar)})"
+        if an is not None and an.animates("x"):
+            xe = f"({xe})+({an.expr('x', tvar)})*{canvas_w}"
+        if an is not None and an.animates("y"):
+            ye = f"({ye})+({an.expr('y', tvar)})*{canvas_h}"
+        fw, fh = kf_pan_frame(tx, canvas_w, canvas_h, an)
         geo += (
             f",scale=w='max(2\\,trunc({canvas_w}*({sexpr})/2)*2)'"
             f":h='max(2\\,trunc({canvas_h}*({sexpr})/2)*2)':eval=frame"
@@ -803,7 +913,10 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
                 f"({pw}-{canvas_w})/2:({ph}-{canvas_h})/2")
 
     ec = effect_chain(c.effects or [], uid=c.id)
-    if ec:
+    # The Canvas background's composite takes the geometry so far (review RE):
+    # effects and opacity go to the PICTURE, the background stays still.
+    cv_geom = geo if canvas_on else ""
+    if ec and not canvas_on:
         geo += "," + ec
 
     # OPACITY. This chain had NO opacity handling at all, so `Transform.opacity`
@@ -839,7 +952,28 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     # actually below 1.
     opa_animated = is_keyframed(tx.opacity)
     opa_static = float(tx.opacity) if isinstance(tx.opacity, (int, float)) else 1.0
-    if opa_animated:
+    if canvas_on:
+        # CANVAS: the opacity and the clip animation's alpha ramps fade the
+        # PICTURE over the still background (its alpha), not the whole frame
+        # toward black; the video fades still take the whole frame to black.
+        alpha = ""
+        if opa_animated:
+            oe = kf_expr(tx.opacity, "T")
+            alpha += (",format=yuva420p,geq=lum='p(X\\,Y)':cb='p(X\\,Y)':cr='p(X\\,Y)'"
+                      f":a='alpha(X\\,Y)*({oe})'")
+        elif opa_static < 0.999:
+            alpha += f",format=yuva420p,colorchannelmixer=aa={max(0.0, min(1.0, opa_static)):.4f}"
+        if an is not None:
+            for kind, ramp in (("in", an.fade_in), ("out", an.fade_out)):
+                if ramp is not None:
+                    alpha += f",fade=t={kind}:st={ramp[0]:.3f}:d={ramp[1]:.3f}:alpha=1"
+        legacy_flips = [e for e in (c.effects or []) if getattr(e, "type", None) in ("hflip", "vflip")]
+        mask_extra = ("," + effect_chain(legacy_flips, uid=f"{c.id}m")) if legacy_flips else ""
+        geo = _canvas_bg.composite_block(
+            c, canvas_w=canvas_w, canvas_h=canvas_h, fit_decrease=_fit_scale("decrease"),
+            cover_scale_small=cover_small, geom=cv_geom, pic_extra=("," + ec) if ec else "",
+            mask_extra=mask_extra, alpha_stage=alpha, uid=f"{c.id}{label_out}")
+    elif opa_animated:
         # Keyframed: per-frame multiply. Same geq shape text_overlay.py uses for
         # an animated text opacity, on RGB rather than on alpha.
         #
@@ -880,7 +1014,14 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     else:
         v_chain = f"{input_label}{geo}"
 
-    if isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
+    if const_sp is not None:
+        # CONSTANT speed / 1x on the file clock anchored at `in` (review RE):
+        # the curve's time base and bias, T = PTS·TB − in, divided by the
+        # speed — frame_map models it with the same doubles.
+        from ..edl.speed_curve import anchored_const_setpts_expr, curve_settb_expr
+        v_chain += (f",settb={curve_settb_expr(_tb.rate_of(fps).numerator)}"
+                    f",setpts={anchored_const_setpts_expr(const_sp, float(c.in_))}")
+    elif isinstance(c.speed, (int, float)) and c.speed and c.speed != 1.0 and c.speed > 0:
         v_chain += f",setpts=PTS/{float(c.speed)}"
     elif curve_cm is not None:
         # A speed CURVE: a time base in which a project frame is whole ticks,
@@ -914,7 +1055,26 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         fades += f",fade=t=in:st=0:d={vfi:.3f}"
     if vfo > 0.001:
         fades += f",fade=t=out:st={max(0.0, eff - vfo):.3f}:d={vfo:.3f}"
-    if not kf_clip:
+    if an is not None and not canvas_on:
+        # The animation's opacity ramps: `fade` toward black, like the video
+        # fades (clip_animations: every opacity channel is this linear ramp).
+        # (With a Canvas background they fade the picture's alpha instead,
+        # inside the composite — review RE.)
+        if an.fade_in is not None:
+            fades += f",fade=t=in:st={an.fade_in[0]:.3f}:d={an.fade_in[1]:.3f}"
+        if an.fade_out is not None:
+            fades += f",fade=t=out:st={an.fade_out[0]:.3f}:d={an.fade_out[1]:.3f}"
+    if not kf_clip and fades:
+        # Before the grid, the fades see the retimed SOURCE frames: on an
+        # in-anchored chain (a curve, a constant speed, 1x) the pre-roll ones
+        # before `in` carry NEGATIVE pts, and vf_fade compares pts against its
+        # start as uint64 — the first negative frame "starts" the fade and is
+        # already past its end, so the whole clip came out unfaded (in) or
+        # black (out): every clip cut at in > 0 (wave E gate, 13.86 dB).
+        shift = _fade_clock_shift(c, fps, curve_cm, const_sp)
+        if shift:
+            fades = (f",setpts=PTS+{shift}/TB{_shift_fade_starts(fades, shift)}"
+                     f",setpts=PTS-{shift}/TB")
         v_chain += fades
 
     if fps is not None:
@@ -925,10 +1085,17 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # `tpad` clones the last frame when a source is a frame short of what
         # its `out` claims (legacy audio-padded extents), so the count holds.
         n = clip_frames(c, fps)
-        # A curve's grid starts at `in` (T = 0), not at its first decoded
-        # pre-roll frame: `start_time=0` drops the slots before it.
-        anchor = ":start_time=0" if curve_cm is not None else ""
-        v_chain += (f",fps={_tb.ffmpeg_rate(fps)}{anchor}"
+        # An in-anchored grid starts at `in` (T = 0), not at its first
+        # decoded pre-roll frame: `start_time=0` drops the slots before it.
+        anchor = ":start_time=0" if (curve_cm is not None or const_sp is not None) else ""
+        # Review RE: a clip ONE frame long whose only input frame lasts under
+        # half an output frame (a 1-source-frame reversed piece at 2x in a
+        # 29.97 project: 0.0167 s) was rounded away by `fps` — tpad then had
+        # nothing to clone, the chunk had no picture and the frame-count check
+        # failed the preview. The last frame is held one output frame longer
+        # BEFORE the grid, which changes no slot the chain already filled.
+        hold = f",tpad=stop_mode=clone:stop_duration={_tb.frame_duration(fps):.9f}" if n == 1 else ""
+        v_chain += (f"{hold},fps={_tb.ffmpeg_rate(fps)}{anchor}"
                     f",tpad=stop={n}:stop_mode=clone"
                     f",trim=end_frame={n},setpts=PTS-STARTPTS")
 
@@ -936,7 +1103,16 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
         # On the grid: `t` (and geq's `T`) is k/R, the clip-local timeline
         # seconds of output frame k; the fades follow the geometry as they
         # always have (after effects and opacity), on that same clock.
-        v_chain += f",{geo}{fades}"
+        uid = "v" + _label_safe(c.id)   # pip.py uses p<i>, stickers s<i>
+        blur = "" if an is None else _clip_anim.blur_mix_filters(
+            an, src=f"[anb{uid}s]", dst=f"[anb{uid}d]", uid=uid,
+            sigma=_clip_anim.blur_sigma(canvas_w, canvas_h))
+        if blur:
+            # Blur In / Out: a blurred copy mixed over the picture (after the
+            # geometry, before the fades) — `split`/`overlay` need labels.
+            v_chain += f",{geo},setsar=1[anb{uid}s];{blur};[anb{uid}d]null{fades}"
+        else:
+            v_chain += f",{geo}{fades}"
 
     # Normalize sample aspect ratio at the end. rotate / scale-with-eval=frame
     # can produce SAR like 86519:86488 which makes concat fail with
@@ -946,12 +1122,46 @@ def _build_clip_video_chain(c: Clip, *, input_label: str, label_out: str,
     return v_chain
 
 
-def kf_pan_frame(tx, canvas_w: int, canvas_h: int) -> tuple[int, int]:
+def _fade_clock_shift(c: Clip, fps, curve_cm, const_sp) -> int:
+    """Whole seconds that lift an in-anchored chain's pre-roll frames to
+    non-negative pts for vf_fade (0: nothing decoded before `in`).
+
+    The shift is exact: `setpts=PTS±K/TB` moves every frame by K·(1/TB)
+    integer ticks (a double below 2^53), and each fade's `st` moves by the
+    same K in its printed decimal, which vf_fade parses to whole µs and
+    rescales to ticks — K/TB added to the same rounding, so the factor of
+    every frame is the one the unshifted clock gives (the retimed source
+    frame's time, T = (pts − in) / speed)."""
+    if fps is None or (curve_cm is None and const_sp is None):
+        return 0
+    from ..edl.speed_curve import curve_seek, start_speed
+    pre = float(c.in_) - curve_seek(c.in_)
+    if pre <= 0:
+        return 0
+    rate = start_speed(curve_cm) if curve_cm is not None else const_sp
+    # +1 s: the demuxer can hand a frame from just before the seek point.
+    return int(math.floor(pre / max(1e-6, float(rate)))) + 2
+
+
+def _shift_fade_starts(fades: str, shift: int) -> str:
+    """`fades` with every `st=` moved K whole seconds later, in decimal (the
+    printed %.3f digits are kept, so vf_fade reads the same µs + K·10^6)."""
+    from decimal import Decimal
+    return re.sub(r"(?<=:st=)([0-9.]+)", lambda m: str(Decimal(m.group(1)) + shift), fades)
+
+
+def _label_safe(cid: str) -> str:
+    """A clip id as filtergraph label text (letters, digits, underscore)."""
+    return re.sub(r"\W", "", str(cid)) or "x"
+
+
+def kf_pan_frame(tx, canvas_w: int, canvas_h: int, anim=None) -> tuple[int, int]:
     """The fixed frame a KEYFRAMED scale/pan is centred in before the canvas
     is cut from it (`_build_clip_video_chain`): wide enough for the largest
     keyed size plus the largest pan on both sides, even. geometry.ts
     `kfPanFrame` computes the same integers from the same EDL values (its
-    parity decides where `pad` and `crop` round)."""
+    parity decides where `pad` and `crop` round). A clip animation (`anim`,
+    a clip_animations.AnimPlan) widens it by its own peak zoom and travel."""
     def peak(v, static: float) -> float:
         if is_keyframed(v):
             return max(abs(float(p[1])) for p in v.keyframes)
@@ -963,6 +1173,10 @@ def kf_pan_frame(tx, canvas_w: int, canvas_h: int) -> tuple[int, int]:
     s_max = peak(tx.scale, float(f"{num(tx.scale, 1.0):.4f}"))
     x_max = peak(tx.x, float(f"{num(tx.x, 0.0):.2f}"))
     y_max = peak(tx.y, float(f"{num(tx.y, 0.0):.2f}"))
+    if anim is not None:
+        s_max *= anim.peak("scale")
+        x_max += anim.peak("x") * canvas_w
+        y_max += anim.peak("y") * canvas_h
 
     def side(canvas: int, pan: float) -> int:
         scaled = max(2, int(canvas * s_max / 2) * 2)
@@ -1058,14 +1272,22 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
             input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
         a_chain = (f"{input_label}aresample=async=1:first_pts=0,"
                    f"aformat=channel_layouts=stereo:sample_rates=48000")
-        pre = _clip_preroll(c, fps)
-        if pre > 1e-9:
-            a_chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
+        # The clip's first sample is S(in) (R9, `clip_head_samples`).
+        # Review RE: a latency-bearing voice effect keeps up to VOICE_PRIME_S
+        # of the pre-roll as REAL sound to prime it, cut off after the effect
+        # (`_audio_props_filters(prime_out=…)`), so a seam has no silence.
+        from .audio_mix import head_trim, latency_prime_samples, speed_filters
+        head = clip_head_samples(c, fps)
+        prime = min(head, latency_prime_samples(c))
+        a_chain += head_trim(head - prime)
         # Speed: varispeed (keep_pitch False, sample-exact) or atempo centred by
         # its lag — the one rule, shared with the audio lanes (QA-086).
-        from .audio_mix import speed_filters
         a_chain += speed_filters(c)
-    a_chain += _audio_props_filters(c)
+        sp = c.speed_factor if c.speed_factor and c.speed_factor > 0 else 1.0
+        prime_out = prime / 48000.0 / sp
+    if curve_src is not None:
+        prime_out = 0.0
+    a_chain += _audio_props_filters(c, tag=label_out.strip("[]"), prime_out=prime_out)
     if fps is not None:
         m = _tb.samples_for_frames(clip_frames(c, fps), fps)
         a_chain += f",apad=whole_len={m},atrim=end_sample={m}"
@@ -1073,8 +1295,10 @@ def _build_clip_audio_chain(c: Clip, *, input_label: str, label_out: str,
     return a_chain
 
 
-def _audio_props_filters(c: Clip) -> str:
-    """`,volume=…,afade=…` fragment for a clip's gain/fade/mute (no labels).
+def _audio_props_filters(c: Clip, *, tag: str = "", prime_out: float = 0.0) -> str:
+    """`,volume=…,afade=…` fragment for a clip's gain/fade/mute (no labels
+    — except a reverb voice effect, which cuts the chain under labels made
+    from `tag`: pass the chain's own output label).
 
     Fade times are clip-LOCAL (the source is -ss/-to-trimmed and starts at
     t=0), so callers must apply this BEFORE any adelay repositioning.
@@ -1082,8 +1306,15 @@ def _audio_props_filters(c: Clip) -> str:
     frag = ""
     if c.audio:
         # QA-122: the clip's channel mode (left/right to both, mono mix).
-        from .audio_mix import channel_filter
+        from .audio_mix import channel_filter, voice_filters
         frag += channel_filter(c.audio)
+        # Wave E (F3): the voice effect — after the retime and the channel
+        # mode, before gain/automation/fades and the exact-length cut
+        # (`edl/voice_effects.py` says why there).
+        frag += voice_filters(c.audio, tag or f"vfx_{c.id}")
+        # the voice effect's priming (review RE), dropped right after it
+        from .audio_mix import voice_prime_cut
+        frag += voice_prime_cut(prime_out)
         if abs(c.audio.gain_db) > 0.01:
             frag += f",volume={c.audio.gain_db:.2f}dB"
         # Volume automation (QA-086), keyed in this same clip-local time.
@@ -1467,12 +1698,17 @@ def _render(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
 
 
 def _check_picture(edl: EDL, path: Path, fps) -> None:
-    """Fail a render whose file has NO PICTURE (review RD3). ffmpeg reports
-    'No filtered frames for output stream' and still exits 0 when a clip's
-    chain emits nothing (a raw MPEG-TS whose seek landed past its only
-    keyframe), so the render "succeeded" with a sound-only mp4. A frame count
-    that differs from the plan is logged, not fatal: the file is playable,
-    and the frame-exact goldens pin the counts."""
+    """Fail a render whose file has NO PICTURE (review RD3), or whose frame
+    count is not its plan (wave E, item 24). ffmpeg reports 'No filtered
+    frames for output stream' and still exits 0 when a clip's chain emits
+    nothing (a raw MPEG-TS whose seek landed past its only keyframe), so the
+    render "succeeded" with a sound-only mp4. The plan is
+    `frame_map.planned_frames` — the renderer's own v1 plan less its xfade
+    overlaps, at the render rate — proven on every path before this became
+    fatal (tests/test_render_frame_count.py: single pass, chunked, the server
+    preview at three sizes, projects at the nine standard rates and exports
+    across them). It was `frame_of(edl.duration)`, which is not the plan (33
+    of the 500 corpus EDLs differ from it by a transition's overlap)."""
     try:
         proc = _cancel.run_prioritised(
             [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets",
@@ -1490,14 +1726,20 @@ def _check_picture(edl: EDL, path: Path, fps) -> None:
     except ValueError:
         n = 0
     if getattr(proc, "returncode", 1) == 0 and n <= 0:
+        _pu.unlink_with_retry(path)     # never served later as a cached render
         raise RuntimeError(
             "The render produced no picture, only sound: a clip's video could not be read "
             "from its source at the requested point. Re-import the source file (or convert "
             "it to MP4) and try again.")
-    want = _tb.frame_of(edl.duration, fps)
+    from . import frame_map as _fm
+    want = _fm.planned_frames(edl, fps)
     if n and want and n != want:
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).error(
             "render %s has %d video frames, the timeline plans %d", path.name, n, want)
+        _pu.unlink_with_retry(path)     # never served later as a cached render
+        raise RuntimeError(
+            f"The render came out {n} frames long where the timeline plans {want}: "
+            "it would not match the editor frame for frame, so it was not kept.")
 
 
 def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
@@ -1791,6 +2033,20 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     extra_inputs += audio_inputs
 
     tmp = _part_path(dst)
+    # The picture stops at the PLAN (wave E, item 24): an overlay input that
+    # outlives the timeline (an animated text PNG is looped for its window
+    # plus 0.5 s) kept `overlay` emitting frozen frames past the end —
+    # measured: a 4 s timeline with keyed text exported 135 frames for 120.
+    # `_check_picture` holds the file to the same number. The cap is a
+    # `trim=end_frame` INSIDE the graph, never the output option `-frames:v`:
+    # at that count ffmpeg closes the file before the AAC encoder flushes its
+    # last packet, so the sound ended ~10 ms before the picture at NTSC rates
+    # (gate RX finding 1; tests/test_render_audio_tail.py). The sound is
+    # already bounded by `apad`+`atrim=end_sample`.
+    from .frame_map import planned_frames as _planned_frames
+    plan_frames = _planned_frames(edl, fps)
+    fc = f"{fc};{v_label}trim=end_frame={plan_frames}[vcap]"
+    v_label = "[vcap]"
     args = [_pu.FFMPEG, "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
@@ -1983,6 +2239,9 @@ def _video_only_fingerprint(edl: EDL) -> str:
             # the same path must not be remuxed from a stale cached video.
             if c.get("src"):
                 c["_file"] = _file_identity(c["src"])
+            # ...and so is a canvas background's picture (wave E, F2).
+            if isinstance(c.get("canvas_bg"), dict) and c["canvas_bg"].get("image"):
+                c["_bg_file"] = _file_identity(c["canvas_bg"]["image"])
         if t.id == "v1":
             d.pop("muted", None)
         # Solo is audio-only (QA-086): it must take the cheap remux, not a

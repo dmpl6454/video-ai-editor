@@ -12,7 +12,7 @@ import {
   type SourceInfo, type SourceInfoJson,
 } from './frameMap'
 import {
-  ffmpegMicros, rateOf, rescale, samplesForFrames, seekPreroll, timeOf, type FpsLike, type Rational,
+  editSample, ffmpegMicros, rateOf, rescale, samplesForFrames, timeOf, type FpsLike, type Rational,
 } from './timebase'
 
 export const KIND_CLIP = 0
@@ -242,13 +242,12 @@ export interface AudioPlacement {
 const SR: Rational = { num: 1, den: 48000 }
 const US_TB: Rational = { num: 1, den: 1_000_000 }
 
-/** `_clip_sample0`: the seek's shift rounded into 1/48000, plus the
- *  pre-roll `atrim` rounded — two roundings, not round(t · 48 kHz). */
-export function clipSample0(t: number, fps: FpsLike): number {
-  const pre = seekPreroll(t, fps)
-  const seek = Math.max(0, t - pre)
-  const j0 = seek > 0 ? rescale(ffmpegMicros(seek), US_TB, SR) : 0
-  return j0 + (pre > 1e-9 ? rescale(ffmpegMicros(pre), US_TB, SR) : 0)
+/** `_clip_sample0`: the first source sample a clip's sound plays for edit
+ *  point `t` — S(t), R9's one start rule (`editSample`), which every server
+ *  chain cuts to in samples. (It was two roundings, S(seek) + round(pre ·
+ *  48 kHz), one sample late about a third of the time at 29.97.) */
+export function clipSample0(t: number): number {
+  return editSample(t)
 }
 
 function reversedRuns(c: EdlClip, src: SourceInfo | null, fps: FpsLike, n: number): AudioRun[] {
@@ -259,7 +258,7 @@ function reversedRuns(c: EdlClip, src: SourceInfo | null, fps: FpsLike, n: numbe
     const nf = Math.min(seg, mFrames - j0)
     const s0 = samplesForFrames(j0, fps)
     const cnt = samplesForFrames(j0 + nf, fps) - s0
-    forward.push([clipSample0((c.in ?? 0) + timeOf(j0, fps), fps), cnt])
+    forward.push([clipSample0((c.in ?? 0) + timeOf(j0, fps)), cnt])
   }
   const runs: AudioRun[] = []
   let off = 0
@@ -290,7 +289,7 @@ export function audioPlacements(pm: ProgramMap, lookup?: SourceLookup): AudioPla
       const curve = curvePoints(c.speed)
       let mode: AudioPlacement['mode']
       let runs: AudioRun[]
-      const src0 = clipSample0(c.in ?? 0, pm.R)
+      const src0 = clipSample0(c.in ?? 0)
       if (freezeOf(c) !== null) {
         out.push({ clip: seg.clip, out0: start, n: m, src0, rate: 0, mode: 'silence', runs: [], fadeIn: ov, fadeOut: 0 })
         last = out.length - 1

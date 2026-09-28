@@ -1473,6 +1473,9 @@ def cut_range(store: EDLStore, args: dict) -> dict:
             retime(right, end - c_start, span)
             _piece_transform(left, c, 0.0, left_dur)            # review RD3
             _piece_transform(right, c, end - c_start, None)
+            _partition_anim(left, right)                        # wave E, F1
+            _piece_gain_env(left, c, 0.0, left_dur)             # wave E, item 25
+            _piece_gain_env(right, c, end - c_start, None)
             # The SOUND fades partition the same way: copied to both pieces,
             # speech faded in again after every removed silence.
             left.audio.fade_out, right.audio.fade_in = 0.0, 0.0
@@ -1482,7 +1485,9 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         elif c_start < start:
             # Trim right side
             new_dur = start - c_start
-            _piece_transform(c, c.model_copy(deep=True), 0.0, new_dur)   # review RD3
+            whole = c.model_copy(deep=True)
+            _piece_transform(c, whole, 0.0, new_dur)   # review RD3
+            _piece_gain_env(c, whole, 0.0, new_dur)    # wave E, item 25
             if frozen:
                 retime(c, 0.0, new_dur)
             else:
@@ -1496,7 +1501,9 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         elif c_end > end:
             # Trim left side
             shift = end - c_start
-            _piece_transform(c, c.model_copy(deep=True), shift, None)    # review RD3
+            whole = c.model_copy(deep=True)
+            _piece_transform(c, whole, shift, None)    # review RD3
+            _piece_gain_env(c, whole, shift, None)     # wave E, item 25: re-based
             if frozen:
                 retime(c, shift, span)
             else:
@@ -1545,6 +1552,7 @@ def split_at(store: EDLStore, args: dict) -> dict:
             left.freeze, right.freeze = t - c_start, c_end - t
             _piece_transform(left, c, 0.0, t - c_start)
             _piece_transform(right, c, t - c_start, None)
+            _partition_anim(left, right)
             new_clips.extend((left, right))
             halves[c.id] = right.id
             split_count += 1
@@ -1601,6 +1609,7 @@ def split_at(store: EDLStore, args: dict) -> dict:
             # the part of the animation it plays, the right one re-based.
             _piece_transform(left, c, 0.0, t - c_start)
             _piece_transform(right, c, t - c_start, None)
+            _partition_anim(left, right)   # In left, Out right (wave E, F1)
             new_clips.append(left)
             new_clips.append(right)
             halves[c.id] = right.id
@@ -1676,9 +1685,12 @@ def trim_clip(store: EDLStore, args: dict) -> dict:
     head = ((c.out - new_out) if getattr(c, "reverse", False) else (new_in - c.in_)) / c.speed_factor
     if abs(head) > 1e-9:
         if head > 0:
-            _piece_transform(c, c.model_copy(deep=True), head, None)
+            whole = c.model_copy(deep=True)
+            _piece_transform(c, whole, head, None)
+            _piece_gain_env(c, whole, head, None)    # wave E, item 25: re-based
         else:
             _shift_transform_keys(c, -head)
+            _shift_gain_env(c, -head)
     c.in_, c.out = new_in, new_out
     new_duration = c.duration
     _ripple_close_gap(track, store.edl.canvas.fps)
@@ -1732,9 +1744,16 @@ def _trim_curve(store: EDLStore, track: Track, c: Clip, args: dict) -> dict | No
         raise ValueError(f"out ({new_out:.3f}) must be greater than in ({new_in:.3f})")
     D = c.effective_duration
     fd = _tb.frame_duration(fps)
-    t0 = _tb.quantize(c.timeline_offset_at(new_in - c.in_), fps) if new_in > c.in_ + 1e-9 else 0.0
-    t1 = (_tb.quantize(c.timeline_offset_at(new_out - c.in_), fps)
-          if new_out < c.out - 1e-9 else D)
+    # The kept TIMELINE span [t0, t1). A REVERSED clip plays its source from
+    # `out` down (wave E, item 22): lowering `out` trims the HEAD, raising
+    # `in` the TAIL, each at the curve's integral from `out`.
+    rev = bool(getattr(c, "reverse", False))
+    head_cut = (new_out < c.out - 1e-9) if rev else (new_in > c.in_ + 1e-9)
+    tail_cut = (new_in > c.in_ + 1e-9) if rev else (new_out < c.out - 1e-9)
+    head_s = (c.out - new_out) if rev else (new_in - c.in_)
+    tail_s = (c.out - new_in) if rev else (new_out - c.in_)
+    t0 = _tb.quantize(c.timeline_offset_at(head_s), fps) if head_cut else 0.0
+    t1 = _tb.quantize(c.timeline_offset_at(tail_s), fps) if tail_cut else D
     t1 = min(t1, D)
     if t1 - t0 < fd - 1e-9:
         raise ValueError("a trim must keep at least one frame of the clip")
@@ -1743,10 +1762,13 @@ def _trim_curve(store: EDLStore, track: Track, c: Clip, args: dict) -> dict | No
     old_start = c.start
     # Both from the ORIGINAL curve and span, then assigned (the model's
     # validator normalises the curve).
-    cut_in = _speed_edit.source_cut(c, t0, lambda v: _q(store.edl, v)) if t0 > 0 else c.in_
-    cut_out = _speed_edit.source_cut(c, t1, lambda v: _q(store.edl, v)) if t1 < D else c.out
+    # The kept piece's source range (`piece_range`: reversed pieces hold the
+    # source's END first), from the ORIGINAL curve and span.
+    cut_in, cut_out = _speed_edit.piece_range(c, t0, t1, lambda v: _q(store.edl, v))
     piece = _speed_edit.piece_speed(c, t0, t1)
-    _piece_transform(c, c.model_copy(deep=True), t0, t1 if t1 < D else None)   # review RD3
+    whole = c.model_copy(deep=True)
+    _piece_transform(c, whole, t0, t1 if t1 < D else None)   # review RD3
+    _piece_gain_env(c, whole, t0, t1 if t1 < D else None)    # wave E, item 25
     c.in_, c.out = cut_in, cut_out
     c.speed = piece
     if args.get("move_start") and track.id != MAIN_LANE_ID and t0 > 0:
@@ -2295,7 +2317,8 @@ def redo_op(store: EDLStore, args: dict) -> dict:
 
 
 def render_preview_tool(store: EDLStore, args: dict) -> dict:
-    res = _render_preview(store.edl, store.dir)
+    # a private copy: the render must not see an edit made while it runs (review RE)
+    res = _render_preview(store.edl.model_copy(deep=True), store.dir)
     return {"path": str(res.path), "cached": res.cached, "edl_hash": res.edl_hash}
 
 
@@ -4045,6 +4068,86 @@ def remove_effect(store: EDLStore, args: dict) -> dict:
     return {"summary": summary}
 
 
+def remove_effects(store: EDLStore, args: dict) -> dict:
+    """Take every effect of the named `types` (default: the LUT filter) off
+    the named media clips, in ONE commit (wave E, F4b: "take off the
+    filter", "remove the colour grade from the second clip"). By type, not
+    by index — `remove_effect(index)` per effect shifts the chain under the
+    next step, and N steps were N undo entries."""
+    from ..render.effects import EFFECT_BUILDERS
+    ids = args.get("clip_ids")
+    if not isinstance(ids, (list, tuple)) or not ids:
+        raise ValueError("remove_effects needs clip_ids (a non-empty list)")
+    raw = args.get("types") or ["lut"]
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError("remove_effects.types must be a non-empty list of effect types")
+    types = {str(t).strip().lower() for t in raw}
+    unknown = sorted(types - set(EFFECT_BUILDERS))
+    if unknown:
+        raise ValueError(f"remove_effects: unknown effect type(s) {unknown}")
+    removed = 0
+    touched: list[str] = []
+    for cid in dict.fromkeys(str(x) for x in ids):
+        res = store.edl.get_clip(cid)
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        track, c = res
+        if not isinstance(c, Clip):
+            raise ValueError(f"remove_effects needs media clips ({cid} is not one)")
+        _reject_audio_lane_clip(track, cid, "remove_effects")
+        keep = [e for e in c.effects if e.type not in types]
+        if len(keep) != len(c.effects):
+            removed += len(c.effects) - len(keep)
+            touched.append(cid)
+            c.effects = keep
+    if not removed:
+        raise ValueError(f"no {'/'.join(sorted(types))} effect on {', '.join(dict.fromkeys(map(str, ids)))}")
+    what = {frozenset({"lut"}): "the filter", frozenset({"lut", "color"}): "the colour grade"}.get(
+        frozenset(types), f"{removed} effect{'s' if removed != 1 else ''}")
+    summary = f"Remove {what} from {len(touched)} clip{'s' if len(touched) != 1 else ''}"
+    store.commit("remove_effects", args, summary)
+    return {"summary": summary, "removed": removed, "clip_ids": touched}
+
+
+#: The Transform fields `flip_clip` writes (wave E: lane F4a adds them to the
+#: schema; F4b the op, the Inspector buttons and the prompt).
+FLIP_FIELDS: dict[str, str] = {"horizontal": "flip_h", "vertical": "flip_v"}
+
+
+def flip_clip(store: EDLStore, args: dict) -> dict:
+    """CapCut's Mirror / Flip on a media clip or sticker: `axis` horizontal
+    (a mirror image) or vertical; `value` sets it, omitted toggles. Not a
+    rotation — "upside down" is `set_clip_transform(rotation=180)`."""
+    cid = str(args.get("clip_id") or "")
+    axis = _enum_arg(args, "axis", tuple(FLIP_FIELDS), "horizontal")
+    field = FLIP_FIELDS[axis]
+    if field not in Transform.model_fields:
+        raise ValueError("flip needs the Transform flip fields (this build has none)")
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    t, c = res
+    if not hasattr(c, "transform") or isinstance(c, TextClip):
+        raise ValueError("flip_clip needs a media clip or a sticker")
+    _reject_audio_lane_clip(t, cid, "flip_clip")
+    # ONE mirror model (review RE): the Effects panel's legacy Flip H / V
+    # effect (`hflip` / `vflip`) mirrors the picture too, so the state a
+    # toggle starts from is the Transform field XOR that effect, and the op
+    # folds the effect away — the Transform field alone then holds the mirror
+    # the picture shows (a clip with both used to UNflip when "flipped").
+    legacy_type = {"flip_h": "hflip", "flip_v": "vflip"}[field]
+    effects = list(getattr(c, "effects", None) or [])
+    legacy = sum(1 for e in effects if e.type == legacy_type)
+    cur = bool(getattr(c.transform, field)) != (legacy % 2 == 1)
+    value = (not cur) if args.get("value") is None else bool(args["value"])
+    if legacy:
+        c.effects = [e for e in effects if e.type != legacy_type]
+    setattr(c.transform, field, value)
+    summary = f"{'Flip' if value else 'Unflip'} {cid} {axis}ly"
+    store.commit("flip_clip", args, summary)
+    return {"summary": summary, field: value}
+
+
 def color_grade(store: EDLStore, args: dict) -> dict:
     """Convenience: add a color effect with brightness/contrast/sat/temp/tint."""
     params = {k: float(v) for k, v in args.items()
@@ -4487,6 +4590,90 @@ def detach_audio(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "audio_clip_id": sound.id, "track": lane.id}
 
 
+#: Lanes whose clips carry sound a voice effect can change (v1, overlays,
+#: music / voice-over / audio lanes).
+_VOICE_LANES = ("video", "audio", "music", "vo")
+
+
+def set_voice_effect(store: EDLStore, args: dict) -> dict:
+    """CapCut's voice changer (wave E, F3): put a voice effect on one clip's
+    sound, several clips' (`clip_ids`) or every clip on a lane (`track`), or
+    take it off (`effect` None / "none"). `edl/voice_effects.py` is the one
+    preset table the Inspector, the agent and the Prompt bar read; a
+    spelling it knows ("Hall", "walkie talkie") resolves to its id, anything
+    else is a crisp 400. `intensity` 0-1 (default: unchanged when the clip
+    already has this effect, else 1). One commit — one undo step."""
+    import math
+    from ..edl import voice_effects as _vfx
+    raw = args.get("effect")
+    off = raw is None or (isinstance(raw, str) and raw.strip().lower() in ("", "none", "off", "remove"))
+    pid = None if off else _vfx.preset_id(raw)
+    if not off and pid is None:
+        raise ValueError(f"unknown voice effect {raw!r} — one of: "
+                         + ", ".join(p.label for p in _vfx.PRESETS))
+    inten = args.get("intensity")
+    if inten is not None:
+        if isinstance(inten, bool) or not isinstance(inten, (int, float)) or not math.isfinite(float(inten)):
+            raise ValueError("intensity must be a number from 0 to 1")
+        if not 0.0 <= float(inten) <= 1.0:
+            raise ValueError(f"intensity {float(inten):g} is outside 0-1")
+    from ..render.compositor import source_has_audio
+
+    def _silent(c: Clip) -> bool:
+        return c.freeze is not None or not source_has_audio(str(c.src))
+
+    ids: list[str] = []
+    if args.get("clip_id") is not None:
+        ids.append(str(args["clip_id"]))
+    if isinstance(args.get("clip_ids"), (list, tuple)):
+        ids += [str(x) for x in args["clip_ids"]]
+    if args.get("track") is not None:
+        tr = store.edl.get_track(str(args["track"]))
+        if tr is None:
+            raise ValueError(f"track {args['track']} not found")
+        # review RE: a lane holding a freeze frame (or a picture-only clip)
+        # refused the WHOLE edit, and the Prompt bar's default target is
+        # track=v1 — a lane covers the clips that HAVE sound
+        lane = [c for c in tr.clips if isinstance(c, Clip)]
+        ids += [c.id for c in lane if pid is None or not _silent(c)]
+        if not ids:
+            raise ValueError(f"track {tr.id} has no clips with sound")
+    if not ids:
+        raise ValueError("set_voice_effect needs a clip_id, clip_ids or a track")
+    clips: list[Clip] = []
+    for cid in dict.fromkeys(ids):
+        res = store.edl.get_clip(cid)
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        track, c = res
+        if not isinstance(c, Clip) or track.type not in _VOICE_LANES:
+            raise ValueError(f"{cid} has no sound a voice effect can change")
+        if c.freeze is not None and pid is not None:
+            raise ValueError(f"clip {cid} is a freeze frame — it has no sound")
+        if pid is not None and not source_has_audio(str(c.src)):
+            raise ValueError(f"clip {cid} has no sound — its file carries no audio")
+        clips.append(c)
+    with store.batch():
+        for c in clips:
+            if pid is None:
+                c.audio.voice_effect = None
+                c.audio.voice_intensity = _vfx.DEFAULT_INTENSITY
+                continue
+            same = c.audio.voice_effect == pid
+            c.audio.voice_effect = pid
+            if inten is not None:
+                c.audio.voice_intensity = float(inten)
+            elif not same:
+                c.audio.voice_intensity = _vfx.DEFAULT_INTENSITY
+    # after the batch closes: a commit inside it is folded away (EDLStore.batch)
+    what = _vfx.describe(pid, clips[0].audio.voice_intensity) if pid else "no voice effect"
+    who = clips[0].id if len(clips) == 1 else f"{len(clips)} clips"
+    summary = f"Voice effect {who} → {what}"
+    store.commit("set_voice_effect", args, summary)
+    return {"summary": summary, "clip_ids": [c.id for c in clips], "effect": pid,
+            "intensity": clips[0].audio.voice_intensity}
+
+
 def set_speed(store: EDLStore, args: dict) -> dict:
     """Set a clip's playback speed and RETIME the timeline (CapCut
     semantics): a 2x clip's footprint halves, later clips on the track ripple
@@ -4838,6 +5025,142 @@ def _push_lane_after(track: Track, c: Clip, fps) -> None:
         o.start += push
 
 
+#: set_animation's `none` spellings (take that side off).
+_ANIM_OFF = frozenset({"", "none", "off", "remove", "no", "clear"})
+
+
+def _anim_arg(kind: str, raw: Any) -> tuple[bool, str | None]:
+    """(present, canonical id or None to clear) for one of set_animation's
+    `in` / `out` / `combo` arguments; a name the table does not know is a
+    crisp 400 naming the valid ones (edl/clip_animations.py)."""
+    from ..edl import clip_animations as _ca
+    if raw is None:
+        return False, None
+    if isinstance(raw, str) and raw.strip().lower() in _ANIM_OFF:
+        return True, None
+    pid = _ca.preset_id(kind, raw)
+    if pid is None:
+        raise ValueError(f"unknown {kind} animation {raw!r} — one of: "
+                         + ", ".join(p.label for p in _ca.PRESETS[kind]))
+    return True, pid
+
+
+def _anim_seconds(args: dict, k: str) -> tuple[bool, float | None]:
+    import math
+    from ..edl import clip_animations as _ca
+    if k not in args or args[k] is None:
+        return False, None
+    v = args[k]
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError(f"{k} must be a number of seconds")
+    try:
+        f = float(v)
+    except ValueError:
+        raise ValueError(f"{k} must be a number of seconds") from None
+    lo, hi = _ca.ANIM_DUR_RANGE
+    if not math.isfinite(f) or not lo <= f <= hi:
+        raise ValueError(f"{k} must be between {lo:g} and {hi:g} seconds")
+    return True, f
+
+
+def set_animation(store: EDLStore, args: dict) -> dict:
+    """CapCut clip animations (wave E, F1): an In, an Out or a looping Combo
+    on a media clip (the main track or an overlay lane) or a sticker —
+    `clip_id`, several (`clip_ids`) or every clip on a lane (`track`).
+
+    `in` / `out` / `combo` name a preset of `edl/clip_animations.py` (the
+    one table the Inspector, the agent and the Prompt bar read; "Zoom In",
+    "zoom-in", "zoomin" all resolve) or "none" to take that side off; an
+    argument not given is left as it is. A Combo excludes In and Out, as in
+    CapCut: choosing one clears the other side. `in_duration` /
+    `out_duration`: seconds (0.1-3; every renderer also caps a side at 40 %
+    of the clip on screen, so In and Out never overlap). One commit — one
+    undo step."""
+    from ..edl import clip_animations as _ca
+    # ONE spelling per argument — the names agent/tools.py advertises and the
+    # Prompt validator and plan schema check (`in`/`out`/`combo`,
+    # `in_duration`/`out_duration`). It also read the EDL field names
+    # (`anim_in`, `anim_dur`, …) as silent aliases, which a schema-validating
+    # client rejects and the validator never range-checked
+    # (tests/test_tool_schema_completeness.py).
+    has_in, a_in = _anim_arg("in", args.get("in"))
+    has_out, a_out = _anim_arg("out", args.get("out"))
+    has_combo, a_combo = _anim_arg("combo", args.get("combo"))
+    has_din, d_in = _anim_seconds(args, "in_duration")
+    has_dout, d_out = _anim_seconds(args, "out_duration")
+    if a_combo is not None and (a_in is not None or a_out is not None):
+        raise ValueError("a Combo animation replaces In and Out — choose a Combo, or an In and/or an Out")
+    if not (has_in or has_out or has_combo or has_din or has_dout):
+        raise ValueError("set_animation needs `in`, `out` or `combo` (a preset name, or 'none')")
+    ids: list[str] = []
+    if args.get("clip_id") is not None:
+        ids.append(str(args["clip_id"]))
+    if isinstance(args.get("clip_ids"), (list, tuple)):
+        ids += [str(x) for x in args["clip_ids"]]
+    if args.get("track") is not None:
+        tr = store.edl.get_track(str(args["track"]))
+        if tr is None:
+            raise ValueError(f"track {args['track']} not found")
+        ids += [c.id for c in tr.clips if isinstance(c, (Clip, Sticker))]
+        if not ids:
+            raise ValueError(f"track {tr.id} has no clips to animate")
+    if not ids:
+        raise ValueError("set_animation needs a clip_id, clip_ids or a track")
+    targets: list = []
+    for cid in dict.fromkeys(ids):
+        res = store.edl.get_clip(cid)
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        track, c = res
+        if isinstance(c, TextClip):
+            raise ValueError(f"{cid} is text — a title animates with its own In/Out (add_text anim_in/anim_out)")
+        if not isinstance(c, (Clip, Sticker)):
+            raise ValueError(f"{cid} cannot be animated")
+        _reject_audio_lane_clip(track, cid, "set_animation")
+        targets.append(c)
+    with store.batch():
+        for c in targets:
+            if has_combo:
+                c.anim_combo = a_combo
+                if a_combo is not None:
+                    c.anim_in = c.anim_out = None
+                    c.anim_dur = c.anim_out_dur = None
+            if has_in:
+                if a_in is not None:
+                    c.anim_combo = None
+                c.anim_in = a_in
+                if a_in is None:
+                    c.anim_dur = None
+            if has_out:
+                if a_out is not None:
+                    c.anim_combo = None
+                c.anim_out = a_out
+                if a_out is None:
+                    c.anim_out_dur = None
+            if has_din and c.anim_in is not None:
+                c.anim_dur = d_in
+            if has_dout and c.anim_out is not None:
+                c.anim_out_dur = d_out
+    who = targets[0].id if len(targets) == 1 else f"{len(targets)} clips"
+    summary = f"Animation {who} → {_ca.describe(targets[0])}"
+    # after the batch closes: a commit inside it is folded into none
+    store.commit("set_animation", args, summary)
+    return {"summary": summary, "clip_ids": [c.id for c in targets],
+            "anim_in": targets[0].anim_in, "anim_out": targets[0].anim_out,
+            "anim_combo": targets[0].anim_combo, "anim_dur": targets[0].anim_dur,
+            "anim_out_dur": targets[0].anim_out_dur}
+
+
+def _partition_anim(left, right) -> None:
+    """A split / cut keeps each animation on the edge it belongs to (wave E,
+    F1): the In on the left piece, the Out on the right; a looping Combo
+    stays on both."""
+    left.anim_out = None
+    left.anim_out_dur = None
+    right.anim_in = None
+    right.anim_dur = None
+
+
 def set_clip_transform(store: EDLStore, args: dict) -> dict:
     """Adjust transform on a clip or sticker: rotation (deg), scale, x, y, opacity."""
     cid = str(args["clip_id"])
@@ -4996,6 +5319,182 @@ def set_clip_fit(store: EDLStore, args: dict) -> dict:
         summary += f"; reset {'/'.join(reset)} to restore the original framing"
     store.commit("set_clip_fit", args, summary)
     return {"summary": summary, "fit": mode}
+
+
+# ---------------------------------------------------------------------------
+# CapCut Canvas background and overlay blend modes (wave E, lane F2). The ONE
+# table is edl/canvas_blend.py; the renderers are render/canvas_bg.py (v1
+# contain fit) and render/pip.py (blend_overlay_parts).
+# ---------------------------------------------------------------------------
+
+_CANVAS_KIND_ALIASES = {
+    "color": "color", "colour": "color", "solid": "color", "fill": "color",
+    "blur": "blur", "blurred": "blur", "blurry": "blur",
+    "image": "image", "picture": "image", "photo": "image", "img": "image",
+    "none": "none", "off": "none", "black": "none", "remove": "none", "clear": "none", "default": "none",
+}
+
+
+def _canvas_image_arg(value: object) -> str:
+    """A canvas picture path: through the path allowlist, an existing file of
+    an image kind Pillow can read."""
+    from ..edl.canvas_blend import CANVAS_IMAGE_EXTS
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("an image background needs `image`: the path of a picture")
+    p = Path(_safe_src(value))
+    if not p.is_file():
+        raise ValueError(f"image not found: {p.name}")
+    if p.suffix.lower() not in CANVAS_IMAGE_EXTS:
+        # A photo imported through the Media panel is a still-image VIDEO
+        # source (ingest/still.py); its upload keeps the original picture.
+        try:
+            meta = json.loads((p.parent / "ingest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = None
+        orig = (Path(_safe_src(str(meta["src"]))) if isinstance(meta, dict) and meta.get("still")
+                and meta.get("src") and Path(str(meta.get("normalized", ""))).name == p.name else None)
+        if orig is not None and orig.is_file():
+            p = orig
+    if p.suffix.lower() not in CANVAS_IMAGE_EXTS:
+        raise ValueError(f"{p.name} is not a picture (use {', '.join(CANVAS_IMAGE_EXTS)})")
+    # review RE: a HEIC (an iPhone photo imported through the Media panel
+    # maps back to its .heic original) is decoded to a PNG by ffmpeg — Pillow
+    # here cannot read it — and every picture is size-capped before use
+    from ..render.canvas_bg import check_picture, pillow_readable
+    p = pillow_readable(p)
+    check_picture(p)
+    return str(p)
+
+
+def _canvas_targets(store: EDLStore, args: dict, tool: str) -> tuple[list[Clip], Clip | None]:
+    """(clips to change, the named clip) — a main-track clip, or with
+    `all: true` every main-track clip ("Apply to all")."""
+    named: Clip | None = None
+    cid = args.get("clip_id")
+    if cid:
+        res = store.edl.get_clip(str(cid))
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        t, c = res
+        if not isinstance(c, Clip):
+            raise ValueError(f"{tool} only supports video clips")
+        _reject_audio_lane_clip(t, str(cid), tool)
+        if t.id != "v1":
+            raise ValueError(f"clip {cid} is on '{t.id}' — the canvas background belongs to main-track "
+                             f"clips; an overlay has no canvas of its own")
+        named = c
+    if args.get("all"):
+        v1 = store.edl.get_track("v1")
+        clips = [c for c in (v1.clips if v1 else []) if isinstance(c, Clip)]
+        if not clips:
+            raise ValueError("there is no clip on the main track")
+        return clips, named
+    if named is None:
+        raise ValueError(f"{tool} needs a clip_id (or all: true for every main-track clip)")
+    return [named], named
+
+
+def set_canvas_background(store: EDLStore, args: dict) -> dict:
+    """CapCut Canvas: what fills a letterboxed (contain-fit) main-track clip's
+    bars — `type` color (+ `color` #RRGGBB or a name), blur (+ `blur` 1-4),
+    image (+ `image`, a picture path) or none (black bars). `all: true`
+    applies it to every main-track clip in ONE undo step; `all: true` with a
+    `clip_id` and no `type` copies that clip's background to every clip
+    (the Inspector's "Apply to all")."""
+    from ..edl.canvas_blend import CANVAS_BLUR_LEVELS, CANVAS_BLUR_DEFAULT, normalize_color
+    from ..edl.schema import CanvasBackground
+    targets, named = _canvas_targets(store, args, "set_canvas_background")
+    raw = args.get("type")
+    if raw is None or str(raw).strip() == "":
+        if not (named is not None and args.get("all")):
+            raise ValueError("set_canvas_background needs a type: color, blur, image or none")
+        src_bg = named.canvas_bg
+        kind = "none" if src_bg is None else src_bg.type
+    else:
+        kind = _CANVAS_KIND_ALIASES.get(str(raw).strip().lower())
+        if kind is None:
+            raise ValueError(f"unknown canvas background {raw!r}; choose color, blur, image or none")
+        src_bg = None
+    cur = named.canvas_bg if named is not None else None
+
+    def build() -> CanvasBackground | None:
+        if src_bg is not None:
+            return src_bg.model_copy(deep=True)
+        if kind == "none":
+            return None
+        if kind == "color":
+            val = args.get("color")
+            if val is None:
+                val = cur.color if cur is not None else "#000000"
+            return CanvasBackground(type="color", color=normalize_color(val))
+        if kind == "blur":
+            lv = args.get("blur")
+            if lv is None:
+                lv = cur.blur if cur is not None and cur.type == "blur" else CANVAS_BLUR_DEFAULT
+            try:
+                n = float(lv)
+            except (TypeError, ValueError):
+                raise ValueError(f"blur must be a strength 1-{len(CANVAS_BLUR_LEVELS)}, got {lv!r}") from None
+            if not (1 <= n <= len(CANVAS_BLUR_LEVELS)) or n != int(n):
+                raise ValueError(f"blur must be a strength 1-{len(CANVAS_BLUR_LEVELS)}, got {lv!r}")
+            return CanvasBackground(type="blur", blur=int(n))
+        img = args.get("image")
+        if img is None and cur is not None and cur.type == "image":
+            img = cur.image
+        return CanvasBackground(type="image", image=_canvas_image_arg(
+            _safe_src(img) if isinstance(img, str) and img.strip() else img))
+
+    first = build()
+    for c in targets:
+        # A fresh model per clip — never one shared object (the _clone_clip trap).
+        c.canvas_bg = None if first is None else first.model_copy(deep=True)
+    covered = sum(1 for c in targets if getattr(c, "fit", "contain") == "cover")
+    what = ("black bars" if first is None else
+            f"colour {first.color}" if first.type == "color" else
+            f"blur {first.blur}" if first.type == "blur" else
+            f"image {Path(first.image or '').name}")
+    who = f"all {len(targets)} main-track clips" if len(targets) > 1 or args.get("all") else f"clip {targets[0].id}"
+    summary = f"Canvas background: {what} on {who}"
+    store.commit("set_canvas_background", args, summary)
+    out: dict = {"summary": summary, "clip_ids": [c.id for c in targets],
+                 "canvas_bg": None if first is None else first.model_dump(mode="json")}
+    if covered and first is not None:
+        out["notice"] = (f"{covered} of these clips fill the frame (Fill frame is on), so the background "
+                         "shows only once they are letterboxed")
+    return out
+
+
+def set_blend_mode(store: EDLStore, args: dict) -> dict:
+    """CapCut blend mode of an OVERLAY (v2+) clip onto what is beneath it:
+    normal, darken, multiply, color_burn, linear_burn, lighten, screen,
+    color_dodge, add, overlay, soft_light, hard_light, difference, exclusion.
+    `clip_id` (or `clip_ids`) and `mode`."""
+    from ..edl.canvas_blend import blend_of, resolve_blend
+    ids = [str(x) for x in (args.get("clip_ids") or []) if x] or (
+        [str(args["clip_id"])] if args.get("clip_id") else [])
+    if not ids:
+        raise ValueError("set_blend_mode needs a clip_id")
+    mode = resolve_blend(args.get("mode"))
+    clips: list[Clip] = []
+    for cid in ids:
+        res = store.edl.get_clip(cid)
+        if not res:
+            raise ValueError(f"clip {cid} not found")
+        t, c = res
+        if not isinstance(c, Clip) or t.type != "video":
+            raise ValueError(f"clip {cid} is not an overlay video clip — blend modes apply to "
+                             f"picture-in-picture (overlay) clips")
+        if t.id == "v1":
+            raise ValueError(f"clip {cid} is on the main track, which is the base layer — blend modes "
+                             f"apply to overlay clips above it (move it to an overlay lane first)")
+        clips.append(c)
+    for c in clips:
+        c.blend = mode  # type: ignore[assignment]
+    label = blend_of(mode).label
+    summary = (f"Blend mode: {label} on clip {clips[0].id}" if len(clips) == 1
+               else f"Blend mode: {label} on {len(clips)} overlay clips")
+    store.commit("set_blend_mode", args, summary)
+    return {"summary": summary, "clip_ids": [c.id for c in clips], "mode": mode}
 
 
 def bulk_delete(store: EDLStore, args: dict) -> dict:
@@ -6262,6 +6761,34 @@ def _piece_transform(piece, whole, t0: float, t1: float | None) -> None:
             setattr(piece.transform, prop, _piece_kf(v, t0, t1))
 
 
+def _piece_gain_env(piece, whole, t0: float, t1: float | None) -> None:
+    """Give `piece` the part of `whole`'s volume automation it plays: [t0,
+    t1) of the whole clip, re-based to the piece's own 0 (`_piece_kf`, exact
+    for every interpolation) — what `cut_range` and a head trim keep (wave
+    E, item 25: the right piece of a cut and a head-trimmed clip replayed the
+    envelope from its first key, a level jump of up to its whole range).
+    A constant result is one key (0 dB: no automation)."""
+    env = getattr(getattr(whole, "audio", None), "gain_env", None)
+    if env is None or piece.audio is None:
+        return
+    from ..edl.schema import Keyframe
+    v = _piece_kf(env, t0, t1)
+    if isinstance(v, (int, float)):
+        v = None if abs(float(v)) < 1e-12 else Keyframe(keyframes=[(0.0, float(v))], interp=env.interp)
+    piece.audio.gain_env = v
+
+
+def _shift_gain_env(c, dt: float) -> None:
+    """Move `c`'s volume keys `dt` seconds later (a head trim that EXTENDS
+    the clip, as `_shift_transform_keys`)."""
+    env = getattr(getattr(c, "audio", None), "gain_env", None)
+    if env is None:
+        return
+    from ..edl.schema import Keyframe
+    c.audio.gain_env = Keyframe(keyframes=[(float(a) + dt, float(b)) for a, b in env.keyframes],
+                                interp=env.interp)
+
+
 def _shift_transform_keys(c, dt: float) -> None:
     """Move every transform keyframe of `c` `dt` seconds later (a head trim
     that EXTENDS the clip: the old frames now play `dt` later)."""
@@ -6472,10 +6999,19 @@ def add_sticker(store: EDLStore, args: dict) -> dict:
 
     canvas = store.edl.canvas
     if emoji_arg and not src_arg:
-        from ..ai.emoji import fetch_emoji_png
-        png_path = fetch_emoji_png(str(emoji_arg))
+        # LOCAL sources only — never the network (gate X3). An edit op that
+        # opened a connection to the emoji CDN stalled on it, failed offline,
+        # and was an unguarded fetch inside the single mutation path. The
+        # picker's swatch request has normally cached the pinned art already;
+        # otherwise the tile is drawn from the installed emoji font (the same
+        # artwork — ai/emoji_local.py) and the serving path upgrades it later.
+        from ..ai.emoji import local_emoji_png
+        png_path = local_emoji_png(str(emoji_arg))
         if not png_path:
-            raise ValueError(f"could not fetch emoji PNG for {emoji_arg!r}")
+            raise ValueError(
+                f"no sticker artwork for {emoji_arg!r} on this machine: it is not in the emoji "
+                "cache and cannot be drawn locally — open the sticker picker while online "
+                "to fetch it, or add a PNG sticker instead")
         # Copy the fetched artwork INTO the session's uploads/stickers/, and
         # point the clip at that copy rather than at the shared per-machine
         # emoji cache (`user_cache_dir/emoji/<codepoint>.png`). Two reasons:
@@ -6744,6 +7280,14 @@ def _check_property_bounds(obj: Any, leaf: str, value: Any) -> None:
     loadable; a caller asking for 1e9 s or a 1e6 px font gets told instead of
     silently getting something else. Negative times keep the handlers'
     long-standing clamp-to-0 (a UI's -0.0004 rounding residue is not an error)."""
+    if isinstance(obj, (Clip, Sticker)) and leaf in ("anim_in", "anim_out", "anim_combo"):
+        # The model drops a name it does not know (a newer build's EDL stays
+        # loadable); a caller naming one gets told (wave E, F1).
+        _anim_arg({"anim_in": "in", "anim_out": "out", "anim_combo": "combo"}[leaf], value)
+        return
+    if isinstance(obj, (Clip, Sticker)) and leaf in ("anim_dur", "anim_out_dur") and value is not None:
+        _anim_seconds({leaf: value}, leaf)
+        return
     for (typ, name), ((lo, hi), label) in _property_bounds().items():
         if name != leaf or not isinstance(obj, typ):
             continue
@@ -6772,7 +7316,7 @@ _TIME_KEYS = frozenset({(Clip, "start"), (Clip, "in_"), (Clip, "out"), (TextClip
 _PROPERTY_GROUPS = {
     "style": "Text style", "audio": "Audio", "transform": "Transform", "speed": "Speed",
     "reverse": "Speed", "text": "Text", "anim_in": "Animation", "anim_out": "Animation",
-    "anim_dur": "Animation", "in": "Timing", "out": "Timing", "start": "Timing", "end": "Timing",
+    "anim_dur": "Animation", "anim_combo": "Animation", "anim_out_dur": "Animation", "in": "Timing", "out": "Timing", "start": "Timing", "end": "Timing",
     "src": "Media",
 }
 #: audio.channels values as the inspector names them (lib/audioChannels.CHANNEL_MODES).
@@ -6902,6 +7446,13 @@ def set_property(store: EDLStore, args: dict) -> dict:
         # against. Guarding add_clip and leaving this open would just have moved
         # the hole one tool to the left.
         value = _safe_src(value)
+    # A canvas background picture is a read path too (wave E, F2): the same
+    # guard as `set_canvas_background`, whether the leaf or the whole object.
+    from ..edl.schema import CanvasBackground
+    if leaf == "image" and isinstance(obj, CanvasBackground) and value is not None:
+        value = _canvas_image_arg(value)
+    if leaf == "canvas_bg" and isinstance(value, dict) and value.get("image"):
+        value = {**value, "image": _canvas_image_arg(value["image"])}
     from ..edl.schema import TextStyle
     if leaf == "font" and isinstance(obj, TextStyle):
         # A bundled font NAME, never a path (render/fonts.py).
@@ -7486,8 +8037,12 @@ DISPATCH: dict[str, DispatchFn] = {
     "detach_audio": detach_audio,
     "set_speed": set_speed,
     "freeze_frame": freeze_frame,
+    "set_voice_effect": set_voice_effect,
     "set_clip_transform": set_clip_transform,
+    "set_animation": set_animation,
     "set_clip_fit": set_clip_fit,
+    "set_canvas_background": set_canvas_background,
+    "set_blend_mode": set_blend_mode,
     "set_clip_timing": set_clip_timing,
     "set_clip_z": set_clip_z,
     "bulk_delete": bulk_delete,
@@ -7500,6 +8055,8 @@ DISPATCH: dict[str, DispatchFn] = {
     # M4: effects, transitions, masks
     "add_effect": add_effect,
     "remove_effect": remove_effect,
+    "remove_effects": remove_effects,
+    "flip_clip": flip_clip,
     "color_grade": color_grade,
     "apply_lut": apply_lut,
     "add_transition": add_transition,

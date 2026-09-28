@@ -114,6 +114,25 @@ def anamorphic_from_stream(stream: dict) -> Anamorphic | None:
     return Anamorphic(width=w, height=h, sar=sar)
 
 
+def display_size(stream: dict) -> tuple[int, int]:
+    """The DISPLAYED `(width, height)` of one ffprobe video stream: the frame
+    ffmpeg's autorotate hands every decode (a quarter turn of the rotation
+    side data / `rotate` tag swaps the sides and inverts the SAR), at square
+    pixels (`display_width`). What the proxy is sized to (wave E: a phone
+    clip shot upright, stored 1920x1080 with a 90° display matrix, was a
+    1280x720 proxy of a 1080x1920 picture — squashed)."""
+    w, h = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    sar = parse_sar(stream.get("sample_aspect_ratio"))
+    if _rotation(stream) in (90, 270):
+        w, h, sar = h, w, (1 / sar if sar is not None else None)
+    return display_width(w, sar), h
+
+
+def rotation_of(stream: dict) -> int:
+    """The stream's display rotation in degrees (0, 90, 180 or 270)."""
+    return _rotation(stream)
+
+
 #: Answers of `_probe`, keyed on the file's identity: only a probe that RAN
 #: is remembered (review RD3 — a timeout cached as None made an anamorphic
 #: source render squeezed for the rest of the process).

@@ -66,6 +66,20 @@ def click_source(path: Path, rate: Fraction, seconds: float) -> Path:
     return path
 
 
+def offset_source(path: Path, rate: Fraction, seconds: float, *, audio_late: float = 0.0,
+                  video_late: float = 0.0) -> Path:
+    """A counter source whose audio (or video) stream STARTS late in the file
+    (stream start_time > the file's): a camera or screen-recorder MOV/MP4.
+    The render reads it on the file clock (`aresample=async=1:first_pts=0`
+    pads the gap), so the proxy must too (gate RX finding 2)."""
+    if not path.exists():
+        base = counter_source(path.with_suffix(".base.mov"), rate, seconds)
+        _run(["ffmpeg", "-v", "error", "-y", "-itsoffset", f"{video_late}", "-i", str(base),
+              "-itsoffset", f"{audio_late}", "-i", str(base),
+              "-map", "0:v", "-map", "1:a", "-c", "copy", str(path)])
+    return path
+
+
 def tone_source(path: Path, seconds: float, lf: float, rf: float, *, video: bool = True,
                 amp: float = 0.2) -> Path:
     """AAC in mp4 (the import format): lf Hz left, rf Hz right, a 2 ms tick
@@ -140,9 +154,11 @@ def build_proxy_audio(src: Path, wd: Path) -> tuple[str, dict, dict]:
 
 
 def decode_master_f32(src: Path) -> np.ndarray:
-    """ffmpeg's decode of the master exactly as build_audio does it."""
+    """ffmpeg's decode of the master exactly as build_audio does it (on the
+    file clock: an audio stream that starts late is led by silence)."""
+    from video_ai_editor.ingest.proxy import AUDIO_FILTER
     raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(src), "-map", "0:a:0", "-vn",
-                          "-af", f"aresample={SR},aformat=sample_fmts=flt:channel_layouts=stereo",
+                          "-af", AUDIO_FILTER,
                           "-f", "f32le", "pipe:1"], check=True, capture_output=True).stdout
     return np.frombuffer(raw, dtype="<f4").reshape(-1, 2)
 
@@ -230,6 +246,22 @@ def placement_edl(counter: str, click: str, rate: Fraction):
     return e, fps
 
 
+def offset_edl(alate: str, vlate: str, rate: Fraction):
+    """P1-A1 on sources whose streams start apart: each source cut near its
+    head (no seek) and mid-file (a seek), 20 frames each."""
+    fps = int(rate) if rate.denominator == 1 else tb.fps_float(rate)
+    e = empty_edl(Canvas(w=64, h=36, fps=fps))
+    e.canvas.loudness_lufs = None
+    v1 = e.get_track("v1")
+    cur = 0
+    for name, src in (("alate", alate), ("vlate", vlate)):
+        for cid, in_ in (("h", 0.2), ("s", 3.337)):
+            v1.clips.append(_clip(src, f"{name}_{cid}", tb.time_of(cur, fps), in_, in_ + tb.time_of(20, fps)))
+            cur += 20
+    e.recompute_duration()
+    return e, fps
+
+
 def ripple_delete(edl, clip_id: str, fps):
     """`edl` with v1 clip `clip_id` removed and every later v1 clip moved
     left by its length (what a ripple delete dispatches)."""
@@ -273,6 +305,25 @@ def mix_edl(tone_a: str, tone_b: str, bed: str, voice: str, *, solo: str | None 
     e.get_track("a1").clips.append(_clip(voice, "a1c", 5.4, 3.0, 4.0, audio={"channels": "mono", "fade_out": 0.25}))
     if solo:
         e.get_track(solo).solo = True
+    e.recompute_duration()
+    return e, 30
+
+
+def hot_edl(c30: str, c2997: str):
+    """Gate RX finding 3: a v1 seam, a PiP, an audio lane, a voice-over and a
+    music bed over each other, counter sources (|x| up to 0.5 each), so the
+    master reaches about twice the limiter's ceiling. The browser's limiter
+    is not alimiter there: the plan must call that stretch APPROX
+    (`AudioPlan.limiting`)."""
+    e = empty_edl(Canvas(w=64, h=36, fps=30))
+    e.canvas.loudness_lufs = None
+    v1 = e.get_track("v1")
+    v1.clips += [_clip(c2997, "a", 0.0, 1.0, 3.0), _clip(c30, "b", 2.0, 4.0, 6.0)]
+    v1.transitions.append(Transition(at=2.0, duration=0.8))
+    e.get_track("v2").clips.append(_clip(c30, "p", 1.0, 2.0, 4.0))
+    e.get_track("a1").clips.append(_clip(c2997, "q", 1.2, 5.0, 7.0))
+    e.get_track("vo").clips.append(_clip(c30, "r", 1.4, 6.0, 7.5))
+    e.get_track("music").clips.append(_clip(c2997, "s", 1.6, 1.0, 3.0))
     e.recompute_duration()
     return e, 30
 

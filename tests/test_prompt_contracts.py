@@ -214,7 +214,7 @@ def test_check_specs_cover_the_verifier_table():
 def test_path_args_table_matches_the_guard_test():
     guards = importlib.import_module("test_path_guards")
     assert path_args.PATH_ARGS == guards.EXPECTED_GUARDS
-    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 23
+    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 24
     assert path_args.path_args_for("apply_lut") == {"src": "read", "lut_path": "read"}
     assert path_args.path_args_for("add_text") == {}
     assert path_args.guarded_args("write") == {("export_ass", "path"), ("export_srt", "path"), ("export_vtt", "path")}
@@ -281,7 +281,15 @@ def test_recipe_table_matches_the_grammar_intents():
                     "reverse",   # QA-037
                     "freeze", "split",   # wave D (review RD2)
                     # wave D3 (E3 key-free sweep): the CapCut clip edits
-                    "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust"}
+                    "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust",
+                    # wave E (F4b): edits by name, a clip's length, flip / mirror
+                    "remove_feature", "clip_length", "flip",
+                    # wave E (F2): CapCut Canvas and overlay blend modes
+                    "canvas", "blend",
+                    # wave E (F3): CapCut's voice changer
+                    "voice_effect",
+                    # wave E (F1): CapCut clip animations (In / Out / Combo)
+                    "animation"}
     assert spec_intents | {"transcribe"} == set(recipes.RECIPE_NAMES)   # undo/redo are intents, not recipes
     offered = {c.name for c in recipes.cards()}
     assert "transcribe" not in offered and "ask" not in offered and "auto_edit" in offered

@@ -48,7 +48,14 @@ export class FakeNode {
     this.outputs.push({ to, out, in: inp })
     return to
   }
-  disconnect() { this.disconnected = true; this.outputs = [] }
+  /** Web Audio's semantics: no argument drops every connection, a node
+   *  drops only the connections to it (and throws when there is none). */
+  disconnect(to?: FakeNode) {
+    if (to === undefined) { this.disconnected = true; this.outputs = []; return }
+    const kept = this.outputs.filter((o) => o.to !== to)
+    if (kept.length === this.outputs.length) throw new Error('InvalidAccessError: not connected')
+    this.outputs = kept
+  }
 }
 
 export class FakeGain extends FakeNode {
@@ -99,6 +106,12 @@ export class FakeCompressor extends FakeNode {
   constructor(ctx: FakeContext) { super(ctx, 'compressor') }
 }
 
+export class FakeConvolver extends FakeNode {
+  buffer: FakeBuffer | null = null
+  normalize = true
+  constructor(ctx: FakeContext) { super(ctx, 'convolver') }
+}
+
 export class FakeContext {
   nodes: FakeNode[] = []
   currentTime = 0
@@ -120,6 +133,7 @@ export class FakeContext {
   createChannelSplitter() { return new FakeNode(this, 'splitter') }
   createChannelMerger() { return new FakeNode(this, 'merger') }
   createDynamicsCompressor() { return new FakeCompressor(this) }
+  createConvolver() { return new FakeConvolver(this) }
   createBuffer(ch: number, len: number, sr: number) { return new FakeBuffer(ch, len, sr) }
   getOutputTimestamp() { return { contextTime: 0, performanceTime: 0 } }
   resume() { this.resumes++; this.setState('running'); return Promise.resolve() }

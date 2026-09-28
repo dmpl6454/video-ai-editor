@@ -10,7 +10,7 @@
 // through timebase.ts, which is exact.
 
 import {
-  floorToFrame, frameOf, timeOf, type FpsLike,
+  ceilToFrame, floorToFrame, frameOf, timeOf, type FpsLike,
 } from './timebase'
 import { curveMap, curvePoints, meanSpeed, sourceSeconds } from './speedCurve'
 
@@ -227,9 +227,43 @@ export function v1FramePlan(clips: EdlClip[], totalDuration: number, fps: FpsLik
   return plan
 }
 
+/** `reverse.on_source_grid`: a reversed speed CURVE's intermediate sits on
+ *  the source's absolute project grid (wave E item 21), so every piece of a
+ *  split reads the whole clip's file clock. */
+export function onSourceGrid(c: EdlClip): boolean {
+  return freezeOf(c) === null && curvePoints(c.speed) !== null
+}
+
+/** `reverse.grid_frames`: the grid frames [floor(in), ceil(out)). */
+export function gridFrames(c: EdlClip, fps: FpsLike): [number, number] {
+  const g0 = frameOf(floorToFrame(clipIn(c), fps), fps)
+  const g1 = frameOf(ceilToFrame(clipOut(c), fps), fps)
+  return [g0, Math.max(g0 + 1, g1)]
+}
+
+/** `reverse.intermediate_span`: [source time of the intermediate's first
+ *  FORWARD frame, frames it holds]. */
+export function intermediateSpan(c: EdlClip, fps: FpsLike): [number, number] {
+  if (onSourceGrid(c)) {
+    const [g0, g1] = gridFrames(c, fps)
+    return [timeOf(g0, fps), g1 - g0]
+  }
+  return [clipIn(c), Math.max(1, frameOf(clipOut(c) - clipIn(c), fps))]
+}
+
 /** `reverse.reversed_frames`: frames the reversed intermediate holds. */
 export function reversedFrameCount(c: EdlClip, fps: FpsLike): number {
-  return Math.max(1, frameOf(clipOut(c) - clipIn(c), fps))
+  return intermediateSpan(c, fps)[1]
+}
+
+const F64 = new Float64Array(1)
+const U64 = new BigUint64Array(F64.buffer)
+/** `math.nextafter(x, inf)` for a finite x >= 0. */
+function nextUp(x: number): number {
+  if (x === 0) return Number.MIN_VALUE
+  F64[0] = x
+  U64[0] += 1n
+  return F64[0]
 }
 
 /** `reverse.view_out`: the reversed view's `out` — the clip's own span
@@ -240,9 +274,28 @@ export function reversedViewOut(c: EdlClip): number {
   return clipOut(c) - clipIn(c)
 }
 
-/** `reverse.reversed_view` timing: in 0, out = `reversedViewOut`. */
-export function reversedView(c: EdlClip, _fps?: FpsLike): EdlClip {
-  return { ...c, in: 0, out: reversedViewOut(c), reverse: false }
+/** `reverse.view_range`: the reversed view's [in, out]. In 0 and
+ *  `reversedViewOut`; a source-grid (curve) clip opens its intermediate
+ *  where `out` sits (G1/R − out), nudged by ulps until the span is the
+ *  clip's own `out − in` bit for bit. */
+export function reversedViewRange(c: EdlClip, fps: FpsLike): [number, number] {
+  const span = reversedViewOut(c)
+  if (!onSourceGrid(c)) return [0, span]
+  const [, g1] = gridFrames(c, fps)
+  const vIn = Math.max(0, timeOf(g1, fps) - clipOut(c))
+  let cand = vIn
+  for (let i = 0; i < 64; i++) {
+    if ((cand + span) - cand === span) return [cand, cand + span]
+    cand = nextUp(cand)
+    if (cand - vIn > 1e-12) break
+  }
+  return [vIn, vIn + span]
+}
+
+/** `reverse.reversed_view` timing (`reversedViewRange`). */
+export function reversedView(c: EdlClip, fps: FpsLike): EdlClip {
+  const [vIn, vOut] = reversedViewRange(c, fps)
+  return { ...c, in: vIn, out: vOut, reverse: false }
 }
 
 /** A seam the compositor cross-fades, between two ADJACENT clip segments. */

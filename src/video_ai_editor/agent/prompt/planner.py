@@ -51,15 +51,18 @@ from .schema import (ARG_REF, LONG_RUN_SECONDS, STAGE_PREREQ, DownloadNeeded, Ne
 #: Recipes whose steps re-time v1 (so later positional maths is stale).
 CUT_RECIPES: frozenset[str] = frozenset({"tighten", "remove_silences", "remove_fillers", "trim", "speed",
                                          # wave D3 (E3): they move or remove clips
-                                         "delete_clip", "duplicate", "move_clip", "freeze"})
+                                         "delete_clip", "duplicate", "move_clip", "freeze",
+                                         # wave E (F4b): a clip's new length re-times what follows
+                                         "clip_length"})
 
 #: Expansion order — prerequisites before dependents, then stage order.
 RECIPE_ORDER: tuple[str, ...] = (
-    "transcribe", "trim", "delete_clip", "duplicate", "move_clip", "split", "freeze", "speed", "reverse",
-    "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten", "zoom", "rotate", "adjust",
-    "shorts", "color_look", "transitions", "reframe", "captions", "translate_captions", "hook", "title",
+    "transcribe", "trim", "clip_length", "delete_clip", "duplicate", "move_clip", "split", "freeze", "speed",
+    "reverse", "stabilize", "upscale", "remove_silences", "remove_fillers", "tighten", "zoom", "rotate", "flip",
+    "adjust", "remove_feature", "blend",
+    "shorts", "color_look", "transitions", "reframe", "canvas", "captions", "translate_captions", "hook", "title",
     "brand", "end_card", "voiceover", "remove_music", "music", "duck", "beat_sync", "fit_music", "fade", "volume",
-    "mute",
+    "mute", "voice_effect", "animation",
     "clean_audio", "loudness", "export_preset", "_audit", "preview", "ask",
 )
 
@@ -80,6 +83,8 @@ _TITLES: dict[str, str] = {
     "remove_music": "Remove music", "reverse": "Reverse", "freeze": "Freeze", "split": "Split",
     "delete_clip": "Delete clip", "duplicate": "Duplicate", "move_clip": "Move clip", "zoom": "Zoom",
     "rotate": "Rotate", "adjust": "Adjust", "sticker": "Sticker", "remove_feature": "Remove", "flip": "Flip",
+    "clip_length": "Clip length",
+    "canvas": "Canvas", "blend": "Blend", "voice_effect": "Voice effect", "animation": "Animation",
     "_audit": "Audit", "preview": "Preview",
 }
 
@@ -298,8 +303,14 @@ def _fade_edges(clause: str) -> set[str]:
     return edges
 
 
+#: The voice-over lane named as a level's object (review RE).
+_VO_WORD_RE = re.compile(r"\bvoice[- ]?overs?\b|\bvo\b|\bnarration track\b|\bvoice track\b")
+
+
 def _volume_slots(clause: str, music: bool) -> dict[str, Any]:
     out: dict[str, Any] = {"target": "music" if music or not _VOICE_WORD_RE.search(clause) else "voice"}
+    if not music and _VO_WORD_RE.search(clause):
+        out["target"] = "vo"
     down, up = bool(_DOWN_RE.search(clause)), bool(_UP_RE.search(clause))
     change = "down" if down and not up else ("up" if up and not down else None)
     m = _DB_RE.search(clause)
@@ -663,26 +674,30 @@ _FEATURE_WORDS: tuple[tuple[str, str], ...] = (
     (r"watermark|end ?card", "the brand overlay"), (r"speed ramp|speed curve", "the speed curve"),
     (r"freeze(?: frame)?", "the freeze frame"),
 )
-#: Flip / mirror (review RD3): no Transform field for it yet (wave E, F4).
-FLIP_REPLY = ("Flipping or mirroring a clip is not available yet — it is coming. Want it turned upside down "
-              "instead (a 180° rotation)?")
-READ_ONLY_INTENTS: tuple[str, ...] = ("sticker", "remove_feature", "flip")
+#: Wave E (F4b): flip / mirror and removing captions, filters, transitions
+#: and text are recipes now (agent/prompt/name_expanders.py); a removal the
+#: Prompt bar has no recipe for still gets the honest reply below.
+READ_ONLY_INTENTS: tuple[str, ...] = ("sticker",)
+
+
+def unsupported_removal_reply(clause: str) -> str:
+    """The honest reply for "remove the <something no recipe removes>"."""
+    what = next((label for pat, label in _FEATURE_WORDS if re.search(rf"\b(?:{pat})\b", clause)), "that")
+    return (f"The Prompt bar cannot remove {what} yet — select it on the timeline and press Delete, or remove it "
+            f"in the Inspector. Was it your last edit? Then say 'undo'.")
 
 
 def _read_only_reply(hit: G.IntentHit) -> str:
     if hit.intent == "sticker":
         return STICKER_REPLY
-    if hit.intent == "flip":
-        return FLIP_REPLY
-    what = next((label for pat, label in _FEATURE_WORDS if re.search(rf"\b(?:{pat})\b", hit.clause)), "that")
-    return (f"The Prompt bar cannot remove {what} yet — select it on the timeline and press Delete, or remove it "
-            f"in the Inspector. Was it your last edit? Then say 'undo'.")
+    return unsupported_removal_reply(hit.clause)
 
 
 #: Words that point at an intent when no phrase matched (review RD3: "slow
 #: the middle clip down…" was offered Captions / Tighten / Auto edit).
 _GUESS_WORDS: tuple[tuple[str, str], ...] = (
     (r"slow|fast|quick|speed|pace|tempo", "speed"), (r"text|words?|write|writ|type|title|caption|say", "title"),
+    (r"animat|bounce|wobble|swing|pendulum|entrance|exit", "animation"),
     (r"zoom|closer|punch|push in", "zoom"), (r"rotat|turn|tilt|spin|upside", "rotate"),
     (r"cut|trim|lose|remove|delete|chop|shorten|drop", "trim"), (r"split|slice|blade", "split"),
     (r"music|song|soundtrack|beat", "music"), (r"loud|quiet|volume|louder|softer", "volume"),
@@ -692,11 +707,26 @@ _GUESS_WORDS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: The phrase's own NOUNS rank first (review RE: "put a pink background behind
+#: the video" and "take off the vignette" were offered Trim | Speed | Title).
+_NOUN_GUESSES: tuple[tuple[str, str], ...] = (
+    (r"back\s*ground|canvas|backdrop|black bars|letter\s*box", "canvas"), (r"blend", "blend"),
+    (r"(?:remove|delete|take off|take out|get rid of|turn off|clear|drop|lose)\b.*\b(?:vignett|grain|vintage|vhs|glow|"
+     r"rgb split|sharpen|effect|filter|look|lut)", "remove_feature"),
+    (r"voice|vocal|pitch|robot|echo|reverb|chipmunk", "voice_effect"),
+    (r"animat|bounce|swing|pendulum|shake|wobble|slide (?:in|out)", "animation"),
+    (r"mirror|flip", "flip"),
+)
+
+
 def _guesses(prompt: str) -> list[tuple[str, str]]:
     text = S.normalize(prompt)
     found: list[str] = []
+    for pat, intent in _NOUN_GUESSES:
+        if intent not in found and re.search(rf"\b(?:{pat})", text):
+            found.append(intent)
     for intent, rows in G.PHRASES.items():
-        if intent in ("ask", "undo", "redo"):
+        if intent in ("ask", "undo", "redo") or intent in found:
             continue
         for pat, _score in rows:
             if re.search(pat, text):

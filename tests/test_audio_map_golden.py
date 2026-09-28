@@ -167,10 +167,13 @@ def test_audio_placement_is_sample_exact(rate, seed, sources, tmp_path):
     assert errs == [], "\n".join(errs[:10])
 
 
-def test_the_two_rounding_start_rule_is_needed(sources, tmp_path):
-    """round(in · 48 kHz) is off by one where the seek's and the pre-roll's
-    roundings do not cancel (in = 319 frames at 29.97: t·48k = 510910.4, the
-    chain plays 510911)."""
+def test_a_clip_starts_on_the_nearest_sample_to_in(sources, tmp_path):
+    """R9's one start rule, ``S(in) = timebase.edit_sample(in)``: in = 319
+    frames at 29.97 is t·48k = 510910.4, and the chain plays 510910 — the
+    sample the clip's first frame's own click sits on. (The rule it replaced,
+    two roundings of a half-frame pre-roll, played 510911: the gate's P1-A1
+    off-by-one between the client and the server. tests/test_audio_start_rule.py
+    measures it across the nine rates and every chain.)"""
     rate = Fraction(30000, 1001)
     fps = tb.fps_float(rate)
     e = empty_edl(Canvas(w=64, h=36, fps=fps))
@@ -181,7 +184,7 @@ def test_the_two_rounding_start_rule_is_needed(sources, tmp_path):
     e.get_track("v1").clips.append(c)
     e.recompute_duration()
     n = _render(e, fps, tmp_path / "cache")
-    assert round(Fraction(c.in_) * 48000) == 510910
-    assert n[0] == 510911
+    assert tb.edit_sample(c.in_) == round(Fraction(c.in_) * 48000) == 510910
+    assert n[0] == 510910
     pm = build_program_map(e, {sources[rate]: SourceInfo.cfr(rate, 1)})
-    assert audio_placements(e, pm)[0].src0 == 510911
+    assert audio_placements(e, pm)[0].src0 == 510910

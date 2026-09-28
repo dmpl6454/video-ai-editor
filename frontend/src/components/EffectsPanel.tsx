@@ -7,6 +7,7 @@ import './EffectsPanel.css'
 import { Icon, type IconName } from './Icon'
 import { effectsTargetLine } from '../lib/effectsTarget'
 import { useMediaNameMap } from './MediaName'
+import { flipState } from '../lib/flip'
 
 // The backend Effect model isn't declared on types.ts's Clip ("M1 frontend
 // ignores transform/effects/etc.") — read it via a cast, same pattern as
@@ -32,6 +33,9 @@ const EFFECT_PRESETS: { type: string; label: string; icon: IconName; params: Rec
   { type: 'hflip',     label: 'Flip H',    icon: 'flipH',    params: {},                hint: 'Mirror horizontally' },
   { type: 'vflip',     label: 'Flip V',    icon: 'flipV',    params: {},                hint: 'Mirror vertically' },
 ]
+
+/** The two presets that are the Transform's Mirror, not a stacked effect. */
+const MIRROR_AXIS: Record<string, 'horizontal' | 'vertical'> = { hflip: 'horizontal', vflip: 'vertical' }
 
 // Friendly names for chips of effects that can arrive via chat/MCP too.
 const EFFECT_LABELS: Record<string, string> = {
@@ -102,6 +106,7 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
   const effects: EffectEntry[] = clip
     ? ((clip as unknown as { effects?: EffectEntry[] }).effects ?? [])
     : []
+  const mirror = flipState((clip as unknown as { transform?: unknown } | null)?.transform, effects)
 
   // Map bundled-LUT filename → its index in the selected clip's chain
   // (remove_effect works BY INDEX). Later duplicates win, matching "the most
@@ -179,6 +184,14 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
 
   const addEffect = async (type: string, params: Record<string, unknown>) => {
     if (!clip) return
+    // Flip H / V are the Transform's Mirror (review RE: one mirror model) —
+    // a toggle of flip_h / flip_v, never a stacked `hflip` effect the
+    // Inspector's Flip buttons could not see.
+    const axis = MIRROR_AXIS[type]
+    if (axis) {
+      await dispatch('flip_clip', { clip_id: clip.id, axis })
+      return
+    }
     await dispatch('add_effect', { clip_id: clip.id, type, params })
   }
 
@@ -265,7 +278,10 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
             key={p.type}
             className="fx-btn"
             disabled={disabled}
-            title={`${p.hint} — effects stack; remove from the chips below.`}
+            aria-pressed={MIRROR_AXIS[p.type] ? (MIRROR_AXIS[p.type] === 'horizontal' ? mirror.h : mirror.v) : undefined}
+            title={MIRROR_AXIS[p.type]
+              ? `${p.hint} — the same toggle as Mirror in the Inspector's Transform`
+              : `${p.hint} — effects stack; remove from the chips below.`}
             onClick={() => void addEffect(p.type, p.params)}
           >
             <Icon name={p.icon} />{p.label}

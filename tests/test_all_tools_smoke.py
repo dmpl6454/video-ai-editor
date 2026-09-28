@@ -157,6 +157,9 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         # Transform / keyframes
         "set_clip_transform": {"clip_id": "c1", "scale": 1.2},
         "set_clip_fit": {"clip_id": "c1", "fit": "cover"},
+        # CapCut Canvas / blend (wave E, F2); set_blend_mode gets its overlay below
+        "set_canvas_background": {"clip_id": "c1", "type": "blur", "blur": 3},
+        "set_blend_mode": {"clip_id": "p_blend", "mode": "screen"},
         # Overlay timing: stickers/text only (s1 is the fixture sticker).
         "set_clip_timing": {"clip_id": "s1", "start": 0.5, "end": 3.0},
         "set_clip_z": {"clip_id": "s1", "z": "front"},
@@ -166,6 +169,12 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         # Effects / color / masks
         "add_effect": {"clip_id": "c1", "type": "blur", "params": {"radius": 4}},
         "remove_effect": {"clip_id": "c1", "idx": 0},
+        # wave E (F4b): the filter off by type, one step; a mirror toggle
+        "remove_effects": {"clip_ids": ["c1"], "types": ["lut"]},
+        "flip_clip": {"clip_id": "c1", "axis": "horizontal"},
+        # Clip animations (F1) and voice effects (F3), wave E
+        "set_animation": {"clip_id": "c1", "in": "zoom_in"},
+        "set_voice_effect": {"clip_id": "c1", "effect": "robot"},
         "color_grade": {"clip_id": "c1", "brightness": 0.05, "contrast": 1.1, "saturation": 1.1},
         "apply_lut": {"clip_id": "c1", "lut_path": os.devnull, "intensity": 0.5},
         "add_mask": {"clip_id": "c1", "type": "circle", "feather": 8.0},
@@ -272,6 +281,13 @@ def test_tool_smoke(tool: str, session: EDLStore, tmp_path: Path):
         saved = shows_dir() / "test_show.json"
         if not saved.exists():
             dispatch(session, "save_show_template", {"name": "test_show"})
+    if tool == "set_blend_mode":
+        src = session.edl.tracks[0].clips[0].src
+        cid = dispatch(session, "add_clip", {"track": "v2", "src": src, "in": 0.0, "out": 1.0,
+                                             "start": 0.0})["clip_id"]
+        args = {**args, "clip_id": cid}
+    if tool == "remove_effects":
+        dispatch(session, "apply_lut", {"clip_id": "c1", "src": "warm.cube"})
     if tool == "remove_effect":
         # Add an effect first so there's an index 0 to remove.
         dispatch(session, "add_effect", {"clip_id": "c1", "type": "blur",

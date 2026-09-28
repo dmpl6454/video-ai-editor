@@ -10,7 +10,9 @@ and the render still "succeeded" with an audio-only mp4.
 
 * add_clip now normalises such a source once (CFR H.264, the upload
   recipe, no transcription) and points the clip at that copy;
-* a render whose output has no video stream fails loudly.
+* a render whose output has no video stream fails loudly;
+* a single-keyframe raw stream placed directly in an EDL renders the frames
+  the program map plans (the anchored seek, wave E) — it no longer fails.
 """
 from __future__ import annotations
 
@@ -103,13 +105,57 @@ def test_the_same_raw_stream_is_normalised_once(tmp_path, bars):
     assert st.edl.get_clip(a["clip_id"])[1].src == st.edl.get_clip(b["clip_id"])[1].src
 
 
-def test_a_render_with_no_picture_fails_instead_of_writing_sound_only(tmp_path, bars):
+def test_a_one_keyframe_raw_stream_placed_directly_renders_the_planned_frames(tmp_path, bars):
     """The raw single-keyframe stream placed directly in an EDL (a legacy
-    project, or any path that skips add_clip): the seek lands past the only
-    keyframe and the chain emits no frame."""
+    project, or any path that skips add_clip). The input seek used to land
+    past the only keyframe and the chain emitted NO frame; the anchored seek
+    (wave E) decodes from the stream's start, so the render now shows exactly
+    the frames the program map plans — every one of the 60, in order. This
+    used to assert the render FAILED; that was the right answer only while
+    the renderer could not read the file, so it is now held to the frame map
+    like every other source."""
     st = _store(tmp_path / "s")
     st.edl.get_track("v1").clips = [Clip(src=bars["onekey"], in_=0.5, out=2.5, start=0.0, id="a")]
     st.edl.recompute_duration()
-    with pytest.raises(RuntimeError, match="no picture"):
-        compositor._render(st.edl, tmp_path / "o.mp4", height=G.H, fps=30, preview=False,
+    got = _frames(st, tmp_path, "onekey")
+    model = build_program_map(st.edl, lambda _s: G.probe_source(Path(bars["onekey"]))).frame
+    own = [x & FB for x in G.measure(Path(bars["onekey"]))["top"]]   # source frame i shows own[i]
+    assert len(model) == 60 and len(got) == 60, (len(model), len(got))
+    assert got == [own[i] for i in model], (got[:5], [own[i] for i in model][:5])
+    assert got == [got[0] + k for k in range(60)], got[:5]          # contiguous, no held frame
+
+
+def _sound_only(path: Path) -> Path:
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=3",
+                    "-c:a", "aac", str(path)], check=True)
+    return path
+
+
+def test_a_render_with_no_picture_fails_loudly(tmp_path):
+    """A clip on v1 whose file has no video stream at all: the render must
+    raise, never hand back a sound-only mp4 as a successful export."""
+    st = _store(tmp_path / "s")
+    aud = _sound_only(tmp_path / "tone.m4a")
+    st.edl.get_track("v1").clips = [Clip(src=str(aud), in_=0.5, out=2.5, start=0.0, id="a")]
+    st.edl.recompute_duration()
+    dst = tmp_path / "o.mp4"
+    # Either loud failure is right: ffmpeg refusing the graph (no video stream
+    # to map) or the post-render picture check. Named, so an unrelated
+    # RuntimeError (a Python bug) cannot pass for "failed loudly".
+    with pytest.raises(RuntimeError, match=r"ffmpeg render failed|no picture"):
+        compositor._render(st.edl, dst, height=G.H, fps=30, preview=False,
                            cache_dir=tmp_path / "cache", chunked=False)
+    assert not dst.exists(), "a failed render must not leave a file to be served"
+
+
+def test_the_picture_check_rejects_a_sound_only_output(tmp_path):
+    """The guard itself (review RD3): ffmpeg can exit 0 having written only
+    sound. `_check_picture` must refuse that file and delete it, whatever
+    input produced it."""
+    st = _store(tmp_path / "s")
+    st.edl.get_track("v1").clips = [Clip(src="x.mp4", in_=0.0, out=2.0, start=0.0, id="a")]
+    st.edl.recompute_duration()
+    out = _sound_only(tmp_path / "o.mp4")
+    with pytest.raises(RuntimeError, match="no picture"):
+        compositor._check_picture(st.edl, out, 30)
+    assert not out.exists(), "a sound-only render is never kept to be served later"

@@ -45,6 +45,8 @@
 
 import { useEffect, useMemo, useRef } from 'react'
 import { useStore } from '../store'
+import { itemsFor, useMediaNames } from '../lib/mediaNames'
+import type { PipSourceHint } from '../lib/pipTime'
 import { isMediaClip, clipEnd, type EDL, type Clip } from '../types'
 import {
   isSticker, stickerGeom, boxFromStickerGeom, toLocal, hitsBody,
@@ -55,14 +57,20 @@ import {
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import {
   pipVideo, syncPipClipVideo, pipDrawGeom, clipToShape, pipIsClientDrawn,
-  pausePipVideosExcept, drawPipVideoFrame, pipInnerPlan,
-  setLivePipFraming, livePipFraming,
+  pausePipVideosExcept, drawPipVideoFrame, pipInnerPlan, flipScale,
+  setLivePipFraming, livePipFraming, overlayAnimPose,
 } from '../lib/pipDraw'
 import * as dv from '../lib/dragVisuals'
 import {
-  activeOnFrames, layoutClock, renderLocal, v1ClipAt, v1LayoutOf, v1SeamsOf,
+  activeOnFrames, layoutClock, renderLocal, renderTime, v1ClipAt, v1LayoutOf, v1SeamsOf,
 } from '../lib/timelineLayout'
-import type { EdlClip } from '../lib/preview/timeline/framePlan'
+import { effectiveDuration, type EdlClip } from '../lib/preview/timeline/framePlan'
+import type { AnimFields } from '../lib/anim/clipAnim'
+import { applyPose, drawWithBlur } from '../lib/anim/animDraw'
+import { floorToFrame } from '../lib/preview/timeline/timebase'
+import { PipBlendLayers } from '../lib/pipBlendLayers'
+import { blendCss, blendLiveNote, blendOf } from '../lib/canvasBlend/catalog'
+import { publishLiveApprox } from '../lib/preview/liveApprox'
 
 interface Props {
   edl: EDL
@@ -157,8 +165,16 @@ type Drag =
   | { id: string; kind: 'video'; mode: 'move'; startMx: number; startMy: number
       x0: number; y0: number; live: { x: number; y: number } }
 
+/** The PIP source's probed rate and size (the media library), when known:
+ *  a reversed PIP from a source at another rate needs it (lib/pipTime). */
+function pipSourceHint(src: string, sid: string | null): PipSourceHint | undefined {
+  const it = itemsFor(useMediaNames.getState(), sid).find((m) => m.src === src)
+  return it ? { rate: it.fps ?? null, w: it.width, h: it.height } : undefined
+}
+
 export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const layersRef = useRef<HTMLDivElement>(null)
   const selection = useStore((s) => s.selection)
   const setSelection = useStore((s) => s.setSelection)
   const dispatch = useStore((s) => s.dispatch)
@@ -269,6 +285,10 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
     const cv = canvasRef.current
     if (!cv) return
     const ctx = cv.getContext('2d')!
+    // Blend modes (wave E, F2): blended PiPs paint into their own layers
+    // under this canvas (lib/pipBlendLayers explains why a layer, not a
+    // composite operation on this canvas).
+    const blendLayers = layersRef.current ? new PipBlendLayers(layersRef.current) : null
 
     // Client engine: the PRESENTED frame's time (spec §3.5) — stickers and
     // the PiP it syncs are frame-locked to the picture on screen.
@@ -520,12 +540,28 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
       // Sources drawn this frame; everything else gets paused below so an
       // ended PIP does not keep decoding in the background.
       const livePipSrcs = new Set<string>()
-      for (const pc of activePips(t)) {
+      // Blend modes (wave E, F2): while any PiP on screen blends, every PiP
+      // gets its own layer in z order (lib/pipBlendLayers); otherwise all of
+      // them paint into this canvas exactly as before.
+      const mainCtx = ctx
+      const pipsNow = activePips(t)
+      const layered = !!blendLayers && pipsNow.some((pc) =>
+        pipIsClientDrawn(pc as unknown as { chromakey?: unknown }) && blendOf(pc) !== 'normal')
+      // review RE: a blend this browser draws differently from the export
+      // (blendLiveNote) is named by the preview's "≈" chip while on screen
+      publishLiveApprox(pipsNow.filter((pc) => pipIsClientDrawn(pc as unknown as { chromakey?: unknown })
+        && blendLiveNote(blendOf(pc), typeof (pc as { transform?: { opacity?: unknown } }).transform?.opacity
+          === 'number' ? Number((pc as { transform?: { opacity?: unknown } }).transform?.opacity)
+          : (pc as { transform?: { opacity?: unknown } }).transform?.opacity == null ? 1 : null) !== null)
+        .map((pc) => `blend:${blendOf(pc)}`))
+      blendLayers?.begin(width, height, dpr)
+      for (const pc of pipsNow) {
         // A chromakey'd PIP is still BAKED (pipIsClientDrawn explains why), so
         // painting it here would double-draw it — and the baked copy is one the
         // client cannot erase. It keeps its selection chrome and its drag; only
         // the live picture is unavailable, so it lags as it did before.
         if (!pipIsClientDrawn(pc as unknown as { chromakey?: unknown })) continue
+        const ctx = layered ? (blendLayers?.next(blendCss(blendOf(pc))) ?? mainCtx) : mainCtx
         const box = pipBox(pc, t)
         const url = sessionFileUrl(pc.src, stateRef.current.sessionId ?? '')
         const dims = srcDimsFor(pc.src, stateRef.current.sessionId)
@@ -549,7 +585,8 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
                            renderLocal(stateRef.current.seams, pc.start, t),
                            stateRef.current.edl.canvas.fps ?? 30,
                            { playing: stateRef.current.isPlaying,
-                             rate: stateRef.current.playbackRate })
+                             rate: stateRef.current.playbackRate,
+                             source: pipSourceHint(pc.src, stateRef.current.sessionId) })
           livePipSrcs.add(pc.src)
         }
         const pcx = pc as unknown as {
@@ -574,67 +611,88 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
         ctx.globalAlpha = livePipTx(pc.id)?.opacity
           ?? sampleKF(pcx.transform?.opacity as never,
                       renderLocal(stateRef.current.seams, pc.start, t), 1)
-        clipToShape(ctx, pcx.mask, box.hw, box.hh)
-        // NEVER `continue` past a PIP whose frame is unavailable — before this
-        // layer owned the pixels the renderer baked it, so skipping is a
-        // REGRESSION to invisible, and an element that silently isn't there is
-        // the worst outcome in this whole subsystem (the same failure as "my
-        // stickers just aren't there", which had no error either).
-        //
-        // Three ways the frame goes missing, one of them routine:
-        //   * readyState dips mid-SEEK, every seek, so a scrub would punch a
-        //     hole in the PIP for a frame or two;
-        //   * the source is still loading right after a project opens;
-        //   * the src resolves outside <session>/uploads/, so the files
-        //     endpoint 404s (an absolute path from Claude/MCP — sessionFileUrl
-        //     falls back to the basename and there is nothing to find).
-        // The first two clear themselves; only the third is permanent, and it
-        // still EXPORTS correctly, which is exactly why it must not look empty.
-        let drawn = false
-        if (v && typeof dims === 'object') {
-          const innerRot = fr?.rotation ?? 0
-          if (Math.abs(innerRot) > 0.001) {
-            // Picture turns INSIDE the shape: mirror pip.py's
-            // cover -> rotate -> crop. The source rect is taken at zoom 1 /
-            // pan 0 because the plan re-applies both — zoom through the
-            // enlarged destination, pan as a post-rotation translate, which is
-            // where the renderer applies it (folding pan into the source rect
-            // would make it slide diagonally once turned).
-            const base = pipDrawGeom(dims.w, dims.h, box.hw * 2, box.hh * 2, null)
-            const plan = pipInnerPlan(box.hw * 2, box.hh * 2, {
-              zoom: fr?.zoom ?? 1, rotation: innerRot,
-              x: fr?.x ?? 0, y: fr?.y ?? 0,
-            })
-            ctx.save()
-            ctx.translate(plan.offX, plan.offY)
-            ctx.rotate(plan.rotRad)
-            drawn = drawPipVideoFrame(ctx, v, pc.src, {
-              sx: base.sx, sy: base.sy, sw: base.sw, sh: base.sh,
-              dw: plan.destW, dh: plan.destH,
-            })
-            ctx.restore()
-          } else {
-            const g = pipDrawGeom(dims.w, dims.h, box.hw * 2, box.hh * 2, fr)
-            // Falls back to the LAST frame that decoded rather than to the
-            // placeholder: a decoder dip is routine (every paused seek causes
-            // one) and one repeated frame is far less alarming than the picture
-            // blanking out.
-            drawn = drawPipVideoFrame(ctx, v, pc.src, g)
+        // The clip animation (wave E, F1) on the element's own clock, at the
+        // OUTPUT FRAME's own time (the export's k/R: a paused preview sits
+        // mid-frame): travel, turn, zoom and alpha here, the blur mix around
+        // the paint.
+        const tFrame = floorToFrame(t, stateRef.current.edl.canvas.fps ?? 30)
+        const seamsNow = stateRef.current.seams
+        const pose = overlayAnimPose(pc as unknown as AnimFields, pc.start,
+          pc.start + effectiveDuration(pc as unknown as EdlClip), renderLocal(seamsNow, pc.start, tFrame),
+          (x) => renderTime(seamsNow, x))
+        applyPose(ctx, pose, box.rot, { w: width, h: height })
+        // Mirror / Flip (wave E): the picture mirrored inside its turn
+        // (pip.py flips the framed element before its rotate).
+        const [pfx, pfy] = flipScale(pcx.transform as { flip_h?: unknown; flip_v?: unknown } | undefined)
+        if (pfx !== 1 || pfy !== 1) ctx.scale(pfx, pfy)
+        const paintPip = (c: CanvasRenderingContext2D): boolean => {
+          c.save()
+          clipToShape(c, pcx.mask, box.hw, box.hh)
+          // NEVER `continue` past a PIP whose frame is unavailable — before this
+          // layer owned the pixels the renderer baked it, so skipping is a
+          // REGRESSION to invisible, and an element that silently isn't there is
+          // the worst outcome in this whole subsystem (the same failure as "my
+          // stickers just aren't there", which had no error either).
+          //
+          // Three ways the frame goes missing, one of them routine:
+          //   * readyState dips mid-SEEK, every seek, so a scrub would punch a
+          //     hole in the PIP for a frame or two;
+          //   * the source is still loading right after a project opens;
+          //   * the src resolves outside <session>/uploads/, so the files
+          //     endpoint 404s (an absolute path from Claude/MCP — sessionFileUrl
+          //     falls back to the basename and there is nothing to find).
+          // The first two clear themselves; only the third is permanent, and it
+          // still EXPORTS correctly, which is exactly why it must not look empty.
+          let drawn = false
+          if (v && typeof dims === 'object') {
+            const innerRot = fr?.rotation ?? 0
+            if (Math.abs(innerRot) > 0.001) {
+              // Picture turns INSIDE the shape: mirror pip.py's
+              // cover -> rotate -> crop. The source rect is taken at zoom 1 /
+              // pan 0 because the plan re-applies both — zoom through the
+              // enlarged destination, pan as a post-rotation translate, which is
+              // where the renderer applies it (folding pan into the source rect
+              // would make it slide diagonally once turned).
+              const base = pipDrawGeom(dims.w, dims.h, box.hw * 2, box.hh * 2, null)
+              const plan = pipInnerPlan(box.hw * 2, box.hh * 2, {
+                zoom: fr?.zoom ?? 1, rotation: innerRot,
+                x: fr?.x ?? 0, y: fr?.y ?? 0,
+              })
+              c.save()
+              c.translate(plan.offX, plan.offY)
+              c.rotate(plan.rotRad)
+              drawn = drawPipVideoFrame(c, v, pc.src, {
+                sx: base.sx, sy: base.sy, sw: base.sw, sh: base.sh,
+                dw: plan.destW, dh: plan.destH,
+              })
+              c.restore()
+            } else {
+              const g = pipDrawGeom(dims.w, dims.h, box.hw * 2, box.hh * 2, fr)
+              // Falls back to the LAST frame that decoded rather than to the
+              // placeholder: a decoder dip is routine (every paused seek causes
+              // one) and one repeated frame is far less alarming than the picture
+              // blanking out.
+              drawn = drawPipVideoFrame(c, v, pc.src, g)
+            }
           }
+          if (!drawn) {
+            // Deliberately a neutral wash, not a guess at the footage: it shows
+            // the element's true position, size and SHAPE (it is drawn inside the
+            // same clip path) so placement and dragging still work, without
+            // claiming to be a frame. Attempting the draw first means a stale
+            // frame always wins over this, which is what ffmpeg's own
+            // eof_action=repeat does at the edges of a PIP.
+            c.fillStyle = 'rgba(120,130,150,0.35)'
+            c.fillRect(-box.hw, -box.hh, box.hw * 2, box.hh * 2)
+          }
+          c.restore()
+          return drawn
         }
-        if (!drawn) {
-          // Deliberately a neutral wash, not a guess at the footage: it shows
-          // the element's true position, size and SHAPE (it is drawn inside the
-          // same clip path) so placement and dragging still work, without
-          // claiming to be a frame. Attempting the draw first means a stale
-          // frame always wins over this, which is what ffmpeg's own
-          // eof_action=repeat does at the edges of a PIP.
-          ctx.fillStyle = 'rgba(120,130,150,0.35)'
-          ctx.fillRect(-box.hw, -box.hh, box.hw * 2, box.hh * 2)
-        }
+        drawWithBlur(ctx, pose, Math.min(width, height), (c) => { paintPip(c) })
         ctx.restore()
       }
 
+      blendLayers?.end()
       pausePipVideosExcept(livePipSrcs)
 
       // The sticker being dragged paints LAST — see paintOrder's comment: its z
@@ -654,32 +712,49 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
         ctx.translate(g.cx, g.cy)
         ctx.rotate(g.rot)
         ctx.globalAlpha = g.opa
+        // The clip animation (wave E, F1), text_overlay.py's sticker stages:
+        // on the sticker's own clock over its window.
+        const local = layoutClock(stateRef.current.seams, sk.start,
+          floorToFrame(t, stateRef.current.edl.canvas.fps ?? 30)) - sk.start
+        // over its RENDER window, like text_overlay.py's `plan_of(s, re - rs)`
+        // (review RE: the layout span held a seam-straddling sticker still
+        // where the export slid it out)
+        const skSeams = stateRef.current.seams
+        const pose = overlayAnimPose(sk as unknown as AnimFields, sk.start, sk.end, local,
+          (x) => renderTime(skSeams, x))
+        applyPose(ctx, pose, g.rot, { w: width, h: height })
+        // Mirror / Flip (wave E): the image mirrored inside its turn
+        // (text_overlay.py mirrors the PNG before rotating it).
+        const [sfx, sfy] = flipScale((sk as { transform?: { flip_h?: unknown; flip_v?: unknown } }).transform)
+        if (sfx !== 1 || sfy !== 1) ctx.scale(sfx, sfy)
         const im = imageFor(sk, stateRef.current.sessionId)
-        if (im instanceof HTMLImageElement && im.naturalWidth > 0) {
-          // Fit inside the g.size box preserving the PNG's aspect — same
-          // contain-fit the server bake uses (target_long on the longer edge).
-          const ar = im.naturalWidth / im.naturalHeight
-          const dw = ar >= 1 ? g.size : g.size * ar
-          const dh = ar >= 1 ? g.size / ar : g.size
-          ctx.drawImage(im, -dw / 2, -dh / 2, dw, dh)
-        } else if (im === 'error' && sk.label) {
-          // The artwork file is genuinely gone (emoji cache cleared, image
-          // moved on disk) — /sticker/{clip_id} 404s. The OS glyph is a
-          // near-enough stand-in; it is NOT what the export bakes, so this is
-          // a fallback, never the normal path.
-          ctx.font = `${g.size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`
-          ctx.textBaseline = 'middle'
-          ctx.textAlign = 'center'
-          ctx.fillText(sk.label, 0, 0)
-        } else if (im === 'error') {
-          // Label-less PNG sticker we can't fetch: outline the box so the
-          // clip is still selectable/draggable rather than invisible.
-          ctx.strokeStyle = 'rgba(255,255,255,0.45)'
-          ctx.setLineDash([5, 4])
-          ctx.strokeRect(-g.size / 2, -g.size / 2, g.size, g.size)
-          ctx.setLineDash([])
-        }
-        // 'loading': draw nothing — resolves within a frame or two.
+        drawWithBlur(ctx, pose, Math.min(width, height), (c) => {
+          if (im instanceof HTMLImageElement && im.naturalWidth > 0) {
+            // Fit inside the g.size box preserving the PNG's aspect — same
+            // contain-fit the server bake uses (target_long on the longer edge).
+            const ar = im.naturalWidth / im.naturalHeight
+            const dw = ar >= 1 ? g.size : g.size * ar
+            const dh = ar >= 1 ? g.size / ar : g.size
+            c.drawImage(im, -dw / 2, -dh / 2, dw, dh)
+          } else if (im === 'error' && sk.label) {
+            // The artwork file is genuinely gone (emoji cache cleared, image
+            // moved on disk) — /sticker/{clip_id} 404s. The OS glyph is a
+            // near-enough stand-in; it is NOT what the export bakes, so this is
+            // a fallback, never the normal path.
+            c.font = `${g.size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`
+            c.textBaseline = 'middle'
+            c.textAlign = 'center'
+            c.fillText(sk.label, 0, 0)
+          } else if (im === 'error') {
+            // Label-less PNG sticker we can't fetch: outline the box so the
+            // clip is still selectable/draggable rather than invisible.
+            c.strokeStyle = 'rgba(255,255,255,0.45)'
+            c.setLineDash([5, 4])
+            c.strokeRect(-g.size / 2, -g.size / 2, g.size, g.size)
+            c.setLineDash([])
+          }
+          // 'loading': draw nothing — resolves within a frame or two.
+        })
         ctx.restore()
       }
 
@@ -1169,6 +1244,8 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
     window.addEventListener('pointerup', onUp)
     return () => {
       cancelAnimationFrame(raf)
+      blendLayers?.destroy()
+      publishLiveApprox([])
       releaseHold()          // also kills the pending safety-net timer
       cv.removeEventListener('pointerdown', onDown)
       window.removeEventListener('pointermove', onMove)
@@ -1176,5 +1253,13 @@ export function StickerLayer({ edl, videoEl, clock, width, height }: Props) {
     }
   }, [videoEl, clock, dispatch, setSelection])
 
-  return <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0 }} />
+  return (
+    <>
+      {/* Blend-mode PiP layers (wave E, F2): positioned, never a stacking
+          context, so each layer's mix-blend-mode reaches the video beneath. */}
+      <div ref={layersRef} data-layer="pip-blend" aria-hidden="true"
+           style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
+      <canvas ref={canvasRef} data-layer="stickers" style={{ position: 'absolute', inset: 0 }} />
+    </>
+  )
 }

@@ -166,9 +166,13 @@ def test_gain_envelope_follows_the_timeline_clock(start, speed, work, tmp_path):
     """`AudioProps.gain_env` (dB offsets on clip-local TIMELINE seconds): the
     rendered level (5 ms RMS steps) against the envelope sampled at
     `playhead - clip.start`. A wrong clock is hundreds of ms off (source
-    time at 0.5x/2x) or 30 s off (`t - start`); what remains is `volume`'s
-    per-audio-FRAME evaluation (eval=frame: one gain per ≈21-43 ms packet
-    after atempo), measured as the lag and bounded here."""
+    time at 0.5x/2x) or 30 s off (`t - start`). The envelope is applied PER
+    SAMPLE (wave E, item 25: `aeval`): the best-fitting lag is 0 and every
+    level from 50 ms on is on the curve. With `volume=…:eval=frame` (one
+    gain per 21-43 ms packet) the fit lagged up to a packet and the steep
+    ramp sat ~1 dB off inside each packet (bounded here at 45 ms / 0.6 dB
+    median before); the first 50 ms of the 0.5x clip are atempo's start-up,
+    not the envelope."""
     tone = _tone(work / "tone")
     e = empty_edl(Canvas(w=320, h=180, fps=30))
     e.canvas.loudness_lufs = None
@@ -194,8 +198,8 @@ def test_gain_envelope_follows_the_timeline_clock(start, speed, work, tmp_path):
     fits = [(float(np.median(np.abs(got - np.array([sample(c.audio.gain_env, float(t - lag)) for t in ts])))), lag)
             for lag in np.arange(-0.06, 0.0601, 0.0025)]
     med, lag = min(fits)
-    # ≤ one audio packet (1024 samples at 1x/2x, 2048 after atempo 0.5x):
-    # the envelope rides the timeline clock; its per-packet staircase is a
-    # separate, audio-side limit (see the lane notes)
-    assert abs(lag) <= 0.045, (start, speed, lag, med)
-    assert med < 0.6, (start, speed, lag, med)
+    assert abs(lag) < 1e-9, (start, speed, lag, med)
+    assert med < 0.08, (start, speed, lag, med)
+    err = np.abs(got - np.array([sample(c.audio.gain_env, float(t)) for t in ts]))
+    late = [(round(float(t), 3), round(float(e), 2)) for t, e in zip(ts, err) if t >= 0.05 and e > 0.25]
+    assert late == [], (start, speed, late[:6])

@@ -31,6 +31,9 @@ import { Icon } from '../Icon'
 import { committedGradeOf, committedPoseAt, liveCssFilter, liveCssTransform, liveVideoCssApplies } from '../../lib/overlay'
 import { videoFingerprintOf } from '../../lib/previewFingerprint'
 import type { WaitKind } from '../../lib/preview/previewController'
+import { MODE_APPROX } from '../../lib/preview/timeline/support'
+import { approxSummary } from '../../lib/preview/fidelityLabels'
+import { useLiveApprox } from '../../lib/preview/liveApprox'
 import './clientPreview.css'
 
 /** Background render cadence (§4.1 step 8). */
@@ -55,6 +58,7 @@ export function ClientPreview() {
   const framing = useStore((s) => s.framing)
   const liveTransform = useStore((s) => s.liveTransform)
   const liveFilter = useStore((s) => s.liveFilter)
+  const liveApprox = useLiveApprox()
   const setLiveTransform = useStore((s) => s.setLiveTransform)
   const setLiveFilter = useStore((s) => s.setLiveFilter)
 
@@ -201,6 +205,10 @@ export function ClientPreview() {
   const showReposition = !!selectedV1Clip && selectedV1Tx?.fit === 'cover'
     && framing?.clipId === selectedV1Clip.id && !isPlaying && !keyframed
   const wait = view?.wait ?? null
+  // review RE: an APPROX frame says so — the engine's reasons at the
+  // presented frame, plus the live overlay draw's (a blend this browser
+  // approximates); the chip is static (nothing moves under reduced motion)
+  const approx = [...(view && view.live && view.modeAtPlayhead === MODE_APPROX ? view.reasons : []), ...liveApprox]
 
   return (
     <div ref={wrapRef} className="client-preview">
@@ -232,6 +240,12 @@ export function ClientPreview() {
           <div className="client-preview-spinner" data-wait={wait} role="status" aria-label={WAIT_LABEL[wait]}
                title={WAIT_LABEL[wait]}>
             <span className="client-preview-ring" aria-hidden="true" />
+          </div>
+        )}
+        {approx.length > 0 && !wait && (
+          <div className="client-preview-approx" role="note" data-fidelity="approx"
+               aria-label={approxSummary(approx)} title={approxSummary(approx)}>
+            <span aria-hidden="true">≈</span>
           </div>
         )}
         {error && <div className="client-preview-error" role="alert">{error}</div>}

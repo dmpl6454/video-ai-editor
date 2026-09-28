@@ -62,7 +62,8 @@ from ..edl.schema import Clip
 from . import cancel as _cancel
 
 #: Bumped whenever the intermediate's recipe changes (part of the key).
-RECIPE = "sa-v4"
+#: sa-v5 (wave E, X1): the decode starts on S(in), cut in samples.
+RECIPE = "sa-v5"
 SAMPLE_RATE = 48000
 
 #: WSOLA grain length (at >= 1x), its floor (slow speeds) and the waveform-
@@ -132,10 +133,12 @@ def _decode(c: Clip, fps) -> np.ndarray:
     if fps is not None:
         # The 1x half-frame pre-roll (not the curve PICTURE's longer seek,
         # compositor.clip_input_args): the atrim below drops exactly it.
+        # The cut is in SAMPLES, to S(in) (R9's one start rule,
+        # `timebase.edit_sample`): the input opens on S(seek).
+        from .audio_mix import head_trim
         args = sound_input_args(c, fps)
-        pre = _tb.seek_preroll(c.in_, fps)
-        if pre > 1e-9:
-            af += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
+        seek = max(0.0, float(c.in_) - _tb.seek_preroll(c.in_, fps))
+        af += head_trim(_tb.edit_sample(c.in_) - _tb.edit_sample(seek))
     else:
         args = [*input_seek(float(c.in_)), "-to", f"{float(c.out):.6f}", "-i", str(c.src)]
     cmd = [_pu.FFMPEG, "-v", "error", *args, "-vn", "-af", af, "-f", "f32le", "-"]

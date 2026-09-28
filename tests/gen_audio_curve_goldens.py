@@ -16,9 +16,10 @@ multiplied a DC signal of 1.0 by:
   the fade (its first sample and its length);
 * ``acrossfade``: the ``acrossfade=d=…`` the v1 assembly emits at real seams
   (``compositor._audio_only_graph``), with the overlap length and both gains;
-* ``gain_env``: ``audio_mix.gain_env_filter`` for every interpolation, rendered
-  one sample per frame (``asetnsamples=1``) so ``eval=frame`` is evaluated at
-  every sample: the curve the expression describes.
+* ``gain_env``: ``audio_mix.gain_env_filter`` for every interpolation, AS
+  EMITTED (wave E, item 25: a per-sample ``aeval``), fed ordinary 1024-sample
+  packets like the export's chain: every 48th sample plus every sample
+  around each key — the curve the export plays, not only the expression.
 
 ``--check`` regenerates in memory and exits non-zero when the checked-in file
 differs (tests/test_audio_curve_golden.py runs the same comparison).
@@ -44,7 +45,7 @@ from video_ai_editor.render import audio_mix, compositor  # noqa: E402
 
 GOLDEN = Path(__file__).resolve().parent / "goldens" / "audio_curve_cases.json"
 SR = 48000
-VERSION = 1
+VERSION = 2
 
 #: Every afade curve ffmpeg 8 knows (af_afade.c `curve` option).
 CURVES = ["tri", "qsin", "esin", "hsin", "log", "ipar", "qua", "cub", "squ", "cbr", "par", "exp",
@@ -238,8 +239,9 @@ def gain_env_cases() -> list[dict]:
     for interp, kfs in ENVS:
         audio = AudioProps(gain_env=Keyframe(keyframes=[tuple(k) for k in kfs], interp=interp))
         filt = audio_mix.gain_env_filter(audio)
-        g = _dc(f"asetnsamples=n=1,{filt}", 1.3)
-        idx = sorted(set(range(0, len(g), 48)) | {len(g) - 1})
+        g = _dc(filt, 1.3)
+        keys = {round(float(t) * SR) + d for t, _v in kfs for d in range(-3, 4)}
+        idx = sorted(set(range(0, len(g), 48)) | {len(g) - 1} | {i for i in keys if 0 <= i < len(g)})
         cases.append({"interp": interp, "keyframes": kfs, "filter": filt,
                       "samples": _pairs(g, idx)})
     return cases

@@ -24,7 +24,13 @@ LIVE = ("contain_portrait", "cover_pan_zoom", "rotate_20", "scale_073_pan", "kf_
         "contain_pal43", "contain_hdv_portrait", "cover_pan_hdv", "kf_pan_pal169",
         "kf_speed_half", "kf_freeze", "kf_opacity_speed_half", "kf_shrink_about_centre",
         # review RD3: a static opacity keeps an odd pan on the chroma grid
-        "scale_05_pan1_opacity")
+        "scale_05_pan1_opacity",
+        # wave E (F4a): Transform.flip_h / flip_v, mirrored before the turn
+        "tflip_h_rotate", "tflip_h_cover_pan", "tflip_h_kf", "tflip_v_pal43",
+        # wave E gate (X2): fades on a clip cut at in > 0 (the in-anchored
+        # clock's negative pre-roll pts had them unfaded / black)
+        "fades_in_offset", "fades_in_offgrid", "fades_in_offset_speed_half", "fades_in_offset_curve",
+        "fades_in_offset_canvas_bg")
 
 GOLD = {c["name"]: c for c in lib.load()["cases"]} if lib.GOLDEN.exists() else {}
 
@@ -39,7 +45,7 @@ def test_golden_covers_every_p1_geometry_feature():
     assert GOLD, "tests/goldens/geometry_cases.json missing: run tests/gen_geometry_goldens.py"
     names = " ".join(GOLD)
     for feature in ("contain", "cover", "cover_pan", "rotate", "scale", "pan", "kf_", "hflip", "vflip",
-                    "opacity", "fade", "pal43", "pal169", "hdv", "kf_freeze", "kf_curve", "kf_reverse"):
+                    "opacity", "fade", "pal43", "pal169", "hdv", "kf_freeze", "kf_curve", "kf_reverse", "tflip_"):
         assert feature in names, feature
     assert {c.name for c in lib.cases()} == set(GOLD), "golden cases out of date with geometry_golden_lib"
 

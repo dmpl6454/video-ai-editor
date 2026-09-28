@@ -1,0 +1,17 @@
+/* The Inspector's Mirror toggles (wave E, F4b). Tokens only (styles.css
+   :root); the state is a filled surface + accent underline, never colour
+   alone (aria-pressed carries it for assistive tech). No motion. */
+.flip-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 2px; }
+.flip-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0;
+  height: 26px; padding: 0 8px; font-size: 11px; color: var(--text-dim);
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+}
+.flip-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flip-button:hover:not(:disabled) { color: var(--text); background: var(--bg-2); }
+.flip-button[aria-pressed="true"] {
+  color: var(--text); background: var(--bg-3); border-color: var(--accent-2);
+  box-shadow: inset 0 -2px 0 var(--accent-2);
+}
+.flip-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.flip-button:disabled { color: var(--icon-disabled); cursor: default; }

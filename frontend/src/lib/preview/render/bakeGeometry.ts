@@ -14,7 +14,7 @@ export function fullFrameGeometry(canvas: Size, texture: Size): ClipGeometry {
     toF2: IDENTITY, f2Bounds: frame,
     toF1: IDENTITY, f1Bounds: frame, f1Clamp: false,
     toUv: { a: 1 / W, b: 0, c: 0, d: 1 / H, e: 0, f: 0 }, uvBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },
-    gain: 1,
+    gain: 1, alpha: 1, fade: 1,
     minification: Math.max(texture.w / W, texture.h / H),
   }
 }

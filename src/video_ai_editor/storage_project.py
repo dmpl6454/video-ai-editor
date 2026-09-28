@@ -58,6 +58,11 @@ def _media_srcs(edl: EDL) -> set[str]:
         for c in t.clips:
             if isinstance(c, (Clip, Sticker)):
                 out.add(c.src)
+            # A CapCut canvas background picture (wave E, F2) is media too:
+            # bundled, and remapped on open like a clip's src.
+            bg = getattr(c, "canvas_bg", None)
+            if isinstance(c, Clip) and bg is not None and bg.image:
+                out.add(bg.image)
     if edl.brand_kit and edl.brand_kit.end_card:
         out.add(edl.brand_kit.end_card)
     return out

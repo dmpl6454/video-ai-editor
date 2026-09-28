@@ -21,6 +21,7 @@ from .test_wk_phase1_video import (  # noqa: F401 — module fixtures reused
     APPROX_DB, CANVAS, EXACT_DB, GEO_APPROX, SHOWCASE, engine_bundle, engine_media, engine_server, geo_env,
     geometry_psnr,
 )
+from .test_wk_geometry_truth import truth_env  # noqa: F401,E402 — module fixture reused
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -99,3 +100,17 @@ def test_geometry_parity_in_playwright_browsers(browser, geo_env):  # noqa: F811
     print(json.dumps({browser.engine_name: per}))
     for feat, db in per.items():
         assert db >= (APPROX_DB if feat in GEO_APPROX else EXACT_DB), (feat, db)
+
+
+def test_geometry_truth_parity_in_playwright_browsers(browser, truth_env):  # noqa: F811
+    """test_wk_geometry_truth's groups (anamorphic sources, every keyframe
+    clock and — wave E, F4a — Transform.flip_h / flip_v) in Chromium and
+    WebKit: every feature EXACT against the export."""
+    from .test_wk_geometry_truth import _groups
+    srv, server_y, _infos = truth_env
+    r = _run(browser, srv, "geometry", timeout=300, shot="geometry-truth", mipmaps="1")
+    per = {f: min(v) for f, v in geometry_psnr(r, server_y).items()}
+    print(json.dumps({browser.engine_name: per}))
+    assert set(per) == {f for g in _groups().values() for f, _ in g}
+    low = {f: db for f, db in per.items() if db < EXACT_DB}
+    assert not low, f"below EXACT ({EXACT_DB} dB): {low}"

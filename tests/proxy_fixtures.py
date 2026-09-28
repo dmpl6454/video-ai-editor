@@ -144,9 +144,11 @@ def y_psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def decode_audio_f32(path: Path) -> np.ndarray:
-    """ffmpeg's decode of the first audio stream at 48 kHz stereo float."""
+    """ffmpeg's decode of the first audio stream at 48 kHz stereo float, on
+    the file clock (`proxy.AUDIO_FILTER`, the proxy's own decode)."""
+    from video_ai_editor.ingest.proxy import AUDIO_FILTER
     out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0",
-                          "-af", "aresample=48000,aformat=sample_fmts=flt:channel_layouts=stereo",
+                          "-af", AUDIO_FILTER,
                           "-f", "f32le", "pipe:1"], capture_output=True, check=True)
     return np.frombuffer(out.stdout, dtype="<f4").reshape(-1, 2)
 

@@ -1,0 +1,65 @@
+/* The Inspector's Animation section (wave E, F1): In | Out | Combo tabs, the
+   preset grid with a looping preview per tile, the duration slider. Tokens
+   only (styles.css :root); motion only when the viewer allows it (the tile
+   previews are Web Animations the component skips under reduced motion). */
+
+.anim-section { display: flex; flex-direction: column; gap: 8px; }
+
+.anim-tabs {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 2px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+}
+.anim-tabs button {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 24px; padding: 0 6px; font-size: 12px; border: none; border-radius: 4px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.anim-tabs button:hover { color: var(--text); }
+.anim-tabs button[aria-selected="true"] { background: var(--bg-3); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent-2); }
+.anim-tabs button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.anim-tab-dot {
+  position: absolute; top: 4px; right: 5px; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent-2);
+}
+
+.anim-panel { display: flex; flex-direction: column; gap: 8px; }
+
+.anim-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.anim-preset {
+  display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0;
+  padding: 6px 2px 5px; font-size: 10.5px; line-height: 1.2; color: var(--text-dim);
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+}
+.anim-preset-label {
+  max-width: 100%; overflow: hidden; text-align: center; line-height: 1.15;
+  /* two short lines ("Slide / Right") rather than an ellipsis */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; min-height: 2.3em;
+}
+.anim-preset:hover { color: var(--text); background: var(--bg-2); }
+.anim-preset[aria-checked="true"] { color: var(--text); border-color: var(--accent-2); background: var(--bg-2); }
+.anim-preset:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+/* The preview: a 40x24 frame (the canvas) and a picture inside it that the
+   preset moves — clipped, so a slide leaves the frame like the clip does. */
+.anim-tile {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 24px; overflow: hidden; border-radius: 3px;
+  background: var(--bg-0); border: 1px solid var(--line); color: var(--text-dim);
+}
+.anim-tile-picture {
+  width: 26px; height: 16px; border-radius: 2px; background: var(--text-faint);
+  will-change: transform, opacity;
+}
+.anim-preset[aria-checked="true"] .anim-tile-picture { background: var(--accent-2); }
+.anim-preset[aria-checked="true"] .anim-tile { color: var(--accent-2); }
+.anim-tile-none { color: var(--text-faint); }
+
+.anim-duration { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); }
+.anim-duration input { width: 100%; }
+.anim-duration-value { color: var(--text); font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; }
+.anim-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--text-dim); }
+.anim-error { color: var(--error-text); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .anim-preset, .anim-tabs button { transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, border-color var(--dur-fast) ease; }
+}

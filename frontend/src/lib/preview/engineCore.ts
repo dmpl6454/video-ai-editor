@@ -25,7 +25,9 @@ import { ProgramFeed } from './engineFeed'
 import { layoutCanvas, mountEngineDom } from './engineDom'
 import { NullAudioSink, engineUnsupportedReason, type EngineOptions } from './engineOptions'
 import { ElementSeeker, PlayingSeekGate, RunStartGate, SoughtFrame } from './engineSeek'
-import { drawProgramFrame, uploadProgramFrame } from './engineDraw'
+import { drawProgramFrame, preloadCanvasBackgrounds, uploadProgramFrame } from './engineDraw'
+import { canvasBgDraw } from './render/canvasBg'
+import { canvasBgImageState } from './render/canvasBgImages'
 import { ExternalPauses, type ExternalCause } from './engineExternal'
 import { BakeSplice } from './engineBake'
 import { FrameLoop, StallWatch, type PresentedMeta } from './engineLoop'
@@ -105,6 +107,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     super()
     this.opts = opts
     this.sink = opts.audioSink ?? new NullAudioSink()
+    // the master limiter's APPROX ranges can land after prepare (gate RX)
+    if ('onLimitingChange' in this.sink) this.sink.onLimitingChange = () => { if (!this.destroyed) this.reclassify() }
     this.pclock = new PresentedClock(this.R)
     this.clock = { now: () => this.pclock.now() }
     this.sources = new EngineSources(opts, {
@@ -250,7 +254,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     this.snapCanvas = snap
     try {
       this.compositor = new Compositor({
-        canvas, snapshot: snap, mipmaps: this.opts.mipmaps,
+        canvas, snapshot: snap, mipmaps: this.opts.mipmaps, canvasBgBaseUrl: this.opts.canvasBgBaseUrl,
+        onAssetReady: () => { if (!this._playing) this.redrawPaused() },
         onContextLost: this.recovery.onContextLost,
         onContextRestored: this.recovery.onContextRestored,
       })
@@ -354,6 +359,18 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     }
     if (sizeChanged) this.layout()
     this.sources.prefetch()
+    // review RE: an image background not decoded yet (or failed, retried)
+    // keeps its frames PENDING; its arrival reclassifies and redraws
+    const bgBase = this.opts.canvasBgBaseUrl
+    this.feed.canvasImagePending = bgBase ? (clip) => {
+      const d = canvasBgDraw(clip, size, size, bgBase)
+      return d?.mode === 'image' && canvasBgImageState(d.url) !== 'ready'
+    } : null
+    preloadCanvasBackgrounds(pm.clips, size, bgBase, () => {
+      this.reclassify()
+      if (!this._playing) this.redrawPaused()
+    })
+    this.reclassify(false)
     if (!this._playing) this.showPaused()
     this.emitStatus()
     return diff
@@ -365,7 +382,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   }
 
   private reclassify(emit = true): void {
-    const s = this.feed.classify()
+    const s = this.feed.classify(this.sink.limitingFrames?.())
     if (s) this.support = s
     if (emit) this.emitStatus()
   }

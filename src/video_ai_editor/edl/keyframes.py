@@ -82,7 +82,8 @@ def frame_exact_expr(value: float | Keyframe | dict, time_var: str) -> str:
     frame's own time — a step key on its own frame then switches ON that
     frame, as `lib/overlay.ts` sampleKF and the v1 chain do. (4 digits print
     23/30 s as 0.7667, after the frame; `k·(1/R)` lands a hair under k/R.)
-    The sound's volume automation keeps the historical text."""
+    The sound's per-sample volume automation uses it too (wave E,
+    `audio_mix.gain_env_filter`; `curves.ts` compileEnv mirrors it)."""
     return to_ffmpeg_expr(value, time_var=time_var, time_digits=9,
                           compare_var=f"({time_var}+0.000001)")
 

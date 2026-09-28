@@ -63,12 +63,14 @@ async function planOf(c: CaseJson): Promise<{ plan: AudioPlan; reader: ReturnTyp
   const { lookup, chunks, reader } = loadCase(c)
   for (const s of Object.values(c.sources)) await chunks.layout(s.key)
   const pm = buildProgramMap(c.edl, lookup)
-  const plan = planFromProgram(c.edl, pm, lookup, { loudnessGainDb: c.loudness_gain_db ?? null, silent: (s) => reader.silent(s) })
+  const plan = planFromProgram(c.edl, pm, lookup, {
+    loudnessGainDb: c.loudness_gain_db ?? null, silent: (s) => reader.silent(s), peak: (s, a, b) => reader.peak?.(s, a, b) ?? null,
+  })
   return { plan, reader, chunks }
 }
 
 const planSummary = (p: AudioPlan) => ({
-  total: p.total, master: p.master, approx: p.approx, duck: p.duck,
+  total: p.total, master: p.master, approx: p.approx, limiting: p.limiting, duck: p.duck,
   buses: p.buses,
   clips: p.clips.map((c) => ({ id: c.id, bus: c.bus, out0: c.out0, n: c.n, exact: c.exact, xIn: c.xIn, xOut: c.xOut, map: c.map })),
 })
@@ -185,12 +187,50 @@ const scenarios: Record<string, () => Promise<Result>> = {
     const { plan, reader } = await planOf(c)
     const [p0, p1] = c.range
     const first = await renderOffline(plan, reader, p0, p1)
-    const diffs: Array<{ i: number; at: number; count: number }> = []
+    const diffs: Array<{ i: number; at: number; count: number; trace?: Result }> = []
+    // One clip's own contribution to the mix (rendered alone): what a render
+    // that lost that clip is missing — the trace names the silenced source.
+    const alone = new Map<string, Float32Array>()
+    const contribution = async (id: string): Promise<Float32Array> => {
+      let x = alone.get(id)
+      if (!x) {
+        x = (await renderOffline({ ...plan, clips: plan.clips.filter((c) => c.id === id) }, reader, p0, p1)).L
+        alone.set(id, x)
+      }
+      return x
+    }
     for (let i = 1; i < n; i++) {
       const r = await renderOffline(plan, reader, p0, p1)
-      let at = -1, count = 0
-      for (let j = 0; j < r.L.length; j++) if (r.L[j] !== first.L[j] || r.R[j] !== first.R[j]) { if (at < 0) at = j; count++ }
-      if (count) diffs.push({ i, at, count })
+      let at = -1, last = -1, count = 0
+      const where: Array<[number, number, number, number, number]> = []
+      for (let j = 0; j < r.L.length; j++) {
+        if (r.L[j] !== first.L[j] || r.R[j] !== first.R[j]) {
+          if (at < 0) at = j
+          last = j
+          count++
+          if (where.length < 24) where.push([j, first.L[j], r.L[j], first.R[j], r.R[j]])
+        }
+      }
+      if (!count) continue
+      const scores: Record<string, number> = {}
+      for (const c of plan.clips) {
+        if (c.out0 + c.n <= p0 + at || c.out0 >= p0 + last + 1) continue
+        const x = await contribution(c.id)
+        let dd = 0, res = 0
+        for (let j = at; j <= last; j++) {
+          const d = r.L[j] - first.L[j]
+          dd += d * d
+          res += (d + x[j]) ** 2
+        }
+        scores[c.id] = dd > 0 ? Math.sqrt(res / dd) : 1
+      }
+      const best = Object.entries(scores).sort((a, b) => a[1] - b[1])[0]
+      diffs.push({ i, at, count, trace: {
+        last, quantum: Math.floor(at / 128), statsFirst: first.stats, statsBad: r.stats,
+        where, plan: plan.clips.map((c) => [c.id, c.out0, c.n, c.map.kind]),
+        badSilentFrom: (() => { let k = at; while (k <= last && r.L[k] === 0 && r.R[k] === 0) k++; return k - at })(),
+        silenced: best ? { clip: best[0], residual: best[1] } : null, scores,
+      } })
     }
     return { name, n, diffs }
   },

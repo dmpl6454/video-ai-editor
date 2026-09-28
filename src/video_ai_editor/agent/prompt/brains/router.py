@@ -356,8 +356,9 @@ RESTRUCTURE_GROUNDS: dict[str, frozenset[str]] = {
     "duplicate_clip": frozenset({"duplicate"}),
     "freeze_frame": frozenset({"freeze"}),
     "auto_reframe": frozenset({"reframe", "auto_edit", "export_preset", "shorts"}),
-    # Deleting the music bed ("remove the music", "replace the music").
-    "bulk_delete": frozenset({"remove_music"}),
+    # Deleting the music bed ("remove the music", "replace the music"), or
+    # captions / text overlays by name (wave E, F4b: "remove the captions").
+    "bulk_delete": frozenset({"remove_music", "remove_feature"}),
 }
 
 

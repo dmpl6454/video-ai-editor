@@ -8,6 +8,9 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from . import speed_curve as _speed_curve
+from . import voice_effects as _voice_fx
+from . import clip_animations as _clip_anim
+from . import canvas_blend as _canvas_blend
 
 # 3 (QA-076): `TextStyle.font` is nullable (None = the role's own font) and a
 #   text clip's scalar x/y is always where it renders. v2 overloaded values as
@@ -100,7 +103,19 @@ EDL_VERSION = 3
 #     (edl/speed_curve.py): a split/cut/trim piece exports its parent's frames.
 # 21: (wave D3, E1a) anamorphic sources fit by their displayed shape; keyframed v1 geometry runs on the output grid (+x right, zoom about the centre); v1 pans scale with the output size.
 # 22: (wave D3, review RD3) a reversed clip keeps its footprint (odd 2x/4x ties), a transition after a retimed clip is applied, keyed PiP opacity/rotation animate, overlay/text step keys switch on their frame, a static opacity keeps an odd pan, a render with no picture fails.
-RENDER_BEHAVIOR_VERSION = 22
+# 23: (wave E, F4a) a reversed curve clip's intermediate sits on the source grid, volume automation is per sample, the picture stops at the plan (-frames:v) and Transform.flip_h/v render.
+# 24: (wave E, review RE) constant-speed / 1x chains run on the file clock anchored at `in` (mixed-rate splits exact), a one-frame clip keeps its frame, pitch/vibrato voice effects are primed, picture overlays convert with BT.709, the Canvas background is a still layer, a PiP animates over its render window.
+# 25: (wave E gate, X2) a v1 clip cut at in > 0 fades (its pre-roll's negative pts had vf_fade leave it
+#     unfaded, a fade-out black), and a keyed-opacity sticker / animated text input lasts exactly its window
+#     at the project rate (it drove the picture past a timeline ending under it).
+#     Same bump (wave E gate, X1): every chain starts a clip's sound on S(in), the nearest sample
+#     (timebase.edit_sample, spec R9), cut in samples — the reversed and speed-curve intermediates
+#     (their own recipe keys bumped too) played the old two-roundings sample, one late about a third
+#     of the time at 29.97, and a primed voice-effect lane's cut rounded apart from its seek.
+# 26: (wave E gate, RX) the picture is capped at the plan by `trim=end_frame` inside the graph, not
+#     `-frames:v`, which closed the file before the AAC flush: an NTSC export or single-pass preview
+#     lost its last ~10 ms of sound (a render cached under 25 is short).
+RENDER_BEHAVIOR_VERSION = 26
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -183,6 +198,16 @@ class Transform(_EDLModel):
     scale: KFNum = 1.0
     rotation: KFNum = 0.0
     opacity: KFNum = 1.0
+    # CapCut Mirror / Flip (wave E, lane F4a): the clip's PICTURE mirrored
+    # left-right / upside-down BEFORE its rotation, scale and position — a
+    # mirrored clip rotated 30° still turns clockwise. Not keyframable. On
+    # v1 the fitted canvas-sized frame is flipped (compositor), on an overlay
+    # the element (pip.py), on a sticker its image (text_overlay.py); the
+    # client mirrors each (geometry.ts, StickerLayer). False: unchanged.
+    # Omitted from the JSON while off (`exclude_if`, like `Clip.freeze`): an
+    # unflipped project serialises byte for byte as before.
+    flip_h: bool = Field(False, exclude_if=lambda v: v is False)
+    flip_v: bool = Field(False, exclude_if=lambda v: v is False)
 
     @field_validator("x", "y")
     @classmethod
@@ -248,11 +273,43 @@ class AudioProps(_EDLModel):
     # input); "mono" folds both channels to the middle. Rendered by
     # `render/audio_mix.channel_filter` on every lane, drawn by the waveform.
     channels: Literal["stereo", "left", "right", "mono"] = "stereo"
+    # Voice effect (wave E, F3 — CapCut's voice changer): a preset id from the
+    # ONE table `edl/voice_effects.py` (chipmunk, deep, monster, robot, echo,
+    # reverb, telephone, megaphone, radio, underwater, vibrato), and how much
+    # of it (0-1, 1 = the preset as designed). Rendered after the clip's
+    # retime and channel mode, before its gain/automation/fades
+    # (`render/audio_mix.voice_filters`). Both are omitted from the JSON while
+    # unset, so an EDL written before they existed serialises, hashes and
+    # renders exactly as it did. An unknown id is refused like an unknown
+    # channel mode; a spelling the table knows ("Hall") is stored as its id.
+    voice_effect: str | None = Field(None, exclude_if=lambda v: v is None)
+    voice_intensity: float = Field(_voice_fx.DEFAULT_INTENSITY,
+                                   exclude_if=lambda v: v == _voice_fx.DEFAULT_INTENSITY)
 
     @field_validator("gain_db")
     @classmethod
     def _check_gain(cls, v: float) -> float:
         return min(GAIN_DB_RANGE[1], max(GAIN_DB_RANGE[0], _finite(float(v), "gain_db")))
+
+    @field_validator("voice_effect")
+    @classmethod
+    def _check_voice_effect(cls, v: str | None) -> str | None:
+        if v is None or (isinstance(v, str) and v.strip().lower() in ("", "none", "off")):
+            return None
+        pid = _voice_fx.preset_id(v)
+        if pid is None:
+            # review RE: ONE policy for the wave's new fields — a name a newer
+            # build wrote loads as "none" with a log line (clip_animations.
+            # normalize_name), never an unloadable EDL; set_voice_effect still
+            # refuses it with a 400 at the tool boundary
+            _log_unknown("voice effect", v, _voice_fx.PRESET_IDS)
+            return None
+        return pid
+
+    @field_validator("voice_intensity")
+    @classmethod
+    def _check_voice_intensity(cls, v: float) -> float:
+        return _voice_fx.check_intensity(v)
 
 
 class Effect(_EDLModel):
@@ -319,7 +376,81 @@ class ChromaKey(_EDLModel):
     spill_suppress: float = 0.5
 
 
-class Clip(_EDLModel):
+def _log_unknown(what: str, value: Any, valid) -> None:
+    import logging
+    logging.getLogger(__name__).warning("unknown %s %r in the EDL — ignoring (valid: %s)",
+                                        what, value, ", ".join(valid))
+
+
+class CanvasBackground(_EDLModel):
+    """CapCut Canvas (wave E, F2): what fills a `contain`-fit clip's
+    letterbox instead of black. The ONE table is `edl/canvas_blend.py`.
+
+    `type` color → `color` (#RRGGBB); blur → a blurred, cover-scaled copy of
+    the clip (`blur` = strength 1-4); image → `image` (a picture path,
+    cover-scaled to the canvas). Out-of-range values clamp, a bad colour
+    falls back to black and an unknown `type` (a newer build's) loads as no
+    background (`Clip._forward_canvas_bg`) — never an unloadable EDL; the
+    typed tool (`set_canvas_background`) rejects them with a 400 first. An
+    `image` background whose path is missing or unreadable renders black."""
+    type: _canvas_blend.CanvasKind = "color"
+    color: str = "#000000"
+    blur: int = _canvas_blend.CANVAS_BLUR_DEFAULT
+    image: str | None = None
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _norm_color(cls, v: Any) -> str:
+        try:
+            return _canvas_blend.normalize_color(v)
+        except ValueError:
+            return "#000000"
+
+    @field_validator("blur", mode="before")
+    @classmethod
+    def _clamp_blur(cls, v: Any) -> int:
+        f = _finite(float(v), "blur")
+        return _canvas_blend.blur_level(f).level
+
+
+class _ClipAnimFields(_EDLModel):
+    """CapCut clip animations (wave E, F1): an In, an Out or a looping Combo
+    on a media clip (v1 and overlay lanes) or a sticker — the ONE preset
+    table is `edl/clip_animations.py`. Names mirror TextClip's
+    anim_in / anim_out / anim_dur (+ `anim_out_dur`, the Out's own length,
+    and `anim_combo`). Every field is omitted from the JSON while unset, so
+    an EDL written before they existed serialises, hashes and renders exactly
+    as it did. A Combo excludes In and Out (the model keeps the Combo when a
+    file holds both; `set_animation` clears the other side)."""
+    anim_in: str | None = Field(None, exclude_if=lambda v: v is None)
+    anim_out: str | None = Field(None, exclude_if=lambda v: v is None)
+    anim_combo: str | None = Field(None, exclude_if=lambda v: v is None)
+    #: Seconds the In / the Out lasts (None = clip_animations.ANIM_DUR_DEFAULT),
+    #: capped at ANIM_SHARE of the clip on screen by every renderer.
+    anim_dur: float | None = Field(None, exclude_if=lambda v: v is None)
+    anim_out_dur: float | None = Field(None, exclude_if=lambda v: v is None)
+
+    @field_validator("anim_in", "anim_out", "anim_combo")
+    @classmethod
+    def _check_anim_name(cls, v: str | None, info: ValidationInfo) -> str | None:
+        kind = {"anim_in": "in", "anim_out": "out", "anim_combo": "combo"}[info.field_name or "anim_in"]
+        return _clip_anim.normalize_name(kind, v, where=info.field_name or "?")
+
+    @field_validator("anim_dur", "anim_out_dur")
+    @classmethod
+    def _check_anim_dur(cls, v: float | None) -> float | None:
+        return _clip_anim.clamp_dur(v)
+
+    @model_validator(mode="after")
+    def _combo_excludes_in_out(self):
+        # object.__setattr__: runs on assignment too, must not re-enter.
+        if self.anim_combo is not None and (self.anim_in is not None or self.anim_out is not None):
+            object.__setattr__(self, "anim_in", None)
+            object.__setattr__(self, "anim_out", None)
+        return self
+
+
+class Clip(_ClipAnimFields):
     id: str = Field(default_factory=lambda: f"c_{uuid4().hex[:8]}")
     src: str
     in_: float = Field(0.0, alias="in")
@@ -365,6 +496,17 @@ class Clip(_EDLModel):
     # video fades above: it changes pixels, so it must invalidate the cached
     # video-only mp4.
     fit: Literal["contain", "cover"] = "contain"
+    # CapCut Canvas (wave E, F2; `CanvasBackground`): fills a CONTAIN-fit
+    # main-track clip's letterbox with a colour, a blur of the clip or an
+    # image instead of black. Read only by the v1 chain's contain branch
+    # (`cover` has no bars; a PiP has no canvas of its own). None (the
+    # default, omitted from the JSON) = black bars, so an EDL written before
+    # the field existed serialises, hashes and renders exactly as it did.
+    canvas_bg: CanvasBackground | None = Field(None, exclude_if=lambda v: v is None)
+    # Blend mode of an OVERLAY (v2+) clip onto what is beneath it (CapCut's
+    # 14; `edl/canvas_blend.py`). The v1 base has nothing beneath it and
+    # ignores it. "normal" (the default) is omitted from the JSON.
+    blend: _canvas_blend.BlendMode = Field("normal", exclude_if=lambda v: v == "normal")
     # Framing INSIDE a PIP's shape — which part of the source appears in the
     # circle/rounded/cropped box, and how far zoomed in.
     #
@@ -411,6 +553,29 @@ class Clip(_EDLModel):
         f = _finite(float(v), "speed")
         # <= 0 has always meant "normal speed" (speed_factor); store it as such.
         return None if f <= 0 else min(SPEED_RANGE[1], max(SPEED_RANGE[0], f))
+
+    @field_validator("blend", mode="before")
+    @classmethod
+    def _forward_blend(cls, v: Any) -> Any:
+        """A blend mode a newer build wrote loads as Normal, logged (review RE:
+        one unknown value made the whole EDL unloadable)."""
+        if v is None or v in _canvas_blend.BLEND_IDS:
+            return "normal" if v is None else v
+        try:
+            return _canvas_blend.resolve_blend(v)
+        except ValueError:
+            _log_unknown("blend mode", v, _canvas_blend.BLEND_IDS)
+            return "normal"
+
+    @field_validator("canvas_bg", mode="before")
+    @classmethod
+    def _forward_canvas_bg(cls, v: Any) -> Any:
+        """A canvas kind a newer build wrote loads as no background, logged."""
+        kind = v.get("type", "color") if isinstance(v, dict) else getattr(v, "type", None)
+        if v is not None and kind not in _canvas_blend.CANVAS_KINDS:
+            _log_unknown("canvas background", kind, _canvas_blend.CANVAS_KINDS)
+            return None
+        return v
 
     @field_validator("freeze")
     @classmethod
@@ -599,8 +764,9 @@ class TextClip(_EDLModel):
         return None if v is None else min(3.0, max(0.1, _finite(float(v), "anim_dur")))
 
 
-class Sticker(_EDLModel):
-    """Image overlay clip: PNG (or fetched emoji) composited on the canvas."""
+class Sticker(_ClipAnimFields):
+    """Image overlay clip: PNG (or fetched emoji) composited on the canvas.
+    Animations (anim_in / anim_out / anim_combo): `_ClipAnimFields`."""
     id: str = Field(default_factory=lambda: f"st_{uuid4().hex[:8]}")
     src: str   # absolute path to the PNG
     start: float

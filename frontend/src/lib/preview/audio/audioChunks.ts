@@ -29,6 +29,9 @@ export interface AudioLayout {
   silent: boolean
   /** Linear gain per chunk ("n" → factor; absent = 1). */
   chunkGain: Record<string, number>
+  /** Each chunk's peak (max |x| of the float decode, rounded up; index.json
+   *  `audio.chunk_peak`), null when the index has none (gate RX). */
+  chunkPeak: number[] | null
 }
 
 export interface Pcm {
@@ -83,6 +86,7 @@ export function parseLayout(index: unknown): AudioLayout {
       if (g !== null && g > 0) gains[k] = g
     }
   }
+  const cp = Array.isArray(a.chunk_peak) ? (a.chunk_peak as unknown[]).map(num) : null
   return {
     rate: num(a.rate) ?? AUDIO_RATE,
     chunkSamples: num(a.chunk_samples) ?? 240000,
@@ -90,6 +94,7 @@ export function parseLayout(index: unknown): AudioLayout {
     chunks: num(a.chunks),
     silent: a.silent === true,
     chunkGain: gains,
+    chunkPeak: cp && cp.every((v): v is number => v !== null && v >= 0) ? cp : null,
   }
 }
 
@@ -273,6 +278,9 @@ export interface PcmReader {
   ready(src: string, a: number, b: number): boolean
   /** Whether the source has no sound at all. */
   silent(src: string): boolean
+  /** The recorded peak of source samples [a, b) (chunk resolution): 0 for a
+   *  silent source or one with no proxy, null while not known. */
+  peak?(src: string, a: number, b: number): number | null
 }
 
 /** A PcmReader over AudioChunks; `keyOf` maps an EDL `src` to its proxy key
@@ -286,6 +294,19 @@ export function chunkReader(chunks: AudioChunks, keyOf: (src: string) => string 
     silent(src) {
       const key = keyOf(src)
       return !key || (chunks.layoutNow(key)?.silent ?? false)
+    },
+    peak(src, a, b) {
+      const key = keyOf(src)
+      if (!key) return 0
+      const l = chunks.layoutNow(key)
+      if (!l) return null
+      if (l.silent) return 0
+      if (!l.chunkPeak) return null
+      const n0 = Math.max(0, Math.floor(a / l.chunkSamples))
+      const n1 = Math.min(l.chunkPeak.length, Math.ceil(b / l.chunkSamples))
+      let p = 0
+      for (let n = n0; n < n1; n++) p = Math.max(p, l.chunkPeak[n])
+      return p
     },
     ready(src, a, b) {
       const key = keyOf(src)

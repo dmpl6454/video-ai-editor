@@ -80,7 +80,19 @@ def _groups() -> dict[str, list[tuple[str, dict]]]:
         ("pal43_rotate_shrink", {"src": "pal43", "transform": {"rotation": 12.0, "scale": 0.8, "x": 30.0}}),
         ("pal169_kf_half", {"src": "pal169", "in": 0.0, "out": 1.0, "speed": 0.5,
                             "transform": {"x": _kf([(0, -50), (2, 50)]), "scale": 1.4}}),
-    ]}
+    ],
+        # wave E (F4a): Transform.flip_h / flip_v — mirrored before the turn
+        "flip": [
+            ("flip_h_rotate", {"src": "land", "transform": {"flip_h": True, "rotation": 20.0}}),
+            ("flip_v_cover_pan", {"src": "hdv", "fit": "cover",
+                                  "transform": {"flip_v": True, "x": 40.0, "y": -20.0, "scale": 1.25}}),
+            ("flip_hv_scale_pan", {"src": "land", "transform": {"flip_h": True, "flip_v": True, "scale": 0.8,
+                                                                "x": 30.0, "y": -12.0}}),
+            ("flip_h_kf", {"src": "land", "in": 0.0, "out": 1.0,
+                           "transform": {"flip_h": True, "x": _kf([(0, -50), (1, 50)]),
+                                         "rotation": _kf([(0, 0), (1, 30)])}}),
+            ("flip_h_pal43", {"src": "pal43", "transform": {"flip_h": True, "rotation": -10.0}}),
+        ]}
     for i, (clock, spec) in enumerate(CLOCKS.items()):
         probe = Clip(src="s", speed=spec.get("speed"))
         probe.in_, probe.out = spec["in"], spec["out"]

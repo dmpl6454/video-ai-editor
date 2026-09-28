@@ -106,6 +106,13 @@ def build_cases() -> dict:
               14.37436, 1.4666666666666666, 3600.0000005, 0.1 + 0.2, 123.4567895,
               0.0000005, 2.5e-6, 7.8125e-3] + [rng.uniform(0, 100) for _ in range(60)]:
         cases["ffmpeg_us"].append([x, ffmpeg_us(x)])
+    # R9's one audio start rule, over every grid time plus the µs ties
+    # and the µs values nearest a half sample on either side (x·48000 is
+    # never a tie once printed: us·6/125 has a fraction in 1/125ths)
+    near = [us / 1e6 for k in (0, 1, 7, 2401, 510910, 10**7)
+            for us in ((2 * k + 1) * 125 // 12, (2 * k + 1) * 125 // 12 + 1)]
+    cases["edit_sample"] = [[x, tb.edit_sample(x)]
+                            for x in times + [x for x, _ in cases["ffmpeg_us"]] + near]
     return cases
 
 
@@ -138,4 +145,11 @@ def test_golden_covers_ties_and_the_whole_rate_list():
     assert len(grid["times"]) * len(grid["fps"]) > 5000
     # The %.6f parse includes exact half-microsecond ties (0.0078125 s).
     assert [x for x, _ in cases["ffmpeg_us"] if (Fraction(x) * 10**6).denominator == 2]
+    # edit_sample (R9) is the NEAREST sample to the printed µs value, and the
+    # table holds values within one µs step (0.048 sample) either side of a half.
+    fr = {x: Fraction(ffmpeg_us(x), 10**6) * 48000 for x, _ in cases["edit_sample"] if x > 0}
+    assert all(s == round(fr[x]) for x, s in cases["edit_sample"] if x > 0)
+    fracs = {v - math.floor(v) for v in fr.values()}
+    assert any(Fraction(9, 20) < f < Fraction(1, 2) for f in fracs)
+    assert any(Fraction(1, 2) < f < Fraction(11, 20) for f in fracs)
     assert all(math.isfinite(v) for row in grid["quantize"] for v in row)

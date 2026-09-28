@@ -62,6 +62,11 @@ describe('the inserts send what the old Text tool sent', () => {
     expect(sent).toEqual([{ tool: 'add_text', args: { text: 'Your text', start: 1, end: 4, role: 'super', allow_stack: true } }])
     expect(selected).toEqual([{ id: 't_1' }])
     expect(defaultTextArgs(0, 3)).toEqual({ text: 'Your text', start: 0, end: 3, role: 'super', allow_stack: true })
+    // review RE: with a caption cue on screen it goes to the upper third
+    const withCaps = { canvas: { w: 1080, h: 1920, fps: 30 }, duration: 10, tracks: [
+      { id: 'captions', type: 'captions', clips: [{ id: 'k', start: 2, end: 4, text: 'hi' }] }] } as never
+    expect(defaultTextArgs(3, 6, withCaps)).toMatchObject({ x: 540, y: 576 })
+    expect(defaultTextArgs(5, 8, withCaps)).not.toHaveProperty('y')
   })
 
   it('a style: ONE add_text with its whole look and the field text', async () => {

@@ -293,6 +293,17 @@ export function seekPreroll(t: number | null | undefined, fps: FpsLike): number 
   return Math.min(t, frameDuration(fps) / 2)
 }
 
+/** `edit_sample`: S(t), the ONE audio start rule (spec §6 R9) — the sample
+ *  an edit point `t` starts on: the NEAREST sample to `t` as ffmpeg reads it
+ *  (`t` printed `%.6f`, then rounded to 1/sampleRate, ties up). Every server
+ *  chain starts a clip's sound there (`compositor.clip_head_samples`, the
+ *  lanes, the reversed and speed-curve intermediates); `programMap.clipSample0`
+ *  and the lanes' `inputSeekSample` are this. */
+export function editSample(t: number | null | undefined, sampleRate = 48000): number {
+  if (t === null || t === undefined || !(t > 0) || !Number.isFinite(t)) return 0
+  return rescale(ffmpegMicros(t), { num: 1, den: 1_000_000 }, { num: 1, den: sampleRate })
+}
+
 /** `enable_window`: `[lo, hi)` gate bounds half a frame before each
  *  boundary frame. */
 export function enableWindow(start: number, end: number, fps: FpsLike): [number, number] {

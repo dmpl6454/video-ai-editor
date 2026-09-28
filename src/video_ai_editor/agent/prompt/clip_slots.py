@@ -221,9 +221,141 @@ def _adjust(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     return out
 
 
+# ------------------------------------------------ wave E (F4b) readers
+
+_SECONDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)\b")
+_BY_RE = re.compile(r"\bby\s+\d|\b(?:off|from)\s+(?:the\s+)?(?:end|start|beginning|front|head|tail\s+of\s+)?"
+                    r"|\b\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?)\s+(?:shorter|longer|off|from)\b")
+_GROW_RE = re.compile(r"\b(?:extend|lengthen|stretch|longer)\b")
+_HEAD_RE = re.compile(r"\b(?:start|beginning|front|head)\s+of\b")
+
+
+def _length(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    """A clip's new timeline length ("to 2 seconds") or a change of it ("by
+    1 s", "2 seconds off the end of", "2 seconds longer") — `_delta` is
+    signed; `_edge` says which end moves (the tail unless the clause names
+    the start)."""
+    clause = hit.clause
+    m = _SECONDS_RE.search(clause)
+    out: dict[str, Any] = {"clip_ref": clip_ref(hit)}
+    if not m:
+        return out
+    n = float(m.group(1))
+    if _BY_RE.search(clause):
+        out["_delta"] = n if _GROW_RE.search(clause) else -n
+        out["_edge"] = "head" if _HEAD_RE.search(clause) else "tail"
+    else:
+        out["seconds"] = n
+    return out
+
+
+#: What "remove the ___" names (wave E, F4b), in the order the nouns are tried.
+_REMOVE_WHAT: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\b(?:captions?|subtitles?|subs)\b"), "captions"),
+    (re.compile(r"\b(?:transitions?|cross[- ]?fades?|dissolves?)\b"), "transition"),
+    (re.compile(r"\b(?:filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading)\b"), "filter"),
+    (re.compile(r"\b(?:text|titles?|lower thirds?|hooks?|headlines?)\b"), "text"),
+)
+_PLURAL_REMOVE_RE = re.compile(r"\b(?:all|every|both|those|these)\b|\b(?:captions|subtitles|subs|transitions|crossfades|"
+                               r"cross fades|dissolves|filters|luts|looks|titles|lower thirds|hooks|headlines|grades)\b")
+_GRADE_RE = re.compile(r"\b(?:colou?r grade|colou?r grading|grades?|grading)\b")
+_WHICH_TR_RE = re.compile(r"\b(first|last|final|opening|closing)\s+(?:transition|cross[- ]?fade|dissolve)\b")
+
+
+#: Effects-panel effect words → the effect types they name (review RE).
+_FX_TYPES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\bvignett(?:e|ing)\b"), "vignette"), (re.compile(r"\bgrain\b"), "grain"),
+    (re.compile(r"\bvintage\b"), "vintage"), (re.compile(r"\bvhs\b"), "vhs"), (re.compile(r"\bglow\b"), "glow"),
+    (re.compile(r"\brgb[- ]split\b|\bchromatic\b"), "rgb_split"), (re.compile(r"\bsharpen"), "sharpen"),
+    (re.compile(r"\bblur effect\b"), "blur"), (re.compile(r"\bflip h\b"), "hflip"), (re.compile(r"\bflip v\b"), "vflip"),
+)
+
+
+#: "the text that says subscribe", "the title saying hello" (review RE).
+_SAYS_RE = re.compile(r"\b(?:that|which)\s+(?:says|reads|said|read)\s+(.{1,60})$|\bsaying\s+(.{1,60})$")
+
+
+def _remove(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    clause = hit.clause
+    what = next((v for rx, v in _REMOVE_WHAT if rx.search(clause)), "other")
+    fx = [t for rx, t in _FX_TYPES if rx.search(clause)]
+    said = _SAYS_RE.search(clause)
+    if fx and what in ("filter", "other"):
+        what = "filter"                       # an Effects-panel effect by name
+    out: dict[str, Any] = {"what": what, "all": bool(_PLURAL_REMOVE_RE.search(clause))}
+    if fx:
+        out["_fx"] = fx
+    if what == "filter":
+        out["clip_ref"] = G.clip_ref_of(clause)
+        out["_grade"] = bool(_GRADE_RE.search(clause))
+        out["_look"] = c.look                  # "the black and white filter" → mono.cube
+    elif what == "transition":
+        from .planner import _at_seconds
+        out["_seam"] = seam_index(clause)
+        w = _WHICH_TR_RE.search(clause)
+        out["_which"] = {"first": "first", "opening": "first"}.get(w.group(1), "last") if w else None
+        out["_at"] = _at_seconds(clause)
+    elif what == "text":
+        out["_role"] = ("lower_third" if re.search(r"\blower thirds?\b", clause)
+                        else "hook" if re.search(r"\bhooks?\b", clause) else None)
+        if c.quoted_text:
+            out["text"] = c.quoted_text[0]
+        elif said:
+            out["text"] = (said.group(1) or said.group(2)).strip(" .!?")   # "the text that says subscribe"
+    return out
+
+
+def _flip(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    """Which axis ("mirror" / "flip" / "horizontally" = horizontal, CapCut's
+    Mirror; "vertically" = vertical) and whether it goes ON, OFF ("unflip",
+    "flip it back", "remove the mirror") or toggles (None)."""
+    clause = hit.clause
+    vertical = bool(re.search(r"\bvertical(?:ly)?\b|\btop to bottom\b|\bbottom to top\b", clause))
+    horizontal = bool(re.search(r"\bhorizontal(?:ly)?\b|\bleft to right\b|\bright to left\b|\bsideways\b"
+                                r"|\bmirror", clause))
+    axis = "both" if vertical and horizontal else ("vertical" if vertical else "horizontal")
+    off = bool(re.search(r"\bun-?flip|\bun-?mirror|\bflip\w*\s+(?:it\s+|this\s+|that\s+|[\w ]{0,24}?\s+)?back\b"
+                         r"|\bno longer (?:flip|mirror)|\b(?:remove|undo|turn off|take off)\s+(?:the\s+)?(?:flip|mirror)",
+                         clause))
+    out: dict[str, Any] = {"clip_ref": clip_ref(hit), "axis": axis, "on": False if off else None}
+    # review RE: "mirror the overlay" asked "which clip?" (and, with a main-
+    # track clip selected, would have mirrored THAT one)
+    if re.search(r"\b(?:stickers?|emojis?)\b", clause):
+        out["_target"] = "sticker"
+    elif re.search(r"\b(?:overlays?|pips?|picture[- ]in[- ]picture|top\s+(?:clip|layer|video))\b", clause):
+        out["_target"] = "overlay"
+    return out
+
+
+def _canvas_read(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    from .canvas_expanders import read_canvas
+    return read_canvas(hit, c)
+
+
+def _blend_read(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    from .canvas_expanders import read_blend
+    return read_blend(hit, c)
+
+
+def _voice_read(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    from .voice_expanders import read_voice
+    return read_voice(hit, c)
+
+
+def _anim_read(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    from .anim_expanders import read_animation
+    return read_animation(hit, c)
+
+
 READERS: dict[str, Callable[[G.IntentHit, S.Slots], dict[str, Any]]] = {
     "delete_clip": _one, "duplicate": _one, "move_clip": _move, "zoom": _zoom, "rotate": _rotate,
-    "adjust": _adjust,
+    "adjust": _adjust, "clip_length": _length, "remove_feature": _remove, "flip": _flip,
+    # Wave E (F2): CapCut Canvas and blend modes (canvas_expanders.py)
+    "canvas": _canvas_read, "blend": _blend_read,
+    # Wave E (F3): CapCut's voice changer (voice_expanders.py)
+    "voice_effect": _voice_read,
+    # Wave E (F1): CapCut clip animations (anim_expanders.py)
+    "animation": _anim_read,
 }
 
 

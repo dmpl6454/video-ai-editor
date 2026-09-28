@@ -34,7 +34,10 @@ def _kinds() -> list[tuple[str, dict]]:
     return [("2x", {"speed": 2.0}), ("half", {"speed": 0.5}), ("1.5x", {"speed": 1.5}),
             ("hero", {"speed": hero}), ("montage", {"speed": montage}),
             ("rev", {"reverse": True}), ("rev1.5", {"reverse": True, "speed": 1.5}),
-            ("rev-hero", {"reverse": True, "speed": hero}), ("freeze", {"freeze": 0.5})]
+            ("rev-hero", {"reverse": True, "speed": hero}), ("freeze", {"freeze": 0.5}),
+            # Off the project grid at both ends: a reversed curve's
+            # intermediate starts on the source's grid, not at `in` (wave E).
+            ("rev-montage-off", {"reverse": True, "speed": montage, "range": (0.6137, 2.5411)})]
 
 
 def build(work: Path) -> dict:
@@ -49,7 +52,7 @@ def build(work: Path) -> dict:
         for key, info in srcs.items():
             for name, k in _kinds():
                 c = Clip(src=key, start=0.0, speed=k.get("speed"), reverse=k.get("reverse", False))
-                c.in_, c.out = 0.6, 2.6
+                c.in_, c.out = k.get("range", (0.6, 2.6))
                 if "freeze" in k:
                     c.out = c.in_ + 1 / float(R)
                     c.freeze = k["freeze"]

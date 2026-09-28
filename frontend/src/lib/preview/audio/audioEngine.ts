@@ -25,6 +25,7 @@ import type { AudioPlacement } from '../timeline/programMap'
 import { samplesForFrames, type Rational } from '../timeline/timebase'
 import { editLeadFrames } from '../clock/editLead'
 import { buildAudioPlan, type AudioPlan } from './audioPlan'
+import { limitingFrames } from './limiting'
 import { AudioChunks, chunkReader, type PcmReader } from './audioChunks'
 import { SAMPLE_RATE } from './curves'
 import { LIMITER_WARMUP_S, MixGraph, RAMP_S, renderOffline, sourceRange } from './mixGraph'
@@ -102,24 +103,61 @@ export class AudioEngine implements AudioSink {
 
   private keyOf(src: string): string | null {
     if (this.keys.has(src)) return this.keys.get(src) ?? null
-    const s = this.program?.info.lookup(src) ?? this.pending?.info.lookup(src) ?? null
+    const s = this.planning?.lookup(src) ?? this.program?.info.lookup(src) ?? this.pending?.info.lookup(src) ?? null
     const key = s?.proxy?.key ?? null
     if (key) this.keys.set(src, key)
     return key
   }
 
+  /** Set by the preview engine (AudioSink): the limiting ranges changed. */
+  onLimitingChange: (() => void) | null = null
+
+  /** The program being planned: keyOf() must see ITS sources (on the first
+   *  prepare there is no program yet, and every source read as silent). */
+  private planning: AudioProgramInfo | null = null
+
+  private planOf(edl: EdlLike, placements: readonly AudioPlacement[], program: AudioProgramInfo): AudioPlan {
+    this.planning = program
+    try {
+      return buildAudioPlan(edl, placements, program.R, {
+        loudnessGainDb: this.opts.loudnessGainDb?.() ?? null,
+        silent: (src) => this.reader.silent(src),
+        peak: (src, a, b) => this.reader.peak?.(src, a, b) ?? null,
+      })
+    } finally {
+      this.planning = null
+    }
+  }
+
+  /** Output frame ranges where the master limiter may work (APPROX). */
+  limitingFrames(): Array<[number, number]> {
+    const p = this.pending ?? this.program
+    return p ? limitingFrames(p.plan.limiting, p.info.R) : []
+  }
+
+  /** The layouts landed: a peak that was unknown at prepare() is known now,
+   *  so the limiting ranges (only) are re-derived and the engine told. */
+  private refreshLimiting(prog: Program): void {
+    if (prog !== this.program && prog !== this.pending) return
+    const again = this.planOf(prog.edl, prog.placements, prog.info)
+    const same = again.limiting.length === prog.plan.limiting.length &&
+      again.limiting.every(([a, b], i) => a === prog.plan.limiting[i][0] && b === prog.plan.limiting[i][1])
+    if (same) return
+    prog.plan = { ...prog.plan, limiting: again.limiting, approx: again.approx }
+    this.onLimitingChange?.()
+  }
+
   prepare(edl: EdlLike, placements: readonly AudioPlacement[], program: AudioProgramInfo): void {
     this.keys.clear()
-    const plan = buildAudioPlan(edl, placements, program.R, {
-      loudnessGainDb: this.opts.loudnessGainDb?.() ?? null,
-      silent: (src) => this.reader.silent(src),
-    })
+    const plan = this.planOf(edl, placements, program)
     const next: Program = { edl, placements, info: program, plan }
     // Layouts first: the reader needs them to answer ready()/copy().
+    const layouts: Array<Promise<unknown>> = []
     for (const c of plan.clips) {
       const key = this.keyOf(c.src)
-      if (key) this.chunks.layout(key).catch(() => { /* PENDING: retried on use */ })
+      if (key) layouts.push(this.chunks.layout(key).catch(() => null /* PENDING: retried on use */))
     }
+    if (layouts.length) void Promise.all(layouts).then(() => this.refreshLimiting(next))
     if (!this.running || !this.graph) {
       this.program = next
       this.pending = null

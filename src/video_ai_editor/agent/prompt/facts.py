@@ -91,6 +91,58 @@ class SpeechSpan(BaseModel):
         return max(0.0, self.end - self.start)
 
 
+class ClipFact(BaseModel):
+    """One media clip as a trim / level / filter edit needs it (wave E,
+    F4b): its source range, speed, footprint, gain and effect chain. Times
+    are the EDL's own (`start`/`duration` timeline, `src_in`/`src_out`
+    source); `curve` is the speed curve's points when the clip plays one."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    track: str
+    start: float
+    duration: float                                   # timeline seconds (effective_duration)
+    src_in: float
+    src_out: float
+    speed: float = 1.0                                # the scalar (a curve's MEAN) speed
+    curve: list[tuple[float, float]] | None = None
+    freeze: float | None = None
+    reverse: bool = False
+    gain_db: float = 0.0
+    effects: list[str] = Field(default_factory=list)  # effect types, chain order
+    looks: list[str] = Field(default_factory=list)    # the LUT files' names ("mono.cube"), chain order
+    src_duration: float | None = None                 # the source file's length, when probed
+    flip_h: bool = False
+    flip_v: bool = False
+    #: Wave E (F3): the clip's voice effect (edl/voice_effects.py id), or None.
+    voice_effect: str | None = None
+    #: The source file's name without its folder or extension ("voiceover"),
+    #: what a person calls an audio clip (review RE: a voice-over dropped on
+    #: the Music lane was invisible to "make my voiceover …").
+    name: str = ""
+    #: Whether the source carries a sound stream (None: not probed).
+    has_audio: bool | None = None
+
+
+class TextFact(BaseModel):
+    """One text overlay (not a caption cue): what "delete the title" or
+    "remove the text 'SALE'" names."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    text: str                                         # first 60 characters
+    role: str | None = None
+    start: float = 0.0
+    end: float = 0.0
+
+
+class TransitionFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    at: float
+    type: str
+
+
 class TimelineFacts(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -138,6 +190,24 @@ class TimelineFacts(BaseModel):
     spoken_language: str | None = None
     music_gain_db: float | None = None                             # the bed's current gain ("turn it down" is relative)
     music_muted: bool = False
+    #: Wave E (F4b): what an edit BY NAME needs — every media clip's timing,
+    #: gain and effects ("trim the second clip to 2 s", "lower clip 2 by
+    #: 3 dB" from its CURRENT gain, "take off the filter"), the caption cue
+    #: ids ("remove the captions"), the text overlays ("delete the title")
+    #: and the transitions ("remove the transition between clip 2 and 3").
+    clips: list[ClipFact] = Field(default_factory=list)
+    caption_clip_ids: list[str] = Field(default_factory=list)
+    texts: list[TextFact] = Field(default_factory=list)
+    transitions: list[TransitionFact] = Field(default_factory=list)
+    #: Wave E (F1): the stickers in start order ("make the sticker bounce
+    #: in"), and every clip / sticker that carries a clip animation, id →
+    #: `in:<id>,out:<id>` / `combo:<id>` ("remove the animation").
+    sticker_ids: list[str] = Field(default_factory=list)
+    animations: dict[str, str] = Field(default_factory=dict)
+
+    def clip(self, cid: str | None) -> ClipFact | None:
+        """The media clip `cid` names, or None."""
+        return next((c for c in self.clips if c.id == cid), None) if cid else None
 
     @classmethod
     def minimal(cls, session_id: str = "s_test", **overrides: Any) -> "TimelineFacts":
@@ -279,7 +349,8 @@ def _probe_cached(store: Any, src: str) -> dict | None:
         vs = next((s for s in p.streams if getattr(s, "codec_type", None) == "video"), None)
         w = getattr(vs, "width", None) if vs else None
         h = getattr(vs, "height", None) if vs else None
-        info = {"duration": p.duration, "width": w, "height": h}
+        has_audio = any(getattr(s, "codec_type", None) == "audio" for s in p.streams)
+        info = {"duration": p.duration, "width": w, "height": h, "has_audio": has_audio}
     except Exception:
         info = None
     cache[src] = info
@@ -319,6 +390,24 @@ def _files_under(root: Path, exts: set[str] | None = None) -> list[Path]:
         if exts is not None and p.suffix.lower() not in exts:
             continue
         out.append(p)
+    return out
+
+
+def _still_pictures(uploads: Path) -> list[Path]:
+    """The original picture of every photo imported through the Media panel
+    (an upload dir whose ingest.json says `still`): what "use this image as
+    the background" can name (wave E, F2)."""
+    out: list[Path] = []
+    if not uploads.is_dir():
+        return out
+    for ij in sorted(uploads.glob("*/ingest.json")):
+        try:
+            data = json.loads(ij.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        src = Path(str(data.get("src") or "")) if isinstance(data, dict) and data.get("still") else None
+        if src is not None and src.is_file() and src.suffix.lower() in _IMAGE_EXT:
+            out.append(src)
     return out
 
 
@@ -437,7 +526,8 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
     # --- files a plan may read ----------------------------------------
     uploads = sdir / "uploads"
     audio_files = _files_under(uploads / "audio", _AUDIO_EXT)
-    image_files = _files_under(uploads / "stickers", _IMAGE_EXT) + _files_under(uploads / "images", _IMAGE_EXT)
+    image_files = (_files_under(uploads / "stickers", _IMAGE_EXT) + _files_under(uploads / "images", _IMAGE_EXT)
+                   + _still_pictures(uploads))
     allowed: set[str] = set()
     allowed.update(_resolved(p) for p in _files_under(uploads))
     allowed.update(_resolved(b.path) for b in music_beds())
@@ -455,6 +545,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
     ui = ui_state or {}
     playhead = ui.get("playhead")
     selection = ui.get("selection")
+    clip_facts, text_facts, transition_facts = _edit_facts(store, edl)
 
     return TimelineFacts(
         session_id=sdir.name,
@@ -483,9 +574,81 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         first_use=first_use_probe(backend),
         ingest_json_path=str(ingest_json) if ingest_json else None,
         word_spans=word_spans, transcript_head=head,
+        clips=clip_facts, caption_clip_ids=[c.id for c in caption_clips],
+        texts=text_facts, transitions=transition_facts,
+        **_anim_facts(edl),
     )
+
+
+#: At most this many distinct source files are probed for their length per
+#: facts build (each is one ffprobe, memoised on the store for the session).
+MAX_PROBED_SOURCES = 16
+
+
+def _anim_facts(edl: Any) -> dict[str, Any]:
+    """Wave E (F1): `sticker_ids` and `animations` (see TimelineFacts)."""
+    from ...edl.schema import Clip, Sticker
+    stickers = sorted((c for t in edl.tracks for c in t.clips if isinstance(c, Sticker)),
+                      key=lambda c: (c.start, c.id))
+    anims: dict[str, str] = {}
+    for t in edl.tracks:
+        for c in t.clips:
+            if not isinstance(c, (Clip, Sticker)):
+                continue
+            parts = [f"{k}:{v}" for k, v in (("in", c.anim_in), ("out", c.anim_out), ("combo", c.anim_combo)) if v]
+            if parts:
+                anims[c.id] = ",".join(parts)
+    return {"sticker_ids": [s.id for s in stickers], "animations": anims}
+
+
+def _fx_count(c: Any, etype: str) -> int:
+    return sum(1 for e in (getattr(c, "effects", None) or []) if getattr(e, "type", None) == etype)
+
+
+def _edit_facts(store: Any, edl: Any) -> tuple[list[ClipFact], list[TextFact], list[TransitionFact]]:
+    """The per-clip / per-overlay / per-seam facts an edit by name needs."""
+    from ...edl.schema import Clip, TextClip
+    clips: list[ClipFact] = []
+    probed: dict[str, float | None] = {}
+    sounds: dict[str, bool | None] = {}
+    for t in edl.tracks:
+        for c in t.clips:
+            if not isinstance(c, Clip):
+                continue
+            src = str(c.src or "")
+            if src and src not in probed and len(probed) < MAX_PROBED_SOURCES:
+                info = _probe_cached(store, src)
+                probed[src] = float(info["duration"]) if info and info.get("duration") else None
+                sounds[src] = info.get("has_audio") if info else None
+            pts = c.speed_curve
+            clips.append(ClipFact(
+                id=c.id, track=t.id, start=round(float(c.start), 4),
+                duration=round(float(c.effective_duration), 4),
+                src_in=float(c.in_), src_out=float(c.out), speed=float(c.speed_factor),
+                curve=[(float(x), float(r)) for x, r in pts] if pts else None,
+                freeze=float(c.freeze) if c.freeze is not None else None,
+                reverse=bool(getattr(c, "reverse", False)), gain_db=float(c.audio.gain_db),
+                voice_effect=getattr(c.audio, "voice_effect", None),
+                effects=[e.type for e in c.effects], src_duration=probed.get(src),
+                looks=[Path(str(e.params.get("src") or e.params.get("lut_path") or "")).name
+                       for e in c.effects if e.type == "lut"],
+                # the MIRROR the picture shows: Transform.flip_* XOR a legacy
+                # Effects-panel Flip H / V (review RE, one mirror model)
+                flip_h=bool(getattr(c.transform, "flip_h", False)) != (_fx_count(c, "hflip") % 2 == 1),
+                flip_v=bool(getattr(c.transform, "flip_v", False)) != (_fx_count(c, "vflip") % 2 == 1),
+                name=Path(src).stem if src else "", has_audio=sounds.get(src)))
+    texts = sorted((TextFact(id=c.id, text=(c.text or "")[:60], role=c.role, start=round(float(c.start), 3),
+                             end=round(float(c.end), 3))
+                    for t in edl.tracks if t.type != "captions"
+                    for c in t.clips if isinstance(c, TextClip) and c.role != "caption"),
+                   key=lambda x: (x.start, x.id))
+    v1 = edl.get_track("v1")
+    transitions = sorted((TransitionFact(at=round(float(tr.at), 4), type=str(tr.type))
+                          for tr in (v1.transitions if v1 else [])), key=lambda x: x.at)
+    return clips, texts, transitions
 
 
 __all__ = ["Aspect", "TranscriptBackend", "TRANSCRIPT_PENDING_MAX_AGE_S", "SPEECH_MERGE_GAP_S",
            "FIRST_USE_BYTES", "WHISPER_MODELS", "VOICE_IDS",
-           "SpeechSpan", "TimelineFacts", "build_facts", "first_use_probe"]
+           "SpeechSpan", "ClipFact", "TextFact", "TransitionFact", "TimelineFacts", "build_facts",
+           "first_use_probe", "MAX_PROBED_SOURCES"]

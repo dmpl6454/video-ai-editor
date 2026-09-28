@@ -18,17 +18,20 @@
 //          preview gain and a −1 dBFS limiter.
 
 import {
-  effectiveDuration, freezeOf, isMediaClip, planView, reversedFrameCount, speedFactor, type EdlClip, type EdlLike, type EdlTrack,
+  effectiveDuration, freezeOf, intermediateSpan, isMediaClip, planView, reversedViewRange, speedFactor, type EdlClip, type EdlLike,
+  type EdlTrack,
 } from '../timeline/framePlan'
 import {
   audioPlacements, clipSample0, type AudioPlacement, type AudioRun, type ProgramMap, type SourceLookup,
 } from '../timeline/programMap'
 import { curvePoints, type CurvePoints } from '../timeline/speedCurve'
-import { ffmpegMicros, frameOf, samplesForFrames, type FpsLike } from '../timeline/timebase'
+import { editSample, ffmpegMicros, frameOf, samplesForFrames, type FpsLike } from '../timeline/timebase'
 import {
   acrossfadeSamples, afadeGainAt, clipFadeWindows, clipGainLinear, compileEnv, envDbAt, laneFadeWindows, microsToSamples, pyRound,
   pyFixedValue, SAMPLE_RATE, sampleTime, type CompiledEnv, type FadeWindow, type GainEnv,
 } from './curves'
+import { voicePlan, type VoicePlan } from '../../voice/voiceFx'
+import { limitingRanges, type PeakLookup } from './limiting'
 
 export type ChannelMode = 'stereo' | 'left' | 'right' | 'mono'
 
@@ -40,6 +43,9 @@ export interface EdlAudioProps {
   gain_env?: GainEnv | null
   keep_pitch?: boolean
   channels?: ChannelMode | string
+  /** Wave E (F3): a voice-effect preset id and its intensity 0-1. */
+  voice_effect?: string | null
+  voice_intensity?: number
 }
 
 /** How a clip's output samples map onto its source's 48 kHz samples. */
@@ -91,6 +97,9 @@ export interface ClipAudio {
   timing: string
   /** Everything that decides only their gain (a change rewrites automation). */
   params: string
+  /** The clip's voice effect (wave E, F3: lib/voice/voiceFx.ts), run on its
+   *  samples after the retime and the channel mode; null when it has none. */
+  voice: VoicePlan | null
 }
 
 export interface DuckPlan {
@@ -119,6 +128,10 @@ export interface AudioPlan {
   master: MasterPlan
   /** Why parts of the sound are only approximate (§7 APPROX). */
   approx: string[]
+  /** Output-sample ranges where the pre-limiter peak may top the ceiling:
+   *  the browser's limiter is not `alimiter` there (APPROX, `limiting`;
+   *  limiting.ts). Empty without a limiter. */
+  limiting: Array<[number, number]>
 }
 
 export interface AudioPlanOptions {
@@ -127,6 +140,10 @@ export interface AudioPlanOptions {
   loudnessGainDb?: number | null
   /** Sources known to have no sound (index.json `audio.silent`). */
   silent?: (src: string) => boolean
+  /** A source's recorded peak over source samples [s0, s1) (index.json
+   *  `audio.chunk_peak`), null while unknown — unknown is unbounded, so a
+   *  mixed range reads APPROX until the layout lands (limiting.ts). */
+  peak?: PeakLookup
 }
 
 // ---------------------------------------------------------------- constants
@@ -158,7 +175,8 @@ function channelMode(a: EdlAudioProps): ChannelMode {
 
 /** Source sample an input seek `-ss t` starts at (`rescale(ffmpeg_us(t))`;
  *  no seek at 0). */
-export const inputSeekSample = (t: number): number => (t > 0 ? microsToSamples(ffmpegMicros(t)) : 0)
+/** The sample an input opened at `t` starts on: S(t) (R9, `editSample`). */
+export const inputSeekSample = (t: number): number => editSample(t)
 
 /** `clock.render_time` over a seam table. */
 export function renderTime(seams: Array<[number, number]>, t: number): number {
@@ -184,12 +202,19 @@ function paramsKey(a: EdlAudioProps, extra: string): string {
     channelMode(a), extra])
 }
 
-function baseClip(c: EdlClip, bus: string, n: number): Pick<ClipAudio, 'id' | 'bus' | 'src' | 'channels' | 'gain' | 'mute' | 'env'> & { key: string } {
+function baseClip(c: EdlClip, bus: string, n: number): Pick<ClipAudio, 'id' | 'bus' | 'src' | 'channels' | 'gain' | 'mute' | 'env' | 'voice'> & { key: string } {
   const a = audioOf(c)
   return {
     key: `${bus}/${c.id}/${n}`, id: c.id, bus, src: c.src, channels: channelMode(a),
     gain: clipGainLinear(a.gain_db), mute: !!a.mute, env: compileEnv(a.gain_env ?? null),
+    voice: voicePlan(a.voice_effect ?? null, a.voice_intensity ?? 1),
   }
+}
+
+/** A voice-effect clip's samples ARE the effect (and its channel mode, which
+ *  the effect follows): either changing reschedules it, like a timing edit. */
+function withVoiceTiming(c: ClipAudio): ClipAudio {
+  return c.voice ? { ...c, timing: `${c.timing}|voice:${c.voice.key}|${c.channels}` } : c
 }
 
 const shift = (ws: FadeWindow[], by: number): FadeWindow[] => ws.map((w) => ({ ...w, start: w.start + by }))
@@ -203,6 +228,16 @@ function trackGain(t: EdlTrack, anySolo: boolean): number {
 // ---------------------------------------------------------------- build
 
 /** The plan from a program map (`programMap.audioPlacements` for v1). */
+/** The source sample a RETIMED reversed clip's sound starts from: the
+ *  intermediate's last sample (its range backwards from `first + M` frames,
+ *  `intermediateSpan`), less the view's `in` (a curve's source-grid
+ *  intermediate is opened where `out` sits, `reversedViewRange`). */
+function reversedSrc0(c: EdlClip, fps: FpsLike): number {
+  const [first, m] = intermediateSpan(c, fps)
+  const [vIn] = reversedViewRange(c, fps)
+  return clipSample0(first) + samplesForFrames(m, fps) - 1 - Math.round(vIn * 48000)
+}
+
 export function planFromProgram(edl: EdlLike, pm: ProgramMap, lookup?: SourceLookup,
                                 opts: AudioPlanOptions = {}): AudioPlan {
   return buildAudioPlan(edl, audioPlacements(pm, lookup), pm.R, opts)
@@ -257,7 +292,7 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
       // reverse reads the reversed intermediate — the source backwards from
       // the last sample of its `reversed_frames`.
       const reverse = p.mode === 'reverse'
-      const src0 = reverse ? p.src0 + samplesForFrames(reversedFrameCount(c, fps), fps) - 1 : p.src0
+      const src0 = reverse ? reversedSrc0(c, fps) : p.src0
       map = { kind: 'rate', src0, rate: p.rate, reverse, end: Number.MAX_SAFE_INTEGER }
       approx.add(p.mode === 'tempo' ? 'tempo' : 'varispeed')
     }
@@ -294,7 +329,7 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
     const nf = Math.max(1, frameOf(win[1], fps) - f0)
     const n = samplesForFrames(nf, fps)
     const out0 = samplesForFrames(f0, fps)
-    const s0 = clipSample0(c.in ?? 0, fps)
+    const s0 = clipSample0(c.in ?? 0)
     const pts = curvePoints(c.speed)
     const sp = typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1 ? c.speed : null
     let map: SourceMap
@@ -303,7 +338,7 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
     } else if (c.reverse) {
       // The reversed intermediate's sound: the range backwards from the
       // last sample of its `reversed_frames` (as v1's retimed reverse).
-      map = { kind: 'rate', src0: s0 + samplesForFrames(reversedFrameCount(c, fps), fps) - 1,
+      map = { kind: 'rate', src0: reversedSrc0(c, fps),
               rate: sp ?? (pts ? speedFactor(c.speed) : 1), reverse: true, end: Number.MAX_SAFE_INTEGER }
       approx.add('varispeed')
     } else if (pts) {
@@ -371,7 +406,11 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
     ceilingDb = LOUDNESS_CEILING_DB
     approx.add('loudness')
   }
-  return { total, clips, buses, duck, master: { gain, ceilingDb }, approx: [...approx] }
+  if (clips.some((c) => c.voice)) approx.add('voice')
+  const limiting = limitingRanges(clips, buses, gain, ceilingDb, total,
+    opts.peak ?? ((src) => (silent(src) ? 0 : null)))
+  if (limiting.length) approx.add('limiting')
+  return { total, clips: clips.map(withVoiceTiming), buses, duck, master: { gain, ceilingDb }, approx: [...approx], limiting }
 }
 
 /** One music / voice-over / audio-lane clip (`_audio_clip_filter`). */

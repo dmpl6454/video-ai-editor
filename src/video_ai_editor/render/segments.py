@@ -132,6 +132,8 @@ def segment_bounds(c: Clip, fps, segment_s: float | None = None) -> list[tuple[f
         return None
     if getattr(c, "freeze", None) is not None:      # a still, not a span of source
         return None
+    if getattr(c, "anim_in", None) or getattr(c, "anim_out", None) or getattr(c, "anim_combo", None):
+        return None                                  # animated on the clip's own clock (wave E, F1)
     if (float(getattr(c, "video_fade_in", 0.0) or 0.0) > 0
             or float(getattr(c, "video_fade_out", 0.0) or 0.0) > 0):
         return None

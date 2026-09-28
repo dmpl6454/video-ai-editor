@@ -14,7 +14,8 @@ names through the idioms dispatch.py actually uses:
 
   (a) `args.get("k")`, `args.pop("k")`, `args["k"]`, `"k" in args`
   (b) helpers that take the key as a literal: `_num(args, "k")`,
-      `_enum_arg(args, "k", …)` — a bare `args.get` regex would miss these and
+      `_enum_arg(args, "k", …)`, and a helper handed several spellings at once
+      (`_h(args, "k", "alias")` reads both) — a bare `args.get` regex would miss these and
       the test would go green by blindness, so a self-check below proves the
       idiom is covered
   (c) helpers/handlers the handler forwards `args` to verbatim:
@@ -50,7 +51,10 @@ _STR = r'''["']([A-Za-z_]\w*)["']'''
 _DIRECT = re.compile(r'args(?:\.get|\.pop)\(\s*' + _STR)                    # (a)
 _INDEX = re.compile(r'args\[\s*' + _STR + r'\s*\]')                        # (a)
 _MEMBER = re.compile(_STR + r'\s+(?:not\s+)?in\s+args\b')                   # (a)
-_HELPER_KEY = re.compile(r'\b(_\w+)\(\s*args\s*,\s*' + _STR)                # (b)
+# (b) every literal in the run right after `args` — `_anim_seconds(args,
+# "in_duration", "anim_dur")` reads BOTH names; matching only the first one
+# is how three unadvertised duration aliases sat under a green census.
+_HELPER_KEY = re.compile(r'\b(_\w+)\(\s*args\s*,\s*((?:' + _STR + r'\s*,\s*)*' + _STR + r')')
 _FORWARD = re.compile(r'\b(\w+)\(\s*(?:store\s*,\s*)?args\s*[,)]')          # (c)
 _LOOP = re.compile(                                                         # (d)
     r'for\s+([A-Za-z_]\w*)(?:\s*,\s*\w+)*\s+in\s+\((.*?)\)\s*:\s*\n((?:[ \t]+.*\n?)+)',
@@ -78,7 +82,8 @@ def handler_reads(fn: Callable, _seen: set | None = None) -> set[str]:
     except (OSError, TypeError):
         return set()
     keys = set(_DIRECT.findall(src)) | set(_INDEX.findall(src)) | set(_MEMBER.findall(src))
-    keys |= {k for _, k in _HELPER_KEY.findall(src)}
+    for m in _HELPER_KEY.finditer(src):
+        keys |= set(re.findall(_STR, m.group(2)))
     for var, tup, body in _LOOP.findall(src):
         # Every way a body can read the loop variable out of args — the last
         # alternative (`args.get(k)` / `args.pop(k)`) is how add_text reads
@@ -149,6 +154,17 @@ def test_census_sees_every_read_idiom(handler, expected, idiom):
     here, update the pin — do not delete it."""
     got = handler_reads(D.DISPATCH[handler])
     assert expected <= got, f"idiom {idiom} no longer detected on {handler}: {sorted(got)}"
+
+
+def _reads_two_spellings_through_one_helper(store, args):     # (b) fixture, never dispatched
+    return _pick(args, "canonical", "alias")                     # noqa: F821
+
+
+def test_census_sees_every_key_handed_to_a_helper():
+    """(b) takes EVERY literal after `args`, not only the first: set_animation
+    read `anim_dur`/`duration`/`anim_out_dur` this way, unadvertised, while
+    the census reported nothing."""
+    assert {"canonical", "alias"} <= handler_reads(_reads_two_spellings_through_one_helper)
 
 
 # --- newly advertised enums must equal what the handler accepts -----------------
@@ -263,3 +279,47 @@ def test_unknown_args_is_not_wired_into_dispatch():
     the smoke suite that passes extras — is where the change must be owned."""
     assert "unknown_args" not in inspect.getsource(D.dispatch)
     assert tools_mod.unknown_args is unknown_args
+
+
+# --- set_animation: ONE spelling, everywhere (gate X3) ----------------------------
+
+_ANIM_EDL_FIELDS = {"anim_in", "anim_out", "anim_combo", "anim_dur", "anim_out_dur"}
+
+
+def test_set_animation_has_one_contract_across_schema_validator_and_handler(tmp_path):
+    """The handler used to read the EDL field names (`anim_in`, `anim_out`,
+    `anim_combo`, `anim_dur`, …) as silent aliases the tool schema never
+    advertised. The contract chosen is the one the Prompt validator and plan
+    schema already used — `in`/`out`/`combo`/`in_duration`/`out_duration` —
+    so the aliases are gone from the handler, not added to the schema: the
+    validator rejects them as unknown args, and dispatch refuses a call that
+    names only them instead of quietly applying it."""
+    from video_ai_editor.agent.prompt import validate as V
+    from video_ai_editor.edl import EDLStore
+    from video_ai_editor.edl.schema import Canvas, Clip, EDL, Track
+
+    advertised = set(tools_mod.input_schema_for("set_animation")["properties"])
+    assert {"in", "out", "combo", "in_duration", "out_duration"} <= advertised
+    assert not advertised & _ANIM_EDL_FIELDS
+    assert handler_reads(D.set_animation) <= advertised, sorted(handler_reads(D.set_animation) - advertised)
+    assert not handler_reads(D.set_animation) & _ANIM_EDL_FIELDS
+    assert {k for t, k in V.ARG_BOUNDS if t == "set_animation"} <= advertised
+
+    reasons: list[str] = []
+    V._check_shape("set_animation", {"clip_id": "c1", "anim_in": "zoom_in"},
+                   V.plan_schema_for("set_animation"), reasons)
+    assert any("unknown args ['anim_in']" in r for r in reasons), reasons
+
+    edl = EDL(canvas=Canvas(w=320, h=180, fps=30), tracks=[
+        Track(id="v1", type="video", clips=[Clip(id="c1", src="/fake/a.mp4", in_=0.0, out=4.0)])])
+    edl.recompute_duration()
+    (tmp_path / "edl.json").write_text(edl.model_dump_json(by_alias=True))
+    store = EDLStore(tmp_path)
+    n = len(store.ops.ops)
+    with pytest.raises(ValueError, match="needs `in`, `out` or `combo`"):
+        D.dispatch(store, "set_animation", {"clip_id": "c1", "anim_in": "zoom_in", "anim_dur": 1.0})
+    c = store.edl.get_clip("c1")[1]
+    assert (c.anim_in, c.anim_dur) == (None, None) and len(store.ops.ops) == n
+    D.dispatch(store, "set_animation", {"clip_id": "c1", "in": "zoom_in", "in_duration": 1.0})
+    c = store.edl.get_clip("c1")[1]
+    assert (c.anim_in, c.anim_dur) == ("zoom_in", 1.0)

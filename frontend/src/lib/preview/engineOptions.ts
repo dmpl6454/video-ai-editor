@@ -22,6 +22,9 @@ export interface EngineOptions {
   proxyBaseUrl?: string
   /** `/api/sessions/{sid}/bake` in the app: enables the bake splice (§5.3). */
   bakeBaseUrl?: string
+  /** `/api/sessions/{sid}/canvas-bg` in the app: image canvas backgrounds
+   *  (wave E, F2; without it an image background draws black bars). */
+  canvasBgBaseUrl?: string
   fetch?: FetchLike
   audioSink?: AudioSink
   /** A fixed backing size for the canvas (tests); else host box × DPR. */

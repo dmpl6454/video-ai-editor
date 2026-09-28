@@ -131,7 +131,9 @@ export async function setup(fx: Fixture, opts: { mipmaps?: boolean } = {}): Prom
   host.style.cssText = `position:relative;width:${fx.canvas[0]}px;height:${fx.canvas[1]}px;`
   document.body.appendChild(host)
   const sink = new RecordingSink()
-  const engine = createPreviewEngine({ audioSink: sink, canvasSize: { w: fx.canvas[0], h: fx.canvas[1] }, mipmaps: opts.mipmaps })
+  // ?canvasBg=<url> serves image canvas backgrounds (wave E, F2 parity)
+  const engine = createPreviewEngine({ audioSink: sink, canvasSize: { w: fx.canvas[0], h: fx.canvas[1] }, mipmaps: opts.mipmaps,
+    canvasBgBaseUrl: q.get('canvasBg') ?? undefined })
   sink.engine = engine
   const srcIds = new Map<string, number>()
   if (!perf) for (const [src, s] of Object.entries(fx.sources)) if (s.srcId) srcIds.set(src, s.srcId)

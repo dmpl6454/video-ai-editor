@@ -18,6 +18,7 @@ import { liveCssTransform, liveCssFilter, committedGradeOf, committedPoseAt, sam
 import { planSourceDraw, sourcePreviewApplies } from '../lib/sourcePreview'
 import { srcDimsFor, sessionFileUrl } from '../lib/media'
 import { renderSpanOf } from '../lib/timelineLayout'
+import { canvasBgOf } from '../lib/canvasBlend/catalog'
 import { displaySeekTime, frameDuration } from '../lib/frameStep'
 import { Icon } from './Icon'
 
@@ -299,7 +300,12 @@ function ServerPreview() {
     const opacity = liveTransform.opacity ?? sampleKF(tx.opacity as never, localT, 1)
     // `start` is what `syncPipVideo` subtracts from the render-time playhead
     // to find the source frame, so it is the RENDER start (see above).
-    return { plan, url, src: c.src, start: renderStart, in: c.in ?? 0, opacity }
+    // A colour canvas background (wave E, F2) belongs to the fitted frame and
+    // turns with it; blur and image backgrounds wait for the render (black
+    // here for the gesture, as the bars always were).
+    const bg = canvasBgOf(c)
+    const bgColor = bg?.type === 'color' ? bg.color ?? '#000000' : null
+    return { plan, url, src: c.src, start: renderStart, in: c.in ?? 0, opacity, bgColor }
   }, [liveTransform, edl, sid, boxSize, playhead])
 
   const srcCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -383,6 +389,11 @@ function ServerPreview() {
         // renderer now performs (compositor's colorchannelmixer on gbrp) — the
         // two have to agree or this preview lies about brightness.
         ctx.globalAlpha = Math.max(0, Math.min(1, srcPreview.opacity))
+        if (srcPreview.bgColor) {
+          // the fitted frame is the box at zoom 1: the letterbox is its colour
+          ctx.fillStyle = srcPreview.bgColor
+          ctx.fillRect(-boxSize.w / 2, -boxSize.h / 2, boxSize.w, boxSize.h)
+        }
         try {
           ctx.drawImage(v, -p.drawW / 2, -p.drawH / 2, p.drawW, p.drawH)
           // Only NOW is it safe to hide the <video> — see srcDrawnRef.

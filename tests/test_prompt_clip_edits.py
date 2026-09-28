@@ -127,12 +127,21 @@ def test_zoom_and_adjust_readings():
 
 def test_removing_a_feature_never_adds_it():
     """"remove the captions" used to LAY captions, "remove the filter" to
-    apply a LUT — both verified and committed."""
-    for prompt in ("remove the captions", "remove the filter", "turn off the transitions", "delete the text"):
+    apply a LUT — both verified and committed. Wave E (F4b): they remove by
+    name now; with nothing of the kind on the timeline the reply says so and
+    nothing is planned (the removals themselves: test_prompt_capcut_sweep)."""
+    for prompt, word in (("remove the captions", "no captions"), ("remove the filter", "no filter"),
+                         ("turn off the transitions", "no transitions"), ("delete the text", "no text"),
+                         ("remove the black and white filter", "no black and white filter")):
         det = G.detect(prompt)
         assert det.intents == ["remove_feature"], (prompt, det.intents)
         p = P.plan(prompt, THREE)
-        assert not p.steps and "say 'undo'" in (p.reply or ""), (prompt, p.reply)
+        assert not p.steps and word in (p.reply or ""), (prompt, p.reply)
+        assert not any(s.tool in ("auto_caption", "add_caption_track", "apply_lut", "add_transition", "add_text")
+                       for s in p.steps)
+    # what no recipe removes still gets the honest reply
+    p = P.plan("remove the stickers", THREE)
+    assert not p.steps and "say 'undo'" in (p.reply or "")
     # the removals that DO have a recipe keep it
     assert G.detect("remove the music").intents == ["remove_music"]
     assert G.detect("remove the silences").intents == ["remove_silences"]

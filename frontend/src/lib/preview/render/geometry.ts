@@ -32,9 +32,13 @@
 // repeats, a 25 fps source in a 30 fps project, or a freeze (Wave D3, E1a).
 
 import { sampleKF, type KFNum } from '../../overlay'
-import { effectiveDuration, type EdlClip } from '../timeline/framePlan'
+import {
+  animates, animatesGeometry, animPeak, animValue, fadeGain as animFadeGain, hasAnimation, planOf,
+  type AnimFields, type AnimPlan,
+} from '../../anim/clipAnim'
+import { clipIn, clipOut, effectiveDuration, type EdlClip } from '../timeline/framePlan'
 import { KIND_GAP, type ProgramMap } from '../timeline/programMap'
-import { ptsOf, type SourceInfo } from '../timeline/frameMap'
+import { anchoredFrameSeconds, ptsOf, type SourceInfo } from '../timeline/frameMap'
 
 // ------------------------------------------------------------------ affine
 
@@ -131,26 +135,42 @@ export function propValue(v: unknown, t: number, fallback: number): number {
 }
 
 /** Whether the export runs this clip's geometry on the output grid
- *  (compositor `kf_clip`): any keyframed transform or opacity. */
+ *  (compositor `kf_clip`): any keyframed transform or opacity, or a clip
+ *  animation (wave E, F1: it runs on the keyframe clock). */
 export function hasKeyframes(clip: EdlClip): boolean {
   const tx = (clip.transform ?? {}) as Transform
-  return [tx.x, tx.y, tx.scale, tx.rotation, tx.opacity].some(isKeyframed)
+  return [tx.x, tx.y, tx.scale, tx.rotation, tx.opacity].some(isKeyframed) || hasAnimation(clip as AnimFields)
+}
+
+/** The clip's animation over its footprint (`compositor`: `plan_of(c,
+ *  c.effective_duration)`), or null. */
+export function clipAnimPlan(clip: EdlClip): AnimPlan | null {
+  const a = clip as AnimFields
+  return hasAnimation(a) ? planOf(a, effectiveDuration(clip)) : null
 }
 
 /** compositor `kf_pan_frame`: the fixed frame a keyframed scale/pan is
  *  centred in — the largest keyed size plus the largest pan on both sides,
- *  even. Same EDL values, same double operations. */
-export function kfPanFrame(tx: Transform, W: number, H: number): [number, number] {
+ *  even. Same EDL values, same double operations. A clip animation widens
+ *  it by its peak zoom and travel (`anim`). */
+export function kfPanFrame(tx: Transform, W: number, H: number, anim: AnimPlan | null = null): [number, number] {
   const peak = (v: unknown, stat: number): number =>
     isKeyframed(v) ? Math.max(...v.keyframes.map((p) => Math.abs(p[1]))) : Math.abs(stat)
   const num = (v: unknown, d: number): number => (typeof v === 'number' ? v : d)
-  const sMax = peak(tx.scale, printed(num(tx.scale, 1), 4))
+  let sMax = peak(tx.scale, printed(num(tx.scale, 1), 4))
+  let xMax = peak(tx.x, printed(num(tx.x, 0), 2))
+  let yMax = peak(tx.y, printed(num(tx.y, 0), 2))
+  if (anim) {
+    sMax *= animPeak(anim, 'scale')
+    xMax += animPeak(anim, 'x') * W
+    yMax += animPeak(anim, 'y') * H
+  }
   const side = (canvas: number, pan: number): number => {
     const scaled = Math.max(2, Math.trunc((canvas * sMax) / 2) * 2)
     const n = Math.max(canvas, scaled) + 2 * Math.ceil(pan) + 2
     return n + (n % 2)
   }
-  return [side(W, peak(tx.x, printed(num(tx.x, 0), 2))), side(H, peak(tx.y, printed(num(tx.y, 0), 2)))]
+  return [side(W, xMax), side(H, yMax)]
 }
 
 // --------------------------------------------------------------- the chain
@@ -188,8 +208,14 @@ export interface ClipGeometry {
   /** F1 → normalized source uv (0..1, y down); the picture's uv bounds. */
   toUv: Affine
   uvBounds: Bounds
-  /** RGB multiplier: opacity × video fades. */
+  /** RGB multiplier: opacity × video fades × the animation's alpha ramps
+   *  (= alpha × fade). */
   gain: number
+  /** The picture's alpha over a CapCut Canvas background (review RE): the
+   *  opacity × the clip animation's ramps. */
+  alpha: number
+  /** The video fades (from / to black): the whole frame, background too. */
+  fade: number
   /** How many source pixels one canvas pixel covers (≥ 1: minification). */
   minification: number
 }
@@ -200,11 +226,14 @@ const UV_BOUNDS: Bounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
  *  has floor(x) in [−1, inw]: continuous [−0.5, W + 1.5). */
 const ROTATE_REACH = (W: number, H: number): Bounds => ({ x0: -0.5, y0: -0.5, x1: W + 1.5, y1: H + 1.5 })
 
-interface Transform { x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown }
+interface Transform {
+  x?: unknown; y?: unknown; scale?: unknown; rotation?: unknown; opacity?: unknown
+  flip_h?: unknown; flip_v?: unknown
+}
 
-function fitStage(c: EdlClip, W: number, H: number, sw: number, sh: number, tx: Transform) {
+function fitStage(c: EdlClip, W: number, H: number, sw: number, sh: number, tx: Transform, an: AnimPlan | null = null) {
   const fit = (c as { fit?: string }).fit === 'cover' ? 'cover' : 'contain'
-  const animated = isKeyframed(tx.scale) || isKeyframed(tx.x) || isKeyframed(tx.y)
+  const animated = isKeyframed(tx.scale) || isKeyframed(tx.x) || isKeyframed(tx.y) || animatesGeometry(an)
   const xs = typeof tx.x === 'number' && !isKeyframed(tx.x) ? tx.x : 0
   const ys = typeof tx.y === 'number' && !isKeyframed(tx.y) ? tx.y : 0
   const sc = typeof tx.scale === 'number' ? tx.scale : 1
@@ -236,17 +265,24 @@ function fitStage(c: EdlClip, W: number, H: number, sw: number, sh: number, tx: 
     cw2 = trunc(cw * zp)
     ch2 = trunc(ch * zp)
   }
-  const cx = cropOffset((cw2 - W) / 2 - printed(xs, 2), cw2, W)
-  const cy = cropOffset((ch2 - H) / 2 - printed(ys, 2), ch2, H)
+  // A flipped clip mirrors this window next (flipStage): it is taken at the
+  // mirrored pan, `+x`, so the mirrored picture still moves right by x.
+  const fh = !!(tx as { flip_h?: unknown }).flip_h
+  const fv = !!(tx as { flip_v?: unknown }).flip_v
+  const cx = cropOffset((cw2 - W) / 2 + (fh ? printed(xs, 2) : -printed(xs, 2)), cw2, W)
+  const cy = cropOffset((ch2 - H) / 2 + (fv ? printed(ys, 2) : -printed(ys, 2)), ch2, H)
   return { toUv: scaleT(1 / cw2, 1 / ch2, cx / cw2, cy / ch2), uvBounds: UV_BOUNDS, coverPan, scaleSrc: cw2 / sw }
 }
 
 /** Rotation in place (`rotate=a:c=black`, ow = iw): positive = clockwise on
  *  screen. Returns F2 → F1. */
-function rotationInverse(tx: Transform, t: number, W: number, H: number): Affine | null {
+function rotationInverse(tx: Transform, t: number, W: number, H: number, an: AnimPlan | null = null): Affine | null {
   let rad: number
-  if (isKeyframed(tx.rotation)) {
-    rad = (propValue(tx.rotation, t, 0) * Math.PI) / 180
+  if (isKeyframed(tx.rotation) || animates(an, 'rotation')) {
+    // keyed, or a static angle printed %.4f, plus the animation's (compositor `an_rot`)
+    const base = isKeyframed(tx.rotation) ? propValue(tx.rotation, t, 0)
+      : printed(typeof tx.rotation === 'number' ? tx.rotation : 0, 4)
+    rad = ((base + animValue(an, 'rotation', t)) * Math.PI) / 180
   } else {
     const r = typeof tx.rotation === 'number' ? tx.rotation : 0
     if (!(Math.abs(r) > 0.001)) return null
@@ -261,8 +297,9 @@ function rotationInverse(tx: Transform, t: number, W: number, H: number): Affine
 }
 
 /** The transform stage: F3 (canvas-sized) → F2, and the zoom it applies. */
-function transformInverse(tx: Transform, t: number, W: number, H: number, coverPan: boolean): { m: Affine; zoom: number } {
-  const animated = isKeyframed(tx.scale) || isKeyframed(tx.x) || isKeyframed(tx.y)
+function transformInverse(tx: Transform, t: number, W: number, H: number, coverPan: boolean,
+  an: AnimPlan | null = null): { m: Affine; zoom: number } {
+  const animated = isKeyframed(tx.scale) || isKeyframed(tx.x) || isKeyframed(tx.y) || animatesGeometry(an)
   const scStatic = typeof tx.scale === 'number' ? tx.scale : 1
   const xStatic = isKeyframed(tx.x) ? 0 : typeof tx.x === 'number' ? tx.x : 0
   const yStatic = isKeyframed(tx.y) ? 0 : typeof tx.y === 'number' ? tx.y : 0
@@ -270,12 +307,17 @@ function transformInverse(tx: Transform, t: number, W: number, H: number, coverP
     // scale=w='max(2,trunc(W·s/2)·2)' (eval=frame) → pad to the fixed pan
     // frame at its centre (eval=frame: re-centred per frame size, truncated
     // and snapped to the chroma grid) → crop W×H at centre − (x, y).
-    const s = isKeyframed(tx.scale) ? propValue(tx.scale, t, 1) : printed(scStatic, 4)
+    // The clip animation rides on the keyed/static pose (compositor): scale
+    // ×, x/y + a share of the canvas.
+    const s = (isKeyframed(tx.scale) ? propValue(tx.scale, t, 1) : printed(scStatic, 4))
+      * (animates(an, 'scale') ? animValue(an, 'scale', t) : 1)
     const sw = Math.max(2, trunc((W * s) / 2) * 2)
     const sh = Math.max(2, trunc((H * s) / 2) * 2)
-    const [fw, fh] = kfPanFrame(tx, W, H)
-    const xv = isKeyframed(tx.x) ? propValue(tx.x, t, 0) : printed(xStatic, 2)
-    const yv = isKeyframed(tx.y) ? propValue(tx.y, t, 0) : printed(yStatic, 2)
+    const [fw, fh] = kfPanFrame(tx, W, H, an)
+    const xv = (isKeyframed(tx.x) ? propValue(tx.x, t, 0) : printed(xStatic, 2))
+      + (animates(an, 'x') ? animValue(an, 'x', t) * W : 0)
+    const yv = (isKeyframed(tx.y) ? propValue(tx.y, t, 0) : printed(yStatic, 2))
+      + (animates(an, 'y') ? animValue(an, 'y', t) * H : 0)
     const px = padOffset((fw - sw) / 2)
     const py = padOffset((fh - sh) / 2)
     const cx = cropOffset(Math.trunc((fw - W) / 2) - xv, fw, W)
@@ -308,6 +350,13 @@ function transformInverse(tx: Transform, t: number, W: number, H: number, coverP
   return { m: scaleT(W / sw, H / sh, ((cx - px) * W) / sw, ((cy - py) * H) / sh), zoom: sw / W }
 }
 
+/** Transform.flip_h / flip_v (wave E, compositor: `hflip`/`vflip` on the
+ *  fitted canvas-sized frame, BEFORE the rotation): F1 after the flip → F1
+ *  before it, an exact mirror about the frame centre (self-inverse). */
+export function flipStage(tx: { flip_h?: unknown; flip_v?: unknown }, W: number, H: number): Affine {
+  return scaleT(tx.flip_h ? -1 : 1, tx.flip_v ? -1 : 1, tx.flip_h ? W : 0, tx.flip_v ? H : 0)
+}
+
 /** hflip/vflip on the canvas-sized frame, in effect order (self-inverse). */
 function flipMap(c: EdlClip, W: number, H: number): Affine {
   let m = IDENTITY
@@ -331,20 +380,36 @@ export function fadeFactor(tOut: number, st: number, d: number, out: boolean): n
 /** Opacity × video fades: opacity keyframes at `tKf`, the fades at `tOut`
  *  (both clip-local timeline seconds; see GeometryInput). */
 export function clipGain(c: EdlClip, tx: Transform, tKf: number, tOut: number): number {
-  let g = 1
-  if (isKeyframed(tx.opacity)) g = propValue(tx.opacity, tKf, 1)
+  const [alpha, fade] = clipAlphaFade(c, tx, tKf, tOut)
+  return alpha * fade
+}
+
+/** (the picture's alpha, the video fades): the opacity × the animation's
+ *  ramps, and the fades from / to black. Without a Canvas background both
+ *  take the picture toward black (`gain` = alpha × fade); with one the alpha
+ *  lays the picture over the still background (compositor.py `canvas_on`,
+ *  review RE) and only the fades darken the whole frame. */
+export function clipAlphaFade(c: EdlClip, tx: Transform, tKf: number, tOut: number): [number, number] {
+  let a = 1
+  if (isKeyframed(tx.opacity)) a = propValue(tx.opacity, tKf, 1)
   else {
     const o = typeof tx.opacity === 'number' ? tx.opacity : 1
-    if (o < 0.999) g = printed(Math.max(0, Math.min(1, o)), 4)
+    if (o < 0.999) a = printed(Math.max(0, Math.min(1, o)), 4)
   }
+  // A clip animation's opacity ramps (the same `fade`, on the same clock).
+  const an = clipAnimPlan(c)
+  if (an) a *= animFadeGain(an, tOut)
   // `Clip.effective_duration` (scalar speed, a speed curve's mean, a freeze)
   const eff = effectiveDuration(c)
   const vfi = Math.min(Number((c as { video_fade_in?: number }).video_fade_in ?? 0) || 0, eff)
   const vfo = Math.min(Number((c as { video_fade_out?: number }).video_fade_out ?? 0) || 0, eff)
-  if (vfi > 0.001) g *= fadeFactor(tOut, 0, printed(vfi, 3), false)
-  if (vfo > 0.001) g *= fadeFactor(tOut, printed(Math.max(0, eff - vfo), 3), printed(vfo, 3), true)
-  return g
+  let f = 1
+  if (vfi > 0.001) f *= fadeFactor(tOut, 0, printed(vfi, 3), false)
+  if (vfo > 0.001) f *= fadeFactor(tOut, printed(Math.max(0, eff - vfo), 3), printed(vfo, 3), true)
+  return [a, f]
 }
+
+const alphaFadeGain = ([alpha, fade]: [number, number]) => ({ gain: alpha * fade, alpha, fade })
 
 /** The geometry of one clip at one displayed frame. */
 export function computeGeometry(input: GeometryInput): ClipGeometry {
@@ -356,17 +421,20 @@ export function computeGeometry(input: GeometryInput): ClipGeometry {
   const tx = (clip.transform ?? {}) as Transform
   const sp = typeof clip.speed === 'number' && clip.speed > 0 ? clip.speed : 1
   const tKf = input.tClip ?? input.tSrc / sp
-  const fit = fitStage(clip, W, H, sw, sh, tx)
-  const rot = rotationInverse(tx, tKf, W, H)
-  const tr = transformInverse(tx, tKf, W, H, fit.coverPan)
+  const an = clipAnimPlan(clip)
+  const fit = fitStage(clip, W, H, sw, sh, tx, an)
+  const rot = rotationInverse(tx, tKf, W, H, an)
+  const tr = transformInverse(tx, tKf, W, H, fit.coverPan, an)
   const toF2 = compose(tr.m, flipMap(clip, W, H))
   const tOut = hasKeyframes(clip) ? tKf : input.tOut ?? input.tSrc / sp
   const frame: Bounds = { x0: 0, y0: 0, x1: W, y1: H }
   return {
     toF2, f2Bounds: frame,
     toF1: rot ?? IDENTITY, f1Bounds: rot ? ROTATE_REACH(W, H) : frame, f1Clamp: rot !== null,
-    toUv: fit.toUv, uvBounds: fit.uvBounds,
-    gain: clipGain(clip, tx, tKf, tOut),
+    // the fitted frame's mirror (Transform.flip_h/v) sits between F1 and the fit
+    toUv: tx.flip_h || tx.flip_v ? compose(fit.toUv, flipStage(tx, W, H)) : fit.toUv,
+    uvBounds: fit.uvBounds,
+    ...alphaFadeGain(clipAlphaFade(clip, tx, tKf, tOut)),
     minification: 1 / Math.max(1e-6, fit.scaleSrc * tr.zoom),
   }
 }
@@ -433,11 +501,18 @@ export function frameGeometry(
     tSrc = sourceSeconds(info, i, f0 >= 0 ? f0 : i)
   }
   const source = info ? { w: info.w, h: info.h } : canvas
-  // A speed curve or a freeze retimes by more than a scalar: the fades'
-  // clock is then the clip-local output time (the retimed pts on the grid).
-  const scalar = clip.speed === null || clip.speed === undefined || typeof clip.speed === 'number'
+  // The fades' clock without keys (they run before the grid there): a
+  // forward clip's retimed pts on its in-anchored chain — T = (pts − in) /
+  // speed, or through a speed curve (wave E gate X2: rebasing at the first
+  // SHOWN frame was the pre-review-RE chain, and a frame off whenever `in`
+  // falls between source frames). A freeze fades over its still on the grid
+  // (the clip-local output time); a reversed clip keeps its grid time.
   const frozen = typeof (clip as { freeze?: unknown }).freeze === 'number'
   const tClip = ((k - pm.clipStart[ci]) * pm.R.den) / pm.R.num
-  const tOut = scalar && !frozen ? undefined : tClip
+  let tOut: number | undefined
+  if (frozen) tOut = tClip
+  else if (!clip.reverse && info) {
+    tOut = anchoredFrameSeconds(info, { in: clipIn(clip), out: clipOut(clip), speed: clip.speed }, i, pm.R)
+  } else if (!(clip.speed === null || clip.speed === undefined || typeof clip.speed === 'number')) tOut = tClip
   return { clip, srcIndex: pm.srcKey[k], srcFrame: i, geometry: computeGeometry({ canvas, source, clip, tSrc, tClip, tOut }) }
 }

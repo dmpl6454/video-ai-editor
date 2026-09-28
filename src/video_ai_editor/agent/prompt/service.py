@@ -297,6 +297,48 @@ def question_text(q: Any) -> str:
     return f"{text} Reply with your answer."
 
 
+#: Item 23 (wave E, F4b): a MODEL's plan (Apple Intelligence, the local
+#: model, Claude) that has no steps and whose reply is a question is paused
+#: as a clarify card with one free-text question under this key; the answer
+#: re-plans "<prompt> — <answer>" through the whole ladder (`resume`).
+MODEL_QUESTION_KEY = "answer"
+MODEL_QUESTION_INTENT = "model_question"
+#: The separator between the first prompt and the answer in the re-plan.
+ANSWER_JOIN = " — "
+
+
+def _question_of(reply: str) -> str:
+    """The question in a model's reply, at most 200 characters: the whole
+    reply when it fits, else from the first sentence that asks something."""
+    reply = " ".join(reply.split())
+    if len(reply) <= 200:
+        return reply
+    q = reply.find("?")
+    start = max(reply.rfind(". ", 0, q), reply.rfind("; ", 0, q), -2) + 2 if q >= 0 else 0
+    return reply[start:start + 200].rstrip()
+
+
+def model_question_plan(plan: Plan) -> Plan | None:
+    """`plan` as a paused clarify plan when a MODEL asked a question instead
+    of planning an edit (item 23: "turn clip two upside down" came back from
+    Apple Intelligence as a rotate with no angle — "Rotate by how much?" —
+    shown as a notice, so the answer could not be given in place). None for
+    the recipes brain (its questions are replies the next prompt answers),
+    a plan with steps or questions of its own, undo/redo, or no question."""
+    from .recipes import ask
+    if plan.brain == "recipes" or plan.steps or plan.needs_input or plan.intent in ("undo", "redo"):
+        return None
+    reply = (plan.reply or "").strip()
+    if "?" not in reply:
+        return None
+    return plan.with_(intent=MODEL_QUESTION_INTENT, reply=None,
+                      needs_input=[ask(MODEL_QUESTION_KEY, _question_of(reply), kind="text")])
+
+
+def is_model_question(plan: Plan) -> bool:
+    return plan.intent == MODEL_QUESTION_INTENT and any(q.key == MODEL_QUESTION_KEY for q in plan.needs_input)
+
+
 def _brain_event(status: str, brain: str, **extra: Any) -> dict[str, Any]:
     from .brains.base import BRAIN_LABELS
     return {"type": "brain", "status": status, "brain": brain,
@@ -552,7 +594,8 @@ async def _replay(store: Any, run_id: str, *, from_index: int = 0) -> AsyncItera
 
 async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
                       ui_state: dict | None = None, brain: str | None = None,
-                      resume_run: str | None = None, from_index: int = 0) -> AsyncIterator[dict]:
+                      resume_run: str | None = None, from_index: int = 0,
+                      history_text: str | None = None) -> AsyncIterator[dict]:
     """One prompt turn as an SSE event stream (§4.6): facts → pending check →
     router.plan (emits `brain` events) → clarify-intent or `plan` → start_run
     → subscribe → yield until `done`.
@@ -595,7 +638,7 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
             notes.append(f"Dropped the earlier question ({why}).")
         pending.clear_pending(session_dir)
 
-    history.append({"role": "user", "content": user_message})
+    history.append({"role": "user", "content": history_text or user_message})
     req = BrainRequest(prompt=user_message, facts=facts, recipes=cards())
     brain = brain or (os.environ.get("VAI_BRAIN") or "").strip().lower() or None
     if brain in ("", "auto"):
@@ -637,6 +680,9 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         evt = _brain_event("answered", plan.brain)
         pre_events.append(evt)
         yield evt
+    asked = model_question_plan(plan)
+    if asked is not None:
+        plan = asked
     if notes:
         plan = plan.with_(reply=" ".join(notes + ([plan.reply] if plan.reply else [])))
     plan_evt = {"type": "plan", "plan": plan.model_dump()}
@@ -698,6 +744,23 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         return
 
     plan = pending.pending_plan(record)
+    if is_model_question(plan):
+        # Item 23: the answer to a model's own question re-plans the whole
+        # request with it — "turn clip two upside down — 180 degrees" — through
+        # the ladder, as a new turn (the grammar may now read all of it).
+        pending.clear_pending(session_dir)
+        answer = str(answers.get(MODEL_QUESTION_KEY) or "").strip()
+        if not answer:
+            yield {"type": "error", "message": "That question needs an answer — type it, or ask again."}
+            yield {"type": "done"}
+            return
+        async for evt in prompt_turn(store, f"{record.get('prompt', '')}{ANSWER_JOIN}{answer}", history,
+                                     ui_state=ui_state or record.get("ui_state") or None,
+                                     history_text=user_message or answer):
+            yield evt
+        if own_history:
+            HISTORY.save(sid, history)
+        return
     # Consent (§1.4): a **download** answer names the tools whose artefacts
     # the executor may fetch on THIS run — the only place that set is built.
     consented: frozenset[str] = frozenset()
@@ -765,4 +828,5 @@ __all__ = ["LEGACY_EVENT_TYPES", "PROMPT_EVENT_TYPES", "EVENT_TYPES", "BRAIN_STA
            "route", "via", "is_known_event", "unknown_event_types", "configure", "resolve_store",
            "FileHistoryWriter", "HISTORY", "provisional_text", "replace_provisional",
            "PlannerUnavailable", "build_facts_for", "question_text", "apply_history_step",
-           "prompt_turn", "resume"]
+           "MODEL_QUESTION_KEY", "MODEL_QUESTION_INTENT", "ANSWER_JOIN", "model_question_plan",
+           "is_model_question", "prompt_turn", "resume"]

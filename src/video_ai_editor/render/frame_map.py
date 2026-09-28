@@ -271,7 +271,7 @@ def curve_retimer(curve: "_sc.CurveMap", time_base: Fraction) -> Callable[[int],
 
 def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
                   n: int, fps, speed=None, curve: "_sc.CurveMap | None" = None,
-                  anchor: tuple[float, float] | None = None) -> list[int]:
+                  anchor: tuple[float, float] | None = None, hold: bool = False) -> list[int]:
     """Source frame index shown in each of ``n`` output slots of one clip
     chain: ``[-ss seek] -t/-to … setpts=PTS-STARTPTS[,setpts=PTS/speed],
     fps=R,tpad=stop_mode=clone,trim=end_frame=n``.
@@ -285,7 +285,11 @@ def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
     ``anchored_setpts_expr``, then ``fps=R:start_time=0``): T is the
     frame's pts on the file clock times TB minus ``in``, and the output grid
     starts at T = 0, so the slots before it are dropped and slot 0 shows the
-    latest frame rounding to <= 0."""
+    latest frame rounding to <= 0. Review RE: with ``anchor`` and NO curve, a
+    CONSTANT ``speed`` (1x included) runs on that same clock
+    (``speed_curve.anchored_const_setpts_expr``). ``hold`` (a one-frame
+    clip): the chain holds its last frame one output frame longer before
+    ``fps``, so the EOF is at least slot 1 and slot 0 is always emitted."""
     if n <= 0:
         return []
     tb = src.time_base
@@ -325,6 +329,8 @@ def select_frames(src: SourceInfo, *, seek_us: int | None, dur_us: int,
     # fps=R: each pts rounds (half away from zero) into an output slot.
     slots = _rescale_vec(ticks, out_tb_num, out_tb_den, monotone=curve is None)
     eof = int(slots[-1])
+    if hold:
+        eof = max(eof, 1)
     slots = slots[:-1]
     # Slot s shows the latest frame whose slot is <= min(s, eof - 1), else
     # the first. Slots never decrease (pts rise, and a constant retime, the
@@ -362,7 +368,7 @@ def _clip_ticks(src: SourceInfo, f0: int, count: int, *, base: int, off: int,
     project slots (``av_rescale_q`` into ``1/R``)."""
     tb = src.time_base
     pts = _pts_vec(src, f0, count)
-    if curve is not None and anchor is not None:
+    if anchor is not None:
         TB = tb.numerator / tb.denominator
         a_seek, a_in = float(anchor[0]), float(anchor[1])
         # graph pts = file pts + off (the demuxer's shift); the chain adds
@@ -375,7 +381,13 @@ def _clip_ticks(src: SourceInfo, f0: int, count: int, *, base: int, off: int,
         TBc = ctb.numerator / ctb.denominator
         pf = (pts + back) * k
         T = pf.astype(np.float64) * TBc - a_in
-        ticks = _trunc_i64((_out_seconds_vec(curve, T) + _sc.CURVE_TICK_BIAS) / TBc)
+        if curve is not None:
+            v = _out_seconds_vec(curve, T)
+        else:
+            # a CONSTANT speed on the same clock (review RE): T, or T / speed
+            sp = _anchored_speed(speed)
+            v = T if sp == 1.0 else T / sp
+        ticks = _trunc_i64((v + _sc.CURVE_TICK_BIAS) / TBc)
         tb = ctb
     elif curve is not None:
         TB = tb.numerator / tb.denominator
@@ -387,6 +399,14 @@ def _clip_ticks(src: SourceInfo, f0: int, count: int, *, base: int, off: int,
         ticks = _trunc_i64(x.astype(np.float64) / div) if div is not None else x
     # a · tb / (1/R) = a · tb.num · R.num / (tb.den · R.den)
     return ticks, tb.numerator * r.numerator, tb.denominator * r.denominator
+
+
+def _anchored_speed(speed) -> float:
+    """The constant speed an in-anchored chain divides by: the number, or
+    1.0 for 1x / unset / not positive (``compositor.v1_const_speed``)."""
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not speed or speed <= 0:
+        return 1.0
+    return float(speed)
 
 
 def _first_at_or_after(src: SourceInfo, ticks: int) -> int:
@@ -412,19 +432,17 @@ def speed_curve_map(speed, in_: float, out: float) -> "_sc.CurveMap | None":
 
 def forward_clip_frames(src: SourceInfo, *, in_: float, out: float, speed,
                         n: int, fps) -> list[int]:
-    """``_build_clip_video_chain`` opened with ``clip_input_args`` (a speed
-    CURVE: the in-anchored chain, seeking at ``speed_curve.curve_seek``)."""
+    """``_build_clip_video_chain`` opened with ``clip_input_args``: the
+    in-anchored chain on the file clock, seeking at ``speed_curve.
+    curve_seek`` — a speed CURVE's own retime (wave D3), a constant speed or
+    1x divided on the same clock (review RE)."""
     curve = speed_curve_map(speed, in_, out)
-    if curve is not None:
-        seek = _sc.curve_seek(in_)
-    else:
-        pre = _tb.seek_preroll(in_, fps)
-        seek = max(0.0, float(in_) - pre)
+    seek = _sc.curve_seek(in_)
     end = float(out) + _DECODE_SLACK_FRAMES * _tb.frame_duration(fps)
     seek_us = ffmpeg_us(seek) if seek > 0 else None
     dur_us = ffmpeg_us(end) - (seek_us or 0)
     return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=n, fps=fps, speed=speed,
-                         curve=curve, anchor=(seek, float(in_)) if curve is not None else None)
+                         curve=curve, anchor=(seek, float(in_)), hold=n == 1)
 
 
 def freeze_frame(src: SourceInfo, *, in_: float, fps) -> int:
@@ -459,7 +477,8 @@ def freeze_in_for(src: SourceInfo, frame: int, fps) -> float:
 
 def reversed_frames(c: Clip, fps) -> int:
     """Frames the reversed intermediate holds (``reverse.reversed_frames``)."""
-    return max(1, _tb.frame_of(float(c.out) - float(c.in_), fps))
+    from .reverse import intermediate_span
+    return intermediate_span(c, fps)[1]
 
 
 def reverse_segment_frames(w: int, h: int, fps) -> int:
@@ -467,17 +486,23 @@ def reverse_segment_frames(w: int, h: int, fps) -> int:
     return _segment_frames(w, h, fps)
 
 
-def reversed_intermediate(src: SourceInfo, *, in_: float, out: float, fps) -> list[int]:
+def reversed_intermediate(src: SourceInfo, *, in_: float, out: float, fps,
+                          span: tuple[float, int] | None = None) -> list[int]:
     """Source frame of each frame of the reversed intermediate
     (``render/reverse.py``): the clip's whole range on the project grid,
     decoded in segments (each with its own seek and ``-t``), each reversed,
-    joined last-first."""
-    m = max(1, _tb.frame_of(float(out) - float(in_), fps))
+    joined last-first. ``span`` = ``reverse.intermediate_span`` (a speed
+    curve's intermediate starts on the source's absolute grid); omitted, the
+    range-anchored ``(in, frame_of(out - in))``."""
+    if span is None:
+        start, m = float(in_), max(1, _tb.frame_of(float(out) - float(in_), fps))
+    else:
+        start, m = float(span[0]), int(span[1])
     seg = reverse_segment_frames(src.width, src.height, fps)
     forward: list[int] = []
     for j0 in range(0, m, seg):
         n = min(seg, m - j0)
-        t0 = float(in_) + _tb.time_of(j0, fps)
+        t0 = start + _tb.time_of(j0, fps)
         pre = _tb.seek_preroll(t0, fps)
         seek = max(0.0, t0 - pre)
         span = pre + _tb.time_of(n + _REV_SLACK_FRAMES, fps)
@@ -557,7 +582,9 @@ def _clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
     if getattr(c, "freeze", None) is not None:
         return [freeze_frame(src, in_=c.in_, fps=fps)] * clip_frames(c, fps)
     if getattr(c, "reverse", False):
-        inter = reversed_intermediate(src, in_=c.in_, out=c.out, fps=fps)
+        from .reverse import intermediate_span
+        inter = reversed_intermediate(src, in_=c.in_, out=c.out, fps=fps,
+                                      span=intermediate_span(c, fps))
         view = _reversed_view(c, fps)
         n = clip_frames(view, fps)
         idx = forward_clip_frames(intermediate_source(len(inter), fps), in_=view.in_,
@@ -569,10 +596,12 @@ def _clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
 
 def _reversed_view(c: Clip, fps) -> Clip:
     """``reverse.reversed_view`` without building the file: what the plan is
-    computed from (in 0, out = the clip's own span, ``reverse.view_out``)."""
-    from .reverse import view_out
+    computed from (``reverse.view_range``: in 0 and the clip's own span; a
+    speed curve opens its source-grid intermediate at a fractional in)."""
+    from .reverse import view_range
+    v_in, v_out = view_range(c, fps)
     return c.model_copy(deep=True, update={
-        "in_": 0.0, "out": view_out(c), "reverse": False})
+        "in_": v_in, "out": v_out, "reverse": False})
 
 
 # ---------------------------------------------------------------- the map
@@ -627,6 +656,62 @@ def _plan_view(edl: EDL, fps) -> tuple[EDL, list[Clip], list[Clip]]:
     planned = render_clips(view)
     by_id = {c.id: c for c in originals}
     return view, planned, [by_id[c.id] for c in planned]
+
+
+def planned_frames(edl: EDL, fps=None) -> int:
+    """Video frames the compositor emits for ``edl`` at ``fps`` (default: the
+    canvas rate): the v1 frame plan less every ``xfade`` seam's overlap —
+    ``build_program_map(...).total`` without a source lookup, and what
+    ``compositor._check_picture`` holds every render to (wave E, item 24).
+
+    Exactly the renderer's own arithmetic (``_render_locked``): the seam
+    COSTS come from the EDL's seam table on the PROJECT grid
+    (``clock.seam_table``: an export at another rate keeps the render clock
+    the overlays are placed on), the plan's tail from those costs, and each
+    xfade passes the left stream's frames before its printed ``%.6f``
+    offset (rescaled into the render rate, ``av_rescale_q``, ties away),
+    then all of the right one. At the canvas rate that is the program
+    map's total (the 500-EDL corpus and every golden render); at another
+    rate a seam that is not whole frames there removes 18 or 19 frames by
+    where its offset lands (tests/test_render_frame_count.py)."""
+    from .compositor import _v1_frame_plan
+    fps = edl.canvas.fps if fps is None else fps
+    r = _tb.rate_of(fps)
+    view, planned, _originals = _plan_view(edl, fps)
+    v1 = view.get_track("v1")
+    transitions = list((v1.transitions if v1 else []) or [])
+    seams = list(view.v1_seam_table()) if transitions else []
+    total_duration = max(0.0, view.duration + sum(d for _s, d in seams))
+    if not planned:
+        total_duration = max(1.0, total_duration)
+    plan = _v1_frame_plan(planned, total_duration, fps)
+    seg_of_clip = {ci: si for si, (kind, ci, _n) in enumerate(plan) if kind == "clip"}
+    seam_after: dict[int, float] = {}
+    for idx, c in enumerate(planned[:-1]):
+        si = seg_of_clip.get(idx)
+        if si is None or seg_of_clip.get(idx + 1) != si + 1:
+            continue
+        boundary = c.start + c.effective_duration
+        cost = next((d for seam, d in seams if abs(seam - boundary) < 0.001), 0.0)
+        if cost > 0.0 and seam_matching(transitions, boundary) is not None:
+            seam_after[si] = cost
+    # The assembly chain (`_build_filter_complex`): `cur_dur` accumulates in
+    # double exactly as it does there; an xfade passes the left stream's
+    # frames before its printed `offset` (rescaled into the render rate) and
+    # then every frame of the right one.
+    frames = [n for _k, _i, n in plan]
+    cur_frames, cur_dur = frames[0], _tb.time_of(frames[0], fps)
+    for i in range(1, len(frames)):
+        seg_dur = _tb.time_of(frames[i], fps)
+        tdur = seam_after.get(i - 1)
+        if tdur is not None:
+            offset = max(0.0, cur_dur - tdur)
+            cur_frames = round_half_away(Fraction(ffmpeg_us(offset), 1_000_000) * r) + frames[i]
+            cur_dur = cur_dur + seg_dur - tdur
+        else:
+            cur_frames += frames[i]
+            cur_dur += seg_dur
+    return cur_frames
 
 
 def build_program_map(edl: EDL, sources: SourceLookup | Mapping[str, SourceInfo],
@@ -770,18 +855,22 @@ class AudioPlacement:
     fade_out: int = 0
 
 
-def _clip_sample0(t: float, fps) -> int:
-    """First source sample a clip chain plays for edit point ``t``: the
-    accurate seek to ``t − pre`` keeps samples from
-    ``round(seek_us · 48 kHz)`` (the demuxer's timestamp shift, rounded into
-    the 1/48000 stream time base), then ``atrim=start=pre`` drops
-    ``round(pre_us · 48 kHz)`` more — two roundings, which is why this is not
-    simply ``round(t · 48 kHz)`` (they differ by one sample about a third of
-    the time; tests/test_audio_map_golden.py)."""
-    pre = _tb.seek_preroll(t, fps)
-    seek = max(0.0, float(t) - pre)
-    j0 = _us_to_samples(ffmpeg_us(seek)) if seek > 0 else 0
-    return j0 + (_us_to_samples(ffmpeg_us(pre)) if pre > 1e-9 else 0)
+def _clip_sample0(t: float, fps=None) -> int:
+    """First source sample a clip chain plays for edit point ``t``: ``S(t)``,
+    INSTANT_PREVIEW_SPEC R9's one start rule (``timebase.edit_sample``: the
+    nearest sample to ``t`` as ffmpeg reads it). Every chain gets there
+    exactly: its input opens on ``S(seek)`` (the demuxer's timestamp shift,
+    rounded into the 1/48000 stream time base) and it cuts ``S(t) −
+    S(seek)`` more in SAMPLES (``compositor.clip_head_samples``, the lanes,
+    ``reverse._render_segment``, ``speed_audio._decode``).
+
+    It was two roundings — ``S(seek) + round(pre · 48 kHz)`` for an
+    ``atrim=start=pre`` in seconds, one sample past ``S(t)`` about a third of
+    the time at 29.97 — until review RE's in-anchored seek moved the v1
+    chain to ``S(t)`` and left the rest behind (wave E gate, X1).
+    ``fps`` is unused (kept for the callers' symmetry with the picture)."""
+    del fps
+    return _tb.edit_sample(t)
 
 
 def _us_to_samples(us: int) -> int:
@@ -1000,7 +1089,7 @@ __all__ = [
     "MSE_TIMESCALE", "FRAME_MAP_VERSION", "KIND_CLIP", "KIND_GAP", "KIND_BLEND",
     "SourceInfo", "ProgramMap", "AudioPlacement",
     "round_half_away", "rescale", "ffmpeg_us", "ticks_per_frame", "default_time_base",
-    "select_frames", "forward_clip_frames", "reversed_intermediate", "clip_frame_list",
+    "select_frames", "forward_clip_frames", "reversed_intermediate", "clip_frame_list", "planned_frames",
     "curve_retimer", "speed_curve_map", "freeze_frame", "freeze_in_for",
     "build_program_map", "audio_placements", "audio_total_samples", "to_rle", "rle_frames",
     "frame_map_json",

@@ -175,15 +175,25 @@ def test_the_curve_chain_runs_on_the_file_clock_anchored_at_in():
     assert "(PTS*TB-12.34)" in chain and ",fps=25:start_time=0," in chain
     # The curve's sound still decodes on the 1x half-frame pre-roll.
     assert compositor.sound_input_args(c, 25)[:2] == ["-ss", f"{12.34 - 0.02:.6f}"]
-    # A clip without a curve keeps its chain: no settb, no anchored grid.
-    for speed in (None, 2.0, 0.5):
+    # Review RE: a CONSTANT speed and 1x run on the same clock (the rebase
+    # at the first decoded frame made a split of a mixed-rate clip shift up
+    # to 37 frames by a source frame); only the retime is a plain division.
+    for speed, body in ((None, "(PTS*TB-12.34)"), (2.0, "(PTS*TB-12.34)/2.0"), (0.5, "(PTS*TB-12.34)/0.5")):
         k = Clip(src=SRC, start=0.0, id="k", speed=speed)
         k.in_, k.out = 12.34, 20.0
         text = compositor._build_clip_video_chain(k, input_label="[0:v]", label_out="[v0]",
                                                   canvas_w=320, canvas_h=180, fps=25)
-        assert "settb" not in text and "start_time" not in text
-        assert text.startswith("[0:v]setpts=PTS-STARTPTS,")
-        assert compositor.clip_input_args(k, 25) == compositor.sound_input_args(k, 25)
+        assert text.startswith("[0:v]setpts=PTS+round(11.8/TB),")
+        assert "settb=intb*gcd(25\\,round(1/intb))/25" in text and ",fps=25:start_time=0," in text
+        assert f"setpts=({body}+1e-08)/TB" in text
+        assert compositor.clip_input_args(k, 25)[:2] == ["-ss", "11.800000"]
+        # its sound reads the same input and drops exactly that pre-roll
+        assert abs(compositor._clip_preroll(k, 25) - (12.34 - 11.8)) < 1e-12
+    # a freeze keeps its own recipe (the first frame of the half-frame 1x chain)
+    fz = Clip(src=SRC, start=0.0, id="f", freeze=1.0)
+    fz.in_, fz.out = 12.34, 12.38
+    assert "settb" not in compositor._build_clip_video_chain(fz, input_label="[0:v]", label_out="[v0]",
+                                                             canvas_w=320, canvas_h=180, fps=25)
 
 
 @pytest.mark.parametrize("in_,want", [(0.0, 0.0), (0.69, 0.0), (0.7, 0.0), (0.71, 0.2),

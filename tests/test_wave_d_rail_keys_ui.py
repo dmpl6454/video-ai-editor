@@ -108,6 +108,9 @@ def test_panel_chords_run_inside_ignore_scopes_and_not_in_text(engine, base_url,
     page.get_by_role("application", name="Timeline").focus()
     page.keyboard.press("Alt+5")
     _wait_selected(page, "effects")
+    # The chord's focus move runs one frame after the selection commits
+    # (commands.focusPanel); wait for it, or it lands after prompt.focus().
+    page.wait_for_function("() => document.activeElement?.id === 'tool-panel-effects'")
     prompt = page.locator(".center-head textarea").first
     prompt.focus()
     page.keyboard.press("Alt+1")

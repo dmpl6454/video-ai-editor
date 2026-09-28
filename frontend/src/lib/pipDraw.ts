@@ -1,6 +1,8 @@
 import { PAUSED_SEEK_BIAS_S } from './frameStep'
-import { pipIsRetimed, pipTiming } from './pipTime'
-import type { EdlClip } from './preview/timeline/framePlan'
+import { pipIsRetimed, pipTiming, type PipSourceHint } from './pipTime'
+import { effectiveDuration, type EdlClip } from './preview/timeline/framePlan'
+import { animAt, type AnimFields, type AnimPose } from './anim/clipAnim'
+import { drawVideoExact, exactVideoCopyWanted } from './videoColour'
 // Client-side painting of PIP (v2+) clips.
 //
 // The preview render deliberately does NOT bake a PIP's picture (see the
@@ -19,8 +21,37 @@ import type { EdlClip } from './preview/timeline/framePlan'
 //   3. shape   — circle / rounded alpha cut.
 //   4. rotate / opacity.
 //   5. overlay — centred on transform.x/y in canvas pixels.
+// A CLIP ANIMATION (wave E, F1; `pipAnimPose`, lib/anim) rides on stages 3-5
+// exactly where pip.py applies it: its blur mix after the shape, its turn
+// with the rotate, its alpha ramps after the opacity, its zoom last, and its
+// travel in the overlay's x/y — on the element's own clock over its footprint.
 
 export interface PipFraming { x?: number; y?: number; zoom?: number; rotation?: number }
+
+/** A PIP's clip-animation pose at clip-local render seconds `local` (pip.py:
+ *  `plan_of(c, re - rs)` on `(t - t0)`). `window` is the element's visible
+ *  RENDER window (`animWindowOf`); review RE: planned over the layout
+ *  footprint, an overlay ending at or after a transition seam never played
+ *  its Out, and the sticker planned over its layout span while the export
+ *  used the render window. One rule now, on all four sides. */
+export function pipAnimPose(clip: EdlClip, local: number, window: number = effectiveDuration(clip)): AnimPose {
+  return animAt(clip as AnimFields, local, window)
+}
+
+/** Seconds an element spanning LAYOUT `[start, end)` is on screen in RENDER
+ *  time — `re − rs` of pip.py / text_overlay.py (the seams it straddles
+ *  consume their overlap). `renderTimeOf` is the timeline's seam fold. */
+export function animWindowOf(renderTimeOf: (t: number) => number, start: number, end: number): number {
+  return Math.max(0, renderTimeOf(end) - renderTimeOf(start))
+}
+
+/** The ONE rule StickerLayer draws a PiP's AND a sticker's clip animation
+ *  with (review RE): the pose at `local` render seconds into an element on
+ *  screen for LAYOUT `[start, end)`, planned over its render window. */
+export function overlayAnimPose(fields: AnimFields, start: number, end: number, local: number,
+                                renderTimeOf: (t: number) => number): AnimPose {
+  return animAt(fields, local, animWindowOf(renderTimeOf, start, end))
+}
 
 /**
  * Whether THIS PIP's picture is the client's to draw, or still ffmpeg's to bake.
@@ -303,14 +334,14 @@ const PIP_RETIMED_SEEK_TOL = 1e-3
  */
 export function syncPipClipVideo(
   v: HTMLVideoElement, clip: EdlClip, local: number, fps: number,
-  opts?: { playing?: boolean; rate?: number },
+  opts?: { playing?: boolean; rate?: number; source?: PipSourceHint },
 ): void {
   if (!pipIsRetimed(clip)) {
     syncPipVideo(v, local, 0, clip.in ?? 0, fps, opts)
     return
   }
   if (!Number.isFinite(v.duration) || v.duration <= 0) return
-  const tm = pipTiming(clip, local, fps)
+  const tm = pipTiming(clip, local, fps, opts?.source)
   const transport = opts?.rate ?? 1
   const playRate = Math.round(tm.rate * transport * 100) / 100
   const playing = !!opts?.playing && transport > 0
@@ -376,7 +407,11 @@ export function drawPipVideoFrame(
       const cg = c.getContext('2d')
       if (cg) {
         cg.clearRect(0, 0, w, h)
-        cg.drawImage(v, g.sx, g.sy, g.sw, g.sh, 0, 0, w, h)
+        // review RE: WebKit colour-manages drawImage(<video>) through a ~1.96
+        // gamma (a 128 grey read 142); a WebGL copy is exact (lib/videoColour)
+        if (!(exactVideoCopyWanted() && drawVideoExact(cg, v, g.sx, g.sy, g.sw, g.sh, w, h))) {
+          cg.drawImage(v, g.sx, g.sy, g.sw, g.sh, 0, 0, w, h)
+        }
         ctx.drawImage(c, -g.dw / 2, -g.dh / 2, g.dw, g.dh)
         return true
       }
@@ -392,6 +427,15 @@ export function drawPipVideoFrame(
     } catch { /* nothing usable */ }
   }
   return false
+}
+
+/** Transform.flip_h / flip_v (wave E) as the canvas scale StickerLayer
+ *  applies INSIDE an element's rotation: the picture is mirrored first and
+ *  then turned, as pip.py (`hflip`/`vflip` on the framed element before its
+ *  rotate) and text_overlay.py (a sticker's image mirrored before its
+ *  rotation) render it. */
+export function flipScale(tx: { flip_h?: unknown; flip_v?: unknown } | null | undefined): [number, number] {
+  return [tx?.flip_h ? -1 : 1, tx?.flip_v ? -1 : 1]
 }
 
 export interface PipDrawGeom {

@@ -10,7 +10,7 @@ import type { SourceInfo } from '../timeline/frameMap'
 import { buildProgramMap } from '../timeline/programMap'
 import type { PcmReader } from './audioChunks'
 import { clipGainAt, planFromProgram, type AudioPlan } from './audioPlan'
-import { asCtx, FakeContext, FakeGain, FakeOfflineContext, FakeParam, FakeSource, type ParamEvent } from './fakeAudio'
+import { asCtx, FakeContext, FakeGain, type FakeNode, FakeOfflineContext, FakeParam, FakeSource, type ParamEvent } from './fakeAudio'
 import {
   BLOCK_SAMPLES, channelMatrix, curvePositions, duckValueAt, duckWindows, holdAndRamp, LIMITER_LATENCY, limiterMakeupUndo, MixGraph,
   RAMP_S, sourceRange, trackedValue,
@@ -271,6 +271,54 @@ describe('duck (APPROX trapezoid)', () => {
     expect(targets[0].v).toBeCloseTo(Math.pow(10, -12 / 20), 9)
     expect(targets[0].t).toBeCloseTo(1 - 0.06, 9)
     expect(targets[1].v).toBe(1)
+  })
+})
+
+describe('summing is order-free', () => {
+  // Web Audio sums an input's connections in an unspecified order (Chromium
+  // and WebKit: a hash set of outputs, keyed by address) and float addition
+  // is not associative, so three lanes on one node rendered a few ULP apart
+  // from one offline render to the next (P1-A2 `mix` in Chromium). Two
+  // inputs commute exactly: no node downstream of the lanes may have more.
+  it('sums the lanes into the master two at a time, and keeps that on a master rebuild', () => {
+    const clip = (c: Record<string, unknown>) => ({ src: '/a.mp4', in: 0, speed: null, reverse: false, audio: {}, ...c })
+    const e: EdlLike = {
+      canvas: { fps: 30 }, duration: 3,
+      tracks: [
+        { id: 'v1', type: 'video', clips: [clip({ id: 'a', start: 0, out: 3 })], transitions: [] },
+        { id: 'v2', type: 'video', clips: [clip({ id: 'p', start: 0.5, out: 2 })], transitions: [] },
+        { id: 'music', type: 'music', clips: [clip({ id: 'bed', src: '/bed.m4a', start: 0, out: 3 })], transitions: [] },
+        { id: 'vo', type: 'vo', clips: [clip({ id: 'vo1', start: 1, out: 2 })], transitions: [] },
+        { id: 'a1', type: 'audio', clips: [clip({ id: 'x', start: 1, out: 2.5 })], transitions: [] },
+      ],
+    }
+    const plan = planOf(e)
+    expect(plan.buses.length).toBeGreaterThanOrEqual(5)
+    const ctx = new FakeOfflineContext()
+    const g = new MixGraph(asCtx(ctx), plan, { reader: reader() })
+    g.restart({ ctxTime: 0, sample: 0 }, plan.total)
+    const check = () => {
+      const into = new Map<FakeNode, number>()
+      for (const n of ctx.nodes) for (const o of n.outputs) into.set(o.to, (into.get(o.to) ?? 0) + 1)
+      // a clip's own nodes (its blocks into its splitter, the 2×2 matrix into
+      // its merger, clips into their lane's generation) never have more than
+      // two SOUNDING inputs at once; every node after the lanes' tails is
+      // held to two connections
+      const perClip = new Set<FakeNode>()
+      for (const n of ctx.nodes) {
+        if (n.kind === 'source' || n.kind === 'merger') for (const o of n.outputs) perClip.add(o.to)
+        if (n.kind === 'merger') for (const o of n.outputs) for (const o2 of o.to.outputs) perClip.add(o2.to)
+      }
+      for (const n of ctx.nodes) if (n.kind === 'gain') for (const o of n.outputs) if (o.to.kind === 'merger') perClip.add(o.to)
+      const wide = [...into].filter(([n, k]) => k > 2 && !perClip.has(n))
+      expect(wide.map(([n, k]) => `${n.kind}#${n.id}:${k}`)).toEqual([])
+      const toOut = ctx.nodes.filter((n) => n.outputs.some((o) => o.to === ctx.destination))
+      expect(toOut).toHaveLength(1)
+    }
+    check()
+    // a limiter switched on (a loudness target) rebuilds the master
+    g.idlePlan({ ...plan, master: { ...plan.master, ceilingDb: -1 } })
+    check()
   })
 })
 

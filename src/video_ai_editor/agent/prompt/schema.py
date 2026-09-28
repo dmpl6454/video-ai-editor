@@ -362,6 +362,9 @@ TOOL_STAGE: dict[str, int] = {
     # 4 — look (per-clip picture; templates are composites applied first)
     "apply_lut": 4, "color_grade": 4, "match_style": 4, "chroma_key": 4,
     "add_mask": 4, "remove_mask": 4, "remove_effect": 4, "set_clip_transform": 4,
+    "remove_effects": 4, "flip_clip": 4,          # wave E (F4b)
+    "set_blend_mode": 4,                          # wave E (F2)
+    "set_animation": 4,                           # wave E (F1)
     "add_keyframe": 4, "remove_keyframe": 4, "set_clip_z": 4,
     "apply_template": 4, "apply_show_template": 4,
     # 5 — transitions (BEFORE reframe/captions/text: they shorten the timeline)
@@ -369,6 +372,7 @@ TOOL_STAGE: dict[str, int] = {
     # 6 — reframe (+ fit fallback, canvas)
     "auto_reframe": 6, "set_clip_fit": 6, "set_canvas": 6, "set_aspect_ratio": 6,
     "set_pip_framing": 6,
+    "set_canvas_background": 6,                  # wave E (F2): after a reframe's fit
     # 7 — captions / translate
     "auto_caption": 7, "add_caption_track": 7, "translate_captions": 7,
     "set_caption_style": 7,
@@ -381,6 +385,7 @@ TOOL_STAGE: dict[str, int] = {
     # 10 — audio (noise, loudness, levels)
     "noise_reduce": 10, "set_loudness_target": 10, "set_volume": 10,
     "set_clip_muted": 10, "set_track_muted": 10, "add_fade": 10, "set_track_solo": 10,
+    "set_voice_effect": 10,                       # wave E (F3)
     # 11 — export preset (+ explicit loudness after it)
     "apply_export_preset": 11,
     # 12 — audit / final inspection
@@ -477,7 +482,30 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     # committed a 20 % scale and verified as "the step completed".
     _spec("clip_zoomed", "the picture zooms the way asked", clip_id=None, direction="in"),
     _spec("transitions_count_geq", "transitions were added", n=1, type=None),
+    # Wave E (F4b): edits BY NAME, measured on the EDL the renderer reads.
+    # `at` None = no transition anywhere on v1; a number = none at that seam.
+    _spec("transitions_absent", "the transition is gone", at=None),
+    _spec("clips_absent", "the named clips are gone", clip_ids=None),
+    # No effect of `types` (default the LUT filter) left on the clip(s).
+    _spec("effect_absent", "the filter is off", clip_id=None, types=None),
+    # A clip's timeline footprint (effective_duration), within `tol` seconds.
+    _spec("clip_duration", "the clip has the asked length", clip_id=None, seconds=None, tol=0.02),
+    # The Transform flip the renderer reads; None = not checked.
+    _spec("clip_flipped", "the clip is mirrored as asked", clip_id=None, flip_h=None, flip_v=None),
     _spec("export_preset_applied", "the export preset is set", name=None),
+    # Wave E (F2): the CapCut canvas background / blend mode the renderer
+    # reads. `type` None = black bars (no background); color/blur checked
+    # only when given.
+    _spec("canvas_bg_set", "the letterbox shows the background asked for", clip_id=None, type=None,
+          color=None, blur=None),
+    _spec("blend_is", "the overlay blends as asked", clip_id=None, clip_ids=None, mode=None),
+    # Wave E (F3): the voice effect the audio chains read (render tests decode it).
+    _spec("voice_effect_is", "the voice sounds as asked", clip_id=None, clip_ids=None, track=None, effect=None,
+          intensity=None),
+    # Wave E (F1): the clip / sticker animation the renderers read (the
+    # render tests decode it). A side not given is not checked; None = off.
+    _spec("animation_is", "the clip animates as asked", clip_id=None, clip_ids=None, track=None,
+          **{"in": None, "out": None, "combo": None}),
     # audio
     _spec("loudness_target_set", "the loudness target is recorded", lufs=None),
     _spec("loudness_within", "the render hits the loudness target", tol=1.0, needs_render=True),
@@ -534,11 +562,27 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "set_clip_reverse": [_pc("clip_reversed", "the clip plays backwards",
                              clip_id=f"{ARG_REF}clip_id", reverse=f"{ARG_REF}reverse")],
     "add_transition": [_pc("transitions_count_geq", "transitions were added", n=1)],
+    "remove_transition": [_pc("transitions_absent", "the transition is gone", at=f"{ARG_REF}at")],
+    "remove_effects": [_pc("effect_absent", "the effect is off", clip_id=f"{ARG_REF}clip_ids",
+                           types=f"{ARG_REF}types")],
     "apply_lut": [_pc("effect_present", "the look is applied", type="lut", track="v1")],
     "auto_reframe": [_pc("canvas_aspect", "the canvas has the requested aspect",
                          ratio=f"{ARG_REF}ratio"),
                      _pc("reframe_effective", "the reframe changed the picture")],
     "set_clip_fit": [_pc("no_letterbox", "no black bars")],
+    # review RE: every target form the agent tools advertise (clip_id,
+    # clip_ids, track) is bound, so a correct multi-target model plan verifies
+    "set_canvas_background": [_pc("canvas_bg_set", "the letterbox shows the background asked for",
+                                  type=f"{ARG_REF}type", color=f"{ARG_REF}color", blur=f"{ARG_REF}blur",
+                                  clip_id=f"{ARG_REF}clip_id")],
+    "set_blend_mode": [_pc("blend_is", "the overlay blends as asked", clip_id=f"{ARG_REF}clip_id",
+                           clip_ids=f"{ARG_REF}clip_ids", mode=f"{ARG_REF}mode")],
+    "set_animation": [_pc("animation_is", "the clip animates as asked", clip_id=f"{ARG_REF}clip_id",
+                          clip_ids=f"{ARG_REF}clip_ids", track=f"{ARG_REF}track",
+                          **{k: f"{ARG_REF}{k}" for k in ("in", "out", "combo")})],
+    "set_voice_effect": [_pc("voice_effect_is", "the voice sounds as asked", clip_id=f"{ARG_REF}clip_id",
+                             clip_ids=f"{ARG_REF}clip_ids", track=f"{ARG_REF}track", effect=f"{ARG_REF}effect",
+                             intensity=f"{ARG_REF}intensity")],
     "set_aspect_ratio": [_pc("canvas_aspect", "the canvas has the requested aspect",
                              ratio=f"{ARG_REF}ratio")],
     "apply_export_preset": [_pc("export_preset_applied", "the export preset is set",

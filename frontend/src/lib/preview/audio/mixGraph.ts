@@ -28,6 +28,7 @@ import {
 import type { PcmReader } from './audioChunks'
 import { SAMPLE_RATE } from './curves'
 import { curveMap, sourceSeconds, type CurveMap } from '../timeline/speedCurve'
+import { processStereo, reverbIr, type ReverbParams } from '../../voice/voiceFx'
 
 const SR = SAMPLE_RATE
 /** Scheduling block: sources and value curves are cut on this grid. */
@@ -70,12 +71,20 @@ export interface Anchor {
 
 interface Scheduled { node: AudioBufferSourceNode; p0: number; p1: number }
 
+const IDENTITY: [number, number, number, number] = [1, 0, 0, 1]
+
+/** The node matrix of a clip: its channel mode — except a voice-effect
+ *  clip, whose samples already carry it (the effect follows the pan). */
+const nodeMatrix = (c: ClipAudio) => (c.voice ? IDENTITY : channelMatrix(c.channels))
+
 interface ClipNodes {
   clip: ClipAudio
   bus: string
   input: ChannelSplitterNode
   mtx: GainNode[]
   merger: ChannelMergerNode
+  /** The Hall voice effect's convolver (merger → conv → shape), or null. */
+  conv: ConvolverNode | null
   shape: GainNode
   sources: Scheduled[]
   /** Output samples scheduled so far: [from, until). */
@@ -165,6 +174,9 @@ export class MixGraph {
   private limiter: DynamicsCompressorNode | null = null
   private limiterGain: GainNode | null = null
   private buses = new Map<string, BusNodes>()
+  /** The one node feeding `master`: the lanes summed TWO AT A TIME in
+   *  creation order (`attachToMaster`), never N inputs on one node. */
+  private sumTail: AudioNode | null = null
   private clips = new Map<string, ClipNodes>()
   private disposed = false
   /** The transport's start point: no sample before it is scheduled. */
@@ -241,13 +253,38 @@ export class MixGraph {
     const gain = this.ctx.createGain()
     gain.gain.value = this.plan.buses.find((x) => x.id === id)?.gain ?? 1
     const duck = id === this.plan.duck?.bus || id === 'music' ? this.ctx.createGain() : null
-    if (duck) gain.connect(duck).connect(this.master)
-    else gain.connect(this.master)
+    if (duck) gain.connect(duck)
     const gen = this.ctx.createGain()
     gen.connect(gain)
     b = { gain, duck, gen, genStart: this.startSample, tail: duck ?? gain }
     this.buses.set(id, b)
+    this.attachToMaster(b.tail)
     return b
+  }
+
+  /** Sum lane `tail` into the master through a node of its own with exactly
+   *  TWO inputs (the lanes before it, and it). Web Audio sums every
+   *  connection into an input in an unspecified order — Chromium and WebKit
+   *  walk a hash set of the connected outputs, keyed by address, so the
+   *  order changes from one context to the next — and float addition is not
+   *  associative: three lanes sounding at once (v1, the bed and a voice-over)
+   *  came out a few ULP apart between two offline renders of one plan
+   *  (Chromium, P1-A2 `mix`: 5 of 5 render pairs differed, up to 1.2e-7 from
+   *  the voice-over's first sample). Two inputs commute exactly, so a chain
+   *  of pairs is the same sum in every render. */
+  private attachToMaster(tail: AudioNode): void {
+    const prev = this.sumTail
+    if (!prev) {
+      tail.connect(this.master)
+      this.sumTail = tail
+      return
+    }
+    const sum = this.ctx.createGain()
+    try { prev.disconnect(this.master) } catch { /* not connected */ }
+    prev.connect(sum)
+    tail.connect(sum)
+    sum.connect(this.master)
+    this.sumTail = sum
   }
 
   private clipNodes(c: ClipAudio): ClipNodes {
@@ -257,7 +294,7 @@ export class MixGraph {
     const ctx = this.ctx
     const input = ctx.createChannelSplitter(2)
     const merger = ctx.createChannelMerger(2)
-    const m = channelMatrix(c.channels)
+    const m = nodeMatrix(c)
     // [inL→outL, inR→outL, inL→outR, inR→outR]
     const mtx = m.map((v) => { const g = ctx.createGain(); g.gain.value = v; return g })
     input.connect(mtx[0], 0).connect(merger, 0, 0)
@@ -266,8 +303,13 @@ export class MixGraph {
     input.connect(mtx[3], 1).connect(merger, 0, 1)
     const shape = ctx.createGain()
     shape.gain.value = 0
-    merger.connect(shape).connect(this.bus(c.bus).gen)
-    n = { clip: c, bus: c.bus, input, mtx, merger, shape, sources: [], from: Number.POSITIVE_INFINITY, until: Number.NEGATIVE_INFINITY }
+    // A Hall voice effect: the export's own impulse response, after the
+    // offline stages and before the clip's gains (voiceFx.ts).
+    const conv = c.voice?.reverb ? reverbNode(ctx, c.voice.reverb) : null
+    if (conv) merger.connect(conv).connect(shape)
+    else merger.connect(shape)
+    shape.connect(this.bus(c.bus).gen)
+    n = { clip: c, bus: c.bus, input, mtx, merger, conv, shape, sources: [], from: Number.POSITIVE_INFINITY, until: Number.NEGATIVE_INFINITY }
     this.clips.set(id, n)
     return n
   }
@@ -331,7 +373,23 @@ export class MixGraph {
     const t = this.when(a)
     let ok = true
     const src = ctx.createBufferSource()
-    if (c.map.kind === 'runs') {
+    if (c.voice) {
+      // A voice effect (wave E, F3): the retimed samples of the block and its
+      // margins, the channel mode, then the effect's offline stages
+      // (voiceFx.processStereo — the same samples whatever block they fall in).
+      const v = c.voice
+      const e0 = a - v.back
+      const e1 = b + v.ahead
+      // review RE: the export primes a pitch / vibrato effect with real sound
+      // before the head — the same samples here, and the stages' clock (the
+      // LFO phase) counted from where the export's stream starts
+      const pr = primeOf(c)
+      const pcm = this.retimed(c, e0, e1, pr)
+      if (!pcm.ok) ok = false
+      const [yL, yR] = processStereo(v, pcm.L, pcm.R, e0 - c.out0 + pr)
+      src.buffer = toBuffer(ctx, Float32Array.from(yL.subarray(a - e0, b - e0)), Float32Array.from(yR.subarray(a - e0, b - e0)))
+      src.start(t)
+    } else if (c.map.kind === 'runs') {
       const L = new Float32Array(b - a)
       const R = new Float32Array(b - a)
       for (const [off, cnt, first, dir] of c.map.runs) {
@@ -393,6 +451,9 @@ export class MixGraph {
     // multiples of 1/48000) must not mute the clip's first sample.
     if (nodes.until < nodes.from) nodes.shape.gain.value = vals[0]
     setCurve(nodes.shape.gain, vals, t)
+    // A reverb's tail stops where the clip does (the export cuts the chain
+    // to the clip's exact length).
+    if (nodes.conv && b >= c.out0 + c.n) nodes.shape.gain.setValueAtTime(0, this.when(c.out0 + c.n))
     nodes.from = Math.min(nodes.from, a)
     nodes.until = Math.max(nodes.until, b)
     this.stats.sources++
@@ -410,6 +471,68 @@ export class MixGraph {
     }
     if (!ok) this.onMissing?.(c, a, b)
     return ok
+  }
+
+  /** A voice-effect clip's retimed sound for output samples [p0, p1), its
+   *  channel mode applied: zero outside the clip [out0, out0 + n) — the
+   *  export's effect sees only the clip's own samples. Every map is read
+   *  sample by sample here (a resample by linear interpolation, like the
+   *  curve path) so the effect runs on exactly what the block plays. */
+  private retimed(c: ClipAudio, p0: number, p1: number, prime = 0): { L: Float32Array; R: Float32Array; ok: boolean } {
+    const n = Math.max(0, p1 - p0)
+    const L = new Float32Array(n)
+    const R = new Float32Array(n)
+    const q0 = Math.max(p0, c.out0 - prime)
+    const q1 = Math.min(p1, c.out0 + c.n)
+    let ok = true
+    if (q1 > q0) {
+      if (c.map.kind === 'runs') {
+        for (const [off, cnt, first, dir] of c.map.runs) {
+          // the first run also reaches `prime` samples back (primeOf)
+          const r0 = Math.max(q0, c.out0 + off - (off === 0 ? prime : 0))
+          const r1 = Math.min(q1, c.out0 + off + cnt)
+          if (r1 <= r0) continue
+          const s = first + dir * (r0 - c.out0 - off)
+          if (!this.reader.copy(c.src, s, r1 - r0, dir as 1 | -1, L, R, r0 - p0)) ok = false
+        }
+      } else {
+        let xs: Float64Array
+        let end: number
+        if (c.map.kind === 'curve') {
+          xs = curvePositions(c, q0, q1)
+          end = c.map.end
+        } else {
+          const { src0, rate, reverse } = c.map
+          xs = new Float64Array(q1 - q0)
+          for (let j = 0; j < xs.length; j++) xs[j] = src0 + (reverse ? -1 : 1) * (q0 + j - c.out0) * rate
+          end = c.map.end
+        }
+        const lo = Math.max(0, Math.floor(Math.min(xs[0], xs[xs.length - 1])))
+        const hi = Math.min(end, Math.ceil(Math.max(xs[0], xs[xs.length - 1])) + 2)
+        const SL = new Float32Array(Math.max(0, hi - lo))
+        const SRr = new Float32Array(Math.max(0, hi - lo))
+        if (hi > lo && !this.reader.copy(c.src, lo, hi - lo, 1, SL, SRr, 0)) ok = false
+        for (let j = 0; j < xs.length; j++) {
+          const x = xs[j] - lo
+          const i0 = Math.floor(x)
+          if (i0 < 0 || i0 >= SL.length) continue
+          const f = x - i0
+          const l1 = i0 + 1 < SL.length ? SL[i0 + 1] : 0
+          const r1 = i0 + 1 < SRr.length ? SRr[i0 + 1] : 0
+          L[q0 - p0 + j] = SL[i0] + f * (l1 - SL[i0])
+          R[q0 - p0 + j] = SRr[i0] + f * (r1 - SRr[i0])
+        }
+      }
+    }
+    const [ll, rl, lr, rr] = channelMatrix(c.channels)
+    if (ll !== 1 || rl !== 0 || lr !== 0 || rr !== 1) {
+      for (let j = 0; j < n; j++) {
+        const l = L[j], r = R[j]
+        L[j] = ll * l + rl * r
+        R[j] = lr * l + rr * r
+      }
+    }
+    return { L, R, ok }
   }
 
   // ------------------------------------------------------------ edits
@@ -468,7 +591,7 @@ export class MixGraph {
     const t = this.when(p)
     const pr = p + Math.round(RAMP_S * SR)
     holdAndRamp(nodes.shape.gain, t, clipGainAt(c, pr), RAMP_S, clipGainAt(old, p))
-    const m = channelMatrix(c.channels)
+    const m = nodeMatrix(c)
     nodes.mtx.forEach((g, i) => holdAndRamp(g.gain, t, m[i]))
     for (const s of nodes.sources) {
       const a = Math.max(s.p0, pr + 1)
@@ -512,9 +635,10 @@ export class MixGraph {
     this.limiter = null
     this.limiterGain = null
     this.buildMaster()
-    for (const b of this.buses.values()) {
-      try { b.tail.disconnect() } catch { /* none */ }
-      b.tail.connect(this.master)
+    // the lanes' pairwise sum (`attachToMaster`) moves over as one node
+    if (this.sumTail) {
+      try { this.sumTail.disconnect(old) } catch { /* not connected */ }
+      this.sumTail.connect(this.master)
     }
     for (const n of [old, oldLim, oldGain]) { try { n?.disconnect() } catch { /* gone */ } }
   }
@@ -663,6 +787,25 @@ export class MixGraph {
 
 // ---------------------------------------------------------------- helpers
 
+const irCache = new WeakMap<BaseAudioContext, Map<string, AudioBuffer>>()
+
+/** A ConvolverNode over the Hall's impulse response (voiceFx.reverbIr: the
+ *  export's `aevalsrc` IR), unnormalised — its levels are the effect's. */
+function reverbNode(ctx: BaseAudioContext, p: ReverbParams): ConvolverNode {
+  let cache = irCache.get(ctx)
+  if (!cache) { cache = new Map(); irCache.set(ctx, cache) }
+  const key = JSON.stringify(p)
+  let buf = cache.get(key)
+  if (!buf) {
+    buf = toBuffer(ctx, reverbIr(p, 0), reverbIr(p, 1))
+    cache.set(key, buf)
+  }
+  const conv = ctx.createConvolver()
+  conv.normalize = false
+  conv.buffer = buf
+  return conv
+}
+
 function toBuffer(ctx: BaseAudioContext, L: Float32Array, R: Float32Array): AudioBuffer {
   const buf = ctx.createBuffer(2, Math.max(1, L.length), SR)
   if (L.length) {
@@ -672,13 +815,33 @@ function toBuffer(ctx: BaseAudioContext, L: Float32Array, R: Float32Array): Audi
   return buf
 }
 
+/** Samples of real sound before clip `c`'s head its voice effect is primed
+ *  with (review RE; `VoicePlan.prime`, render/audio_mix.VOICE_PRIME_S): a
+ *  forward, sample-exact clip reaches that far back into its source — never
+ *  before the file's first sample. Other maps (a retime, a curve, a reversed
+ *  intermediate, which starts at the clip) are not primed. */
+export function primeOf(c: ClipAudio): number {
+  const pr = c.voice?.prime ?? 0
+  if (pr <= 0 || c.map.kind !== 'runs') return 0
+  const head = c.map.runs.find((r) => r[0] === 0)
+  if (!head || head[3] !== 1) return 0
+  return Math.max(0, Math.min(pr, head[2]))
+}
+
 /** Source sample range [a, b) the clip needs for output samples [p0, p1). */
 export function sourceRange(c: ClipAudio, p0: number, p1: number): [number, number] | null {
+  if (c.voice) {
+    // the effect reads its margins (echo taps, filter warm-up, grains) and
+    // its priming before the head
+    p0 = Math.max(c.out0 - primeOf(c), p0 - c.voice.back)
+    p1 = Math.min(c.out0 + c.n, p1 + c.voice.ahead)
+  }
   if (p1 <= p0) return null
   if (c.map.kind === 'runs') {
     let lo = Infinity, hi = -Infinity
+    const pr = primeOf(c)
     for (const [off, cnt, first, dir] of c.map.runs) {
-      const r0 = Math.max(p0, c.out0 + off)
+      const r0 = Math.max(p0, c.out0 + off - (off === 0 ? pr : 0))
       const r1 = Math.min(p1, c.out0 + off + cnt)
       if (r1 <= r0) continue
       const s0 = first + dir * (r0 - c.out0 - off)
@@ -736,12 +899,14 @@ export function duckValueAt(d: { floor: number; key: Array<[number, number]> }, 
   return 1
 }
 
-/** Render output samples [p0, p1) of `plan` offline (the verification path
- *  of §8.4 and the P1-A1/A2 tests): stereo Float32Arrays, the limiter's
- *  warm-up and look-ahead trimmed. */
-export async function renderOffline(plan: AudioPlan, reader: PcmReader, p0: number, p1: number,
-                                    make: (channels: number, length: number, rate: number) => OfflineAudioContext
-                                      = (c, l, r) => new OfflineAudioContext(c, l, r)): Promise<{ L: Float32Array; R: Float32Array; stats: MixGraph['stats'] }> {
+type OfflineRender = { L: Float32Array; R: Float32Array; stats: MixGraph['stats'] }
+type MakeOffline = (channels: number, length: number, rate: number) => OfflineAudioContext
+
+/** Renders an offline mix may take before one is accepted (see below). */
+export const OFFLINE_RENDER_ATTEMPTS = 6
+
+async function renderOfflineOnce(plan: AudioPlan, reader: PcmReader, p0: number, p1: number,
+                                  make: MakeOffline): Promise<OfflineRender> {
   // A limiter needs its warm-up (LIMITER_WARMUP_S of silence) and adds its
   // look-ahead; both are rendered and trimmed.
   const lim = plan.master.ceilingDb !== null
@@ -756,4 +921,43 @@ export async function renderOffline(plan: AudioPlan, reader: PcmReader, p0: numb
   const L = buf.getChannelData(0).slice(pre + lat, pre + lat + (p1 - p0))
   const R = buf.getChannelData(1).slice(pre + lat, pre + lat + (p1 - p0))
   return { L, R, stats: g.stats }
+}
+
+const sameRender = (a: OfflineRender, b: OfflineRender): boolean => {
+  if (a.L.length !== b.L.length) return false
+  for (let j = 0; j < a.L.length; j++) if (a.L[j] !== b.L[j] || a.R[j] !== b.R[j]) return false
+  return true
+}
+
+/** Render output samples [p0, p1) of `plan` offline (the verification path
+ *  of §8.4 and the P1-A1/A2 tests): stereo Float32Arrays, the limiter's
+ *  warm-up and look-ahead trimmed.
+ *
+ *  Rendered until two renders AGREE sample for sample (wave E, d2-followups
+ *  item 30). WebKit's `AudioBufferSourceNode::process` begins with
+ *  `if (!m_processLock.tryLock()) { outputBus->zero(); return; }`: when
+ *  another thread holds the node's lock for that quantum it outputs silence
+ *  AND does not advance its playhead, so the rest of that source plays one
+ *  render quantum late. Traced in WKWebView and Playwright WebKit
+ *  (`render_repeat`, placement30): 128 zeros at a random quantum, then the
+ *  source 128 samples late to its end (c0 from quantum 13 / 18, k1 at 1225,
+ *  c3 at 1609 / 1644) — 5 of 1,280 renders before this; keeping every clip
+ *  chain fed through the render did not change it (at least 7 of 2,560). Nothing in
+ *  the graph can prevent another thread taking that lock, so the render is
+ *  repeated: a skipped quantum lands at a random place, so two renders agree
+ *  only on the true mix. Chromium's renders agree the first time — since the
+ *  lanes are summed two at a time (`attachToMaster`; with every lane on the
+ *  master's one input, three sounding lanes came out a few ULP apart from
+ *  render to render and P1-A2 `mix` failed 1 run in 5); this path is the
+ *  verification render, not playback, so the second render is its whole
+ *  cost. */
+export async function renderOffline(plan: AudioPlan, reader: PcmReader, p0: number, p1: number,
+                                    make: MakeOffline = (c, l, r) => new OfflineAudioContext(c, l, r)): Promise<OfflineRender> {
+  let prev = await renderOfflineOnce(plan, reader, p0, p1, make)
+  for (let i = 1; i < OFFLINE_RENDER_ATTEMPTS; i++) {
+    const next = await renderOfflineOnce(plan, reader, p0, p1, make)
+    if (sameRender(prev, next)) return next
+    prev = next
+  }
+  throw new Error(`offline mix: ${OFFLINE_RENDER_ATTEMPTS} renders of [${p0}, ${p1}) never agreed`)
 }

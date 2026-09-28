@@ -170,6 +170,13 @@ export interface AudioSink {
    *  waits for this before the picture moves. False after `timeoutMs`.
    *  Optional: a sink without it is ready at once. */
   whenRunning?(timeoutMs: number): Promise<boolean>
+  /** Output FRAME ranges where the master limiter may work — APPROX, the
+   *  browser's limiter is not the export's alimiter (gate RX,
+   *  audio/limiting.ts). Optional: a sink without it has none. */
+  limitingFrames?(): ReadonlyArray<readonly [number, number]>
+  /** Set by the engine: called when limitingFrames() changes by itself (a
+   *  source's recorded peaks landed after prepare). */
+  onLimitingChange?: (() => void) | null
   dispose?(): void
 }
 

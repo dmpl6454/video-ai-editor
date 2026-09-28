@@ -165,6 +165,14 @@ describe('support.classify (§7)', () => {
     expect(stale.ranges.every((r) => r.reasons.includes('audio:loudness'))).toBe(true)
   })
 
+  it('the master limiter\'s ranges are APPROX (gate RX: the browser limiter is not alimiter)', () => {
+    const { edl, pm } = mapOf(gaps)
+    const s = classify(pm, edl, { phase: 1, limiting: [[-3, 5], [20, 1e9]] })
+    expect(s.ranges.filter((r) => r.reasons.includes('audio:limiting')).map((r) => [r.k0, r.k1, r.mode]))
+      .toEqual([[0, 5, MODE_APPROX], [20, pm.total, MODE_APPROX]])
+    expect(classify(pm, edl, { phase: 1, limiting: [] }).ranges.some((r) => r.reasons.includes('audio:limiting'))).toBe(false)
+  })
+
   it('a non-standard project rate refuses the engine (R1)', () => {
     const { edl, pm } = mapOf(gaps, (e) => { e.canvas = { ...e.canvas, fps: 7 } })
     expect(classify(pm, edl, { phase: 1 }).engine).toEqual({ ok: false, reason: 'rate' })

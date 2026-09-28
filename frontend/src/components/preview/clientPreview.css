@@ -54,6 +54,27 @@
 .client-preview-spinner[data-wait='baking'] .client-preview-ring { border-top-color: var(--accent-2); }
 .client-preview-spinner[data-wait='buffering'] .client-preview-ring { border-top-color: var(--text); }
 
+/* The "≈" chip (review RE): the frame on screen is an APPROXIMATION of the
+   export (support.ts APPROX, or a blend this browser draws its own way).
+   Static: nothing animates, reduced motion or not. */
+.client-preview-approx {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-width: calc(var(--cp-spinner-size) + 8px);
+  height: calc(var(--cp-spinner-size) + 8px);
+  padding: 0 6px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--cp-well);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+}
+
 .client-preview-error {
   position: absolute;
   top: 8px;

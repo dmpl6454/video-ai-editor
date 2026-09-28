@@ -1,7 +1,7 @@
 // Gain SHAPES of the export's sound, sample for sample (instant preview spec
 // §6 R10): ffmpeg's `afade` curves, `acrossfade`'s default overlap, the
-// `volume=…:eval=frame` expression a clip's gain envelope becomes
-// (`audio_mix.gain_env_filter` → `edl/keyframes.to_ffmpeg_expr`), and the
+// per-sample `aeval` expression a clip's gain envelope becomes (wave E:
+// `audio_mix.gain_env_filter` → `edl/keyframes.frame_exact_expr`), and the
 // `volume=<g>dB` clip gain — including how each number is FORMATTED into the
 // filter text (`%.3f`, `%.4f`, `%.6f`, `%.2f`), because ffmpeg only ever sees
 // the text. Pinned by tests/goldens/audio_curve_cases.json, which is rendered
@@ -11,9 +11,9 @@ import { floatToQ, rescale, roundHalfEvenQ, type Rational } from '../timeline/ti
 
 export const SAMPLE_RATE = 48000
 
-/** `av_q2d(1/48000)`: ffmpeg's `t` of sample `i` is `i · (1/48000)` (a
- *  product, not `i / 48000`; they differ in the last bit, which decides a
- *  `lt(t, 0.4)` at sample 19200). */
+/** `av_q2d(1/48000)`: the `t` of sample `i`, `i · (1/48000)` (aeval adds
+ *  `i·(1/48000)` to its packet's own time; the last bit no longer decides a
+ *  segment: the expression picks it 1 µs past `t`, `ENV_KEY_NUDGE_S`). */
 export const SAMPLE_PERIOD = 1 / SAMPLE_RATE
 export const sampleTime = (i: number): number => i * SAMPLE_PERIOD
 
@@ -200,8 +200,12 @@ export interface GainEnv {
 interface EnvSegment { t1: number; kind: 'const'; v: number }
 interface EnvRamp { t1: number; kind: 'ramp'; t0: number; dt: number; v0: number; dv: number; interp: string }
 
-/** The compiled `to_ffmpeg_expr`: its constants exactly as the filter text
- *  carries them, evaluated in the expression's own order. */
+/** `frame_exact_expr`'s segment pick: `lt((t+0.000001), key)`. */
+export const ENV_KEY_NUDGE_S = 0.000001
+
+/** The compiled `frame_exact_expr`: its constants exactly as the filter text
+ *  carries them (key times `%.9f`, a ramp's span `%.11f`, values `%.4f`),
+ *  evaluated in the expression's own order. */
 export interface CompiledEnv {
   first: { t0: number; v: number } | null
   segs: Array<EnvSegment | EnvRamp>
@@ -215,27 +219,30 @@ export function compileEnv(env: GainEnv | null | undefined): CompiledEnv | null 
   const pts = kfs.map(([t, v]) => [Number(t), Number(v)] as [number, number])
     .sort((a, b) => a[0] - b[0])
   const f4 = (x: number) => pyFixedValue(x, 4)
+  const f9 = (x: number) => pyFixedValue(x, 9)
   if (pts.length === 1) return { first: null, segs: [], last: f4(pts[0][1]) }
   const segs: Array<EnvSegment | EnvRamp> = []
   for (let i = 1; i < pts.length; i++) {
     const [t0, v0] = pts[i - 1]
     const [t1, v1] = pts[i]
-    const t1r = f4(t1)
+    const t1r = f9(t1)
     if (interp === 'step' || t1 - t0 < 1e-6) {
       segs.push({ t1: t1r, kind: 'const', v: interp === 'step' ? f4(v0) : f4(v1) })
     } else {
-      segs.push({ t1: t1r, kind: 'ramp', t0: f4(t0), dt: pyFixedValue(t1 - t0, 6), v0: f4(v0), dv: f4(v1 - v0), interp })
+      segs.push({ t1: t1r, kind: 'ramp', t0: f9(t0), dt: pyFixedValue(t1 - t0, 11), v0: f4(v0), dv: f4(v1 - v0), interp })
     }
   }
-  return { first: { t0: f4(pts[0][0]), v: f4(pts[0][1]) }, segs, last: f4(pts[pts.length - 1][1]) }
+  return { first: { t0: f9(pts[0][0]), v: f4(pts[0][1]) }, segs, last: f4(pts[pts.length - 1][1]) }
 }
 
-/** The envelope's dB offset at clip-local time `t` (the `volume` filter's
- *  `t`), as ffmpeg evaluates the emitted expression. */
+/** The envelope's dB offset at clip-local time `t` (the sample's `t`), as
+ *  ffmpeg evaluates the emitted expression: the segment picked at
+ *  `t + ENV_KEY_NUDGE_S`, the value at `t`. */
 export function envDbAt(c: CompiledEnv, t: number): number {
-  if (c.first && t < c.first.t0) return c.first.v
+  const tc = t + ENV_KEY_NUDGE_S
+  if (c.first && tc < c.first.t0) return c.first.v
   for (const s of c.segs) {
-    if (!(t < s.t1)) continue
+    if (!(tc < s.t1)) continue
     if (s.kind === 'const') return s.v
     const f = (t - s.t0) / s.dt
     let p: number

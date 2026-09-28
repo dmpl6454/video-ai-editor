@@ -1,0 +1,35 @@
+/* The Inspector's Voice effects section (wave E, F3): CapCut's voice-changer
+   grid, the Strength slider and the Preview button. Tokens only (styles.css
+   :root); the only motion is the loading icon's spin, which styles.css stops
+   under prefers-reduced-motion. */
+
+.voice-section { display: flex; flex-direction: column; gap: 8px; }
+
+.voice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.voice-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0;
+  padding: 7px 2px 6px; font-size: 10.5px; line-height: 1.2; color: var(--text-dim);
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
+}
+.voice-tile span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-tile:hover { color: var(--text); background: var(--bg-2); }
+.voice-tile:active { background: var(--bg-3); }
+.voice-tile[aria-checked="true"] { color: var(--text); border-color: var(--accent-2); background: var(--bg-2); }
+.voice-tile[aria-checked="true"] .icon { color: var(--accent-2); }
+.voice-tile:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+.voice-preview-row { display: flex; align-items: center; gap: 8px; min-height: var(--control-h); }
+.voice-preview {
+  display: inline-flex; align-items: center; gap: 6px; height: var(--control-h); padding: 0 10px;
+  font-size: 12px; color: var(--text); background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; cursor: pointer;
+}
+.voice-preview:hover:not(:disabled) { background: var(--bg-3); }
+.voice-preview:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.voice-preview:disabled { color: var(--text-disabled); background: var(--bg-disabled); cursor: default; }
+.voice-preview:disabled .icon { color: var(--icon-disabled); }
+.voice-status { font-size: 11px; color: var(--text-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.voice-note { margin: 0; font-size: 11px; line-height: 1.4; color: var(--text-dim); display: flex; gap: 6px; align-items: center; }
+.voice-error { color: var(--error-text); }

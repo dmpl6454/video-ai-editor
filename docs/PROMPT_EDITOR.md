@@ -46,8 +46,44 @@ add smooth transitions between the clips  smooth zoom between every clip
 add a glitch transition at the hook       make 3 shorts under 30 seconds for tiktok
 make it good for youtube                  complete the video for instagram reels with hindi captions and upbeat music
 add a voiceover saying 'Thanks for watching' at the end
+remove the captions                       take off the black and white filter
+remove the transition between clip 2 and 3   delete the title
+trim the second clip to 2 seconds         make the first clip 3 seconds long
+lower the volume of the second clip       make the music quieter by 6 dB
+flip the second clip                      mirror this clip
+add a zoom in animation to the first clip   make the sticker bounce in
+slide the last clip out to the left         make the second clip shake
+blur the background                       make the background black
+use this image as the background          fill the black bars with white
+set the overlay to screen                 multiply blend the top clip
 undo that
 ```
+
+Edits by name (wave E): captions, a filter (all of them, a named look, or one
+clip's), a transition (by its seam, first/last, or all) and a text overlay (by
+its words, its role, or all) are removed by what they are; a clip's length is
+set through its speed or speed curve, moving its end ("off the start of" moves
+its head); a clip's level moves from its CURRENT gain; flip / mirror toggles
+(`upside down` is still a 180° rotation). When the words fit more than one
+thing ("delete the title" with two titles) the reply asks which, and nothing
+changes.
+
+Clip animations (wave E): CapCut's In / Out / Combo on a clip, the overlay or
+a sticker ("add a zoom in animation to the first clip", "make the sticker
+bounce in", "make the second clip shake", "remove the animation from the
+sticker"). A motion that is only an In or an Out is the In unless the words
+say out / exit / leave / away; "slide … out" with no direction and "animate
+the first clip" with no motion ask which. "zoom in on the second clip" is
+still the Ken Burns push, "fade in the second clip" the video fade.
+
+Canvas and blend (wave E): "blur the background" / "make the background
+black" / "use this image as the background" fill the letterbox of every
+main-track clip (CapCut's Apply to all) unless a clip is named; "remove the
+background blur" puts black bars back ("remove the background" is NOT this —
+it is the AI cut-out). "set the overlay to screen" / "multiply blend the top
+clip" set an overlay clip's blend mode. The reply asks which picture when
+several are imported, which overlay when several are on screen and none is
+selected, and which mode when none is named.
 
 Clauses combine (`, and, then, aur, phir`) and Hinglish verbs are understood
 (`captions laga do`, `silence hata do`). Negation excludes a step
@@ -81,6 +117,7 @@ The planner asks only when it cannot know:
 | **Which ratio?** | the source is already vertical and no platform was named | `9:16`, `16:9`, `1:1`, `4:5` |
 | **First use downloads … Download or skip?** | a model or voice is not on disk (MADLAD 3 GB, large-v3 3.1 GB, a Piper voice 60 MB) | `download` or `skip` — skipping drops the dependent steps and the reply says so |
 | **This will take about N minutes. Start?** | the estimate is over 90 s | `yes` or `no` |
+| **A model's own question** ("Rotate by how much?") | Apple Intelligence, the local model or Claude planned the edit but needs one more fact | type the answer in the card; the request is planned again with it ("… — 90 degrees"). A complete new request typed instead is planned on its own |
 
 Nothing in the prompt path downloads without a **yes** — "no cloud key" is
 not "no network", the rule is no network without your answer. Model

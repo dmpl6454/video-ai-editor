@@ -20,8 +20,10 @@ re-exported here so `recipes.__getattr__` finds every name in one place.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
+from . import grammar as G
 from . import slots as S
 from .facts import TimelineFacts, VOICE_IDS
 from .langs import base_lang, is_latin_hindi, needs_translation
@@ -30,6 +32,10 @@ from .recipes import (_PLATFORMS, _RATIOS, FILLERS_STRICT, RECIPE_SLOTS, Context
                       download, normalize_slots, pc, placeholder, step)
 from .live import MIN_TRANSITION_NEIGHBOUR_S, seams_from_boundaries, smpte
 from . import clip_expanders as CX
+from . import name_expanders as NX
+from . import canvas_expanders as KX
+from . import voice_expanders as VX
+from . import anim_expanders as AX
 from ...edl.speed_presets import PRESET_BY_ID as _SPEED_PRESET_BY_ID, PRESETS as _SPEED_PRESETS
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
@@ -964,8 +970,22 @@ def _x_export_preset(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         prerequisites=prereq)
 
 
+#: A request to MAKE a new voice-over (not to change an existing sound).
+_NEW_VO_RE = re.compile(r"\b(?:add|put|record|generate|create|make|need|want|give|write|lay|include|narrate|say|"
+                        r"saying|says|read|reading|tts|text[- ]to[- ]speech|ai voice)\b|^(?:an?\s+)?(?:ai\s+)?"
+                        r"(?:voice[- ]?over|narration)$")
+
+
 def _x_voiceover(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     text = (it.get("text") or "").strip()
+    clause = S.normalize(it.clause or "")
+    if not text and clause and (G.clip_ref_of(clause) is not None or not _NEW_VO_RE.search(clause)):
+        # review RE: a phrase about an EXISTING sound ("make the voice on clip
+        # 1 deeper", "lower the voiceover") must never open with a 60 MB voice
+        # download and "what should it say?"
+        return Expansion(notes=("Do you want a NEW spoken voice-over, or to change a clip's sound? Say like "
+                                "'add a voiceover saying \"welcome\"', 'make the voice on clip 1 deeper' or "
+                                "'lower the voiceover by 6 dB'.",))
     voice = it.get("voice") or "en_US-amy-medium"
     questions: tuple[NeedsInput, ...] = ()
     downloads: tuple[DownloadNeeded, ...] = ()
@@ -1125,13 +1145,41 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     delta = float(it.get("_delta_db") or VOLUME_STEP_DB)
     if it.get("clip_ref") is not None and target != "music":
         return _clip_volume(it, f, change, db, delta)
-    if target == "music":
+    if target == "vo":
+        vo = [c for c in f.clips if c.track == "vo"]
+        track = "vo"
+        if not vo:
+            named, q = VX._voiceover_elsewhere(f)       # a voice file dropped on the Music lane
+            if q is not None:
+                return q
+            vo = [c for c in f.clips if c.id in named]
+            track = vo[0].id if len(vo) == 1 else ""
+        if not vo:
+            return Expansion(notes=("There is no voice-over on the timeline — which clip's level did you mean? "
+                                    "Name it like 'lower the second clip by 6 dB'.",))
+        if len(vo) > 1 and (track != "vo" or (db is None and len({round(c.gain_db, 2) for c in vo}) > 1)):
+            if db is None:
+                return _clip_volumes_relative(f, change, delta, ids=[c.id for c in vo])
+            return Expansion(notes=("Which voice clip? Select it and say 'this clip'.",))
+        current, label = vo[0].gain_db, "voice-over"
+    elif target == "music":
         if _no_music(f, ctx):
             return Expansion(notes=("there is no music on the timeline to turn up or down",))
+        # review RE: "make the music quieter" set EVERY music clip to the first
+        # one's level − 6 dB (−12 / −3 became −18 / −18): clips at different
+        # levels each move by the amount instead, one step per clip
+        beds = [c for c in f.clips if c.track == "music"]
+        if db is None and len({round(c.gain_db, 2) for c in beds}) > 1:
+            return _clip_volumes_relative(f, change, delta, ids=[c.id for c in beds], what="music")
         current = f.music_gain_db if f.music_gain_db is not None else MUSIC_DEFAULT_DB
         track, label = "music", "music"
     else:
-        current = 0.0
+        # the programme's own sound: relative to the clips' CURRENT gain (wave
+        # E, F4b) — when they differ, each clip moves by the same amount
+        gains = {round(c.gain_db, 2) for c in f.clips if c.id in set(f.v1_clip_ids)}
+        if db is None and len(gains) > 1:
+            return _clip_volumes_relative(f, change, delta)
+        current = next(iter(gains)) if gains else 0.0
         track, label = "v1", "original sound"
     if db is None:
         level = current + (delta if change == "up" else -delta)
@@ -1154,25 +1202,62 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 def _clip_volume(it: Intent, f: TimelineFacts, change: Any, db: Any, delta: float) -> Expansion:
     """One clip's level ("lower the volume of the second clip", wave D3 E3):
-    `set_volume` on that clip id. Facts do not carry a clip's gain, so a
-    relative change is from its source level (0 dB)."""
+    `set_volume` on that clip id. A relative change moves the clip's CURRENT
+    gain (`facts.clips`, wave E F4b) — it used to start from 0 dB, so
+    "lower it" on a clip already at -6 dB set -6 dB again: a no-op that
+    verified."""
     cid, q = CX.bind_clip(it.get("clip_ref"), f)
     if q:
         return Expansion(notes=(q,))
     if cid == "$v1_all":
+        gains = {round(c.gain_db, 2) for c in f.clips if c.id in set(f.v1_clip_ids)}
+        if db is None and len(gains) > 1:
+            return _clip_volumes_relative(f, change, delta)
         cid = "v1"                                   # every clip: the main track's level
     elif cid in ("$v1_first", "$v1_last", "$playhead"):
         ids = list(f.v1_clip_ids)
         cid = {"$v1_first": ids[:1], "$v1_last": ids[-1:]}.get(cid, [None])[0] if ids else None
         if cid is None:
             return Expansion(notes=("Which clip? Name it like 'the second clip'.",))
-    level = float(db) if db is not None else (delta if change == "up" else -delta)
+    fact = f.clip(cid) if cid != "v1" else None
+    if cid == "v1":
+        gains = [c.gain_db for c in f.clips if c.id in set(f.v1_clip_ids)]
+        current = gains[0] if gains else 0.0
+    else:
+        current = fact.gain_db if fact is not None else 0.0
+    level = float(db) if db is not None else current + (delta if change == "up" else -delta)
     level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
-    who = "every clip's" if cid == "v1" else "the clip's"
+    who = "every clip's" if cid == "v1" else ("the clip's" if fact is None else f"{CX._label(cid, f)}'s")
+    if abs(level - current) < 0.05:
+        edge = "loudest" if level >= VOLUME_MAX_DB else ("quietest" if level <= VOLUME_MIN_DB else "")
+        return Expansion(notes=(f"{who.capitalize()} sound is already at {current:g} dB"
+                                + (f", the {edge} this sets" if edge else "") + " — what level should it be?",))
     return Expansion(
         steps=(step("set_volume", STAGE_AUDIO, f"set {who} level to {level:g} dB", target=cid, db=level),),
         postconditions=(pc("volume_db", f"{who} level is set", target=cid, db=level),),
-        notes=(f"{who} sound {level:+g} dB",))
+        notes=(f"{who} sound {current:g} dB → {level:g} dB",))
+
+
+def _clip_volumes_relative(f: TimelineFacts, change: Any, delta: float, *, ids: list[str] | None = None,
+                           what: str = "clip") -> Expansion:
+    """"make my voice louder" when the main-track clips (or the music clips,
+    `ids`) sit at DIFFERENT levels: each moves by the same amount (one
+    `set_volume` per clip, one undo step), so a balance the user set
+    survives."""
+    wanted = set(f.v1_clip_ids if ids is None else ids)
+    clips = [c for c in f.clips if c.id in wanted]
+    step_db = delta if change == "up" else -delta
+    steps, pcs = [], []
+    for c in clips[:20]:
+        level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, c.gain_db + step_db)), 1)
+        steps.append(step("set_volume", STAGE_AUDIO, f"{CX._label(c.id, f)}: {c.gain_db:g} → {level:g} dB",
+                          target=c.id, db=level))
+        pcs.append(pc("volume_db", f"{CX._label(c.id, f)}'s level is set", target=c.id, db=level))
+    if len(clips) > 20:
+        return Expansion(notes=(f"The {len(clips)} clips sit at different levels — select the ones to change, "
+                                "or set one level for all, like 'set the voice to -3 dB'?",))
+    return Expansion(steps=tuple(steps), postconditions=tuple(pcs),
+                     notes=(f"every {what} clip's sound {step_db:+g} dB from its own level",))
 
 
 def _pct(db: float) -> str:
@@ -1256,6 +1341,14 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     # Wave D3 (E3): the CapCut clip edits (agent/prompt/clip_expanders.py)
     "delete_clip": CX.x_delete_clip, "duplicate": CX.x_duplicate, "move_clip": CX.x_move_clip,
     "zoom": CX.x_zoom, "rotate": CX.x_rotate, "adjust": CX.x_adjust,
+    # Wave E (F4b): edits by name (agent/prompt/name_expanders.py)
+    "remove_feature": NX.x_remove_feature, "clip_length": NX.x_clip_length, "flip": NX.x_flip,
+    # Wave E (F2): CapCut Canvas and blend modes (agent/prompt/canvas_expanders.py)
+    "canvas": KX.x_canvas, "blend": KX.x_blend,
+    # Wave E (F3): CapCut's voice changer (agent/prompt/voice_expanders.py)
+    "voice_effect": VX.x_voice,
+    # Wave E (F1): CapCut clip animations (agent/prompt/anim_expanders.py)
+    "animation": AX.x_animation,
 }
 
 

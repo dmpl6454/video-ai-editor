@@ -206,9 +206,24 @@ def parse_answer_for(question: NeedsInput, message: str) -> Any | None:
     return None
 
 
+def _is_a_request(message: str) -> bool:
+    """True when `message` alone reads as a confident edit (the grammar's run
+    bar) — not an answer like "the second clip" or "90 degrees"."""
+    from . import grammar as G
+    det = G.detect(message)
+    return det.confidence >= G.RUN_THRESHOLD and any(h.intent not in ("ask",) for h in det.hits)
+
+
 def try_parse_answer(message: str, record: dict[str, Any]) -> dict[str, Any] | None:
     """`{key: value}` for the FIRST unanswered blocking question the whole
     message answers, else None (→ the caller drops the pending plan)."""
+    plan = pending_plan(record)
+    if plan.intent == "model_question" and _is_a_request(message):
+        # Item 23: a model's free-text question takes any message as its
+        # answer; a message that is a complete request on its own ("add
+        # captions") is that request, planned fresh — never glued onto the
+        # earlier prompt as its "answer".
+        return None
     for q in blocking_questions(record):
         value = parse_answer_for(q, message)
         if value is not None:

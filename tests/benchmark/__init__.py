@@ -28,6 +28,7 @@ Module map:
 
 WHY the benchmark is a package under tests/ and not a script: pytest gives
 it parametrised ids per case, `-m` tiers, `-k` selection, skips with reasons
-(MADLAD not cached, routes not mounted yet), and a session-scoped fixture that
-uploads + transcribes each media variant exactly once.
+(MADLAD not cached, routes not mounted yet), and a module-scoped fixture that
+uploads + transcribes each media variant exactly once (module, not session: its
+egress guard and patches must end with the benchmark — see conftest.py).
 """

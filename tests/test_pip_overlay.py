@@ -150,22 +150,33 @@ def test_a_pip_input_is_offset_to_its_timeline_position(tmp_path):
     chain, inputs, _, _ = _chain(s.edl)
     assert "-itsoffset" not in inputs
     assert "setpts=PTS-STARTPTS+240," in chain
-    # …decoding only the trimmed span (half a frame of seek pre-roll, then
-    # 120 frames + 2 of slack), expressed as a DURATION.
-    assert inputs[inputs.index("-ss") + 1] == "0.983333"
-    assert inputs[inputs.index("-t") + 1] == "4.083333"
+    # …decoding only the trimmed span. Review RE: a 1x PIP is opened as v1
+    # opens it — the in-anchored seek on the 1/5 s grid (`curve_seek`, the
+    # frames then picked on the file clock anchored at `in`), up to the out
+    # point plus 2 frames of slack — and cut to its 120 frames in the graph.
+    from video_ai_editor.edl.speed_curve import curve_seek
+    assert inputs[inputs.index("-ss") + 1] == f"{curve_seek(1.0):.6f}" == "0.400000"
+    assert inputs[inputs.index("-to") + 1] == "5.066667"
+    assert "setpts=((PTS*TB-1.0)+1e-08)/TB,fps=30:start_time=0" in chain
     assert "trim=end_frame=120," in chain
 
 
-def test_a_duration_is_used_not_an_absolute_end(tmp_path):
+def test_an_absolute_end_never_meets_an_input_offset(tmp_path):
     """`-to` is an absolute input timestamp and `-itsoffset` shifts the
     timestamps it is compared against, so the two together can truncate the
-    input to nothing. A duration is immune."""
+    input to nothing. Review RE: a 1x PIP now opens like v1 (`-ss … -to …`,
+    as retimed PIPs have since wave D3), which is safe only because no PIP
+    input carries `-itsoffset` (the offset is a setpts shift in the graph):
+    pin both halves, and the end is the clip's out point plus the slack, far
+    past the seek, so nothing can be truncated."""
     s = _store(tmp_path)
     s.edl.get_track("v2").clips.append(
         Clip(id="p", src="/x/a.mp4", in_=2.0, out=6.0, start=30.0))
-    _, inputs, _, _ = _chain(s.edl)
-    assert "-to" not in inputs
+    chain, inputs, _, _ = _chain(s.edl)
+    assert "-itsoffset" not in inputs
+    assert float(inputs[inputs.index("-to") + 1]) == pytest.approx(6.0 + 2 / 30, abs=1e-6)
+    assert float(inputs[inputs.index("-ss") + 1]) < 2.0
+    assert "setpts=PTS-STARTPTS+900," in chain
 
 
 def test_a_pip_at_zero_needs_no_offset(tmp_path):

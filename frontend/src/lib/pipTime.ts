@@ -10,10 +10,12 @@
 //
 //   forward  source = in + S(t)               S = speed·t, or the curve's
 //                                             integral (speedCurve.sourceSeconds)
-//   reverse  the reversed intermediate (render/reverse.py) holds the range's
-//            M = frame_of(out − in) grid frames backwards, so intermediate
-//            frame i is grid frame M−1−i of the range: source =
-//            in + (M − 1 − i + ½)/fps with i = ⌊fps · S((j + ½)/fps)⌋
+//   reverse  the reversed intermediate (render/reverse.py) holds M grid
+//            frames backwards from source time `first` (`intermediateSpan`:
+//            the range's own, or a curve's source-grid [floor(in),
+//            ceil(out))), so intermediate frame i is grid frame M−1−i:
+//            source = first + (M − 1 − i + ½)/fps with
+//            i = ⌊fps · (vIn + S((j + ½)/fps))⌋ (`reversedViewRange`)
 //   freeze   the first frame a 1x chain shows at `in` (frame_map.freeze_frame):
 //            in + ½/fps, for the whole hold
 //
@@ -25,9 +27,12 @@
 //
 // Pure: no DOM, so vitest pins it against the Python model's numbers.
 
-import { clipIn, clipOut, freezeOf, reversedFrameCount, reversedViewOut, type EdlClip } from './preview/timeline/framePlan'
+import {
+  clipIn, clipOut, freezeOf, intermediateSpan, reversedViewOut, reversedViewRange, type EdlClip,
+} from './preview/timeline/framePlan'
 import { curveMap, curvePoints, sourceSeconds, speedAt, type CurveMap } from './preview/timeline/speedCurve'
-import { timeOf, type FpsLike } from './preview/timeline/timebase'
+import { reverseSegmentFrames } from './preview/timeline/frameMap'
+import { seekPreroll, timeOf, type FpsLike } from './preview/timeline/timebase'
 
 /** How far below an exact tie a frame instant is taken (1 µs: far below
  *  any frame at <= 240 fps, far above double rounding). */
@@ -45,6 +50,35 @@ export interface PipTiming {
   /** Source seconds per timeline second at the playhead: the speed there
    *  (a curve's instantaneous speed), 0 for a freeze, NEGATIVE reversed. */
   rate: number
+}
+
+/** What the caller may know about the PIP's SOURCE (the media library's
+ *  proxy probe). With its frame rate a reversed PIP whose source rate is not
+ *  the project's finds its frames exactly: each intermediate segment's
+ *  `fps=` grid starts at the first SOURCE frame its seek keeps, not at the
+ *  segment's project-grid time (render/reverse.py `_render_segment`). */
+export interface PipSourceHint {
+  rate?: { num: number; den: number } | null
+  w?: number | null
+  h?: number | null
+}
+
+/** Source seconds (a mid-slot instant, less the tie margin) of the
+ *  intermediate's FORWARD frame `k`, the intermediate starting at source
+ *  time `first` (`intermediateSpan`). */
+function intermediateFrameTime(first: number, k: number, fps: FpsLike, hint?: PipSourceHint): number {
+  const fd = timeOf(1, fps)
+  const rate = hint?.rate
+  if (!rate || !(rate.num > 0) || !(rate.den > 0)) return first + k * fd + fd / 2 - TIE_S
+  const seg = reverseSegmentFrames(hint?.w || 1920, hint?.h || 1080, fps)
+  const j0 = Math.floor(k / seg) * seg
+  const t0 = first + timeOf(j0, fps)
+  const rs = rate.num / rate.den
+  // The first source frame at or after the segment's seek (half a project
+  // frame before t0): the segment's `setpts=PTS-STARTPTS` + `fps=` grid
+  // origin.
+  const pFirst = Math.ceil((t0 - seekPreroll(t0, fps)) * rs - 1e-6) / rs
+  return pFirst + timeOf(k - j0, fps) + fd / 2 - TIE_S
 }
 
 interface Retime { offset: (t: number) => number; speedAt: (t: number) => number }
@@ -66,7 +100,7 @@ export function pipIsRetimed(c: EdlClip): boolean {
 
 /** The source instant PIP `c` shows at clip-local timeline seconds `local`
  *  (render clock: playhead − render_time(start)), on a project at `fps`. */
-export function pipTiming(c: EdlClip, local: number, fps: FpsLike): PipTiming {
+export function pipTiming(c: EdlClip, local: number, fps: FpsLike, hint?: PipSourceHint): PipTiming {
   const inP = clipIn(c)
   const fd = timeOf(1, fps)
   const t = Math.max(0, local)
@@ -79,15 +113,17 @@ export function pipTiming(c: EdlClip, local: number, fps: FpsLike): PipTiming {
   const j = Math.floor(t / fd + 1e-6)
   const mid = timeOf(j, fps) + fd / 2
   if (c.reverse) {
-    // The retime runs over the INTERMEDIATE (in 0, out M frames).
-    const m = reversedFrameCount(c, fps)
+    // The retime runs over the INTERMEDIATE, opened at the view's `in` (0,
+    // or where `out` sits on a curve's source-grid intermediate).
+    const [first, m] = intermediateSpan(c, fps)
+    const [vIn] = reversedViewRange(c, fps)
     const rt = retimeOf(c, reversedViewOut(c))
-    const i = Math.min(m - 1, Math.floor((rt.offset(mid) - TIE_S) / fd))
-    const top = inP + timeOf(m, fps)
+    const i = Math.min(m - 1, Math.floor((vIn + rt.offset(mid) - TIE_S) / fd))
+    const top = first + timeOf(m, fps) - vIn
     return {
       kind: 'reverse',
-      // grid frame m−1−i of the range: its own middle, less the tie margin
-      frameTime: inP + (m - 1 - i) * fd + fd / 2 - TIE_S,
+      // forward frame m−1−i of the intermediate: its own middle, less the tie margin
+      frameTime: intermediateFrameTime(first, m - 1 - i, fps, hint),
       time: Math.max(inP, top - rt.offset(t)),
       rate: -rt.speedAt(t),
     }

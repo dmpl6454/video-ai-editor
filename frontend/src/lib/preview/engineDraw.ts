@@ -7,6 +7,9 @@ import type { ProgramFeed } from './engineFeed'
 import { fullFrameGeometry } from './render/bakeGeometry'
 import type { Compositor } from './render/compositor'
 import { frameGeometry, type Size } from './render/geometry'
+import { canvasBgDraw } from './render/canvasBg'
+import { canvasBgImage } from './render/canvasBgImages'
+import type { EdlClip } from './timeline/framePlan'
 import { KIND_GAP, type ProgramMap } from './timeline/programMap'
 
 /** Draws output frame k from the current texture (the caller checked it
@@ -21,7 +24,22 @@ export function drawProgramFrame(comp: Compositor, pm: ProgramMap, feed: Program
   }
   const fg = frameGeometry(pm, k, canvas, (src) => feed.sourceInfo(src))
   if (!fg) return false
-  return comp.draw({ geometry: fg.geometry, canvas, texture: h ? { w: h.index.w, h: h.index.h } : undefined }, k)
+  // the clip's CapCut Canvas background in its letterbox (wave E, F2)
+  const info = feed.sourceInfo(fg.clip.src)
+  const background = canvasBgDraw(fg.clip, canvas, info ? { w: info.w, h: info.h } : canvas, comp.canvasBgBaseUrl)
+  return comp.draw({ geometry: fg.geometry, canvas, texture: h ? { w: h.index.w, h: h.index.h } : undefined, background }, k)
+}
+
+/** Starts fetching the pictures of the program's image canvas backgrounds
+ *  (wave E, F2), so the first frame that shows one rarely waits; `ready`
+ *  redraws a paused frame when one lands. */
+export function preloadCanvasBackgrounds(clips: readonly EdlClip[], canvas: Size, baseUrl: string | undefined,
+  ready: () => void): void {
+  if (!baseUrl) return
+  for (const c of clips) {
+    const d = canvasBgDraw(c, canvas, canvas, baseUrl)
+    if (d?.mode === 'image') canvasBgImage(d.url, ready)
+  }
 }
 
 /** Uploads the element's current frame as output frame k's texture. The

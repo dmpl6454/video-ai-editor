@@ -76,7 +76,7 @@ describe('v1 clips', () => {
     const a = one(p, 'a')
     expect(a.out0).toBe(0)
     expect(a.n).toBe(48000)
-    expect(a.map).toEqual({ kind: 'runs', runs: [[0, 48000, clipSample0(1.234, 30), 1]] })
+    expect(a.map).toEqual({ kind: 'runs', runs: [[0, 48000, clipSample0(1.234), 1]] })
     expect(a.gain).toBeCloseTo(Math.pow(10, -6 / 20), 15)
     expect(a.fades.map((f) => [f.type, f.start, f.range])).toEqual([['in', 0, 12000], ['out', 24000, 24000]])
     const b = one(p, 'b')
@@ -134,7 +134,7 @@ describe('speed curves and freezes (lane S1)', () => {
     ], music: [{ id: 'mc', start: 0, in: 0, out: 2, speed: curve as never }] })
     const p = plan(e)
     const c = one(p, 'c')
-    expect(c.map).toMatchObject({ kind: 'curve', src0: clipSample0(1, 30), seconds: 2 })
+    expect(c.map).toMatchObject({ kind: 'curve', src0: clipSample0(1), seconds: 2 })
     expect(c.exact).toBe(false)
     const f = one(p, 'f')
     expect([f.map, f.exact]).toEqual([{ kind: 'runs', runs: [] }, true])
@@ -205,7 +205,7 @@ describe('PiP sound', () => {
     expect(x.bus).toBe('pip:v2')
     expect(x.out0).toBe(samplesForFrames(30, 30))
     expect(x.n).toBe(samplesForFrames(30, 30))
-    expect(x.map).toEqual({ kind: 'runs', runs: [[0, 48000, clipSample0(0.51, 30), 1]] })
+    expect(x.map).toEqual({ kind: 'runs', runs: [[0, 48000, clipSample0(0.51), 1]] })
     expect(p.master.ceilingDb).toBeNull()                    // folded into the main sound: not "mixed"
   })
 
@@ -217,7 +217,7 @@ describe('PiP sound', () => {
     const p = plan(e)
     const x = one(p, 'p')
     expect(x.n).toBe(samplesForFrames(30, 30))              // 2 s of source → 1 s
-    expect(x.map).toEqual({ kind: 'rate', src0: clipSample0(0.5, 30), rate: 2, reverse: false, end: Number.MAX_SAFE_INTEGER })
+    expect(x.map).toEqual({ kind: 'rate', src0: clipSample0(0.5), rate: 2, reverse: false, end: Number.MAX_SAFE_INTEGER })
     expect(x.exact).toBe(false)
     expect(p.approx).toContain('varispeed')
   })

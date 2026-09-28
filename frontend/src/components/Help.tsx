@@ -115,6 +115,15 @@ export function Help() {
         them, and by their edges to trim. Edges, markers and the playhead snap
         together; the magnet above the timeline turns snapping on and off.
       </p>
+      {/* Item 26: Safari's Tab skips buttons and menus unless you hold
+          Option (or turn on "Press Tab to highlight each item"); the app
+          window has no such setting and needs neither. */}
+      <p className="help-tip" data-help-tip="safari-tab">
+        Using the editor in Safari? Safari&apos;s Tab key skips buttons unless you hold Option: press{' '}
+        <kbd className="kbd">{IS_MAC ? '⌥' : 'Alt'}</kbd><kbd className="kbd">Tab</kbd> to move through every
+        control, or turn on &ldquo;Press Tab to highlight each item&rdquo; in Safari Settings &rsaquo; Advanced.
+        The app window does not need either.
+      </p>
       {/* About: the build identity lives here and in the version's tooltip,
           not as developer text in the toolbar (QA-101). */}
       <section className="help-licences" aria-labelledby={`${titleId}-fonts`}>

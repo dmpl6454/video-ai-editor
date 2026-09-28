@@ -18,6 +18,7 @@ from typing import NamedTuple
 from ..edl import EDL
 from ..edl.schema import Clip
 from ..edl.keyframes import frame_exact_expr, is_keyframed
+from ..edl import clip_animations as _clip_anim
 from .effects import build_chromakey_filter
 from .sar import square_pixels_filter
 from .text_overlay import enable_expr
@@ -167,8 +168,10 @@ def pip_input_args(c: Clip, n: int, fps) -> list[str]:
     whole source range, a curve's in-anchored seek, a freeze's one frame),
     because its chain is v1's (`pip_retime`) and the frames it picks depend
     on what was decoded. Safe now that no input carries `-itsoffset`."""
-    if is_retimed(c):
-        from .compositor import clip_input_args
+    from .compositor import clip_input_args, v1_const_speed
+    if is_retimed(c) or v1_const_speed(c, fps) is not None:
+        # review RE: a 1x / constant-speed PIP runs on v1's in-anchored file
+        # clock too, so it is opened exactly as v1 opens it
         return clip_input_args(c, fps)
     pre = _tb.seek_preroll(c.in_, fps)
     seek = max(0.0, float(c.in_) - pre)
@@ -226,14 +229,20 @@ def pip_retime(c: Clip, fps) -> PipRetime:
     fail the moment the two disagree."""
     if getattr(c, "freeze", None) is not None:
         return PipRetime(_REBASE, f"fps={_tb.ffmpeg_rate(fps)},trim=end_frame=1,setpts=PTS-STARTPTS,", "")
-    sp = c.speed
-    if isinstance(sp, (int, float)) and sp and sp > 0 and float(sp) != 1.0:
-        return PipRetime(_REBASE, f"setpts=PTS/{float(sp)},", "")
-    from .compositor import _v1_curve_map
+    from .compositor import _v1_curve_map, v1_const_speed
+    from ..edl.speed_curve import (anchored_const_setpts_expr, anchored_setpts_expr, curve_seek,
+                                   curve_settb_expr, file_clock_expr)
+    const_sp = v1_const_speed(c, fps)
+    if const_sp is not None:
+        # review RE: 1x and a constant speed on v1's in-anchored file clock
+        fc = file_clock_expr(curve_seek(c.in_))
+        return PipRetime(f"setpts={fc}," if fc else "",
+                         f"settb={curve_settb_expr(_tb.rate_of(fps).numerator)},"
+                         f"setpts={anchored_const_setpts_expr(const_sp, float(c.in_))},",
+                         ":start_time=0")
     cm = _v1_curve_map(c)
     if cm is None:
         return PipRetime(_REBASE, "", "")
-    from ..edl.speed_curve import anchored_setpts_expr, curve_seek, curve_settb_expr, file_clock_expr
     fc = file_clock_expr(curve_seek(c.in_))
     return PipRetime(f"setpts={fc}," if fc else "",
                      f"settb={curve_settb_expr(_tb.rate_of(fps).numerator)},"
@@ -265,7 +274,11 @@ def pip_video_timing(n: int, first_frame: int, fps, retime: PipRetime | None = N
     `retime` (`pip_retime`) replaces the rebase with v1's clock and puts v1's
     speed stage before `fps=`: the grid then picks the same frames."""
     rt = retime or PipRetime(_REBASE, "", "")
-    return (f"{rt.head}{rt.retime}fps={_tb.ffmpeg_rate(fps)}{rt.anchor},"
+    # review RE: a one-frame PIP whose only frame lasts under half an output
+    # frame is held one frame longer before the grid (v1's rule), or `fps`
+    # rounds it away and the overlay has no picture
+    hold = f"tpad=stop_mode=clone:stop_duration={_tb.frame_duration(fps):.9f}," if n == 1 else ""
+    return (f"{rt.head}{rt.retime}{hold}fps={_tb.ffmpeg_rate(fps)}{rt.anchor},"
             f"tpad=stop={n}:stop_mode=clone,trim=end_frame={n},"
             f"setpts=PTS-STARTPTS+{int(first_frame)},")
 
@@ -305,14 +318,98 @@ def pip_audio_chain(c: Clip, input_label: str, label_out: str, *, rs: float,
             input_label = "anullsrc=channel_layout=stereo:sample_rate=48000,"
         chain = (f"{input_label}aresample=async=1:first_pts=0,"
                  f"aformat=channel_layouts=stereo:sample_rates=48000")
-        pre = _tb.seek_preroll(c.in_, fps)
-        if pre > 1e-9:
-            chain += f",atrim=start={pre:.6f},asetpts=PTS-STARTPTS"
-        from .audio_mix import speed_filters
+        from .compositor import clip_head_samples
+        from .audio_mix import head_trim, latency_prime_samples, speed_filters
+        head = clip_head_samples(c, fps)  # the input's own pre-roll: starts on S(in) (v1's rule, R9)
+        prime = min(head, latency_prime_samples(c))   # a voice effect's priming (review RE)
+        chain += head_trim(head - prime)
         chain += speed_filters(c)
-    chain += _audio_props_filters(c)
+        sp = c.speed_factor if c.speed_factor and c.speed_factor > 0 else 1.0
+        prime_out = prime / 48000.0 / sp
+    if curve_src is not None:
+        prime_out = 0.0
+    chain += _audio_props_filters(c, tag=label_out.strip("[]"), prime_out=prime_out)
     chain += f",apad=whole_len={m},atrim=end_sample={m}"
     return chain + tail + label_out
+
+
+#: swscale conversions of the blend stage: BT.709 limited <-> full-range RGB,
+#: the project's colour domain (INSTANT_PREVIEW_SPEC R12) — what the browser
+#: decodes the picture with before `mix-blend-mode` combines it.
+_TO_RGB = "scale=in_color_matrix=bt709:in_range=tv:out_range=pc"
+_TO_YUV = "scale=out_color_matrix=bt709:out_range=tv"
+
+
+def base_tags_filter(edl: EDL) -> str:
+    """`setparams` naming the colour tags the composed base carries — the
+    first main-track clip's source's (concat negotiates the lane to its
+    first input), untagged when v1 is empty (the black filler). The blended
+    layer is converted through RGB with explicit BT.709 and must carry the
+    base's tags again, or ffmpeg 8's colorspace negotiation converts one
+    side of the final `overlay` (render/canvas_bg.tags_filter)."""
+    from .canvas_bg import tags_filter
+    v1 = edl.get_track("v1")
+    first = next((c for c in sorted(v1.clips if v1 else [], key=lambda c: c.start) if isinstance(c, Clip)), None)
+    return tags_filter(first.src) if first is not None else "setparams=colorspace=unknown:range=unknown"
+
+
+def blend_overlay_parts(i: int, base: str, elem: str, *, x_expr: str, y_expr: str,
+                        enable: str, mode: str, out: str,
+                        base_tags: str = "setparams=colorspace=unknown:range=unknown") -> list[str]:
+    """Filter chains that composite PiP element `elem` onto `base` at
+    (x_expr, y_expr) inside `enable` with blend `mode` (edl/canvas_blend.py),
+    ending on `out`. Same placement and gate as the plain `overlay`.
+
+    1. The element is laid on a TRANSPARENT canvas-sized RGBA frame (built
+       from the base, so it has the base's timestamps): colour Cs where the
+       element is, its alpha α (shape, rotation edges, opacity) — `overlay`
+       onto a zero-alpha main keeps the element's own colour.
+    2. `lut2` computes B(Cb, Cs) per RGB plane against the base in RGB
+       (for add / linear burn, against the PREMULTIPLIED α·Cs / α·(1 − Cs):
+       CSS plus-lighter / plus-darker).
+    3. That result, carrying α (binarised for the two Porter-Duff modes, whose
+       lut2 output is already final), is overlaid on the UNTOUCHED base in
+       YUV: (1 − α)·Cb + α·B. Outside the element α = 0 and the base passes
+       through byte for byte — nothing else in the frame is converted."""
+    from ..edl.canvas_blend import blend_of, lut2_expr
+    b = blend_of(mode)
+    e = lut2_expr(mode)
+    u = f"{i}"
+    place = f"x='{x_expr}':y='{y_expr}':enable='{enable}'"
+    if not b.porter_duff:
+        parts = [
+            f"{base}split=3[pbt{u}][pbg{u}][pbk{u}]",
+            f"[pbt{u}]{_TO_RGB},format=gbrap,colorchannelmixer=aa=0[pbz{u}]",
+            f"{elem}{_TO_RGB},format=gbrap[pbe{u}]",
+            f"[pbz{u}][pbe{u}]overlay={place}:format=gbrp[pbl{u}]",
+            f"[pbl{u}]split=2[pbc{u}][pba{u}]",
+            f"[pbg{u}]{_TO_RGB},format=gbrp[pbb{u}]",
+            f"[pbc{u}]format=gbrp[pbs{u}]",
+        ]
+    else:
+        # The premultiplied layer is the element composited OVER opaque
+        # black: α·Cs, and 0 outside it (`premultiply` misreads a full-range
+        # RGB frame's alpha, measured: 200 at α 129 came out 199). Linear
+        # burn lays the NEGATED element: α·(1 − Cs).
+        neg = "lutrgb=r=negval:g=negval:b=negval," if mode == "linear_burn" else ""
+        parts = [
+            f"{base}split=4[pbt{u}][pbg{u}][pbk{u}][pbn{u}]",
+            f"[pbt{u}]{_TO_RGB},format=gbrap,colorchannelmixer=aa=0[pbz{u}]",
+            f"{elem}{_TO_RGB},format=gbrap,split=2[pbe{u}][pbf{u}]",
+            f"[pbz{u}][pbe{u}]overlay={place}:format=gbrp[pba{u}]",
+            f"[pbn{u}]{_TO_RGB},format=gbrp,colorchannelmixer=rr=0:gg=0:bb=0[pbo{u}]",
+            f"[pbf{u}]format=rgba,{neg}format=gbrap[pbq{u}]",
+            f"[pbo{u}][pbq{u}]overlay={place}:format=gbrp,format=gbrp[pbs{u}]",
+            f"[pbg{u}]{_TO_RGB},format=gbrp[pbb{u}]",
+        ]
+    parts.append(f"[pbb{u}][pbs{u}]lut2=c0='{e}':c1='{e}':c2='{e}'[pbx{u}]")
+    alpha = "alphaextract" + (",lut=c0='if(gt(val\\,0)\\,255\\,0)'" if b.porter_duff else "")
+    parts += [
+        f"[pba{u}]{alpha}[pbm{u}]",
+        f"[pbx{u}][pbm{u}]alphamerge,{_TO_YUV},format=yuva420p,{base_tags}[pby{u}]",
+        f"[pbk{u}][pby{u}]overlay=x=0:y=0:format=yuv420{out}",
+    ]
+    return parts
 
 
 def _on_render_clock(pips: list[tuple[str, Clip]], seams: clock.SeamTable
@@ -481,11 +578,25 @@ def build_pip_overlay_chain(
         scale_kf = is_keyframed(tx.scale)
         sc_static = (_max_key(tx.scale, 1.0) if scale_kf
                      else _scalar_or_last(tx.scale, 1.0))
+        # CLIP ANIMATION (wave E, F1; edl/clip_animations.py) on the element's
+        # own clock `(t - t0)`, over its visible RENDER window `re - rs`: an
+        # extra scale ×, x/y (canvas share) and rotation +, alpha fades and a
+        # blur mix, each at the matching stage below. `pipDraw`/StickerLayer
+        # mirror them. Review RE: planned over the LAYOUT length, an Out never
+        # played on an overlay ending at or after a transition seam (the
+        # render window is shorter) — it vanished mid-pose; stickers already
+        # used the render window (text_overlay.py), now one rule for both.
+        an = _clip_anim.plan_of(c, max(0.0, re - rs))
+        an_scale = an is not None and an.animates("scale")
+        # Built at the largest size the animation reaches, so its zoom only
+        # ever DOWN-scales pixels (the keyed-scale rule above).
+        an_peak = max(1.0, an.peak("scale")) if an_scale else 1.0
+        sc_build = sc_static * an_peak
         # Default PiP "1.0" = 35% of canvas. >1 = larger PiP.
         canvas_long = max(canvas.w, canvas.h)
         # Translate canvas-space scale to output-pixel scale
         out_long = max(out_w, out_h)
-        target_long = max(40, int(out_long * 0.35 * sc_static))
+        target_long = max(40, int(out_long * 0.35 * sc_build))
 
         # FRAMING. The element's box is not always the source's own shape:
         #
@@ -582,6 +693,18 @@ def build_pip_overlay_chain(
             parts.append(f"[{idx}:v]{pip_video_timing(n, f0, fps, retime)}{square_pixels_filter(c.src)}"
                          f"scale=w={target_long}:h=-1{scaled_label}")
 
+        # MIRROR / FLIP (Transform.flip_h/v, wave E): the element's picture,
+        # framed in its box, mirrored BEFORE its key, shape, rotation and
+        # opacity (CapCut's order; StickerLayer scales the box by −1 inside
+        # its rotation). No filter when unflipped: every other chain is
+        # byte-identical.
+        flips = (["hflip"] if getattr(tx, "flip_h", False) else []) + (
+            ["vflip"] if getattr(tx, "flip_v", False) else [])
+        if flips:
+            flipped = f"[pipf{i}]"
+            parts.append(f"{scaled_label}{','.join(flips)}{flipped}")
+            scaled_label = flipped
+
         # Optional chroma key BEFORE rotate/opacity so transparency survives.
         if getattr(c, "chromakey", None) is not None:
             keyed_label = f"[pipk{i}]"
@@ -612,12 +735,27 @@ def build_pip_overlay_chain(
         # local, like the UI), frame-exact (`frame_exact_expr`).
         kt = f"(t-{t0:.9f})"
 
+        # Animation blur (Blur In / Out): a blurred copy mixed over the shaped
+        # element, before it turns, so the mix turns with it.
+        if an is not None:
+            blur = _clip_anim.blur_mix_filters(
+                an, src=f"[pipbs{i}]", dst=f"[pipbd{i}]", uid=f"p{i}",
+                sigma=_clip_anim.blur_sigma(out_w, out_h), tvar=kt, alpha_input=True, t0=t0)
+            if blur:
+                parts.append(f"{scaled_label}format=yuva420p[pipbs{i}]")
+                parts.append(blur)
+                scaled_label = f"[pipbd{i}]"
+
         # Optional rotation. KEYED (review RD3): per frame, on a square
         # canvas big enough for any angle (hypot), so the overlay's centring
         # on overlay_w/2 keeps the pivot where the preview has it. It used to
         # take the LAST key for the whole clip — a keyed spin exported still.
-        if is_keyframed(tx.rotation):
-            re_ = frame_exact_expr(tx.rotation, kt)
+        an_rot = an is not None and an.animates("rotation")
+        if is_keyframed(tx.rotation) or an_rot:
+            re_ = (frame_exact_expr(tx.rotation, kt) if is_keyframed(tx.rotation)
+                   else f"{_scalar_or_last(tx.rotation, 0.0):.4f}")
+            if an_rot:
+                re_ = f"({re_})+({an.expr('rotation', kt)})"
             rotated = f"[pipr{i}]"
             parts.append(f"{scaled_label}rotate=a='({re_})*PI/180':c=black@0"
                          f":ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'{rotated}")
@@ -647,6 +785,17 @@ def build_pip_overlay_chain(
                 parts.append(f"{scaled_label}format=yuva420p,colorchannelmixer=aa={opa_static:.3f}{faded}")
                 scaled_label = faded
 
+        # Animation opacity: the linear alpha ramps (`fade` on the alpha
+        # plane; its `st` is stream time — the element sits at t0).
+        if an is not None and (an.fade_in is not None or an.fade_out is not None):
+            ramps = "".join(
+                f",fade=t={kind}:st={t0 + st:.3f}:d={d:.3f}:alpha=1"
+                for kind, ramp in (("in", an.fade_in), ("out", an.fade_out)) if ramp is not None
+                for st, d in (ramp,))
+            faded = f"[pipaf{i}]"
+            parts.append(f"{scaled_label}format=yuva420p{ramps}{faded}")
+            scaled_label = faded
+
         # Animated scale (QA-035): the element above is built at the largest
         # keyed scale; shrink it per frame to S(t)/S_max. Same mechanism the
         # text `pop` preset has always used (scale with eval=frame, then an
@@ -655,9 +804,11 @@ def build_pip_overlay_chain(
         # at `rs` via -itsoffset, so the local clock is (t - rs). LAST stage,
         # so every filter before it (shape geq, rotate, opacity) sees a fixed
         # frame size.
-        if scale_kf and sc_static > 0:
-            se = frame_exact_expr(tx.scale, kt)
-            ratio = f"(({se})/{sc_static:.6f})"
+        if (scale_kf or an_scale) and sc_static > 0:
+            se = frame_exact_expr(tx.scale, kt) if scale_kf else f"{sc_static:.6f}"
+            if an_scale:
+                se = f"({se})*({an.expr('scale', kt)})"
+            ratio = f"(({se})/{sc_build:.6f})"
             animated = f"[pips{i}]"
             parts.append(
                 f"{scaled_label}scale=w='max(2\\,trunc(iw*{ratio}/2)*2)'"
@@ -670,26 +821,49 @@ def build_pip_overlay_chain(
         sy = out_h / max(1, canvas.h)
         x_kf = tx.x
         y_kf = tx.y
+        # Animation travel: a share of the canvas, in output pixels.
+        ax = (f"+({an.expr('x', kt)})*{out_w}" if an is not None and an.animates("x") else "")
+        ay = (f"+({an.expr('y', kt)})*{out_h}" if an is not None and an.animates("y") else "")
         if is_keyframed(x_kf):
             xe = frame_exact_expr(x_kf, kt)
-            x_expr = f"({xe})*{sx:.6f}-overlay_w/2"
+            x_expr = f"({xe})*{sx:.6f}{ax}-overlay_w/2"
         else:
             xc = float(getattr(tx, "x", 0)) if isinstance(tx.x, (int, float)) else canvas.w / 2
-            x_expr = f"({xc * sx:.2f})-overlay_w/2"
+            x_expr = f"({xc * sx:.2f}){ax}-overlay_w/2"
         if is_keyframed(y_kf):
             ye = frame_exact_expr(y_kf, kt)
-            y_expr = f"({ye})*{sy:.6f}-overlay_h/2"
+            y_expr = f"({ye})*{sy:.6f}{ay}-overlay_h/2"
         else:
             yc = float(getattr(tx, "y", 0)) if isinstance(tx.y, (int, float)) else canvas.h / 2
-            y_expr = f"({yc * sy:.2f})-overlay_h/2"
+            y_expr = f"({yc * sy:.2f}){ay}-overlay_h/2"
 
         # The last BAKED clip, not the last clip — see `_last_baked` above.
         is_last = i == _last_baked
         next_label = out_label if is_last else f"[pip_post{i}]"
-        parts.append(
-            f"{cur}{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
-            f":enable='{enable_expr(rs, re, fps)}'{next_label}"
-        )
+        blend = str(getattr(c, "blend", "normal") or "normal")
+        if blend != "normal":
+            # CapCut blend mode (wave E, F2): the same placement, composited
+            # with the W3C formula instead of `over` — `blend_overlay_parts`.
+            parts.extend(blend_overlay_parts(
+                i, cur, scaled_label, x_expr=x_expr, y_expr=y_expr,
+                enable=enable_expr(rs, re, fps), mode=blend, out=next_label,
+                base_tags=base_tags_filter(edl)))
+        else:
+            # review RE: a PICTURE element (PNG / JPEG) is converted with the
+            # project's BT.709 on an untagged base, like the blend path
+            # (canvas_bg.picture_overlay_tags); a video element passes as is
+            from .canvas_bg import base_src_of, is_picture_source, picture_overlay_tags
+            pre, post = picture_overlay_tags(base_src_of(edl)) if is_picture_source(c.src) else ("", "")
+            if pre:
+                parts.append(f"{cur}{pre}[pipcs{i}]")
+                parts.append(
+                    f"[pipcs{i}]{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
+                    f":enable='{enable_expr(rs, re, fps)}',{post}{next_label}")
+            else:
+                parts.append(
+                    f"{cur}{scaled_label}overlay=x='{x_expr}':y='{y_expr}'"
+                    f":enable='{enable_expr(rs, re, fps)}'{next_label}"
+                )
         cur = next_label
         audio_clips.append(c)
 

@@ -1,0 +1,146 @@
+{
+ "blends": [
+  {
+   "id": "normal",
+   "label": "Normal",
+   "css": "normal",
+   "porter_duff": false
+  },
+  {
+   "id": "darken",
+   "label": "Darken",
+   "css": "darken",
+   "porter_duff": false
+  },
+  {
+   "id": "multiply",
+   "label": "Multiply",
+   "css": "multiply",
+   "porter_duff": false
+  },
+  {
+   "id": "color_burn",
+   "label": "Color Burn",
+   "css": "color-burn",
+   "porter_duff": false
+  },
+  {
+   "id": "linear_burn",
+   "label": "Linear Burn",
+   "css": "plus-darker",
+   "porter_duff": true
+  },
+  {
+   "id": "lighten",
+   "label": "Lighten",
+   "css": "lighten",
+   "porter_duff": false
+  },
+  {
+   "id": "screen",
+   "label": "Screen",
+   "css": "screen",
+   "porter_duff": false
+  },
+  {
+   "id": "color_dodge",
+   "label": "Color Dodge",
+   "css": "color-dodge",
+   "porter_duff": false
+  },
+  {
+   "id": "add",
+   "label": "Add",
+   "css": "plus-lighter",
+   "porter_duff": true
+  },
+  {
+   "id": "overlay",
+   "label": "Overlay",
+   "css": "overlay",
+   "porter_duff": false
+  },
+  {
+   "id": "soft_light",
+   "label": "Soft Light",
+   "css": "soft-light",
+   "porter_duff": false
+  },
+  {
+   "id": "hard_light",
+   "label": "Hard Light",
+   "css": "hard-light",
+   "porter_duff": false
+  },
+  {
+   "id": "difference",
+   "label": "Difference",
+   "css": "difference",
+   "porter_duff": false
+  },
+  {
+   "id": "exclusion",
+   "label": "Exclusion",
+   "css": "exclusion",
+   "porter_duff": false
+  }
+ ],
+ "canvas": {
+  "kinds": [
+   "color",
+   "blur",
+   "image"
+  ],
+  "blur_levels": [
+   {
+    "level": 1,
+    "label": "Light",
+    "sigma_frac": 0.012
+   },
+   {
+    "level": 2,
+    "label": "Medium",
+    "sigma_frac": 0.024
+   },
+   {
+    "level": 3,
+    "label": "Strong",
+    "sigma_frac": 0.04
+   },
+   {
+    "level": 4,
+    "label": "Heavy",
+    "sigma_frac": 0.06
+   }
+  ],
+  "blur_default": 2,
+  "blur_downscale": 4,
+  "swatches": [
+   "#000000",
+   "#FFFFFF",
+   "#1F1F1F",
+   "#7F7F7F",
+   "#E53935",
+   "#FB8C00",
+   "#FDD835",
+   "#43A047",
+   "#00ACC1",
+   "#1E88E5",
+   "#5E35B1",
+   "#D81B60",
+   "#F8BBD0",
+   "#FFE0B2"
+  ],
+  "image_exts": [
+   ".png",
+   ".jpg",
+   ".jpeg",
+   ".webp",
+   ".bmp",
+   ".tif",
+   ".tiff",
+   ".heic",
+   ".heif"
+  ]
+ }
+}

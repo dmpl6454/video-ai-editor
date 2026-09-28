@@ -5,6 +5,7 @@
 // edit — only video-track changes trigger an ffmpeg re-render.
 
 import { useEffect, useRef, useState } from 'react'
+import { textDrawOrder } from '../lib/textDrawOrder'
 import { useStore } from '../store'
 import type { EDL, TextClip } from '../types'
 import {
@@ -509,9 +510,10 @@ export function TextLayer({ edl, videoEl, clock, width, height }: Props) {
       const boxes: OverlayBox[] = []
 
       // Collect active text clips
-      const active: { c: TextClip; role: string; win: { start: number; end: number } }[] = []
+      const active: { c: TextClip; role: string; win: { start: number; end: number }; z: number }[] = []
       for (const tk of edl.tracks) {
         if (tk.type !== 'text' && tk.type !== 'captions') continue
+        const trackZ = Number((tk as { z?: unknown }).z ?? 0) || 0
         for (const c of tk.clips) {
           if (!isText(c)) continue
           // A window the renderer drops (wholly inside a consumed span) is
@@ -521,14 +523,16 @@ export function TextLayer({ edl, videoEl, clock, width, height }: Props) {
           // Half-open on the frame grid (QA-016) — mirror of the export's
           // enable_expr, so a cue change never shows both cues on one frame.
           if (!w.dropped && inEnableWindow(w.start, w.end, t, edl.canvas.fps)) {
-            active.push({ c, role: (c as TextClip & { role?: string }).role ?? 'default', win: w })
+            active.push({ c, role: (c as TextClip & { role?: string }).role ?? 'default', win: w, z: trackZ })
           }
         }
       }
 
-      // Sort by role priority: watermark drawn first (under), hook last (top)
-      const order = ['watermark', 'lower_third', 'caption', 'label', 'super', 'hook']
-      active.sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role))
+      // The export's own layer order (text_overlay.build_overlay_chain: track
+      // z, then start; later draws on top) — review RE: this sorted by ROLE,
+      // so a text drew OVER a caption the export draws on top of it (the
+      // captions track is z 13, the text tracks 10-12).
+      active.sort(textDrawOrder)
 
       for (const { c, role, win } of active) {
         const s = roleStyle(role)

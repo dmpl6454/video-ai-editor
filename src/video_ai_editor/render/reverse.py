@@ -27,12 +27,26 @@ reversed clip's first frame is the last frame the forward clip would show.
 It is keyed on the source's on-disk identity, the range and the rate, lives
 in `cache/reversed/` and is a render cache like any other (LRU byte budget:
 render.cache_budget).
+
+A reversed SPEED-CURVE clip (wave E, d2-followups item 21) is built on the
+SOURCE'S ABSOLUTE project grid instead: the whole grid frames
+`[floor(in), ceil(out))` (`intermediate_span`), and its view opens the file at
+a FRACTIONAL `in` = `ceil(out) - out` (`view_range`). A curve chain is
+anchored at `in` on the file clock (edl/speed_curve.py), so every piece of a
+split / cut / trim of the clip then reads the same file clock as the whole —
+the pieces' intermediates hold the same source frames at the same grid
+positions, a whole number of frames apart — exactly as a forward curve's
+pieces read their shared source. Built on the piece's own range, a piece's
+grid sat a fraction of a frame off the whole's (Hero at 30 fps: 25 of 76
+split points showed a frame one source frame off). Constant-speed reversed
+clips keep the range-anchored recipe (their splits were already exact).
 """
 from __future__ import annotations
 
 import contextvars
 import hashlib
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -47,7 +61,8 @@ from ..edl.schema import Clip
 from . import cancel as _cancel
 
 #: Bumped whenever the intermediate's recipe changes (it is part of the key).
-_RECIPE = "rev-v1"
+#: rev-v2 (wave E, X1): the sound of a segment starts on S(t0), cut in samples.
+_RECIPE = "rev-v2"
 #: Raw decoded frames one segment may hold while `reverse` buffers it.
 _SEGMENT_BYTES = 384 * 1024 * 1024
 #: Segment length bounds, in frames.
@@ -96,10 +111,41 @@ def _sar_of(c: Clip) -> str:
     return ana.sar_text if ana is not None else "1"
 
 
+def on_source_grid(c: Clip) -> bool:
+    """Whether `c`'s intermediate sits on the source's absolute project grid
+    (a speed CURVE, see the module docstring) rather than on its own range."""
+    from ..edl import speed_curve as _sc
+    return getattr(c, "freeze", None) is None and _sc.curve_points(c.speed) is not None
+
+
+def grid_frames(c: Clip, fps) -> tuple[int, int]:
+    """`(G0, G1)`: the project-grid frames `[floor(in), ceil(out))` a
+    source-grid intermediate spans (1 µs of float noise tolerated, so an
+    on-grid `in`/`out` is its own frame)."""
+    g0 = _tb.frame_of(_tb.floor_to_frame(float(c.in_), fps), fps)
+    g1 = _tb.frame_of(_tb.ceil_to_frame(float(c.out), fps), fps)
+    return g0, max(g0 + 1, g1)
+
+
+def intermediate_span(c: Clip, fps) -> tuple[float, int]:
+    """`(t0, M)`: the source time of the intermediate's first FORWARD frame
+    and the frames it holds. A range-anchored clip: `in` and
+    `frame_of(out - in)`; a source-grid one (a curve): `G0/R` and `G1 - G0`."""
+    if on_source_grid(c):
+        g0, g1 = grid_frames(c, fps)
+        return _tb.time_of(g0, fps), g1 - g0
+    return float(c.in_), max(1, _tb.frame_of(float(c.out) - float(c.in_), fps))
+
+
 def _key(c: Clip, fps) -> str:
     from .chunks import file_identity
     payload = {"r": _RECIPE, "file": file_identity(c.src), "src": str(c.src),
                "in": float(c.in_), "out": float(c.out), "fps": _tb.ffmpeg_rate(fps)}
+    if on_source_grid(c):
+        # The file is a function of the grid range alone: a split piece that
+        # shares its parent's grid shares its file.
+        del payload["in"], payload["out"]
+        payload["grid"] = list(grid_frames(c, fps))
     sar = _sar_of(c)
     if sar != "1":
         payload["sar"] = sar          # only then: every square key is unchanged
@@ -107,8 +153,9 @@ def _key(c: Clip, fps) -> str:
 
 
 def reversed_frames(c: Clip, fps) -> int:
-    """Frames the intermediate holds: the clip's whole source range."""
-    return max(1, _tb.frame_of(float(c.out) - float(c.in_), fps))
+    """Frames the intermediate holds: the clip's whole source range (on the
+    source grid for a curve, `intermediate_span`)."""
+    return intermediate_span(c, fps)[1]
 
 
 def _segment_frames(w: int, h: int, fps) -> int:
@@ -129,10 +176,13 @@ def _video_codec_args() -> list[str]:
 
 
 def _render_segment(c: Clip, fps, j0: int, n: int, s0: int, m: int, dst: Path, *,
-                    has_video: bool, has_audio: bool, vcodec: list[str]) -> None:
-    """Source frames [j0, j0+n) of clip `c` (and samples [s0, s0+m) of its
-    sound), reversed, into `dst`."""
-    t0 = float(c.in_) + _tb.time_of(j0, fps)
+                    has_video: bool, has_audio: bool, vcodec: list[str],
+                    start: float | None = None) -> None:
+    """Source frames [j0, j0+n) of clip `c`'s intermediate (and samples
+    [s0, s0+m) of its sound), reversed, into `dst`. `start` is the source
+    time of the intermediate's forward frame 0 (`intermediate_span`)."""
+    base = float(c.in_) if start is None else float(start)
+    t0 = base + _tb.time_of(j0, fps)
     pre = _tb.seek_preroll(t0, fps)
     seek = max(0.0, t0 - pre)
     span = pre + _tb.time_of(n + _SLACK_FRAMES, fps)
@@ -149,7 +199,12 @@ def _render_segment(c: Clip, fps, j0: int, n: int, s0: int, m: int, dst: Path, *
         a_in = "[0:a]"
     else:
         a_in = f"anullsrc=channel_layout=stereo:sample_rate={_SAMPLE_RATE},"
-    trim_pre = f"atrim=start={pre:.6f},asetpts=PTS-STARTPTS," if has_audio and pre > 1e-9 else ""
+    # the segment's sound starts on S(t0) (INSTANT_PREVIEW_SPEC R9's one
+    # rule, `timebase.edit_sample`): the input opens on S(seek); cut the rest
+    # in SAMPLES (a `start=` in seconds rounded on its own, one sample late
+    # about a third of the time at 29.97)
+    head = _tb.edit_sample(t0) - _tb.edit_sample(seek)
+    trim_pre = f"atrim=start_sample={head},asetpts=PTS-STARTPTS," if has_audio and head > 0 else ""
     parts.append(f"{a_in}aresample=async=1:first_pts=0,"
                  f"aformat=sample_fmts=s16:channel_layouts=stereo:sample_rates={_SAMPLE_RATE},"
                  f"{trim_pre}apad=whole_len={m},atrim=end_sample={m},"
@@ -185,7 +240,7 @@ def build_reversed(c: Clip, fps, cache_dir: Path) -> Path:
 
 def _build(c: Clip, fps, dst: Path) -> None:
     w, h, has_video, has_audio = _source_info(str(c.src))
-    total = reversed_frames(c, fps)
+    start, total = intermediate_span(c, fps)
     seg = _segment_frames(w, h, fps) if has_video else max(total, 1)
     spans = [(j0, min(seg, total - j0)) for j0 in range(0, total, seg)]
     vcodec = _video_codec_args() if has_video else []
@@ -200,7 +255,7 @@ def _build(c: Clip, fps, dst: Path) -> None:
         def _one(job) -> None:
             _k, j0, n, s0, m, path = job
             _render_segment(c, fps, j0, n, s0, m, path, has_video=has_video,
-                            has_audio=has_audio, vcodec=vcodec)
+                            has_audio=has_audio, vcodec=vcodec, start=start)
 
         from .chunks import _chunk_workers
         workers = max(1, min(len(jobs), _chunk_workers(len(jobs))))
@@ -248,11 +303,35 @@ def view_out(c: Clip) -> float:
     return float(c.out) - float(c.in_)
 
 
+def view_range(c: Clip, fps) -> tuple[float, float]:
+    """`(in, out)` of the reversed view. A range-anchored clip: `0` and
+    `view_out`. A source-grid one (a curve): `in` = `G1/R - out`, the file
+    time at which the clip's `out` sits, so the in-anchored curve clock
+    reads `T = out - source` like the whole clip's; `out` = `in + (out -
+    in)`, the `in` nudged by ulps (never by more than 1e-12 s) until the
+    view's span is the clip's own `out - in` bit for bit (`view_out`'s
+    footprint rule)."""
+    if not on_source_grid(c):
+        return 0.0, view_out(c)
+    span = view_out(c)
+    _g0, g1 = grid_frames(c, fps)
+    v_in = max(0.0, _tb.time_of(g1, fps) - float(c.out))
+    cand = v_in
+    for _ in range(64):
+        if (cand + span) - cand == span:
+            return cand, cand + span
+        cand = math.nextafter(cand, math.inf)
+        if cand - v_in > 1e-12:
+            break
+    return v_in, v_in + span
+
+
 def reversed_view(c: Clip, fps, cache_dir: Path) -> Clip:
     """`c` playing its reversed intermediate forwards (a deep copy)."""
     path = build_reversed(c, fps, cache_dir)
+    v_in, v_out = view_range(c, fps)
     return c.model_copy(deep=True, update={
-        "src": str(path), "in_": 0.0, "out": view_out(c), "reverse": False})
+        "src": str(path), "in_": v_in, "out": v_out, "reverse": False})
 
 
 def has_reversed(edl) -> bool:

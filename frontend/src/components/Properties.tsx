@@ -23,6 +23,13 @@ import { ColorField } from './ColorField'
 import { openCaptionStyle } from '../lib/captionStyleOpen'
 import { Icon } from './Icon'
 import { SpeedSection } from './speed/SpeedSection'
+import { CanvasSection } from './canvas/CanvasSection'
+import { BlendSection } from './canvas/BlendSection'
+import { VoiceEffectsSection } from './voice/VoiceEffectsSection'
+import { AnimationSection } from './anim/AnimationSection'
+import type { AnimFields } from '../lib/anim/clipAnim'
+import { FlipButtons } from './transform/FlipButtons'
+import { SectionIndex, sectionId } from './inspector/SectionIndex'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -223,6 +230,7 @@ function PropertiesPanel() {
   const setLiveTransform = useStore((s) => s.setLiveTransform)
   const framing = useStore((s) => s.framing)
   const setFraming = useStore((s) => s.setFraming)
+  const sessionId = useStore((s) => s.sessionId)   // wave E (F3): the voice audition
 
   if (!sel || !edl) return (
     <div className="props">
@@ -429,6 +437,8 @@ function PropertiesPanel() {
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · <MediaName src={c.src} />
       </div>
+      {/* review RE: a jump list — the media Inspector is ~2,200 px tall */}
+      <SectionIndex clipId={c.id} />
       {/* Timeline footprint = source duration / speed (effective_duration
           server-side); a 2x clip ends halfway through its source length. */}
       <ClipWindowNotice
@@ -482,6 +492,17 @@ function PropertiesPanel() {
           </label>
           )}
         </Section>
+
+      {!isAudioLane && (
+        // CapCut Animation (wave E, F1): In | Out | Combo on v1 and overlay
+        // lanes — render/compositor.py and pip.py bake it, the engine and
+        // pipDraw draw it live.
+        <Section label="Animation" onReset={() => dispatch('set_animation', {
+          clip_id: c.id, in: 'none', out: 'none', combo: 'none' })}>
+          <AnimationSection key={c.id} clipId={c.id} anim={c as unknown as AnimFields} clipSeconds={clipLen}
+            send={dispatch} />
+        </Section>
+      )}
 
       {!isAudioLane && (
         <Section label="Color" onReset={() => dispatch('color_grade', {
@@ -634,6 +655,14 @@ function PropertiesPanel() {
         <ChannelModeField clipId={c.id} src={c.src} audio={audio} />
       </Section>
 
+      {/* Wave E (F3): CapCut's voice changer on this clip's sound — every
+          lane with sound (components/voice, edl/voice_effects.py). */}
+      <Section label="Voice effects" onReset={audio?.voice_effect
+        ? () => dispatch('set_voice_effect', { clip_id: c.id, effect: 'none' }) : undefined}>
+        <VoiceEffectsSection sessionId={sessionId} clipId={c.id} effect={audio?.voice_effect}
+          intensity={audio?.voice_intensity} localT={localT} freeze={freeze !== null} src={c.src} send={dispatch} />
+      </Section>
+
       {!isAudioLane && (
       <Section label="Framing">
         {/* The only framing control used to be the toolbar's aspect buttons,
@@ -728,6 +757,15 @@ function PropertiesPanel() {
             </div>
           </>
         )}
+      </Section>
+      )}
+
+      {/* CapCut Canvas (wave E, F2): what fills a letterboxed main-track
+          clip's bars — components/canvas/CanvasSection. */}
+      {!isAudioLane && clip.t.id === 'v1' && (
+      <Section label="Canvas" onReset={(c as unknown as { canvas_bg?: unknown }).canvas_bg
+        ? () => dispatch('set_canvas_background', { clip_id: c.id, type: 'none' }) : undefined}>
+        <CanvasSection clipId={c.id} clip={c} sessionId={sessionId} send={dispatch} />
       </Section>
       )}
 
@@ -832,6 +870,14 @@ function PropertiesPanel() {
       </Section>
       )}
 
+      {/* Blend mode of an overlay clip (wave E, F2): components/canvas/BlendSection. */}
+      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && (
+      <Section label="Blend" onReset={(c as unknown as { blend?: string }).blend && (c as unknown as { blend?: string }).blend !== 'normal'
+        ? () => dispatch('set_blend_mode', { clip_id: c.id, mode: 'normal' }) : undefined}>
+        <BlendSection clipId={c.id} clip={c} send={dispatch} />
+      </Section>
+      )}
+
       {!isAudioLane && (
       <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
         clip_id: c.id, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1,
@@ -884,6 +930,9 @@ function PropertiesPanel() {
             onLive={(v) => setLiveTransform({ clipId: c.id, rotation: v })}
             onChange={(v) => dispatch('set_clip_transform', { clip_id: c.id, rotation: v, time: localT })} />
         </div>
+        {/* Mirror (wave E, F4b): flip_clip toggles Transform.flip_h / flip_v. */}
+        <FlipButtons clipId={c.id} transform={tx}
+          effects={(c as unknown as { effects?: { type?: unknown }[] }).effects} send={dispatch} />
         <div className="row" style={{ alignItems: 'center', gap: 6 }}>
           <Slider label="Opacity" min={0} max={1} step={0.05} value={opacity}
             format={(v) => `${v.toFixed(2)}`}
@@ -991,6 +1040,15 @@ function StickerProps({ c, trackLabel, canRaise, canLower, localT, dispatch }: {
           format={(v) => `${v.toFixed(0)}°`} onChange={(v) => setTx({ rotation: v })} />
         <Slider label="Opacity" min={0} max={1} step={0.05} value={opacity}
           format={(v) => `${v.toFixed(2)}`} onChange={(v) => setTx({ opacity: v })} />
+        <FlipButtons clipId={c.id} transform={tx} send={dispatch} />
+      </Section>
+
+      {/* CapCut Animation on a sticker (wave E, F1; text_overlay.py bakes it,
+          StickerLayer draws it). */}
+      <Section label="Animation" onReset={() => dispatch('set_animation', {
+        clip_id: c.id, in: 'none', out: 'none', combo: 'none' })}>
+        <AnimationSection key={c.id} clipId={c.id} anim={c as unknown as AnimFields} clipSeconds={duration}
+          send={dispatch} />
       </Section>
 
       <Section label="Timing">
@@ -1424,16 +1482,25 @@ function TextProps({ c, trackLabel, canvas, localT, dispatch }: {
   )
 }
 
+/** CapCut's names for sections this Inspector calls something else (review
+ *  RE: people searching "Background" or "Voice changer" did not find them). */
+const SECTION_AKA: Record<string, string> = {
+  Canvas: 'Background', 'Voice effects': 'Voice changer', Color: 'Adjust', Blend: 'Blend mode',
+}
+
 function Section({ label, children, onReset }: {
   label: string; children: React.ReactNode; onReset?: () => void;
 }) {
+  const aka = SECTION_AKA[label]
   return (
-    <div style={{ marginTop: 10 }}>
+    <div style={{ marginTop: 10 }} data-section={label} id={sectionId(label)} tabIndex={-1}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     margin: '8px 0 4px' }}>
         {/* The shared .section-label (styles.css): it was an inline
             `0.08 * 10 + 'em'` = 0.8em ("T I M I N G", QA-104). */}
-        <div className="section-label">{label}</div>
+        <div className="section-label" title={aka ? `${label} — "${aka}" in CapCut` : undefined}>
+          {label}{aka && <span className="section-aka"> · {aka}</span>}
+        </div>
         {onReset && (
           <button type="button" className="props-reset"
             onClick={onReset}

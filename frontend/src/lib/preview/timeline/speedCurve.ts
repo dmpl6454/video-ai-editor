@@ -150,6 +150,14 @@ export function anchoredTicks(ptsFile: number, TB: number, inS: number, cm: Curv
   return Math.trunc((outSeconds(cm, T) + CURVE_TICK_BIAS) / TB)
 }
 
+/** `anchored_const_ticks` (review RE): a CONSTANT speed (1x included) on the
+ *  same in-anchored file clock — T, or T / speed, the bias, truncated. */
+export function anchoredConstTicks(ptsFile: number, TB: number, inS: number, speed: number): number {
+  const T = ptsFile * TB - inS
+  const v = speed === 1 ? T : T / speed
+  return Math.trunc((v + CURVE_TICK_BIAS) / TB)
+}
+
 /** `frame_map.curve_retimer`: rebased input ticks → output ticks on a stream
  *  in time base `tb` (T = PTS·TB in double, the curve, /TB, truncated). */
 export function curveRetimer(cm: CurveMap, tb: { num: number; den: number }): (x: number) => number {

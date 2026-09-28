@@ -109,3 +109,21 @@ def test_the_export_emits_only_the_triangle_curve():
     preview must reproduce exactly; the others are pinned for completeness."""
     assert all("curve" not in f for c in DOC["emitted"] for f in c["fades"])
     assert DOC["emitted"] and all(c["fades"] or c["fade_in"] < 0.001 for c in DOC["emitted"])
+
+
+@pytest.mark.parametrize("case", DOC["gain_env"], ids=lambda c: f"{c['interp']}-{len(c['keyframes'])}")
+def test_gain_env_is_the_curve_at_every_sample(case):
+    """Wave E, item 25: the export's volume automation is PER SAMPLE — what
+    ffmpeg multiplied a DC signal by, in its ordinary 1024-sample packets, is
+    the envelope sampled at every sample's own time (values at the filter's
+    %.4f), a step switching ON its key's sample. The `volume=…:eval=frame`
+    it replaced held one gain per packet (measured through these cases: up
+    to 0.36-0.48 dB off the ramps inside a packet, a step 6 dB off for up to
+    a packet)."""
+    from video_ai_editor.edl.keyframes import sample
+    from video_ai_editor.edl.schema import Keyframe
+    env = Keyframe(keyframes=[(float(t), round(float(v), 4)) for t, v in case["keyframes"]],
+                   interp=case["interp"])
+    assert case["filter"].startswith("aeval=")
+    worst = max(abs(g - 10 ** (sample(env, i / SR) / 20)) for i, g in case["samples"])
+    assert worst <= 1e-6, worst

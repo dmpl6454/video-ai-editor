@@ -26,6 +26,7 @@ from ..edl.schema import TextClip, Sticker
 from ..edl.keyframes import frame_exact_expr, is_keyframed, sample
 from .. import platformutil as _pu
 from ..edl import timebase
+from ..edl import clip_animations as _clip_anim
 from . import clock
 from . import shaping as _shaping
 
@@ -1365,11 +1366,20 @@ def collect_stickers(edl: EDL) -> list[Sticker]:
 
 
 def _sticker_is_animated(s: Sticker) -> bool:
-    """A sticker animates server-side if any of x / y / opacity has keyframes.
-    Scale + rotation animate in the browser preview only — the render bakes
-    them as their current (last) value."""
+    """A sticker animates server-side if any of x / y / opacity has keyframes
+    or it carries a clip animation (wave E, F1). Keyed scale + rotation
+    animate in the browser preview only — the render bakes them as their
+    current (last) value."""
     tx = s.transform
-    return any(is_keyframed(getattr(tx, p)) for p in ("x", "y", "opacity"))
+    return (any(is_keyframed(getattr(tx, p)) for p in ("x", "y", "opacity"))
+            or _clip_anim.has_animation(s))
+
+
+def _sticker_anim_peak(s: Sticker) -> float:
+    """How much larger than its pose a sticker's animation draws it (≥ 1):
+    the small PNG is rendered that large so the zoom only down-scales."""
+    pl = _clip_anim.plan_of(s, max(0.0, s.end - s.start))
+    return max(1.0, pl.peak("scale")) if pl is not None and pl.animates("scale") else 1.0
 
 
 def _scalar_or_last(v: float | dict | object, default: float = 0.0) -> float:
@@ -1385,16 +1395,34 @@ def _scalar_or_last(v: float | dict | object, default: float = 0.0) -> float:
     return float(sorted(kfs, key=lambda p: p[0])[-1][1])
 
 
+def _mirrored(img: "Image.Image", tx) -> "Image.Image":
+    """A sticker's image mirrored by its Transform.flip_h / flip_v (wave E):
+    before its rotation, like every other layer (StickerLayer scales by −1
+    inside its rotate)."""
+    if getattr(tx, "flip_h", False):
+        img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if getattr(tx, "flip_v", False):
+        img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    return img
+
+
+def _flip_key(tx) -> str:
+    """The cache-key suffix of a flipped sticker ("" unflipped: every
+    existing key is unchanged)."""
+    return ("|fh" if getattr(tx, "flip_h", False) else "") + ("|fv" if getattr(tx, "flip_v", False) else "")
+
+
 def _render_sticker_smallpng(sticker: Sticker, canvas_w: int, canvas_h: int,
-                             dst: Path) -> tuple[int, int] | None:
-    """Render the sticker PNG at its natural size (no canvas padding).
+                             dst: Path, mult: float = 1.0) -> tuple[int, int] | None:
+    """Render the sticker PNG at its natural size (no canvas padding), `mult`
+    times its pose's size (an animation's peak zoom).
     Returns (w, h) of the resulting PNG, or None on failure."""
     try:
         src = Image.open(sticker.src).convert("RGBA")
     except Exception:
         return None
     tx = sticker.transform
-    scale = _scalar_or_last(tx.scale, 1.0)
+    scale = _scalar_or_last(tx.scale, 1.0) * mult
     rotation = _scalar_or_last(tx.rotation, 0.0)
     base = max(canvas_w, canvas_h)
     target_long = max(16, int(base * 0.22 * scale))
@@ -1405,7 +1433,7 @@ def _render_sticker_smallpng(sticker: Sticker, canvas_w: int, canvas_h: int,
     else:
         th = target_long
         tw = max(8, int(sw * (th / sh)))
-    img = src.resize((tw, th), Image.LANCZOS)
+    img = _mirrored(src.resize((tw, th), Image.LANCZOS), tx)
     if abs(rotation) > 0.01:
         img = img.rotate(-rotation, resample=Image.BICUBIC, expand=True)
     _save_png_atomic(img, dst)
@@ -1426,12 +1454,17 @@ def cache_animated_sticker_pngs(edl: EDL, cache_dir: Path
             continue
         scale = _scalar_or_last(s.transform.scale, 1.0)
         rot = _scalar_or_last(s.transform.rotation, 0.0)
+        mult = _sticker_anim_peak(s)
+        # the peak only enters the key when it is not 1: every existing
+        # animated sticker keeps its cache file
+        peak_key = "" if mult == 1.0 else f"|x{mult:.4f}"
         key = hashlib.sha256(
-            f"sa|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scale:.3f}|{rot:.1f}|{Path(s.src).stat().st_mtime}".encode()
+            f"sa|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scale:.3f}|{rot:.1f}|{Path(s.src).stat().st_mtime}{peak_key}"
+            f"{_flip_key(s.transform)}".encode()
         ).hexdigest()[:16]
         dst = cache_dir / f"sa_{key}.png"
         if not _png_is_valid(dst):
-            sz = _render_sticker_smallpng(s, canvas.w, canvas.h, dst)
+            sz = _render_sticker_smallpng(s, canvas.w, canvas.h, dst, mult)
             if sz is None:
                 continue
         try:
@@ -1462,7 +1495,8 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
         opacity = float(tx.opacity if not isinstance(tx.opacity, dict) else 1)
         rotation = float(tx.rotation if not isinstance(tx.rotation, dict) else 0)
         key = hashlib.sha256(
-            f"st|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scalar:.3f}|{x:.1f},{y:.1f}|{opacity:.2f}|{rotation:.1f}|{Path(s.src).stat().st_mtime}".encode()
+            f"st|{s.id}|{s.src}|{canvas.w}x{canvas.h}|{scalar:.3f}|{x:.1f},{y:.1f}|{opacity:.2f}|{rotation:.1f}|{Path(s.src).stat().st_mtime}"
+            f"{_flip_key(tx)}".encode()
         ).hexdigest()[:16]
         dst = cache_dir / f"st_{key}.png"
         if not _png_is_valid(dst):
@@ -1480,7 +1514,7 @@ def cache_sticker_pngs(edl: EDL, cache_dir: Path) -> list[tuple[Sticker, Path]]:
             else:
                 th = target_long
                 tw = max(8, int(sw * (th / sh)))
-            sticker_img = src.resize((tw, th), Image.LANCZOS)
+            sticker_img = _mirrored(src.resize((tw, th), Image.LANCZOS), tx)
             if abs(rotation) > 0.01:
                 sticker_img = sticker_img.rotate(-rotation, resample=Image.BICUBIC, expand=True)
                 tw, th = sticker_img.size
@@ -1535,8 +1569,33 @@ def enable_expr(rs: float, re: float, fps: float | int | None) -> str:
     return f"gte(t\\,{lo:.6f})*lt(t\\,{hi:.6f})"
 
 
+def _looped_input_seconds(rs: float, re: float) -> float:
+    """`-t` of a looped overlay PNG placed at `rs` (`-itsoffset`): its
+    render window, never longer (wave E gate, X2). Past the v1 base's end a
+    longer input drives `overlay` on by itself — the render grew by the
+    slack (measured: 255 frames for a 240-frame plan with a keyed-opacity
+    sticker ending at the end). Inside the window nothing changes: the
+    `enable` gate closes at `re`, before the next frame the slack held. A
+    microsecond floor keeps a zero-length window a valid input."""
+    return max(1e-6, float(re) - float(rs))
+
+
+def _picture_overlay(cur: str, elem: str, opts: str, nxt: str, i: int,
+                     relabel: tuple[str, str]) -> list[str]:
+    """`cur` + `elem` composited by `overlay={opts}` into `nxt`: with the
+    base labelled BT.709 around it when the base is untagged (`relabel`,
+    canvas_bg.picture_overlay_tags — review RE: a sticker / text PNG was
+    converted with swscale's BT.601 default, 16 luma levels off the engine's
+    and the blend path's BT.709)."""
+    pre, post = relabel
+    if not pre:
+        return [f"{cur}{elem}overlay={opts}{nxt}"]
+    return [f"{cur}{pre}[tcs{i}]", f"[tcs{i}]{elem}overlay={opts},{post}{nxt}"]
+
+
 def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
-                      canvas, out_w: int, out_h: int, rs: float, re: float) -> list[str]:
+                      canvas, out_w: int, out_h: int, rs: float, re: float,
+                      relabel: tuple[str, str] = ("", "")) -> list[str]:
     """Filters for an animated-transform text clip (QA-036).
 
     The input is the tight PNG from cache_xform_text_pngs (anchor at its
@@ -1603,10 +1662,48 @@ def _xform_text_parts(item: dict, idx: int, i: int, cur: str, next_label: str,
         y_terms.append(f"-{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
     elif a_out == "slide_down":
         y_terms.append(f"+{off:.1f}*clip((t-{re - d:.4f})/{d:.4f}\\,0\\,1)")
-    parts.append(
-        f"{cur}{pre}overlay=x='{x_c}-overlay_w/2':y='{''.join(y_terms)}'"
-        f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}")
+    parts.extend(_picture_overlay(
+        cur, pre, f"x='{x_c}-overlay_w/2':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, canvas.fps)}'",
+        next_label, i, relabel))
     return parts
+
+
+def _sticker_anim_parts(parts: list[str], an, stream: str, i: int, *, tvar: str, rs: float,
+                        out_w: int, out_h: int, peak: float) -> tuple[str, str, str]:
+    """A sticker's clip-animation stages, in pip.py's order: blur mix →
+    rotate (a hypot square, so the centre stays put) → alpha fades; the zoom
+    (`_sticker_anim_zoom`) runs after the sticker's opacity. Returns the new
+    stream label and the x / y travel terms for the overlay."""
+    blur = _clip_anim.blur_mix_filters(
+        an, src=f"[stbs{i}]", dst=f"[stbd{i}]", uid=f"s{i}", sigma=_clip_anim.blur_sigma(out_w, out_h),
+        tvar=tvar, alpha_input=True, t0=rs)
+    if blur:
+        parts.append(f"{stream}format=yuva420p[stbs{i}]")
+        parts.append(blur)
+        stream = f"[stbd{i}]"
+    chain: list[str] = []
+    if an.animates("rotation"):
+        chain.append(f"rotate=a='({an.expr('rotation', tvar)})*PI/180':c=black@0"
+                     f":ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'")
+    ramps = [f"fade=t={kind}:st={rs + st:.3f}:d={d:.3f}:alpha=1"
+             for kind, ramp in (("in", an.fade_in), ("out", an.fade_out)) if ramp is not None
+             for st, d in (ramp,)]
+    if ramps:
+        chain.append("format=yuva420p," + ",".join(ramps))
+    if chain:
+        parts.append(f"{stream}format=yuva420p,{','.join(chain)}[sta{i}]")
+        stream = f"[sta{i}]"
+    ax = f"+({an.expr('x', tvar)})*{out_w}" if an.animates("x") else ""
+    ay = f"+({an.expr('y', tvar)})*{out_h}" if an.animates("y") else ""
+    return stream, ax, ay
+
+
+def _sticker_anim_zoom(an, tvar: str, peak: float) -> str:
+    """The animation's per-frame zoom, the LAST stage before the overlay (so
+    nothing after it sees a varying size — pip.py's rule)."""
+    ratio = f"(({an.expr('scale', tvar)})/{peak:.6f})"
+    return (f"scale=w='max(2\\,trunc(iw*{ratio}/2)*2)'"
+            f":h='max(2\\,trunc(ih*{ratio}/2)*2)':eval=frame")
 
 
 def build_overlay_chain(
@@ -1642,6 +1739,8 @@ def build_overlay_chain(
     Export has no TextLayer/StickerLayer, so it always bakes both regardless
     of this flag; this only ever changes what the in-app preview looks like.
     """
+    from .canvas_bg import base_src_of, picture_overlay_tags
+    relabel = picture_overlay_tags(base_src_of(edl))     # review RE: BT.709 on an untagged base
     text_paired = [] if preview else cache_text_pngs(edl, cache_dir)
     xform_texts = [] if preview else cache_xform_text_pngs(edl, cache_dir)
     static_stickers = [] if preview else cache_sticker_pngs(edl, cache_dir)
@@ -1747,21 +1846,41 @@ def build_overlay_chain(
         # them, never the layout `start`, or the pts and the gate would sit
         # `overlap` seconds apart and the item would open on its final frame.
         rs, re = float(item["rs"]), float(item["re"])
-        if item["kind"] == "anim" and is_keyframed(item["sticker"].transform.opacity):
-            dur = max(0.5, re - rs) + 0.5
+        if item["kind"] == "anim" and _clip_anim.has_animation(item["sticker"]):
+            # A clip animation moves every frame: a frame per OUTPUT frame
+            # (the project rate), placed at `rs` like an animated text — and
+            # no longer than its window (+ one frame): the half-second of
+            # slack the keyed paths add outlives v1 at the timeline's end and
+            # the render grows by it (measured: 255 frames for a 240-frame
+            # plan with a keyed-opacity sticker ending at the end; one frame
+            # of slack still made it 961 of 960).
+            dur = max(0.0, re - rs)
+            extra_inputs += ["-itsoffset", f"{rs:.6f}",
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-t", f"{dur:.6f}", "-i", str(item["png"])]
+        elif item["kind"] == "anim" and is_keyframed(item["sticker"].transform.opacity):
+            # Exactly the window (wave E gate, X2), like the animated sticker
+            # above: the old window + 0.5 s outlived v1 at the timeline's end
+            # and drove `overlay` 0.5 s past the plan (255 of 240 frames) —
+            # and at the PROJECT rate: a 30 fps input's last frame sits past
+            # a 24 fps timeline's last frame (193 of 192), and a keyed value
+            # is sampled on the output grid, where the editor samples it.
+            dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
-                             "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-t", f"{dur:.6f}", "-i", str(item["png"])]
         elif item["kind"] == "anim_text":
-            dur = max(0.5, re - rs) + 0.5
+            dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
-                             "-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(item["png"])]
+                             "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
+                             "-t", f"{dur:.6f}", "-i", str(item["png"])]
         elif item["kind"] == "xform_text":
             # At the PROJECT rate: a transform that moves every frame must
             # have a frame for every output frame, or a 60 fps project steps.
-            dur = max(0.5, re - rs) + 0.5
+            dur = _looped_input_seconds(rs, re)
             extra_inputs += ["-itsoffset", f"{rs:.3f}",
                              "-loop", "1", "-framerate", timebase.ffmpeg_rate(canvas.fps),
-                             "-t", f"{dur:.3f}", "-i", str(item["png"])]
+                             "-t", f"{dur:.6f}", "-i", str(item["png"])]
         else:
             extra_inputs += ["-i", str(item["png"])]
         is_last = i == len(items) - 1
@@ -1778,12 +1897,11 @@ def build_overlay_chain(
                 # static item whose PNG doesn't carry its own opacity.
                 pre += f",format=rgba,colorchannelmixer=aa={opa:.3f}"
             parts.append(pre + scaled)
-            parts.append(
-                f"{cur}{scaled}overlay=enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
-            )
+            parts.extend(_picture_overlay(cur, scaled, f"enable='{enable_expr(rs, re, canvas.fps)}'",
+                                          next_label, i, relabel))
         elif item["kind"] == "xform_text":
             parts.extend(_xform_text_parts(item, idx, i, cur, next_label, canvas,
-                                           out_w, out_h, rs, re))
+                                           out_w, out_h, rs, re, relabel))
         elif item["kind"] == "anim_text":
             tc = item["text_clip"]
             role = item["role"]
@@ -1858,10 +1976,9 @@ def build_overlay_chain(
                 x_expr = "(main_w-overlay_w)/2"
             else:
                 x_expr = f"{cx:.2f}*(1-overlay_w/main_w)"
-            parts.append(
-                f"{cur}{preprocessed}overlay=x='{x_expr}':y='{''.join(y_terms)}'"
-                f":enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
-            )
+            parts.extend(_picture_overlay(
+                cur, preprocessed, f"x='{x_expr}':y='{''.join(y_terms)}':enable='{enable_expr(rs, re, canvas.fps)}'",
+                next_label, i, relabel))
         else:
             s: Sticker = item["sticker"]
             sw, sh = item["size"]  # PNG natural pixel size (canvas-aligned)
@@ -1878,17 +1995,32 @@ def build_overlay_chain(
             scaled_label = f"[ovs{i}]"
             parts.append(f"[{idx}:v]scale={sticker_out_w}:{sticker_out_h}{scaled_label}")
             sticker_stream = scaled_label
+            # CLIP ANIMATION (wave E, F1): over the render window, on the
+            # clock `(t - rs)`; StickerLayer mirrors every stage.
+            an = _clip_anim.plan_of(s, re - rs)
+            ax = ay = ""
+            if an is not None:
+                sticker_stream, ax, ay = _sticker_anim_parts(
+                    parts, an, sticker_stream, i, tvar=tvar, rs=rs, out_w=out_w, out_h=out_h,
+                    peak=_sticker_anim_peak(s))
 
             # Position. Center on (x, y): subtract overlay_w/_h via ffmpeg vars.
             if is_keyframed(tx.x):
                 xe = frame_exact_expr(tx.x, tvar)
-                xexpr = f"({xe})*{sx:.6f}-overlay_w/2"
+                xexpr = f"({xe})*{sx:.6f}{ax}-overlay_w/2"
+            elif an is not None:
+                # centred on overlay_w: the animation rotates/zooms the frame
+                xc = _scalar_or_last(tx.x, canvas.w / 2)
+                xexpr = f"{xc * sx:.2f}{ax}-overlay_w/2"
             else:
                 xc = _scalar_or_last(tx.x, canvas.w / 2)
                 xexpr = f"{xc * sx - sticker_out_w / 2:.2f}"
             if is_keyframed(tx.y):
                 ye = frame_exact_expr(tx.y, tvar)
-                yexpr = f"({ye})*{sy:.6f}-overlay_h/2"
+                yexpr = f"({ye})*{sy:.6f}{ay}-overlay_h/2"
+            elif an is not None:
+                yc = _scalar_or_last(tx.y, canvas.h / 2)
+                yexpr = f"{yc * sy:.2f}{ay}-overlay_h/2"
             else:
                 yc = _scalar_or_last(tx.y, canvas.h / 2)
                 yexpr = f"{yc * sy - sticker_out_h / 2:.2f}"
@@ -1914,8 +2046,11 @@ def build_overlay_chain(
                 else:
                     parts.append(f"{sticker_stream}null{preprocessed}")
 
-            parts.append(
-                f"{cur}{preprocessed}overlay=x='{xexpr}':y='{yexpr}':enable='{enable_expr(rs, re, canvas.fps)}'{next_label}"
-            )
+            if an is not None and an.animates("scale"):
+                parts.append(f"{preprocessed}{_sticker_anim_zoom(an, tvar, _sticker_anim_peak(s))}[ovz{i}]")
+                preprocessed = f"[ovz{i}]"
+            parts.extend(_picture_overlay(
+                cur, preprocessed, f"x='{xexpr}':y='{yexpr}':enable='{enable_expr(rs, re, canvas.fps)}'",
+                next_label, i, relabel))
         cur = next_label
     return ";".join(parts), extra_inputs, cur

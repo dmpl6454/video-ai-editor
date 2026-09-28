@@ -37,6 +37,7 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
     ("apply_brand_kit", "end_card"): "read",
     ("apply_lut", "src"): "read",
     ("apply_lut", "lut_path"): "read",   # alias of src; the handler resolves it into src BEFORE _safe_src
+    ("set_canvas_background", "image"): "read",   # wave E F2: a CapCut canvas picture
     ("find_broll", "bin"): "read",
     ("import_srt", "path"): "read",
     ("match_style", "reference"): "read",
@@ -87,7 +88,7 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
 }
 
 #: For the count pin in tests/test_path_guards.py and test_prompt_contracts.py.
-PATH_ARGS_COUNT = 23   # +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt)
+PATH_ARGS_COUNT = 24   # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt)
 
 
 def guarded_args(kind: PathGuard) -> frozenset[tuple[str, str]]:

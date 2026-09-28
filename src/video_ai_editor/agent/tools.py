@@ -40,6 +40,58 @@ def _speed_preset_list() -> str:
     return ", ".join(f"{p.id} ({p.label}: {p.hint.lower()})" for p in PRESETS)
 
 
+def _anim_ids(kind: str) -> list[str]:
+    """`set_animation`'s enums, from the ONE preset table
+    (`edl/clip_animations.py`), which the Inspector also reads."""
+    from ..edl.clip_animations import PRESET_IDS
+    return list(PRESET_IDS[kind])
+
+
+def _anim_list(kind: str) -> str:
+    from ..edl.clip_animations import PRESETS
+    return ", ".join(f"{p.id} ({p.hint[0].lower() + p.hint[1:]})" for p in PRESETS[kind])
+
+
+def _blend_ids() -> list[str]:
+    """`set_blend_mode.mode`, from the ONE table (`edl/canvas_blend.py`)."""
+    from ..edl.canvas_blend import BLEND_IDS
+    return list(BLEND_IDS)
+
+
+def _blend_list() -> str:
+    from ..edl.canvas_blend import BLENDS
+    # the porter-duff pair are also known by their Photoshop names
+    return ", ".join(f"{b.id} ({b.aliases[0]})" if b.porter_duff and b.aliases else b.id for b in BLENDS)
+
+
+def _canvas_kinds() -> list[str]:
+    """`set_canvas_background.type`, from the ONE table, plus 'none'."""
+    from ..edl.canvas_blend import CANVAS_KINDS
+    return [*CANVAS_KINDS, "none"]
+
+
+def _canvas_blur_max() -> int:
+    from ..edl.canvas_blend import CANVAS_BLUR_LEVELS
+    return len(CANVAS_BLUR_LEVELS)
+
+
+def _anim_dur_range() -> tuple[float, float]:
+    from ..edl.clip_animations import ANIM_DUR_RANGE
+    return (float(ANIM_DUR_RANGE[0]), float(ANIM_DUR_RANGE[1]))
+
+
+def _voice_effect_ids() -> list[str]:
+    """The `set_voice_effect.effect` enum, from the ONE preset table
+    (`edl/voice_effects.py`), which the Inspector also reads."""
+    from ..edl.voice_effects import PRESET_IDS
+    return list(PRESET_IDS)
+
+
+def _voice_effect_list() -> str:
+    from ..edl.voice_effects import PRESETS
+    return ", ".join(f"{p.id} ({p.label}: {p.hint[0].lower() + p.hint[1:]})" for p in PRESETS)
+
+
 def _t(name: str, description: str, category: str, properties: dict, required: list[str] | None = None) -> ToolSchema:
     return {
         "name": name,
@@ -157,6 +209,49 @@ EDIT_TOOLS = [
         "keep_pitch": {"type": "boolean",
                        "description": "Omit to keep the clip's current setting"}},
        ["clip_id"]),
+    _t("set_voice_effect",
+       "Voice changer (CapCut's Voice effects): put a voice effect on the SOUND of a clip "
+       "— `clip_id`, several `clip_ids`, or every clip on a `track` (e.g. 'vo' for the "
+       "voice-over, 'v1' for the main video, 'music', an overlay lane) — or remove it with "
+       "effect 'none'. Effects: " + _voice_effect_list() + ". `intensity` 0-1 scales it "
+       "(1 = the preset as designed, the default; 0.5 = half the pitch shift / echo / "
+       "reverb / filtering). Pitch effects keep the clip's length and timing. One undo step.",
+       "edit",
+       {"clip_id": {"type": "string"},
+        "clip_ids": {"type": "array", "items": {"type": "string"}},
+        "track": {"type": "string", "description": "Every clip on this lane (v1, v2, music, vo, a1…)"},
+        "effect": {"type": "string", "enum": [*_voice_effect_ids(), "none"],
+                   # The handler also takes "Hall", "walkie talkie", "helium"
+                   # (edl/voice_effects.preset_id) and names them in its refusal.
+                   "x-validated-by-handler": True,
+                   "description": "A voice-effect preset id, or 'none' to remove it"},
+        "intensity": {"type": "number", "description": "0-1 (default 1, or unchanged for the same effect)"}},
+       ["effect"]),
+    _t("set_animation",
+       "Clip animation (CapCut's Animation: In / Out / Combo) on a media clip — the main "
+       "video track or an overlay (picture-in-picture) lane — or a sticker: `clip_id`, "
+       "several `clip_ids`, or every clip on a `track`. `in` plays as the clip appears: "
+       + _anim_list("in") + ". `out` plays as it leaves: " + _anim_list("out") + ". "
+       "`combo` loops over the whole clip: " + _anim_list("combo") + ". A combo replaces "
+       "In and Out (and choosing an In or Out removes a combo). 'none' removes that side; "
+       "an argument you leave out is unchanged. `in_duration` / `out_duration` in seconds "
+       "(0.1-3, default 0.5; each side is also capped at 40% of the clip, so they never "
+       "overlap). It rides on top of the clip's own position/scale/rotation and keyframes. "
+       "Text titles have their own anim_in/anim_out (add_text). One undo step.",
+       "edit",
+       {"clip_id": {"type": "string"},
+        "clip_ids": {"type": "array", "items": {"type": "string"}},
+        "track": {"type": "string", "description": "Every clip on this lane (v1, v2, stickers…)"},
+        # The handler also takes "Zoom In" / "zoom-in" / "fade" and names the
+        # presets in its refusal (edl/clip_animations.preset_id).
+        "in": {"type": "string", "enum": [*_anim_ids("in"), "none"], "x-validated-by-handler": True,
+               "description": "An In preset id, or 'none'"},
+        "out": {"type": "string", "enum": [*_anim_ids("out"), "none"], "x-validated-by-handler": True,
+                "description": "An Out preset id, or 'none'"},
+        "combo": {"type": "string", "enum": [*_anim_ids("combo"), "none"], "x-validated-by-handler": True,
+                  "description": "A Combo preset id, or 'none'"},
+        "in_duration": {"type": "number", "description": "Seconds the In lasts (0.1-3)"},
+        "out_duration": {"type": "number", "description": "Seconds the Out lasts (0.1-3)"}}),
     _t("freeze_frame",
        "Freeze frame (CapCut's Freeze): hold the frame at `time` (the playhead, "
        "timeline seconds) for `duration` seconds (default 3) on the main video "
@@ -191,6 +286,39 @@ EDIT_TOOLS = [
                                    "omitted (default 'cover' when both are absent)."},
        },
        ["clip_id", "fit"]),
+    # Wave E, lane F2 — the ONE table is edl/canvas_blend.py.
+    _t("set_canvas_background",
+       "CapCut Canvas: fill the black bars of a letterboxed main-track clip. type 'blur' = a "
+       f"blurred copy of the clip itself behind it (blur 1-{_canvas_blur_max()}, light to heavy); 'color' = a solid "
+       "colour (#RRGGBB or a name like black/white); 'image' = a picture from the project "
+       "(`image`, its path) scaled to cover the canvas; 'none' = back to black bars. Only "
+       "clips that are letterboxed (fit 'contain') show it. all=true applies it to EVERY "
+       "main-track clip in one undo step; all=true with a clip_id and no type copies that "
+       "clip's background to all clips.",
+       "edit",
+       {
+           "clip_id": {"type": "string", "description": "A main-track (v1) clip."},
+           "type": {"type": "string", "enum": _canvas_kinds(),
+                    "x-validated-by-handler": True},
+           "color": {"type": "string", "description": "#RRGGBB or a colour name (type color)."},
+           "blur": {"type": "integer",
+                    "description": f"Blur strength 1-{_canvas_blur_max()} (type blur; default 2)."},
+           "image": {"type": "string", "description": "Path of a picture file (type image)."},
+           "all": {"type": "boolean", "description": "Apply to every main-track clip."},
+       },
+       []),
+    _t("set_blend_mode",
+       "CapCut blend mode of an OVERLAY (picture-in-picture, v2+) clip onto the video beneath "
+       f"it: {_blend_list()}. Screen/add "
+       "drop a dark background (light leaks, fire, flares); multiply drops a white one "
+       "(paper, ink). The main track is the base layer and takes no blend mode.",
+       "edit",
+       {
+           "clip_id": {"type": "string", "description": "An overlay (v2+) video clip."},
+           "clip_ids": {"type": "array", "items": {"type": "string"}},
+           "mode": {"type": "string", "enum": _blend_ids(), "x-validated-by-handler": True},
+       },
+       ["mode"]),
     _t("set_clip_transform",
        "Set transform properties on any clip (media, sticker, or text): x/y position, "
        "scale, rotation (degrees), opacity — this is THE tool for positioning things on "
@@ -847,6 +975,27 @@ EFFECT_TOOLS = [
                 "description": "Alias of index; prefer index. Read only when index is "
                                "omitted (default 0 when both are absent)."}},
        ["clip_id", "index"]),
+    _t("remove_effects",
+       "Take every effect of the given types off the given media clips in ONE step "
+       "(one undo): e.g. types=['lut'] removes the filter/look, ['lut','color'] the "
+       "whole colour grade. Use this rather than remove_effect by index to take a "
+       "filter off; it fails when none of the clips carries such an effect.",
+       "effects",
+       {"clip_ids": {"type": "array", "items": {"type": "string"},
+                     "description": "Media clip ids (main track or overlays)"},
+        "types": {"type": "array", "items": {"type": "string", "enum": _effect_names()},
+                  "description": "Effect types to remove; default ['lut'] (the filter)"}},
+       ["clip_ids"]),
+    _t("flip_clip",
+       "Mirror a media clip or sticker: axis 'horizontal' (CapCut's Mirror, a "
+       "left-right mirror image) or 'vertical' (top-bottom). `value` true/false "
+       "sets it; omit it to toggle. Upside down is a 180° rotation "
+       "(set_clip_transform rotation=180), not a flip.",
+       "edit",
+       {"clip_id": {"type": "string"},
+        "axis": {"type": "string", "enum": ["horizontal", "vertical"]},
+        "value": {"type": "boolean", "description": "Omit to toggle"}},
+       ["clip_id", "axis"]),
     _t("color_grade",
        "Convenience: add a color effect with brightness/contrast/saturation/temp/tint. "
        "Applies to one clip or all V1 clips if clip_id omitted.",
@@ -1207,6 +1356,11 @@ _ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("set_duck", "to_db"): (-96.0, 0.0),
     ("set_loudness_target", "lufs"): (-70.0, -5.0),
     ("set_speed", "factor"): (0.1, 100.0),
+    # the ONE tables (review RE: these were restated by hand)
+    ("set_canvas_background", "blur"): (1.0, float(_canvas_blur_max())),
+    ("set_voice_effect", "intensity"): _UNIT,
+    ("set_animation", "in_duration"): _anim_dur_range(),
+    ("set_animation", "out_duration"): _anim_dur_range(),
     ("freeze_frame", "duration"): (0.1, 60.0),
     ("color_grade", "brightness"): (-1.0, 1.0),
     ("color_grade", "contrast"): (0.0, 4.0),

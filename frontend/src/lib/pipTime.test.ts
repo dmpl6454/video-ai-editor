@@ -36,7 +36,8 @@ function shownFrame(c: Case, t: number): number {
 describe('pipTiming: the export frame of every output slot', () => {
   it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
     const clip = { ...c.clip, id: 'p', src: 's' } as EdlClip
-    const got = c.frames.map((_f, j) => shownFrame(c, pipTiming(clip, timeOf(j, c.fps), c.fps).frameTime))
+    const hint = { rate: { num: c.rate[0], den: c.rate[1] } }
+    const got = c.frames.map((_f, j) => shownFrame(c, pipTiming(clip, timeOf(j, c.fps), c.fps, hint).frameTime))
     expect(got).toEqual(c.frames)
   })
 

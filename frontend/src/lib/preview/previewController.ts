@@ -45,6 +45,9 @@ export interface ControllerView {
   wait: WaitKind
   /** Fidelity class at the presented frame (§7): EXACT, APPROX, BAKED, PENDING. */
   modeAtPlayhead: number
+  /** The reasons of that frame's range (support.ts codes: `anim:in:spin`,
+   *  `audio:voice:deep` …) — what the "≈" chip names (review RE). */
+  reasons: readonly string[]
   presentedK: number
 }
 
@@ -164,7 +167,8 @@ export class PreviewController {
     const audio = this.opts.audio === false ? undefined
       : (this.opts.audio ?? ((onInt: () => void) => new AudioEngine({ onInterrupted: onInt })))(
         () => engine?.pauseExternal())
-    const eo: EngineOptions = { bakeBaseUrl: `${this.base}/bake`, ...this.opts.engineOptions, audioSink: audio }
+    const eo: EngineOptions = { bakeBaseUrl: `${this.base}/bake`, canvasBgBaseUrl: `${this.base}/canvas-bg`,
+      ...this.opts.engineOptions, audioSink: audio }
     engine = (this.opts.createEngine ?? createPreviewEngine)(eo)
     this.engineRef = engine
     this.offs.push(engine.on('status', (st) => this.onStatus(st)))
@@ -473,7 +477,7 @@ export class PreviewController {
   view(): ControllerView {
     const engine = this.engineRef
     const st = engine?.status
-    if (!engine || !st) return { live: false, playing: false, wait: null, modeAtPlayhead: 0, presentedK: 0 }
+    if (!engine || !st) return { live: false, playing: false, wait: null, modeAtPlayhead: 0, reasons: [], presentedK: 0 }
     const k = engine.playing ? engine.presentedK : engine.targetK
     const range = st.ranges.find((r) => k >= r.k0 && k < r.k1)
     const mode = range?.mode ?? 0
@@ -481,13 +485,16 @@ export class PreviewController {
     if (st.buffering) wait = 'buffering'
     else if (st.spinner) wait = 'pending'
     else if (mode === MODE_BAKED && !engine.isBakedFrame(k)) wait = 'baking'
-    return { live: st.mode === 'client', playing: st.playing, wait, modeAtPlayhead: mode, presentedK: st.presentedK }
+    return {
+      live: st.mode === 'client', playing: st.playing, wait, modeAtPlayhead: mode,
+      reasons: range?.reasons ?? [], presentedK: st.presentedK,
+    }
   }
 
   private emitView(): void {
     if (!this.opts.onView) return
     const v = this.view()
-    const key = `${v.live}|${v.playing}|${v.wait}|${v.modeAtPlayhead}`
+    const key = `${v.live}|${v.playing}|${v.wait}|${v.modeAtPlayhead}|${v.reasons.join(',')}`
     if (key === this.lastView) return
     this.lastView = key
     this.opts.onView(v)

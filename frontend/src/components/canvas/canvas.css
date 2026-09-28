@@ -1,0 +1,82 @@
+/* The Inspector's Canvas and Blend sections (wave E, lane F2). Tokens only
+   (styles.css :root); the swatches' fills are the colours themselves (data,
+   not chrome). Motion only when the viewer allows it. */
+
+.canvas-section, .blend-section { display: flex; flex-direction: column; gap: 8px; }
+
+.canvas-kinds {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; padding: 2px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+}
+.canvas-kinds button {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  min-width: 0; height: 40px; padding: 2px 4px; font-size: 10.5px; line-height: 1.2;
+  border: none; border-radius: 4px; background: transparent; color: var(--text-dim); cursor: pointer;
+}
+.canvas-kinds button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-kinds button:hover { color: var(--text); }
+.canvas-kinds button[aria-checked="true"] { background: var(--bg-3); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent-2); }
+.canvas-kinds button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.canvas-colors { display: flex; flex-direction: column; gap: 6px; }
+.canvas-swatches { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.canvas-swatch {
+  aspect-ratio: 1 / 1; width: 100%; min-height: 18px; padding: 0; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.canvas-swatch[aria-checked="true"] { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.canvas-swatch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.canvas-custom { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
+.canvas-custom input[type="color"] {
+  width: 32px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg-1); cursor: pointer;
+}
+.canvas-custom input[type="color"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.canvas-hex { font-variant-numeric: tabular-nums; color: var(--text); }
+
+.canvas-blurs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.canvas-blur {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0;
+  padding: 6px 2px 5px; font-size: 10.5px; color: var(--text-dim);
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+}
+.canvas-blur:hover { color: var(--text); background: var(--bg-2); }
+.canvas-blur[aria-checked="true"] { color: var(--text); border-color: var(--accent-2); background: var(--bg-2); }
+.canvas-blur:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+/* A strength as a picture: two token-coloured bars, blurred by the level. */
+.canvas-blur-chip {
+  display: block; width: 36px; height: 16px; border-radius: 3px; overflow: hidden;
+  background: linear-gradient(90deg, var(--accent-2) 0 50%, var(--track-text) 50% 100%);
+  filter: blur(var(--canvas-blur-px, 2px));
+}
+
+.canvas-image { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.canvas-image-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-dim);
+}
+
+.canvas-foot { display: flex; justify-content: flex-end; }
+.canvas-tool {
+  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
+  font-size: 11px; color: var(--text); background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 4px; cursor: pointer;
+}
+.canvas-tool:hover:not(:disabled) { background: var(--bg-3); }
+.canvas-tool:disabled { color: var(--text-disabled); background: var(--bg-disabled); cursor: default; }
+.canvas-tool:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+.canvas-note { margin: 0; font-size: 10.5px; line-height: 1.4; color: var(--text-faint); }
+.canvas-error { color: var(--error-text); }
+
+.blend-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+.blend-label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.blend-row select {
+  flex: 1 1 auto; max-width: 60%; height: var(--control-h); padding: 0 6px; font-size: 12px;
+  color: var(--text); background: var(--bg-1); border: 1px solid var(--line); border-radius: 4px;
+}
+.blend-row select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .canvas-kinds button, .canvas-blur, .canvas-tool { transition: background var(--dur-fast) linear, color var(--dur-fast) linear; }
+}

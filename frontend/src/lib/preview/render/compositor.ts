@@ -16,6 +16,9 @@
 
 import { apply, type Affine, type Bounds, type ClipGeometry, type Size } from './geometry'
 import { GEOMETRY_FRAG, GEOMETRY_VERT } from './shaders/geometry'
+import type { BgDraw } from './canvasBg'
+import { CanvasBlur } from './canvasBlur'
+import { canvasBgImage } from './canvasBgImages'
 
 export const NO_CONTENT = -3
 
@@ -25,6 +28,9 @@ export interface DrawSpec {
   canvas: Size
   /** Source texture size (proxy px), for the mipmap decision. */
   texture?: Size
+  /** The clip's CapCut Canvas background (render/canvasBg.ts); absent or
+   *  null: black letterbox. */
+  background?: BgDraw | null
 }
 
 export interface CompositorOptions {
@@ -35,11 +41,17 @@ export interface CompositorOptions {
   onContextRestored?(): void
   /** Trilinear sampling when a clip is shown smaller than its texture. */
   mipmaps?: boolean
+  /** `/api/sessions/{sid}/canvas-bg`: image canvas backgrounds (wave E, F2). */
+  canvasBgBaseUrl?: string
+  /** A canvas-background picture finished loading: redraw a paused frame. */
+  onAssetReady?(): void
 }
 
 export interface DrawnInfo { k: number; black: boolean; ms: number }
 
 interface Locs {
+  alpha: WebGLUniformLocation | null
+  fade: WebGLUniformLocation | null
   tex: WebGLUniformLocation | null
   dispToCanvas: WebGLUniformLocation | null
   dispH: WebGLUniformLocation | null
@@ -54,6 +66,10 @@ interface Locs {
   gain: WebGLUniformLocation | null
   black: WebGLUniformLocation | null
   lod: WebGLUniformLocation | null
+  bgMode: WebGLUniformLocation | null
+  bgColor: WebGLUniformLocation | null
+  bgTex: WebGLUniformLocation | null
+  toBg: WebGLUniformLocation | null
 }
 
 const mat3 = (m: Affine) => new Float32Array([m.a, m.b, 0, m.c, m.d, 0, m.e, m.f, 1])
@@ -85,7 +101,10 @@ export class Compositor {
   snapshotK = -1
   textureContent = NO_CONTENT
   textureSize: Size = { w: 0, h: 0 }
-  readonly stats = { draws: 0, blackDraws: 0, uploads: 0, maxUploadMs: 0, maxDrawMs: 0, lost: 0, restored: 0, snapshots: 0, mipmaps: 0 }
+  readonly stats = { draws: 0, blackDraws: 0, uploads: 0, maxUploadMs: 0, maxDrawMs: 0, lost: 0, restored: 0, snapshots: 0, mipmaps: 0,
+    bgBlurs: 0, bgImages: 0 }
+  /** Where image canvas backgrounds are fetched from (engineDraw reads it). */
+  readonly canvasBgBaseUrl: string | null
   private gl: WebGL2RenderingContext | null = null
   private program: WebGLProgram | null = null
   private vao: WebGLVertexArrayObject | null = null
@@ -93,6 +112,13 @@ export class Compositor {
   private loc: Locs | null = null
   private mipmapped = false
   private readonly opts: CompositorOptions
+  // Canvas backgrounds (wave E, F2): the blur passes, and the picture
+  // texture with the URL it holds.
+  private blur: CanvasBlur | null = null
+  private bgTex: WebGLTexture | null = null
+  private bgTexUrl = ''
+  /** Content id whose mip levels the clip texture holds (blur downscale). */
+  private mipLevelsFor = NO_CONTENT
   private readonly onLost = (e: Event) => {
     e.preventDefault()
     this.lost = true
@@ -110,6 +136,7 @@ export class Compositor {
 
   constructor(opts: CompositorOptions) {
     this.opts = opts
+    this.canvasBgBaseUrl = opts.canvasBgBaseUrl ?? null
     this.canvas = opts.canvas
     this.snapshotCanvas = opts.snapshot ?? null
     this.canvas.addEventListener('webglcontextlost', this.onLost)
@@ -154,6 +181,8 @@ export class Compositor {
       f2Bounds: u('u_f2Bounds'), toF1: u('u_toF1'), f1Bounds: u('u_f1Bounds'), f1Clamp: u('u_f1Clamp'),
       f1Extent: u('u_f1Extent'), toUv: u('u_toUv'), uvBounds: u('u_uvBounds'), gain: u('u_gain'), black: u('u_black'),
       lod: u('u_lod'),
+      bgMode: u('u_bgMode'), bgColor: u('u_bgColor'), bgTex: u('u_bgTex'), toBg: u('u_toBg'),
+      alpha: u('u_alpha'), fade: u('u_fade'),
     }
     this.vao = gl.createVertexArray()
     this.tex = gl.createTexture()
@@ -167,6 +196,10 @@ export class Compositor {
     this.textureContent = NO_CONTENT
     this.textureSize = { w: 0, h: 0 }
     this.mipmapped = false
+    this.blur = null
+    this.bgTex = null
+    this.bgTexUrl = ''
+    this.mipLevelsFor = NO_CONTENT
   }
 
   resize(w: number, h: number): void {
@@ -190,6 +223,7 @@ export class Compositor {
     this.textureContent = contentId
     this.textureSize = size
     this.mipmapped = false
+    this.blur?.invalidate()
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     this.stats.uploads++
     this.stats.maxUploadMs = Math.max(this.stats.maxUploadMs, performance.now() - t0)
@@ -208,10 +242,20 @@ export class Compositor {
     const t0 = performance.now()
     const L = this.loc
     const disp = { w: this.canvas.width, h: this.canvas.height }
+    // The canvas background first: its blur passes use their own programs,
+    // framebuffers and viewport (wave E, F2).
+    const bgMode = spec?.background ? this.prepareBackground(spec) : 0
     gl.viewport(0, 0, disp.w, disp.h)
     gl.useProgram(this.program)
     gl.bindVertexArray(this.vao)
     gl.uniform1i(L.black, spec ? 0 : 1)
+    gl.uniform1i(L.bgMode, bgMode)
+    gl.uniform1i(L.bgTex, 1)
+    if (bgMode === 1 && spec?.background?.mode === 'color') {
+      const [r, g, b] = spec.background.rgb
+      gl.uniform3f(L.bgColor, r / 255, g / 255, b / 255)
+    }
+    if (bgMode !== 0 && spec?.background) gl.uniformMatrix3fv(L.toBg, false, mat3(spec.background.toBg))
     if (spec) {
       const g = spec.geometry
       gl.activeTexture(gl.TEXTURE0)
@@ -236,6 +280,8 @@ export class Compositor {
       gl.uniformMatrix3fv(L.toUv, false, mat3(g.toUv))
       gl.uniform4fv(L.uvBounds, vec4(g.uvBounds))
       gl.uniform1f(L.gain, g.gain)
+      gl.uniform1f(L.alpha, g.alpha)
+      gl.uniform1f(L.fade, g.fade)
       // the rotate path samples on the F1 pixel grid: its mip level is the
       // texture footprint of ONE F1 pixel (hardware derivatives across that
       // snapped grid are meaningless)
@@ -252,6 +298,60 @@ export class Compositor {
     this.stats.maxDrawMs = Math.max(this.stats.maxDrawMs, ms)
     this.onDrawn?.({ k, black: !spec, ms }, gl)
     return true
+  }
+
+  /** Readies the clip's canvas background for the geometry pass: 1 for a
+   *  colour, 2 when TEXTURE1 holds the picture or the blur, 0 (black bars)
+   *  while a picture is still loading — `onAssetReady` then asks for a redraw. */
+  private prepareBackground(spec: DrawSpec): number {
+    const gl = this.gl!
+    const bg = spec.background!
+    if (bg.mode === 'color') return 1
+    if (bg.mode === 'image') {
+      if (this.bgTexUrl !== bg.url) {
+        const img = canvasBgImage(bg.url, () => this.opts.onAssetReady?.())
+        if (!img) return 0
+        if (!this.bgTex) this.bgTex = gl.createTexture()
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, this.bgTex)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        this.bgTexUrl = bg.url
+        this.stats.bgImages++
+      }
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.bgTex)
+      gl.activeTexture(gl.TEXTURE0)
+      return 2
+    }
+    // blur: the clip's own texture, through its mipmaps at the downscale's
+    // footprint (levels built here without changing the geometry pass's
+    // filter), then the separable Gaussian (render/canvasBlur.ts)
+    if (this.textureContent === NO_CONTENT || !this.tex) return 0
+    const tex = spec.texture ?? this.textureSize
+    const lod = Math.max(0, Math.log2(Math.max(1e-6, Math.abs(bg.coverToUv.a * tex.w))))
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.tex)
+    if (lod > 0.01) {
+      if (this.mipLevelsFor !== this.textureContent) {
+        gl.generateMipmap(gl.TEXTURE_2D)
+        this.mipLevelsFor = this.textureContent
+      }
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR)
+    }
+    this.blur ??= new CanvasBlur(gl)
+    const key = `${this.textureContent}|${bg.small.w}x${bg.small.h}|${bg.sigma}|${Object.values(bg.coverToUv).join(',')}`
+    const out = this.blur.run(this.tex, key, bg.small, bg.coverToUv, lod, bg.sigma)
+    if (lod > 0.01 && !this.mipmapped) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    if (!out) return 0
+    this.stats.bgBlurs++
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, out)
+    gl.activeTexture(gl.TEXTURE0)
+    return 2
   }
 
   /** Copies the frame just drawn to the 2D backing canvas (call right after
@@ -308,6 +408,8 @@ export class Compositor {
     const gl = this.gl
     if (gl && !gl.isContextLost()) {
       if (this.tex) gl.deleteTexture(this.tex)
+      if (this.bgTex) gl.deleteTexture(this.bgTex)
+      this.blur?.destroy()
       if (this.program) gl.deleteProgram(this.program)
       if (this.vao) gl.deleteVertexArray(this.vao)
     }

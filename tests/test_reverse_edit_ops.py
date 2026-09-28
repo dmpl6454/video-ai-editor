@@ -145,32 +145,61 @@ def test_split_of_a_reversed_v1_clip_at_every_frame_is_invisible(tmp_path, info,
 
 
 @pytest.mark.parametrize("sp", CURVES, ids=_sid)
-def test_split_of_a_reversed_curve_clip_keeps_the_order_within_a_frame(tmp_path, info, sp):
+def test_split_of_a_reversed_curve_clip_at_every_frame_is_invisible(tmp_path, info, sp):
     """A reversed CURVE splits at an off-grid source point (the exact
-    integral); its right piece's intermediate is then built on a grid a
-    fraction of a frame away from the whole's, so a frame can land one
-    source frame off (the order and the footprint are right). Before this
-    fix the pieces played in the wrong order (errors of 100+ frames)."""
-    bad, worst = _split_errors(_store(tmp_path / "w", sp), info, tmp_path, sp, step=3)
-    assert worst <= 1, f"worst source-frame error {worst}: {bad[:6]}"
+    integral). Its pieces' intermediates are built on the source's ABSOLUTE
+    grid and opened at a fractional `in` (render/reverse.py
+    `intermediate_span`/`view_range`, wave E item 21), so every piece reads
+    the whole clip's file clock: exact at every frame. Before: built on the
+    piece's own range, Hero at 30 fps changed frames at 25 of 76 split
+    points (one source frame each); before RD3 the pieces played out of
+    order (errors of 100+ frames)."""
+    bad, _ = _split_errors(_store(tmp_path / "w", sp), info, tmp_path, sp)
+    assert bad == [], f"{len(bad)} splits changed frames: {bad[:6]}"
 
 
-@pytest.mark.xfail(strict=True, reason="reversed-curve splits are within one source frame, not "
-                   "exact: the reversed intermediate is anchored at the piece's own range "
-                   "(d2-followups: absolute-grid reversed intermediates)")
-def test_split_of_a_reversed_hero_clip_is_frame_exact(tmp_path, info):
-    bad, _ = _split_errors(_store(tmp_path / "w", "hero"), info, tmp_path, "hero", step=3)
-    assert bad == []
+@pytest.mark.parametrize("sp", CURVES, ids=_sid)
+@pytest.mark.parametrize("R", [Fraction(24000, 1001), Fraction(25), Fraction(60000, 1001)],
+                         ids=G.rate_name)
+def test_split_of_a_reversed_curve_clip_is_exact_at_other_rates(tmp_path, sp, R):
+    """The same at 23.976, 25 and 59.94 with an off-grid in and out."""
+    info = SourceInfo.cfr(R, 900)
+    st = _store(tmp_path / "w", sp, R=R, in_=2.0137, out=8.4111)
+    whole = build_program_map(st.edl, lambda _s: info).frame
+    c = st.edl.get_clip(st.cid)[1]
+    k0 = tb.frame_of(c.start, R)
+    bad = []
+    for k in range(k0 + 1, k0 + len(whole), 4):
+        s2 = _copy(st, tmp_path / f"s{k}")
+        if dispatch(s2, "split_at", {"time": tb.time_of(k, R), "track": "v1"})["split"] != 1:
+            continue
+        if build_program_map(s2.edl, lambda _s: info).frame != whole:
+            bad.append(k)
+    assert bad == [], f"{len(bad)} splits changed frames: {bad[:6]}"
+
+
+def test_a_reversed_curve_intermediate_sits_on_the_source_grid():
+    """The recipe itself: a curve's intermediate spans [floor(in), ceil(out))
+    on the project grid and its view opens it where `out` sits, keeping the
+    clip's span bit for bit; a constant-speed reversal is unchanged."""
+    from video_ai_editor.render import reverse
+    c = Clip(src=SRC, in_=2.0137, out=8.4111, start=0.0, id="c", reverse=True,
+             speed={"name": "custom", "curve": [[0, 1], [0.5, 0.2], [1, 1]]})
+    t0, m = reverse.intermediate_span(c, R30)
+    assert (t0, m) == (tb.time_of(60, R30), 253 - 60)        # floor(60.41), ceil(252.33)
+    v_in, v_out = reverse.view_range(c, R30)
+    assert abs(v_in - (253 / 30 - 8.4111)) < 1e-12
+    assert v_out - v_in == c.out - c.in_
+    flat = c.model_copy(update={"speed": 2.0})
+    assert reverse.intermediate_span(flat, R30) == (2.0137, tb.frame_of(8.4111 - 2.0137, R30))
+    assert reverse.view_range(flat, R30) == (0.0, reverse.view_out(flat))
 
 
 @pytest.mark.parametrize("sp", EXACT + CURVES, ids=_sid)
 def test_split_of_a_reversed_overlay_clip_keeps_its_frames(tmp_path, info, sp):
-    bad, worst = _split_errors(_store(tmp_path / "w", sp, track="v2"), info, tmp_path, sp,
-                               track="v2", step=5)
-    if sp in CURVES:
-        assert worst <= 1, f"worst source-frame error {worst}: {bad[:6]}"
-    else:
-        assert bad == [], f"{len(bad)} overlay splits changed frames: {bad[:6]}"
+    bad, _ = _split_errors(_store(tmp_path / "w", sp, track="v2"), info, tmp_path, sp,
+                           track="v2", step=5)
+    assert bad == [], f"{len(bad)} overlay splits changed frames: {bad[:6]}"
 
 
 @pytest.mark.parametrize("sp", [None, 2.0, "hero"], ids=_sid)
@@ -184,10 +213,7 @@ def test_cut_range_through_a_reversed_clip_removes_exactly_its_frames(tmp_path, 
                                    "end": tb.time_of(b, R30)})
         got, want = _v1(s2, info), whole[:a] + whole[b:]
         assert len(got) == len(want), (a, b)
-        if sp in CURVES:   # the reversed-curve bound (see the split test above)
-            assert max(abs(x - y) for x, y in zip(got, want)) <= 1, (a, b)
-        else:
-            assert got == want, (a, b)
+        assert got == want, (a, b)
 
 
 @pytest.fixture(scope="module")
@@ -209,10 +235,7 @@ def test_freeze_on_a_reversed_clip_keeps_the_frames_around_it(tmp_path, bar, sp)
     assert len(got) == len(whole) + hold
     assert got[:k] == whole[:k], "every frame before the freeze is unchanged"
     assert got[k:k + hold] == [whole[k]] * hold, "the freeze holds the frame at the playhead"
-    if sp in CURVES:   # the reversed-curve bound (see the split test above)
-        assert max(abs(x - y) for x, y in zip(got[k + hold:], whole[k:])) <= 1
-    else:
-        assert got[k + hold:] == whole[k:], "and the picture resumes where it stopped"
+    assert got[k + hold:] == whole[k:], "and the picture resumes where it stopped"
 
 
 def test_freeze_on_a_reversed_clip_without_a_frame_table_holds_the_mirrored_frame(tmp_path, info):
@@ -232,8 +255,8 @@ def _export(st: EDLStore, tmp: Path, name: str) -> list[int]:
     return G.measure(path)["top"]
 
 
-@pytest.mark.parametrize("track,sp", [("v1", None), ("v1", "hero"), ("v2", 2.0)],
-                         ids=["v1_1x", "v1_hero", "v2_2x"])
+@pytest.mark.parametrize("track,sp", [("v1", None), ("v1", "hero"), ("v2", 2.0), ("v2", "montage")],
+                         ids=["v1_1x", "v1_hero", "v2_2x", "v2_montage"])
 def test_a_split_reversed_clip_exports_the_whole_clips_frames(tmp_path, bar, track, sp):
     src, _ = bar
     st = _store(tmp_path / "s", sp, track=track, src=src)
@@ -246,15 +269,10 @@ def test_a_split_reversed_clip_exports_the_whole_clips_frames(tmp_path, bar, tra
     split = _export(st, tmp_path, "split")
     assert len(split) == len(whole)
     diff = [i for i, (a, b) in enumerate(zip(split, whole)) if a != b]
-    if sp in CURVES:
-        # The reversed-curve bound (see the model test): within one source
-        # frame, and exactly what the program map predicts for the pieces.
+    assert diff == [], f"{len(diff)} frames differ, first {diff[:5]}"
+    if track == "v1":
         fbits = (1 << G.FRAME_BITS) - 1
-        assert max(abs((a & fbits) - (b & fbits)) for a, b in zip(split, whole)) <= 1
-        if track == "v1":
-            assert [x & fbits for x in split] == _v1(st, _, src)
-    else:
-        assert diff == [], f"{len(diff)} frames differ, first {diff[:5]}"
+        assert [x & fbits for x in split] == _v1(st, _, src), "the program map predicts it"
 
 
 # ------------------------------------------- the reversed view's footprint
@@ -313,3 +331,88 @@ def test_six_reversed_2x_clips_export_the_timelines_length(tmp_path, bar):
     st = _six_reversed_2x(tmp_path / "s", src)
     frames = _export(st, tmp_path, "six")
     assert len(frames) == tb.frame_of(st.edl.duration, R30) == 189
+
+
+# ------------------------------------- the browser port reads the same pieces
+
+PIECES_GOLDEN = Path(__file__).resolve().parent / "goldens" / "reversed_curve_pieces.json"
+
+
+def _pieces_corpus(tmp: Path) -> dict:
+    """Whole reversed curve clips and their split / cut / trimmed / frozen
+    edits, with the program map's frames: frameMap.ts must read the same
+    (frontend/src/lib/preview/timeline/reversedPieces.test.ts)."""
+    import json
+    cases = []
+    for R in (Fraction(30), Fraction(24000, 1001), Fraction(25)):
+        info = SourceInfo.cfr(R, 900)
+        for sp in CURVES:
+            st = _store(tmp / f"{G.rate_name(R)}-{sp}", sp, R=R, in_=2.0137, out=8.4111)
+            c = st.edl.get_clip(st.cid)[1]
+            k0, n = tb.frame_of(c.start, R), compositor.clip_frames(c, R)
+            edits = [("whole", None)]
+            edits += [(f"split@{k}", ("split_at", {"time": tb.time_of(k0 + k, R), "track": "v1"}))
+                      for k in (n // 5, n // 2, n - 3)]
+            edits += [("cut", ("cut_range", {"track": "v1", "start": tb.time_of(n // 4, R),
+                                             "end": tb.time_of(n // 3, R)}))]
+            for name, op in edits:
+                s2 = _copy(st, tmp / f"{G.rate_name(R)}-{sp}-{name}")
+                if op is not None:
+                    dispatch(s2, op[0], op[1])
+                pm = build_program_map(s2.edl, lambda _s: info)
+                cases.append({"name": f"{G.rate_name(R)}/{sp}/{name}",
+                              "edl": json.loads(s2.edl.model_dump_json(by_alias=True)),
+                              "source": info.to_json(), "frames": pm.frame})
+    return {"_": "tests/test_reverse_edit_ops.py (VAI_REGEN_GOLDENS=1 rewrites it)", "cases": cases}
+
+
+def test_the_reversed_curve_pieces_golden_is_current(tmp_path):
+    import json
+    import os
+    doc = _pieces_corpus(tmp_path)
+    if os.environ.get("VAI_REGEN_GOLDENS") == "1" or not PIECES_GOLDEN.exists():
+        PIECES_GOLDEN.write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
+    stored = json.loads(PIECES_GOLDEN.read_text())
+    assert [c["frames"] for c in stored["cases"]] == [c["frames"] for c in doc["cases"]], \
+        "stale: VAI_REGEN_GOLDENS=1 pytest tests/test_reverse_edit_ops.py -k pieces_golden"
+    whole = {c["name"].rsplit("/", 1)[0]: c["frames"] for c in doc["cases"] if c["name"].endswith("/whole")}
+    for c in doc["cases"]:
+        base, edit = c["name"].rsplit("/", 1)
+        if edit.startswith("split"):
+            assert c["frames"] == whole[base], c["name"]
+
+
+# ------------------------------------------------- trims of a reversed curve
+
+@pytest.mark.parametrize("sp", CURVES, ids=_sid)
+@pytest.mark.parametrize("track", ["v1", "v2"])
+def test_trim_of_a_reversed_curve_clip_keeps_the_frames_it_shows(tmp_path, info, sp, track):
+    """`trim_clip` on a reversed CURVE clip (wave E, item 22): its source
+    `out` is played FIRST, so lowering `out` trims the HEAD of the footprint
+    and raising `in` trims the TAIL. The kept frames play exactly as before
+    (the curve's reversed integral, `dispatch._trim_curve`). Before: the
+    source points were mapped forwards, so a tail trim cut the head's curve
+    and the frames that stayed changed."""
+    st = _store(tmp_path / "w", sp, track=track)
+    lane = (lambda s: _v1(s, info)) if track == "v1" else (lambda s: _lane(s, info, track))
+    whole = lane(st)
+    c = st.edl.get_clip(st.cid)[1]
+    D = c.effective_duration
+    for i, (new_in, new_out) in enumerate([(c.in_ + 1.3, c.out), (c.in_, c.out - 1.7),
+                                           (c.in_ + 0.77, c.out - 2.21)]):
+        s2 = _copy(st, tmp_path / f"t{i}")
+        args = {"clip_id": st.cid, "in": new_in, "out": new_out}
+        if track != "v1":
+            args["move_start"] = True
+        dispatch(s2, "trim_clip", args)
+        t0 = tb.quantize(c.timeline_offset_at(c.out - new_out), R30) if new_out < c.out else 0.0
+        t1 = tb.quantize(c.timeline_offset_at(c.out - new_in), R30) if new_in > c.in_ else D
+        k0, k1 = tb.frame_of(t0, R30), tb.frame_of(t1, R30)
+        got = lane(s2)
+        trimmed = s2.edl.get_clip(st.cid)[1]
+        assert trimmed.reverse and trimmed.in_ >= c.in_ and trimmed.out <= c.out
+        if track == "v1":
+            assert got == whole[k0:k1], (new_in, new_out)
+        else:
+            assert tb.frame_of(trimmed.start, R30) == tb.frame_of(c.start, R30) + k0
+            assert got == whole[k0:k1], (new_in, new_out)

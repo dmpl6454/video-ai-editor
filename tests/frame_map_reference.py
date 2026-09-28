@@ -60,7 +60,7 @@ def _first_at_or_after(src: SourceInfo, ticks: int) -> int:
 
 
 def select_frames(src: SourceInfo, *, seek_us, dur_us: int, n: int, fps, speed=None,
-                  curve=None, anchor=None) -> list[int]:
+                  curve=None, anchor=None, hold: bool = False) -> list[int]:
     if n <= 0:
         return []
     tb = src.time_base
@@ -83,7 +83,7 @@ def select_frames(src: SourceInfo, *, seek_us, dur_us: int, n: int, fps, speed=N
     while f0 + qlast + 1 <= last and pts(src, f0 + qlast + 1) - base < dur_tb:
         qlast += 1
     div = _speed_divisor(speed)
-    if curve is not None and anchor is not None:
+    if anchor is not None:
         TB = tb.numerator / tb.denominator
         a_seek, a_in = float(anchor[0]), float(anchor[1])
         back = (off if seek_us is not None else 0) + (
@@ -92,8 +92,16 @@ def select_frames(src: SourceInfo, *, seek_us, dur_us: int, n: int, fps, speed=N
         k = int(src.time_base / tb)
         TBc = tb.numerator / tb.denominator
 
-        def ticks(q: int) -> int:
-            return _sc.anchored_ticks((pts(src, f0 + q) + back) * k, TBc, a_in, curve)
+        if curve is not None:
+            def ticks(q: int) -> int:
+                return _sc.anchored_ticks((pts(src, f0 + q) + back) * k, TBc, a_in, curve)
+        else:
+            # review RE: a constant speed (1x included) on the same clock
+            sp = float(speed) if isinstance(speed, (int, float)) and not isinstance(speed, bool) \
+                and speed and speed > 0 else 1.0
+
+            def ticks(q: int) -> int:
+                return _sc.anchored_const_ticks((pts(src, f0 + q) + back) * k, TBc, a_in, sp)
     else:
         if curve is not None:
             retime = curve_retimer(curve, tb)
@@ -106,6 +114,8 @@ def select_frames(src: SourceInfo, *, seek_us, dur_us: int, n: int, fps, speed=N
 
     slots = [rescale(ticks(q), tb, out_tb) for q in range(qlast + 1)]
     eof = rescale(ticks(qlast + 1), tb, out_tb)
+    if hold:
+        eof = max(eof, 1)
     out: list[int] = []
     q = 0
     for s in range(n):
@@ -118,16 +128,12 @@ def select_frames(src: SourceInfo, *, seek_us, dur_us: int, n: int, fps, speed=N
 
 def forward_clip_frames(src: SourceInfo, *, in_: float, out: float, speed, n: int, fps) -> list[int]:
     curve = speed_curve_map(speed, in_, out)
-    if curve is not None:
-        seek = _sc.curve_seek(in_)
-    else:
-        pre = _tb.seek_preroll(in_, fps)
-        seek = max(0.0, float(in_) - pre)
+    seek = _sc.curve_seek(in_)          # every forward chain is in-anchored (review RE)
     end = float(out) + 2 * _tb.frame_duration(fps)
     seek_us = ffmpeg_us(seek) if seek > 0 else None
     dur_us = ffmpeg_us(end) - (seek_us or 0)
     return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=n, fps=fps, speed=speed,
-                         curve=curve, anchor=(seek, float(in_)) if curve is not None else None)
+                         curve=curve, anchor=(seek, float(in_)), hold=n == 1)
 
 
 def freeze_frame(src: SourceInfo, *, in_: float, fps) -> int:
@@ -138,13 +144,16 @@ def freeze_frame(src: SourceInfo, *, in_: float, fps) -> int:
     return select_frames(src, seek_us=seek_us, dur_us=dur_us, n=1, fps=fps)[0]
 
 
-def reversed_intermediate(src: SourceInfo, *, in_: float, out: float, fps) -> list[int]:
-    m = max(1, _tb.frame_of(float(out) - float(in_), fps))
+def reversed_intermediate(src: SourceInfo, *, in_: float, out: float, fps, span=None) -> list[int]:
+    if span is None:
+        start, m = float(in_), max(1, _tb.frame_of(float(out) - float(in_), fps))
+    else:
+        start, m = float(span[0]), int(span[1])
     seg = reverse_segment_frames(src.width, src.height, fps)
     forward: list[int] = []
     for j0 in range(0, m, seg):
         n = min(seg, m - j0)
-        t0 = float(in_) + _tb.time_of(j0, fps)
+        t0 = start + _tb.time_of(j0, fps)
         pre = _tb.seek_preroll(t0, fps)
         seek = max(0.0, t0 - pre)
         span = pre + _tb.time_of(n + 2, fps)
@@ -158,7 +167,9 @@ def clip_frame_list(c: Clip, src: SourceInfo, fps) -> list[int]:
     if getattr(c, "freeze", None) is not None:
         return [freeze_frame(src, in_=c.in_, fps=fps)] * clip_frames(c, fps)
     if getattr(c, "reverse", False):
-        inter = reversed_intermediate(src, in_=c.in_, out=c.out, fps=fps)
+        from video_ai_editor.render.reverse import intermediate_span
+        inter = reversed_intermediate(src, in_=c.in_, out=c.out, fps=fps,
+                                      span=intermediate_span(c, fps))
         view = live._reversed_view(c, fps)
         n = clip_frames(view, fps)
         idx = forward_clip_frames(intermediate_source(len(inter), fps), in_=view.in_,
@@ -277,11 +288,8 @@ def build_program_map(edl, sources, fps=None) -> ProgramMap:
 
 
 def _clip_sample0(t: float, fps) -> int:
-    pre = _tb.seek_preroll(t, fps)
-    seek = max(0.0, float(t) - pre)
-    sr = Fraction(1, _SAMPLE_RATE)
-    j0 = rescale(ffmpeg_us(seek), _US, sr) if seek > 0 else 0
-    return j0 + (rescale(ffmpeg_us(pre), _US, sr) if pre > 1e-9 else 0)
+    # R9: the nearest sample to the edit point as ffmpeg reads it (µs)
+    return rescale(ffmpeg_us(t), _US, Fraction(1, _SAMPLE_RATE)) if t > 0 else 0
 
 
 def _reversed_runs(c: Clip, src, fps, n: int):

@@ -17,9 +17,12 @@ const SR = 48000
 const SRC: SourceInfo = { rate: { num: 30, den: 1 }, tb: { num: 1, den: 15360 }, frames: 30 * 600, startTicks: 0, w: 64, h: 36 }
 const CS = 48000
 
-function fakeChunks() {
+function fakeChunks(peak?: number) {
   const fetch = async (url: string): Promise<Response> => {
-    if (url.endsWith('index.json')) return new Response(JSON.stringify({ audio: { chunk_samples: CS, samples: 60 * CS, chunks: 60 } }))
+    if (url.endsWith('index.json')) {
+      return new Response(JSON.stringify({ audio: { chunk_samples: CS, samples: 60 * CS, chunks: 60,
+        ...(peak === undefined ? {} : { chunk_peak: new Array(60).fill(peak) }) } }))
+    }
     const n = Number(/a\/(\d+)\.flac$/.exec(url)![1])
     return new Response(new Uint32Array([n]).buffer)
   }
@@ -47,12 +50,12 @@ const info: AudioProgramInfo = {
   lookup: (src) => ({ info: SRC, proxy: { key: src === '/bed.m4a' ? 'bbbb' : 'aaaa' } }),
 }
 
-function setup(opts: { interrupted?: (s: string) => void } = {}) {
+function setup(opts: { interrupted?: (s: string) => void; peak?: number } = {}) {
   const ctx = new FakeContext()
   const timers: Array<{ fn: () => void; ms: number }> = []
   const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
   const engine = new AudioEngine({
-    chunks: fakeChunks(), createContext: () => asCtx(ctx), now: () => 1000 * ctx.currentTime,
+    chunks: fakeChunks(opts.peak), createContext: () => asCtx(ctx), now: () => 1000 * ctx.currentTime,
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
     setInterval: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h },
     clearInterval: (h) => { (h as { cleared: boolean }).cleared = true },
@@ -250,5 +253,35 @@ describe('the clock and pauses nobody issued', () => {
     expect(ctx.resumes).toBe(1)
     timers.find((t) => t.ms === 150)!.fn()
     expect(ctx.suspends).toBe(1)
+  })
+})
+
+describe('the master limiter\'s APPROX ranges (gate RX)', () => {
+  const mixed = edl([{ id: 'a', start: 0, out: 20 }], [{ id: 'm', src: '/bed.m4a', start: 2, out: 4 }])
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
+
+  it('are unbounded until the layouts land, then re-derived from the recorded peaks', async () => {
+    const { engine, prepare } = setup({ peak: 0.2 })
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    prepare(mixed)
+    expect(engine.limitingFrames()).toEqual([[0, 601]])                  // no peak known: all of it
+    await settle()
+    expect(engine.limitingFrames()).toEqual([])                          // (0.2 + 0.2) / 0.97 < 1
+    expect(told).toBe(1)
+  })
+
+  it('narrow to where the lanes overlap when the peaks say so; a later prepare needs no telling', async () => {
+    const { engine, prepare } = setup({ peak: 0.7 })
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    prepare(mixed)
+    await settle()
+    expect(engine.limitingFrames()).toEqual([[59 - 3, 180 + 3 + 1]])    // the bed's 2-6 s ± 100 ms ± a frame
+    expect(told).toBe(1)
+    prepare(mixed)
+    expect(engine.limitingFrames()).toEqual([[56, 184]])
+    await settle()
+    expect(told).toBe(1)
   })
 })

@@ -361,13 +361,20 @@ GEO_GROUPS: dict[str, list[tuple[str, dict]]] = {
         ("contain_odd_25fps", {"src": "odd25"}),
         ("combined", {"src": "port", "fit": "cover", "transform": {"scale": 1.2, "rotation": -8.0, "opacity": 0.85},
                       "effects": [{"type": "hflip", "params": {}}]}),
+        # wave E gate (X2): fades at in > 0 off the source grid and retimed —
+        # the retimed source frame's time on the in-anchored clock
+        ("fades_offgrid", {"src": "land", "in": 0.52, "out": 1.52, "video_fade_in": 0.4,
+                           "video_fade_out": 0.4}),
+        ("fades_half_speed", {"src": "land", "in": 1.01, "out": 1.51, "speed": 0.5, "video_fade_in": 0.3,
+                              "video_fade_out": 0.3}),
     ],
     "kf_transform": [("kf_transform", {"src": "land", "transform": {"scale": _kf((0, 1), (1, 1.6)), "x": _kf((0, 0), (1, 120))}})],
     "kf_rotation": [("kf_rotation", {"src": "land", "transform": {"rotation": _kf((0, 0), (1, 45))}})],
     "kf_opacity": [("kf_opacity", {"src": "land", "transform": {"opacity": _kf((0, 1), (1, 0.2))}})],
 }
 #: clip-local frames measured per feature
-GEO_KS = {"fades": (5, 27), "kf_transform": (0, 12, 24), "kf_rotation": (6, 18, 28), "kf_opacity": (6, 20)}
+GEO_KS = {"fades": (5, 27), "fades_offgrid": (0, 5, 27), "fades_half_speed": (1, 5, 25),
+          "kf_transform": (0, 12, 24), "kf_rotation": (6, 18, 28), "kf_opacity": (6, 20)}
 DEFAULT_KS = (15, 25)
 
 
@@ -378,7 +385,7 @@ def _geo_edl(group: str, paths: dict[str, str]):
     e.canvas.loudness_lufs = None
     v1 = e.get_track("v1")
     for i, (_feat, f) in enumerate(GEO_GROUPS[group]):
-        c = Clip(src=paths[f["src"]], start=float(i), id=f"g{i:02d}")
+        c = Clip(src=paths[f["src"]], start=float(i), speed=f.get("speed"), id=f"g{i:02d}")
         c.in_ = f.get("in", 0.0)
         c.out = f.get("out", c.in_ + 1.0)
         c.fit = f.get("fit", "contain")

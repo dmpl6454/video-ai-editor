@@ -30,7 +30,8 @@ export const TOOL_TITLES: Record<string, string> = {
   match_style: 'Match style', motion_track: 'Motion tracking', move_clip: 'Move', multicam: 'Multicam',
   name_speakers: 'Name speakers', noise_reduce: 'Noise removal', object_erase: 'Erase object',
   paste_clips: 'Paste', record_voiceover: 'Voiceover', redo: 'Redo', remove_background: 'Remove background',
-  remove_effect: 'Remove effect', remove_fillers: 'Remove filler words', remove_keyframe: 'Remove keyframe',
+  remove_effect: 'Remove effect', remove_effects: 'Remove filter', flip_clip: 'Flip',
+  remove_fillers: 'Remove filler words', remove_keyframe: 'Remove keyframe',
   remove_marker: 'Remove marker', remove_mask: 'Remove mask', remove_silences: 'Remove silences',
   remove_transition: 'Remove transition', reorder_clips: 'Reorder', ripple_delete: 'Delete',
   save_show_template: 'Save show template', set_aspect_ratio: 'Aspect ratio', set_canvas: 'Canvas',
@@ -38,11 +39,13 @@ export const TOOL_TITLES: Record<string, string> = {
   set_clip_z: 'Layer order', set_duck: 'Ducking', set_loudness_target: 'Loudness', set_pip_framing: 'Framing',
   set_property: 'Edit', set_speed: 'Speed', set_track_locked: 'Lock track', set_track_muted: 'Mute track',
   set_track_solo: 'Solo track', detach_audio: 'Detach audio', freeze_frame: 'Freeze frame',
+  set_voice_effect: 'Voice effect',
   set_video_fade: 'Fade', set_volume: 'Volume', smooth_slow_motion: 'Smooth slow motion',
   split_at: 'Split', stabilize: 'Stabilize', transcribe: 'Transcribe', translate_captions: 'Translate captions',
   trim_clip: 'Trim', tts_voiceover: 'Voiceover', undo: 'Undo', upscale: 'AI upscale', vocal_isolate: 'Isolate vocals',
   prompt: 'Prompt', verify_render: 'Check the result', download: 'Download', finish_short: 'Finish short',
   repair_media_paths: 'Relink media', repair_chunks: 'Repair preview',
+  set_animation: 'Animation',
 }
 
 /** A title for a tool id: the table, else the id made readable. */

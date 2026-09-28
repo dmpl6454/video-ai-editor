@@ -625,6 +625,15 @@ def open_bench(workdir: Path, *, media: MediaSet | None = None, brain: str | Non
     mp.setattr(_main, "WORKDIR", workdir)
     mp.setattr(_main, "_STORES", OrderedDict())
     mp.setattr(_features, "_REPORT_CACHE", None)
+    # The router's process-wide brain singletons FREEZE part of the env they
+    # were built under (`CloudBrain._allowed` reads VAI_PROMPT_CLOUD once),
+    # and its brains report is memoised. Built inside the benchmark they
+    # carried `VAI_PROMPT_CLOUD=0` into every later test (a saved key never lit
+    # the claude rung — test_c3_settings_key, gate X3); built before it they
+    # would carry the caller's env in. Fresh on entry, the caller's back on exit.
+    from video_ai_editor.agent.prompt.brains import router as _router
+    mp.setattr(_router, "_DEFAULT_BRAINS", None)
+    mp.setattr(_router, "_REPORT_CACHE", {})
     _forbid_downloads(mp)
     restrict_before = config._FORCED_RESTRICT
     config.enable_path_restriction(False)

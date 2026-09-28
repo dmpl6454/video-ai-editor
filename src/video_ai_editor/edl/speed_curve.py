@@ -358,6 +358,34 @@ def anchored_ticks(pts_file: int, TB: float, in_: float, cm: CurveMap) -> int:
     return int((out_seconds(cm, T) + CURVE_TICK_BIAS) / TB)
 
 
+# ---------------------------------------------------------------- constant speed, same clock
+#
+# Review RE (wave E): a CONSTANT speed (1x included) used to rebase at the
+# first DECODED frame (`setpts=PTS-STARTPTS`), which sits up to a source frame
+# away from `in` — so when the source rate differs from the project's, a
+# split's right piece rounded its frames against a different offset than the
+# whole clip: 30 fps in a 25 fps project, in 0.52, split at 1.48, 22 frames of
+# the right piece one source frame off (24→30, 25→29.97, 30→24 alike). A
+# constant speed now runs on the curve's clock above: the same seek grid,
+# `file_clock_expr`, `curve_settb_expr`, T = PTS·TB − in, `/ speed`, the
+# same bias and `fps=R:start_time=0`. Only the retime itself is simpler.
+
+def anchored_const_setpts_expr(speed: float, in_: float) -> str:
+    """The ``setpts`` value of a CONSTANT speed on the file clock, anchored
+    at ``in`` (1x: no division)."""
+    T = f"(PTS*TB-{_num(in_)})"
+    body = T if float(speed) == 1.0 else f"{T}/{_num(float(speed))}"
+    return f"({body}+{_num(CURVE_TICK_BIAS)})/TB"
+
+
+def anchored_const_ticks(pts_file: int, TB: float, in_: float, speed: float) -> int:
+    """Output ticks ``anchored_const_setpts_expr`` gives the frame whose
+    file-clock pts (refined time base ``TB``) is ``pts_file``."""
+    T = float(pts_file) * TB - float(in_)
+    v = T if float(speed) == 1.0 else T / float(speed)
+    return int((v + CURVE_TICK_BIAS) / TB)
+
+
 def source_seconds(cm: CurveMap, t: float) -> float:
     """Source seconds consumed after ``t`` output seconds (the forward map:
     the curve's integral; clamps below 0, extends linearly past ``D``)."""
@@ -419,6 +447,6 @@ __all__ = [
     "CurveSeg", "CurveMap", "curve_map", "out_seconds", "setpts_expr", "start_speed",
     "CURVE_PREROLL_S", "CURVE_SEEK_GRID", "CURVE_TICK_BIAS", "curve_seek", "c_round",
     "file_clock_expr", "curve_settb_expr", "curve_time_base", "anchored_setpts_expr",
-    "anchored_ticks",
+    "anchored_ticks", "anchored_const_setpts_expr", "anchored_const_ticks",
     "source_seconds", "speed_at", "split_curve", "integral_fraction",
 ]

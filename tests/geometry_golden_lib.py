@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from video_ai_editor.edl.schema import EDL, Canvas, Clip, Effect, Keyframe, empty_edl
+from video_ai_editor.edl.schema import EDL, Canvas, CanvasBackground, Clip, Effect, Keyframe, empty_edl
 from video_ai_editor.render import compositor
 from video_ai_editor.render.frame_map import SourceInfo
 from video_ai_editor.render.sar import display_width, parse_sar
@@ -136,6 +136,8 @@ class ClipSpec:
     measure: bool = True
     freeze: float | None = None
     reverse: bool = False
+    #: other Clip fields set verbatim (a Canvas background, a clip animation)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -233,6 +235,36 @@ def cases() -> list[Case]:
         Case("fade_longer_than_clip", [ClipSpec(L, out=0.5, fade_in=3.0)], list(range(0, 15)), gain_only=True),
         Case("fade_and_opacity", [ClipSpec(L, out=1.0, fade_out=0.5, tx={"opacity": 0.8})], [0, 20, 25, 29],
              gain_only=True),
+        # wave E gate (X2): a clip cut at in > 0 runs on the in-anchored clock
+        # with NEGATIVE pre-roll pts, and vf_fade (uint64 start) came out
+        # unfaded / black. Every fade case at in > 0: the retimed source
+        # frame's time T = (pts - in) / speed is the non-keyframed fade clock.
+        Case("fades_in_offset", [ClipSpec(L, in_=1.0, out=2.0, fade_in=0.4, fade_out=0.4)],
+             list(range(0, 30)), gain_only=True),
+        Case("fades_in_offgrid", [ClipSpec(L, in_=0.52, out=1.52, fade_in=0.4, fade_out=0.4)],
+             list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_speed2", [ClipSpec(L, in_=0.8, out=2.8, speed=2.0, fade_in=0.5, fade_out=0.5)],
+             list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_speed_half", [ClipSpec(L, in_=0.61, out=1.11, speed=0.5, fade_in=0.4,
+                                                     fade_out=0.3)], list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_25fps_in_30", [ClipSpec("land25", in_=0.52, out=2.0, fade_in=0.4, fade_out=0.7)],
+             list(range(0, 44, 2)), gain_only=True),
+        Case("fades_in_offset_curve", [ClipSpec(L, in_=0.9, out=2.4, speed={"curve": [[0, 1], [0.5, 0.5], [1, 1]]},
+                                                fade_in=0.4, fade_out=0.4)], list(range(0, 60, 2)), gain_only=True),
+        Case("fades_in_offset_freeze", [ClipSpec(L, in_=1.2, out=1.2 + 1 / 30, freeze=1.0, fade_in=0.3,
+                                                 fade_out=0.3)], list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_reverse_2x", [ClipSpec(L, in_=0.5, out=2.5, speed=2.0, reverse=True,
+                                                     fade_in=0.3, fade_out=0.4)], list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_kf_opacity", [ClipSpec(L, in_=1.0, out=2.0, fade_in=0.3, fade_out=0.3,
+                                                     tx={"opacity": kf((0, 1), (1, 0.5))})],
+             list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_anim", [ClipSpec(L, in_=1.0, out=2.0, fade_in=0.3, fade_out=0.3,
+                                               extra={"anim_in": "fade_in", "anim_dur": 0.5})],
+             list(range(0, 30)), gain_only=True),
+        Case("fades_in_offset_canvas_bg", [ClipSpec("port", in_=1.0, out=2.0, fade_in=0.4, fade_out=0.4,
+                                                    extra={"canvas_bg": CanvasBackground(type="color",
+                                                                                         color="#0000FF")})],
+             list(range(0, 30)), gain_only=True),
         # ---- anamorphic sources: fitted by their DISPLAYED shape
         Case("contain_pal43", [ClipSpec("pal43")], [0]),
         Case("cover_pal43", [ClipSpec("pal43", fit="cover")], [0]),
@@ -245,6 +277,22 @@ def cases() -> list[Case]:
              [0]),
         Case("kf_pan_pal169", [ClipSpec("pal169", out=1.2, speed=0.5,
                                         tx={"x": kf((0, -80), (2, 80)), "scale": 1.5})], [0, 1, 30, 59]),
+        # ---- Transform.flip_h / flip_v (wave E): the fitted frame mirrored
+        # BEFORE the rotation, scale and pan (the picture turns as set)
+        Case("tflip_h_rotate", [ClipSpec(L, tx={"flip_h": True, "rotation": 20.0})], [0]),
+        Case("tflip_v_contain_portrait", [ClipSpec("port", tx={"flip_v": True})], [0]),
+        Case("tflip_hv_scale_pan", [ClipSpec(L, tx={"flip_h": True, "flip_v": True, "scale": 0.73,
+                                                    "x": -33.4, "y": 12.6})], [0]),
+        Case("tflip_h_cover_pan", [ClipSpec("port", fit="cover", tx={"flip_h": True, "x": 30.0, "y": -50.0,
+                                                                     "scale": 1.3})], [0]),
+        Case("tflip_v_cover_pan", [ClipSpec("port", fit="cover", tx={"flip_v": True, "y": -500.0})], [0]),
+        Case("tflip_h_cover_zoom_rotate", [ClipSpec(L, fit="cover", tx={"flip_h": True, "scale": 1.2,
+                                                                        "rotation": 7.0})], [0]),
+        Case("tflip_h_kf", [ClipSpec(L, tx={"flip_h": True, "x": kf((0, 0), (1, 200)),
+                                            "rotation": kf((0, 0), (1, 45)), "scale": 1.5})], [0, 15, 29]),
+        Case("tflip_h_and_hflip_effect", [ClipSpec(L, tx={"flip_h": True, "rotation": 15.0},
+                                                   effects=("hflip",))], [0]),
+        Case("tflip_v_pal43", [ClipSpec("pal43", tx={"flip_v": True, "rotation": -10.0})], [0]),
         # ---- combined
         Case("combined_25fps_odd", [ClipSpec("odd25", fit="cover", out=2.0,
                                              tx={"scale": 1.2, "rotation": -12.0, "x": -40.0, "y": 25.0},
@@ -271,6 +319,8 @@ def build_edl(case: Case, paths: dict[str, str] | None = None) -> EDL:
             c.freeze = cs.freeze
         if cs.reverse:
             c.reverse = True
+        for k, v in cs.extra.items():
+            setattr(c, k, v)
         v1.clips.append(c)
     e.recompute_duration()
     return e

@@ -31,6 +31,9 @@ import re
 from dataclasses import dataclass, field
 
 from . import slots as S
+from . import canvas_vocab as _CV
+from . import voice_vocab as _VV
+from . import anim_vocab as _AV
 
 INTENTS: tuple[str, ...] = (
     "auto_edit", "captions", "translate_captions", "remove_silences", "remove_fillers", "tighten",
@@ -52,9 +55,21 @@ INTENTS: tuple[str, ...] = (
     # find those by name, so the reply says where to do it — it used to ADD
     # captions and apply a LUT (the E3 sweep's wrong edits).
     "remove_feature",
-    # Review RD3: flip / mirror is not a Transform yet (wave E F4) — an honest
-    # reply instead of a question the reply could not act on.
+    # Flip / mirror (wave E, F4b): the Transform's flip_h / flip_v, toggled
+    # like CapCut's Mirror; "turn it upside down" stays a 180° rotation.
     "flip",
+    # Wave E (F4b): "trim the second clip to 2 seconds", "make the first clip
+    # 3 seconds long" — a clip's LENGTH, not a range cut out of the video.
+    "clip_length",    # Wave E (F2): CapCut Canvas (blur / colour / picture behind a
+    # letterboxed clip) and an overlay clip's blend mode (agent/prompt/
+    # canvas_expanders.py; words in canvas_vocab.py).
+    "canvas", "blend",
+    # Wave E (F3): CapCut's voice changer on a clip's sound (agent/prompt/
+    # voice_expanders.py; words in voice_vocab.py).
+    "voice_effect",
+    # Wave E (F1): CapCut clip animations (In / Out / Combo) on a clip or a
+    # sticker (agent/prompt/anim_expanders.py).
+    "animation",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -336,11 +351,51 @@ _DELETE_CLIP = (rf"\b(?:ripple[- ]?)?(?:delete|remove|drop|get rid of|take out|c
                 r"|\bripple[- ]?delete\b|^(?:ripple[- ]?)?(?:delete|remove)\s+(?:it|this|that)$")
 #: Taking away something a clip or the timeline CARRIES (not a clip, not the
 #: music bed, not silences or noise — those have their own recipes).
-REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|hide|drop|lose|kill|strip)"
-                  r"\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|every\s+|that\s+|this\s+|those\s+|these\s+)?"
-                  r"(?:\w+\s+)?(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|grades?|grading|effects?"
-                  r"|transitions?|text|titles?|lower thirds?|hooks?|keyframes?|zoom|ken burns|stickers?|emojis?"
-                  r"|watermark|end ?card|speed ramp|speed curve|freeze(?: frame)?)\b(?!\s*(?:from|on)\s+the\s+music)")
+#: Wave E (F4b): the recipe removes captions, filters, transitions and text by
+#: name (`remove_feature`); one look / quoted word may sit before the noun
+#: ("the black and white filter", "the 'SALE' text") — "remove the black and
+#: white filter" used to APPLY the mono look.
+#: The Effects panel's effects by name (review RE: "take off the vignette"
+#: got an unrelated clarify card; "delete the vintage filter" looked only at
+#: the LUT looks). Never a bare "blur": "remove the background blur" is the
+#: canvas.
+FX_NOUN = (r"(?:vignett(?:e|ing)|film grain|grain|vintage effect|vhs(?: effect| look)?|glow(?: effect)?"
+           r"|rgb[- ]split|chromatic aberration|sharpen(?:ing)?(?: effect)?|blur effect|flip [hv] effect)")
+REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|hide|drop|lose|kill|strip|undo)"
+                  r"\s+(?:the\s+|all\s+(?:of\s+)?(?:the\s+|my\s+)?|my\s+|every\s+|that\s+|this\s+|those\s+|these\s+|both\s+)?"
+                  r"(?:black and white\s+|b ?& ?w\s+|teal (?:and |& )?orange\s+|[\"'“”][^\"'“”]{1,60}[\"'“”]\s+|[\w'-]+\s+)?"
+                  r"(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading|effects?"
+                  r"|transitions?|cross[- ]?fades?|dissolves?|text|titles?|lower thirds?|hooks?|keyframes?|zoom|ken burns"
+                  r"|stickers?|emojis?|watermark|end ?card|speed ramp|speed curve|freeze(?: frame)?)\b"
+                  r"(?!\s*(?:from|on)\s+the\s+music)"
+                  r"|\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|drop|lose|kill|strip)"
+                  r"\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|that\s+|this\s+)?" + FX_NOUN + r"\b"
+                  r"|\b(?:take|turn|switch|strip|get)\s+(?:the\s+|that\s+|this\s+)?" + FX_NOUN + r"\s+off\b"
+                  # the particle after the object: "take the warm filter off"
+                  # (it APPLIED the warm look), "turn the captions off"
+                  r"|\b(?:take|turn|switch|strip|get|lose)\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|that\s+|this\s+)?"
+                  r"(?:black and white\s+|b ?& ?w\s+|[\w'-]+\s+)?"
+                  r"(?:captions?|subtitles?|subs|filters?|luts?|looks?|colou?r grade|grades?|grading|transitions?"
+                  r"|cross[- ]?fades?|dissolves?|text|titles?|lower thirds?|hooks?)\s+off\b")
+#: A clip's LENGTH on the timeline (wave E, F4b): "trim the second clip to 2
+#: seconds", "make the first clip 3 seconds long", "clip 2 should be 1.5 s".
+#: Never "trim 2 seconds off the second clip" (a range) nor "make it 30s" (the
+#: whole video's target length).
+_LEN = r"\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?)\b"
+CLIP_LENGTH = (rf"\b(?:trim|cut|shorten|extend|lengthen|stretch)\s+{CLIP_PHRASE}\s+(?:down\s+|back\s+|out\s+)?to\s+(?:be\s+)?"
+               rf"(?:only\s+|just\s+|exactly\s+)?{_LEN}"
+               rf"|\b(?:make|set|change|get)\s+{CLIP_PHRASE}\s+(?:to\s+(?:be\s+)?)?(?:only\s+|just\s+|exactly\s+)?{_LEN}"
+               r"(?:\s+long)?(?!\s*(?:slower|faster|later|earlier|shorter|longer|in|of|off)\b)"
+               rf"|\b(?:set|change|make)\s+(?:the\s+)?(?:length|duration)\s+of\s+{CLIP_PHRASE}\s+(?:to\s+)?{_LEN}"
+               rf"|\bmake\s+{CLIP_PHRASE}\s+last\s+(?:only\s+|just\s+|exactly\s+)?{_LEN}"
+               rf"|\b{CLIP_PHRASE}\s+(?:should|must|needs to|has to)\s+(?:be|last)\s+(?:only\s+|just\s+|exactly\s+)?{_LEN}"
+               # by an amount: "trim 2 seconds off (the end of) the second clip",
+               # "shorten clip 2 by 1 s", "make the last clip 2 seconds longer"
+               # ("…off the end of the second clip" cut the VIDEO's last 2 s)
+               rf"|\b(?:trim|cut|shave|take|chop|lose|remove)\s+(?:off\s+)?{_LEN}\s+(?:off|from)\s+"
+               rf"(?:(?:the\s+)?(?:end|start|beginning|front|head|tail)\s+of\s+)?{CLIP_PHRASE}"
+               rf"|\b(?:shorten|trim|cut|extend|lengthen|stretch)\s+{CLIP_PHRASE}\s+by\s+{_LEN}"
+               rf"|\bmake\s+{CLIP_PHRASE}\s+{_LEN}\s+(?:shorter|longer)\b")
 #: A zoom on a clip's picture — Ken Burns, a slow push, a punch-in, a zoom
 #: level. Never a clause about transitions or seams ("zoom transition at
 #: 0:04", "a zoom at every cut" stay transitions), and never the hook's own
@@ -362,7 +417,15 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
      r"|\bfade (?:in |up )?from black (?:at|in|for) (?:the )?(?:very )?(?:start|beginning|opening|intro)\b"
      r"|\b(?:end|finish|close) (?:it |the video |everything )?(?:with|on) a fade(?: out| to black)?\b", "fade", EXACT),
     (r"\bcut(?:s|ting)?\s+(?:it\s+|this\s+|the\s+video\s+)?(?:to|on|with|along)\s+the\s+(?:beat|music|rhythm|drums?|bpm)\b|\bcut to the beat\b|\bon the beat\b|\bbeat[- ]sync\b|\bsync(?:ed)?\s+to\s+the\s+(?:beat|music)\b|\bbeat[- ]match\b", "beat_sync", EXACT),
+    # Wave E (F3): taking a VOICE effect off ("remove the voice effect", "turn
+    # off the echo") before the generic "remove the ___ effect" row.
+    (_VV.VOICE_OFF_PHRASE, "voice_effect", EXACT),
+    # Wave E (F1): a clip ANIMATION ("add a zoom in animation", "make the
+    # sticker bounce in", "slide the last clip out", "remove the animation")
+    # before the remove-feature and Ken Burns zoom rows.
+    (_AV.ANIM_PHRASE, "animation", EXACT),
     (REMOVE_FEATURE, "remove_feature", EXACT),
+    (CLIP_LENGTH, "clip_length", EXACT),
     (_ZOOM, "zoom", EXACT),
     # "export in 4k" is the 4K export preset, not an AI upscale of every clip.
     (r"\bexport\b(?!.*\bupscal)(?=.*\b(?:4k|uhd|2160p)\b)", "export_preset", EXACT),
@@ -385,6 +448,8 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
 _MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|background music|backing track)"
 #: The programme's own sound (v1 clip audio), as the object of a level / mute.
 _VOICE_NOUN = r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound)"
+#: The voice-over lane, as the object of a level request (review RE).
+_VO_NOUN = r"(?:voice[- ]?overs?|vo|narration track|voice track)"
 #: What "fade the ___ in/out" may name besides the music.
 _FADE_OBJECT = (r"video|clip|clips|first clip|last clip|opening clip|final clip|picture|image|footage|start|end|"
                 r"beginning|ending|intro|outro|audio|sound|voice|whole thing|whole video")
@@ -498,7 +563,21 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"|\b(?:lower|raise|reduce|increase|boost|drop|decrease|turn (?:up|down)|bring (?:up|down))\s+(?:the\s+)?"
                 rf"(?:volume|level|gain|audio|sound)\s+(?:of|on|for|in)\s+{CLIP_PHRASE}"
                 rf"|\bmake\s+{CLIP_PHRASE}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?(?:louder|quieter|softer)\b"
-                rf"|\b(?:turn|bring)\s+{CLIP_PHRASE}\s+(?:up|down)\b", EXACT),),
+                rf"|\b(?:turn|bring)\s+{CLIP_PHRASE}\s+(?:up|down)\b"
+                # Review RE: "raise the first clip's volume by 3 db" moved the
+                # PROJECT loudness target; "lower clip 2 by 4 dB" was unread.
+                rf"|\b(?:lower|raise|reduce|increase|boost|drop|decrease|lift|turn\s+(?:up|down)|bring\s+(?:up|down))\s+"
+                rf"{CLIP_PHRASE}(?:'s)?\s+(?:volume|level|gain|audio|sound)\b"
+                rf"|\b(?:lower|raise|reduce|increase|boost|drop|decrease|lift|turn|bring)\s+{CLIP_PHRASE}"
+                r"(?:\s+(?:up|down))?\s+by\s+[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|decibels?|%|percent)\b"
+                rf"|\b{CLIP_PHRASE}(?:'s)?\s+(?:volume|level|gain)\s+(?:up|down|by|to)\b"
+                # the voice-over lane's level ("lower the voiceover by 6 dB" asked
+                # to download a TTS voice)
+                rf"|\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)"
+                rf"\s+(?:the\s+|my\s+)?{_VO_NOUN}(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
+                rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?{_VO_NOUN}\b"
+                rf"|\b{_VO_NOUN}(?:'s)?\s+(?:volume|level|gain)\b"
+                rf"|\bmake\s+(?:the\s+|my\s+)?{_VO_NOUN}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?(?:louder|quieter|softer)\b", EXACT),),
     # QA-037: "reverse the clip", "play it backwards", "ulta chala do"; the
     # forwards-again wording is read by `reverse_off`. "reverse that" / "reverse
     # the last edit" is an undo and "reverse the order" a reorder, so neither
@@ -579,8 +658,23 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     # Stickers are placed from the Stickers panel: `add_sticker` fetches its
     # artwork from a CDN, so a plan may not name it (schema.PLAN_DENY).
     "sticker": ((r"\bstickers?\b|\bemojis?\b|\bgifs?\b|\bheart (?:icon|emoji|sticker)\b", EXACT),),
-    # a mirror image; "flip it upside down" is a rotation (tie-break below)
-    "flip": ((r"\bmirror(?:ed|ing|s)?\b|\bflip(?:ped|ping|s)?\b(?:(?!upside).)*\b(?:horizontal(?:ly)?|vertical(?:ly)?|sideways|left to right|right to left)\b", EXACT),),
+    # a mirror image; "flip it upside down" is a rotation (tie-break below).
+    # Wave E (F4b): "flip the second clip" / "flip it" (CapCut's Mirror is
+    # the horizontal flip), "unflip it", "flip it back".
+    "flip": ((r"\bmirror(?:ed|ing|s)?\b|\bflip(?:ped|ping|s)?\b(?:(?!upside).)*\b(?:horizontal(?:ly)?|vertical(?:ly)?|sideways|left to right|right to left)\b"
+              rf"|\b(?:un-?)?flip(?:ped|s)?\s+(?:{CLIP_PHRASE}|it|this|that|them|everything|the (?:video|picture|image|footage))"
+              r"(?!\s+(?:upside|over|to (?:the )?(?:vertical|portrait|landscape|horizontal|square)))"
+              r"|\bun-?flip\b|^flip(?:\s+it)?(?:\s+back)?$", EXACT),),
+    "clip_length": ((CLIP_LENGTH, EXACT),),
+    # Wave E (F2): "blur the background", "make the background black",
+    # "use this image as the background"; "set the overlay to screen",
+    # "multiply blend the top clip" (canvas_vocab.py).
+    "canvas": ((_CV.CANVAS_PHRASE, EXACT),),
+    "blend": ((_CV.BLEND_PHRASE, EXACT),),
+    # Wave E (F3): "make my voice sound like a robot", "add echo to the
+    # voiceover", "remove the voice effect" (voice_vocab.py).
+    "voice_effect": ((_VV.VOICE_PHRASE, EXACT),),
+    "animation": ((_AV.ANIM_PHRASE, EXACT),),
     "trim": ((rf"\b(?:trim|cut|remove|delete|drop|chop|lose|take (?:off|out)|get rid of|skip|shave)\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?:first|last|opening|closing|intro|outro)?\s*(?=.*{_HAS_RANGE})|\btrim (?:it|this|the (?:start|end|beginning|intro|outro|clip|video))\b|\bstart (?:it |the video )?(?:at|from)\s+\d|\bend (?:it |the video )?at\s+\d|\bkeep (?:only )?(?:the )?(?:first|last)\b|\bremove the (?:intro|outro|beginning|ending)\b|\bcut (?:the )?(?:intro|outro|beginning|ending|start|end)\b", EXACT),
              (r"\btrim\b|\bshorter\b|\bchop\b", SYNONYM)),
     # "write 'The End' over the last 2 seconds" (review RD3): quoted words
@@ -605,10 +699,21 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     # added). "make it into a short" stays the Auto edit.
     "export_preset": ((r"\b(?:render|export|output|save|encode)\s+(?:it|this|that|the (?:video|edit|project|clip|timeline|movie))?\s*(?:for|as)\s+(?:instagram|reels?|tiktok|youtube|shorts?|linkedin|stories|story|facebook|twitter)\b|\bexport (?:preset|settings?|for|as|to)\b|\bexport[- ]ready\b|\brender (?:for|as|settings?)\b|\b(?:set|use|apply)\s+(?:the\s+)?(?:\w+\s+)?(?:export\s+)?preset\b|\boptimi[sz]e (?:the )?(?:export|output|render|settings) for\b|\bformat (?:it|this) for\b|\bsettings for (?:instagram|reels|tiktok|youtube|shorts|linkedin|stories)\b|\b(?:instagram|reels|tiktok|youtube|shorts|linkedin|story|stories) (?:export|settings?|specs?|format|preset|ready|spec)\b|\bbitrate\b|\bready to (?:upload|post|publish)\b", EXACT),
                       (r"\bexport\b|\bpreset\b|\bupload (?:it|this|ready)\b", SYNONYM)),
-    "voiceover": ((r"\bvoice[- ]?over\b|\bnarrat(?:e|ion|or)\b|\btts\b|\btext[- ]to[- ]speech\b|\bai voice\b|\b(?:add|put|record|generate|make|have)\s+(?:a\s+|an\s+|some\s+|the\s+)?(?:\w+\s+)?voice\s+(?:say(?:ing)?|read(?:ing)?|that says|line|clip|narration)\b|\bvoice (?:say|saying|read|reading)\b|\bsay(?:ing)?\s+[\"“'].+[\"”']|\bread (?:this|it|the text) (?:out|aloud)\b|\bspoken (?:intro|outro|line)\b", EXACT),
-                  (r"\bvoice\b|\bnarration\b|\bsay\b", SYNONYM)),
+    # Review RE: the bare noun "voiceover" used to be this EXACT row, so
+    # "lower the voiceover by 6 dB" planned a NEW voice-over (a 60 MB voice
+    # download, then "what should it say?"). A new one needs a creation verb,
+    # quoted words, or the noun on its own.
+    "voiceover": ((r"\b(?:add|put|record|generate|create|make|need|want|give(?:\s+(?:it|me))?|write|lay|include|do)\s+"
+                   r"(?:a\s+|an\s+|some\s+|the\s+|my\s+)?(?:[\w'-]+\s+){0,2}?(?:voice[- ]?over|narration|narrator)\b"
+                   r"|^(?:an?\s+|some\s+)?(?:ai\s+)?(?:voice[- ]?over|narration)$"
+                   r"|\bvoice[- ]?over\s+(?:saying|that says|reading|of the|for the)\b|\bnarrate\b|\btts\b|\btext[- ]to[- ]speech\b|\bai voice\b|\b(?:add|put|record|generate|make|have)\s+(?:a\s+|an\s+|some\s+|the\s+)?(?:\w+\s+)?voice\s+(?:say(?:ing)?|read(?:ing)?|that says|line|clip|narration)\b|\bvoice (?:say|saying|read|reading)\b|\bsay(?:ing)?\s+[\"“'].+[\"”']|\bread (?:this|it|the text) (?:out|aloud)\b|\bspoken (?:intro|outro|line)\b", EXACT),
+                  (r"\bnarration\b|\bsay\b", SYNONYM), (r"\bvoice\b|\bvoice[- ]?over\b", WEAK)),
     "stabilize": ((r"\bstabili[sz](?:e|ation|er)\b|\b(?:fix|remove|reduce|smooth out|smooth)\s+(?:the\s+)?(?:shake|shakiness|shaky (?:footage|video|camera|cam|clip)|camera shake|jitter|wobble)\b|\bshaky\b|\bhandheld shake\b|\bsteady (?:it|this|the (?:shot|footage|video|clip))\b|\bsteadicam\b|\bwarp stabili[sz]er\b", EXACT),
-                  (r"\bshake\b|\bjittery\b|\bwobbly\b", SYNONYM)),
+                  # Review RE: a bare "shake" is CapCut's Shake COMBO ("shake the
+                  # second clip the whole time" replaced the clip with a
+                  # stabilised render); only "fix / remove the shake" and
+                  # "shaky" (EXACT above) mean stabilise.
+                  (r"\bjittery\b|\bwobbly\b", SYNONYM)),
     "upscale": ((r"\bupscal(?:e|ed|ing)\b|\bup-?res\b|\bsuper[- ]?resolution\b|\benhance (?:the )?resolution\b|\b(?:make|render|export) (?:it|this|the video) (?:4k|1080p|hd|sharper|higher res(?:olution)?)\b|\b(?:2|4)x (?:resolution|res|upscale)\b|\bincrease (?:the )?resolution\b|\bsharpen (?:it|this|the video) up\b|\bto 4k\b|\b(?:in|at) 4k\b", EXACT),
                 (r"\bresolution\b|\b4k\b|\bsharper\b|\bblurry\b|\bhd\b", SYNONYM)),
     "ask": ((r"^(?:how long|what(?:'s| is) the (?:length|duration|aspect|resolution|size|canvas|loudness|language)|what (?:did|does|do) (?:i|we|you|this|it)|what(?:'s| is) (?:on|in) (?:the|this)|is there|are there|does (?:it|this) have|do (?:i|we) have|how many|which (?:brain|model|tools?)|what can you do|what tools|help|tell me about|describe (?:the|this)|summari[sz]e (?:the|this)|explain (?:the|this)|why (?:did|is|was)|where (?:is|are)|show me the|list the|kya hai|kitna lamba|kitne)\b|\?$", EXACT),
@@ -660,7 +765,23 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("adjust", "color_look"), ("adjust", "loudness"), ("duplicate", "trim"), ("move_clip", "trim"),
     ("move_clip", "reverse"), ("rotate", "transitions"), ("sticker", "title"), ("sticker", "brand"),
     ("rotate", "flip"),
+    # Wave E (F2): a canvas / blend clause names the background or the
+    # overlay; the look, colour and title readings of its words lose.
+    ("canvas", "color_look"), ("canvas", "adjust"), ("canvas", "transitions"), ("canvas", "title"),
+    ("canvas", "reframe"), ("canvas", "remove_feature"), ("canvas", "trim"),
+    ("blend", "title"), ("blend", "color_look"), ("blend", "transitions"), ("blend", "adjust"),
+    # Wave E (F3): a voice-effect clause names an effect on a sound ("add echo
+    # to the voiceover", "remove the voice effect", "make my voice deeper").
+    ("voice_effect", "voiceover"), ("voice_effect", "volume"), ("voice_effect", "remove_feature"),
+    ("voice_effect", "clean_audio"), ("voice_effect", "mute"), ("voice_effect", "music"),
+    ("voice_effect", "loudness"), ("voice_effect", "fade"), ("voice_effect", "title"),
+    ("voice_effect", "speed"), ("voice_effect", "transitions"), ("voice_effect", "color_look"),
+    ("voice_effect", "trim"),
     ("delete_clip", "trim"), ("zoom", "transitions"), ("zoom", "reframe"),
+    # Wave E (F1): an animation names its motion and its clip / sticker.
+    ("animation", "zoom"), ("animation", "rotate"), ("animation", "fade"), ("animation", "sticker"),
+    ("animation", "stabilize"), ("animation", "remove_feature"), ("animation", "title"),
+    ("animation", "color_look"), ("animation", "speed"), ("animation", "adjust"),
 )
 
 
@@ -777,7 +898,7 @@ def detect(prompt: str) -> Detection:
                      slots=whole, unmatched=tuple(unmatched))
 
 
-__all__ = ["REMOVE_FEATURE", "INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
+__all__ = ["REMOVE_FEATURE", "FX_NOUN", "CLIP_LENGTH", "INTENTS", "EXACT", "SYNONYM", "WEAK", "RUN_THRESHOLD", "NORMALISE_THRESHOLD",
            "IntentHit", "Detection", "split_clauses", "exclusions_in", "strip_negations", "duck_off",
            "reverse_off", "clip_ref_of", "NTH_REF", "AT_REF", "ORDINAL", "CLIP_NOUN", "CLIP_PHRASE",
            "CUT_PRECEDENCE", "PHRASES", "detect"]

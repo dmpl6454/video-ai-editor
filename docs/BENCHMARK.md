@@ -81,8 +81,15 @@ every planted event is an exact concat offset, not a whisper guess:
   coordinates (`captions_relaid_without_drift`, `edl_duration_agrees`) cannot
   see a lane that plays late.
 * No network: a socket-level guard fails any non-loopback connection for the
-  whole session; `huggingface_hub.snapshot_download` can only resolve from the
-  local cache. `downloads` questions are answered **skip**, so a case that
+  whole benchmark module; `huggingface_hub.snapshot_download` can only resolve
+  from the local cache. The guard, `BENCH_ENV`, the WORKDIR redirect and the
+  download stubs (and fresh prompt-router brain singletons — `CloudBrain` freezes
+  `VAI_PROMPT_CLOUD` when it is built) are held by the MODULE-scoped `bench` fixture and are gone
+  when the benchmark ends, so a marker expression that collects
+  tests/benchmark alongside the rest of the suite (`-m "not wk"` replaces the
+  default `not benchmark`) cannot leak them into later tests;
+  `tests/benchmark/conftest.py` errors the last benchmark test if any of that
+  state has not been restored. `downloads` questions are answered **skip**, so a case that
   needs MADLAD (2; the Hindi variant of 20) skips with the reason unless the
   model is already on disk.
 

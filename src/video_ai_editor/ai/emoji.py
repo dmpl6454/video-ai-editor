@@ -47,6 +47,11 @@ one-constant change — see `_PRIOR_STYLE_CACHES` for the namespacing rule that
 makes a switch actually visible.
 
 Fallback order is Apple -> Noto -> Fluent 3D -> Twemoji.
+
+DISPATCH NEVER FETCHES. `fetch_emoji_png` is for the serving paths (the picker
+swatch, text emoji, prewarm, the restyle). `add_sticker` is an edit op and
+uses `local_emoji_png`, which reads the caches and otherwise draws the tile
+from the installed font (`emoji_local`) — never a socket.
 """
 from __future__ import annotations
 import http.client
@@ -76,6 +81,11 @@ _EMOJI_CACHE_ROOT = _LEGACY_EMOJI_CACHE if _LEGACY_EMOJI_CACHE.exists() else \
 # to identify the whole chain, not just its first link.
 _PRIOR_STYLE_CACHES = ("noto", "apple", "fluent3d", ".")
 EMOJI_CACHE = _EMOJI_CACHE_ROOT / "apple2"
+# Tiles drawn on THIS machine, offline, by `emoji_local` — kept apart from
+# `apple2` so the live namespace only ever holds the pinned download (a
+# namespace identifies a whole chain), and never listed as a prior style: it
+# is read by `local_emoji_png` alone, the dispatch path.
+LOCAL_CACHE = _EMOJI_CACHE_ROOT / "local"
 
 # All pinned to release tags, never branches: `@main` moves under us, and the
 # artwork every already-cached sticker was fetched with would change silently.
@@ -365,6 +375,13 @@ def refresh_session_sticker_art(stickers_dir: Path) -> list[str]:
             canon = fetch_emoji_png(emoji)
             if canon is None or canon.resolve() == p.resolve():
                 continue
+            # Only the CURRENT set restyles a copy. Offline, `fetch_emoji_png`
+            # ends at a prior-style cache (older Noto/Fluent/Twemoji art);
+            # swapping a sticker to that is a restyle backwards — it would
+            # replace a locally drawn Apple tile (`local_emoji_png`) with
+            # another house's design the moment the project is opened.
+            if canon.resolve().parent != EMOJI_CACHE.resolve():
+                continue
             new = canon.read_bytes()
             if new and new != p.read_bytes():
                 tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -452,6 +469,47 @@ def fetch_emoji_png(emoji: str) -> Path | None:
         _set_fallback_state(dst, state)
         return out
 
+    for style in _PRIOR_STYLE_CACHES:
+        legacy = (_EMOJI_CACHE_ROOT / style / f"{seq}.png").resolve()
+        if legacy.exists() and legacy.stat().st_size > 100:
+            return legacy
+    return None
+
+
+def local_emoji_png(emoji: str) -> Path | None:
+    """A local PNG for `emoji` WITHOUT touching the network — the resolver
+    `add_sticker` uses (gate X3: an edit op must never open a connection, and
+    a sticker must be addable offline).
+
+    Order: the pinned set already cached (`apple2`, whatever its provenance —
+    it is the chain's current answer) → a tile this machine already drew →
+    draw one now from the installed Apple emoji font (`emoji_local`; the same
+    artwork, see its docstring) → any prior-style cache. None when none of
+    those has it; the caller says so.
+
+    The download still happens, just never here: the sticker picker's swatch
+    request (`GET /api/emoji/{seq}.png`) and prewarm fill `apple2` before a
+    click, and the serving-path restyle (`refresh_session_sticker_art`) swaps
+    a session's locally drawn copy for the pinned bytes once they exist.
+    """
+    seq = _codepoints(emoji, keep_vs16=False)
+    if not seq:
+        return None
+    for d in (EMOJI_CACHE, LOCAL_CACHE):
+        p = d / f"{seq}.png"
+        if p.exists() and p.stat().st_size > 100:
+            return p
+    from . import emoji_local
+    data = emoji_local.render_png(emoji)
+    if data:
+        try:
+            LOCAL_CACHE.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        else:
+            out = _write_png_atomic(data, LOCAL_CACHE / f"{seq}.png", convert=False)
+            if out is not None:
+                return out
     for style in _PRIOR_STYLE_CACHES:
         legacy = (_EMOJI_CACHE_ROOT / style / f"{seq}.png").resolve()
         if legacy.exists() and legacy.stat().st_size > 100:

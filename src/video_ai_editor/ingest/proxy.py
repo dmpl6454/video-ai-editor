@@ -66,7 +66,13 @@ from ..edl import timebase as _tb
 #: so old proxies are simply never looked up again (and age out of the LRU).
 #: 2: levels/matrix converted to BT.709 limited (not relabelled), square pixels
 #:    (setsar=1, SAR parsed), absolute seeks, power-of-two audio headroom.
-RECIPE_VERSION = 2
+#: 3: sized to the AUTOROTATED picture (wave E): a source with a 90/270°
+#:    display matrix (a phone clip shot upright) was scaled to its stored
+#:    landscape size — the proxy squashed a portrait picture.
+#: 4: the sound is on the FILE clock (wave E gate RX): an audio stream that
+#:    starts after the file does is led by silence, so proxy sample S(t) is
+#:    file time t, as every render chain reads it (`AUDIO_FILTER`).
+RECIPE_VERSION = 4
 #: Short edge of the proxy picture. Sources smaller than this are NOT upscaled
 #: (a 360p source makes a 360p proxy): upscaling adds bytes, not detail.
 SHORT_EDGE = 720
@@ -74,6 +80,16 @@ SPAN_SECONDS = 2
 AUDIO_RATE = 48000
 AUDIO_CHANNELS = 2
 AUDIO_CHUNK_SAMPLES = 5 * AUDIO_RATE          # 240000 samples = 5 s
+#: The proxy's decode of a master's sound. First `aresample=async=1:first_pts=0`
+#: at the source's own rate — the head of every render chain (compositor,
+#: pip, audio_mix, reverse, speed_audio) — so a stream that starts after the
+#: file (audio start_time > format start_time: camera and screen-recorder
+#: MOV/MP4) is padded with silence and proxy sample S(t) is file time t,
+#: which the client indexes by `edit_sample(in)` (spec R9). Without it the
+#: client played such a source 100 ms off the server on every sample (gate RX,
+#: tests/test_proxy_audio_clock.py). Then the 48 kHz stereo float conversion.
+AUDIO_FILTER = ("aresample=async=1:first_pts=0,"
+                f"aresample={AUDIO_RATE},aformat=sample_fmts=flt:channel_layouts=stereo")
 #: MSE timescale the client writes in (spec R1). The init's mdhd carries it so
 #: the init segment can be passed through untouched.
 TIMESCALE = 240000
@@ -321,7 +337,8 @@ def probe_source(src: str | os.PathLike, key: str | None = None) -> SourceInfo:
     data = _ffprobe_json(["-show_entries",
                           "stream=index,codec_type,width,height,pix_fmt,r_frame_rate,"
                           "avg_frame_rate,time_base,start_time,sample_aspect_ratio,"
-                          "color_range,color_space",
+                          "color_range,color_space"
+                          ":stream_side_data=rotation:stream_tags=rotate",
                           real])
     streams = data.get("streams") or []
     v = next((s for s in streams if s.get("codec_type") == "video"), None)
@@ -333,10 +350,13 @@ def probe_source(src: str | os.PathLike, key: str | None = None) -> SourceInfo:
                           rate=_tb.DEFAULT_RATE, time_base=Fraction(1, AUDIO_RATE),
                           pts=[], keyframes=[], has_audio=True,
                           extra={"audio_only": True})
-    width, height = int(v.get("width") or 0), int(v.get("height") or 0)
-    # The DISPLAYED size (render/sar.py: the export fits the same number).
-    from ..render.sar import display_width
-    width = display_width(width, _frac(v.get("sample_aspect_ratio")))
+    # The DISPLAYED size (render/sar.py: the export fits the same number):
+    # square pixels, and the picture ffmpeg's autorotate decodes — every
+    # decode the proxy encode makes is autorotated, so a quarter-turn
+    # rotation swaps the sides (wave E; E1a notDone).
+    from ..render.sar import display_size, rotation_of
+    width, height = display_size(v)
+    rotation = rotation_of(v)
     rate = _tb.source_rate(v.get("avg_frame_rate"), v.get("r_frame_rate"))
     tb = _frac(v.get("time_base")) or Fraction(1, 90000)
     pts, keys = _packet_table(real)
@@ -356,6 +376,8 @@ def probe_source(src: str | os.PathLike, key: str | None = None) -> SourceInfo:
     colour = {"color_range": "pc" if rng == "pc" or pix_fmt.startswith("yuvj") else
               (rng if rng in ("tv",) else "unknown"),
               "color_space": str(v.get("color_space") or "unknown")}
+    if rotation:
+        colour["rotation"] = rotation
     return SourceInfo(key=key, src=real, width=width, height=height,
                       pix_fmt=pix_fmt, rate=rate, time_base=tb,
                       pts=pts, keyframes=keys or [0], has_audio=a is not None,
@@ -402,18 +424,33 @@ def static_index(info: SourceInfo, *, avcc: bytes | None = None) -> dict:
 
 
 def audio_layout(info: SourceInfo, samples: int | None = None,
-                 gains: dict[str, float] | None = None) -> dict:
+                 gains: dict[str, float] | None = None,
+                 peaks: list[float] | None = None) -> dict:
     """``chunk_gain`` is sparse ("n" -> the LINEAR power of two chunk n was
     divided by; absent = 1); ``gain_db`` is the largest of them in dB, for
     display (0.0: nothing to undo). The client multiplies by the linear
-    value, never by a rounded dB figure, so the undo is exact."""
+    value, never by a rounded dB figure, so the undo is exact.
+    ``chunk_peak`` (once the sound is built) is every chunk's max |x| of the
+    float decode, rounded UP to 1e-6: the client bounds the pre-limiter peak
+    with it and calls a range whose bound tops the ceiling APPROX (the
+    browser's limiter is not `alimiter`; gate RX finding 3)."""
     gains = dict(gains or {})
-    return {"rate": AUDIO_RATE, "channels": AUDIO_CHANNELS,
-            "chunk_samples": AUDIO_CHUNK_SAMPLES, "silent": not info.has_audio,
-            "start_s": info.audio_start, "samples": samples,
-            "chunks": (-(-samples // AUDIO_CHUNK_SAMPLES) if samples else 0)
-            if samples is not None else None,
-            "gain_db": _db(max(gains.values(), default=1.0)), "chunk_gain": gains}
+    out = {"rate": AUDIO_RATE, "channels": AUDIO_CHANNELS,
+           "chunk_samples": AUDIO_CHUNK_SAMPLES, "silent": not info.has_audio,
+           "start_s": info.audio_start, "samples": samples,
+           "chunks": (-(-samples // AUDIO_CHUNK_SAMPLES) if samples else 0)
+           if samples is not None else None,
+           "gain_db": _db(max(gains.values(), default=1.0)), "chunk_gain": gains}
+    if peaks is not None:
+        out["chunk_peak"] = list(peaks)
+    return out
+
+
+def peak_up(peak: float) -> float:
+    """`peak` rounded UP to 1e-6 (an upper bound that survives JSON)."""
+    if not peak > 0.0 or peak != peak:
+        return 0.0
+    return math.ceil(peak * 1e6) / 1e6
 
 
 def _db(linear: float) -> float:
@@ -901,7 +938,7 @@ def build_audio(info: SourceInfo, *, cancel: "threading.Event | _EventLike | Non
         return layout
     argv = [_pu.FFMPEG, "-nostdin", "-hide_banner", "-v", "error", "-i", info.src,
             "-map", "0:a:0", "-vn", "-sn", "-dn",
-            "-af", f"aresample={AUDIO_RATE},aformat=sample_fmts=flt:channel_layouts=stereo",
+            "-af", AUDIO_FILTER,
             "-f", "f32le", "pipe:1"]
     proc = _spawn(argv, low_priority)
     err: list[bytes] = []
@@ -914,6 +951,7 @@ def build_audio(info: SourceInfo, *, cancel: "threading.Event | _EventLike | Non
     want = AUDIO_CHUNK_SAMPLES * frame_bytes
     total = 0
     n = 0
+    peaks: list[float] = []
     gains: dict[str, float] = dict(((read_index(key) or {}).get("audio") or {})
                                    .get("chunk_gain") or {})
     d.mkdir(parents=True, exist_ok=True)
@@ -930,12 +968,14 @@ def build_audio(info: SourceInfo, *, cancel: "threading.Event | _EventLike | Non
             if got == 0:
                 break
             pcm = np.frombuffer(b"".join(parts)[:got], dtype="<f4").reshape(-1, AUDIO_CHANNELS)
+            peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+            peaks.append(peak_up(peak))
             dst = d / f"{n:04d}.flac"
             if not dst.is_file():
                 # The export mixes the UNCLIPPED float decode; 24-bit PCM
                 # would hard-clip an over. Store it with power-of-two headroom
                 # and publish the gain BEFORE the chunk becomes servable.
-                div = headroom(float(np.max(np.abs(pcm))) if pcm.size else 0.0)
+                div = headroom(peak)
                 if div != 1.0:
                     pcm = pcm / np.float32(div)
                     gains[str(n)] = div
@@ -965,7 +1005,7 @@ def build_audio(info: SourceInfo, *, cancel: "threading.Event | _EventLike | Non
     if proc.returncode != 0:
         tail = b"".join(err).decode("utf-8", "replace")[-400:]
         raise ProxyError(f"audio decode failed ({proc.returncode}): {tail}")
-    layout = audio_layout(info, samples=total, gains=gains)
+    layout = audio_layout(info, samples=total, gains=gains, peaks=peaks)
     _merge_index(info, {"audio": layout})
     return layout
 
@@ -1014,7 +1054,7 @@ def media_facts(info: SourceInfo | None) -> dict:
 
 
 __all__ = [
-    "RECIPE_VERSION", "SHORT_EDGE", "SPAN_SECONDS", "AUDIO_RATE", "AUDIO_CHUNK_SAMPLES",
+    "RECIPE_VERSION", "SHORT_EDGE", "SPAN_SECONDS", "AUDIO_RATE", "AUDIO_CHUNK_SAMPLES", "AUDIO_FILTER",
     "TIMESCALE", "ProxyError", "Cancelled", "SourceInfo", "proxies_root", "proxy_dir",
     "proxy_key", "is_valid_key", "probe_source", "load_source", "save_source",
     "static_index", "live_index", "read_index", "write_index", "mark_failed",

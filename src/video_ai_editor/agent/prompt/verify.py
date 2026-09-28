@@ -1260,6 +1260,66 @@ def c_transitions_count_geq(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     return _ok(pc, len(trs) >= n, len(trs), f"≥ {n}", unit="transitions")
 
 
+# ---- wave E (F4b): edits by name --------------------------------------------------
+
+def c_transitions_absent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """No transition on v1 at `at` (within the seam tolerance), or none at
+    all when `at` is not given — what "remove the transition(s)" asked."""
+    at = _arg(pc, "at")
+    t = ctx.edl.get_track("v1")
+    trs = list(t.transitions if t else [])
+    if at is not None:
+        trs = [tr for tr in trs if abs(float(tr.at) - float(at)) < 0.05]
+    return _ok(pc, not trs, len(trs), 0, unit="transitions",
+               detail=None if at is None else f"at {float(at):g}s")
+
+
+def c_clips_absent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    ids = _arg(pc, "clip_ids") or []
+    ids = [ids] if isinstance(ids, str) else list(ids)
+    if not ids:
+        return _ok(pc, None, None, 0, detail="no clips named")
+    left = [cid for cid in ids if ctx.edl.get_clip(str(cid))]
+    return _ok(pc, not left, len(left), 0, unit="clips left")
+
+
+def _named_clips(ctx: VerifyCtx, ref: Any) -> list[Clip]:
+    """Media clips an id, a list of ids, or a sentinel names."""
+    if isinstance(ref, (list, tuple)):
+        hits = [ctx.edl.get_clip(str(r)) for r in ref]
+        return [h[1] for h in hits if h and isinstance(h[1], Clip)]
+    return _clips_for_ref(ctx, ref)
+
+
+def c_effect_absent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    types = _arg(pc, "types") or ["lut"]
+    types = {types} if isinstance(types, str) else set(types)
+    clips = _named_clips(ctx, _arg(pc, "clip_id"))
+    if not clips:
+        return _ok(pc, False, None, 0, detail="no clip to measure")
+    left = sum(1 for c in clips for e in c.effects if e.type in types)
+    return _ok(pc, left == 0, left, 0, unit=f"{'/'.join(sorted(types))} effects left")
+
+
+def c_clip_duration(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    want, tol = _arg(pc, "seconds"), float(_arg(pc, "tol") or 0.02)
+    clips = _named_clips(ctx, _arg(pc, "clip_id"))
+    if len(clips) != 1 or want is None:
+        return _ok(pc, False, None, want, unit="s", detail="needs one clip and a length")
+    got = round(float(clips[0].effective_duration), 4)
+    return _ok(pc, abs(got - float(want)) <= tol, got, float(want), unit="s")
+
+
+def c_clip_flipped(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    clips = _named_clips(ctx, _arg(pc, "clip_id"))
+    want = {k: _arg(pc, k) for k in ("flip_h", "flip_v") if _arg(pc, k) is not None}
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    got = [{k: bool(getattr(c.transform, k, False)) for k in want} for c in clips]
+    ok = all(g[k] == bool(v) for g in got for k, v in want.items())
+    return _ok(pc, ok, got[0] if len(got) == 1 else got, want)
+
+
 def c_export_preset_applied(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     name = _arg(pc, "name")
     preset = _D._EXPORT_PRESETS.get(str(name).lower()) if name else None
@@ -1353,6 +1413,127 @@ def c_tool_ok(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         return _ok(pc, None, None, "ok", detail=f"no step for {tool}" if tool else "no steps ran")
     statuses = [o.status for o in outcomes]
     return _ok(pc, all(s == "ok" for s in statuses), statuses if len(statuses) > 1 else statuses[0], "ok")
+
+
+def _clips_for_refs(ctx: VerifyCtx, ref: Any) -> list[Clip]:
+    """`_clips_for_ref`, for one reference or a list of ids."""
+    if isinstance(ref, (list, tuple)):
+        out: list[Clip] = []
+        for r in ref:
+            out += _clips_for_ref(ctx, r)
+        return out
+    return _clips_for_ref(ctx, ref)
+
+
+def _named_targets(ctx: VerifyCtx, pc: Postcondition, *, stickers: bool = False) -> list | None:
+    """What a wave-E step names, in the order the tools read it: `clip_id`,
+    then `clip_ids`, then every clip (and, with `stickers`, sticker) on
+    `track`. None when nothing is named (review RE: a model plan's
+    `clip_ids` / `track` used to verify against nothing, or every v1 clip)."""
+    from ...edl.schema import Sticker
+    ref = _arg(pc, "clip_id")
+    if ref is None:
+        ref = _arg(pc, "clip_ids")
+    if ref is not None:
+        refs = list(ref) if isinstance(ref, (list, tuple)) else [ref]
+        out: list = []
+        for r in refs:
+            hit = ctx.edl.get_clip(str(r)) if r and not str(r).startswith("$") else None
+            out += [hit[1]] if hit else _clips_for_ref(ctx, r)
+        return out
+    track = _arg(pc, "track")
+    if track is not None:
+        t = ctx.edl.get_track(str(track))
+        kinds = (Clip, Sticker) if stickers else (Clip,)
+        return [c for c in (t.clips if t else []) if isinstance(c, kinds)]
+    return None
+
+
+def c_canvas_bg_set(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Wave E (F2): every clip `clip_id` names (default: every main-track
+    clip) carries the CapCut canvas background asked for — the field the v1
+    chain's contain branch reads (render/canvas_bg.py; the render tests
+    decode the pixels). `type` None / "none" = black bars."""
+    named = _named_targets(ctx, pc)
+    clips = v1_clips(ctx.edl) if named is None else named
+    kind = _arg(pc, "type")
+    kind = None if kind in (None, "none", "") else str(kind)
+    want: dict[str, Any] = {"type": kind}
+    col, blur = _arg(pc, "color"), _arg(pc, "blur")
+    if kind == "color" and col is not None:
+        from ...edl.canvas_blend import normalize_color
+        want["color"] = normalize_color(col)
+    if kind == "blur" and blur is not None:
+        want["blur"] = int(blur)
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    got = []
+    for c in clips:
+        bg = getattr(c, "canvas_bg", None)
+        g: dict[str, Any] = {"type": None if bg is None else bg.type}
+        if bg is not None and "color" in want:
+            g["color"] = bg.color
+        if bg is not None and "blur" in want:
+            g["blur"] = bg.blur
+        got.append(g)
+    ok = all(g == want for g in got)
+    return _ok(pc, ok, got[0] if len(got) == 1 else got, want)
+
+
+def c_voice_effect_is(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Wave E (F3): every clip `clip_id` names (one id or a list), or every
+    clip on `track`, carries the voice effect asked for (None = none) and,
+    when asked, its intensity — the fields the audio chains read
+    (render/audio_mix.voice_filters; tests/test_voice_effects_render.py
+    decodes the sound)."""
+    named = _named_targets(ctx, pc) or []
+    want = _arg(pc, "effect")
+    if _arg(pc, "clip_id") is None and _arg(pc, "clip_ids") is None and want not in (None, "", "none"):
+        # a whole lane: the clips with sound (dispatch skips a freeze and a
+        # picture-only source)
+        from ...render.compositor import source_has_audio
+        named = [c for c in named if c.freeze is None and source_has_audio(str(c.src))]
+    clips = named
+    want = None if want in (None, "", "none") else str(want)
+    inten = _arg(pc, "intensity")
+    if not clips:
+        return _ok(pc, False, None, want, detail="no clip")
+    got = [c.audio.voice_effect for c in clips]
+    ok = all(g == want for g in got)
+    if ok and want is not None and inten is not None:
+        ok = all(abs(float(c.audio.voice_intensity) - float(inten)) < 1e-6 for c in clips)
+    return _ok(pc, ok, got[0] if len(set(got)) == 1 else got, want)
+
+
+def c_animation_is(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Wave E (F1): every clip / sticker `clip_id` names (one id, a list or a
+    v1 sentinel) carries the clip animation asked for — the fields
+    render/compositor.py, pip.py and text_overlay.py read. A side given as a
+    preset id must be that preset, "none" must be off; a side not given (None)
+    is not checked."""
+    named = _named_targets(ctx, pc, stickers=True)
+    objs: list = _clips_for_ref(ctx, None) if named is None else named
+    want = {k: _arg(pc, k) for k in ("in", "out", "combo")}
+    want = {k: (None if str(v) == "none" else str(v)) for k, v in want.items()
+            if v is not None and not str(v).startswith("$")}
+    if not objs:
+        return _ok(pc, False, None, want, detail="no clip or sticker")
+    got = [{k: getattr(o, f"anim_{k}", None) for k in ("in", "out", "combo")} for o in objs]
+    ok = bool(want) and all(g[k] == v for g in got for k, v in want.items())
+    return _ok(pc, ok, got[0] if len(got) == 1 else got, want or "any")
+
+
+def c_blend_is(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """Wave E (F2): the overlay clip(s) named blend with `mode` — the field
+    render/pip.py composites with."""
+    want = _arg(pc, "mode")
+    clips = _named_targets(ctx, pc) or []
+    if not clips:
+        return _ok(pc, False, None, want, detail="no overlay clip")
+    got = [str(getattr(c, "blend", "normal")) for c in clips]
+    if want is None:
+        return _ok(pc, None, got, None, detail="no mode requested")
+    return _ok(pc, all(g == want for g in got), got[0] if len(got) == 1 else got, want)
 
 
 CHECKS: dict[str, Callable[[VerifyCtx, Postcondition], CheckResult]] = {

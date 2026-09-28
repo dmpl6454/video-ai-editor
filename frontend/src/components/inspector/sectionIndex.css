@@ -1,0 +1,29 @@
+/* The Inspector's jump list (review RE): sticky at the top of the scroll,
+   small token-coloured chips that wrap. */
+.section-index {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 6px 0;
+  background: var(--bg-1);          /* the panel's own surface (.sidebar) */
+  border-bottom: 1px solid var(--line);
+}
+.section-index-empty { display: none; }
+.section-index-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.section-index-chip:hover { color: var(--text); border-color: var(--accent); }
+.section-index-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--text); }
+.section-index-chip:active { background: var(--accent-fill); color: var(--on-accent); }
+.section-aka { color: var(--text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; }

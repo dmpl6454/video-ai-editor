@@ -526,6 +526,25 @@ export const api = {
     return res.json() as Promise<{ path: string; name: string }>
   },
 
+  // Review RE: whether a clip has sound a voice effect can change (a
+  // picture-only source or a freeze frame does not).
+  voiceSound: (sid: string, clipId: string) =>
+    http<{ has_audio: boolean }>('GET', `/sessions/${sid}/voice/sound/${encodeURIComponent(clipId)}`),
+
+  // Wave E (F3): a short WAV of one clip's sound through a voice effect,
+  // rendered by the export's own chain and NOT committed (the Inspector's
+  // audition button; api/voice_routes.py). `at`: clip-local seconds.
+  voicePreview: async (sid: string, body: { clip_id: string; effect: string | null; intensity?: number
+                                             at?: number; seconds?: number }, signal?: AbortSignal) => {
+    const res = await send(`${BASE}/sessions/${sid}/voice/preview`, {
+      method: 'POST', signal,
+      headers: { ...CLIENT_HEADERS, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) throw await apiError(res)
+    return res.blob()
+  },
+
   // `peaks_l`/`peaks_r`: each side's own peaks for a 2+ channel source (QA-122).
   waveform: (sid: string, src: string, peaksPerSec = 50) =>
     http<{ peaks: number[]; peaks_per_sec: number; duration: number; peaks_l?: number[]; peaks_r?: number[] }>(
@@ -552,6 +571,18 @@ export const api = {
     const res = await fetch(`${BASE}/sessions/${sid}/vo_record`, { method: 'POST', body: fd })
     if (!res.ok) throw await apiError(res)
     return res.json() as Promise<{ clip_id: string; src: string; duration: number; summary: string }>
+  },
+
+  // Wave E (F2): the Inspector Canvas section's "Choose picture…" — into the
+  // session's uploads/images; a HEIC comes back as the PNG it was decoded to.
+  // Review RE: this was a raw fetch that read `body.detail` (never on the
+  // wire), so a refusal showed only "400 Bad Request".
+  canvasBgUpload: async (sid: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await postForm(`${BASE}/sessions/${sid}/canvas-bg/upload`, fd)
+    if (!res.ok) throw await apiError(res)
+    return res.json() as Promise<{ src: string; name: string }>
   },
 
   stickerUpload: async (sid: string, file: File, addAtPlayhead = true, playhead = 0) => {

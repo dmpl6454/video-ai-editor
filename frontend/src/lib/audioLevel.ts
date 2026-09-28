@@ -22,6 +22,9 @@ export interface ClipAudioProps {
   keep_pitch?: boolean
   /** QA-122: 'stereo' | 'left' | 'right' | 'mono' (lib/audioChannels). */
   channels?: string
+  /** Wave E (F3): a voice-effect preset id (edl/voice_effects.py) and 0-1. */
+  voice_effect?: string | null
+  voice_intensity?: number
 }
 
 export function hasVolumeKeys(a: ClipAudioProps | undefined): boolean {

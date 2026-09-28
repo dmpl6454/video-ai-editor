@@ -81,6 +81,9 @@ def audio_root(tmp_path_factory) -> dict:
                     f"aevalsrc=exprs='1.7*sin(2*PI*100*t)|0.4*sin(2*PI*150*t)':s={SR}:d=6",
                     "-c:a", "pcm_f32le", str(hot)], check=True, capture_output=True)
     S["hot"] = hot
+    # Streams that start apart (gate RX finding 2): the proxy is on the file clock.
+    S["alate2997"] = fx.offset_source(src / "alate2997.mov", r2997, 12, audio_late=0.1)
+    S["vlate2997"] = fx.offset_source(src / "vlate2997.mov", r2997, 12, video_late=0.1)
     keys: dict[str, tuple[str, dict]] = {}
     ref = root / "ref"
     ref.mkdir()
@@ -124,6 +127,7 @@ def cases(audio_root) -> dict:
         add(f"placement{label}", e, fps)
         if label == "30":
             add("placement30_cut", fx.ripple_delete(e, "c1", fps), fps)
+    add("placement_offset", *fx.offset_edl(S["alate2997"], S["vlate2997"], Fraction(30000, 1001)))
     mix = dict(tone_a=S["toneA"], tone_b=S["toneB"], bed=S["bed"], voice=S["voice"])
     add("mix", *fx.mix_edl(**mix))
     add("mix_solo", *fx.mix_edl(**mix, solo="vo"))
@@ -132,6 +136,7 @@ def cases(audio_root) -> dict:
     add("mix_loud", e, fps, loud=-4.5)
     add("mix_curve", *fx.curve_edl(S["toneA"], S["toneB"], S["bed"]))
     add("pip_speed", *fx.pip_speed_edl(S["toneA"], S["toneB"]))
+    add("mix_hot", *fx.hot_edl(S["counter30"], S["counter2997"]))
     return out
 
 
@@ -314,6 +319,30 @@ def test_p1_a1_every_sample_where_the_server_puts_it(browser, cases, audio_root,
     assert r["plan"]["total"] == len(server)
 
 
+def test_p1_a1_a_stream_that_starts_late_plays_on_the_file_clock(browser, cases, audio_root):
+    """Audio starting 0.1 s after the file (and the mirror, video late), cut
+    near the head and mid-file: the client plays every sample the server
+    does — the proxy is decoded on the file clock like every render chain
+    (was 4800 samples off on 32032 of 32032 per clip, gate RX finding 2)."""
+    edl, fps, server, _aac = cases["placement_offset"]
+    client = _pcm(browser.run("render", case="placement_offset", timeout=120))
+    assert client.shape == server.shape, (client.shape, server.shape)
+    got, want = fx.decode_counter(client), fx.decode_counter(server)
+    bad = np.nonzero(got != want)[0]
+    assert len(bad) == 0, f"{len(bad)} samples differ, first at {bad[:5]}: client {got[bad[:5]]} server {want[bad[:5]]}"
+    assert np.abs(client.astype(np.float64) - server).max() <= 2.0 ** -24
+    K = audio_root["keys"]
+    info = {s: SourceInfo.from_json(K[n][1]) for n, s in audio_root["src"].items() if n in K}
+    pm = build_program_map(edl, info)
+    places = audio_placements(edl, pm, sources=info)
+    assert len(places) == 4
+    for a in places:
+        c = pm.clips[a.clip]
+        (off, _cnt, first, d), = a.runs
+        lead = 4800 if "alate" in c.src else 0      # the audio stream's own sample 0 is file time 0.1
+        assert off == 0 and d == 1 and got[a.out0] == first - lead, (c.id, int(got[a.out0]), first)
+
+
 def test_offline_render_is_deterministic(browser, cases):
     """The same offline mix 30 times, bit for bit. (A disconnect() from a
     source's `ended` handler once raced WebKit's offline render thread and
@@ -331,12 +360,31 @@ def _block_db(x: np.ndarray) -> np.ndarray:
     return 20 * np.log10(np.maximum(rms, 1e-12))
 
 
-def _approx_blocks(plan: dict, n_blocks: int) -> np.ndarray:
+#: Server output this close to full scale is where its limiter may be at work
+#: (alimiter auto-levels its 0.97 ceiling to 1.0).
+NEAR_CEILING = 0.9
+
+
+def _limiting_samples(plan: dict, n: int) -> np.ndarray:
+    m = np.zeros(n, dtype=bool)
+    for a, b in plan.get("limiting", []):
+        m[a:b] = True
+    return m
+
+
+def _approx_blocks(plan: dict, n_blocks: int, server: np.ndarray | None = None) -> np.ndarray:
     """Blocks touched by an APPROX feature (a resampled clip ± its block; the
-    whole programme for a master-level approximation; the bed under a duck)."""
+    whole programme for a master-level approximation; the bed under a duck;
+    gate RX: a block of a `limiting` range where the server's sound is near
+    full scale — elsewhere in a range the plan flags (its peak bound is
+    conservative) both limiters are transparent and the block stays EXACT)."""
     mask = np.zeros(n_blocks, dtype=bool)
     if "loudness" in plan["approx"]:
         mask[:] = True
+    if server is not None and plan.get("limiting"):
+        near = (np.abs(server).max(axis=1) > NEAR_CEILING) & _limiting_samples(plan, len(server))
+        hot = np.nonzero(near)[0] // BLOCK
+        mask[np.clip(hot, 0, n_blocks - 1)] = True
     for c in plan["clips"]:
         if not c["exact"] or ("duck" in plan["approx"] and c["bus"] == "music"):
             a = max(0, c["out0"] // BLOCK - 1)
@@ -357,14 +405,14 @@ def _lag(client: np.ndarray, server: np.ndarray, max_lag: int = 64) -> int:
     return arg
 
 
-@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed"])
+@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed", "mix_hot"])
 def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
     edl, fps, server, aac = cases[name]
     r = browser.run("render", case=name, timeout=120)
     client = _pcm(r)
     assert client.shape == server.shape, (client.shape, server.shape)
     cdb, sdb = _block_db(client), _block_db(server)
-    approx = _approx_blocks(r["plan"], len(cdb))
+    approx = _approx_blocks(r["plan"], len(cdb), server)
     loud = (cdb > QUIET_DB) | (sdb > QUIET_DB)
     diff = np.abs(cdb - sdb)
     tol = np.where(approx, APPROX_DB, EXACT_DB)[:, None]
@@ -374,6 +422,7 @@ def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
         "max_exact_db": float(diff[~approx][loud[~approx]].max(initial=0)),
         "max_approx_db": float(diff[approx][loud[approx]].max(initial=0)),
         "lag": _lag(client, server),
+        "limiting": r["plan"].get("limiting"), "server_peak": float(np.abs(server).max()),
     }
     if aac is not None:
         report["vs_aac_render"] = _vs_aac_render(client, aac, server)
@@ -381,6 +430,24 @@ def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
     assert len(bad) == 0, (f"{len(bad)} blocks off: " + ", ".join(
         f"t={b * BLOCK / SR:.2f}s ch{c} client {cdb[b, c]:.2f} server {sdb[b, c]:.2f}" for b, c in bad[:8]))
     assert abs(report["lag"]) <= 1, report
+
+
+def test_p1_a2_the_limiter_is_approx_exactly_where_it_works(browser, cases):
+    """Gate RX finding 3: over the ceiling the browser's limiter departs from
+    alimiter (|Δ| up to 0.25), so every sample where client and server part
+    lies inside a `limiting` range of the plan (which named no such range
+    before: approx was empty). Outside those ranges they agree within 1e-4
+    (the gate's own threshold; the compressor below its threshold is not
+    bit-transparent — up to 2.8e-5 on a 0.5 sample, −0.0005 dB, in its first
+    10 ms)."""
+    edl, fps, server, _aac = cases["mix_hot"]
+    r = browser.run("render", case="mix_hot", timeout=120)
+    client = _pcm(r)
+    assert "limiting" in r["plan"]["approx"] and r["plan"]["limiting"], r["plan"]["approx"]
+    inside = _limiting_samples(r["plan"], len(server))
+    d = np.abs(client.astype(np.float64) - server).max(axis=1)
+    assert d[inside].max() > 1e-3, "the case no longer drives the limiter"
+    assert d[~inside].max(initial=0) <= 1e-4, (int(np.argmax(np.where(inside, 0, d))), float(d[~inside].max()))
 
 
 def _vs_aac_render(client: np.ndarray, aac: np.ndarray, twin: np.ndarray) -> dict:

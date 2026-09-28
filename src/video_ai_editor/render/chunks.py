@@ -126,6 +126,21 @@ def fingerprint_clip(c: Clip, *, canvas_w: int, canvas_h: int, fps: int,
         "transform": _canonical(c.transform),
         "effects": _canonical(c.effects),
         "mask": _canonical(c.mask) if c.mask else None,
+        # The fit, the key and the CapCut canvas background (wave E, F2) change
+        # the chunk's pixels too: `fit` and `chromakey` were missing, so a
+        # clip switched to Fill frame (or keyed) kept serving its cached
+        # letterboxed (unkeyed) chunk in the preview. Present only when not the
+        # default, so every existing chunk key is unchanged. An image
+        # background is keyed on the picture on disk, like the source.
+        **({"fit": "cover"} if getattr(c, "fit", "contain") == "cover" else {}),
+        **({"chromakey": _canonical(c.chromakey)} if getattr(c, "chromakey", None) is not None else {}),
+        **({"canvas_bg": _canonical(c.canvas_bg),
+            "canvas_bg_file": file_identity(c.canvas_bg.image) if c.canvas_bg.image else None}
+           if getattr(c, "canvas_bg", None) is not None else {}),
+        # A clip animation (wave E, F1) is baked into the chunk. Only present
+        # when set, so every existing chunk key is unchanged.
+        **{k: getattr(c, k) for k in ("anim_in", "anim_out", "anim_combo", "anim_dur", "anim_out_dur")
+           if getattr(c, k, None) is not None},
         "canvas": [canvas_w, canvas_h, fps],
         "enc": encoder_args,
     }
@@ -160,6 +175,20 @@ def chunk_is_valid(p: Path) -> bool:
         return proc.returncode == 0 and bool(proc.stdout.strip())
     except Exception:
         return False
+
+
+def _video_packets(p: Path) -> int | None:
+    """Video packets in `p` (None when the probe itself fails)."""
+    try:
+        out = subprocess.run(
+            [_pu.FFPROBE, "-v", "error", "-select_streams", "v:0", "-count_packets",
+             "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(p)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            **_pu.SUBPROCESS_FLAGS)
+        txt = out.stdout.strip().splitlines()
+        return int(txt[0].rstrip(",")) if txt and txt[0].strip() else 0
+    except Exception:  # noqa: BLE001 — cannot check: keep the chunk
+        return None
 
 
 def evict_old_chunks(cache_dir: Path, keep: int = 200) -> None:
@@ -230,8 +259,11 @@ def render_clip_to_chunk(
     v_args = (["-map", v_label, "-r", _tb.ffmpeg_rate(fps), *encoder_args]
               if "v" in streams else ["-vn"])
     # Pin AAC output rate/channels so the encoder never hits EINVAL
-    # (-22) on a negotiated PCM layout. See compositor._AAC_OUT.
-    a_codec = audio_codec_args or ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+    # (-22) on a negotiated PCM layout: compositor._AAC_OUT itself (read at
+    # call time, one definition — the sample-exact sound tests swap it for a
+    # lossless codec to read every chunk's samples).
+    from .compositor import _AAC_OUT
+    a_codec = audio_codec_args or list(_AAC_OUT)
     a_args = ["-map", "[a]", *a_codec] if "a" in streams else ["-an"]
 
     args = [_pu.FFMPEG, "-y", *inputs, *extras,
@@ -257,6 +289,18 @@ def render_clip_to_chunk(
         if proc.returncode != 0:
             raise RuntimeError(
                 f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")
+        if "v" in streams:
+            # Review RE: a chunk whose chain dropped its only frame (a 1-frame
+            # reversed 2x clip at 29.97) had NO picture, and the assembly then
+            # failed on "matches no streams" — or, with a frame short, the
+            # plan's frame-count check. A chunk must hold exactly its clip's
+            # frames; otherwise it is not cached (the render falls back to the
+            # single pass, compositor._render_locked).
+            from .compositor import clip_frames
+            want = clip_frames(c, fps)
+            got = _video_packets(tmp)
+            if got is not None and got != want:
+                raise RuntimeError(f"chunk of clip {c.id} has {got} video frames, the clip plans {want}")
         _pu.replace_with_retry(tmp, dst)
     except BaseException:
         # Includes KeyboardInterrupt/SystemExit — a killed render must not leave

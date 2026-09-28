@@ -115,9 +115,14 @@ PLAN_TOOLS: frozenset[str] = frozenset(
 KNOWN_TRACK_IDS: frozenset[str] = frozenset(
     {"v1", "v2", "a1", "music", "vo", "captions", "tx_hook", "tx_super", "tx_lt", "stickers"})
 
+from ...edl.clip_animations import ANIM_DUR_RANGE as _ANIM_DUR_RANGE  # noqa: E402
+
 #: (tool, arg) → (min, max); None = unbounded on that side.
 ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("set_speed", "factor"): (0.25, 4.0),
+    ("set_voice_effect", "intensity"): (0.0, 1.0),
+    ("set_animation", "in_duration"): _ANIM_DUR_RANGE,     # the ONE table (review RE)
+    ("set_animation", "out_duration"): _ANIM_DUR_RANGE,
     ("freeze_frame", "duration"): (0.5, 10.0),
     ("freeze_frame", "time"): (0.0, None),
     ("smooth_slow_motion", "factor"): (2, 8),
@@ -391,6 +396,40 @@ def _check_whitelists(tool: str, args: dict[str, Any], facts: TimelineFacts, pla
             reasons.append(f"add_transition.type: {args['type']!r} is not in the transition catalog")
     if tool == "set_clip_fit" and args.get("fit") not in (None, "contain", "cover"):
         reasons.append(f"set_clip_fit.fit: {args.get('fit')!r} must be contain or cover")
+    if tool == "set_canvas_background":
+        # Wave E (F2): the ONE table (edl/canvas_blend.py) — never a free string.
+        from ...edl.canvas_blend import CANVAS_BLUR_LEVELS, CANVAS_KINDS, normalize_color
+        kind = args.get("type")
+        if kind is not None and kind not in (*CANVAS_KINDS, "none"):
+            reasons.append(f"set_canvas_background.type: {kind!r} must be {', '.join(CANVAS_KINDS)} or none")
+        if args.get("color") is not None and not _is_placeholder(args["color"]):
+            try:
+                normalize_color(args["color"])
+            except ValueError:
+                reasons.append(f"set_canvas_background.color: {args['color']!r} is not #RRGGBB or a colour name")
+        b = args.get("blur")
+        if b is not None and not _is_placeholder(b) and (
+                isinstance(b, bool) or not isinstance(b, (int, float)) or b != int(b)
+                or not 1 <= b <= len(CANVAS_BLUR_LEVELS)):
+            reasons.append(f"set_canvas_background.blur: {b!r} must be a strength 1-{len(CANVAS_BLUR_LEVELS)}")
+        if kind == "image" and not args.get("image"):
+            reasons.append("set_canvas_background: an image background needs `image`")
+    if tool == "set_voice_effect" and args.get("effect") is not None and not _is_placeholder(args["effect"]):
+        # Wave E (F3): the ONE table (edl/voice_effects.py) — never a free string.
+        from ...edl.voice_effects import PRESET_IDS
+        if str(args["effect"]) not in (*PRESET_IDS, "none"):
+            reasons.append(f"set_voice_effect.effect: {args['effect']!r} is not one of {[*PRESET_IDS, 'none']}")
+    if tool == "set_animation":
+        # Wave E (F1): the ONE table (edl/clip_animations.py) — never a free string.
+        from ...edl.clip_animations import PRESET_IDS as _ANIM_IDS
+        for kind in ("in", "out", "combo"):
+            v = args.get(kind)
+            if v is not None and not _is_placeholder(v) and str(v) not in (*_ANIM_IDS[kind], "none"):
+                reasons.append(f"set_animation.{kind}: {v!r} is not one of {[*_ANIM_IDS[kind], 'none']}")
+    if tool == "set_blend_mode" and args.get("mode") is not None and not _is_placeholder(args["mode"]):
+        from ...edl.canvas_blend import BLEND_IDS
+        if args["mode"] not in BLEND_IDS:
+            reasons.append(f"set_blend_mode.mode: {args['mode']!r} is not one of {list(BLEND_IDS)}")
 
 
 def _lut_name(value: str) -> str | None:
@@ -542,6 +581,12 @@ def _explicit_toggle(tool: str, args: dict[str, Any], facts: TimelineFacts) -> d
         return {**args, "enabled": not facts.music_ducked}
     if tool == "set_track_muted" and "muted" not in args and args.get("track") == "music":
         return {**args, "muted": not facts.music_muted}
+    if tool == "flip_clip" and args.get("value") is None and args.get("axis") in ("horizontal", "vertical"):
+        # wave E (F4b): a toggle becomes the state it produces, from facts
+        clip = facts.clip(str(args.get("clip_id")))
+        if clip is not None:
+            cur = clip.flip_h if args["axis"] == "horizontal" else clip.flip_v
+            return {**args, "value": not cur}
     return args
 
 

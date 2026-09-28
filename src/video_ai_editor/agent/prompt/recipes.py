@@ -35,6 +35,9 @@ from typing import Any
 from . import slots as S
 from .facts import FIRST_USE_BYTES, TimelineFacts, VOICE_IDS, WHISPER_MODELS
 from .presets import transition_catalog
+from ...edl.canvas_blend import BLEND_IDS as _BLEND_IDS
+from ...edl.voice_effects import PRESET_IDS as _VOICE_FX
+from ...edl.clip_animations import PRESET_IDS as _ANIM_IDS
 from ...edl.speed_presets import PRESET_IDS as _SPEED_PRESETS
 from .schema import (CHECK_SPECS, DownloadNeeded, IntentDraft, NeedsInput, NeedsInputOption, Plan,
                      Postcondition, Step)
@@ -153,6 +156,36 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("adjust", "Adjust the picture: brightness, contrast or saturation up or down.",
           clip_ref="text", property=("brightness", "contrast", "saturation"), change=("up", "down"),
           amount="number"),
+    # Wave E (F4b): edits by name. `what` names what goes; a clip, a quoted
+    # text or all=yes narrows / widens it (the expander asks when unclear).
+    _card("remove_feature", "Remove the captions, a filter (LUT look), a transition or a text overlay.",
+          what=("captions", "filter", "transition", "text"), clip_ref="text", text="text", all=_YES_NO),
+    _card("clip_length", "Trim or extend ONE clip to a length in seconds (its end moves).",
+          clip_ref="text", seconds="number"),
+    _card("flip", "Mirror a clip horizontally or flip it vertically (on=no removes it). Upside down is rotate.",
+          clip_ref="text", axis=("horizontal", "vertical", "both"), on=_YES_NO),
+    # Wave E (F2): CapCut Canvas and blend modes (canvas_expanders.py). A
+    # canvas with no clip named applies to every main-track clip.
+    _card("canvas", "Fill the black bars around a letterboxed video: a blur of the clip, a colour or a "
+          "picture (CapCut Canvas); kind=none puts black bars back.",
+          kind=("blur", "color", "image", "none"), blur="number", color="text", image="text", clip_ref="text",
+          all=_YES_NO),
+    _card("blend", "Blend an overlay (picture-in-picture) clip onto the video beneath it.",
+          mode=_BLEND_IDS,
+          overlay=("top", "first", "second", "third", "last"), clip_ref="text", all=_YES_NO),
+    # Wave E (F3): CapCut's voice changer (voice_expanders.py). No target:
+    # the voice-over lane, else every main-track clip (the talking clip).
+    _card("voice_effect", "Change how a voice sounds: a voice effect on a clip, the voice-over, the music or "
+          "every clip (off=yes removes it).",
+          effect=_VOICE_FX, intensity="number", lane=("vo", "music", "overlay"), clip_ref="text",
+          all=_YES_NO, off=_YES_NO),
+    # Wave E (F1): CapCut clip animations (anim_expanders.py): an In as a clip
+    # or sticker appears, an Out as it leaves, a Combo loops; off=yes removes.
+    _card("animation", "Animate a clip or a sticker: an In as it appears, an Out as it leaves, or a looping "
+          "Combo (off=yes removes it).",
+          kind=("in", "out", "combo"), preset=tuple(sorted({*_ANIM_IDS["in"], *_ANIM_IDS["out"], *_ANIM_IDS["combo"]})),
+          target=("clip", "sticker", "overlay", "text"), clip_ref="text", nth="number", all=_YES_NO,
+          off=_YES_NO, duration_s="number"),
     _card("reverse", "Play a clip backwards (reverse=no plays it forwards again).",
           clip_ref="text", reverse=_YES_NO),
     _card("trim", "Cut a time range out.", range="text"),
@@ -174,9 +207,9 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("fade", "Fade the picture and sound in at the start or out at the end, or fade the music bed.",
           target=("video", "audio", "music"), edge=("in", "out", "both"), duration_s="number",
           clip_ref="text"),
-    _card("volume", "Make the music bed or the original sound (of every clip, or one clip) louder or quieter "
-          "all the way through, or set its level in dB.",
-          target=("music", "voice"), change=("up", "down"), db="number", clip_ref="text"),
+    _card("volume", "Make the music bed, the voice-over (vo) or the original sound (of every clip, or one clip) "
+          "louder or quieter all the way through, or set its level in dB.",
+          target=("music", "voice", "vo"), change=("up", "down"), db="number", clip_ref="text"),
     _card("mute", "Mute or unmute the music bed or the original sound (of every clip, or one clip).",
           target=("music", "voice"), muted=_YES_NO, clip_ref="text"),
     _card("fit_music", "Trim the music so it ends with the video, with a fade-out.", duration_s="number"),
@@ -372,7 +405,8 @@ def normalize_slots(recipe: str, raw: dict[str, Any]) -> dict[str, Any]:
 #: clip reference that names nothing is dropped, so the expander asks which
 #: clip — never the old `$v1_all` fallback, which read a model's "clip_ref":
 #: "the second clip" as EVERY clip (a delete of the whole timeline).
-ONE_CLIP_RECIPES: frozenset[str] = frozenset({"delete_clip", "duplicate", "move_clip", "zoom", "rotate"})
+ONE_CLIP_RECIPES: frozenset[str] = frozenset({"delete_clip", "duplicate", "move_clip", "zoom", "rotate",
+                                               "clip_length", "flip"})
 
 
 def _clip_ref_value(recipe: str, raw: str) -> str | None:

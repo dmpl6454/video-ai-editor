@@ -60,9 +60,20 @@ export function overlaySpan(edl: EDL | null | undefined, playhead: number): { st
   return { start, end: defaultOverlayEnd(start, DEFAULT_TEXT_S, videoContentEnd(edl ?? null)) }
 }
 
-/** add_text for the one-click default text. */
-export function defaultTextArgs(start: number, end: number): Record<string, unknown> {
-  return {
+/** Whether a caption cue is on screen during [start, end) (review RE). */
+export function captionsOverlap(edl: EDL | null | undefined, start: number, end: number): boolean {
+  const cap = edl?.tracks.find((t) => t.type === 'captions')
+  return !!cap?.clips.some((c) => {
+    const x = c as { start?: number; end?: number }
+    return (x.start ?? 0) < end && (x.end ?? 0) > start
+  })
+}
+
+/** add_text for the one-click default text. Review RE: with captions on
+ *  screen the default place IS the caption band (both unreadable, and the
+ *  export draws the caption over it) — it goes to the upper third instead. */
+export function defaultTextArgs(start: number, end: number, edl?: EDL | null): Record<string, unknown> {
+  const args: Record<string, unknown> = {
     text: 'Your text',
     start,
     end,
@@ -70,7 +81,15 @@ export function defaultTextArgs(start: number, end: number): Record<string, unkn
     // Never replace an existing overlay from the UI tool (see the header note).
     allow_stack: true,
   }
+  if (edl && captionsOverlap(edl, start, end)) {
+    args.x = Math.round(edl.canvas.w / 2)
+    args.y = Math.round(edl.canvas.h * UPPER_THIRD)
+  }
+  return args
 }
+
+/** Where the default text sits when captions hold the lower band. */
+export const UPPER_THIRD = 0.3
 
 /** apply_text_template for a template. It picks the slot it needs per
  *  preset; the one typed value goes into all three so the UI stays one field. */
@@ -94,9 +113,10 @@ async function insert(deps: TextInsertDeps, tool: string, args: (s: number, e: n
   return res
 }
 
-/** "Add text at playhead": the default text, selected. */
+/** "Add text at playhead": the default text, selected (clear of captions). */
 export function insertDefaultText(deps: TextInsertDeps) {
-  return insert(deps, 'add_text', defaultTextArgs)
+  const { edl } = deps.state()
+  return insert(deps, 'add_text', (s, e) => defaultTextArgs(s, e, edl))
 }
 
 /** A gallery look: ONE add_text carrying its whole style (one undo step, QA-078). */

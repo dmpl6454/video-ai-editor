@@ -4,7 +4,7 @@
 // bytes (ProxyStore). Content ids survive edits — one slot per proxy key — so
 // laneA can tell which output frames really changed.
 
-import type { EdlLike } from './timeline/framePlan'
+import type { EdlClip, EdlLike } from './timeline/framePlan'
 import { defaultTimeBase, type SourceInfo } from './timeline/frameMap'
 import {
   KIND_GAP, audioPlacements, buildProgramMap, diffPrograms, type AudioPlacement, type ProgramDiff, type ProgramMap,
@@ -276,6 +276,10 @@ export class ProgramFeed {
     return { url, info: this.sourceInfo(src), frame: pm.srcFrame[k], contentId: id }
   }
 
+  /** Set by the engine: whether a clip's IMAGE canvas background picture is
+   *  not decoded yet (or failed) — its frames are PENDING (review RE). */
+  canvasImagePending: ((clip: EdlClip) => boolean) | null = null
+
   proxyState(src: string): ProxyState {
     const s = this.lookup(src)
     const key = s?.proxy?.key
@@ -285,10 +289,13 @@ export class ProgramFeed {
   }
 
   /** Fidelity classes of the program (§7), Phase 1 capabilities. */
-  classify(): Support | null {
+  classify(limiting?: ReadonlyArray<readonly [number, number]>): Support | null {
     if (!this.pm || !this.edl) return null
     try {
-      return classify(this.pm, this.edl, { phase: 1, proxyState: (src) => this.proxyState(src), demote: this.demote })
+      return classify(this.pm, this.edl, {
+        phase: 1, proxyState: (src) => this.proxyState(src), demote: this.demote,
+        canvasImagePending: this.canvasImagePending ?? undefined, limiting,
+      })
     } catch (e) {
       console.error('[preview engine] classify failed', e)
       return null

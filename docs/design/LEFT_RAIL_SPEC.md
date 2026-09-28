@@ -309,6 +309,7 @@ This header replaces the old 34 px uppercase tab strip. MediaBin's hidden `<h2>M
   4. "Show the Chat", which also focuses the chat input.
 - **Contents:** Properties + OpsLog "History" (Inspector) and ChatOverlay (Chat) are unchanged. Both stay mounted.
 - **Code:** extracted from `App.tsx` into `components/RightPanel.tsx`.
+- **Inspector jump list (wave E, review RE, as built).** The media clip Inspector is one long scroll (about 2,200 px; Canvas and Transform sit two screens down at 1440×900). `components/inspector/SectionIndex.tsx` puts a sticky `nav` "Jump to an Inspector section" under the media header. It lists the sections actually rendered (each Properties `Section` carries `data-section`, an id from `sectionId(label)` and `tabIndex=-1`) and appears only when there are at least 4. A chip ("Jump to <section>") scrolls the section to the top and moves focus into it; the scroll is instant when the viewer reduces motion (`lib/useReducedMotion.ts`). Section headings also carry the CapCut names people look for (`SECTION_AKA` in Properties.tsx): Canvas "Background", Voice effects "Voice changer", Color "Adjust", Blend "Blend mode". Tested by `tests/test_review_e_ui_e2e.py` (Chromium and WebKit).
 
 ### 2.10 Ratio menu (M6)
 
@@ -775,6 +776,12 @@ Measured in Chromium and Playwright WebKit (`tests/test_wave_d_rail_keys_ui.py`,
 2. **⌥1 … ⌥8 put focus on the panel** (§4.1 as built above).
 3. **The Media panel's names below the app's 1100 px minimum** (a browser window only): one line with an ellipsis, never broken mid-word.
 4. **Tab reaches every control in the app window**: `desktop.enable_tab_to_all_controls` turns on WKPreferences.tabFocusesLinks (Safari's "Press Tab to highlight each item"); by default WebKit tabs only to text fields unless the Mac's Keyboard navigation is on, and the editor had six Tab stops (WK: `tests/wk/test_wk_tab_focus.py`, both ways).
+
+**Wave E (lane F4b), follow-ups 26 and 27 (the editor in a browser):**
+1. **The timeline zoom −/+ steps stay** at every window width the grid makes. §10.1 item 5 dropped them below a 522 px pane (every window under 1100 px); now the toolbar tightens instead: gaps 6 → 3 px, no separator margins, icon buttons 28 → 24 px wide (still a 24 × 24 target). Measured in Chromium and Playwright WebKit: the pane is 440 px at any window ≤ 960 px, 484 at 1024, 559 at 1099; the tightened bar is 424 px with both steps, so Zoom out, Zoom in and Zoom to fit are inside the bar and nothing scrolls at 860-1180 px. Only a pane ≤ 430 px (narrower than the grid ever makes) drops the steps (`tests/test_f4b_ui_e2e.py::test_the_zoom_steps_stay_reachable_below_1100px`).
+2. **Help says how Tab reaches every control in Safari**: hold Option (⌥Tab), or turn on "Press Tab to highlight each item" in Safari Settings › Advanced; the app window needs neither (item 4 above).
+
+**Wave E (lane F2): Canvas and Blend in the Inspector.** A main-track clip's Inspector has a **Canvas** section (after Framing): a radiogroup "Canvas background" None · Colour · Blur · Image, CapCut's 14 colour swatches plus a custom colour, four blur strengths (Light … Heavy), "Choose picture…" (uploaded to the session's `uploads/images`), and **Apply to all** (one `set_canvas_background {all: true}`, one undo step); Reset puts black bars back. An overlay clip has a **Blend** section (after PIP shape): a native `<select>` "Blend mode" in CapCut's order, with a note where this browser's live blend is not the export's. Arrow keys / Home / End move inside every radiogroup, Space or Enter picks; lucide glyphs through `lib/icons` (`canvasNone`, `canvasColor`, `canvasBlur`, `canvasImage`, `applyAll`, `blendMode`); tokens only; transitions only under `prefers-reduced-motion: no-preference`. **Not in the Ratio menu:** §2.10 fixes that menu to three project-level groups whose every pick closes it, and the canvas background is per clip (CapCut's own Canvas lives on the clip, with Apply to all), so it stays in the Inspector. Measured in Chromium and Playwright WebKit (`tests/test_f2_canvas_blend_ui.py`).
 
 ---
 
