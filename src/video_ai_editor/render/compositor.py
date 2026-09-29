@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import contextvars
@@ -64,6 +65,76 @@ def _part_path(dst: Path) -> Path:
     MP4-brand internals.
     """
     return dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.part{dst.suffix}")
+
+
+#: When ffmpeg's argv is longer than this, the filter graph goes in a FILE.
+#: Windows' CreateProcess takes 32,767 characters of command line in total
+#: (`subprocess` raises WinError 206 before ffmpeg starts), so the whole
+#: command line is measured there with headroom for the priority wrapper;
+#: a clip split every 7th frame is ~50 KB of graph. POSIX has no such total
+#: but Linux caps ONE argument at 128 KiB (MAX_ARG_STRLEN), so the largest
+#: single argument is measured there.
+_ARGV_GRAPH_LIMIT = 30_000 if _pu.IS_WINDOWS else 100_000
+
+
+def _argv_cost(args: list[str]) -> int:
+    """What the OS limit is charged for `args`: the command line's length on
+    Windows, the longest single argument (bytes) elsewhere."""
+    if _pu.IS_WINDOWS:
+        return len(subprocess.list2cmdline([str(a) for a in args]))
+    return max((len(str(a).encode("utf-8", "replace")) for a in args), default=0)
+
+
+def _parse_ffmpeg_major(banner: str) -> int | None:
+    """The major version in `ffmpeg -version`'s first line ("ffmpeg version
+    8.1.1 ...", "n7.0.2", "6.1.1-3ubuntu5"); None for a git build
+    ("N-118000-g...") or anything unreadable."""
+    m = re.search(r"version\s+n?(\d+)\.\d+", banner or "")
+    return int(m.group(1)) if m else None
+
+
+@lru_cache(maxsize=1)
+def _ffmpeg_major() -> int | None:
+    """Major version of the ffmpeg on PATH, read once."""
+    try:
+        out = subprocess.run([_pu.FFMPEG, "-version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=20,
+                             **_pu.SUBPROCESS_FLAGS)
+        return _parse_ffmpeg_major(out.stdout)
+    except Exception:
+        return None
+
+
+def _graph_file_option() -> str:
+    """The option that reads a filter graph from a file: `-/filter_complex`
+    (ffmpeg 7.0+, where `-filter_complex_script` is deprecated and may go, as
+    `-vsync` did) or `-filter_complex_script` before 7. An unreadable version
+    (a git build) is a recent one."""
+    major = _ffmpeg_major()
+    return "-filter_complex_script" if major is not None and major < 7 else "-/filter_complex"
+
+
+@contextmanager
+def _graph_in_file_if_long(args: list[str], anchor: Path):
+    """Yield `args` with an over-long `-filter_complex <graph>` replaced by the
+    graph read from a UTF-8 file beside `anchor` (the `.part` output, so it is
+    on the same volume and swept with it); the file is removed on the way out,
+    whether ffmpeg succeeded, failed or was cancelled. Short graphs, and argv
+    with no graph, pass through untouched."""
+    try:
+        i = args.index("-filter_complex")
+    except ValueError:
+        yield args
+        return
+    if _argv_cost(args) <= _ARGV_GRAPH_LIMIT:
+        yield args
+        return
+    gfile = anchor.with_suffix(".filtergraph")
+    _pu.write_text_utf8(gfile, args[i + 1])
+    try:
+        yield [*args[:i], _graph_file_option(), str(gfile), *args[i + 2:]]
+    finally:
+        _pu.unlink_with_retry(gfile)
 
 
 def _run_ffmpeg_progress(args: list[str], total_s: float,
@@ -2184,21 +2255,19 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
             str(tmp)]
     # Export streams progress (and can be cancelled); preview keeps the plain
     # blocking path so nothing about its hot loop changes.
-    if on_progress is not None or cancel_event is not None:
-        try:
-            rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
-        except BaseException:
-            _pu.unlink_with_retry(tmp)
-            raise
-    else:
-        # _cancel.run IS subprocess.run unless a superseded-preview scope is
-        # active (render.cancel), in which case it can terminate ffmpeg early.
-        try:
-            proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
-        except BaseException:
-            _pu.unlink_with_retry(tmp)
-            raise
-        rc, err = proc.returncode, proc.stderr
+    try:
+        with _graph_in_file_if_long(args, tmp) as run_args:
+            if on_progress is not None or cancel_event is not None:
+                rc, err = _run_ffmpeg_progress(run_args, edl.duration, on_progress, cancel_event)
+            else:
+                # _cancel.run IS subprocess.run unless a superseded-preview
+                # scope is active (render.cancel), in which case it can
+                # terminate ffmpeg early.
+                proc = _cancel.run(run_args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+                rc, err = proc.returncode, proc.stderr
+    except BaseException:
+        _pu.unlink_with_retry(tmp)
+        raise
     if rc != 0:
         _pu.unlink_with_retry(tmp)
         raise RuntimeError(f"ffmpeg render failed (rc={rc}):\n{(err or '')[-2000:]}")
@@ -2308,8 +2377,9 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
                  "-c:v", "copy", *_preview_aac_out(),
                  "-movflags", "+faststart", str(tmp)]
         try:
-            proc = _cancel.run(args, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+            with _graph_in_file_if_long(args, tmp) as run_args:
+                proc = _cancel.run(run_args, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
         except BaseException:
             _pu.unlink_with_retry(tmp)
             raise
@@ -2723,7 +2793,8 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
             "-movflags", "+faststart",
             str(tmp)]
     try:
-        proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
+        with _graph_in_file_if_long(args, tmp) as run_args:
+            proc = _cancel.run(run_args, capture_output=True, text=True, encoding="utf-8", errors="replace", **_pu.SUBPROCESS_FLAGS)
     except BaseException:
         _pu.unlink_with_retry(tmp)
         raise
@@ -2790,8 +2861,10 @@ def _measure_mix_graph(edl: EDL, *, fps, cache_dir: Path | None,
     fc += f";{label}ebur128=peak=true:framelog=quiet[meas]"
     args = [_pu.FFMPEG, "-hide_banner", "-nostats", "-v", "info", *a_inputs,
             "-filter_complex", fc, "-map", "[meas]", "-f", "null", "-"]
-    proc = _cancel.run(args, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", **_pu.SUBPROCESS_FLAGS)
+    with _graph_in_file_if_long(args, _pu.part_path(
+            Path(tempfile.gettempdir()) / "vai-measure.tmp")) as run_args:
+        proc = _cancel.run(run_args, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", **_pu.SUBPROCESS_FLAGS)
     if proc.returncode != 0:
         return None
     hits = _EBUR128_I_RE.findall(proc.stderr or "")
@@ -3157,7 +3230,8 @@ def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,
     args = [_pu.FFMPEG, "-y", *inputs, "-filter_complex", fc, "-map", label,
             *_AUDIO_EXPORT_ARGS.get(ext, _AUDIO_EXPORT_ARGS["m4a"]), str(tmp)]
     try:
-        rc, err = _run_ffmpeg_progress(args, edl.duration, on_progress, cancel_event)
+        with _graph_in_file_if_long(args, tmp) as run_args:
+            rc, err = _run_ffmpeg_progress(run_args, edl.duration, on_progress, cancel_event)
     except BaseException:
         _pu.unlink_with_retry(tmp)
         raise

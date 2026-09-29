@@ -288,3 +288,158 @@ def test_a_cut_and_trims_of_a_curve_export_exactly_the_kept_frames(bars, tmp_pat
     got = _export(st, tmp_path, "edited")
     assert got == want
     assert got == _frames(st, info, src)
+
+
+# ------------------------------------------- a long graph goes in a FILE, not argv
+#
+# Windows' CreateProcess takes 32,767 characters of command line, and a clip
+# split every 7th frame has dozens of chains: the export died with WinError 206
+# before ffmpeg started (CI run 36584432248). The graph is written next to the
+# `.part` output and named with `-/filter_complex <file>` (ffmpeg >= 7) or
+# `-filter_complex_script <file>` (older). The limit is patched down here so
+# any multi-clip render exceeds it on this Mac; the real Windows limit and an
+# ffmpeg 6.1 / 9.x binary are only exercised on the CI runners.
+
+def _split_timeline(bars, tmp_path, every: int = 7):
+    src, _info = bars["b30"]
+    R = Fraction(30)
+    st = _store(tmp_path / "s", R, "hero", in_=OFF_GRID, secs=8.0, src=src)
+    n = len(_frames(st, bars["b30"][1], src))
+    for k in range(every, n - 1, every):
+        dispatch(st, "split_at", {"time": tb.time_of(k, R)})
+    return st
+
+
+def _graph_opts(args) -> list[str]:
+    return [a for a in args if a in ("-filter_complex", "-/filter_complex", "-filter_complex_script")]
+
+
+def _record_argv(monkeypatch):
+    seen: list[list[str]] = []
+    real = compositor._cancel.run
+
+    def spy(args, **kw):
+        if not _graph_opts(args):              # the speed-curve pre-render etc. are not the render
+            return real(args, **kw)
+        seen.append(list(args))
+        graph_files = [a for a in args if str(a).endswith(".filtergraph")]
+        for g in graph_files:                      # the file exists WHILE ffmpeg runs
+            assert Path(g).is_file()
+        return real(args, **kw)
+
+    monkeypatch.setattr(compositor._cancel, "run", spy)
+    return seen
+
+
+def test_a_graph_over_the_argv_limit_is_passed_as_a_file_and_renders_the_same_frames(
+        bars, tmp_path, monkeypatch):
+    st = _split_timeline(bars, tmp_path)
+    assert len(st.edl.get_track("v1").clips) > 20
+    inline_seen = _record_argv(monkeypatch)
+    inline = _export(st, tmp_path, "inline")
+    (inline_argv,) = inline_seen
+    assert "-filter_complex" in inline_argv and not any(
+        a.endswith(".filtergraph") for a in inline_argv)          # under the real limit: unchanged
+    fc = inline_argv[inline_argv.index("-filter_complex") + 1]
+
+    monkeypatch.setattr(compositor, "_ARGV_GRAPH_LIMIT", 2000)
+    assert len(fc) > 2000
+    for major in (8, 6):                                           # the -/opt form and the old one
+        monkeypatch.setattr(compositor, "_ffmpeg_major", lambda m=major: m)
+        seen = _record_argv(monkeypatch)
+        got = _export(st, tmp_path, f"file{major}")
+        (argv,) = seen
+        opt = "-/filter_complex" if major >= 7 else "-filter_complex_script"
+        assert opt in argv
+        assert "-filter_complex" not in argv                       # no giant inline string...
+        assert max(len(a) for a in argv) < 2000                    # ...anywhere in argv
+        gfile = Path(argv[argv.index(opt) + 1])
+        assert gfile.name.endswith(".filtergraph") and gfile.parent == Path(argv[-1]).parent
+        assert not gfile.exists(), "the graph file is removed once ffmpeg is done"
+        assert got == inline, f"{sum(a != b for a, b in zip(got, inline))} frames differ"
+        assert list(gfile.parent.glob("*.filtergraph")) == []
+
+
+def test_the_graph_file_is_removed_when_ffmpeg_fails(bars, tmp_path, monkeypatch):
+    st = _split_timeline(bars, tmp_path, every=30)
+    monkeypatch.setattr(compositor, "_ARGV_GRAPH_LIMIT", 500)
+    seen = _record_argv(monkeypatch)
+    real = compositor._cancel.run
+
+    def broken(args, **kw):                                        # a bad output codec, after argv is built
+        if not _graph_opts(args):
+            return real(args, **kw)
+        return real([*args[:-1], "-c:v", "no_such_encoder", args[-1]], **kw)
+
+    monkeypatch.setattr(compositor._cancel, "run", broken)
+    with pytest.raises(RuntimeError, match="ffmpeg render failed"):
+        compositor._render(st.edl, tmp_path / "boom.mp4", height=G.H, fps=st.edl.canvas.fps,
+                           preview=False, cache_dir=tmp_path / "cache", chunked=False)
+    assert len(seen) == 1
+    assert list(tmp_path.rglob("*.filtergraph")) == []
+
+
+@pytest.mark.parametrize("banner,want", [
+    ("ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers", 8),
+    ("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023", 6),
+    ("ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright", 9),
+    ("ffmpeg version n7.0.2 Copyright", 7),
+    ("ffmpeg version N-118000-gabcdef Copyright", None),           # a git build: unknown
+    ("", None),
+])
+def test_the_ffmpeg_major_is_read_from_the_version_banner(banner, want):
+    assert compositor._parse_ffmpeg_major(banner) == want
+
+
+def test_the_graph_option_of_an_unknown_ffmpeg_is_the_current_one(monkeypatch):
+    monkeypatch.setattr(compositor, "_ffmpeg_major", lambda: None)
+    assert compositor._graph_file_option() == "-/filter_complex"
+    monkeypatch.setattr(compositor, "_ffmpeg_major", lambda: 6)
+    assert compositor._graph_file_option() == "-filter_complex_script"
+
+
+def test_on_windows_the_whole_command_line_is_what_is_measured(tmp_path, monkeypatch):
+    """The Windows rule rehearsed on this machine: no single argument is long,
+    the command line as CreateProcess receives it is. 400 inputs of ~80
+    characters are ~35,000 characters, past 32,767."""
+    monkeypatch.setattr(compositor._pu, "IS_WINDOWS", True)
+    monkeypatch.setattr(compositor, "_ARGV_GRAPH_LIMIT", 30_000)
+    monkeypatch.setattr(compositor, "_ffmpeg_major", lambda: 9)
+    graph = ";".join(f"[{i}:v]null[v{i}]" for i in range(400))
+    inputs = [a for i in range(400) for a in ("-i", str(tmp_path / f"{'clip' * 12}{i:04d}.mp4"))]
+    args = ["ffmpeg", "-y", *inputs, "-filter_complex", graph, "-map", "[v0]", str(tmp_path / "o.mp4")]
+    assert max(len(a) for a in args) < 30_000 < compositor._argv_cost(args)
+    with compositor._graph_in_file_if_long(args, tmp_path / ".o.part.mp4") as run_args:
+        i = run_args.index("-/filter_complex")
+        gfile = Path(run_args[i + 1])
+        assert gfile.read_bytes() == graph.encode("utf-8")           # the graph, byte for byte
+        assert run_args[:i] == args[:i] and run_args[i + 2:] == args[i + 2:]
+        assert "-filter_complex" not in run_args
+    assert not gfile.exists()
+    assert "-filter_complex" in args, "the caller's argv is not edited in place"
+
+    short = ["ffmpeg", "-i", "a.mp4", "-filter_complex", "[0:v]null[v]", "-map", "[v]", "o.mp4"]
+    with compositor._graph_in_file_if_long(short, tmp_path / ".o.part.mp4") as run_args:
+        assert run_args == short
+    assert list(tmp_path.glob("*.filtergraph")) == []
+
+
+def test_the_graph_file_is_removed_when_the_run_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(compositor, "_ARGV_GRAPH_LIMIT", 10)
+    args = ["ffmpeg", "-filter_complex", "[0:v]null[v];" * 4, "o.mp4"]
+    with pytest.raises(KeyboardInterrupt):
+        with compositor._graph_in_file_if_long(args, tmp_path / ".o.part.mp4") as run_args:
+            assert Path(run_args[2]).is_file()
+            raise KeyboardInterrupt
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_every_graph_the_compositor_runs_goes_through_the_file_fallback():
+    """A new `-filter_complex` site that skips `_graph_in_file_if_long` is the
+    same WinError 206 waiting for a long timeline."""
+    import inspect
+    import re
+    src = inspect.getsource(compositor)
+    sites = len(re.findall(r'"-filter_complex",\s*fc', src))
+    assert sites >= 5
+    assert len(re.findall(r"with _graph_in_file_if_long\(", src)) == sites

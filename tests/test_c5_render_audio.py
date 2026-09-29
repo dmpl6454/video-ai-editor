@@ -294,11 +294,13 @@ def test_one_aac_overshoot_spot_is_dipped_not_the_whole_programme(tmp_path, dens
     mp4 = render_export(s.edl, s.dir, height=144).path
     i, tp = _loudness(mp4)
     i_enc, tp_enc = seen["encoded"]
-    _skip_unless_encode_overshoots(tp_enc)
+    # What holds on every encoder runs first; only the "a dip, not a lowered
+    # programme" comparison needs an encode that really overshot.
     assert tp <= audio_mix.EXPORT_TRUE_PEAK_DBTP, (i_enc, tp_enc, i, tp)
-    assert i == pytest.approx(i_enc, abs=0.2), (i_enc, tp_enc, i, tp)
     assert i == pytest.approx(s.edl.canvas.loudness_lufs, abs=1.0), (i, tp)
     assert not list((s.dir / "exports").glob("*.tpfix*")), "no fix-up candidate left behind"
+    _skip_unless_encode_overshoots(tp_enc)
+    assert i == pytest.approx(i_enc, abs=0.2), (i_enc, tp_enc, i, tp)
 
 
 def test_overshoot_everywhere_falls_back_to_lowering_the_ceiling(tmp_path, dense_bed, monkeypatch):

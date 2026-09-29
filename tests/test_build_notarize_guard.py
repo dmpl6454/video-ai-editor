@@ -27,50 +27,15 @@ pins build_app.sh:
 from __future__ import annotations
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from shell_fixtures import BASH_SKIP, lf_bytes, working_bash
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "build_notarize.sh"
-
-
-def _working_bash() -> str | None:
-    """A bash that can run scripts, or None.
-
-    `shutil.which("bash")` is the WSL launcher (System32\\bash.exe) on the
-    Windows runners: with no distro installed it prints UTF-16 "no installed
-    distributions" text and exits 1, which says nothing about our scripts.
-    On Windows prefer Git Bash; everywhere, accept a candidate only if
-    `bash -c` really runs and answers."""
-    candidates: list[str] = []
-    if os.name == "nt":
-        roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)")]
-        candidates += [str(Path(r) / "Git" / "bin" / "bash.exe") for r in roots if r]
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidates.append(str(Path(local) / "Programs" / "Git" / "bin" / "bash.exe"))
-        git = shutil.which("git")
-        if git:                                     # <Git>\cmd\git.exe -> <Git>\bin\bash.exe
-            candidates.append(str(Path(git).resolve().parent.parent / "bin" / "bash.exe"))
-    found = shutil.which("bash")
-    if found:
-        candidates.append(found)
-    for cand in candidates:
-        if not Path(cand).is_file():
-            continue
-        try:
-            probe = subprocess.run([cand, "-c", "echo vai-bash-ok"], capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if probe.returncode == 0 and probe.stdout.strip() == b"vai-bash-ok":
-            return cand
-    return None
-
-
-BASH_SKIP = "no working bash (on Windows `bash` is the WSL launcher without a distro, and Git Bash was not found)"
 
 
 def _text() -> str:
@@ -208,11 +173,16 @@ def test_summary_and_done_line_keyed_on_dmg_built_this_run():
     assert "warn_stale_dmg" in main
 
 
-def test_help_survives_a_closed_pipe():
-    bash = _working_bash()
+def test_help_survives_a_closed_pipe(tmp_path):
+    bash = working_bash()
     if bash is None:
         pytest.skip(BASH_SKIP)
-    script = SCRIPT.as_posix()      # C:/... works in Git Bash; backslashes would not survive the -c string
+    # An LF copy, so a CRLF checkout cannot fail this (`set -euo pipefail\r`
+    # is "invalid option name"). --help prints from the script's own text and
+    # returns before anything looks at the directory the script lives in.
+    copy = tmp_path / SCRIPT.name
+    copy.write_bytes(lf_bytes(SCRIPT))
+    script = copy.as_posix()        # C:/... works in Git Bash; backslashes would not survive the -c string
     proc = subprocess.run(
         [bash, "-o", "pipefail", "-c", f'"$BASH" "{script}" --help | head -1; exit "${{PIPESTATUS[0]}}"'],
         capture_output=True, text=True, encoding="utf-8")
@@ -237,11 +207,11 @@ def test_never_handles_credentials():
 
 
 def test_build_notarize_sh_parses():
-    bash = _working_bash()
+    bash = working_bash()
     if bash is None:
         pytest.skip(BASH_SKIP)
     # Fed on stdin with CRLF folded to LF: a Windows checkout may translate line
     # endings, which is not what this test is about (the script never runs there).
-    proc = subprocess.run([bash, "-n"], input=SCRIPT.read_bytes().replace(b"\r\n", b"\n"),
+    proc = subprocess.run([bash, "-n"], input=lf_bytes(SCRIPT),
                           capture_output=True)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")

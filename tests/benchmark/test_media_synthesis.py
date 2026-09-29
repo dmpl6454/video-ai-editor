@@ -32,6 +32,7 @@ import pytest
 
 from video_ai_editor import platformutil as _pu
 from video_ai_editor.agent.dispatch import dispatch
+from video_ai_editor.ai import tts as _tts
 from video_ai_editor.agent.prompt.recipes import FILLERS_STRICT
 from video_ai_editor.edl.snapshot import EDLStore
 from video_ai_editor.ingest.probe import probe
@@ -42,17 +43,23 @@ from .harness import EgressAttempted, EgressGuard, PromptRun, clone_session_dir,
 from .media import (BED_LUFS, BED_SECONDS, LOOP_FIXTURE_SECONDS, MediaSet, build_media_set,
                     ensure_preset_beds, media_key)
 from .narration import (CONTENT_LIKE_SENTENCE, EN_VOICE, GAP_S, PAUSE_S, PLANTED_FILLERS,
-                        hindi_backend, piper_voice_available)
+                        hindi_backend)
 
 _SILENCE = re.compile(r"silence_start: ([\d.]+)|silence_duration: ([\d.]+)")
+
+
+def _piper_voice_cached(name: str = EN_VOICE) -> bool:
+    """True when the voice's model file is already on disk. `voice_paths`
+    only names the cache location (the expression `hindi_backend` uses);
+    it never calls `ensure_voice`, so this probe cannot download anything."""
+    return _tts.voice_paths(name)[0].exists()
 
 
 def _build_media_or_skip() -> MediaSet:
     """`build_media_set()` synthesizes the narration with Piper and raises
     FileNotFoundError when the voice is not cached; CI runners have no voice
-    and the suite never downloads one. `piper_voice_available` only looks at
-    the cache (never `ensure_voice`), so the probe cannot trigger a download."""
-    if not piper_voice_available(EN_VOICE):
+    and the suite never downloads one."""
+    if not _piper_voice_cached(EN_VOICE):
         pytest.skip(f"Piper voice {EN_VOICE} is not cached (no downloads in CI)")
     return build_media_set()
 
@@ -66,7 +73,7 @@ def test_media_fixture_skips_cleanly_when_the_piper_voice_is_not_cached(monkeypa
     """Rehearses the CI runner: with the voice absent the fixture skips (with
     the reason below) and never reaches the synthesizer."""
     mod = sys.modules[__name__]
-    monkeypatch.setattr(mod, "piper_voice_available", lambda name=EN_VOICE: False)
+    monkeypatch.setattr(mod, "_piper_voice_cached", lambda name=EN_VOICE: False)
     monkeypatch.setattr(mod, "build_media_set",
                         lambda *a, **k: pytest.fail("build_media_set must not run without the voice"))
     with pytest.raises(pytest.skip.Exception, match=r"Piper voice en_US-amy-medium is not cached \(no downloads in CI\)"):

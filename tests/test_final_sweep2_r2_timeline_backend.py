@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from sticker_fixtures import sticker_png
 from video_ai_editor.agent.dispatch import dispatch
 from video_ai_editor.edl import EDLStore
 from video_ai_editor.edl.schema import EDL, Canvas, Clip, Track
@@ -200,17 +201,6 @@ def test_a_drag_reorder_and_a_move_that_closes_a_legacy_gap_still_work(tmp_path,
 
 # ------------------------------------------------ 3. overlapping stickers get their own lane
 
-def _sticker_png(tmp_path: Path) -> str:
-    """A tiny PNG sticker made locally. The lane logic under test is not about
-    emoji artwork: `add_sticker(emoji=...)` needs the emoji cache or an installed
-    colour emoji font (gate X3: never the network), which CI runners lack."""
-    from PIL import Image
-    p = tmp_path / "sticker.png"
-    if not p.exists():
-        Image.new("RGBA", (32, 32), (255, 120, 0, 255)).save(p)
-    return str(p)
-
-
 def _sticker_lanes(st: EDLStore) -> dict[str, list[tuple[float, float]]]:
     return {t.id: [(c.start, c.end) for c in t.clips]
             for t in st.edl.tracks if t.type == "sticker" and t.clips}
@@ -218,7 +208,7 @@ def _sticker_lanes(st: EDLStore) -> dict[str, list[tuple[float, float]]]:
 
 def test_two_stickers_at_the_same_time_land_on_different_lanes(tmp_path, media):
     st = _three(tmp_path / "s", media)
-    png = _sticker_png(tmp_path)
+    png = sticker_png(tmp_path)
     a = dispatch(st, "add_sticker", {"src": png, "start": 2.0, "end": 5.0})["sticker_id"]
     out = dispatch(st, "add_sticker", {"src": png, "start": 0.0, "end": 3.0})
     b = out["sticker_id"]

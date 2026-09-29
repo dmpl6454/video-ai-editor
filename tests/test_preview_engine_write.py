@@ -59,8 +59,6 @@ def test_each_engine_is_stored_and_read_back(client, settings_file, engine):
     assert client.get(ROUTE).json()["eager_proxies"] is (engine != "server")
 
 
-@pytest.mark.skipif(_pu.IS_WINDOWS, reason="NTFS has no POSIX mode bits (st_mode is always 0o666 "
-                    "for a writable file); the user-profile ACL protects settings.json there")
 def test_the_write_keeps_every_other_setting(client, settings_file):
     settings_file.parent.mkdir(parents=True)
     settings_file.write_text(json.dumps({"version": 1, "lan_enabled": True,
@@ -71,7 +69,10 @@ def test_the_write_keeps_every_other_setting(client, settings_file):
     data = json.loads(settings_file.read_text())
     assert data["lan_enabled"] is True and data["devices"] == [{"id": "d1", "name": "Phone"}]
     assert data["preview"] == {"engine": "client", "future": 7}
-    assert (settings_file.stat().st_mode & 0o777) == 0o600
+    # NTFS has no POSIX mode bits (st_mode is always 0o666 for a writable
+    # file); the user-profile ACL protects settings.json there.
+    if not _pu.IS_WINDOWS:
+        assert (settings_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_case_and_space_are_forgiven_like_the_reader(client, settings_file):

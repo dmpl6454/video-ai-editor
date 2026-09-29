@@ -18,21 +18,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from sticker_fixtures import sticker_png
 from video_ai_editor.agent.dispatch import dispatch
 from video_ai_editor.edl import EDLStore
 from video_ai_editor.edl.schema import Canvas, empty_edl
-
-
-def _sticker_png(tmp_path: Path) -> str:
-    """A tiny PNG sticker made locally. These tests are about span logic, not
-    emoji artwork: `add_sticker(emoji=...)` needs the emoji cache or an
-    installed colour emoji font (gate X3: never the network), which CI runners
-    lack, so a `src` sticker keeps them hermetic."""
-    from PIL import Image
-    p = tmp_path / "sticker.png"
-    if not p.exists():
-        Image.new("RGBA", (32, 32), (255, 120, 0, 255)).save(p)
-    return str(p)
 
 
 def _store(tmp_path: Path) -> EDLStore:
@@ -69,7 +58,7 @@ def test_moving_a_text_clip_keeps_its_duration(tmp_path: Path):
 def test_moving_a_sticker_keeps_its_duration(tmp_path: Path):
     s = _store(tmp_path)
     sid = dispatch(s, "add_sticker",
-                   {"src": _sticker_png(tmp_path), "start": 1.0, "end": 4.0})["sticker_id"]
+                   {"src": sticker_png(tmp_path), "start": 1.0, "end": 4.0})["sticker_id"]
     dispatch(s, "move_clip", {"clip_id": sid, "new_start": 30.0})
     c = s.edl.get_clip(sid)[1]
     assert (c.start, c.end) == (30.0, 33.0)
@@ -98,7 +87,7 @@ def test_replacing_a_long_video_with_a_short_one_shortens_the_timeline(tmp_path:
     tid = dispatch(s, "add_text",
                    {"text": "FIRE", "start": 0.2, "end": 3.5, "role": "super"})["id"]
     sid = dispatch(s, "add_sticker",
-                   {"src": _sticker_png(tmp_path), "start": 0.5, "end": 3.0})["sticker_id"]
+                   {"src": sticker_png(tmp_path), "start": 0.5, "end": 3.0})["sticker_id"]
 
     # Drag both overlays out past the end of the footage — the gesture that
     # used to invert them.
