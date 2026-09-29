@@ -314,8 +314,23 @@ def _graph_opts(args) -> list[str]:
     return [a for a in args if a in ("-filter_complex", "-/filter_complex", "-filter_complex_script")]
 
 
-def _record_argv(monkeypatch):
+def _binary_reads(opt: str) -> bool:
+    """Whether the ffmpeg on PATH has `opt`. CI run 36601831900 measured both
+    ends: 9.0.1 says "Unrecognized option 'filter_complex_script'" (removed
+    after 8, where it was deprecated), 6.1.1 says the same of
+    '/filter_complex' (new in 7.0). An unreadable version is a recent build."""
+    major = _REAL_FFMPEG_MAJOR()
+    if opt == "-filter_complex_script":
+        return major is not None and major <= 8
+    return major is None or major >= 7
+
+
+_REAL_FFMPEG_MAJOR = compositor._ffmpeg_major          # the cached reader, before any test patches it
+
+
+def _record_argv(monkeypatch, graphs: list[str] | None = None):
     seen: list[list[str]] = []
+    graphs = [] if graphs is None else graphs          # the text of each graph file, read while it exists
     real = compositor._cancel.run
 
     def spy(args, **kw):
@@ -325,6 +340,7 @@ def _record_argv(monkeypatch):
         graph_files = [a for a in args if str(a).endswith(".filtergraph")]
         for g in graph_files:                      # the file exists WHILE ffmpeg runs
             assert Path(g).is_file()
+            graphs.append(Path(g).read_text(encoding="utf-8"))
         return real(args, **kw)
 
     monkeypatch.setattr(compositor._cancel, "run", spy)
@@ -335,21 +351,46 @@ def test_a_graph_over_the_argv_limit_is_passed_as_a_file_and_renders_the_same_fr
         bars, tmp_path, monkeypatch):
     st = _split_timeline(bars, tmp_path)
     assert len(st.edl.get_track("v1").clips) > 20
-    inline_seen = _record_argv(monkeypatch)
+    # The reference render, under the REAL limit. On macOS and Linux that is
+    # the inline graph, unchanged; on Windows this timeline's command line is
+    # already over the limit (it is the render that raised WinError 206), so
+    # the reference itself goes through the file. Either way the product must
+    # have followed its own rule.
+    base_graphs: list[str] = []
+    base_seen = _record_argv(monkeypatch, base_graphs)
     inline = _export(st, tmp_path, "inline")
-    (inline_argv,) = inline_seen
-    assert "-filter_complex" in inline_argv and not any(
-        a.endswith(".filtergraph") for a in inline_argv)          # under the real limit: unchanged
-    fc = inline_argv[inline_argv.index("-filter_complex") + 1]
+    (base_argv,) = base_seen
+    (base_opt,) = _graph_opts(base_argv)
+    if base_opt == "-filter_complex":
+        fc = base_argv[base_argv.index("-filter_complex") + 1]
+        as_inline = base_argv
+        assert not any(a.endswith(".filtergraph") for a in base_argv)
+    else:
+        (fc,) = base_graphs
+        i = base_argv.index(base_opt)
+        as_inline = [*base_argv[:i], "-filter_complex", fc, *base_argv[i + 2:]]
+        assert base_opt == compositor._graph_file_option()
+    over = compositor._argv_cost(as_inline) > compositor._ARGV_GRAPH_LIMIT
+    assert (base_opt != "-filter_complex") == over
 
     monkeypatch.setattr(compositor, "_ARGV_GRAPH_LIMIT", 2000)
     assert len(fc) > 2000
+    rendered = 0
     for major in (8, 6):                                           # the -/opt form and the old one
         monkeypatch.setattr(compositor, "_ffmpeg_major", lambda m=major: m)
+        opt = "-/filter_complex" if major >= 7 else "-filter_complex_script"
+        assert compositor._graph_file_option() == opt
+        if not _binary_reads(opt):
+            # This binary does not have the option a version-`major` ffmpeg
+            # would be given, so only the argv is checked, not a render.
+            with compositor._graph_in_file_if_long(list(as_inline), tmp_path / f"argv{major}.part") as argv:
+                assert opt in argv and "-filter_complex" not in argv
+                assert Path(argv[argv.index(opt) + 1]).read_text(encoding="utf-8") == fc
+            assert list(tmp_path.glob("*.filtergraph")) == []
+            continue
         seen = _record_argv(monkeypatch)
         got = _export(st, tmp_path, f"file{major}")
         (argv,) = seen
-        opt = "-/filter_complex" if major >= 7 else "-filter_complex_script"
         assert opt in argv
         assert "-filter_complex" not in argv                       # no giant inline string...
         assert max(len(a) for a in argv) < 2000                    # ...anywhere in argv
@@ -358,6 +399,8 @@ def test_a_graph_over_the_argv_limit_is_passed_as_a_file_and_renders_the_same_fr
         assert not gfile.exists(), "the graph file is removed once ffmpeg is done"
         assert got == inline, f"{sum(a != b for a, b in zip(got, inline))} frames differ"
         assert list(gfile.parent.glob("*.filtergraph")) == []
+        rendered += 1
+    assert rendered >= 1, "every ffmpeg reads at least one of the two options"
 
 
 def test_the_graph_file_is_removed_when_ffmpeg_fails(bars, tmp_path, monkeypatch):
