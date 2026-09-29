@@ -3,6 +3,270 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.8.0
+
+The pro-editor release. Working editors drove the app the way they cut every
+day, and this release is what they asked for: CapCut's speed curves, freeze
+frames, clip animations, canvas backgrounds, blend modes and voice changer;
+an export that plays exactly the frames the preview shows; a Prompt bar that
+shows you what it will change before it changes anything; and a long list of
+fixes to cuts, sound, overlays and transitions. Projects from 0.7.x open
+unchanged.
+
+### Import and organise
+- Two imports with the same name no longer overwrite each other, and the media library shows each file's original name.
+- Your footage keeps its frame rate: 23.976, 24, 25, 29.97, 50, 59.94 and 60 fps sources are no longer forced to 30 fps.
+- Portrait video keeps its full resolution, 4K stays 4K, and HDR footage is tone-mapped to standard colour instead of coming out washed out.
+- Anamorphic footage (PAL, HDV, DV) previews and exports at its real shape instead of squeezed.
+- HEIC photos from an iPhone import like any other picture.
+- Adding media with the playhead inside a main-track clip inserts it there and splits that clip, as CapCut does, and the drop label says so.
+- An imported voiceover keeps its file name in the media library, on the timeline and in the Inspector.
+- Audio panel › Add music… always puts the file on the Music track, whatever the "Add imports to the timeline" setting says.
+- Uploads show their progress and can be cancelled, and upload errors say what went wrong in plain words.
+- Projects have names you can rename instead of ids.
+- A custom LUT is saved inside the project file, so the project opens and exports on another Mac, and Save warns if a LUT is missing.
+- MPEG-TS, M2TS, MPG and VOB files added by an AI agent are converted like an upload, and a photo added that way becomes a 5-second clip you can lengthen.
+
+### Cut, trim and arrange
+- Every cut is frame-exact: split, trim, move and every automatic cut land on a frame boundary, so a split no longer exports a duplicate frame and picture and sound stay in sync.
+- The clock, the ruler and every timing field show SMPTE timecode, and you can type a timecode into any of them.
+- A timeline toolbar holds split, freeze, delete, duplicate, snap, zoom and fit, with real move and trim cursors and zoom anchored on the cursor.
+- Snapping is visible and includes markers.
+- Lock track works, deleting a multi-selection ripples the titles and captions with it, and duplicate and paste create independent clips.
+- Titles, stickers, captions and picture-in-picture stay over the footage they were placed on when you delete, trim, speed up, freeze, duplicate, reorder or insert clips on the main track, cut a range, or remove silences or filler words.
+- One placed past the end of the video, or over a gap, stays where you put it.
+- Transitions stay on their cut when you delete, trim, cut, reorder, duplicate, drag or change the speed of a clip on the main track, and a transition whose clip is deleted goes with it.
+- Adding a transition where there is no cut is refused, and the message lists the cuts.
+- A clip's detached sound stays with its picture, including a J or L cut offset you set, when you trim, delete, slow down, freeze, duplicate or drag an earlier clip.
+- Dragging, resizing or turning an animated picture-in-picture in the preview adds a keyframe at the playhead instead of deleting the animation.
+- Splitting a clip with keyframes keeps its animation where it was.
+- Typing a later Start for a main-track clip, or nudging the last clip right, is refused with a message saying main-track clips sit end to end, instead of opening a black gap.
+- Splitting (⌘B) or trimming to the playhead (Q/W) on a voiceover, music or audio clip cuts exactly at the playhead when there are transitions on the main track.
+- After transitions, the Inspector's Start, End and Duration match the ruler, and a typed Start lands where you typed it.
+- Timelines with more than 200 different clips preview and export.
+- History shows plain names and timecodes: where each clip landed, the transition and caption style names the panels use, and no internal ids.
+- Redo brings back the edit's own name in History.
+
+### Speed, curves and freeze frames
+- Speed curves, like CapCut's: open Speed in the Inspector, switch from Normal to Curve, and pick Montage, Hero, Bullet, Jump Cut, Flash In, Flash Out, or Custom, where you drag, add and remove points.
+- The clip's new length is shown before you commit, the export plays exactly the frames the preview shows, and Keep pitch works on curves.
+- Freeze frame holds the frame under the playhead for 3 seconds, from the toolbar, the clip's right-click menu or the Prompt bar, and pressing Freeze again on a still makes it longer.
+- Picture-in-picture clips take speed, speed curves, freeze frames and reverse, picture and sound, in the preview and the export.
+- Every retimed clip shows what it does on the timeline: "2.0x", "0.5x", "Hero", "Curve" or "Freeze".
+- Splitting, trimming or cutting a clip with a curve, a freeze or reverse keeps exactly the frames it showed, in order.
+- The Normal speed slider on a curve clip starts at the curve's average speed, and a curve clip's Duration field sets the length you type.
+- Keep pitch no longer fails an export that has a sped-up or slowed-down clip.
+- Reversed clips at 2x or 4x no longer shift everything after them by a frame.
+- Speeding up or slowing down a captioned clip moves its captions, titles and stickers to where the words now play, and AI › Smooth slow-mo does the same.
+- Speeding up a main-track clip, or giving it a curve, ends the music with the picture instead of over a black tail.
+
+### Text, titles and captions
+- Hindi, Arabic and other complex scripts export with the right letter shapes and joining, matching the preview.
+- Preview and export place text identically, including outline weight, rotation, scale and position keyframes, letter and line spacing, background box and shadow.
+- Text and stickers appear on the right frame in 50 and 60 fps exports of a 24, 25 or 30 fps project, and animated ones move every frame.
+- A title with emoji exports its emoji without an internet connection, and the emoji in the preview and the sticker picker show offline too.
+- Double-clicking a title in the preview or on the timeline puts the cursor in its Text box.
+- New text, and the Title box, Subtitle band, Side label, Quote and Neon styles, go above the captions when captions are already there.
+- Text added over another text at the same time goes on its own new Text track, and a sticker added over another goes on its own sticker lane, so both can be selected and trimmed.
+- Text on higher tracks draws on top in the preview, as it does in the export.
+- TikTok-style captions come in short phrases on real word timing, and changing the caption style keeps your manual edits.
+- Generate captions captions every clip that speaks, the voiceover and speech on a picture-in-picture lane, so both people in a stacked podcast get captions.
+- Captions made from a voiceover stay on its words when you later add a transition or edit the main track, and moving or splitting the voiceover moves its captions with it.
+- Captions, Remove silences and filler removal follow speed-curve and reversed clips exactly.
+- Hinglish captions are transliterated on your Mac instead of needing a 3 GB download.
+- AI › Cut range, Super text, Lower third and AI voiceover use the times you see on the ruler.
+- The Transform x and y fields are wide enough for four-digit positions.
+
+### Animations, canvas and blend modes
+- Clip animations: In, Out and Combo animations (Fade, Zoom, Slide, Rotate, Spin, Bounce, Blur and more) for main clips, overlays and stickers.
+- Canvas: fill the bars around a letterboxed clip with a colour, a blurred copy of the clip or a picture, and the background stays still while the clip moves or fades over it.
+- Blend modes for overlay clips: Screen, Multiply, Overlay, Add and ten more.
+- Mirror and Flip for any clip, overlay or sticker, with the older Flip effects on the same buttons.
+- Keyframed position, zoom, rotation and opacity export exactly as keyed on a clip anywhere on the timeline, sped up, slowed down, on a curve, reversed or frozen.
+- Keyframed opacity and rotation on an overlay clip animate in the export instead of sticking at their last value.
+- An overlay's Out animation finishes exactly where the overlay ends.
+- A picture-in-picture with a blend mode exports its Zoom, Spin, Bounce or keyframed size animation, and a spinning one no longer shows a black square behind it.
+- Stickers and picture overlays keep their true colours on every video.
+- Inspector › Framing says where the bars really are, and "no bars" when the clip fills the frame.
+- Inserting a clip into the main track no longer moves titles, stickers, captions and picture-in-picture that sit over a gap or past the end of the video.
+
+### Sound and voice
+- Voice changer: Robot, Echo, Chipmunk, Deep, Monster, Telephone, Megaphone, Radio, Underwater, Vibrato and Hall.
+- Detach audio for J and L cuts, volume keyframes, solo, per-clip fades, gain above +6 dB, and ducking under voiceover and dialogue with a real depth.
+- Waveforms are accurate, and the preview is loudness-matched to the export.
+- The Voice panel says when a clip has no sound instead of silently doing nothing.
+- A voiceover you import or record starts at the playhead, even after transitions.
+- A voiceover, music or audio clip that runs across or past main-track transitions plays to its end in the export, and the timeline block and the Inspector show its full length.
+- Music laid to the end of the video ends with the picture, with its fade-out, when the main track has transitions, and "Trim to video" ends the music exactly with the picture.
+- Two voiceover lines, AI voiceover lines or songs with a short gap between them no longer play over each other after a transition.
+- Detaching the sound of two neighbouring clips with a transition between them keeps the second sound on time.
+- Splitting a clip with the Telephone, Radio or Megaphone voice effect no longer puts a click at each split, and pitch and vibrato effects no longer leave a gap at a split.
+- Soloing a track or changing the music ducking updates the preview's sound straight away.
+- Exporting a WAV with Loudness Off no longer distorts when a loud picture-in-picture plays over the main track.
+- Exports with dynamic music reach their loudness target instead of coming out 1-2 LU quiet.
+- Exports at 29.97 and 59.94 fps no longer lose the last few milliseconds of sound.
+- "Cut away the dead air" no longer leaves tiny slivers of silence where a silence crossed a cut, and Remove silences reports an error when its check fails instead of saying there was nothing to cut.
+- AI panel › Cut to the beat leaves shots of at least 0.8 seconds by default.
+- Exporting at a different frame rate from the project's no longer adds a black frame and a short audio dropout at cuts, or ends on a black frame with a short silence.
+
+### Colour and effects
+- The Effects panel can import your own LUT (.cube), and "Apply look to all clips" copies a clip's look to every main-track clip, replacing their looks instead of stacking them.
+- An imported LUT keeps its own name in the Effects panel and in History.
+- Importing a .cube checks the file first: a 1D LUT, a cut-off file, an unsupported size or old Mac line endings is refused with a message saying what is wrong, and a LUT whose comments use accented or Cyrillic letters is accepted.
+- A LUT whose file name has an apostrophe, comma, semicolon or brackets no longer breaks preview and export.
+- If a look already on a clip cannot be read, preview and export name that look and say to remove it, instead of blaming the clip.
+- Applying a filter to every clip no longer stacks a second copy on a clip that already has it.
+- Clips with and without colour information can share the main track and keep their colours in the export, including under a Canvas Blur background and picture-in-picture.
+- In the macOS app, the preview shows the main video and overlays with the same colours as the export, instead of slightly brighter.
+- An effect setting outside its range is refused instead of being kept and breaking every preview and export.
+- The green-screen key colour must be a colour, and a project file holding anything else opens with the default green key.
+
+### Preview
+- Previews always show your latest edit, superseded renders are cancelled, and only the part of the timeline you changed re-renders.
+- A small "≈" mark appears on the preview when what you see is a close approximation of the export rather than an exact match, and hovering over it says why.
+- The regular preview no longer plays loud overlapping sound too quietly the first time you preview a project or after you add a loud music track.
+- Editing while an export or preview is being made can no longer mix two versions of the project in one file.
+- Crossfades start on the exact frame in both the preview and the export, and previews of clips whose frame rate differs from the project's pick the same frames the export shows.
+- **Instant preview (beta)** is a new choice in Settings: Auto, Always or Off (the default).
+- When it is on, cuts, splits, trims, moves, deletes and undo show up in the preview immediately, frame-exact and with sound in sync, while effects it cannot draw yet still come from the rendered preview.
+- Instant preview plays at the project's loudness target, as the rendered preview and the export do.
+- Loud mixes are limited exactly as the rendered preview limits them, and one loud moment in a long clip marks only that stretch.
+- Music and voiceovers imported as audio files play in Instant preview.
+- Pressing Play while a new clip's sound is still loading waits for it briefly, and a stretch whose sound is not ready yet is marked "≈ Sound loading" instead of playing silent.
+- Videos whose sound starts a moment after the picture play in sync.
+- A clip whose preview copy fails keeps showing exact frames from its original file, a slow or failing preview file no longer freezes the picture, and a stuck playback restarts itself.
+- When a clip's preview data keeps failing to load, or the disk is full, the preview switches to its slower fallback instead of waiting under a spinner.
+- Pressing Play right after moving the playhead no longer sometimes stops by itself, and turning Instant preview on while the video plays pauses cleanly.
+- J and repeated L say that reverse and fast shuttle need Instant preview off, instead of silently doing nothing.
+- The "≈" mark says in plain words what is approximate, such as "Canvas behind a moved or resized clip", and appears over sped-up clips with Keep pitch off and over reversed overlays.
+
+### Export
+- A proper Export dialog with real resolution, frame rate, quality, loudness target and a size estimate.
+- Platform presets set a real bitrate, loudness and frame rate, and every export keeps its own file.
+- A timeline with sped-up or speed-curved clips no longer ends on a black, silent frame.
+- After you cut the main track into pieces, a picture-in-picture, keyframed text and animated titles or stickers export on the right frame.
+- A clip one frame long keeps its picture instead of turning black.
+- A split in a clip filmed at a different frame rate from the project is exact in the export.
+- A transition after a sped-up or slowed-down clip is applied instead of silently skipped.
+- When the disk is full, or the encoder is stopped because memory runs low, the error says so instead of blaming your clip.
+- An export that would have no picture fails with a clear message instead of producing a sound-only file.
+- If the app quits during an export, the leftover encoder is stopped and its partial file is deleted the next time the app starts.
+
+### The Prompt bar (no API key) and the assistant
+- **Preview, then apply.** Without a Claude key, the Prompt bar now shows what it would change before changing anything: each change on its own line, with clip names and times, under the words "Nothing has changed yet".
+- Press Apply (Enter) to make the edit or Change (Esc) to go back to your sentence, and one ⌘Z undoes an applied edit.
+- The list names every change, and a card with many changes opens "and N more changes" so you can see all of them; the chat pane lists them too.
+- If the timeline changes while a card is open, Apply shows a fresh preview instead of applying the old one, and a new sentence typed while a card is open replaces it.
+- Typing "yes" or "no" in the bar while a card is open applies or drops it, and "undo" typed while a card is open drops the card and undoes nothing.
+- New setting: Settings › Prompt bar › "Ask before applying Prompt bar edits", on by default; turn it off to apply Prompt bar edits straight away.
+- A run that did something you did not ask for, or did not do all of it, is undone in full and asks what you meant, leaving nothing in History.
+- Apple Intelligence works as an on-device brain on macOS 26 and later when it is turned on in System Settings.
+- The Prompt bar's Undo only appears while the prompt's change is the latest edit.
+- The Prompt bar understands the new tools: speed curves ("add a hero speed ramp", "flash in speed curve on the second clip"), freeze frames ("freeze frame at 5 seconds"), animations ("make the logo pop in and spin out"), canvas ("put a blue background behind it"), blend modes ("set the overlay's blend to screen"), voice effects ("make the voice on clip 2 robotic") and Mirror and Flip.
+- Many more everyday phrasings make the right edit or ask one clear question, and common typos such as "spead up teh second clip" are understood.
+- Speed requests read the way you say them: "50% faster" is 1.5×, "25% slower" is 0.75×, "three quarter speed" is 0.75×, "reset the speed" is 1×, and "slow it down to 2x" asks instead of speeding up.
+- Level requests move from the current level: "bring the music down 4 dB" lowers it by 4 dB, "clip 2 volume +2" raises clip 2, "mute everything except the voiceover" mutes the music too, and "the music's too loud" lowers the music.
+- Requests naming clips change exactly those clips: "speed up clip 2 and clip 3", "delete clips 1-2", "every clip except the first", "the clip under the playhead", "slow down the pour shot" and "clip2" without a space.
+- In a request with several steps, "it" means the clip named earlier, and a step that could not be done is never listed as done.
+- Title requests restyle or retime your title and keep its words: "make the title red", "title font size 80", "put the title at the top", "make the title last 5 seconds", "change the Summer Trip text to Winter Trip" and "make the title say …".
+- New titles take the look you ask for, such as "small", "in a black box", "with no outline", a font name, "fades in" or "on clip 2", and quoted words like 'Like & Subscribe' are kept exactly.
+- Caption requests change the captions' look without rebuilding them: "make the captions yellow", "make the subtitles bigger", "captions at the top please".
+- Transition requests act on the transition you name: "change the crossfade to a wipe" changes that one, "make all transitions 1 second long" keeps their types, "put a wipe between clip 1 and clip 2" adds one wipe, and "take the transitions out" removes them.
+- Removal requests remove what they name: "turn the robot voice off", "take the black and white off", "remove the fade in" keeps the fade out, "remove the screen blend" goes back to Normal, and "remove all animations" takes them off.
+- Cut requests cut what they say: "keep only the first 10 seconds" keeps that part, "cut the first 2 seconds of clip 3" cuts inside that clip, "split clip 3 at 10 seconds" splits there, and a cut that would empty the main track is refused unless you say "all".
+- Music requests stay on the music: "music fade in 1s and fade out 3s", "cut the music at 8 seconds", "replace the music with silence" and "remove the music ducking" never touch the picture or turn ducking on.
+- "Add captions" captions every clip that speaks and the voiceover, and "remove the silences" keeps a B-roll shot that has no sound of its own.
+- Cuts, deletes, speed changes, freezes and reorders work on a project with a picture-in-picture or B-roll overlay, and the overlay moves with its picture.
+- "Make this a 30s reel" ends on a complete sentence, and "add transitions between every clip" covers every clip.
+- A request that would change nothing says "Nothing to change", a request the bar cannot apply asks one clear question, and on a full disk the bar says the disk is full.
+- A new request typed after a question is planned as a request, not taken as the answer, and an unanswered question left over from before a restart no longer blocks a new instruction.
+- After "I undid that", picking an option carries out that edit or asks its next question, and never runs the same wrong edit again.
+- A sentence that only starts with "undo" or "revert", such as "revert clip 2 to normal speed", previews that change instead of undoing your last edit.
+- Edits from the chat assistant or an AI agent are refused while a Prompt bar run is working, instead of reporting success and then vanishing, and long agent tools no longer freeze the editor.
+- Changing a main-track clip's speed, In or Out through the chat assistant or an AI agent keeps the clips end to end.
+- Model downloads always state their size and ask first, and Chat is docked in the right panel and closed by default.
+- Projects made by a newer version open safely: an effect, blend mode or background this version does not know is skipped and logged.
+
+### Keyboard and accessibility
+- Eight tools in the left rail: Media, Audio, Text, Stickers, Effects, Transitions, Captions and AI, each opening in one tool panel, with Help, Keyboard shortcuts and Settings at the foot of the rail.
+- A calmer top bar: safe zones are in the Ratio menu, a single activity chip shows a recording or a captions run with its Stop or Cancel button, and the bar tidies itself as the window narrows.
+- The Media, Audio, Text, Effects and Captions panels list their AI tools, and clicking one opens it in the AI panel with a back button.
+- The Inspector has a row of jump buttons at the top, and its sections also show the names CapCut uses (Background, Voice changer, Adjust, Blend mode).
+- ⌥1 … ⌥8 show a rail panel and put focus on it, ⌥\ hides or shows the tool panel, ⌥9 shows the Inspector and ⌥0 the Chat.
+- F6 and ⇧F6 move between the top bar, the rail, the tool panel, the Prompt bar, the timeline, the right panel and the rail's foot.
+- ⌘E opens Export, ⌥⌘K opens Keyboard shortcuts, and ⌥T adds text at the playhead and puts you straight into it.
+- C (Final Cut, CapCut) or D (Premiere) selects the clip under the playhead, and ↑ and ↓ select the previous or next clip and move the playhead to it.
+- Space, Enter, ⌘Z, J, K, L and N keep working wherever focus is, including on a rail tab, a toolbar button, a checkbox, the Speed section, and right after you apply a transition or add a clip.
+- Tab reaches every button in the app, and Esc in an empty Prompt bar or Chat box returns to the timeline.
+- Every icon button has an accessible name, menus work from the keyboard, and text meets 4.5:1 contrast.
+- A screen reader hears why a Prompt bar preview was refreshed and what it would change, and the "Undid …" reply names the clip.
+- The Inspector's Video fade in and Video fade out fields apply when you press Enter, and the left-rail tooltip no longer blocks the button under it.
+- Disabled toolbar buttons look disabled, the Run key hint has better contrast, and long media names are tidy in a narrow window.
+
+### Security and privacy
+- A web page open in your browser on another local address can no longer create, change, upload into or delete your projects; only the editor's own window can.
+- The preview link only serves this project's own preview renders.
+- Opening a project file is limited to what it can really unpack to and to the free space, so a malformed file can no longer fill the disk.
+- Opening a project file can no longer make the next Save copy a private file from your Mac into it.
+- Templates you save are kept in your user folder, not inside the app, so saving one no longer damages the app's signature.
+- Nothing in the Prompt bar downloads a model or a voice without your yes.
+
+### Fixes
+- When the disk is full, Save no longer leaves a broken project file or overwrites your previous save, an edit that could not be saved does not stay on the timeline, and every action says the disk is full instead of "internal server error".
+- Undo and Redo on a full disk no longer lose the Redo history, and a damaged step in a project's undo history stops Undo there with a plain message.
+- A project file with a damaged meta.json no longer breaks the project list and New project.
+- Viewing the history of a project that does not exist no longer creates an empty project.
+- If the editor's engine stops, an offline banner says so and the app recovers cleanly when it is back.
+- History shows an added clip, sticker, text or transition at the time the ruler shows after a transition.
+- Inspector › Timing for a music bed that ends with the video shows End and Duration where the music actually stops.
+- An Inspector time field shows the clip's real value again when a typed value changes nothing.
+- The Transitions panel targets the cut under the playhead, and its arrows move the playhead onto the cut, so a transition never replaces one on a different cut.
+- With transitions on the main track, clip names on the timeline are no longer covered by the transition icons.
+- The Inspector's jump buttons no longer hide the section title, and Inspector › Canvas › Colour keeps "Custom" and the colour code on one line.
+- The folded Prompt bar result no longer covers the top of the preview, and a preview card never takes the keyboard from a field you are typing in.
+- Undo updates the Canvas tab correctly.
+- Typing a clip's start as the previous clip's end on a 25 fps project no longer leaves a one-frame flash of the wrong shot at the end of the export.
+- Instant preview (beta): pressing Play again after playback stopped at the end restarts from the start every time. Before, on a timeline whose start was no longer buffered, the picture could stay on the last frame (or show frame 0 for a second) and playback stop by itself.
+- Exporting a WAV or M4A with Loudness Off no longer clips when a single clip's gain pushes it past full scale (for example +12 dB on a loud clip): the sound goes through the export's peak limiter, and a clip that stays under the ceiling is delivered exactly as it was.
+- Instant preview (beta): when a clip's preview data cannot be built at all (the drive holding the cache dropped out, or ffmpeg is missing), the preview now switches to its fallback at once instead of retrying the same failed build every time it asks for the next piece.
+- Generate captions on a project that already has a transition now captions every word a voiceover or picture-in-picture speaks during the cross-fade. Before, a caption that started and ended inside the dissolve (a sped-up voiceover's word, a short phrase) was silently left out.
+- Opening a large project file no longer freezes the rest of the editor while it unpacks (about two seconds per gigabyte of media); the preview, thumbnails and the timeline keep responding.
+- A damaged project file whose media list points at the project's own timeline file, or at the whole archive, no longer opens as an empty project; the timeline is kept, and if it cannot be, the open is refused instead.
+
+- Prompt bar: "make the voiceover 3 dB quieter", "lower the narration by 3 dB" and "make the narration louder" change the voice-over lane's level; they no longer offer a 60 MB voice download or change the main-track clips.
+- Prompt bar: a look, adjustment or other clip edit named by the footage ("make the kitchen before shot black and white", "the before shots", "re_kitchen_before and re_living_before") lands on those clips only, and a name that matches nothing asks which clip instead of changing every clip.
+- Prompt bar: "add a title 'Hold it' on clip 4" stacks a second title on a clip that already has one instead of refusing; "add a title 'BEFORE' on clip 2 and 'AFTER' on clip 3" adds both titles on their clips.
+- Prompt bar: "make clip 2 and clip 4 black and white" (the noun repeated) edits both clips; "silence the first two clips" mutes them instead of cutting the pauses out of every clip; "take the warm off clip 1" removes the look; "un-mute clip 3" unmutes it.
+- Prompt bar: "keep the logo on screen for the whole video" and "show the logo until the end" stretch the sticker to the end of the video instead of asking for a watermark handle, and when combined with a corner request the position note is still shown.
+- Prompt bar: "lower the music while the coach is talking", "whenever someone is talking" and "under his voice" duck the music instead of lowering it by a fixed amount.
+- Prompt bar: "remove the 2 seconds after the playhead", "the second before the playhead" and "from 1s to the playhead" cut exactly that span instead of everything to the end or from the start.
+- Prompt bar: a stated amount is the amount — "drop the bed to -30", "voice up 3, music down 3", "over half a second", "slow it to half", "until it's 2 seconds long", "brightness +0.2", "saturation by half" and "duck … to -20" no longer fall back to the default step.
+- Prompt bar: "scale clip 1 down to 80%" zooms to 80% instead of 180%; "cut out the part between clip 1 and clip 3" removes clip 2 only (and says so when the two clips sit next to each other); "at the very end" and "from the playhead" place a title where they say.
+- Prompt bar: "freeze the first frame of clip 2" freezes that clip's frame, "split every clip in half" splits each clip, "mirror the middle clip vertically" flips one axis, "transition between clips 1-2 only" adds one transition, and "fade the music in over 1 second and out over 3" sets both fades.
+- Prompt bar: "auto captions in yellow" and "add subtitles and make them bold and big" lay the captions with that look in the same step; "make the warm look on clip 1 weaker" steps that clip's look; "remove all looks" is no longer refused.
+- Prompt bar: "add a 3 2 1 countdown at the start of clip 2" adds a 3 · 2 · 1 countdown (three one-second cards); a picture-in-picture request explains how to add one from the PIP / overlay lane instead of the generic menu.
+- Prompt bar: everyday verbs and forms are understood — "nuke the last clip", "bin clip 1", "dupe clip 3", "make clip 2 go away", "throw away everything after 0:10", "reverse the order", "razor at 3.25", "lop off the last half second", "keep 3s through 9s", "keep everything from 4 seconds on", "back to widescreen", "rename Day One to Day Two", timecodes such as 00:00:07:15, "the last clip 20% brighter", the typo lines "trm teh frist 2 secs" and "mkae clp 3 balck adn wihte", and "the title should show for the whole video" keeps the retime instead of undoing it.
+- Prompt bar: a preview step that hits a full disk says the disk is full instead of showing an error number.
+- ⌘, (Ctrl+, on Windows) opens Settings from the Prompt bar's text field and brain button too, like ⌘E.
+
+### Known issues
+- Instant preview (beta): a clip with the Hall voice effect can show the "≈ Limiter on loud sound" mark even when the sound is nowhere near the limit.
+- The Prompt bar still asks a question instead of editing for some phrasings; rewording the sentence, or picking one of its options, gets the edit.
+- A full manual VoiceOver pass of the new panels is still owed, so a few controls may read less clearly than they look.
+- The Prompt bar does not yet read "shave a second off each clip", "make it 21:9" or "make the canvas 1280 by 720"; use Inspector › Timing and Inspector › Canvas for those.
+
+### Upgrading from 0.7.3
+
+Your projects open unchanged, and nothing about your media, settings or
+projects is rewritten. The first time you open a project, cached previews
+re-render once, because previews and exports now share one exact frame grid.
+Two behaviours are settings rather than surprises: Instant preview is an
+opt-in beta, Off by default, under Settings; and the Prompt bar's
+"Ask before applying Prompt bar edits" is On by default, so a key-free prompt
+shows you a preview card and changes nothing until you press Apply, and you
+can turn it off under Settings › Prompt bar to get the old immediate
+behaviour.
+
 ## 0.7.3
 
 ### Security
