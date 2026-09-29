@@ -149,14 +149,18 @@ def test_downloads_are_a_question_and_skip_degrades_honestly():
     assert yes.steps[0].args["target"] == "hi" and yes.downloads_needed
 
 
-def test_transitions_precede_captions_and_relay_existing_ones():
+def test_transitions_precede_captions_and_keep_existing_ones():
     p = P.plan("add smooth transitions and captions", F916)
     tools = _tools(p)
     assert tools.index("add_transition") < tools.index("add_caption_track")
     assert [s.args["type"] for s in p.steps if s.tool == "add_transition"] == ["crossdissolve"] * 3
-    p = P.plan("add smooth transitions", F916)            # captions exist, not requested → re-laid
-    assert _tools(p)[-1] == "add_caption_track" and "re-laid" in (p.reply or "")
-    assert any(c.check == "captions_sync" for c in p.postconditions)
+    # captions exist, not requested → left as they are (final sweep 3 r2,
+    # HIGH): the re-lay rebuilt them from the FIRST clip's transcript and lost
+    # a voice-over's or a second clip's captions; the renderer maps every
+    # overlay through the seam overlap already
+    p = P.plan("add smooth transitions", F916)
+    assert set(_tools(p)) == {"add_transition"}, _tools(p)
+    assert "re-laid" not in (p.reply or "")
     p = P.plan("add smooth transitions", F16)             # one clip → nothing to do, says so
     assert p.steps == [] and "no seam" in (p.reply or "")
 

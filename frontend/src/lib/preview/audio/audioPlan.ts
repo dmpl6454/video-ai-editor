@@ -140,7 +140,7 @@ export interface AudioPlan {
   approx: string[]
   /** Output-sample ranges where the pre-limiter peak may top the ceiling:
    *  the browser's limiter is not `alimiter` there (APPROX, `limiting`;
-   *  limiting.ts). Empty without a limiter. */
+   *  limiting.ts). Empty without a limiter, and with `exactLimiter`. */
   limiting: Array<[number, number]>
 }
 
@@ -154,6 +154,10 @@ export interface AudioPlanOptions {
    *  `audio.chunk_peak`), null while unknown — unknown is unbounded, so a
    *  mixed range reads APPROX until the layout lands (limiting.ts). */
   peak?: PeakLookup
+  /** The mix plays through the alimiter worklet (limiterWorklet.ts): over
+   *  the ceiling it is the server's limiter sample for sample, so nothing is
+   *  APPROX `limiting`. False/absent: the DynamicsCompressorNode fallback. */
+  exactLimiter?: boolean
 }
 
 // ---------------------------------------------------------------- constants
@@ -219,50 +223,26 @@ export function soundWindow(seams: Array<[number, number]>, start: number, lengt
  *  their cut). */
 const opensSoundRun = (c: EdlClip): boolean => Boolean(c.linked_to)
 
-/** `schema.sound_pulls`: per clip of ONE sound lane, how much earlier than
- *  its start it plays — a run of abutting clips (a split voice-over, a looped
- *  bed) is pulled as one block by the overlap before its first clip, so the
- *  pieces stay back to back instead of doubling at every seam between them. */
-export function soundPulls(clips: EdlClip[], seams: Array<[number, number]>): Map<EdlClip, number> {
-  const out = new Map<EdlClip, number>()
-  let runEnd: number | null = null
-  let runPull = 0
-  for (const c of [...clips].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
-    const s = c.start ?? 0
-    const e = s + effectiveDuration(c)
-    if (runEnd === null || opensSoundRun(c) || s > runEnd + 1e-3) {
-      runPull = s - renderTime(seams, s)
-      runEnd = e
-    } else {
-      runEnd = Math.max(runEnd, e)
-    }
-    out.set(c, runPull)
-  }
-  return out
-}
-
 /** `schema.SOUND_RUN_TOL_S`: a run ending this close to v1's layout end is
  *  laid TO it (`soundWindows`). */
 const SOUND_RUN_TOL = 1e-3
 
-/** `schema.sound_render_windows` — THE sound-lane seam rule (final QA, K1),
- *  mirrored step for step: per clip of ONE sound lane, its render window. A
- *  run of abutting clips starts where its first clip's start plays (one pull,
- *  `soundPulls`) and stays back to back; it plays WHOLE when it ends inside
- *  v1's layout `videoEnd` — even past the picture's render end (final QA run
- *  2, round 2: the cut dropped a voiceover's last words) — and is cut where
- *  its layout end maps (`renderTime(end)`, its fade-out at the cut, never
- *  before the picture's end) when laid to or past it. A clip wholly past its
- *  run's cut is absent. */
-export function soundWindows(clips: EdlClip[], seams: Array<[number, number]>,
-                             videoEnd: number): Map<EdlClip, [number, number]> {
-  const out = new Map<EdlClip, [number, number]>()
+interface SoundRunPlan { run: EdlClip[]; pull: number; cut: number }
+
+/** `schema._sound_run_plan`, step for step: per run of ONE sound lane its
+ *  pull (the overlap before its first clip — the run moves as one block)
+ *  and the programme end's cut (Infinity when it ends inside v1's layout).
+ *  An UNLINKED run never starts before the previous unlinked run ends
+ *  (final sweep 3, round 2: two voice-over lines 0.2 s apart after a 0.5 s
+ *  fade played 0.3 s over each other); a detached sound keeps its J/L
+ *  overlap. */
+function soundRunPlan(clips: EdlClip[], seams: Array<[number, number]>, videoEnd: number): SoundRunPlan[] {
   const runs: EdlClip[][] = []
   let runEnd: number | null = null
   for (const c of [...clips].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
     const s = c.start ?? 0
     const e = s + effectiveDuration(c)
-    if (runEnd === null || opensSoundRun(c) || s > runEnd + 1e-3) {
+    if (runEnd === null || opensSoundRun(c) || s > runEnd + SOUND_RUN_TOL) {
       runs.push([c])
       runEnd = e
     } else {
@@ -271,13 +251,51 @@ export function soundWindows(clips: EdlClip[], seams: Array<[number, number]>,
     }
   }
   const pictureEnd = renderTime(seams, videoEnd)
+  const out: SoundRunPlan[] = []
+  let prevEnd = -Infinity                          // render end of the last UNLINKED run
   for (const run of runs) {
+    const first = run[0].start ?? 0
     let pull = 0                                   // `_overlap_before(seams, start)`
-    for (const [seam, cost] of seams) if (seam <= (run[0].start ?? 0) + SEAM_EPS) pull += cost
+    for (const [seam, cost] of seams) if (seam <= first + SEAM_EPS) pull += cost
     const layEnd = Math.max(...run.map((c) => (c.start ?? 0) + effectiveDuration(c)))
     // a run ending INSIDE v1's layout plays whole (final QA run 2, round 2)
     const cut = layEnd >= videoEnd - SOUND_RUN_TOL
       ? Math.max(renderTime(seams, layEnd), pictureEnd) : Infinity
+    const linked = opensSoundRun(run[0])
+    if (!linked) pull = Math.max(0, Math.min(pull, first - prevEnd))
+    const end = Math.max(...run.map((c) => Math.min((c.start ?? 0) - pull + effectiveDuration(c), cut)))
+    if (!linked) prevEnd = Math.max(prevEnd, end)
+    out.push({ run, pull, cut })
+  }
+  return out
+}
+
+/** `schema.sound_pulls`: per clip of ONE sound lane, how much earlier than
+ *  its start it plays — a run of abutting clips (a split voice-over, a looped
+ *  bed) is pulled as one block by the overlap before its first clip, so the
+ *  pieces stay back to back instead of doubling at every seam between them,
+ *  and never so far that it starts before the unlinked run before it ends
+ *  (`soundRunPlan`; `videoEnd` = v1's layout end, Infinity when unknown). */
+export function soundPulls(clips: EdlClip[], seams: Array<[number, number]>,
+                           videoEnd = Infinity): Map<EdlClip, number> {
+  const out = new Map<EdlClip, number>()
+  for (const { run, pull } of soundRunPlan(clips, seams, videoEnd)) for (const c of run) out.set(c, pull)
+  return out
+}
+
+/** `schema.sound_render_windows` — THE sound-lane seam rule (final QA, K1),
+ *  mirrored step for step: per clip of ONE sound lane, its render window. A
+ *  run of abutting clips starts where its first clip's start plays (one pull,
+ *  `soundPulls` — never before the unlinked run before it ends) and stays
+ *  back to back; it plays WHOLE when it ends inside v1's layout `videoEnd` —
+ *  even past the picture's render end (final QA run 2, round 2: the cut
+ *  dropped a voiceover's last words) — and is cut where its layout end maps
+ *  (`renderTime(end)`, its fade-out at the cut, never before the picture's
+ *  end) when laid to or past it. A clip wholly past its run's cut is absent. */
+export function soundWindows(clips: EdlClip[], seams: Array<[number, number]>,
+                             videoEnd: number): Map<EdlClip, [number, number]> {
+  const out = new Map<EdlClip, [number, number]>()
+  for (const { run, pull, cut } of soundRunPlan(clips, seams, videoEnd)) {
     for (const c of run) {
       const rs = (c.start ?? 0) - pull
       const re = Math.min(rs + effectiveDuration(c), cut)
@@ -515,7 +533,7 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
     approx.add('loudness')
   }
   if (clips.some((c) => c.voice)) approx.add('voice')
-  const limiting = limitingRanges(clips, buses, gain, ceilingDb, total,
+  const limiting = opts.exactLimiter ? [] : limitingRanges(clips, buses, gain, ceilingDb, total,
     opts.peak ?? ((src) => (silent(src) ? 0 : null)), post)
   if (limiting.length) approx.add('limiting')
   const master: MasterPlan = post ? { gain, ceilingDb, post } : { gain, ceilingDb }

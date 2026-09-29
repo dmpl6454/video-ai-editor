@@ -31,6 +31,9 @@ import type { PcmReader } from './audioChunks'
 import { SAMPLE_RATE } from './curves'
 import { curveMap, sourceSeconds, type CurveMap } from '../timeline/speedCurve'
 import { processStereo, reverbIr, type ReverbParams } from '../../voice/voiceFx'
+import {
+  ALIMITER_ATTACK_MS, ALIMITER_RELEASE_MS, alimiterLimit, createLimiterNode, limiterWorkletReady, loadLimiterWorklet,
+} from './limiterWorklet'
 
 const SR = SAMPLE_RATE
 /** Scheduling block: sources and value curves are cut on this grid. */
@@ -38,7 +41,9 @@ export const BLOCK_SAMPLES = SR
 /** Ramp of every parameter change, pause and structural cross-fade. */
 export const RAMP_S = 0.005
 /** DynamicsCompressorNode's fixed look-ahead in WebKit and Chromium: 6 ms
- *  (288 samples at 48 kHz, measured in both; tests/wk/test_wk_audio.py). */
+ *  (288 samples at 48 kHz, measured in both; tests/wk/test_wk_audio.py).
+ *  The alimiter worklet (limiterWorklet.ts) pads its 239-frame ring to the
+ *  same latency, so either limiter schedules the same. */
 export const LIMITER_LATENCY = 288
 const LIMITER_RATIO = 20
 /** Processing time after which a new limiter is transparent (see
@@ -123,7 +128,15 @@ export interface MixGraphOptions {
   compensateLatency?: boolean
   /** Called when a block could not be scheduled whole (a chunk not loaded). */
   onMissing?: (clip: ClipAudio, p0: number, p1: number) => void
+  /** 'compressor': the DynamicsCompressorNode even where the alimiter
+   *  worklet is registered (tests of the fallback). Default: the worklet
+   *  when `limiterWorkletReady(ctx)`. */
+  limiter?: 'auto' | 'compressor'
 }
+
+/** A limiter stage's node: the alimiter port (EXACT) or the fallback
+ *  DynamicsCompressorNode (APPROX over the ceiling, limiting.ts). */
+type LimiterNode = DynamicsCompressorNode | AudioWorkletNode
 
 type ParamLike = AudioParam & { cancelAndHoldAtTime?: (t: number) => AudioParam }
 
@@ -168,7 +181,46 @@ function setCurve(param: AudioParam, values: Float32Array, t0: number): void {
   else param.setValueCurveAtTime(values, t0, (values.length - 1) / SR)
 }
 
+/** One render quantum. */
+const QUANTUM_S = 128 / SR
+
+/** How far past `currentTime` the render thread may already be when an
+ *  automation call lands (final sweep 3, run 3): Chromium renders a whole
+ *  callback buffer ahead (measured 256 frames past currentTime; its
+ *  baseLatency, 512 frames, bounds it), so one quantum was not enough. */
+function renderAhead(ctx: BaseAudioContext): number {
+  const base = (ctx as { baseLatency?: number }).baseLatency
+  return Math.max(QUANTUM_S, typeof base === 'number' && Number.isFinite(base) ? base : 0) + QUANTUM_S
+}
+
+/** setCurve for a LIVE block (final sweep 3): a curve whose start the
+ *  context has already passed is moved to "now" by Chromium with its
+ *  duration kept, so it ran past the next block's first event, which then
+ *  threw ("overlaps setValueCurveAtTime"). The samples already played (up
+ *  to the render position, `ahead` past `now`) are dropped instead, so the
+ *  curve still ends where its block does; a block wholly in the past writes
+ *  nothing. */
+function setLiveCurve(param: AudioParam, values: Float32Array, t0: number, now: number, ahead = QUANTUM_S): void {
+  const safe = now + ahead
+  if (t0 >= safe) return setCurve(param, values, t0)
+  const k = Math.ceil((safe - t0) * SR)
+  if (k >= values.length) return
+  setCurve(param, values.subarray(k), t0 + k / SR)
+}
+
 const identity = (c: ClipAudio) => `${c.bus}|${c.id}|${c.timing}`
+
+/** Sorted, overlapping or touching ranges joined (a new array). */
+function mergeRanges(ranges: ReadonlyArray<readonly [number, number]>): Array<[number, number]> {
+  const sorted = ranges.filter(([a, b]) => b > a).map(([a, b]) => [a, b] as [number, number]).sort((x, y) => x[0] - y[0])
+  const out: Array<[number, number]> = []
+  for (const [a, b] of sorted) {
+    const last = out[out.length - 1]
+    if (last && a <= last[1]) out[out.length - 1] = [last[0], Math.max(last[1], b)]
+    else out.push([a, b])
+  }
+  return out
+}
 
 export class MixGraph {
   readonly ctx: BaseAudioContext
@@ -184,10 +236,13 @@ export class MixGraph {
   /** A realtime context (an OfflineAudioContext renders ahead of time). */
   private readonly live: boolean
   private master!: GainNode
-  private limiter: DynamicsCompressorNode | null = null
+  private limiter: LimiterNode | null = null
   private limiterGain: GainNode | null = null
   /** The loudness stage after the mix limiter (`MasterPlan.post`). */
-  private post: { gain: GainNode; lim: DynamicsCompressorNode; undo: GainNode } | null = null
+  private post: { gain: GainNode; lim: LimiterNode; undo: GainNode } | null = null
+  private readonly limiterChoice: 'auto' | 'compressor'
+  /** The current limiter stages are the alimiter worklet. */
+  private exact = false
   private buses = new Map<string, BusNodes>()
   /** The one node feeding `master`: the lanes summed TWO AT A TIME in
    *  creation order (`attachToMaster`), never N inputs on one node. */
@@ -198,6 +253,12 @@ export class MixGraph {
   private startSample = 0
   /** Context time the current limiter was built at (its warm-up clock). */
   private limiterBorn = 0
+  /** Live, since the last restart (final sweep 3, run 3): output ranges the
+   *  last schedule found without their chunks (`waiting`), and ranges whose
+   *  time passed before their chunks came, or that were scheduled with a
+   *  hole (`lost`) — silence the export does not have. */
+  private waiting: Array<[number, number]> = []
+  private lost: Array<[number, number]> = []
 
   constructor(ctx: BaseAudioContext, plan: AudioPlan, opts: MixGraphOptions) {
     this.ctx = ctx
@@ -205,6 +266,7 @@ export class MixGraph {
     this.reader = opts.reader
     this.compensate = opts.compensateLatency ?? false
     this.onMissing = opts.onMissing
+    this.limiterChoice = opts.limiter ?? 'auto'
     this.destination = opts.destination ?? ctx.destination
     this.live = typeof (ctx as { startRendering?: unknown }).startRendering !== 'function'
     this.out = ctx.createGain()
@@ -240,8 +302,24 @@ export class MixGraph {
 
   // ------------------------------------------------------------ structure
 
-  /** A hard-knee limiter at `ceiling` dBFS and the gain undoing its makeup. */
-  private limiterStage(ceiling: number): [DynamicsCompressorNode, GainNode] {
+  /** Whether new limiter stages are the alimiter worklet. */
+  private useWorklet(): boolean {
+    return this.limiterChoice === 'auto' && limiterWorkletReady(this.ctx)
+  }
+
+  /** A limiter stage at `ceiling` dBFS and its output gain: the alimiter
+   *  worklet (the server's limiter, sample for sample; unity gain), or a
+   *  hard-knee DynamicsCompressorNode and the gain undoing its makeup. */
+  private limiterStage(ceiling: number): [LimiterNode, GainNode] {
+    if (this.useWorklet()) {
+      const lim = createLimiterNode(this.ctx, {
+        limit: alimiterLimit(ceiling), autoLevel: false, attackMs: ALIMITER_ATTACK_MS,
+        releaseMs: ALIMITER_RELEASE_MS, latency: LIMITER_LATENCY,
+      })
+      const g = this.ctx.createGain()
+      lim.connect(g)
+      return [lim, g]
+    }
     const lim = this.ctx.createDynamicsCompressor()
     lim.threshold.value = ceiling
     lim.knee.value = 0
@@ -255,6 +333,7 @@ export class MixGraph {
   }
 
   private buildMaster(): void {
+    this.exact = this.useWorklet()
     this.master = this.ctx.createGain()
     this.master.gain.value = this.plan.master.gain
     const ceiling = this.plan.master.ceilingDb
@@ -290,16 +369,21 @@ export class MixGraph {
     }
     set(this.master.gain, m.gain)
     if (this.limiter && m.ceilingDb !== null) {
-      if (t === null) this.limiter.threshold.value = m.ceilingDb
-      else this.limiter.threshold.setValueAtTime(m.ceilingDb, t)
-      set(this.limiterGain!.gain, limiterMakeupUndo(m.ceilingDb))
+      this.setCeiling(this.limiter, m.ceilingDb, t)
+      if (!this.exact) set(this.limiterGain!.gain, limiterMakeupUndo(m.ceilingDb))
     }
     if (this.post && m.post) {
       set(this.post.gain.gain, m.post.gain)
-      if (t === null) this.post.lim.threshold.value = m.post.ceilingDb
-      else this.post.lim.threshold.setValueAtTime(m.post.ceilingDb, t)
-      set(this.post.undo.gain, limiterMakeupUndo(m.post.ceilingDb))
+      this.setCeiling(this.post.lim, m.post.ceilingDb, t)
+      if (!this.exact) set(this.post.undo.gain, limiterMakeupUndo(m.post.ceilingDb))
     }
+  }
+
+  /** A limiter stage's ceiling from `t` (at once when null). */
+  private setCeiling(lim: LimiterNode, db: number, t: number | null): void {
+    const [param, v] = 'threshold' in lim ? [lim.threshold, db] : [lim.parameters.get('limit')!, alimiterLimit(db)]
+    if (t === null) param.value = v
+    else param.setValueAtTime(v, t)
   }
 
   private bus(id: string): BusNodes {
@@ -371,6 +455,12 @@ export class MixGraph {
 
   // ------------------------------------------------------------ scheduling
 
+  /** Live: the output ranges [p0, p1) this run could not play (lost) or
+   *  cannot yet (waiting for chunks), merged. Offline: none. */
+  soundGaps(): Array<[number, number]> {
+    return mergeRanges([...this.lost, ...this.waiting])
+  }
+
   /** Load every source chunk [p0, p1) of the programme needs. */
   async prefetch(p0: number, p1: number): Promise<void> {
     const jobs: Array<Promise<void>> = []
@@ -389,6 +479,17 @@ export class MixGraph {
     let missing = 0
     const floor = this.live ? this.ctx.currentTime + LIVE_LEAD_S : -Infinity
     const end = Math.min(p1, this.plan.total)
+    // What the last schedule left waiting: gone by now (before the floor)
+    // is lost; ahead of the floor but before this window it still waits.
+    const floorSample = this.live ? Math.ceil(this.sampleAt(floor)) : 0
+    const waiting: Array<[number, number]> = []
+    const lost: Array<[number, number]> = [...this.lost]
+    for (const [w0, w1] of this.live ? this.waiting : []) {
+      if (w0 < floorSample) lost.push([w0, Math.min(w1, floorSample)])
+      const k0 = Math.max(w0, floorSample)
+      const k1 = Math.min(w1, p0)
+      if (k1 > k0) waiting.push([k0, k1])
+    }
     for (const c of this.plan.clips) {
       // Nothing before the transport's start point — or before the start of
       // its lane's generation (a structural edit) — ever sounds.
@@ -411,12 +512,19 @@ export class MixGraph {
             // Live: a block waits for its chunks (the next refill, or the load's
             // own retry), so a clip's sound is never cut into silent holes.
             const r = sourceRange(c, q, qe)
-            if (r && !this.reader.ready(c.src, r[0], r[1])) { missing++; break }
+            if (r && !this.reader.ready(c.src, r[0], r[1])) { missing++; waiting.push([q, b]); break }
           }
-          if (!this.scheduleBlock(c, q, qe)) missing++
+          if (!this.scheduleBlock(c, q, qe)) {
+            missing++
+            if (this.live) lost.push([q, qe])
+          }
           q = qe
         }
       }
+    }
+    if (this.live) {
+      this.waiting = mergeRanges(waiting)
+      this.lost = mergeRanges(lost)
     }
     this.stats.missing += missing
     return missing
@@ -499,18 +607,45 @@ export class MixGraph {
     }
     src.connect(nodes.input)
     nodes.sources.push({ node: src, p0: a, p1: b })
-    const vals = new Float32Array(b - a)
-    for (let j = 0; j < vals.length; j++) vals[j] = clipGainAt(c, a + j)
-    // The value before a node's first curve is its first value: an event
-    // time a hair past its frame (context times far from 0 are not exact
-    // multiples of 1/48000) must not mute the clip's first sample.
-    if (nodes.until < nodes.from) nodes.shape.gain.value = vals[0]
-    setCurve(nodes.shape.gain, vals, t)
-    // A reverb's tail stops where the clip does (the export cuts the chain
-    // to the clip's exact length).
-    if (nodes.conv && b >= c.out0 + c.n) nodes.shape.gain.setValueAtTime(0, this.when(c.out0 + c.n))
+    const first = nodes.until < nodes.from
+    const appending = !first && a >= nodes.until
+    // The block is the clip's BEFORE its automation is written (final sweep
+    // 3): a refused automation call must never leave a started source
+    // untracked — the next refill scheduled that block again, on top.
     nodes.from = Math.min(nodes.from, a)
     nodes.until = Math.max(nodes.until, b)
+    const vals = new Float32Array(b - a)
+    for (let j = 0; j < vals.length; j++) vals[j] = clipGainAt(c, a + j)
+    const gain = nodes.shape.gain as ParamLike
+    const write = () => {
+      if (this.live) setLiveCurve(gain, vals, t, ctx.currentTime, renderAhead(ctx))
+      else setCurve(gain, vals, t)
+      // A reverb's tail stops where the clip does (the export cuts the chain
+      // to the clip's exact length).
+      if (nodes.conv && b >= c.out0 + c.n) gain.setValueAtTime(0, this.when(c.out0 + c.n))
+    }
+    try {
+      // The value before a node's first curve is its first value: an event
+      // time a hair past its frame (context times far from 0 are not exact
+      // multiples of 1/48000) must not mute the clip's first sample.
+      if (first) gain.value = vals[0]
+      write()
+    } catch (e) {
+      // Live, a block appended after everything the clip holds (final sweep
+      // 3, run 3): the refusal is the previous block's curve, moved by the
+      // browser past its block's end. Truncate it at this block's start
+      // (nothing of this clip is automated after it) and write again once.
+      if (this.live && appending && typeof gain.cancelAndHoldAtTime === 'function') {
+        try {
+          gain.cancelAndHoldAtTime(t)
+          write()
+        } catch (e2) {
+          console.warn('[preview audio] a block\'s gain automation was refused', e2)
+        }
+      } else {
+        console.warn('[preview audio] a block\'s gain automation was refused', e)
+      }
+    }
     this.stats.sources++
     if (this.live) {
       // Live: forget a block once it has played. Only the reference: a
@@ -722,6 +857,8 @@ export class MixGraph {
    *  shortly after; the graph keeps its structure (bus, master gains). */
   stopAll(t: number = this.ctx.currentTime, ramp = RAMP_S): void {
     holdAndRamp(this.out.gain, t, 0, ramp)
+    this.waiting = []
+    this.lost = []
     const at = t + ramp + 0.002
     for (const nodes of this.clips.values()) {
       for (const s of nodes.sources) {
@@ -756,6 +893,8 @@ export class MixGraph {
   restart(anchor: Anchor, scheduleUntil: number): number {
     this.anchor = anchor
     this.startSample = anchor.sample
+    this.waiting = []
+    this.lost = []
     for (const b of this.buses.values()) b.genStart = anchor.sample
     const t = this.when(anchor.sample)
     const g = this.out.gain as ParamLike
@@ -804,11 +943,26 @@ export class MixGraph {
    *  Chromium: −17 dB at 0 ms, −1 dB at 40 ms, transparent from 100 ms).
    *  True once the current limiter has processed that long (or there is none). */
   limiterWarm(): boolean {
-    return !this.limiter || this.ctx.currentTime - this.limiterBorn >= LIMITER_WARMUP_S
+    return !this.limiter || this.exact || this.ctx.currentTime - this.limiterBorn >= LIMITER_WARMUP_S
   }
 
   get hasLimiter(): boolean {
     return this.limiter !== null
+  }
+
+  /** The limiter stages are the alimiter worklet: over the ceiling the mix
+   *  is the server's (no `limiting` APPROX). True without a limiter. */
+  get exactLimiter(): boolean {
+    return !this.limiter || this.exact
+  }
+
+  /** The alimiter worklet was registered after this graph was built: move
+   *  the master's limiter stages onto it (same latency: nothing moves).
+   *  True when the stages changed. */
+  upgradeLimiter(): boolean {
+    if (!this.hasLimiter || this.exact || !this.useWorklet()) return false
+    this.rebuildMaster()
+    return true
   }
 
   /** Clips currently holding nodes (tests, telemetry). */
@@ -943,31 +1097,34 @@ export function duckValueAt(d: { floor: number; key: Array<[number, number]> }, 
   return 1
 }
 
-type OfflineRender = { L: Float32Array; R: Float32Array; stats: MixGraph['stats'] }
+/** `exactLimiter`: the render's limiter stages were the alimiter worklet
+ *  (MixGraph.exactLimiter). */
+type OfflineRender = { L: Float32Array; R: Float32Array; stats: MixGraph['stats']; exactLimiter: boolean }
 type MakeOffline = (channels: number, length: number, rate: number) => OfflineAudioContext
 
 /** Renders an offline mix may take before one is accepted (see below). */
 export const OFFLINE_RENDER_ATTEMPTS = 6
 
 async function renderOfflineOnce(plan: AudioPlan, reader: PcmReader, p0: number, p1: number,
-                                  make: MakeOffline): Promise<OfflineRender> {
+                                  make: MakeOffline, limiter: 'auto' | 'compressor'): Promise<OfflineRender> {
   // A limiter needs its warm-up (LIMITER_WARMUP_S of silence) and adds its
   // look-ahead; both are rendered and trimmed.
   const lat = masterLatency(plan.master)
   const pre = lat > 0 ? Math.round(LIMITER_WARMUP_S * SR) : 0
   const len = Math.max(1, pre + lat + p1 - p0)
   const ctx = make(2, len, SR)
-  const g = new MixGraph(ctx, plan, { reader, compensateLatency: false })
+  if (lat > 0 && limiter === 'auto') await loadLimiterWorklet(ctx)
+  const g = new MixGraph(ctx, plan, { reader, compensateLatency: false, limiter })
   await g.prefetch(p0, p1)
   g.restart({ ctxTime: pre / SR, sample: p0 }, p1)
   const buf = await ctx.startRendering()
   const L = buf.getChannelData(0).slice(pre + lat, pre + lat + (p1 - p0))
   const R = buf.getChannelData(1).slice(pre + lat, pre + lat + (p1 - p0))
-  return { L, R, stats: g.stats }
+  return { L, R, stats: g.stats, exactLimiter: g.exactLimiter }
 }
 
 const sameRender = (a: OfflineRender, b: OfflineRender): boolean => {
-  if (a.L.length !== b.L.length) return false
+  if (a.L.length !== b.L.length || a.exactLimiter !== b.exactLimiter) return false
   for (let j = 0; j < a.L.length; j++) if (a.L[j] !== b.L[j] || a.R[j] !== b.R[j]) return false
   return true
 }
@@ -995,10 +1152,11 @@ const sameRender = (a: OfflineRender, b: OfflineRender): boolean => {
  *  verification render, not playback, so the second render is its whole
  *  cost. */
 export async function renderOffline(plan: AudioPlan, reader: PcmReader, p0: number, p1: number,
-                                    make: MakeOffline = (c, l, r) => new OfflineAudioContext(c, l, r)): Promise<OfflineRender> {
-  let prev = await renderOfflineOnce(plan, reader, p0, p1, make)
+                                    make: MakeOffline = (c, l, r) => new OfflineAudioContext(c, l, r),
+                                    limiter: 'auto' | 'compressor' = 'auto'): Promise<OfflineRender> {
+  let prev = await renderOfflineOnce(plan, reader, p0, p1, make, limiter)
   for (let i = 1; i < OFFLINE_RENDER_ATTEMPTS; i++) {
-    const next = await renderOfflineOnce(plan, reader, p0, p1, make)
+    const next = await renderOfflineOnce(plan, reader, p0, p1, make, limiter)
     if (sameRender(prev, next)) return next
     prev = next
   }

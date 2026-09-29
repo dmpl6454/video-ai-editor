@@ -10,14 +10,14 @@ import type { SourceInfo } from '../timeline/frameMap'
 import { audioPlacements, buildProgramMap } from '../timeline/programMap'
 import { AudioChunks } from './audioChunks'
 import { AudioEngine, REFILL_S, WINDOW_S } from './audioEngine'
-import { asCtx, FakeContext, type FakeParam } from './fakeAudio'
+import { asCtx, FakeContext, type FakeParam, FakeWorkletNode, installFakeWorklet } from './fakeAudio'
 import { RAMP_S } from './mixGraph'
 
 const SR = 48000
 const SRC: SourceInfo = { rate: { num: 30, den: 1 }, tb: { num: 1, den: 15360 }, frames: 30 * 600, startTicks: 0, w: 64, h: 36 }
 const CS = 48000
 
-function fakeChunks(peak?: number) {
+function fakeIO(peak?: number) {
   const fetch = async (url: string): Promise<Response> => {
     if (url.endsWith('index.json')) {
       return new Response(JSON.stringify({ audio: { chunk_samples: CS, samples: 60 * CS, chunks: 60,
@@ -31,7 +31,11 @@ function fakeChunks(peak?: number) {
     const L = Float32Array.from({ length: CS }, (_v, i) => (n * CS + i) / 1e7)
     return { sampleRate: SR, numberOfChannels: 2, length: CS, getChannelData: () => L } as unknown as AudioBuffer
   }
-  return new AudioChunks({ fetch, decode })
+  return { fetch, decode }
+}
+
+function fakeChunks(peak?: number) {
+  return new AudioChunks(fakeIO(peak))
 }
 
 function edl(v1: Array<Record<string, unknown>>, music: Array<Record<string, unknown>> = []): EdlLike {
@@ -293,6 +297,39 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     expect(told).toBe(1)
   })
 
+  // P2 limiter tail: the engine registers the alimiter worklet on its
+  // context; once it is, the graph's limiter moves onto it and the plans
+  // drop their ranges (the mix over the ceiling is the server's) — told.
+  it('go when the alimiter worklet lands on the context, and the graph moves onto it', async () => {
+    const { ctx, engine, prepare } = setup({ peak: 0.7 })
+    const undo = installFakeWorklet(ctx)
+    try {
+      let told = 0
+      engine.onLimitingChange = () => { told++ }
+      prepare(mixed)
+      expect(engine.exactLimiter).toBe(false)                            // the compressor until then
+      await settle()
+      expect(ctx.audioWorklet!.modules).toHaveLength(1)
+      expect(engine.exactLimiter).toBe(true)
+      expect(ctx.nodes.some((n) => n instanceof FakeWorkletNode && !n.disconnected)).toBe(true)
+      expect(engine.limitingFrames()).toEqual([])
+      expect(told).toBeGreaterThanOrEqual(1)
+      prepare(mixed)                                                     // a later program is planned for it
+      expect(engine.limitingFrames()).toEqual([])
+    } finally { undo() }
+  })
+
+  it('stay (the compressor fallback) where the worklet module is refused', async () => {
+    const { ctx, engine, prepare } = setup({ peak: 0.7 })
+    const undo = installFakeWorklet(ctx, true)
+    try {
+      prepare(mixed)
+      await settle()
+      expect(engine.exactLimiter).toBe(false)
+      expect(engine.limitingFrames()).toEqual([[59 - 3, 180 + 3 + 1]])
+    } finally { undo() }
+  })
+
   it('narrow to where the lanes overlap when the peaks say so; a later prepare needs no telling', async () => {
     const { engine, prepare } = setup({ peak: 0.7 })
     let told = 0
@@ -418,5 +455,115 @@ describe('our own suspend is never an interruption', () => {
     ctx.setState('suspended')          // the system, not us
     expect(seen).toEqual(['suspended'])
     expect(engine.isRunning).toBe(false)
+  })
+})
+
+// Final sweep 3, run 3 (round 2): play pressed while a new import's sound
+// chunks were still loading dropped the first 0.4 s (1 s with a slow server)
+// while picture and playhead ran — and the range read EXACT. The engine now
+// holds a start for the chunks under it (soundHold, ≤ 700 ms, §11.1), and
+// whatever still could not be played is reported as loading ('audio:pending').
+describe('sound whose chunks are not in memory yet', () => {
+  /** Chunks whose FLAC answers wait until `open()` (the layout does not). */
+  function gated() {
+    let open!: () => void
+    const gate = new Promise<void>((r) => { open = r })
+    const io = fakeIO()
+    const fetch = async (url: string): Promise<Response> => {
+      if (!url.endsWith('index.json')) await gate
+      return io.fetch(url)
+    }
+    return { chunks: new AudioChunks({ fetch, decode: io.decode }), open }
+  }
+  const flush = async () => { for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0)) }
+
+  function make(chunks: AudioChunks) {
+    const ctx = new FakeContext()
+    const timers: Array<{ fn: () => void; ms: number }> = []
+    const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
+    const engine = new AudioEngine({
+      chunks, createContext: () => asCtx(ctx), now: () => 1000 * ctx.currentTime,
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+      setInterval: (fn, ms) => { const h = { fn, ms, cleared: false }; intervals.push(h); return h },
+      clearInterval: (h) => { (h as { cleared: boolean }).cleared = true },
+    })
+    engine.prepare(base, audioPlacements(buildProgramMap(base, () => SRC), () => SRC), info)
+    return { ctx, engine, timers, intervals }
+  }
+
+  it('soundHold: none when the chunks are in memory; else resumes the context and waits for them', async () => {
+    const g = gated()
+    const { ctx, engine } = make(g.chunks)
+    await flush()                                       // the layout
+    const hold = engine.soundHold(2 * SR, 700)
+    expect(hold).not.toBeNull()
+    expect(ctx.resumes).toBe(1)                         // inside the user's gesture
+    let ok: boolean | null = null
+    void hold!.then((v) => { ok = v })
+    await flush()
+    expect(ok).toBeNull()
+    g.open()
+    await flush()
+    expect(ok).toBe(true)
+    // the first block and the one after its first 0.3 s are in memory now
+    expect(engine.reader.ready('/a.mp4', 2 * SR, 3 * SR)).toBe(true)
+    expect(engine.soundHold(2 * SR, 700)).toBeNull()
+  })
+
+  it('soundHold gives up after its timeout', async () => {
+    const g = gated()
+    const { engine, timers } = make(g.chunks)
+    await flush()
+    const hold = engine.soundHold(2 * SR, 700)!
+    let ok: boolean | null = null
+    void hold.then((v) => { ok = v })
+    timers.find((t) => t.ms === 700)!.fn()
+    await flush()
+    expect(ok).toBe(false)
+  })
+
+  it('a start before the chunks land: what it cannot play reads as loading, what it lost stays so, a stop clears it', async () => {
+    const g = gated()
+    const { ctx, engine, intervals } = make(g.chunks)
+    await flush()
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    ctx.currentTime = 2
+    engine.start(2.1, 2 * SR)                           // output sample 96000 heard at 2.1 s
+    expect(ctx.sources).toHaveLength(0)                 // nothing to play yet
+    const f0 = engine.soundLoadingFrames()
+    expect(told).toBe(1)
+    expect(f0.some(([a, b]) => a <= 60 && b > 60)).toBe(true)          // frame 60 = 2.0 s
+    // a refill a second later, still nothing: the second gone by is lost
+    ctx.currentTime = 3
+    intervals[0].fn()
+    const f1 = engine.soundLoadingFrames()
+    expect(f1.some(([a, b]) => a <= 60 && b > 85)).toBe(true)
+    // the chunks land at 3.4 s: scheduled from there; [2.0, ~3.3) stays loading
+    g.open()
+    ctx.currentTime = 3.4
+    await flush()
+    expect(ctx.sources.length).toBeGreaterThan(0)
+    const first = Math.min(...ctx.sources.map((s) => s.startedAt!))
+    expect(first).toBeGreaterThanOrEqual(3.4)
+    const f2 = engine.soundLoadingFrames()
+    const heardAtFirst = Math.floor((2 * SR + (first - 2.1) * SR) / SR * 30)
+    expect(f2.some(([a, b]) => a <= 60 && b >= heardAtFirst)).toBe(true)
+    expect(f2.every(([, b]) => b <= heardAtFirst + 2)).toBe(true)      // nothing past the sound
+    const toldBeforeStop = told
+    engine.stop(5)
+    expect(engine.soundLoadingFrames()).toEqual([])
+    expect(told).toBe(toldBeforeStop + 1)
+  })
+
+  it('a start with every chunk in memory reads nothing as loading', async () => {
+    const { ctx, engine } = make(fakeChunks())
+    await loaded(engine)
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    ctx.currentTime = 2
+    engine.start(2.1, 2 * SR)
+    expect(engine.soundLoadingFrames()).toEqual([])
+    expect(told).toBe(0)
   })
 })

@@ -25,7 +25,7 @@
  */
 import { clipEnd, isMediaClip, type AnyClip, type EDL } from '../types'
 import {
-  isSoundLane, layoutTime, renderSpanOf, soundPull, v1SeamsOf, v1TimeFromOutput,
+  isSoundLane, layoutTime, renderSpanOf, soundPull, v1LayoutOf, v1SeamsOf, v1TimeFromOutput,
 } from './timelineLayout'
 
 export interface SplitTarget {
@@ -47,7 +47,7 @@ export function splitTimeFor(
   const seams = v1SeamsOf(edl)
   const track = edl?.tracks.find((t) => t.id === trackId)
   if (clip && isSoundLane(trackId, track?.type)) {
-    return playhead + soundPull(seams, clip, track?.clips)
+    return playhead + soundPull(seams, clip, track?.clips, v1LayoutOf(edl).end)
   }
   return layoutTime(seams, playhead)
 }

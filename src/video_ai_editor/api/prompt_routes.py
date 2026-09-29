@@ -58,6 +58,9 @@ class PromptRequest(BaseModel):
 class AnswerRequest(BaseModel):
     token: str = Field(min_length=1, max_length=64)
     answers: dict[str, Any] = Field(default_factory=dict)
+    #: A preview card's Apply (true) / Change (false) — the same as
+    #: `answers: {"apply": "yes" | "no"}` (agent/prompt/preview.py).
+    apply: bool | None = None
 
 
 class CancelRequest(BaseModel):
@@ -106,7 +109,10 @@ async def prompt(sid: str, body: PromptRequest):
 @router.post(service.route("answer"))
 async def answer(sid: str, body: AnswerRequest):
     store = _store(sid)
-    return _sse(service.resume(store, body.token, body.answers))
+    answers = dict(body.answers)
+    if body.apply is not None:
+        answers["apply"] = "yes" if body.apply else "no"
+    return _sse(service.resume(store, body.token, answers))
 
 
 @router.get(service.route("pending"))
@@ -121,10 +127,15 @@ def pending(sid: str):
         _pending.clear_pending(store.dir)
         return {"pending": None, "dropped": why}
     plan = _pending.pending_plan(record)
-    return {"pending": {"token": record["token"], "plan_id": plan.id, "prompt": record.get("prompt"),
-                        "brain": record.get("brain"),
-                        "questions": [q.model_dump() for q in plan.blocking_questions],
-                        "expires_in_s": max(0, int(float(record["expires"]) - time.time()))}}
+    from ..agent.prompt.preview import public_view
+    body = {"token": record["token"], "plan_id": plan.id, "prompt": record.get("prompt"),
+            "brain": record.get("brain"),
+            "questions": [q.model_dump() for q in plan.blocking_questions],
+            "expires_in_s": max(0, int(float(record["expires"]) - time.time()))}
+    view = public_view(record)
+    if view is not None:
+        body["preview"] = view
+    return {"pending": body}
 
 
 @router.get(service.route("run"))
@@ -154,6 +165,51 @@ def cancel(sid: str, body: CancelRequest | None = None):
         _pending.clear_pending(store.dir)
         cancelled["pending"] = record.get("token")
     return {"cancelled": cancelled}
+
+
+# ---- "Ask before applying Prompt bar edits" (0.8.0, prompt_setting.py) ------
+
+SETTINGS_ROUTE = "/api/settings/prompt"
+_MAX_SETTING_BODY = 1024
+
+
+def _prompt_settings_body() -> dict[str, Any]:
+    from .. import prompt_setting
+    on, source = prompt_setting.confirm_before_apply()
+    return {"confirm_before_apply": on, "source": source, "default": prompt_setting.DEFAULT_CONFIRM}
+
+
+@router.get(SETTINGS_ROUTE)
+def get_prompt_settings() -> JSONResponse:
+    return JSONResponse(_prompt_settings_body(), headers={"Cache-Control": "no-store"})
+
+
+@router.put(SETTINGS_ROUTE)
+async def put_prompt_settings(request: Request) -> JSONResponse:
+    """Write the setting. A state change, so the same posture as every other
+    app-settings write (api/preview_routes PUT /api/settings/preview):
+    loopback only, the app's own origin only, `application/json` only."""
+    from .. import prompt_setting
+    from .settings_routes import _same_origin
+    if not _is_loopback(request):
+        raise HTTPException(403, "desktop_only: this setting is changed on the Mac itself.")
+    if not _same_origin(request):
+        raise HTTPException(403, "desktop_only: this setting is changed from the app's own window.")
+    ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(415, "Send the setting as application/json.")
+    raw = await request.body()
+    if len(raw) > _MAX_SETTING_BODY:
+        raise HTTPException(413, "That request is far too large for one setting.")
+    try:
+        data = json.loads(raw.decode("utf-8") or "null")
+    except (UnicodeDecodeError, ValueError):
+        raise HTTPException(400, 'Send the setting as JSON: {"confirm_before_apply": true}.') from None
+    if not isinstance(data, dict) or set(data) != {"confirm_before_apply"} \
+            or not isinstance(data["confirm_before_apply"], bool):
+        raise HTTPException(400, 'Send exactly one field: {"confirm_before_apply": true | false}.')
+    prompt_setting.set_confirm_before_apply(data["confirm_before_apply"])
+    return JSONResponse(_prompt_settings_body(), headers={"Cache-Control": "no-store"})
 
 
 def _brains_report(refresh: bool) -> dict[str, Any]:

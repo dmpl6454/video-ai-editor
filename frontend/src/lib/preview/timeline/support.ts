@@ -285,6 +285,10 @@ export interface SupportOptions {
   /** Output frame ranges where the master limiter may work: the browser's
    *  limiter is not the export's alimiter there (gate RX; audio/limiting.ts). */
   limiting?: ReadonlyArray<readonly [number, number]>
+  /** Output frame ranges the live sound could not play (or cannot yet)
+   *  because its chunks were not in memory (AudioSink.soundLoadingFrames,
+   *  final sweep 3 run 3): silence the export does not have. */
+  soundLoading?: ReadonlyArray<readonly [number, number]>
   /** Transition type → mechanism (the catalog's `kind`); default: the lists above. */
   transitionKind?: (type: string) => 'native' | 'custom' | 'post'
   /** An IMAGE canvas background's picture: not yet decoded / failed (review
@@ -452,6 +456,9 @@ export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Su
       const b = frameOf(renderTime((c.start ?? 0) + eff), fps)
       if (ducked) bump(a, b, MODE_APPROX, 'audio:duck')
       if (freezeOf(c) !== null) continue
+      // Final sweep 3: a source with no proxy yet (still probing, or given
+      // up) plays as silence — say so rather than call the range EXACT
+      if (!t.muted && c.audio?.mute !== true && proxy(c.src) === 'pending') bump(a, b, MODE_APPROX, 'audio:pending')
       const voice = voiceFxReason(c)
       if (voice) bump(a, b, MODE_APPROX, voice)
       const retimed = typeof c.speed === 'number' && c.speed > 0 && c.speed !== 1
@@ -470,6 +477,7 @@ export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Su
   }
   if ((opts.loudnessOffDb ?? 0) > LOUDNESS_AUDIBLE_DB) bump(0, n, MODE_APPROX, 'audio:loudness')
   for (const [a, b] of opts.limiting ?? []) bump(Math.max(0, a), Math.min(n, b), MODE_APPROX, 'audio:limiting')
+  for (const [a, b] of opts.soundLoading ?? []) bump(Math.max(0, a), Math.min(n, b), MODE_APPROX, 'audio:pending')
   for (const [a, b] of opts.demote ?? []) bump(a, b, MODE_BAKED, 'structure:mismatch')
 
   // Merge into ranges with identical mode and reasons.

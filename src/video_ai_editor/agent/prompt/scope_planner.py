@@ -54,7 +54,9 @@ def _targets(scope: M.Scope, facts: TimelineFacts) -> list[str] | None:
         if any(g is None for g in got):
             return None
         return list(dict.fromkeys(g for g in got if g))
-    if scope.all and scope.except_refs:
+    if scope.except_refs and (scope.all or not scope.refs):
+        # final sweep 3 r2: "make it grayscale except clip 2" with clip 2
+        # selected turned clip 2 grey — "it … except" is everything else
         ex = {_resolve(r, facts) for r in scope.except_refs}
         if None in ex:
             return None

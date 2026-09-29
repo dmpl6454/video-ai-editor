@@ -9,9 +9,15 @@
 //   Enter        run     ·  Shift+Enter  newline
 //   ↑ / ↓        recall the last 20 prompts when the caret is at the start / end
 //   Esc          idle → clear the field · running → ASK before cancelling
+//                · a preview card is open → Change (drop it, keep the sentence)
 //                (a run is a one-op edit that finishes on the Mac whether or not
 //                this tab is watching; aborting it silently would be a lie about
 //                what the timeline is doing — spec §5.2, §4.2)
+//
+// 0.8.0 "Preview, then apply": with no Anthropic key the plan is dry-run and
+// shown as a PromptPreviewCard (what would change, "Nothing has changed yet",
+// Apply ↵ / Change Esc). Only Apply edits the timeline; typing a different
+// sentence and pressing Enter drops the card and plans the new one.
 //
 // The bar is also the reconnect point: on mount and when a `prompt` op lands
 // from elsewhere (the phone, another tab) it reads `GET …/prompt/run` and
@@ -26,6 +32,9 @@ import { focusTimeline } from '../keymap/regions'
 import { promptLengthNote } from '../lib/promptLimit'
 import { BrainBadge } from './BrainBadge'
 import { ClarifyCard } from './ClarifyCard'
+import { PromptPreviewCard } from './PromptPreviewCard'
+import { PREVIEW_CARD_CLASS, previewReplyOf, typedOverCard } from '../lib/previewCard'
+import { cardMayTakeFocusNow } from '../lib/cardFocus'
 import { PromptRunLog } from './PromptRunLog'
 import './promptBar.css'
 import { Icon } from './Icon'
@@ -57,8 +66,11 @@ export function PromptBar() {
   const reply = usePromptStore((s) => s.reply)
   const lastError = usePromptStore((s) => s.lastError)
   const cancelling = usePromptStore((s) => s.cancelling)
+  const lastPrompt = usePromptStore((s) => s.prompt)
+  const nothingToApply = usePromptStore((s) => !!s.nothingToApply)
   const run = usePromptStore((s) => s.run)
   const answer = usePromptStore((s) => s.answer)
+  const applyPreview = usePromptStore((s) => s.applyPreview)
   const cancel = usePromptStore((s) => s.cancel)
   const dropClarify = usePromptStore((s) => s.dropClarify)
   const reconnect = usePromptStore((s) => s.reconnect)
@@ -108,9 +120,13 @@ export function PromptBar() {
     // Only a FINISHED run empties the field; a failed or cancelled one keeps
     // the sentence so it can be fixed and run again (QA-124).
     if (shouldClearPromptText(was, status)) setText('')
-    const line = terminalAnnouncement(usePromptStore.getState())
-    if (line && !isBusy(status) && was !== status) setAnnounce(line)
+    const st = usePromptStore.getState()
+    const line = terminalAnnouncement(st)
+    // The result of pressing Apply is announced as that: "Applied — …".
+    const said = line && st.appliedFromPreview && status === 'done' ? line.replace(/^Done\b/, 'Applied') : line
+    if (said && !isBusy(status) && was !== status) setAnnounce(said)
   }, [status])
+
 
   // Rotating placeholder while idle and empty; a still string otherwise.
   useEffect(() => {
@@ -162,7 +178,8 @@ export function PromptBar() {
   const focusCard = () => {
     requestAnimationFrame(() => {
       const f = formRef.current
-      const el = f?.querySelector<HTMLElement>('.clarify input, .clarify textarea')
+      const el = f?.querySelector<HTMLElement>(`.${PREVIEW_CARD_CLASS} button.primary`)
+        ?? f?.querySelector<HTMLElement>('.clarify input, .clarify textarea')
         ?? f?.querySelector<HTMLElement>('.clarify [role="radio"][tabindex="0"]')
         ?? f?.querySelector<HTMLElement>('.clarify [role="radio"]')
         ?? f?.querySelector<HTMLElement>('.clarify .clarify-actions button')
@@ -172,14 +189,26 @@ export function PromptBar() {
   // The card takes focus when it APPEARS (wave-B review: 3 of 4 trials left
   // focus in the textarea — the card's own mount-time focus lost the race
   // with the run's re-render). Only when focus is not already inside it.
+  // Never from a field the person is typing in outside the bar (the Playhead
+  // timecode, the Chat box): the Enter meant for it pressed Apply (final
+  // sweep 3 r2, CRITICAL). The live region says the card is ready instead.
   useEffect(() => {
     if (status !== 'clarify' || !clarify) return
-    const inCard = () => !!document.activeElement?.closest?.('.clarify')
-    if (!inCard()) focusCard()
+    const inCard = () => !!document.activeElement?.closest?.(`.clarify, .${PREVIEW_CARD_CLASS}`)
+    if (!inCard() && cardMayTakeFocusNow(formRef.current)) focusCard()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, clarify?.token])
 
   const submit = () => {
+    const open = usePromptStore.getState().clarify
+    if (!disabled && status === 'clarify' && open?.preview) {
+      // "yes" / "no" typed over the card answers it — the card's own text says
+      // "Reply yes to apply or no to change it"; it used to drop the card and
+      // plan "yes" as a new request (final sweep 3 r2).
+      const reply = previewReplyOf(text)
+      if (reply === 'apply') { setText(''); void applyPreview(); return }
+      if (reply === 'change') { changePreview(true); return }
+    }
     if (!disabled && supersedesClarify(status, text, usePromptStore.getState().prompt)) {
       const t = text.trim()
       setHistIdx(-1)
@@ -187,7 +216,7 @@ export function PromptBar() {
       void dropClarify().then(() => run(t))
       return
     }
-    if (!canSubmitPrompt(status, { disabled, text })) {
+    if (!canSubmitPrompt(status, { disabled, text, cardOpen: !!open })) {
       // A card is waiting: Enter here means "answer it", so send the user there
       // instead of re-planning the sentence over the open question.
       if (status === 'clarify') focusCard()
@@ -205,6 +234,7 @@ export function PromptBar() {
     if (e.key === 'Escape') {
       e.preventDefault()
       if (busy) { setAskCancel(true); return }
+      if (status === 'clarify' && usePromptStore.getState().clarify?.preview) { changePreview(); return }
       if (status === 'clarify') { void dropClarify(); return }
       if (text) { setText(''); setHistIdx(-1); return }
       if (logOpen) { usePromptStore.getState().setLogOpen(false); return }
@@ -232,6 +262,35 @@ export function PromptBar() {
     }
   }
 
+  // Change: drop the card (nothing was committed) and hand the sentence back
+  // for editing — restored from the run when the field is empty (a card that
+  // came back after a reload).
+  const changePreview = (restoreSentence = false) => {
+    void dropClarify()
+    if ((restoreSentence || !text.trim()) && lastPrompt) setText(lastPrompt)
+    setAnnounce('Preview dropped — nothing was changed. Edit the prompt and press Enter.')
+    requestAnimationFrame(() => {
+      const el = taRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(el.value.length, el.value.length)
+    })
+  }
+
+  // A key typed over the preview card goes to the prompt, never to the card's
+  // focused Apply (final sweep 3: "no wait" applied the card at its first
+  // space). Focus moves NOW, in the keydown, so the next keys land in the
+  // prompt; `/` selects the sentence, any other character starts a new one.
+  // The card stays open until Enter plans the new sentence (or Esc).
+  const typeOverCard = (key: string) => {
+    const el = taRef.current
+    if (!el) return
+    el.focus()
+    if (key === '/') { el.select(); return }
+    setText(typedOverCard(key, text))
+    setHistIdx(-1)
+  }
+
   const progress = busy ? runProgress(steps) : null
   // The counter near the server's 4000-character limit, and the refusal past it (QA-124).
   const lengthNote = promptLengthNote(text)
@@ -239,7 +298,8 @@ export function PromptBar() {
     'prompt-bar',
     busy ? 'is-busy' : '',
     status === 'planning' ? 'is-planning' : '',
-    status === 'done' ? 'is-done' : '',
+    // a preview that would change nothing is not a green "done" (final sweep 3 r2)
+    status === 'done' && !nothingToApply ? 'is-done' : '',
     status === 'error' ? 'is-error' : '',
     status === 'cancelled' ? 'is-cancelled' : '',
     cancelling ? 'is-cancelling' : '',
@@ -310,7 +370,17 @@ export function PromptBar() {
         </div>
       )}
 
-      {status === 'clarify' && clarify && (
+      {status === 'clarify' && clarify?.preview && (
+        <PromptPreviewCard
+          key={clarify.token}
+          preview={clarify.preview}
+          onApply={() => void applyPreview()}
+          onChange={() => changePreview()}
+          onTypeAhead={typeOverCard}
+        />
+      )}
+
+      {status === 'clarify' && clarify && !clarify.preview && (
         <ClarifyCard
           key={clarify.token}
           questions={clarify.questions}

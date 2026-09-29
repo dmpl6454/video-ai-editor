@@ -29,6 +29,16 @@ layout time the ruler draws at ``R`` (`layout_time`, the Python twin of
 `timelineLayout.layoutTime`) — behind a 0.5 s dissolve a voiceover imported
 at the ruler's 06:00 is captioned at 06:00, not half a second late.
 
+Final sweep 3 r2: a SOUND-lane or PIP cue is stored on its clip's own clock
+instead (``clip.start + (R − rs)``) and linked to the clip
+(`TextClip.linked_to`); it plays in the clip's render window
+(`render/clock.linked_text_windows`) and moves only with the clip
+(`dispatch._follow_sounds`). Stored in layout time and placed through
+`render_time`, a voiceover's captions drifted a word early after a later
+transition and 2 s early after a trim before it — the voiceover is one
+sound run, the cues were not. `layout_time` is still what `merge_tiers`
+compares against the main track's cues (`sound_clock`).
+
 Where two sources speak at once, the voiceover wins: a narrated vlog's own
 ambient footage speech under the narration is not stacked on top of it
 (`merge_tiers`).
@@ -131,31 +141,40 @@ def layout_time(seams: list[tuple[float, float]], r: float) -> float:
     return r + consumed
 
 
-def sound_segments(edl: EDL, source: SpeechSource,
-                   segments: list[dict]) -> tuple[list[dict], float]:
-    """`segments` (source-timed) as the caption lane must store them for a
-    SOUND-lane or PIP-lane source, and the layout time its cues may not run
-    past."""
+def _source_windows(edl: EDL, source: SpeechSource) -> list[tuple[Clip, float, float]]:
+    """`(clip, render start, render end)` of each clip of a SOUND-lane or
+    PIP-lane source that is heard, in timeline order."""
     track = edl.get_track(source.track_id)
     if track is None:
-        return [], 0.0
+        return []
     seams = list(edl.v1_seam_table())
     if sound_lane(track):
         windows = sound_render_windows(list(track.clips), seams, edl.video_extent())
     elif track.type == "video" and track.id != "v1":
         windows = _pip_render_windows(source.clips, seams)
     else:
-        return [], 0.0
+        return []
+    return [(c, *windows[c.id]) for c in sorted(source.clips, key=lambda c: c.start)
+            if c.id in windows]
+
+
+def sound_segments(edl: EDL, source: SpeechSource,
+                   segments: list[dict]) -> tuple[list[dict], float]:
+    """`segments` (source-timed) as the caption lane must store them for a
+    SOUND-lane or PIP-lane source, and the time its cues may not run past.
+
+    Final sweep 3 r2: on the CLIP'S OWN clock — `clip.start` plus how far
+    into the clip the word is heard — not the layout clock. The cue is
+    linked to that clip (`TextClip.linked_to`, `sound_clock`) and plays in its
+    render window (`render/clock.linked_text_windows`), so a later
+    transition or main-track trim, which moves the pictures and not the
+    voiceover, no longer moves its captions off its words."""
     out: list[dict] = []
     extent = 0.0
-    for c in source.clips:
-        win = windows.get(c.id)
-        if win is None:
-            continue
-        rs, re = win
+    for c, rs, re in _source_windows(edl, source):
 
         def conv(t: float, c=c, rs=rs, re=re) -> float:
-            return layout_time(seams, min(rs + (t - c.start), re))
+            return min(t, float(c.start) + (re - rs))
 
         extent = max(extent, conv(c.start + c.effective_duration))
         for seg in segments:
@@ -171,6 +190,27 @@ def sound_segments(edl: EDL, source: SpeechSource,
                         **({"words": words} if piece.get("words") else {})})
     out.sort(key=lambda s: s["start"])
     return out, extent
+
+
+def sound_clock(edl: EDL, source: SpeechSource):
+    """For a SOUND-lane or PIP-lane source: `f(t) -> (clip id, layout t)` —
+    the clip a cue stored at `t` on `sound_segments`' clock belongs to (the
+    last one starting at or before it) and the layout time the ruler draws
+    it at (`layout_time` of where it is heard). The layout time is what
+    `merge_tiers` compares against the main track's cues; the clip id is
+    what the cue is linked to."""
+    wins = _source_windows(edl, source)
+    seams = list(edl.v1_seam_table())
+
+    def at(t: float) -> tuple[str | None, float]:
+        if not wins:
+            return None, t
+        c, rs, _re = wins[0]
+        for w in wins:
+            if float(w[0].start) <= t + _EPS:
+                c, rs, _re = w
+        return c.id, layout_time(seams, rs + (t - float(c.start)))
+    return at
 
 
 T = TypeVar("T")
@@ -199,4 +239,4 @@ def merge_tiers(tiers: Iterable[list[tuple[float, float, T]]]) -> list[tuple[flo
 
 
 __all__ = ["SpeechSource", "TIER", "speech_sources", "layout_time", "sound_segments",
-           "merge_tiers"]
+           "sound_clock", "merge_tiers"]

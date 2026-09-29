@@ -29,7 +29,8 @@ import { toast } from '../toast'
 import { answersPayload, type Answers } from './clarifyDefaults'
 import { promptTooLongError } from './promptLimit'
 import {
-  EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, onPromptRunning, onSessionSwitch, promptRunningFromError,
+  EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, normalizePreview, onPromptRunning, onSessionSwitch,
+  promptRunningFromError,
   readSseStream, reduce, startRun, type BrainsReport, type PromptEvent, type PromptRunState,
   type ClarifyState, type PromptStatus, type StepRow, type VerifyEvent,
 } from './promptEvents'
@@ -97,9 +98,14 @@ interface PromptStoreState extends PromptRunState {
   // QA-064: Cancel was asked for and the run is finishing its current step
   // (a step is not interruptible); the bar says "Stopping…" meanwhile.
   cancelling: boolean
+  // 0.8.0: the run on screen is the Apply of a preview card — the result is
+  // announced as "Applied", and a fresh card (the timeline moved) replaces it.
+  appliedFromPreview: boolean
 
   run(prompt: string): Promise<void>
   answer(answers: Answers): Promise<void>
+  /** Apply the open preview card: re-runs the previewed plan on the timeline. */
+  applyPreview(): Promise<void>
   cancel(): Promise<void>
   dropClarify(): Promise<void>
   reconnect(sid: string): Promise<void>
@@ -161,7 +167,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
   async function startTurn(sid: string, prompt: string, open: () => Promise<Response>): Promise<void> {
     const signal = freshSignal()
     set({ ...startRun(), sid, runId: null, prompt, logOpen: true, connectionDropped: false, reconnecting: false,
-          cancelling: false })
+          cancelling: false, appliedFromPreview: false })
     let res: Response
     try {
       res = await open()
@@ -206,6 +212,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
     connectionDropped: false,
     reconnecting: false,
     cancelling: false,
+    appliedFromPreview: false,
 
     applyEvent: (evt) => {
       const before = get()
@@ -261,6 +268,32 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       let res: Response
       try {
         res = await api.promptAnswer(sid, token, payload)
+      } catch (e) {
+        if (signal.aborted) return
+        set({ status: 'error', lastError: errorMessage(e) })
+        return
+      }
+      try {
+        await consume(res, signal)
+      } catch (e) {
+        if (!signal.aborted) console.warn('[prompt] stream dropped:', errorMessage(e))
+      }
+      await settle(sid, signal)
+    },
+
+    applyPreview: async () => {
+      const s = get()
+      if (!s.clarify?.preview || !s.sid) return
+      const { token } = s.clarify
+      const sid = s.sid
+      // Same turn, answered: keep the prompt and the brain; the plan event
+      // that follows replaces the card with the running steps.
+      const signal = freshSignal()
+      set({ status: 'planning', clarify: null, reply: '', steps: [], verify: null, lastError: null,
+            opSeen: false, opRef: null, connectionDropped: false, logOpen: true, appliedFromPreview: true })
+      let res: Response
+      try {
+        res = await api.promptApply(sid, token, true)
       } catch (e) {
         if (signal.aborted) return
         set({ status: 'error', lastError: errorMessage(e) })
@@ -383,6 +416,15 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
     },
 
     restorePending: async (sid) => {
+      // Final sweep 3 r2: a run record hydrated as `clarify` whose card is
+      // gone (expired, answered in the Chat pane, dropped in another window)
+      // left the bar in `clarify` with NO card — Enter and Run did nothing.
+      const releaseStaleClarify = (at: string, why: string | null) => {
+        const now = get()
+        if (now.sid !== at || now.status !== 'clarify' || now.clarify) return
+        set({ status: 'cancelled', clarify: null,
+              lastError: `The earlier preview is gone${why ? ` (${why})` : ''} — nothing was changed.` })
+      }
       // A clarification outlives the page (pending.py keeps it 10 minutes):
       // after a reload the card comes back from `GET …/prompt/pending`. Never
       // over a run that is busy here, and never for another session.
@@ -393,14 +435,21 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
       // A record hydrated as `clarify` has no questions yet — fetch them.
       if (s.status === 'clarify' && s.clarify) return true
       let pending: PromptPending | null
+      let dropped: string | null = null
       try {
         const res = await api.promptPending(sid)
         pending = res && typeof res === 'object' && res.pending && typeof res.pending === 'object' ? res.pending : null
+        const why = res && typeof res === 'object' ? (res as { dropped?: unknown }).dropped : null
+        dropped = typeof why === 'string' && why.trim() ? why.trim() : null
       } catch (e) {
         if (!/^404 /.test(errorMessage(e))) console.warn('[prompt] pending lookup failed:', errorMessage(e))
+        releaseStaleClarify(sid, null)
         return false
       }
-      if (!pending || typeof pending.token !== 'string' || !Array.isArray(pending.questions) || !pending.questions.length) return false
+      if (!pending || typeof pending.token !== 'string' || !Array.isArray(pending.questions) || !pending.questions.length) {
+        releaseStaleClarify(sid, dropped)
+        return false
+      }
       const brainId = typeof pending.brain === 'string' ? pending.brain : null
       set({
         ...EMPTY_RUN,
@@ -414,6 +463,7 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
           planId: typeof pending.plan_id === 'string' ? pending.plan_id : '',
           questions: pending.questions as ClarifyState['questions'],
           expiresInS: typeof pending.expires_in_s === 'number' ? pending.expires_in_s : 0,
+          preview: normalizePreview(pending.preview),
         },
         logOpen: true,
       })

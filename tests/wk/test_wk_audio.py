@@ -142,6 +142,7 @@ def cases(audio_root) -> dict:
     add("mix_hot", *fx.hot_edl(S["counter30"], S["counter2997"]))
     e, fps = fx.hot_loud_edl(S["sine440"], S["sine330"])
     add("mix_hot_loud", e, fps, loud=-12.0)
+    add("mix_hot_release", *fx.hot_release_edl(S["sine440"], S["hot"]))
     return out
 
 
@@ -365,11 +366,6 @@ def _block_db(x: np.ndarray) -> np.ndarray:
     return 20 * np.log10(np.maximum(rms, 1e-12))
 
 
-#: Server output this close to full scale is where its limiter may be at work
-#: (alimiter auto-levels its 0.97 ceiling to 1.0).
-NEAR_CEILING = 0.9
-
-
 def _limiting_samples(plan: dict, n: int) -> np.ndarray:
     m = np.zeros(n, dtype=bool)
     for a, b in plan.get("limiting", []):
@@ -377,19 +373,20 @@ def _limiting_samples(plan: dict, n: int) -> np.ndarray:
     return m
 
 
-def _approx_blocks(plan: dict, n_blocks: int, server: np.ndarray | None = None) -> np.ndarray:
+def _approx_blocks(plan: dict, n_blocks: int) -> np.ndarray:
     """Blocks touched by an APPROX feature (a resampled clip ± its block; the
     whole programme for a master-level approximation; the bed under a duck;
-    gate RX: a block of a `limiting` range where the server's sound is near
-    full scale — elsewhere in a range the plan flags (its peak bound is
-    conservative) both limiters are transparent and the block stays EXACT)."""
+    every block a `limiting` range of the plan touches). The PLAN's
+    classification only: the test once added its own "server near full
+    scale" rule, which called the limiter's release after a loud stretch
+    EXACT while the plan (rightly) did not — the fallback compressor lets go
+    on its own curve for ~90 ms (P2 limiter tail: mix_hot 3.20 s, 0.76 dB)."""
     mask = np.zeros(n_blocks, dtype=bool)
     if "loudness" in plan["approx"]:
         mask[:] = True
-    if server is not None and plan.get("limiting"):
-        near = (np.abs(server).max(axis=1) > NEAR_CEILING) & _limiting_samples(plan, len(server))
-        hot = np.nonzero(near)[0] // BLOCK
-        mask[np.clip(hot, 0, n_blocks - 1)] = True
+    for a, b in plan.get("limiting", []):
+        if b > a:
+            mask[max(0, a // BLOCK):min(n_blocks, (b - 1) // BLOCK + 1)] = True
     for c in plan["clips"]:
         if not c["exact"] or ("duck" in plan["approx"] and c["bus"] == "music"):
             a = max(0, c["out0"] // BLOCK - 1)
@@ -410,15 +407,25 @@ def _lag(client: np.ndarray, server: np.ndarray, max_lag: int = 64) -> int:
     return arg
 
 
-@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed", "mix_hot",
-                                  "mix_hot_loud"])
+#: Loud mixes: the master limiter works on them.
+HOT = ("mix_hot", "mix_hot_loud", "mix_hot_release")
+
+
+@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed", *HOT,
+                                  *(f"{h}@compressor" for h in HOT)])
 def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
+    """`name@compressor`: through the DynamicsCompressorNode fallback, which
+    the plan calls APPROX over the ceiling and for its release after it."""
+    name, _, limiter = name.partition("@")
     edl, fps, server, aac = cases[name]
-    r = browser.run("render", case=name, timeout=120)
+    r = browser.run("render", case=name, timeout=120, **({"limiter": limiter} if limiter else {}))
     client = _pcm(r)
     assert client.shape == server.shape, (client.shape, server.shape)
+    # The app's limiter is the alimiter worklet in every engine (the fallback
+    # only where AudioWorklet is missing).
+    assert r["exactLimiter"] is (limiter != "compressor"), (r["limiter"], r["workletLoaded"], r["exactLimiter"])
     cdb, sdb = _block_db(client), _block_db(server)
-    approx = _approx_blocks(r["plan"], len(cdb), server)
+    approx = _approx_blocks(r["plan"], len(cdb))
     loud = (cdb > QUIET_DB) | (sdb > QUIET_DB)
     diff = np.abs(cdb - sdb)
     tol = np.where(approx, APPROX_DB, EXACT_DB)[:, None]
@@ -429,6 +436,8 @@ def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
         "max_approx_db": float(diff[approx][loud[approx]].max(initial=0)),
         "lag": _lag(client, server),
         "limiting": r["plan"].get("limiting"), "server_peak": float(np.abs(server).max()),
+        "exact_limiter": r["exactLimiter"],
+        "max_abs": float(np.abs(client.astype(np.float64) - server).max()),
     }
     if aac is not None:
         report["vs_aac_render"] = _vs_aac_render(client, aac, server)
@@ -438,22 +447,98 @@ def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
     assert abs(report["lag"]) <= 1, report
 
 
-def test_p1_a2_the_limiter_is_approx_exactly_where_it_works(browser, cases):
-    """Gate RX finding 3: over the ceiling the browser's limiter departs from
-    alimiter (|Δ| up to 0.25), so every sample where client and server part
-    lies inside a `limiting` range of the plan (which named no such range
-    before: approx was empty). Outside those ranges they agree within 1e-4
-    (the gate's own threshold; the compressor below its threshold is not
-    bit-transparent — up to 2.8e-5 on a 0.5 sample, −0.0005 dB, in its first
-    10 ms)."""
-    edl, fps, server, _aac = cases["mix_hot"]
-    r = browser.run("render", case="mix_hot", timeout=120)
+@pytest.mark.parametrize("name", HOT)
+def test_p1_a2_the_limiter_is_approx_exactly_where_it_works(browser, cases, name):
+    """Gate RX finding 3, for the DynamicsCompressorNode FALLBACK: over the
+    ceiling it departs from alimiter (|Δ| up to 0.25), so every sample where
+    client and server part lies inside a `limiting` range of the plan —
+    its release included (P2 limiter tail: `mix_hot_release` drops from ~8 dB
+    over the ceiling to under it; the ranges run LIMITING_SPREAD past the
+    stretch). Outside those ranges they agree within 1e-4 (the gate's own
+    threshold; the compressor below its threshold is not bit-transparent —
+    up to 2.8e-5 on a 0.5 sample, −0.0005 dB, in its first 10 ms)."""
+    edl, fps, server, _aac = cases[name]
+    r = browser.run("render", case=name, limiter="compressor", timeout=120)
     client = _pcm(r)
+    assert r["exactLimiter"] is False
     assert "limiting" in r["plan"]["approx"] and r["plan"]["limiting"], r["plan"]["approx"]
     inside = _limiting_samples(r["plan"], len(server))
     d = np.abs(client.astype(np.float64) - server).max(axis=1)
     assert d[inside].max() > 1e-3, "the case no longer drives the limiter"
+    # How long after its last sample over 1e-4 each range still runs (the
+    # release margin left), and the ranges themselves, for the record.
+    bad = np.nonzero(d > 1e-4)[0]
+    margins = [round((b - int(bad[(bad >= a) & (bad < b)].max(initial=a))) / SR * 1000, 1)
+               for a, b in r["plan"]["limiting"]]
+    print(name, browser.engine, json.dumps({"limiting": r["plan"]["limiting"], "release_margin_ms": margins}))
     assert d[~inside].max(initial=0) <= 1e-4, (int(np.argmax(np.where(inside, 0, d))), float(d[~inside].max()))
+
+
+#: The alimiter worklet against the server's alimiter, per sample: the mix
+#: into it differs by float rounding (the browser sums lanes in float32 and
+#: applies the 1/0.97 auto-level before the limiter; ffmpeg after it, in
+#: double) and the proxy's 24-bit FLAC — far below one EXACT block's 0.25 dB.
+WORKLET_ABS = 2e-6
+#: ...except where a release ENDS: the gain rises by (1 − limit/peak)/(50 ms)
+#: per sample and is clamped to 1 on the sample after it crosses 1, so a
+#: last-bit difference in that step can move the crossing by one sample —
+#: that one sample is at most one step (≤ 1/2400 of full scale, 0.0036 dB)
+#: off (measured: mix_hot_release 2.047 s, 2.0e-4).
+RELEASE_STEP = 1 / (0.050 * SR)
+#: Each case's output ceiling: the mix limiter's 0 dBFS (after its
+#: auto-level), times the loudness gain of mix_hot_loud (−12 dB).
+HOT_CEILING = {"mix_hot": 1.0, "mix_hot_release": 1.0, "mix_hot_loud": 10 ** (-12 / 20)}
+
+
+@pytest.mark.parametrize("name", HOT)
+def test_p1_a2_the_worklet_limiter_is_the_servers_limiter(browser, cases, name):
+    """P2 limiter tail: the app's limiter is a port of alimiter run in an
+    AudioWorklet (audio/alimiter.ts), so over the ceiling and through its
+    release the preview is the server's render sample for sample: the plan
+    names no `limiting` range (no "Limiter on loud sound" chip) and every
+    sample agrees within WORKLET_ABS. Was: DynamicsCompressorNode, 0.75 dB
+    off per 50 ms block at mix_hot 3.20 s."""
+    edl, fps, server, _aac = cases[name]
+    r = browser.run("render", case=name, timeout=120)
+    client = _pcm(r)
+    assert r["exactLimiter"] is True, (r["workletLoaded"], r["exactLimiter"])
+    assert r["plan"]["limiting"] == [] and "limiting" not in r["plan"]["approx"], r["plan"]["approx"]
+    assert client.shape == server.shape
+    d = np.abs(client.astype(np.float64) - server).max(axis=1)
+    over = float(np.abs(server).max())
+    print(name, browser.engine, json.dumps({"max_abs": float(d.max()), "at": int(np.argmax(d)), "server_peak": over}))
+    assert over > 0.999 * HOT_CEILING[name], "the case no longer drives the limiter"
+    off = np.nonzero(d > WORKLET_ABS)[0]
+    assert d.max() <= RELEASE_STEP, (int(np.argmax(d)), float(d.max()))
+    # only lone samples (a release's last step), never a stretch
+    assert not np.any(np.diff(off) == 1), off[:10]
+    assert len(off) <= 8, off[:10]
+
+
+@pytest.mark.parametrize("name", ["mix_hot_release", "mix_hot"])
+def test_live_sink_plays_the_servers_limiter(browser, cases, name):
+    """P2 limiter tail, LIVE: the AudioEngine on a real AudioContext registers
+    the alimiter worklet, moves its master onto it (the plan's `limiting`
+    ranges go: no chip) and, played from sample 0, its output — tapped on
+    the context's own frame clock — is the server's render within the
+    worklet's bounds (WORKLET_ABS; RELEASE_STEP at a release's last sample)."""
+    edl, fps, server, _aac = cases[name]
+    r = browser.run("live_limiter", case=name, timeout=60)
+    L = np.frombuffer(base64.b64decode(r["L"]), dtype="<f4")
+    print(name, browser.engine, json.dumps({k: r[k] for k in ("exactAtPrepare", "exactLimiter", "framesAtPrepare",
+                                                               "framesAfter", "limitingChanges", "stats")}))
+    assert r["sampleRate"] == SR
+    assert r["exactLimiter"] is True and r["framesAfter"] == [], (r["exactLimiter"], r["framesAfter"])
+    if r["framesAtPrepare"]:
+        assert r["limitingChanges"] >= 1          # the engine was told the chip went
+    b0 = round(r["at"] * SR) - r["firstFrame"]
+    n = min(int((r["seconds"] - 0.1) * SR), len(L) - b0)
+    assert b0 >= 0 and n > 2 * SR, (b0, n, len(L))
+    d = np.abs(L[b0:b0 + n].astype(np.float64) - server[:n, 0])
+    off = np.nonzero(d > WORKLET_ABS)[0]
+    print(name, browser.engine, json.dumps({"max_abs": float(d.max()), "at": int(np.argmax(d)), "over": off[:8].tolist()}))
+    assert d.max() <= RELEASE_STEP, (int(np.argmax(d)), float(d.max()))
+    assert not np.any(np.diff(off) == 1) and len(off) <= 8, off[:10]
 
 
 def _vs_aac_render(client: np.ndarray, aac: np.ndarray, twin: np.ndarray) -> dict:

@@ -131,7 +131,13 @@ EDL_VERSION = 3
 # 30: (final QA run 2, round 2) a sound-lane run ending INSIDE v1's layout plays whole
 #     (`schema.sound_render_windows`), even past the picture's render end: the K1 cut applied to every
 #     run and dropped the last 1.0 s of a voiceover laid at 2.0 over three 0.5 s fades, ending before v1.
-RENDER_BEHAVIOR_VERSION = 30
+# 31: (final sweep 3, round 2) an UNLINKED sound-lane run starts no earlier than the previous unlinked
+#     run on its lane ends (`schema.sound_render_windows`): two voiceover lines 0.2 s apart after a 0.5 s
+#     fade played over each other for 0.3 s (the first plays whole, the second was pulled by the whole
+#     overlap). A laid gap now shrinks at most to zero; a detached sound keeps its J/L overlap. Same bump:
+#     with Loudness Off a PIP's sound folded into v1 counts as a mix and gets the true-peak limiter
+#     (`audio_mix.build_audio_mix(main_is_mix=)`): a WAV of v1 + a loud PIP hard-clipped.
+RENDER_BEHAVIOR_VERSION = 31
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -823,6 +829,17 @@ class TextClip(_EDLModel):
     anim_dur: float | None = None
     role: Literal["super", "hook", "lower_third", "caption", "label", "watermark"] | None = None
     speaker: str | None = None  # for lower-thirds attached to a speaker
+    # Final sweep 3 r2: a caption made from a SOUND-lane or PIP clip's words
+    # (auto_caption) names that clip. Its start/end are then on that clip's
+    # own clock — the clip's `start` plus how far into it the words are
+    # heard — and it plays in the clip's render window
+    # (`render/clock.linked_text_windows`, `timelineLayout.linkedTextSpan`),
+    # moving only with that clip (`dispatch._follow_sounds`). A voiceover's
+    # captions used to go through `render_time(start)` and follow the main
+    # track while the voiceover did not: a word early after a transition,
+    # 2 s early after a trim before it. A link to a clip that no longer
+    # exists is the layout clock again.
+    linked_to: str | None = Field(None, exclude_if=lambda v: v is None)
 
     @field_validator("anim_dur")
     @classmethod
@@ -991,7 +1008,44 @@ def sound_runs(clips: list) -> list[list]:
     return runs
 
 
-def sound_pulls(clips: list, seams: list[tuple[float, float]]) -> dict[str, float]:
+def _sound_run_plan(clips: list, seams: list[tuple[float, float]], video_end: float
+                    ) -> list[tuple[list, float, float, float]]:
+    """`(run, pull, cut, render end)` per run of ONE sound lane, in start
+    order — the one place `sound_pulls`, `sound_pull_at` and
+    `sound_render_windows` get a run's placement from.
+
+    `pull` is the overlap before the run's first clip (the run moves as one
+    block), except that an UNLINKED run never starts before the previous
+    unlinked run on the lane ENDS (final sweep 3, round 2): the run before it
+    plays whole while this one is pulled by every seam before it, so a gap
+    shorter than the overlap between them turned into the two lines talking
+    over each other (0.2 s laid apart after a 0.5 s fade -> 0.3 s of both).
+    A laid gap now shrinks at most to zero. A detached sound (`linked_to`)
+    follows its own picture and keeps its J/L overlap: it is neither clamped
+    nor clamps the run after it. `cut` is where the programme end cuts the
+    run (`math.inf` when it ends inside v1's layout, `video_end`)."""
+    plan: list[tuple[list, float, float, float]] = []
+    picture_end = float(video_end) - _overlap_before(seams, video_end)
+    prev_end = -math.inf                     # render end of the last UNLINKED run
+    for run in sound_runs(clips):
+        first = float(run[0].start)
+        pull = _overlap_before(seams, first)
+        lay_end = max(c.start + c.effective_duration for c in run)
+        if lay_end >= float(video_end) - SOUND_RUN_TOL_S:
+            cut = max(lay_end - _overlap_before(seams, lay_end), picture_end)
+        else:
+            cut = math.inf                   # ends inside: plays whole
+        if not run[0].linked_to:
+            pull = max(0.0, min(pull, first - prev_end))
+        run_end = max(min(float(c.start) - pull + c.effective_duration, cut) for c in run)
+        if not run[0].linked_to:
+            prev_end = max(prev_end, run_end)
+        plan.append((run, pull, cut, run_end))
+    return plan
+
+
+def sound_pulls(clips: list, seams: list[tuple[float, float]],
+                video_end: float = math.inf) -> dict[str, float]:
     """Seconds each clip of ONE sound lane plays EARLIER than its layout
     `start` (`render start = start − pull`), by clip id.
 
@@ -1001,15 +1055,15 @@ def sound_pulls(clips: list, seams: list[tuple[float, float]]) -> dict[str, floa
     by the overlap before the run's FIRST clip. Pulling each piece by its own
     start instead would overlap the pieces (the later one pulled left while
     the earlier one plays whole) and double the sound at every seam between
-    them. A lone clip is pulled by `overlap_before(start)`, as every lane.
-    A detached sound (`linked_to`) always starts a run of its own
-    (`sound_runs`), so it is pulled exactly like its picture."""
-    pulls: dict[str, float] = {}
-    for run in sound_runs(clips):
-        run_pull = _overlap_before(seams, run[0].start)
-        for c in run:
-            pulls[c.id] = run_pull
-    return pulls
+    them. A lone clip is pulled by `overlap_before(start)`, as every lane,
+    but never so far that it starts before the unlinked run before it ends
+    (`_sound_run_plan`; pass v1's layout end `video_end` so a run cut at the
+    programme end clamps by where it is cut). A detached sound (`linked_to`)
+    always starts a run of its own (`sound_runs`), so it is pulled exactly
+    like its picture."""
+    return {c.id: pull
+            for run, pull, _cut, _end in _sound_run_plan(clips, seams, video_end)
+            for c in run}
 
 
 def sound_render_windows(clips: list, seams: list[tuple[float, float]],
@@ -1020,7 +1074,10 @@ def sound_render_windows(clips: list, seams: list[tuple[float, float]],
 
     * A run's START maps through the v1 seam map like the picture under it
       (`sound_pulls`: the run moves as one block), so what the user lines up
-      on the timeline stays lined up in the export.
+      on the timeline stays lined up in the export — but an unlinked run
+      never starts before the unlinked run before it ends (final sweep 3,
+      round 2: a 0.2 s laid gap after a 0.5 s fade became a 0.3 s overlap
+      of two voiceover lines; `_sound_run_plan`).
     * A run that ENDS INSIDE v1's layout (`lay_end < video_end`) plays
       WHOLE from there (round 3: a voiceover never loses its last words to
       the seams it crosses) — even when that runs past the picture's render
@@ -1037,14 +1094,7 @@ def sound_render_windows(clips: list, seams: list[tuple[float, float]],
       than `render_time(video_end)` and never later than its whole length.
     A clip wholly past its run's cut is not heard (absent from the map)."""
     out: dict[str, tuple[float, float]] = {}
-    picture_end = float(video_end) - _overlap_before(seams, video_end)
-    for run in sound_runs(clips):
-        pull = _overlap_before(seams, run[0].start)
-        lay_end = max(c.start + c.effective_duration for c in run)
-        if lay_end >= float(video_end) - SOUND_RUN_TOL_S:
-            cut = max(lay_end - _overlap_before(seams, lay_end), picture_end)
-        else:
-            cut = math.inf                         # ends inside: plays whole
+    for run, pull, cut, _end in _sound_run_plan(clips, seams, video_end):
         for c in run:
             rs = float(c.start) - pull
             re = min(rs + c.effective_duration, cut)
@@ -1053,16 +1103,20 @@ def sound_render_windows(clips: list, seams: list[tuple[float, float]],
     return out
 
 
-def sound_pull_at(clips: list, seams: list[tuple[float, float]], start: float) -> float:
-    """The pull a NEW clip placed at layout `start` on a sound lane holding
-    `clips` would get (`sound_pulls`): the run it abuts, else its own."""
-    pull = _overlap_before(seams, start)
-    for c in sorted((c for c in clips if isinstance(c, Clip)), key=lambda c: c.start):
-        if c.start > start + SOUND_RUN_TOL_S:
+def sound_pull_at(clips: list, seams: list[tuple[float, float]], start: float,
+                  video_end: float = math.inf) -> float:
+    """The pull a NEW (unlinked) clip placed at layout `start` on a sound
+    lane holding `clips` would get (`sound_pulls`): the run it abuts, else
+    its own — never starting before the unlinked run before it ends."""
+    plan = _sound_run_plan(clips, seams, video_end)
+    for run, pull, _cut, _end in plan:
+        if run[0].start > start + SOUND_RUN_TOL_S:
             break
-        if c.start + c.effective_duration >= start - SOUND_RUN_TOL_S:
-            return sound_pulls(clips, seams).get(c.id, pull)
-    return pull
+        if max(c.start + c.effective_duration for c in run) >= start - SOUND_RUN_TOL_S:
+            return pull
+    prev_end = max((end for run, _p, _c, end in plan
+                    if not run[0].linked_to and run[0].start < start), default=-math.inf)
+    return max(0.0, min(_overlap_before(seams, start), float(start) - prev_end))
 
 
 # Canvas bounds. The lower bound is not cosmetic: `set_canvas {w:0, h:-10}`
@@ -1271,7 +1325,7 @@ class EDL(_EDLModel):
         its pull is the run it would join (`sound_pull_at`)."""
         t = self.get_track(track_id)
         seams = self.v1_seam_table()
-        pull = sound_pull_at(t.clips if t else [], seams, start)
+        pull = sound_pull_at(t.clips if t else [], seams, start, self.video_extent())
         return self.render_video_end() - (float(start) - pull)
 
     def v1_seam_table(self) -> list[tuple[float, float]]:

@@ -141,6 +141,21 @@ class Detection:
 # --------------------------------------------------------------------------
 
 _QUOTE_RE = re.compile(r"[\"“”']([^\"“”']{1,200})[\"“”']")
+#: A QUOTED span as a person types one: the opening mark after the start or a
+#: space, the closing one before the end, a space or punctuation — so the
+#: apostrophes in "don't" and "it's" are never taken for quotes.
+_TEXT_QUOTE_RE = re.compile(r"(?:(?<=^)|(?<=[\s(:]))([\"“”'‘])([^\"“”‘]{1,200}?)([\"“”'’])(?=$|[\s.,;:!?)])")
+
+
+def mask_quotes(clause: str) -> str:
+    """`clause` with each quoted span's WORDS replaced by a neutral token and
+    its marks kept: the words of a title are the title, never an edit
+    ("add a title 'Chop the onions'" asked "Which part should I cut?", and
+    "'Trim the fat'" cut the silences). Rows that look for a quote still
+    see one; the slots are read from the unmasked clause."""
+    return _TEXT_QUOTE_RE.sub(lambda m: f"{m.group(1)}q{m.group(3)}", clause)
+_AMOUNT_TAIL_RE = re.compile(r",\s*(?:like|about|around|roughly|say|maybe|by|of)\s+[-+]?\d+(?:\.\d+)?\s*"
+                             r"(?:d\s?b|decibels?|%|percent|x|s|sec|secs|seconds?)\b(?=\s*(?:[,;.!?]|$))")
 _LOWER_THIRD_TWO_LINES_RE = re.compile(
     r"(?<=lower third)(?:\s*[:—-]\s*|\s+(?:saying|that says|reading|showing|for|with)\s+)"
     r"[^,;:]{1,40},\s*[^,;]{1,40}?(?=\s*(?:[,;]|\band\b|\bthen\b|$))")
@@ -186,6 +201,10 @@ def split_clauses(prompt: str) -> list[str]:
         return key
 
     text = _QUOTE_RE.sub(_stash, text)
+    # Final sweep 3: "make the music louder, like 3db" — the amount after the
+    # comma belongs to the edit before it (it was a clause of its own, read
+    # as nothing, and the music went up the default 6 dB).
+    text = _AMOUNT_TAIL_RE.sub(_stash, text)
     # Final QA: "add a lower third saying Jane Doe, Producer" — the comma is
     # the card's second line, not a second edit.
     text = _LOWER_THIRD_TWO_LINES_RE.sub(_stash, text)
@@ -215,7 +234,7 @@ _PIECE = rf"(?:{CLIP_NOUN}|one|part|bit|section|piece)"
 _NTH_CLIP_RE = re.compile(rf"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|opening|(\d{{1,2}})(?:st|nd|rd|th))"
                           rf"\s+{_PIECE}\b")
 _CLIP_NUM_RE = re.compile(rf"\b{CLIP_NOUN}\s+(?:#\s*|number\s+|no\.?\s*)?(\d{{1,2}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
-                          r"(?!\s*(?:s|sec|secs|seconds?|%|x)\b)")
+                          r"(?!\s*(?:s|sec|secs|seconds?|%|x)\b)(?!\.\d)")   # "every clip 1.5x" is a speed
 _NUM_WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 _PENULT_RE = re.compile(rf"\b(?:second[- ]to[- ]last|next[- ]to[- ]last|penultimate|second[- ]last)\s+{_PIECE}\b")
 _MIDDLE_RE = re.compile(rf"\bmiddle\s+{_PIECE}\b|\bin the middle\b")
@@ -628,6 +647,10 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               r"|\b(?:kill|cut|drop|lose|silence|switch off|turn off)\s+(?:the\s+|all\s+(?:the\s+)?)?(?:audio|sound)\s+"
               r"(?:from|of|on|in)\s+(?:the\s+|my\s+)?(?:camera|clips?|video|footage|recording|phone)\b"
               rf"|\b(?:take|pull|strip|remove|kill|cut)\s+(?:the\s+)?(?:sound|audio)\s+(?:out\s+)?(?:of|from|on)\s+{CLIP_PHRASE}"
+              # final sweep 3: "silence the original audio but keep the
+              # music" cut the pauses (remove_silences) instead of muting
+              r"|\bsilence\s+(?:the\s+|my\s+|all\s+(?:the\s+)?)?(?:original|clip|clips'?|camera|video|footage)\s+"
+              r"(?:audio|sound)\b"
               rf"|\b(?:un)?mute\b", EXACT),),
     "volume": ((rf"\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
                 rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?(?:\s+(?:volume|level|gain))?\b"
@@ -867,6 +890,7 @@ _CUT_COMPILED = tuple((re.compile(p), i, s) for p, i, s in CUT_PRECEDENCE)
 #: When two intents both match at EXACT in one clause, the more specific one
 #: wins. Rows are (winner, loser).
 _TIE_BREAKS: tuple[tuple[str, str], ...] = (
+    ("title", "trim"), ("title", "tighten"),
     ("translate_captions", "captions"), ("tighten", "remove_silences"), ("tighten", "remove_fillers"),
     ("tighten", "trim"), ("beat_sync", "music"), ("beat_sync", "trim"), ("beat_sync", "speed"),
     ("duck", "music"), ("duck", "loudness"), ("end_card", "title"), ("end_card", "brand"),
@@ -1056,7 +1080,7 @@ def detect(prompt: str) -> Detection:
     for clause in clauses:
         clause_ex = exclusions_in(clause)
         positive = strip_negations(clause) if clause_ex else clause
-        resolved = _resolve_clause(positive) if positive.strip() else None
+        resolved = _resolve_clause(mask_quotes(positive)) if positive.strip() else None
         if "duck" in clause_ex and (resolved is None or (resolved[0] == "music" and resolved[1] < EXACT)):
             # QA-031: "don't duck the music" / "no ducking on the music" is a
             # request to turn ducking OFF, not a pure negation to ignore (and

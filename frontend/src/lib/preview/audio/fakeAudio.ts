@@ -106,6 +106,33 @@ export class FakeCompressor extends FakeNode {
   constructor(ctx: FakeContext) { super(ctx, 'compressor') }
 }
 
+/** An AudioWorkletNode stand-in (`installFakeWorklet` puts its constructor
+ *  on globalThis): records the processor and its options; its AudioParams
+ *  are the processor's `parameterData`. */
+export class FakeWorkletNode extends FakeNode {
+  readonly processor: string
+  readonly options: { processorOptions?: Record<string, unknown>; parameterData?: Record<string, number> }
+  readonly parameters = new Map<string, FakeParam>()
+  constructor(ctx: FakeContext, processor: string, options: FakeWorkletNode['options'] = {}) {
+    super(ctx, 'worklet')
+    this.processor = processor
+    this.options = options
+    for (const [k, v] of Object.entries(options.parameterData ?? {})) this.parameters.set(k, new FakeParam(v))
+  }
+}
+
+/** Give `ctx` an `audioWorklet` whose addModule resolves (or rejects with
+ *  `fail`), and globalThis an AudioWorkletNode building FakeWorkletNodes.
+ *  Returns the undo. */
+export function installFakeWorklet(ctx: FakeContext, fail = false): () => void {
+  const g = globalThis as { AudioWorkletNode?: unknown }
+  const had = 'AudioWorkletNode' in g
+  const prev = g.AudioWorkletNode
+  g.AudioWorkletNode = function (c: FakeContext, name: string, o: FakeWorkletNode['options']) { return new FakeWorkletNode(c, name, o) }
+  ctx.audioWorklet = { modules: [], addModule(url: string) { this.modules.push(url); return fail ? Promise.reject(new Error('refused')) : Promise.resolve() } }
+  return () => { if (had) g.AudioWorkletNode = prev; else delete g.AudioWorkletNode }
+}
+
 export class FakeConvolver extends FakeNode {
   buffer: FakeBuffer | null = null
   normalize = true
@@ -122,6 +149,8 @@ export class FakeContext {
   destination: FakeNode
   resumes = 0
   suspends = 0
+  /** Set by installFakeWorklet (absent: no AudioWorklet, like old engines). */
+  audioWorklet?: { modules: string[]; addModule(url: string): Promise<void> }
   private listeners: Array<() => void> = []
   readonly offline: boolean
   constructor(offline = false) {

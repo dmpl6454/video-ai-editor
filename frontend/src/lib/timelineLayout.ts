@@ -80,6 +80,9 @@ export interface V1Layout {
   /** v1's LAYOUT end (`EDL.video_extent()`); where a sound run laid to it is
    *  cut (`soundSpan`). Absent without v1 clips. */
   end?: number
+  /** Text clip id -> where a caption LINKED to a voiceover / PIP clip plays
+   *  (`linkedTextSpans`). Absent: none is linked. */
+  linked?: Map<string, RenderWindow>
 }
 
 // The gap tolerance (compositor._GAP_EPS) and the 0.05 s boundary match
@@ -238,9 +241,75 @@ export function v1SeamsOf(edl: EDL | null | undefined): SeamLayout[] {
  * transitions, so `shift.get(id) ?? 0` is the identity there.
  */
 export function v1LayoutOf(edl: EDL | null | undefined): V1Layout {
+  return withLinkedText(v1Base(edl), edl)
+}
+
+function v1Base(edl: EDL | null | undefined): V1Layout {
   const v1 = v1InputsOf(edl)
   if (!v1 || !v1.transitions.length) return { shift: new Map<string, number>(), seams: [] }
   return v1Layout(v1.clips, v1.transitions, edl?.canvas?.fps)
+}
+
+/** `layout` plus its `linked` map for `edl` (unchanged when no caption is
+ *  linked) — what `v1LayoutOf` returns and the Timeline's own layout adds. */
+export function withLinkedText(layout: V1Layout, edl: EDL | null | undefined): V1Layout {
+  const linked = linkedTextSpans(edl)
+  return linked.size ? { ...layout, linked } : layout
+}
+
+/**
+ * Final sweep 3 r2 — `render/clock.linked_text_windows`: where each text clip
+ * LINKED to a voiceover / sound-lane or PIP clip (`linked_to`, a caption
+ * `auto_caption` made from that clip's words) plays. Its `start`/`end` are on
+ * the clip's own clock, so it plays at `rs + (start − clip.start)` of the
+ * clip's window (`soundSpan` / the PIP's `renderWindow`) and stops no later
+ * than the clip. Drawn through `renderTime(start)` instead, every voiceover
+ * caption after a 1.0 s fade before it sat a word left of its word. A text
+ * clip that is not linked, or whose clip is gone, is absent (layout clock).
+ */
+export function linkedTextSpans(
+  edl: EDL | null | undefined, layout?: V1Layout,
+): Map<string, RenderWindow> {
+  // One pass per EDL object (the store replaces the EDL on every change):
+  // `renderSpanOf` asks per clip, and a captions lane holds hundreds.
+  const hit = !layout && edl ? LINKED_CACHE.get(edl) : undefined
+  if (hit) return hit
+  const out = computeLinkedTextSpans(edl, layout)
+  if (!layout && edl) LINKED_CACHE.set(edl, out)
+  return out
+}
+
+const LINKED_CACHE = new WeakMap<EDL, Map<string, RenderWindow>>()
+
+function computeLinkedTextSpans(
+  edl: EDL | null | undefined, layout?: V1Layout,
+): Map<string, RenderWindow> {
+  const out = new Map<string, RenderWindow>()
+  const tracks = edl?.tracks ?? []
+  const links = tracks.flatMap((t) => t.clips.filter((c) => !isMediaClip(c)
+    && Boolean((c as { linked_to?: string | null }).linked_to)))
+  if (!links.length) return out
+  const hosts = new Map<string, { track: (typeof tracks)[number]; clip: AnyClip }>()
+  for (const t of tracks) for (const c of t.clips) if (isMediaClip(c)) hosts.set(c.id, { track: t, clip: c })
+  const { seams, end } = layout ?? v1Base(edl)
+  for (const x of links) {
+    const host = hosts.get((x as { linked_to?: string | null }).linked_to ?? '')
+    if (!host) continue
+    const { track, clip } = host
+    let win: RenderWindow
+    if (isSoundLane(track.id, track.type)) {
+      const sp = soundSpan(seams, end, clip, track.clips)
+      win = { start: sp.start, end: sp.end, dropped: sp.end - sp.start <= SEAM_EPS }
+    } else if (track.type === 'video' && track.id !== 'v1') {
+      win = renderWindow(seams, clip.start, clipEnd(clip))
+    } else {
+      continue
+    }
+    const rs = win.start + (x.start - clip.start)
+    const re = Math.min(win.start + (clipEnd(x) - clip.start), win.end)
+    out.set(x.id, { start: rs, end: re, dropped: win.dropped || re - rs <= SEAM_EPS })
+  }
+  return out
 }
 
 /**
@@ -283,74 +352,85 @@ const SOUND_RUN_TOL = 1e-3
 const opensSoundRun = (c: AnyClip): boolean => Boolean((c as { linked_to?: string | null }).linked_to)
 
 /**
+ * The run of `laneClips` holding `clip` (`clip` stands in for the lane's copy
+ * of itself: a what-if position — the Inspector's typed Start, a drag
+ * preview), as `schema._sound_run_plan` places it: `pull` is the overlap
+ * before the run's first clip, clamped so an UNLINKED run never starts before
+ * the previous unlinked run ends (final sweep 3, round 2: two voice-over
+ * lines laid 0.2 s apart after a 0.5 s fade played 0.3 s over each other);
+ * `cut` is where the programme end cuts it (Infinity when it ends inside
+ * v1's layout `videoEnd`, or `videoEnd` is unknown).
+ */
+function soundRunOf(
+  seams: SeamLayout[], clip: AnyClip, laneClips: readonly AnyClip[], videoEnd: number,
+): { pull: number; cut: number } {
+  const lane = laneClips.some((c) => c.id === clip.id)
+    ? laneClips.map((c) => (c.id === clip.id ? clip : c)) : [...laneClips, clip]
+  const runs: AnyClip[][] = []
+  let runEnd: number | null = null
+  for (const c of lane.filter((c) => c.id === clip.id || isMediaClip(c)).sort((a, b) => a.start - b.start)) {
+    const e = c.start + clipDuration(c)
+    if (runEnd === null || opensSoundRun(c) || c.start > runEnd + SOUND_RUN_TOL) {
+      runs.push([c])
+      runEnd = e
+    } else {
+      runs[runs.length - 1].push(c)
+      runEnd = Math.max(runEnd, e)
+    }
+  }
+  const pictureEnd = renderTime(seams, videoEnd)
+  let prevEnd = -Infinity                          // render end of the last UNLINKED run
+  for (const run of runs) {
+    const first = run[0].start
+    let pull = first - renderTime(seams, first)
+    const layEnd = Math.max(...run.map((c) => c.start + clipDuration(c)))
+    // a run ending INSIDE v1's layout plays whole (final QA run 2, round 2)
+    const cut = layEnd >= videoEnd - SOUND_RUN_TOL
+      ? Math.max(renderTime(seams, layEnd), pictureEnd) : Infinity
+    const linked = opensSoundRun(run[0])
+    if (!linked) pull = Math.max(0, Math.min(pull, first - prevEnd))
+    if (run.some((c) => c.id === clip.id)) return { pull, cut }
+    const end = Math.max(...run.map((c) => Math.min(c.start - pull + clipDuration(c), cut)))
+    if (!linked) prevEnd = Math.max(prevEnd, end)
+  }
+  return { pull: clip.start - renderTime(seams, clip.start), cut: Infinity }
+}
+
+/**
  * How much earlier than its layout `start` a SOUND clip plays
  * (`schema.sound_pulls`): a run of abutting clips on its lane (a split
  * voiceover, a looped bed) moves as ONE block, pulled by the overlap before
  * the run's first clip — pulling each piece by its own start would overlap
- * the pieces at every seam between them. Without `laneClips` the clip is
- * its own run: `start − renderTime(start)`.
+ * the pieces at every seam between them — and never so far that it starts
+ * before the unlinked run before it ends (`soundRunOf`; pass v1's layout end
+ * `videoEnd` so a run the programme end cut clamps by its cut). Without
+ * `laneClips` the clip is its own run: `start − renderTime(start)`.
  */
 export function soundPull(
-  seams: SeamLayout[], clip: AnyClip, laneClips?: readonly AnyClip[],
+  seams: SeamLayout[], clip: AnyClip, laneClips?: readonly AnyClip[], videoEnd?: number,
 ): number {
   // (final QA, run 2) a detached sound (`linked_to`) always opens its own
   // run — `schema.sound_runs` — so it is pulled exactly like its picture
-  const own = clip.start - renderTime(seams, clip.start)
-  if (!laneClips?.length) return own
-  // `clip` stands in for the lane's copy of itself (a what-if position:
-  // the Inspector's typed Start, a drag preview)
-  const lane = laneClips.some((c) => c.id === clip.id)
-    ? laneClips.map((c) => (c.id === clip.id ? clip : c)) : [...laneClips, clip]
-  let runEnd: number | null = null
-  let runPull = 0
-  for (const c of lane.filter(isMediaClip).sort((a, b) => a.start - b.start)) {
-    if (runEnd === null || opensSoundRun(c) || c.start > runEnd + SOUND_RUN_TOL) {
-      runPull = c.start - renderTime(seams, c.start)
-      runEnd = c.start + clipDuration(c)
-    } else {
-      runEnd = Math.max(runEnd, c.start + clipDuration(c))
-    }
-    if (c.id === clip.id) return runPull
-  }
-  return own
+  if (!laneClips?.length) return clip.start - renderTime(seams, clip.start)
+  return soundRunOf(seams, clip, laneClips, videoEnd ?? Infinity).pull
 }
 
 /**
  * Where a SOUND clip plays, in render time (`schema.sound_render_windows`,
  * final QA K1): its run (the abutting clips around it) starts where the
- * run's first start plays (`soundPull`) and plays whole — unless the run was
- * laid to or past v1's layout end `videoEnd`, which cuts it where that end
- * maps (`renderTime(end)`). A run ending inside v1's layout plays whole even
- * past the picture's render end (final QA run 2, round 2), so its block
- * shows the full length the export plays. `end <= start` for a piece wholly
- * past its run's cut.
+ * run's first start plays (`soundPull`, never before the unlinked run before
+ * it ends) and plays whole — unless the run was laid to or past v1's layout
+ * end `videoEnd`, which cuts it where that end maps (`renderTime(end)`). A
+ * run ending inside v1's layout plays whole even past the picture's render
+ * end (final QA run 2, round 2), so its block shows the full length the
+ * export plays. `end <= start` for a piece wholly past its run's cut.
  */
 export function soundSpan(
   seams: SeamLayout[], videoEnd: number | undefined, clip: AnyClip, laneClips?: readonly AnyClip[],
 ): { start: number; end: number } {
-  const pull = soundPull(seams, clip, laneClips)
+  const { pull, cut } = soundRunOf(seams, clip, laneClips ?? [], videoEnd ?? Infinity)
   const start = clip.start - pull
-  const whole = start + clipDuration(clip)
-  if (!seams.length || videoEnd === undefined) return { start, end: whole }
-  // the run's layout end (`clip` stands in for the lane's copy of itself)
-  const lane = (laneClips ?? []).filter((c) => c.id !== clip.id && isMediaClip(c))
-  const sorted = [...lane, clip].sort((a, b) => a.start - b.start)
-  let runEnd = -Infinity
-  let hit = -Infinity
-  for (const c of sorted) {
-    const e = c.start + clipDuration(c)
-    if (runEnd === -Infinity || opensSoundRun(c) || c.start > runEnd + SOUND_RUN_TOL) {
-      if (hit !== -Infinity) break                // the run holding `clip` has ended
-      runEnd = e
-    } else {
-      runEnd = Math.max(runEnd, e)
-    }
-    if (c.id === clip.id) hit = runEnd
-  }
-  // a run ending INSIDE v1's layout plays whole (final QA run 2, round 2)
-  if (runEnd < videoEnd - SOUND_RUN_TOL) return { start, end: whole }
-  const cut = Math.max(renderTime(seams, runEnd), renderTime(seams, videoEnd))
-  return { start, end: Math.min(whole, cut) }
+  return { start, end: Math.min(start + clipDuration(clip), cut) }
 }
 
 export interface DrawnSpan {
@@ -379,6 +459,11 @@ export function drawnSpan(
       duration: clipDuration(clip),
       dropped: false,
     }
+  }
+  const linked = layout.linked?.get(clip.id)
+  if (linked) {
+    // a caption on its voiceover / PIP's clock (`linkedTextSpans`)
+    return { start: linked.start, duration: Math.max(0, linked.end - linked.start), dropped: linked.dropped }
   }
   if (isSoundLane(trackId, trackType)) {
     // A sound lane plays WHOLE from render_time(start) (`clock.sound_window`):
@@ -510,6 +595,9 @@ export interface TimingClock {
   start: (r: number) => number
   /** A typed End (ruler time) → the EDL end a trim takes. */
   end: (r: number) => number
+  /** Where the clip's layout END shows, when that is not `show(end)`: a
+   *  sound clip the programme end cuts (`soundSpan`). */
+  showEnd?: (layoutEnd: number) => number
 }
 
 export const LAYOUT_CLOCK: TimingClock = { show: (t) => t, start: (r) => r, end: (r) => r }
@@ -528,16 +616,28 @@ export function timingClockOf(edl: EDL | null | undefined, trackId: string, clip
   }
   const seams = layout.seams
   const track = (edl?.tracks ?? []).find((t) => t.id === trackId)
+  const linked = layout.linked?.get(clip.id)
+  if (linked) {
+    // A caption on its voiceover / PIP's clock (`linkedTextSpans`): pulled
+    // exactly as that clip is, so a typed time lands where it is shown.
+    const pull = clip.start - linked.start
+    return { show: (t) => t - pull, start: (r) => r + pull, end: (r) => r + pull }
+  }
   if (isSoundLane(trackId, track?.type)) {
     // A sound clip keeps its length (`drawnSpan`): the whole clip is pulled
     // by its run's overlap (`soundPull`), so End / Duration read its real
     // length and a typed End trims by what the ruler shows. A typed Start is
     // decoded with the overlay inverse, as the Timeline's drop does.
-    const pull = soundPull(seams, clip, track?.clips)
+    const pull = soundPull(seams, clip, track?.clips, layout.end)
+    // …except where the programme end cuts it (a bed laid to v1's end,
+    // `schema.sound_render_windows`): End shows where it stops playing, as
+    // its Timeline block does (final QA run 3). A typed End still trims.
+    const played = soundSpan(seams, layout.end, clip, track?.clips)
     return {
       show: (t) => t - pull,
       start: (r) => layoutTime(seams, r),
       end: (r) => r + pull,
+      showEnd: (t) => Math.max(played.start, Math.min(t - pull, played.end)),
     }
   }
   return {

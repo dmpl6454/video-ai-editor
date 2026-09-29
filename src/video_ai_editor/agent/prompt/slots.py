@@ -62,6 +62,8 @@ def normalize(text: str) -> str:
     # "lose the first second" / "the last minute" is a length of ONE (review
     # RD3: a bare unit made the trim ask "Which part should I cut?").
     t = _ONE_UNIT_RE.sub(r"\1 1 \2", t)
+    # final sweep 3 r2: "clip2 1.5x" named no clip (no space) → every clip
+    t = re.sub(r"\b(clips?|shots?|scenes?)(\d{1,2})\b", r"\1 \2", t)
     return _WS_RE.sub(" ", t).strip()
 
 

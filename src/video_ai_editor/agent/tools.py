@@ -883,6 +883,10 @@ AUDIO_TOOLS = [
            "threshold_db": {"type": "number", "default": -30},
            "min_dur": {"type": "number", "default": 0.5, "description": "Minimum silence duration to cut, seconds"},
            "keep_pad": {"type": "number", "default": 0.1, "description": "Seconds of silence to leave at each edge for breathing room"},
+           "keep_silent_clips": {"type": "boolean", "default": False,
+                                 "description": "Keep a clip that is silent from end to end (B-roll, a product "
+                                                "shot) instead of cutting it whole; only pauses inside clips "
+                                                "with sound are cut"},
        }),
     _t("remove_fillers",
        "Find filler-word ranges in the transcript and ripple-cut them out (default: um, uh, "

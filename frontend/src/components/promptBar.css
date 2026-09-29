@@ -618,3 +618,66 @@
   box-shadow: none;
   border-bottom: 0;
 }
+
+/* ---- preview card (0.8.0 "Preview, then apply") ----------------------------
+   What a key-free plan WOULD change, before anything is committed. In flow
+   under the input like the clarify card; the list scrolls inside a cap so a
+   40-line auto edit never pushes the picture off screen. The accent is the
+   informational blue (--accent-2), not the destructive pink: nothing has
+   happened yet. */
+.prompt-preview {
+  border-top: 1px solid var(--line);
+  background: var(--bg-0);
+  padding: 10px 14px 12px 38px;
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .prompt-preview { animation: prompt-preview-in 160ms ease-out; }
+}
+@keyframes prompt-preview-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.prompt-preview-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; min-width: 0; }
+.prompt-preview-kicker {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-2); font-weight: 600;
+}
+.prompt-preview-kicker .icon { width: 12px; height: 12px; }
+.prompt-preview-summary {
+  margin: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; min-width: 0;
+}
+.prompt-preview-note { margin: 0 0 4px; font-size: 11.5px; color: var(--warn); }
+.prompt-preview-safe {
+  display: flex; align-items: center; gap: 5px; margin: 0 0 6px; font-size: 11.5px; color: var(--text-dim);
+}
+.prompt-preview-safe .icon { width: 12px; height: 12px; color: var(--good); }
+.prompt-preview-list {
+  margin: 0; padding: 6px 10px 6px 22px;
+  max-height: 168px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px; line-height: 1.5; color: var(--text);
+}
+.prompt-preview-list:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.prompt-preview-list li { overflow-wrap: anywhere; }
+.prompt-preview-list li + li { margin-top: 2px; }
+.prompt-preview-list li.is-more { list-style: none; margin-left: -12px; color: var(--text-dim); font-style: italic; }
+.prompt-preview-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.prompt-preview-actions button { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 5px 12px; }
+.prompt-preview-actions button .icon { width: 13px; height: 13px; }
+.prompt-preview-actions button:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.prompt-preview-actions button:active:not(:disabled) { transform: translateY(1px); }
+.prompt-preview-actions .ghost { background: transparent; color: var(--text-dim); }
+.prompt-preview-actions .ghost:hover:not(:disabled) { color: var(--text); background: var(--bg-3); }
+.prompt-preview-actions kbd { font: inherit; font-size: 10px; opacity: 0.7; margin-left: 4px; }
+@media (max-width: 520px) {
+  .prompt-preview { padding-left: 14px; }
+  .prompt-preview-head { flex-wrap: wrap; }
+}
+/* "and N more changes" opens the capped list (final sweep 3) */
+.prompt-preview-more {
+  background: none; border: 0; padding: 0; font: inherit; font-style: italic; color: var(--accent-2);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.prompt-preview-more:hover { color: var(--text); }
+.prompt-preview-more:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; border-radius: 3px; }

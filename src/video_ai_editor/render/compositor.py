@@ -2153,6 +2153,7 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         main_audio_label=a_label,
         first_input_index=next_idx,
         apply_loudnorm=not preview,
+        main_is_mix=bool(pip_audio_clips),      # a folded PIP is a mix (limiter)
     )
     if audio_chain:
         fc = fc + ";" + audio_chain
@@ -2475,7 +2476,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
             try:
                 # QA-082: loudness-matched to the export (render/preview_loudness).
                 from . import preview_loudness as _pl
-                with _pl.matched(edl, session_dir, dst):
+                with _pl.matched(edl, session_dir, dst, fps=fps):
                     _remux_with_new_audio(edl, cached_video, dst, fps=fps,
                                           cache_dir=cache_dir)
                 _cache_budget.enforce(session_dir, protect=(dst, cached_video),
@@ -2488,7 +2489,7 @@ def render_preview(edl: EDL, session_dir: Path, *, height: int = 540,
                 pass
 
         from . import preview_loudness as _pl
-        with _pl.matched(edl, session_dir, dst):
+        with _pl.matched(edl, session_dir, dst, fps=fps):
             _render(edl, dst, height=height, fps=fps, preview=True,
                     cache_dir=cache_dir)
         # Also cache the video-only version (extract from the just-rendered
@@ -2674,6 +2675,7 @@ def _audio_only_graph(edl: EDL, *, fps, first_input: int,
     audio_chain, audio_inputs, final_label = build_audio_mix(
         edl, main_audio_label=a_main, first_input_index=next_idx,
         apply_loudnorm=apply_loudnorm,
+        main_is_mix=bool(pip_clips),            # a folded PIP is a mix (limiter)
     )
     fc = ";".join(fc_parts)
     if audio_chain:

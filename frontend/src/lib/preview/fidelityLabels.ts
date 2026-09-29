@@ -41,6 +41,7 @@ export function approxLabel(reason: string): string {
   if (a === 'audio' && b === 'duck') return 'Music ducking'
   if (a === 'audio' && b === 'loudness') return 'Loudness'
   if (a === 'audio' && b === 'limiting') return 'Limiter on loud sound'
+  if (a === 'audio' && b === 'pending') return 'Sound loading'
   if (a === 'transition' && b) return `${title(b)} transition`
   if (a === 'effect' && b) return `${title(b)} effect`
   if (a === 'blend' && b) return `Blend: ${blendLabel(b)}`

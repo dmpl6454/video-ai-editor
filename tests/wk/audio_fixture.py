@@ -355,6 +355,22 @@ def hot_loud_edl(v: str, bed: str):
     return e, 30
 
 
+def hot_release_edl(v: str, hot: str):
+    """P2 limiter tail (0.8.0 final QA): the limiter's RELEASE. A 0.8 sine on
+    v1 for 4 s under the hot source (1.7 left / 0.4 right) on the music lane
+    from 1.0 to 2.0 s: the mix sits ~8 dB over the ceiling for a second and
+    then drops to the sine alone, under it, so every sample after the hot
+    stretch is the limiter letting go (alimiter: linear over 50 ms; the
+    DynamicsCompressorNode fallback: its own curve, measured ≤ 91 ms to
+    agree within 1e-4 — limiting.ts LIMITING_SPREAD)."""
+    e = empty_edl(Canvas(w=64, h=36, fps=30))
+    e.canvas.loudness_lufs = None
+    e.get_track("v1").clips.append(_clip(v, "v", 0.0, 0.0, 4.0))
+    e.get_track("music").clips.append(_clip(hot, "h", 1.0, 1.0, 2.0))
+    e.recompute_duration()
+    return e, 30
+
+
 def curve_edl(tone_a: str, tone_b: str, bed: str):
     """Speed curves (lane S1) and a freeze, APPROX in the preview: a
     varispeed curve and a pitch-kept curve on v1 (alone: a pitch-kept tone

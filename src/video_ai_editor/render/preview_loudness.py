@@ -16,7 +16,13 @@ very render that plays (no extra pass):
   * after the render the tap's I is read back; when the gain it implies differs
     from the one applied by more than `TOLERANCE_LU` (the first render of a
     session, a new music bed…) the audio is re-gained in place — one AAC
-    encode, the same cost as the audio-only remux fast path.
+    encode, the same cost as the audio-only remux fast path;
+  * unless the limiter below could have engaged at the gain applied (the
+    tap's pre-gain sample peak × that gain reaching −1 dBFS): a re-gain of a
+    limited file only turns the SQUASH up or down (two overlapping 0.8 sines
+    came out 4.8 dB low in their overlap on a session's first render, Final
+    QA), so the audio is rendered again at the wanted gain instead — the
+    audio-only remux, one pass through gain and limiter like the export.
 
 A brick-wall limiter at −1 dBFS follows the gain, the same true-peak ceiling
 the export's loudnorm is given (`TP=-1`), so a +20 dB lift cannot clip.
@@ -34,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import re
 import threading
 from pathlib import Path
@@ -51,6 +58,10 @@ TOLERANCE_LU = 1.0
 MAX_GAIN_DB = 30.0
 _STATE = "preview_loudness.json"
 _I_RE = re.compile(r"lavfi\.r128\.I=(-?[\d.]+)")
+_PEAK_RE = re.compile(r"lavfi\.r128\.sample_peak=(-?[\d.]+)")
+#: The preview limiter's ceiling (audio_mix.PREVIEW_LIMITER, −1 dBFS), less
+#: the tap's print precision (3 decimals) so a peak AT the ceiling counts.
+_LIMIT = 0.891251 - 0.002
 #: Applied gains kept per session (one per distinct sound; oldest dropped).
 GAINS_KEPT = 64
 #: Track types whose clips make sound (a text, sticker, effect or captions
@@ -172,6 +183,23 @@ def read_integrated(meas: Path) -> float | None:
     return None if v <= -69.0 else v
 
 
+def read_peak(meas: Path) -> float | None:
+    """The pre-gain sample peak (linear, the tap's running max), or None."""
+    try:
+        hits = _PEAK_RE.findall(meas.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return float(hits[-1]) if hits else None
+
+
+def limiter_could_engage(peak: float | None, gain_db: float) -> bool:
+    """Whether the −1 dBFS preview limiter could have touched a mix of
+    pre-gain sample `peak` at `gain_db` (unknown peak: assume it could)."""
+    if peak is None:
+        return True
+    return peak * 10.0 ** (gain_db / 20.0) >= _LIMIT
+
+
 def regain(path: Path, delta_db: float) -> None:
     """Re-encode `path`'s audio with `delta_db` more gain (picture copied)."""
     from .compositor import _part_path, _preview_aac_out
@@ -192,9 +220,11 @@ def regain(path: Path, delta_db: float) -> None:
 
 
 @contextlib.contextmanager
-def matched(edl: EDL, session_dir: Path, dst: Path) -> Iterator[None]:
+def matched(edl: EDL, session_dir: Path, dst: Path, *, fps: int | None = None) -> Iterator[None]:
     """Run a preview render of `edl` into `dst` loudness-matched to the
-    export. No-op when the project has no loudness target."""
+    export. No-op when the project has no loudness target. `fps` (the
+    render's) lets a stale gain whose pass hit the limiter be re-rendered
+    in one pass (`_rerender_audio`); without it the file is re-gained."""
     target = getattr(edl.canvas, "loudness_lufs", None)
     if target is None:
         yield
@@ -202,7 +232,9 @@ def matched(edl: EDL, session_dir: Path, dst: Path) -> Iterator[None]:
     session_dir = Path(session_dir)
     meas = session_dir / "cache" / f"loudness_{dst.stem}.txt"
     meas.parent.mkdir(parents=True, exist_ok=True)
+    peak_meas = audio_mix.preview_peak_path(meas)
     _pu.unlink_with_retry(meas)
+    _pu.unlink_with_retry(peak_meas)
     applied = _gain_for(target, _last_pre_gain_lufs(session_dir))
     try:
         with audio_mix.preview_loudness_scope(audio_mix.PreviewLoudness(gain_db=applied, meas_path=meas)):
@@ -210,6 +242,7 @@ def matched(edl: EDL, session_dir: Path, dst: Path) -> Iterator[None]:
     except BaseException:
         # A failed or superseded render: nothing was measured that means anything.
         _pu.unlink_with_retry(meas)
+        _pu.unlink_with_retry(peak_meas)
         raise
     try:
         pre = read_integrated(meas)
@@ -220,10 +253,37 @@ def matched(edl: EDL, session_dir: Path, dst: Path) -> Iterator[None]:
             _remember(session_dir, pre)
             wanted = _gain_for(target, pre)
             if abs(wanted - applied) > TOLERANCE_LU:
-                regain(dst, wanted - applied)
-                effective = round(applied, 2) + round(wanted - applied, 2)
+                if (fps is not None and limiter_could_engage(read_peak(peak_meas), applied)
+                        and _rerender_audio(edl, session_dir, dst, fps=fps, gain_db=wanted)):
+                    effective = round(wanted, 2)
+                else:
+                    regain(dst, wanted - applied)
+                    effective = round(applied, 2) + round(wanted - applied, 2)
         # what this preview's sound really carries (the Instant preview
         # plays the same master gain: GET /preview_loudness)
         _record_gain(session_dir, audio_key(edl), effective)
     finally:
         _pu.unlink_with_retry(meas)
+        _pu.unlink_with_retry(peak_meas)
+
+
+def _rerender_audio(edl: EDL, session_dir: Path, dst: Path, *, fps: int, gain_db: float) -> bool:
+    """Replace `dst`'s audio with the timeline's sound rendered at `gain_db`
+    in one pass (the audio-only remux, picture copied from `dst` itself).
+    False when it failed (the caller falls back to `regain`); a cancel
+    propagates."""
+    from .compositor import _remux_with_new_audio
+    meas = Path(session_dir) / "cache" / f"loudness_{dst.stem}_rr.txt"
+    try:
+        with audio_mix.preview_loudness_scope(audio_mix.PreviewLoudness(gain_db=gain_db, meas_path=meas)):
+            _remux_with_new_audio(edl, dst, dst, fps=fps, cache_dir=Path(session_dir) / "cache")
+        return True
+    except _cancel.RenderCancelled:
+        raise
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "preview loudness: one-pass audio re-render failed, re-gaining instead: %s", e)
+        return False
+    finally:
+        _pu.unlink_with_retry(meas)
+        _pu.unlink_with_retry(audio_mix.preview_peak_path(meas))

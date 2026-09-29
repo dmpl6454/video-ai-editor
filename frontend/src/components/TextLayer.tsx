@@ -13,7 +13,7 @@ import {
   type KFNum, type OverlayBox,
 } from '../lib/overlay'
 import { emojiImage, emojiGeneration } from '../lib/emojiArt'
-import { renderWindow, v1SeamsOf } from '../lib/timelineLayout'
+import { linkedTextSpans, renderWindow, v1SeamsOf } from '../lib/timelineLayout'
 import { animEnvelope } from '../lib/textAnim'
 import { inEnableWindow } from '../lib/overlayGate'
 import {
@@ -467,6 +467,9 @@ export function TextLayer({ edl, videoEl, clock, width, height }: Props) {
     // once per effect run, not per frame: the seam table only changes with
     // the EDL, which is already in this effect's deps.
     const seams = v1SeamsOf(edl)
+    // A caption made from a voiceover / PIP plays on that clip's clock
+    // (final sweep 3 r2, `render/clock.linked_text_windows`).
+    const linked = linkedTextSpans(edl)
     // The captions track's position (QA-075) — where every caption cue sits.
     const capPos = (edl.tracks.find((tk) => tk.id === 'captions') as { config?: { position?: string } | null } | undefined)
       ?.config?.position ?? 'bottom'
@@ -519,7 +522,7 @@ export function TextLayer({ edl, videoEl, clock, width, height }: Props) {
           // A window the renderer drops (wholly inside a consumed span) is
           // not drawn here either — the preview must not show a caption the
           // export will never contain.
-          const w = renderWindow(seams, c.start, c.end)
+          const w = linked.get(c.id) ?? renderWindow(seams, c.start, c.end)
           // Half-open on the frame grid (QA-016) — mirror of the export's
           // enable_expr, so a cue change never shows both cues on one frame.
           if (!w.dropped && inEnableWindow(w.start, w.end, t, edl.canvas.fps)) {

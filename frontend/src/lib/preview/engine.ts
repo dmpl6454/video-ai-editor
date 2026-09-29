@@ -176,8 +176,17 @@ export interface AudioSink {
   limitingFrames?(): ReadonlyArray<readonly [number, number]>
   /** Set by the engine: called when limitingFrames() changes by itself (a
    *  source's recorded peaks landed after prepare), or loudnessOffDb() /
-   *  the loudness gain did (refreshLoudness). */
+   *  the loudness gain did (refreshLoudness), or soundLoadingFrames() did. */
   onLimitingChange?: (() => void) | null
+  /** Before play() runs (inside the user's gesture): null when the sound
+   *  under output sample `fromSample` is in memory; else a promise that
+   *  resolves true once it is, false after `timeoutMs` — the engine holds
+   *  picture and sound, buffering, meanwhile (§11.1). Optional. */
+  soundHold?(fromSample: number, timeoutMs: number): Promise<boolean> | null
+  /** Output FRAME ranges the sound could not be played (or cannot yet)
+   *  because its chunks were not in memory: APPROX 'audio:pending'.
+   *  Optional: a sink without it has none. */
+  soundLoadingFrames?(): ReadonlyArray<readonly [number, number]>
   /** How far (dB) the master loudness gain the sink plays is from the one
    *  measured for the current program's render (over 1 dB: APPROX
    *  'audio:loudness', §7); undefined: nothing to say (no target, or not

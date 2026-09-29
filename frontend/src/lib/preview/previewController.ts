@@ -113,6 +113,8 @@ interface ProxySummary {
   w?: number
   h?: number
   frames?: number
+  /** False for an audio-only source (probed; it never has frames). */
+  has_video?: boolean
   src_rate?: { num: number; den: number }
 }
 
@@ -356,7 +358,10 @@ export class PreviewController {
       }
       if (summary?.key) {
         const failed = summary.state === 'failed'
-        const ready = typeof summary.frames === 'number' && summary.frames > 0
+        // an audio-only source (a music bed, a voice-over) has no frames at
+        // all: its probe says has_video false, and its sound chunks follow
+        // (AudioChunks re-reads a layout still building) — final sweep 3
+        const ready = (typeof summary.frames === 'number' && summary.frames > 0) || summary.has_video === false
         if (ready || failed) {
           const prev = this.known.get(src)
           const info = prev?.exact ? prev.source.info : this.standIn(summary)

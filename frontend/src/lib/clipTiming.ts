@@ -106,12 +106,15 @@ export interface FieldClock {
   show: (layoutT: number) => number
   start: (r: number) => number
   end: (r: number) => number
+  /** The END's own mapping when it differs from `show` (a sound clip the
+   *  programme end cuts — `timelineLayout.timingClockOf`). */
+  showEnd?: (layoutEnd: number) => number
 }
 
 /** A clip's EDL span as the fields show it: on the ruler's clock, where the
  *  playhead, the Timeline and the export put it. */
 export function shownTiming(span: OverlaySpan, clock: FieldClock): OverlaySpan {
-  return { start: clock.show(span.start), end: clock.show(span.end) }
+  return { start: clock.show(span.start), end: (clock.showEnd ?? clock.show)(span.end) }
 }
 
 /** A value typed into Start / End / Duration (ruler time) → the EDL-time

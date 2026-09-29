@@ -49,11 +49,13 @@ export function supersedesClarify(status: PromptStatus, text: string, clarifyPro
   return status === 'clarify' && t.length > 0 && t !== clarifyPrompt.trim()
 }
 
-/** May the input's Enter / Run start a new prompt right now? */
-export function canSubmitPrompt(status: PromptStatus, opts: { disabled: boolean; text: string }): boolean {
+/** May the input's Enter / Run start a new prompt right now? `cardOpen`
+ *  false = the status says `clarify` but no card is on screen (it expired or
+ *  was dropped elsewhere): Enter and Run did nothing at all (final sweep 3 r2). */
+export function canSubmitPrompt(status: PromptStatus, opts: { disabled: boolean; text: string; cardOpen?: boolean }): boolean {
   if (isBusy(status) || opts.disabled) return false
   // A card is waiting for an answer: Enter must not re-plan over it.
-  if (status === 'clarify') return false
+  if (status === 'clarify' && opts.cardOpen !== false) return false
   // Over the server's limit it can only fail (QA-124) — the bar says so instead.
   if (opts.text.trim().length > PROMPT_MAX_CHARS) return false
   return opts.text.trim().length > 0

@@ -951,6 +951,21 @@ def _v1_media_end(edl: EDL) -> float:
                 for c in v1.clips if isinstance(c, Clip)), default=0.0)
 
 
+def _interval_remap(removed_start: float, removed_end: float):
+    """The ripple time map of removing `[removed_start, removed_end)` (see
+    `_ripple_overlays`): before -> unchanged, inside -> the cut point,
+    after -> left by the width."""
+    shift = removed_end - removed_start
+
+    def remap(t: float) -> float:
+        if t <= removed_start:
+            return t
+        if t < removed_end:
+            return removed_start
+        return t - shift
+    return remap
+
+
 def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
                       v1_now_empty: bool = False, tail: bool | None = None) -> None:
     """Shift text/sticker/caption overlays to follow a ripple on the video
@@ -1033,13 +1048,7 @@ def _ripple_overlays(edl: EDL, removed_start: float, removed_end: float,
         return
     if tail is None:
         tail = _v1_media_end(edl) <= removed_start + 0.5 * _tb.frame_duration(edl.canvas.fps)
-
-    def remap(t: float) -> float:
-        if t <= removed_start:
-            return t
-        if t < removed_end:
-            return removed_start
-        return t - shift
+    remap = _interval_remap(removed_start, removed_end)
 
     for track in edl.tracks:
         if track.type not in _OVERLAY_TRACK_TYPES:
@@ -1604,7 +1613,14 @@ def _insert_on_main_lane(store: EDLStore, track: Track, clip: Clip) -> str | Non
     return split_id
 
 
-def cut_range(store: EDLStore, args: dict) -> dict:
+def cut_range(store: EDLStore, args: dict, *, _pinned: "_Pinned | None" = None) -> dict:
+    """Remove timeline `[start, end)` from a video lane and ripple.
+
+    On v1 every unlocked overlay follows the picture it sat over inside the
+    same step (final QA run 3, `_follow_main_lane`): the interval remap
+    (`_ripple_overlays`) places what sat over the cut picture, the follow
+    pass adds the gap the magnetic repack closed and restores a layer over a
+    gap or past v1's end. `_pinned` is `_cut_source_ranges`' — see there."""
     track = _v_track(store.edl, args["track"])
     start = _q(store.edl, args["start"])
     end = _q(store.edl, args["end"])
@@ -1617,6 +1633,7 @@ def cut_range(store: EDLStore, args: dict) -> dict:
                               and (c.start + c.effective_duration) > start]}
 
     seams = _v1_seam_owners(track)     # Final QA: transitions follow their cut
+    layers = _capture_layers(store.edl, _pinned) if track.id == MAIN_LANE_ID else None
     tail_of: dict[str, str] = {}
     new_clips: list[Clip] = []
     for c in list(track.clips):
@@ -1725,6 +1742,9 @@ def cut_range(store: EDLStore, args: dict) -> dict:
         _shift_lane_after_cut(track, start, end)   # QA-013: close the cut only
     if track.id == "v1":
         _ripple_overlays(store.edl, start, end, v1_now_empty=not track.clips)
+    if layers and layers[1]:
+        _follow_main_lane(store.edl, layers[0], layers[1], set(),
+                          tool_map=_interval_remap(start, end))
     summary = f"Cut {start:.2f}–{end:.2f}s on {track.id} (ripple)"
     store.commit("cut_range", args, summary)
     return {"summary": summary, "clips_after": len(track.clips)}
@@ -3237,7 +3257,7 @@ def auto_caption(store: EDLStore, args: dict, *,
     # (`agent/caption_sources`). Only the first v1 clip's file used to be
     # transcribed: speech in a later clip, and the voiceover, got no captions
     # and nothing said so.
-    from .caption_sources import merge_tiers, sound_segments, speech_sources
+    from .caption_sources import merge_tiers, sound_clock, sound_segments, speech_sources
     v1 = store.edl.get_track("v1")
     src_clip = next((c for c in (v1.clips if v1 else []) if isinstance(c, Clip)), None)
     sources = speech_sources(store.edl)
@@ -3278,6 +3298,9 @@ def auto_caption(store: EDLStore, args: dict, *,
         else:
             run["segments_tl"], run["extent"] = sound_segments(
                 store.edl, source, run["tx_dict"].get("segments", []))
+            # Final sweep 3 r2: its cues are on the clip's own clock and
+            # linked to the clip; the layout time is only for merge_tiers.
+            run["clock"] = sound_clock(store.edl, source)
         run["cues"] = cues_from_segments(run["segments_tl"], **budget)
         runs.append(run)
     model = runs[0]["model"]
@@ -3295,7 +3318,7 @@ def auto_caption(store: EDLStore, args: dict, *,
     y_pos = overlay_default_y(canvas, "caption", position)
     chunk = int(args.get("chunk_size", 2))
     for run in runs:
-        spans: list[tuple[float, float, str]] = []
+        raw: list[tuple[float, float, str]] = []
         if style == "word_emphasis":
             words = [w for seg in run["segments_tl"] for w in (seg.get("words") or [])]
             for j in range(0, len(words), chunk):
@@ -3305,13 +3328,13 @@ def auto_caption(store: EDLStore, args: dict, *,
                     continue
                 span = clamp_to_extent(float(grp[0]["start"]), float(grp[-1]["end"]), run["extent"])
                 if span is not None:
-                    spans.append((span[0], span[1], text.upper()))
+                    raw.append((span[0], span[1], text.upper()))
         else:
             for cue in run["cues"]:
                 span = clamp_to_extent(cue.start, cue.end, run["extent"])
                 if span is not None:
-                    spans.append((span[0], span[1], cue.text))
-        run["spans"] = spans
+                    raw.append((span[0], span[1], cue.text))
+        run["spans"] = [_caption_span(run.get("clock"), a, b, text) for a, b, text in raw]
     # One source: its spans as they always were. Several: the voiceover
     # wins where two speak at once (`caption_sources.merge_tiers`).
     if len(runs) == 1:
@@ -3331,15 +3354,16 @@ def auto_caption(store: EDLStore, args: dict, *,
     cap.config.position = position  # type: ignore
     cap.config.lang = caption_lang
     cap.clips = []
-    for a, b, text in placed:
+    for a_l, b_l, payload in placed:
+        text, link, a, b = _caption_stored(a_l, b_l, payload)
         if style == "word_emphasis":
             cap.clips.append(TextClip(
-                text=text, start=a, end=b,
+                text=text, start=a, end=b, linked_to=link,
                 role="hook", transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5),
             ))
         else:
             cap.clips.append(TextClip(
-                text=text, start=a, end=b, role="caption",
+                text=text, start=a, end=b, role="caption", linked_to=link,
                 transform=Transform(x=canvas.w / 2, y=y_pos),
             ))
 
@@ -3376,6 +3400,28 @@ def auto_caption(store: EDLStore, args: dict, *,
             "target": target, "model": model, "cues": n, "style": style,
             "sources": [{"src": r["src"], "kind": r["kind"], "cues": len(r["spans"])} for r in runs],
             "sample": sample}
+
+
+def _caption_span(clock, a: float, b: float, text: str) -> tuple[float, float, tuple]:
+    """One cue as `merge_tiers` takes it: its LAYOUT span (what the tiers
+    are compared in) and, as the payload, the text, the clip it is linked to
+    and its span on that clip's clock (final sweep 3 r2). A main-track cue
+    (`clock` None) is on the layout clock and linked to nothing."""
+    if clock is None:
+        return a, b, (text, None, a, b, b)
+    link, a_l = clock(a)
+    _l, b_l = clock(b)
+    return a_l, max(a_l, b_l), (text, link, a, b, max(a_l, b_l))
+
+
+def _caption_stored(a_l: float, b_l: float, payload: tuple) -> tuple[str, str | None, float, float]:
+    """`(text, link, start, end)` a placed span is stored with. A linked cue
+    keeps its own clock; an end `merge_tiers` trimmed (held into the next
+    cue) is pulled in by the same amount."""
+    text, link, a, b, b_l0 = payload
+    if link is None:
+        return text, None, a_l, b_l
+    return text, link, a, max(a, b - (b_l0 - b_l))
 
 
 def _auto_caption_one(store: EDLStore, source, *, is_primary: bool, language, model: str,
@@ -3687,7 +3733,7 @@ def _fit_music_to_video(edl: EDL, *, fade_in: float | None = None,
     clips = sorted((c for c in track.clips if isinstance(c, Clip)), key=lambda c: c.start)
     if not clips:
         return info
-    pulls = sound_pulls(clips, edl.v1_seam_table())
+    pulls = sound_pulls(clips, edl.v1_seam_table(), edl.video_extent())
     tail = max(clips, key=lambda c: c.start + c.effective_duration)
     tail_fade = float(tail.audio.fade_out or 0.0)
     gone: set[str] = set()
@@ -3972,6 +4018,11 @@ def _cut_source_ranges(store: EDLStore, track_id: str,
     hits = _hits()
     budget = len(hits)
     n = 0
+    # Final QA run 3: a layer over a v1 gap or past v1's end keeps its time
+    # through the WHOLE pass. The first cut's repack closes the gap, so the
+    # next cut would find that layer over a picture and carry it along;
+    # which layers were placed against nothing is decided once, here.
+    pinned = _unanchored_layers(store.edl) if track_id == MAIN_LANE_ID else None
     while hits:
         if n >= budget:
             raise RuntimeError(
@@ -3982,7 +4033,7 @@ def _cut_source_ranges(store: EDLStore, track_id: str,
         fps = store.edl.canvas.fps
         cut_range(store, {"track": track_id,
                           "start": _tb.floor_to_frame(s, fps),
-                          "end": _tb.ceil_to_frame(e, fps)})
+                          "end": _tb.ceil_to_frame(e, fps)}, _pinned=pinned)
         n += 1
         hits = _hits()
     return n
@@ -4001,6 +4052,12 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
     min_dur = float(args.get("min_dur", 0.5))
     keep_pad = float(args.get("keep_pad", 0.1))  # leave a little air
     track_id = str(args.get("track", "v1"))
+    # Final sweep 3 r2: "remove the silences" from the Prompt bar deleted a
+    # whole B-roll / product shot whose own sound is quiet — and the price
+    # title over it. With this set, a clip that is silent from end to end is
+    # kept: only the pauses INSIDE clips with sound are cut.
+    keep_silent = bool(args.get("keep_silent_clips", False))
+    kept: list[str] = []
 
     track = store.edl.get_track(track_id)
     if not track or not track.clips:
@@ -4009,7 +4066,7 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
     import re, subprocess
     from ..edl.schema import Clip
     source_ranges: list[tuple[str | None, float, float]] = []  # (src, SOURCE s, SOURCE e)
-    for c in track.clips:
+    for c in sorted(track.clips, key=lambda x: x.start):
         if not isinstance(c, Clip):
             continue
         proc = subprocess.run(
@@ -4020,6 +4077,12 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             **_pu.SUBPROCESS_FLAGS,
         )
+        if proc.returncode != 0:
+            # Final sweep 3: a killed, crashed or unreadable-file run printed
+            # none (or only some) of the silences — reading its stderr as the
+            # answer reported "none found" or a partial cut as success.
+            raise RuntimeError(f"silence detection failed on {Path(c.src).name} "
+                               f"(ffmpeg exit {proc.returncode})")
         starts = [float(m.group(1)) for m in re.finditer(r"silence_start: ([\d.]+)", proc.stderr)]
         ends = [float(m.group(1)) for m in re.finditer(r"silence_end: ([\d.]+)", proc.stderr)]
         # Pair them. A silence still running at the slice's end (an ffmpeg
@@ -4027,6 +4090,10 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
         slice_len = c.out - c.in_
         if len(starts) == len(ends) + 1 and starts[-1] < slice_len - 1e-3:
             ends.append(slice_len)
+        if keep_silent and any(s0 <= max(keep_pad, 0.05) and e0 >= slice_len - max(keep_pad, 0.05)
+                               for s0, e0 in zip(starts, ends)):
+            kept.append(Path(c.src).name)
+            continue
         for i in range(min(len(starts), len(ends))):
             # Air is kept only next to SOUND (final sweep 2): a silence that
             # runs into the slice's own in/out point is the clip's edge, not
@@ -4052,17 +4119,19 @@ def remove_silences(store: EDLStore, args: dict) -> dict:
             # the live EDL right before each cut rather than up front.
             source_ranges.append((c.src, c.in_ + local_start, c.in_ + local_end))
 
+    kept_note = (f"; kept {len(kept)} clip{'s' if len(kept) != 1 else ''} with no sound "
+                 f"({', '.join(dict.fromkeys(kept))})") if kept else ""
     if not source_ranges:
-        store.commit("remove_silences", args, "Remove silences: none found")
-        return {"summary": "No silences detected", "cuts": 0}
+        store.commit("remove_silences", args, "Remove silences: none found" + kept_note)
+        return {"summary": "No silences detected" + kept_note, "cuts": 0, "kept_silent": kept}
 
     # One user action = one undo step: batch() swallows each cut_range's own
     # commit so the single commit below is the only op/snapshot recorded.
     with store.batch():
         n = _cut_source_ranges(store, track_id, source_ranges)
-    summary = f"Removed {n} silences (threshold {threshold_db}dB, min {min_dur}s)"
+    summary = f"Removed {n} silences (threshold {threshold_db}dB, min {min_dur}s)" + kept_note
     store.commit("remove_silences", args, summary)
-    return {"summary": summary, "cuts": n}
+    return {"summary": summary, "cuts": n, "kept_silent": kept}
 
 
 #: remove_fillers' default single-token fillers (QA-011: no content words).
@@ -5165,6 +5234,15 @@ def _retime_overlays_over(edl: EDL, old: Clip, new: Clip, start: float,
     change; a time before the clip is untouched. Start and end map
     independently, so a caption over the clip keeps its words' timing and a
     title spanning the clip's end stretches or shrinks with it."""
+    _retime_overlays_by(edl, start, old_fp, new_fp,
+                        lambda t: start + new.timeline_offset_at(old.source_offset_at(t - start)))
+
+
+def _retime_overlays_by(edl: EDL, start: float, old_fp: float, new_fp: float,
+                        inside) -> None:
+    """`_retime_overlays_over` with the in-footprint map given as `inside(t)`
+    (final sweep 3: smooth_slow_motion's RIFE file has no speed field to map
+    through — its map is linear, start + (t-start)*new_fp/old_fp)."""
     end_old = start + old_fp
     delta = new_fp - old_fp
 
@@ -5173,7 +5251,7 @@ def _retime_overlays_over(edl: EDL, old: Clip, new: Clip, start: float,
             return t
         if t >= end_old - 1e-9:
             return t + delta
-        return start + new.timeline_offset_at(old.source_offset_at(t - start))
+        return inside(t)
 
     frame = 1.0 / max(1.0, float(edl.canvas.fps or 30))
     for t in edl.tracks:
@@ -6813,11 +6891,23 @@ def smooth_slow_motion(store: EDLStore, args: dict, *, set_progress=None,
     if new_out <= new_in:
         new_in, new_out = 0.0, extent or new_out
     seams = _v1_seam_owners(track)     # Final QA: transitions follow their cut
+    old_start, old_fp = float(c.start), c.effective_duration
     c.src = str(new_src)
     c.in_, c.out = new_in, new_out
     _ripple_close_gap(track, fps)  # the slowed clip is factor× longer on v1
     _reseat_v1_transitions(track, seams)
     dur = c.effective_duration
+    if track.id == MAIN_LANE_ID and old_fp > 1e-9 and abs(dur - old_fp) > 1e-9:
+        # Final sweep 3: the layers over the slowed clip keep the moment of
+        # its footage (RIFE's file plays it `factor`x slower, so its captions
+        # stretch with it) and later ones shift by the footprint change, as
+        # after set_speed. Layers over LATER pictures and their detached
+        # sounds are re-anchored by dispatch (_LAYER_FOLLOW_TOOLS/_FOLLOW_TOOLS).
+        ratio = dur / old_fp
+        _retime_overlays_by(store.edl, old_start, old_fp, dur,
+                            lambda t: old_start + (t - old_start) * ratio)
+        if dur < old_fp:
+            _fit_music_to_video(store.edl)
     summary = f"Smooth slow-mo ×{factor} on {cid} ({dur:.1f}s)"
     store.commit("smooth_slow_motion", args, summary)
     return {"summary": summary, "new_src": str(new_src), "duration": dur}
@@ -7913,7 +8003,7 @@ def set_property(store: EDLStore, args: dict) -> dict:
     res = store.edl.get_clip(cid)
     if not res:
         raise ValueError(f"clip {cid} not found")
-    _, c = res
+    lane, c = res
     parts = path.split(".")
     # Every step must be a DECLARED FIELD of a model in the EDL tree (QA-107).
     # `getattr`/`hasattr` also reach dunders and pydantic internals, so
@@ -7954,6 +8044,14 @@ def set_property(store: EDLStore, args: dict) -> dict:
         # A bundled font NAME, never a path (render/fonts.py).
         value = _check_font(value)
     _check_property_bounds(obj, leaf, value)
+    main_timing = obj is c and isinstance(c, Clip) and lane.id == MAIN_LANE_ID \
+        and leaf in ("speed", "in_", "out", "start", "freeze")
+    if main_timing and leaf != "freeze":
+        done = _set_main_lane_timing(store, lane, c, leaf, value)
+        if done is not None:
+            return done
+    seams = _v1_seam_owners(lane) if main_timing else None
+    old_fp = c.effective_duration if main_timing else 0.0
     before = getattr(obj, leaf)
     setattr(obj, leaf, value)
     if obj is c and isinstance(c, Clip) and leaf in ("in_", "out") and c.out <= c.in_ + 1e-9:
@@ -7963,10 +8061,54 @@ def set_property(store: EDLStore, args: dict) -> dict:
             and c.end <= c.start + 1e-9:
         setattr(obj, leaf, before)
         raise ValueError("the clip's end must come after its start")
+    if main_timing and leaf == "freeze":
+        # A v1 freeze's length is its footprint: keep the main lane packed.
+        _ripple_close_gap(lane, store.edl.canvas.fps)
+        _reseat_v1_transitions(lane, seams)
+        if c.effective_duration < old_fp - 1e-9:
+            _fit_music_to_video(store.edl)
     group, phrase = property_label(path, value)
     summary = f"{group}: {phrase}"
     store.commit("set_property", args, summary)
     return {"summary": summary}
+
+
+def _set_main_lane_timing(store: EDLStore, lane: Track, c: Clip, leaf: str,
+                          value: Any) -> dict | None:
+    """Final sweep 3: set_property speed / in / out on a v1 clip IS set_speed /
+    trim_clip. A bare setattr left the magnetic main lane unpacked: a speed-up
+    or trim left a black hole in the export, a slow-down stored two
+    overlapping v1 clips the export then played one after the other. `start`
+    is still a plain placement (a move into a gap is allowed) unless it would
+    overlap another v1 picture. Returns None to fall through to the setattr."""
+    def num(v: Any) -> float:
+        if isinstance(v, bool):
+            raise ValueError(f"{leaf.rstrip('_')} must be a number")
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{leaf.rstrip('_')} must be a number") from None
+
+    if leaf == "speed":
+        if isinstance(value, dict):
+            if value.get("curve") is None:
+                raise ValueError("speed must be a number or a speed curve")
+            return set_speed(store, {"clip_id": c.id, "curve": value["curve"]})
+        return set_speed(store, {"clip_id": c.id, "factor": 1.0 if value is None else num(value)})
+    if leaf in ("in_", "out"):
+        new_in = num(value) if leaf == "in_" else float(c.in_)
+        new_out = num(value) if leaf == "out" else float(c.out)
+        if new_out <= new_in + 1e-9:
+            raise ValueError("the clip's end must come after its start (out > in)")
+        return trim_clip(store, {"clip_id": c.id, ("in" if leaf == "in_" else "out"): num(value)})
+    at = _q(store.edl, max(0.0, num(value)))        # leaf == "start"
+    end = at + c.effective_duration
+    for o in lane.clips:
+        if o is not c and isinstance(o, Clip) \
+                and at < o.start + o.effective_duration - _EPS_T and o.start < end - _EPS_T:
+            raise ValueError(f"{c.id} at {at:.2f}s would overlap {o.id} on the main lane "
+                             "(use move_clip to reorder)")
+    return None
 
 
 def add_text(store: EDLStore, args: dict) -> dict:
@@ -8886,6 +9028,7 @@ _FOLLOW_TOOLS = frozenset({
     "ripple_delete", "duplicate_clip", "paste_clips", "remove_silences",
     "remove_fillers", "auto_cut_to_beats", "set_property", "set_speed",
     "freeze_frame", "set_clip_timing", "bulk_delete", "bulk_duplicate",
+    "smooth_slow_motion",   # final sweep 3: lengthens a v1 clip and ripples
 })
 
 #: sound id -> (picture id, sound start, picture start), captured BEFORE an edit.
@@ -8937,10 +9080,36 @@ def _follow_pictures(edl: EDL, links: _Links) -> None:
 
 #: Main-lane edits after which every unlocked overlay (PIP, title, sticker,
 #: caption) is re-anchored to the picture it sat over (`_follow_main_lane`).
+#: `cut_range` (and so remove_silences / remove_fillers, which loop it) runs
+#: the pass itself, once per cut (final QA run 3); `split_at` and
+#: `set_clip_timing` move no picture, and are listed so that holds by rule.
 _LAYER_FOLLOW_TOOLS = frozenset({
     "ripple_delete", "trim_clip", "set_speed", "freeze_frame", "duplicate_clip",
     "move_clip", "reorder_clips", "bulk_delete", "bulk_duplicate", "paste_clips",
+    "split_at", "set_clip_timing", "set_property",
+    # Final sweep 3: smooth_slow_motion ripples v1 like set_speed. add_clip on
+    # v1 (Insert at playhead, a drop) shifts EVERY layer after the insert
+    # point (`_insert_on_main_lane`); this pass puts back the ones over a gap
+    # that absorbed the push, over a picture that did not move or past v1's
+    # end. Off v1 the v1 anchor map is unchanged and the pass returns.
+    "smooth_slow_motion", "add_clip",
 })
+
+#: `set_property` leaves that change where a v1 picture sits or how long it
+#: is — the only set_property calls worth a layer capture (a transform or
+#: colour slider sends many per second).
+_TIMING_PROPS = frozenset({"start", "in", "out", "speed", "freeze"})
+
+
+def _follows_layers(edl: EDL, tool: str, args: dict) -> bool:
+    if tool not in _LAYER_FOLLOW_TOOLS:
+        return False
+    if tool != "set_property":
+        return True
+    path = args.get("path")  # path-guard: exempt (dotted ATTRIBUTE path)
+    res = edl.get_clip(str(args.get("clip_id")))
+    return (isinstance(path, str) and path in _TIMING_PROPS
+            and res is not None and res[0].id == MAIN_LANE_ID)
 
 _EPS_T = 1e-6
 
@@ -8969,9 +9138,19 @@ def _anchor_of(spans: list[tuple[float, float, str]], t: float, is_end: bool) ->
 
 #: (track id, layer id) -> (start, end | None, start anchor, end anchor)
 _Layers = dict[tuple[str, str], tuple[float, float | None, str | None, str | None]]
+#: (track id, layer id) -> (start over nothing, end over nothing)
+_Pinned = dict[tuple[str, str], tuple[bool, bool]]
 
 
-def _capture_layers(edl: EDL) -> tuple[dict, _Layers]:
+def _unanchored_layers(edl: EDL) -> _Pinned:
+    """The layer endpoints that sit over a v1 gap or past v1's end now —
+    kept unanchored through a multi-cut pass (`_cut_source_ranges`)."""
+    return {k: (a_s is None, e is not None and a_e is None)
+            for k, (_s, e, a_s, a_e) in _capture_layers(edl)[1].items()
+            if a_s is None or (e is not None and a_e is None)}
+
+
+def _capture_layers(edl: EDL, pinned: _Pinned | None = None) -> tuple[dict, _Layers]:
     before = _v1_anchor_map(edl)
     spans = sorted((s, e, cid) for cid, (s, e, _sig) in before.items())
     layers: _Layers = {}
@@ -8989,10 +9168,15 @@ def _capture_layers(edl: EDL) -> tuple[dict, _Layers]:
                 if isinstance(oc, Clip):
                     s0 = float(oc.start)
                     layers[(t.id, oc.id)] = (s0, None, _anchor_of(spans, s0, False), None)
+    for k, (pin_s, pin_e) in (pinned or {}).items():
+        if k in layers:
+            s0, e0, a_s, a_e = layers[k]
+            layers[k] = (s0, e0, None if pin_s else a_s, None if pin_e else a_e)
     return before, layers
 
 
-def _follow_main_lane(edl: EDL, before: dict, layers: _Layers, named: set[str]) -> None:
+def _follow_main_lane(edl: EDL, before: dict, layers: _Layers, named: set[str], *,
+                      tool_map=None) -> None:
     """Final QA (K1): an overlay FOLLOWS the main-lane picture it sits over.
 
     CapCut's linked layers: a PIP, title, sticker or caption keeps its offset
@@ -9008,7 +9192,14 @@ def _follow_main_lane(edl: EDL, before: dict, layers: _Layers, named: set[str]) 
     measured from the pictures' own moves, only adds that picture's
     displacement, re-anchors every layer over an untouched picture and
     restores the unanchored ones. A layer the tool itself names is its own
-    edit and is left as the tool put it."""
+    edit and is left as the tool put it.
+
+    `tool_map` is where the tool's own helper put a pre-edit instant when
+    that helper already ripples in the edit's final coordinates
+    (`cut_range`'s interval remap): a layer over the edited picture then
+    gets only what the helper could not know — the part of its picture's
+    move the magnetic repack added (a gap it closed). Without it the helper
+    worked in the picture's pre-edit position and the whole move is added."""
     after = _v1_anchor_map(edl)
     if after == before:
         return
@@ -9032,7 +9223,9 @@ def _follow_main_lane(edl: EDL, before: dict, layers: _Layers, named: set[str]) 
         d = after[anchor][0] - before[anchor][0]
         if after[anchor][2] == before[anchor][2]:
             return t0 + d                           # an untouched picture
-        return t1 + d                               # the edited picture
+        if tool_map is not None:                    # the edited picture
+            return t1 + after[anchor][0] - tool_map(before[anchor][0])
+        return t1 + d
 
     by_key = {(t.id, oc.id): oc for t in edl.tracks if not t.locked for oc in t.clips}
     moved_lanes: set[str] = set()
@@ -9072,13 +9265,96 @@ def _named_ids(args: dict) -> set[str]:
     return {i for i in ids if isinstance(i, str)}
 
 
+#: (captions lane id, cue id) -> (the cue as it was, its sound clip id,
+#: (lane id, src, start, in, speed) of that clip) — captured BEFORE an edit.
+_CueLinks = dict[tuple[str, str], tuple[TextClip, str, tuple[str, str, float, float, float]]]
+
+
+def _capture_cue_links(edl: EDL) -> _CueLinks:
+    """Every unlocked text cue linked to a clip that exists (`TextClip.
+    linked_to`: a caption made from a voiceover / PIP's words)."""
+    hosts = {c.id: (t.id, c) for t in edl.tracks for c in t.clips if isinstance(c, Clip)}
+    out: _CueLinks = {}
+    for t in edl.tracks:
+        if t.locked:
+            continue
+        for x in t.clips:
+            link = getattr(x, "linked_to", None)
+            if isinstance(x, TextClip) and link in hosts:
+                lane, c = hosts[link]
+                out[(t.id, x.id)] = (x.model_copy(deep=True), link,
+                                     (lane, str(c.src), float(c.start), float(c.in_),
+                                      float(c.speed_factor) or 1.0))
+    return out
+
+
+def _sound_host(edl: EDL, link: str, lane_id: str, src: str, a: float) -> Clip | None:
+    """The clip on `lane_id` playing source second `a` of `src` now (a cue's
+    first word; a frame of slack before the in-point) — the linked clip
+    itself when it still does, else another piece of the same file on that
+    lane (the right half of a split). None: that word was cut out."""
+    lane = edl.get_track(lane_id)
+    pieces = [c for c in (lane.clips if lane else []) if isinstance(c, Clip) and str(c.src) == src]
+    pieces.sort(key=lambda c: c.id != link)
+    slack = _tb.frame_duration(edl.canvas.fps)
+    for c in pieces:
+        if c.in_ - slack <= a < c.out - _EPS_T:
+            return c
+    return None
+
+
+def _follow_sounds(edl: EDL, cues: _CueLinks, named: set[str]) -> None:
+    """Final sweep 3 r2: a caption made from a voiceover (or PIP) stays on
+    its words — it is placed from the clip it is linked to, never from the
+    main track.
+
+    Its start and end are on that clip's clock, so every main-lane pass
+    (`_ripple_overlays`, `_shift_overlays_after`, `_retime_overlays_by`,
+    `_follow_main_lane`) moved it with the PICTURES while the voiceover,
+    which does not follow them, stayed: trimming the clip before a
+    voiceover put its captions 2 s ahead of its words, and deleting the clip
+    under it dropped them. After the edit each cue is put back where its
+    words are heard in the clip now — the same source seconds, through the
+    clip's new start / in-point / speed — which also carries it with a
+    moved, trimmed or split voiceover (a split re-links it to the half that
+    plays its words). A cue the tool names is its own edit; one whose words
+    were cut out of every clip on that lane goes (nothing left to caption);
+    one whose clip was deleted stays where it is."""
+    for (tid, xid), (x0, link, (lane_id, src, s0, in0, sp0)) in cues.items():
+        if xid in named:
+            continue
+        track = edl.get_track(tid)
+        if track is None or track.locked:
+            continue
+        a = in0 + (float(x0.start) - s0) * sp0
+        b = in0 + (float(x0.end) - s0) * sp0
+        cue = next((x for x in track.clips if x.id == xid), None)
+        host = _sound_host(edl, link, lane_id, src, a)
+        if host is None:
+            if edl.get_clip(link) is not None and cue is not None:
+                track.clips.remove(cue)              # its words were cut out
+            continue
+        sp = float(host.speed_factor) or 1.0
+        ns = float(host.start) + max(0.0, a - float(host.in_)) / sp
+        ne = float(host.start) + (b - float(host.in_)) / sp
+        if cue is None:
+            cue = x0.model_copy(deep=True)           # a main-lane pass dropped it
+            track.clips.append(cue)
+        cue.start, cue.end = ns, max(ns, ne)
+        cue.linked_to = host.id
+        track.clips.sort(key=lambda o: getattr(o, "start", 0.0))
+
+
 def _call_following(store: EDLStore, tool: str, fn, args: dict, hooks: dict) -> dict:
-    """`_call_guarded`, plus the linked-sound pass (`_follow_pictures`) and
-    the overlay pass (`_follow_main_lane`) inside the same batch, so the edit
-    and what follows it are ONE undo step."""
+    """`_call_guarded`, plus the linked-sound pass (`_follow_pictures`), the
+    overlay pass (`_follow_main_lane`) and the linked-caption pass
+    (`_follow_sounds`) inside the same batch, so the edit and what follows
+    it are ONE undo step."""
     links = _capture_links(store.edl) if tool in _FOLLOW_TOOLS else {}
-    layers = _capture_layers(store.edl) if tool in _LAYER_FOLLOW_TOOLS else None
-    if (not links and not (layers and layers[1])) or not hasattr(store, "batch"):
+    layers = _capture_layers(store.edl) if _follows_layers(store.edl, tool, args) else None
+    cues = (_capture_cue_links(store.edl)
+            if tool in _FOLLOW_TOOLS or tool in _LAYER_FOLLOW_TOOLS else {})
+    if (not links and not cues and not (layers and layers[1])) or not hasattr(store, "batch"):
         return _call_guarded(store, tool, fn, args, hooks)
     before_hash = store.edl.hash()
     with store.batch():
@@ -9087,6 +9363,8 @@ def _call_following(store: EDLStore, tool: str, fn, args: dict, hooks: dict) -> 
             _follow_main_lane(store.edl, layers[0], layers[1], _named_ids(args))
         if links:
             _follow_pictures(store.edl, links)
+        if cues:
+            _follow_sounds(store.edl, cues, _named_ids(args))
     if store.edl.hash() != before_hash:
         summary = result.get("summary", tool) if isinstance(result, dict) else tool
         store.commit(tool, args, str(summary))

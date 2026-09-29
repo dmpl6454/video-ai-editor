@@ -292,12 +292,13 @@ export class ProgramFeed {
    *  `loudnessOffDb`: how far the loudness gain the sound plays is from the
    *  measured one (AudioSink.loudnessOffDb) — over 1 dB every frame is
    *  APPROX 'audio:loudness'; undefined (not measured yet) is no verdict. */
-  classify(limiting?: ReadonlyArray<readonly [number, number]>, loudnessOffDb?: number): Support | null {
+  classify(limiting?: ReadonlyArray<readonly [number, number]>, loudnessOffDb?: number,
+    soundLoading?: ReadonlyArray<readonly [number, number]>): Support | null {
     if (!this.pm || !this.edl) return null
     try {
       return classify(this.pm, this.edl, {
         phase: 1, proxyState: (src) => this.proxyState(src), demote: this.demote,
-        canvasImagePending: this.canvasImagePending ?? undefined, limiting, loudnessOffDb,
+        canvasImagePending: this.canvasImagePending ?? undefined, limiting, loudnessOffDb, soundLoading,
       })
     } catch (e) {
       console.error('[preview engine] classify failed', e)

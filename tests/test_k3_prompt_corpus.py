@@ -650,7 +650,11 @@ CORPUS: list[P] = [
       both(only("B", mono), music_db(lambda g: g < -14)), touch="vm"),
     P("slow down clip 1, then mute it, then flip it",
       only("A", lambda c: slower(c) and muted(c) and flip_h(c))),
-    P("take clip 3, make it 2x and black and white", only("C", lambda c: speed_is(2.0)(c) and mono(c))),
+    # clip 3 is the last clip: its 2x ends the music with the picture (the
+    # same follow "make the 3rd clip twice as fast" allows). Before final
+    # sweep 3 r2 this phrase planned mono on EVERY clip and was rolled back.
+    P("take clip 3, make it 2x and black and white", only("C", lambda c: speed_is(2.0)(c) and mono(c)),
+      touch="vm"),
 
     # ---- vague / nonsense: nothing may change without a real reading -------------------
     P("do something cool", ASK, touch=""),

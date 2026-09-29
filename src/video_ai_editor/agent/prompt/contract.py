@@ -66,7 +66,8 @@ _FAMILY_RX: tuple[tuple[str, str], ...] = (
     ("order", r"\breverse\s+(?:the\s+)?order\b|\bmove\b|\bswap\b|\breorder|\brearrange|\bshove\b|\bswitch\b"
               r"|\bput\s+.*\b(?:first|last|second|third|before|after|at the (?:end|start|beginning)|to the (?:end|start))\b"
               r"|\b(?:put|place|drag|stick|slot|insert)\s+.*\bbetween\b"),
-    ("mute", r"\bun-?mute|\bmute|\bsilence\s+(?:the\s+)?(?:clip|shot|audio|sound|music|it|this|that|everything|all|\w+\s+clip)"
+    ("mute", r"\bun-?mute|\bmute|\bsilence\s+(?:the\s+)?(?:clip|shot|audio|sound|music|it|this|that|everything|all|\w+\s+clip"
+             r"|(?:original|camera|video|footage)\s+(?:audio|sound))"
              r"|\bno sound\b|\bkill the (?:audio|sound)|\b(?:turn|switch) off the (?:audio|sound|music|background music|song)"
              r"|\btake the (?:sound|audio) (?:out|off)|\bwithout sound\b|\bsound off\b|\baudio off\b|\bsound back on\b"
              r"|\bno audio\b|\bwithout audio\b|\b(?:shut|switch|turn) off (?:the |its )?(?:sound|audio)\b|\bsilent\b"
@@ -358,6 +359,10 @@ class _Ctx:
             return [set(got)]  # type: ignore[arg-type]
         if sc.all:
             return [set(self.ids) - ex]
+        if sc.except_refs:
+            # "make it grayscale except clip 2": everything else, never the
+            # selection (final sweep 3 r2 — the inverted edit passed the net)
+            return None if None in ex else [set(self.ids) - ex]
         alts = [set(self.ids)]
         if self.c.selection in self.ids:
             alts.append({self.c.selection})
@@ -599,6 +604,10 @@ _LICENSE: dict[str, Callable[[_Ctx], bool]] = {
         or ("mute" in r.families and r.scope.all) for r in x.c.reads),
     "overlay:change": lambda x: _has(x, "blend") or any("overlay" in r.scope.media for r in x.c.reads)
     or x.c.composite,
+    # A PIP / B-roll that only MOVED IN TIME with the picture under it (P3
+    # layer-follow) is a consequence of the main-lane edit, like a title's
+    # or a caption's; its look stays licensed only by `overlay:change`.
+    "overlay:time": lambda x: _v1_retimed(x) or _LICENSE["overlay:change"](x),
     "sticker:change": lambda x: any("sticker" in r.scope.media for r in x.c.reads) or _v1_retimed(x),
     "text:add": _lic_text_add,
     "text:remove": _lic_text_remove,
@@ -638,7 +647,8 @@ _CATEGORY_WORDS: dict[str, str] = {
     "captions:remove": "removed the captions", "captions:text": "changed the captions' words",
     "captions:style": "restyled the captions", "canvas:size": "changed the frame size",
     "canvas:loudness": "changed the overall loudness", "canvas:export": "changed the export settings",
-    "overlay:change": "changed the overlay clip", "sticker:change": "changed a sticker",
+    "overlay:change": "changed the overlay clip", "overlay:time": "moved the overlay clip in time",
+    "sticker:change": "changed a sticker",
 }
 
 
@@ -658,17 +668,20 @@ def _rule_licensed(ctx: _Ctx) -> list[Violation]:
 # 7. The reply after a rollback
 # --------------------------------------------------------------------------
 
-def rollback_question(messages: list[str]) -> str:
+def rollback_question(messages: list[str], *, preview: bool = False) -> str:
     """"I undid that — <what went wrong>. Which of these did you mean?" — at
     most two reasons, plain words, never check names; ≤ 200 characters (the
     wire schema's question length)."""
     body = "; ".join(m.rstrip(" .?!") for m in messages[:2] if m) or "the result did not match the request"
     body = body[0].upper() + body[1:]
     tail = " Nothing was changed. Which did you mean?"
-    room = 200 - len("I undid that: ") - len(tail)
+    # A preview never applied anything, so there is nothing to "undo": the
+    # plan was judged and not offered (final sweep 3).
+    lead = "I did not offer that plan: " if preview else "I undid that: "
+    room = 200 - len(lead) - len(tail)
     if len(body) > room:
         body = body[:room - 1].rstrip(" ,;—") + "…"
-    return f"I undid that: {body}.{tail}".replace("…." , "…")
+    return f"{lead}{body}.{tail}".replace("…." , "…")
 
 
 __all__ = ["Contract", "ClauseRead", "Violation", "families_of", "rollback_question", "INTENT_FAMILIES"]

@@ -91,6 +91,20 @@ def test_session_proxy_probes_and_returns_the_index(client, tmp_path):
     assert idx["pack_format"].startswith("u32be first")
 
 
+def test_session_proxy_says_whether_the_source_has_pictures(client, tmp_path):
+    """Final sweep 3: an audio-only source (a music bed) has frames 0, and the
+    client took "no frames yet" for "not probed yet" forever, so the bed
+    played silent in Instant preview. The summary now says `has_video`."""
+    sid, src = _session_with_master(client, tmp_path, frames=30)
+    assert _proxy(client, sid, src)["has_video"] is True
+    bed = tmp_path / sid / "uploads" / "bed" / "bed.m4a"
+    bed.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=660:duration=2",
+                    "-c:a", "aac", str(bed)], check=True)
+    body = _proxy(client, sid, bed)
+    assert body["has_video"] is False and body["frames"] == 0 and body["state"] != "failed"
+
+
 def test_session_proxy_refuses_sources_outside_the_session(client, tmp_path):
     sid = client.post("/api/sessions").json()["id"]
     outside = make_barcode_master(tmp_path / "elsewhere.mp4", frames=5, audio=False)

@@ -125,6 +125,33 @@ describe('PreviewController', () => {
     expect(engine().lastLookup!('A')?.info.frames).toBe(300)
   })
 
+  // Final sweep 3 (HIGH): an audio-only source (a music bed, a voice-over)
+  // has frames 0, and the lookup waited for frames > 0 forever: the bed had
+  // no proxy key, so the sound engine took it for silence and the preview
+  // played without it while the chip said nothing.
+  it('accepts an audio-only proxy (frames 0, has_video false) so its sound plays', async () => {
+    const key = 'b'.repeat(24)
+    const { ctl, engine, srv } = setup({
+      '/proxy?': () => ({ status: 200, body: { key, state: 'ready', frames: 0, w: 0, h: 0, spans: 0, has_video: false, silent: false } }),
+      '/frame_map': () => ({ status: 409, body: {} }),
+    })
+    ctl.applyTimeline(edl([['BED', 0, 2, 0]]), H1)
+    await settle()
+    expect(srv.log.filter((l) => l.includes('/proxy?src=BED'))).toHaveLength(1)
+    expect(engine().lastLookup!('BED')?.proxy?.key).toBe(key)
+  })
+
+  it('still waits for a video proxy that has no frames yet (not probed)', async () => {
+    const { ctl, engine } = setup({
+      '/proxy?': () => ({ status: 200, body: { key: 'c'.repeat(24), state: 'pending' } }),
+      '/frame_map': () => ({ status: 409, body: {} }),
+    }, { sourceRetryMs: 1000 })
+    ctl.applyTimeline(edl([['V', 0, 2, 0]]), H1)
+    await settle()
+    expect(engine().lastLookup!('V')).toBeNull()
+    ctl.dispose()
+  })
+
   it('names each source\'s master for the degraded tier (§7): the session file URL of its upload', async () => {
     const { ctl, engine } = setup({ '/proxy?': () => ({ status: 200, body: { key: 'k'.repeat(24), state: 'failed' } }), '/frame_map': () => ({ status: 409, body: {} }) })
     const src = `/wd/${SID}/uploads/clip one/clip one.normalized.mp4`

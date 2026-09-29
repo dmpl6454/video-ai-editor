@@ -178,7 +178,14 @@ export interface PromptPending {
   brain?: string | null
   questions: unknown[]
   expires_in_s?: number
+  // 0.8.0 "Preview, then apply": the card of a previewed plan waiting for
+  // Apply (agent/prompt/preview.py `public_view`). Absent for a question.
+  preview?: unknown
 }
+
+// `GET/PUT /api/settings/prompt` — "Ask before applying Prompt bar edits"
+// (prompt_setting.py). `source: "env"` means VAI_PROMPT_CONFIRM wins.
+export interface PromptSettingsWire { confirm_before_apply: boolean; source: string; default: boolean }
 
 export interface PromptModelRow {
   id: string; installed: boolean; snapshot_path?: string | null
@@ -648,6 +655,16 @@ export const api = {
   // POST …/prompt/answer {token, answers} → SSE (the resumed run).
   promptAnswer: (sid: string, token: string, answers: Record<string, unknown>) =>
     sse(`/sessions/${sid}/prompt/answer`, { token, answers }),
+
+  // A preview card's Apply (true) or Change (false) → SSE: the applied run,
+  // a fresh card when the timeline moved, or the one-line "dropped" reply.
+  promptApply: (sid: string, token: string, apply: boolean) =>
+    sse(`/sessions/${sid}/prompt/answer`, { token, apply }),
+
+  // "Ask before applying Prompt bar edits" (Settings › Prompt bar).
+  promptSettings: () => http<PromptSettingsWire>('GET', '/settings/prompt'),
+  setPromptSettings: (confirmBeforeApply: boolean) =>
+    http<PromptSettingsWire>('PUT', '/settings/prompt', { confirm_before_apply: confirmBeforeApply }),
 
   promptPending: (sid: string) => http<{ pending: PromptPending | null }>('GET', `/sessions/${sid}/prompt/pending`),
 

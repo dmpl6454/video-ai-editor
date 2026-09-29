@@ -167,6 +167,11 @@ class TimelineFacts(BaseModel):
     selection: str | None = None
     playhead: float | None = None
     has_transcript: bool = False
+    #: Distinct audible speech sources (each file the main track plays, the
+    #: voice-over, overlay and audio lanes — `agent/caption_sources`). Over
+    #: one, captions come from auto_caption, which hears every one of them;
+    #: the transcript-only path reads the first main-track clip alone.
+    speech_sources: int = 1
     transcript_pending: bool = False
     transcript_backend: TranscriptBackend = None
     language: str | None = None
@@ -449,6 +454,14 @@ def _spoken_language(ingest_json: Path | None, transcript_language: str | None) 
     return (transcript_language or "").strip().lower() or None
 
 
+def _speech_source_count(edl: Any) -> int:
+    try:
+        from ..caption_sources import speech_sources
+        return max(1, len(speech_sources(edl)))
+    except Exception:  # noqa: BLE001 — a fact must never break planning
+        return 1
+
+
 def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | None = None) -> TimelineFacts:
     """Pure reads of `store` + `ui_state` → TimelineFacts (spec §2.1).
 
@@ -584,6 +597,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         selection=str(selection) if selection else None,
         playhead=float(playhead) if isinstance(playhead, (int, float)) else None,
         has_transcript=words_total > 0, transcript_pending=transcript_pending,
+        speech_sources=_speech_source_count(edl),
         transcript_backend=backend, language=language, words=words_total,
         speech_spans=speech_spans, speech_seconds=speech_seconds, filler_count=filler_count,
         has_music=bool(music_clips), music_ducked=bool(music and music.duck is not None),

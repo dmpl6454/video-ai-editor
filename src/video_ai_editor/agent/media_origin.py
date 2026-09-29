@@ -52,9 +52,50 @@ def record_origin(derived: str | os.PathLike, source: str | os.PathLike) -> Path
     try:
         side = origin_sidecar(derived_p)
         side.write_text(root, encoding="utf-8")
-        return side
     except OSError:
         return None
+    _record_steps(derived_p, source)
+    return side
+
+
+#: `<derived>.steps`: the AI steps a derived file went through, in order
+#: ("reframe", "denoise"), because `.origin` collapses the chain (final sweep
+#: 3 r2 — "make it vertical and clean up the audio" was labelled "(denoised)"
+#: only; the subject-tracked reframe it was cleaned from was never named).
+STEPS_SUFFIX = ".steps"
+
+
+def _step_word(path: str | os.PathLike) -> str | None:
+    stem = Path(str(path)).stem
+    return stem.split("_", 1)[0].lower() if "cache" in Path(str(path)).parts and "_" in stem else None
+
+
+def steps_of(path: str | os.PathLike | None) -> list[str]:
+    """The AI steps `path` went through, oldest first ([] for an upload); a
+    derived file with no `.steps` record is its own one step."""
+    if not path:
+        return []
+    side = Path(str(path) + STEPS_SUFFIX)
+    try:
+        if side.is_file():
+            got = [w.strip() for w in side.read_text(encoding="utf-8").split(",") if w.strip()]
+            if got:
+                return got
+    except (OSError, UnicodeDecodeError):
+        pass
+    word = _step_word(path)
+    return [word] if word and is_derived(path) else []
+
+
+def _record_steps(derived: Path, source: str | os.PathLike) -> None:
+    word = _step_word(derived)
+    chain = [*steps_of(source), *([word] if word else [])]
+    if len(chain) < 2:
+        return                            # one step: the file name already says it
+    try:
+        Path(str(derived) + STEPS_SUFFIX).write_text(",".join(chain), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def origin_of(path: str | os.PathLike | None) -> str:
@@ -81,4 +122,4 @@ def is_derived(path: str | os.PathLike | None) -> bool:
     return bool(path) and origin_sidecar(path).is_file()
 
 
-__all__ = ["ORIGIN_SUFFIX", "origin_sidecar", "record_origin", "origin_of", "is_derived"]
+__all__ = ["ORIGIN_SUFFIX", "STEPS_SUFFIX", "origin_sidecar", "record_origin", "origin_of", "is_derived", "steps_of"]

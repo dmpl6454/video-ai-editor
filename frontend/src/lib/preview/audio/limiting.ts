@@ -1,9 +1,16 @@
-// WHERE THE MASTER LIMITER WORKS (wave E gate RX, finding 3). The client's
-// limiter is a DynamicsCompressorNode (mixGraph.ts); the export's is ffmpeg's
-// `alimiter`. Below the ceiling both are transparent and the offline mix is
-// the server's sample for sample; once summed lanes push the master over it,
-// their attack/release envelopes differ (measured: |Δ| up to 0.254, 0.64 dB
-// per 50 ms block, all within ±50 ms of a server sample over 0.95). So the
+// WHERE THE MASTER LIMITER WORKS (wave E gate RX, finding 3) — for the
+// FALLBACK limiter only. The client's limiter is a port of ffmpeg's
+// `alimiter` in an AudioWorklet (alimiter.ts, limiterWorklet.ts; P2 limiter
+// tail, 0.8.0 final QA), the server's sample for sample, and a plan made for
+// it has no ranges (AudioPlanOptions.exactLimiter). Where AudioWorklet is
+// missing it is a DynamicsCompressorNode (mixGraph.ts), and the rest of this
+// note applies: the server's limiter is ffmpeg's `alimiter`. Below the
+// ceiling both are transparent and the offline mix is the server's sample
+// for sample; once summed lanes push the master over it, their attack/
+// release envelopes differ (measured: |Δ| up to 0.254, 0.75 dB per 50 ms
+// block, and through the compressor's release up to ~91 ms after the last
+// sample over the ceiling — mix_hot 3.20 s, which a test rule of "server
+// near full scale" once called EXACT; see LIMITING_SPREAD). So the
 // plan bounds the PRE-LIMITER peak of every stretch of the programme from the
 // sources' recorded chunk peaks (index.json `audio.chunk_peak`) and calls a
 // stretch whose bound tops the ceiling APPROX (`AudioPlan.limiting`, reason
@@ -23,8 +30,17 @@ import { frameOf, type FpsLike } from '../timeline/timebase'
 import { voicePeakBound } from '../../voice/voiceFx'
 
 /** Samples either side of a stretch over the ceiling that the limiters'
- *  envelopes still touch: alimiter's 5 ms attack look-ahead and 50 ms
- *  release, the compressor's 6 ms look-ahead and 50 ms release — 100 ms. */
+ *  envelopes still touch: alimiter's 5 ms attack look-ahead and its linear
+ *  50 ms release, the compressor's 6 ms look-ahead and its own release
+ *  curve — 100 ms. Measured (P2 limiter tail, Chromium and WebKit, 0.5-30 dB
+ *  over the ceiling for 20 ms-2 s, tones and click bursts, then a tone at 0.3
+ *  or 0.9 of the ceiling): the two agree within 1e-4 per sample at most
+ *  90.6 ms after the last sample over the ceiling (within 0.25 dB per 10 ms
+ *  at most 50.3 ms), and part at most 0.6 ms before the first; on the real
+ *  renders of tests/wk/test_wk_audio.py a range still runs ≥ 19.8 ms past its
+ *  last differing sample. Only the DynamicsCompressorNode FALLBACK needs
+ *  these ranges: the alimiter worklet (limiterWorklet.ts) is the server's
+ *  limiter, and a plan made for it (`exactLimiter`) has none. */
 export const LIMITING_SPREAD = 4800
 /** A resampled clip (varispeed, atempo, a speed curve) can overshoot its
  *  source's sample peak (windowed sinc / WSOLA): +1 dB of margin. */

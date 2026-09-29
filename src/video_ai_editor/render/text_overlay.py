@@ -1595,13 +1595,23 @@ def _layout_window(item: dict) -> tuple[float, float]:
     return float(item["start"]), float(item["end"])
 
 
-def _on_render_clock(items: list[dict], seams: clock.SeamTable) -> list[dict]:
+def _item_clip_id(item: dict) -> str | None:
+    tc = item.get("text_clip")
+    return tc.id if tc is not None else item.get("clip_id")
+
+
+def _on_render_clock(items: list[dict], seams: clock.SeamTable,
+                     linked: dict[str, tuple[float, float] | None] | None = None) -> list[dict]:
     """New item dicts carrying `rs`/`re` — the item's window on the render
     clock — with the items the seams consumed entirely left out. Pure: the
-    input list and its dicts are not touched (a caller may still hold them)."""
+    input list and its dicts are not touched (a caller may still hold them).
+
+    `linked` (`clock.linked_text_windows`): a caption made from a voiceover
+    or PIP plays in that clip's window, not at `render_time(start)` (final
+    sweep 3 r2: a word early after a transition before it)."""
     placed: list[dict] = []
     for it in items:
-        win = clock.render_window(seams, *_layout_window(it))
+        win = clock.text_window(seams, linked or {}, _item_clip_id(it), *_layout_window(it))
         if win is None:
             continue
         placed.append({**it, "rs": win[0], "re": win[1]})
@@ -1837,7 +1847,7 @@ def build_overlay_chain(
             # or the colorchannelmixer branch below would apply it a SECOND
             # time (0.4 baked × aa=0.4 → effective 0.16).
             items.append({"kind": "static", "start": c.start, "end": c.end, "png": png,
-                          "opacity": 1.0,
+                          "opacity": 1.0, "clip_id": c.id,
                           "z": zmap.get(c.id, 0),
                           "sort_start": c.start, "is_sticker": 0})
     for xt in xform_texts:
@@ -1865,7 +1875,7 @@ def build_overlay_chain(
     # Zoom-Ins, measured). Done BEFORE indices are assigned: an item whose
     # window the seams consumed entirely is dropped here, so the `-i` list
     # and the filter labels can never disagree about how many items exist.
-    items = _on_render_clock(items, clock.seam_table(edl))
+    items = _on_render_clock(items, clock.seam_table(edl), clock.linked_text_windows(edl))
     if not items:
         return "", [], source_label
 

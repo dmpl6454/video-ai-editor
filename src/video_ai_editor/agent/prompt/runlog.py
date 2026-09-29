@@ -24,6 +24,7 @@ thread writes it.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,8 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from .service import RUNLOG_FILE
+
+log = logging.getLogger(__name__)
 
 RunStatus = str   # "planning" | "running" | "verifying" | "done" | "failed" | "cancelled" | "clarify"
 
@@ -193,12 +196,14 @@ class RunLog:
         # The run thread and its synthetic-progress ticker both emit; the
         # fold + file rewrite must not interleave.
         self._lock = threading.Lock()
+        #: The first OSError the record's rewrite hit (a full disk), if any.
+        self.persist_error: OSError | None = None
 
     def emit(self, event: dict[str, Any]) -> None:
         with self._lock:
             self._fold(event)
             self.record.events = self.bus.publish(event) + 1
-            write_record(self.session_dir, self.record)
+            self._persist()
 
     def set_status(self, status: RunStatus, *, error: str | None = None) -> None:
         with self._lock:
@@ -216,7 +221,20 @@ class RunLog:
                     if rec.status in ("running", "pending"):
                         rec.status, rec.ended = "cancelled", now
                 self.record.steps = [self._steps[i].as_dict() for i in sorted(self._steps)]
+            self._persist()
+
+    def _persist(self) -> None:
+        """Rewrite the record, best-effort (final sweep 3 r2). On a full disk
+        the rewrite raised out of `set_status` BEFORE the error frame was
+        published, so the client saw only `done` ("Nothing to change"), and
+        an Apply's step was reported failed for the run log's OWN file. The
+        frames are the truth the client needs; the file is a mirror of them."""
+        try:
             write_record(self.session_dir, self.record)
+        except OSError as e:
+            if not self.persist_error:
+                log.warning("prompt run %s: could not write the run record: %s", self.record.run_id, e)
+            self.persist_error = e
 
     def _fold(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
@@ -254,7 +272,7 @@ class RunLog:
         text is THE reply from the executor, not from a flag in the event."""
         with self._lock:
             self.record.reply = text
-            write_record(self.session_dir, self.record)
+            self._persist()
 
 
 __all__ = ["RunBus", "RunLog", "RunRecord", "StepRecord", "new_run_id", "runlog_path",

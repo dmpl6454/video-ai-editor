@@ -214,15 +214,28 @@ def preview_loudness_scope(pl: PreviewLoudness | None) -> Iterator[None]:
         _PREVIEW_LOUDNESS.reset(tok)
 
 
+def preview_peak_path(meas_path: Path) -> Path:
+    """Where the preview tap prints the pre-gain sample peak, next to
+    `meas_path` (render/preview_loudness reads it to know whether the
+    limiter could have engaged at the applied gain)."""
+    meas_path = Path(meas_path)
+    return meas_path.with_name(f"{meas_path.stem}_peak{meas_path.suffix}")
+
+
 def _preview_norm_chain(edl: EDL) -> str:
     """`,ebur128…,volume…,alimiter…` for a preview inside a loudness scope
-    (the leading comma included), else ""."""
+    (the leading comma included), else "". The tap prints the pre-gain
+    integrated loudness to `meas_path` and the pre-gain sample peak (linear,
+    running max) to `preview_peak_path(meas_path)`."""
     pl = _PREVIEW_LOUDNESS.get()
     if pl is None or getattr(edl.canvas, "loudness_lufs", None) is None:
         return ""
     from .. import platformutil as _pu
     meas = _pu.ffmpeg_filter_path(pl.meas_path)
-    return (f",ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.I:file={meas}"
+    peak = _pu.ffmpeg_filter_path(preview_peak_path(pl.meas_path))
+    return (f",ebur128=metadata=1:peak=sample"
+            f",ametadata=mode=print:key=lavfi.r128.I:file={meas}"
+            f",ametadata=mode=print:key=lavfi.r128.sample_peak:file={peak}"
             f",volume={pl.gain_db:.2f}dB,{PREVIEW_LIMITER}")
 
 
@@ -700,8 +713,16 @@ def build_audio_mix(
     first_input_index: int,
     out_label: str = "[afinal]",
     apply_loudnorm: bool = True,
+    main_is_mix: bool = False,
 ) -> tuple[str, list[str], str]:
     """Mix main audio with music + voiceover tracks.
+
+    `main_is_mix`: the caller already summed other sound into
+    `main_audio_label` (a PIP's audio folded into v1). It is then a MIX for
+    the export master (`_export_master(mixed=)`): with Loudness Off the
+    true-peak limiter still runs, where a v1 + loud PIP sum hard-clipped a
+    WAV export (final sweep 3, round 2 — the AAC delivery hold hid it in
+    mp4/m4a).
 
     Returns (filter_chain, extra_inputs, final_label). If no music/vo present
     AND no loudnorm requested, returns ("", [], main_audio_label) — caller
@@ -738,7 +759,7 @@ def build_audio_mix(
         # Still master the speech-only path when a target is set AND we're in
         # export mode (QA-121: gain + true-peak limiter). Preview skips it
         # (see docstring).
-        master = _export_master(edl, mixed=False) if apply_loudnorm else ""
+        master = _export_master(edl, mixed=main_is_mix) if apply_loudnorm else ""
         if master:
             return f"{main_audio_label}{master}{out_label}", [], out_label
         preview_norm = "" if apply_loudnorm else _preview_norm_chain(edl)
@@ -838,7 +859,8 @@ def build_audio_mix(
     # trailing aresample pulls the rate back to 48k — the AAC encoder would
     # otherwise persist 96k, which Safari and a couple of phone browsers
     # reject inside mp4 containers.
-    master = _export_master(edl, mixed=len(final_inputs) > 1) if apply_loudnorm else ""
+    master = (_export_master(edl, mixed=len(final_inputs) > 1 or main_is_mix)
+              if apply_loudnorm else "")
     # QA-082: the preview's static loudness match (empty outside its scope).
     preview_norm = "" if apply_loudnorm else _preview_norm_chain(edl)
 

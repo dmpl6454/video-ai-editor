@@ -452,6 +452,64 @@ def _clarify_plan(routed: Any, brain: str) -> Plan | None:
 _UNDO_HINT = "Undo with ⌘Z."
 _REDO_HINT = "Redo with ⇧⌘Z."
 
+#: A clip id as an op summary spells it ("Muted clip c_8bcef0e2_32fb08").
+_CLIP_ID_RE = re.compile(r"\b(?:clip\s+)?(c_[0-9a-f]{6,}(?:_[0-9a-f]{3,})*)\b", re.I)
+
+
+def history_command(message: str) -> str | None:
+    """`"undo"` / `"redo"` when the WHOLE message is a history command ("undo",
+    "go back", "revert that", "undo the last 3 edits"), else None.
+
+    Final sweep 3 r2 (CRITICAL): any prompt that merely STARTED with undo /
+    revert ("revert clip 2 to normal speed", "undo the black and white",
+    "revert the title") undid the LAST edit at once — not the one it named,
+    with no card and no Apply. Only this whole-message form is a history
+    step; everything else is planned as an edit or answered in words."""
+    from . import slots as _S
+    from .grammar import PHRASES
+
+    t = re.sub(r"^(?:please|pls|ok|okay)\s+|\s+(?:please|pls|now)$", "", _S.normalize(message or "").strip(" .!?"))
+    for verb in ("undo", "redo"):
+        rx = PHRASES.get(verb, ((None,),))[0][0]
+        if rx and re.match(rx, t):
+            return verb
+    return None
+
+
+def friendly_summary(store: Any, summary: str) -> str:
+    """An op summary with clip ids named as the timeline shows them ("Muted
+    Clip 3 'talk.mp4'"), never "Muted clip c_8bcef0e2_32fb08_e51236"."""
+    try:
+        from .change_words import Names
+        names = Names(store.edl, store.edl, Path(store.dir))
+    except Exception:  # noqa: BLE001 — a name must never break the reply
+        return summary
+
+    def _name(m: re.Match) -> str:
+        got = names.clip(m.group(1))
+        return got if not got.startswith("Clip c_") else m.group(0)
+    return _CLIP_ID_RE.sub(_name, summary or "")
+
+
+def last_edit_words(store: Any) -> str | None:
+    last = store.ops.last() if getattr(store, "ops", None) is not None else None
+    if last is None or not getattr(last, "summary", None):
+        return None
+    return friendly_summary(store, str(last.summary)).rstrip(".")
+
+
+def named_undo_reply(store: Any, verb: str) -> str:
+    """What a prompt that names an undo ("undo the black and white") gets:
+    the last edit in words and how to undo it — nothing is changed."""
+    if verb == "redo":
+        return ("Nothing was changed. Say 'redo' (or press ⇧⌘Z) to redo the last undone edit, "
+                "or say the change you want in one line.")
+    last = last_edit_words(store)
+    head = f"Your last edit was “{last}”. " if last else ""
+    return (f"{head}Nothing was changed — I only undo the last edit as a whole. Say 'undo' (or press ⌘Z) "
+            "to undo it, or say the change you want, like 'set clip 2 to normal speed' or "
+            "'remove the black and white look'.")
+
 
 def apply_history_step(store: Any, verb: str) -> tuple[str, dict[str, Any] | None]:
     """Perform `undo` / `redo` on `store` and return `(reply, op_payload)`.
@@ -479,6 +537,7 @@ def apply_history_step(store: Any, verb: str) -> tuple[str, dict[str, Any] | Non
     if verb not in ("undo", "redo"):
         raise ValueError(f"not a history step: {verb!r}")
     undone = store.ops.last() if verb == "undo" else None
+    words = friendly_summary(store, undone.summary) if undone is not None else None
     hash_before = store.edl.hash()
     result = dispatch(store, verb, {})
     if not result.get("ok"):
@@ -487,10 +546,11 @@ def apply_history_step(store: Any, verb: str) -> tuple[str, dict[str, Any] | Non
         last = store.ops.last()
         return f"Redid the last undone edit. {_UNDO_HINT}", last.model_dump() if last else None
     summary = undone.summary if undone is not None else "the last edit"
+    words = (words or summary).rstrip(".")
     op = Op(seq=undone.seq if undone is not None else len(store.ops.ops), ts=time.time(), tool="undo",
             args={}, summary=f"Undo: {summary}", edl_hash_before=hash_before,
             edl_hash_after=store.edl.hash(), by="user")
-    return f"Undid: {summary}. {_REDO_HINT}", op.model_dump()
+    return f"Undid: {words}. {_REDO_HINT}", op.model_dump()
 
 
 async def _history_step(store: Any, plan: Plan, *, history: list[dict]) -> AsyncIterator[dict]:
@@ -536,11 +596,12 @@ async def _history_step(store: Any, plan: Plan, *, history: list[dict]) -> Async
             ops: list[dict[str, Any]] = []
             for _ in range(count):
                 undone = live.ops.last() if verb == "undo" else None
+                words = friendly_summary(live, undone.summary).rstrip(".") if undone is not None else "an edit"
                 reply, op = apply_history_step(live, verb)
                 if op is None:
                     break
                 ops.append(op)
-                done.append(undone.summary if undone is not None else "an edit")
+                done.append(words)
             if not ops:
                 return f"Nothing to {verb}.", []
             past = "Undid" if verb == "undo" else "Redid"
@@ -586,18 +647,30 @@ async def _iter_bus(bus: Any, start: int = 0) -> AsyncIterator[dict]:
 async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, history: list[dict],
                           pre_events: list[dict],
                           consented_downloads: frozenset[str] = frozenset(),
-                          contract_hint: dict[str, Any] | None = None) -> AsyncIterator[dict]:
+                          contract_hint: dict[str, Any] | None = None,
+                          confirm: bool | None = None, mode: str = "run",
+                          preview: dict[str, Any] | None = None,
+                          ui_state: dict | None = None) -> AsyncIterator[dict]:
+    """Start the run thread and stream its bus. `mode="run"` becomes a
+    PREVIEW (a dry run and a confirm card, preview.py) when the plan comes
+    from an on-device brain and "Ask before applying" is on (`confirm=None`
+    reads the setting). `mode="apply"` runs a previewed plan; if its card
+    went stale the thread runs nothing and this stream plans the prompt
+    again (a fresh card) instead of ending."""
     from . import executor
     from .brains.base import BRAIN_LABELS
+    from .preview import wants_preview
     from .runlog import RunBus
 
+    if mode == "run" and wants_preview(plan, confirm):
+        mode = "preview"
     sid = Path(store.dir).name
     bus = RunBus()
     for evt in pre_events:
         bus.publish(evt)
     handle = executor.start_run(_resolver_for(store), sid, plan, facts, prompt=prompt,
                                 history_writer=HISTORY, bus=bus, consented_downloads=consented_downloads,
-                                contract_hint=contract_hint)
+                                contract_hint=contract_hint, mode=mode, preview=preview, ui_state=ui_state)
     label = BRAIN_LABELS.get(plan.brain, plan.brain)
     history.append({"role": "assistant", "content": [
         {"type": "text", "text": provisional_text(label, plan.title or plan.intent, handle.run_id)}]})
@@ -605,6 +678,8 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
         async for evt in _iter_bus(bus, start=len(pre_events)):
             if evt.get("type") == "done" and handle.final_text:
                 _replace_in_place(history, handle.run_id, handle.final_text)
+            if evt.get("type") == "done" and handle.stale:
+                break
             yield evt
     finally:
         # A client that went away mid-run: the route's `finally` will save
@@ -613,6 +688,10 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
         # the run thread's `finalize` replaces it on disk when it is done.
         if handle.final_text:
             _replace_in_place(history, handle.run_id, handle.final_text)
+    if handle.stale:
+        async for evt in prompt_turn(store, prompt, history, ui_state=ui_state, confirm=True,
+                                     replan_note=executor.STALE_PREVIEW_TEXT + " Here is a fresh preview."):
+            yield evt
 
 
 async def _pause(store: Any, plan: Plan, facts: Any, *, prompt: str, history: list[dict],
@@ -650,7 +729,8 @@ async def _replay(store: Any, run_id: str, *, from_index: int = 0) -> AsyncItera
 async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
                       ui_state: dict | None = None, brain: str | None = None,
                       resume_run: str | None = None, from_index: int = 0,
-                      history_text: str | None = None, asked_before: str | None = None) -> AsyncIterator[dict]:
+                      history_text: str | None = None, asked_before: str | None = None,
+                      confirm: bool | None = None, replan_note: str | None = None) -> AsyncIterator[dict]:
     """One prompt turn as an SSE event stream (§4.6): facts → pending check →
     router.plan (emits `brain` events) → clarify-intent or `plan` → start_run
     → subscribe → yield until `done`.
@@ -659,6 +739,11 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
     `history` is the list the chat route saves in its `finally`; the user
     message and the (provisional, then final) assistant reply are appended
     to it, tool blocks never are.
+
+    `confirm` (0.8.0): preview an on-device brain's plan before it runs —
+    None reads "Ask before applying Prompt bar edits". `replan_note`: this
+    turn re-plans a stale preview's prompt (no new user line; the note leads
+    the fresh card).
     """
     from . import pending
     from .brains.base import BRAIN_LABELS, BrainRequest, BrainUnavailable
@@ -679,6 +764,32 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         return
 
     record = pending.load_pending(session_dir)
+    if record is not None and pending.is_preview(record) and replan_note is None:
+        # A preview card is open: "yes" / "apply" / "no" typed as the next
+        # message answers it even when the timeline moved (resume re-plans a
+        # stale card rather than dropping it); anything else drops the card.
+        answers = pending.try_parse_answer(user_message, record)
+        if answers is not None:
+            async for evt in resume(store, record["token"], answers, ui_state,
+                                    history=history, user_message=user_message):
+                yield evt
+            return
+        if history_command(user_message) is not None:
+            # final sweep 3 r2 (CRITICAL): "undo" / "go back" typed over an
+            # open card undid an EARLIER edit (the music bed) while the card
+            # said "Nothing has changed yet". Over a card it means Change.
+            pending.clear_pending(session_dir)
+            text = via(BRAIN_LABELS.get(pending.pending_plan(record).brain, "Recipes")) + (
+                "Dropped the preview — nothing from it was applied, so there was nothing to undo. "
+                "Say 'undo' again (or press ⌘Z) to undo your last edit.")
+            history.append({"role": "user", "content": history_text or user_message})
+            history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+            yield {"type": "text_delta", "text": text}
+            yield {"type": "done"}
+            return
+        notes.append("Dropped the earlier preview — nothing from it was applied.")
+        pending.clear_pending(session_dir)
+        record = None
     if record is not None:
         valid, why = pending.pending_is_valid(record, facts)
         if valid:
@@ -693,7 +804,10 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
             notes.append(f"Dropped the earlier question ({why}).")
         pending.clear_pending(session_dir)
 
-    history.append({"role": "user", "content": history_text or user_message})
+    if replan_note is None:
+        history.append({"role": "user", "content": history_text or user_message})
+    else:
+        notes.insert(0, replan_note)
     req = BrainRequest(prompt=user_message, facts=facts, recipes=cards())
     brain = brain or (os.environ.get("VAI_BRAIN") or "").strip().lower() or None
     if brain in ("", "auto"):
@@ -759,6 +873,15 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         async for evt in _pause(store, plan, facts, prompt=user_message, history=history, ui_state=ui_state):
             yield evt
         return
+    if plan.intent in ("undo", "redo") and history_command(history_text or user_message) is None:
+        # final sweep 3 r2 (CRITICAL): a prompt that only starts with undo /
+        # revert names an edit; undoing the LAST one instead is wrong, and it
+        # changed the timeline with no card. Answer in words, change nothing.
+        text = via(BRAIN_LABELS.get(plan.brain, plan.brain)) + named_undo_reply(store, plan.intent)
+        history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "done"}
+        return
     if plan.intent in ("undo", "redo"):
         # Step-less by design (PLAN_DENY), so it must be taken BEFORE the
         # read-only branch or it is silently a no-op.
@@ -772,8 +895,28 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         yield {"type": "done"}
         return
     async for evt in _run_and_stream(store, plan, facts, prompt=user_message, history=history,
-                                     pre_events=pre_events, contract_hint={}):
+                                     pre_events=pre_events, contract_hint={}, confirm=confirm,
+                                     ui_state=ui_state, preview=_card_note(notes, routed, plan)):
         yield evt
+
+
+def _card_note(notes: list[str], routed: Any, plan: Plan) -> dict[str, Any] | None:
+    """What a preview card says above its lines: this turn's own notes, plus
+    (final sweep 3) the router's "I read that as: …" and the planner's "Not
+    done: '…'" — in the preview flow they were lost, and the card for
+    "screen blend and make it full screen" showed only the blend.
+    `strip_note` is the part that belongs to the card alone (Apply's report
+    must not say "nothing was applied")."""
+    bits = list(notes)
+    reading = str(getattr(routed, "note", None) or "")
+    if reading.startswith("I read that as"):
+        bits.append(reading.rstrip(".") + ".")
+    m = re.search(r"Not done: .*", plan.reply or "")
+    if m:
+        bits.append(m.group(0))
+    if not bits:
+        return None
+    return {"note": " ".join(bits), "strip_note": " ".join(notes) or None}
 
 
 async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict | None = None,
@@ -795,6 +938,12 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
     if record is None or record.get("token") != token:
         yield {"type": "error", "message": "There is no pending question for this session (or the token is stale)."}
         yield {"type": "done"}
+        return
+    if pending.is_preview(record):
+        async for evt in _resume_preview(store, record, answers, history=history, user_message=user_message):
+            yield evt
+        if own_history:
+            HISTORY.save(sid, history)
         return
     try:
         facts = await asyncio.to_thread(build_facts_for, store, ui_state or record.get("ui_state") or None)
@@ -904,6 +1053,14 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
     pre_events = [_brain_event("answered", plan.brain), {"type": "plan", "plan": plan.model_dump()}]
     for evt in pre_events:
         yield evt
+    if plan.intent in ("undo", "redo") and history_command(prompt) is None:
+        text = via(BRAIN_LABELS.get(plan.brain, plan.brain)) + named_undo_reply(store, plan.intent)
+        history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "done"}
+        if own_history:
+            HISTORY.save(sid, history)
+        return
     if plan.intent in ("undo", "redo"):
         async for evt in _history_step(store, plan, history=history):
             yield evt
@@ -925,6 +1082,59 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         yield evt
     if own_history:
         HISTORY.save(sid, history)
+
+
+async def _resume_preview(store: Any, record: dict[str, Any], answers: dict[str, Any], *,
+                          history: list[dict], user_message: str | None) -> AsyncIterator[dict]:
+    """Apply or drop a previewed plan (preview.py). Apply re-runs the SAME
+    plan on the live store — only if the live tree still hashes to the one
+    the card was built from; an expired or stale card is planned again and
+    shown fresh, never applied. No / Change drops it; nothing was committed."""
+    from . import pending
+    from . import preview as _pv
+    from .brains.base import BRAIN_LABELS
+
+    session_dir = Path(store.dir)
+    sid = session_dir.name
+    info = record["preview"]
+    plan = _pv.preview_plan(record)
+    label = BRAIN_LABELS.get(plan.brain, plan.brain)
+    prompt = str(record.get("prompt") or "")
+    ui_state = record.get("ui_state") or None
+    decision = _pv.is_apply_yes(answers.get(_pv.APPLY_KEY))
+    history.append({"role": "user", "content": user_message or ("Apply" if decision else "Change")})
+    pending.clear_pending(session_dir)
+    if decision is not True:
+        text = via(label) + ("Dropped the preview — nothing was changed." if decision is False else
+                             "That was not an answer to the preview, so it was dropped — nothing was changed.")
+        history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "done"}
+        return
+    live = _resolver_for(store)(sid)
+    note = None
+    if float(record.get("expires", 0)) < time.time():
+        note = "That preview expired, so nothing was applied. Here is a fresh one."
+    elif live.edl.hash() != info.get("base_hash"):
+        note = "The timeline changed since the preview, so nothing was applied. Here is a fresh one."
+    if note is not None:
+        async for evt in prompt_turn(store, prompt, history, ui_state=ui_state, confirm=True, replan_note=note):
+            yield evt
+        return
+    try:
+        facts = await asyncio.to_thread(build_facts_for, store, ui_state)
+    except Exception as e:  # noqa: BLE001
+        yield {"type": "error", "message": f"Could not read the timeline: {e}"}
+        yield {"type": "done"}
+        return
+    pre_events = [_brain_event("answered", plan.brain), {"type": "plan", "plan": plan.model_dump()}]
+    for evt in pre_events:
+        yield evt
+    async for evt in _run_and_stream(store, plan, facts, prompt=prompt, history=history, pre_events=pre_events,
+                                     consented_downloads=frozenset(info.get("consented") or ()),
+                                     contract_hint=info.get("contract_hint"), mode="apply", preview=info,
+                                     ui_state=ui_state):
+        yield evt
 
 
 def _pick_label(intent: str) -> str:

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import inspect
 import importlib
+import hashlib
 import json
 import os
 import re
@@ -435,6 +436,26 @@ def resolve_step_args(edl: EDL, args: dict[str, Any], facts: TimelineFacts) -> l
 # side-effect snapshot
 # --------------------------------------------------------------------------
 
+#: Tools that write a transcript into the upload's ingest.json themselves.
+_TRANSCRIBING_TOOLS = frozenset({"transcribe", "auto_caption"})
+
+
+def _has_transcript(path: Path | None) -> bool:
+    if path is None:
+        return False
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    tx = body.get("transcript") if isinstance(body, dict) else None
+    return isinstance(tx, dict) and bool(tx.get("segments") or tx.get("words"))
+
+
+def _transcript_arrived(copy: Path | None, live: Path) -> bool:
+    """The snapshot's bytes had no transcript and the file now has one."""
+    return not _has_transcript(copy) and _has_transcript(live)
+
+
 @dataclass
 class SideEffectSnapshot:
     """Byte copies of the files a step may rewrite outside the EDL. `paths`
@@ -442,6 +463,13 @@ class SideEffectSnapshot:
     failed run CREATED is removed on restore."""
     root: Path
     paths: dict[Path, Path | None] = field(default_factory=dict)
+    #: A dry run restores only the files a STEP changed (`touched`): the
+    #: background transcriber writes the upload's ingest.json at any moment,
+    #: and restoring every file erased a transcript that landed mid-preview.
+    only_touched: bool = False
+    #: file -> the bytes' hash a step left it with. A later write by someone
+    #: else (the transcriber finishing) means the newer bytes win.
+    touched: dict[Path, str | None] = field(default_factory=dict)
 
     @classmethod
     def take(cls, store: EDLStore, facts: TimelineFacts, run_id: str) -> "SideEffectSnapshot":
@@ -464,9 +492,33 @@ class SideEffectSnapshot:
                 snap.paths[src] = None
         return snap
 
+    def fingerprints(self) -> dict[Path, str | None]:
+        out: dict[Path, str | None] = {}
+        for src in self.paths:
+            try:
+                out[src] = hashlib.sha256(src.read_bytes()).hexdigest()
+            except OSError:
+                out[src] = None
+        return out
+
+    def note_changes(self, before: dict[Path, str | None], tool: str) -> None:
+        """Mark the files whose bytes changed while step `tool` ran. A
+        transcript ARRIVING in an ingest.json during a step that does not
+        transcribe is the background transcriber, not the step: not marked."""
+        now = self.fingerprints()
+        for p, h in now.items():
+            if before.get(p) == h:
+                continue
+            if tool not in _TRANSCRIBING_TOOLS and _transcript_arrived(self.paths.get(p), p):
+                continue
+            self.touched[p] = h
+
     def restore(self) -> list[str]:
         restored: list[str] = []
+        now = self.fingerprints() if self.only_touched else {}
         for src, copy in self.paths.items():
+            if self.only_touched and (src not in self.touched or now.get(src) != self.touched[src]):
+                continue
             if copy is None:
                 if src.exists():
                     src.unlink()
@@ -521,6 +573,12 @@ class ExecResult:
     #: K3: why the run was rolled back to a question (blocking checks that
     #: failed, contract violations) — None when it was not.
     rollback: list[dict[str, str]] | None = None
+    #: Preview (0.8.0): the tree a dry run produced (then discarded), or the
+    #: tree an Apply produced that did not match its preview (rolled back).
+    after: EDL | None = None
+    dry_run: bool = False
+    #: Apply only: why the live result differed from the card (rolled back).
+    mismatch: str | None = None
 
     @property
     def applied(self) -> int:
@@ -630,9 +688,12 @@ class _ProgressTicker:
 
 def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: TimelineFacts,
                    *, emit: Emit, cancel_event: threading.Event | None,
-                   plan_id: str, consented: frozenset[str] = frozenset()) -> StepOutcome:
+                   plan_id: str, consented: frozenset[str] = frozenset(),
+                   dry_run: bool = False) -> StepOutcome:
     """One step: guard → resolve sentinels → dispatch (fan-out) → events.
-    Raises on failure; the caller decides optional-vs-required."""
+    Raises on failure; the caller decides optional-vs-required. A `dry_run`
+    (preview.py) keeps `make_shorts` from creating projects: it reports the
+    shorts it WOULD make, and Apply makes them."""
     tool = step.tool
     started = time.monotonic()
     call_id = f"{plan_id}_s{index}"
@@ -688,6 +749,8 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
         if cancel_event is not None and cancel_event.is_set():
             raise JobCancelled()
         dispatch_args = dict(args)
+        if dry_run and tool == "make_shorts":
+            dispatch_args["save_as_sessions"] = False
         if _handler_reports_progress(tool) or n > 1:
             def _sub_progress(p: float, _k=k) -> None:
                 _progress((_k + max(0.0, min(1.0, float(p)))) / n)
@@ -726,6 +789,15 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     return outcome
 
 
+class _DryRunDone(Exception):
+    """Raised at the end of a dry run's batch: the tree it built is kept on
+    the result and the batch restores the store (preview.py)."""
+
+
+class _ApplyMismatch(Exception):
+    """An Apply produced something other than its card said: roll back."""
+
+
 class _NetRollback(Exception):
     """Raised inside the executor's batch so `EDLStore.batch()` restores the
     pre-run tree (K3 safety net)."""
@@ -733,6 +805,11 @@ class _NetRollback(Exception):
     def __init__(self, reasons: list[dict[str, str]]) -> None:
         super().__init__("; ".join(r["message"] for r in reasons))
         self.reasons = reasons
+
+
+#: Render-only tools a dry run skips (preview.DRY_RUN_SKIP; kept here so the
+#: executor does not import the preview module at import time).
+_DRY_RUN_SKIP: frozenset[str] = frozenset({"render_preview", "audit_aesthetic"})
 
 
 #: `VAI_CONTRACT_SHADOW=<path>`: log what the net WOULD roll back (one JSON
@@ -773,14 +850,15 @@ def safety_net(store: EDLStore, plan: Plan, result: "ExecResult", facts: Timelin
     if contract_on and hint.get("contract", True) and prompt and prompt.strip():
         try:
             from .contract import Contract
-            con = Contract.read(prompt, selection=facts.selection, playhead=facts.playhead,
+            said = _contract_words(prompt, plan, facts)
+            con = Contract.read(said, selection=facts.selection, playhead=facts.playhead,
                                 picked=tuple(hint.get("picked") or ()))
             found = [v.as_dict() for v in con.judge(result.edl_before, store.edl)]
             refused = {(r.get("kind"), r.get("message")) for r in (hint.get("refused") or [])}
             if refused and hint.get("picked"):
                 # a pick licenses its family, never the very thing the net
                 # refused on the first run (Final sweep 2)
-                plain = Contract.read(prompt, selection=facts.selection, playhead=facts.playhead)
+                plain = Contract.read(said, selection=facts.selection, playhead=facts.playhead)
                 have = {(v["kind"], v["message"]) for v in found}
                 found += [v.as_dict() for v in plain.judge(result.edl_before, store.edl)
                           if (v.kind, v.message) in refused and (v.kind, v.message) not in have]
@@ -816,10 +894,19 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
              run_id: str | None = None, validator: Callable[[Plan, TimelineFacts], Plan] | None = None,
              wait_transcript: bool = True, consented_downloads: frozenset[str] = frozenset(),
              fetch: Callable[..., None] = _fetch_artefact,
-             contract_hint: dict[str, Any] | None = None) -> ExecResult:
+             contract_hint: dict[str, Any] | None = None,
+             dry_run: bool = False,
+             expect: Callable[[EDLStore, "ExecResult"], str | None] | None = None) -> ExecResult:
     """Execute `plan` on `store` (caller holds the session lock). Returns an
     `ExecResult`; never raises for a step failure — `result.error` carries
     the message and the timeline is guaranteed unchanged in that case.
+
+    `dry_run` (preview.py — `store` is then a scratch copy): every step and
+    the K3 net run as usual, the resulting tree is kept on `result.after`,
+    and then everything is rolled back — no commit, side-effect files
+    restored, render-only tools skipped. `expect` (an Apply): called on the
+    live tree before the commit; a reason rolls the run back and is kept on
+    `result.mismatch` with the tree it would have committed on `result.after`.
 
     `consented_downloads` = the tools the user answered **download** for on
     this run (only `service.resume` can set it, from a `downloads` answer);
@@ -844,7 +931,6 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
     if total == 0:
         return result
 
-    snapshot = SideEffectSnapshot.take(store, facts, run_id)
     skip_index: int | None = None
     if wait_transcript and facts.transcript_pending:
         for i, s in enumerate(steps):
@@ -857,7 +943,6 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
                     result.cancelled = True
                     result.error = "Cancelled — timeline unchanged."
                     emit({"type": "error", "message": result.error})
-                    snapshot.discard()
                     return result
                 break
 
@@ -869,14 +954,17 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
             result.cancelled = True
             result.error = "Cancelled — timeline unchanged."
             emit({"type": "error", "message": result.error})
-            snapshot.discard()
             return result
         except Exception as e:  # noqa: BLE001
             result.error = f"{e}. Timeline unchanged."
             emit({"type": "error", "message": result.error})
-            snapshot.discard()
             return result
 
+    # Taken AFTER the upload-transcript wait (final sweep 3): a transcript
+    # that lands while the run waits for it is part of the baseline, not a
+    # change a rollback or a dry run's restore should undo.
+    snapshot = SideEffectSnapshot.take(store, facts, run_id)
+    snapshot.only_touched = dry_run
     failed_step: tuple[int, Step, Exception] | None = None
     try:
         with store.batch():
@@ -891,13 +979,27 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
                           "status": "ok", "progress": 1.0, "effect": "none",
                           "summary": "upload transcript arrived — nothing to do"})
                     continue
+                if dry_run and step.tool in _DRY_RUN_SKIP:
+                    result.steps.append(StepOutcome(index=i, tool=step.tool, args=[dict(step.args)],
+                                                    status="ok", effect="none"))
+                    emit({"type": "step", "index": i, "total": total, "tool": step.tool, "status": "ok",
+                          "progress": 1.0, "effect": "none", "summary": "runs when you apply"})
+                    continue
+                seen = snapshot.fingerprints() if dry_run else None
                 try:
                     result.steps.append(_dispatch_step(
                         store, step, i, total, facts, emit=emit, cancel_event=cancel_event,
-                        plan_id=validated.id or "p_00000000", consented=consented_downloads))
+                        plan_id=validated.id or "p_00000000", consented=consented_downloads,
+                        dry_run=dry_run))
+                    if seen is not None:
+                        snapshot.note_changes(seen, step.tool)
                 except JobCancelled:
+                    if seen is not None:
+                        snapshot.note_changes(seen, step.tool)
                     raise
                 except Exception as e:  # noqa: BLE001 — every handler error is a step failure
+                    if seen is not None:
+                        snapshot.note_changes(seen, step.tool)
                     if cancel_event is not None and cancel_event.is_set():
                         # The handler noticed the cancel in its own terms
                         # (transcribe raises TranscriptionCancelled, which is
@@ -917,6 +1019,27 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
             net = safety_net(store, validated, result, facts, prompt, contract_hint)
             if net:
                 raise _NetRollback(net)
+            if dry_run:
+                result.after = store.edl.model_copy(deep=True)
+                raise _DryRunDone()
+            if expect is not None:
+                why = expect(store, result)
+                if why:
+                    result.after = store.edl.model_copy(deep=True)
+                    raise _ApplyMismatch(why)
+    except _DryRunDone:
+        # Preview: nothing is kept — the batch put the (scratch) tree back and
+        # any file a step rewrote beside the media is restored byte for byte.
+        result.restored_files = snapshot.restore()
+        snapshot.discard()
+        result.dry_run = True
+        return result
+    except _ApplyMismatch as mm:
+        result.restored_files = snapshot.restore()
+        snapshot.discard()
+        result.mismatch = str(mm)
+        result.new_sessions = _sessions_created(result)
+        return result
     except _NetRollback as nr:
         # K3: the run did something the prompt did not ask for (or did not
         # do what it asked): the batch already put the tree back — one
@@ -1005,6 +1128,14 @@ class RunHandle:
     final_text: str | None = None
     consented_downloads: frozenset[str] = frozenset()
     contract_hint: dict[str, Any] | None = None
+    #: "run" (execute and commit), "preview" (dry run → a confirm card) or
+    #: "apply" (execute the previewed plan, checked against `preview`).
+    mode: str = "run"
+    preview: dict[str, Any] | None = None
+    ui_state: dict | None = None
+    #: Apply only: the live tree no longer hashes to the preview's base, so
+    #: nothing ran — the service plans the prompt again (a fresh card).
+    stale: bool = False
 
     @property
     def bus(self) -> RunBus:
@@ -1119,7 +1250,11 @@ def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResu
     from .service import CLARIFY_TTL_S, question_text, via
     from .brains.base import BRAIN_LABELS
     reasons = result.rollback or []
-    question = rollback_question([r["message"] for r in reasons])
+    question = rollback_question([r["message"] for r in reasons], preview=handle.mode == "preview")
+    # this turn's own note ("Dropped the earlier preview — nothing from it was
+    # applied.") leads the question too (final sweep 3 r2: it was lost here)
+    lead = str((handle.preview or {}).get("strip_note") or "").strip()
+    lead = f"{lead} " if lead else ""
     # never re-offer the kind of edit the net just refused as unasked
     said = " ".join(r["message"] for r in reasons if r.get("kind") == "unasked")
     avoid = {intent for word, intent in (("voice-over", "voiceover"), ("noise reduction", "clean_audio"),
@@ -1144,7 +1279,7 @@ def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResu
                           title="Which edit?", reply=None)
         record = pending.save_pending(Path(store.dir), plan=paused, prompt=prompt, facts=facts, ui_state=None,
                                       rollback={"steps": sig, "reasons": list(reasons)})
-        text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + question_text(q)
+        text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + lead + question_text(q)
         log.set_reply(text)
         log.emit({"type": "text_delta", "text": text})
         log.emit({"type": "clarify", "token": record["token"], "plan_id": paused.id,
@@ -1156,7 +1291,7 @@ def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResu
                       title="Which edit?", reply=None)
     record = pending.save_pending(Path(store.dir), plan=paused, prompt=prompt, facts=facts, ui_state=None,
                                   rollback={"steps": sig, "reasons": list(reasons)})
-    text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + question_text(q)
+    text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + lead + question_text(q)
     log.set_reply(text)
     log.emit({"type": "text_delta", "text": text})
     log.emit({"type": "clarify", "token": record["token"], "plan_id": paused.id,
@@ -1183,11 +1318,27 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
             locks.register_prompt_run(sid, handle.run_id)
             try:
                 store = store_resolver(sid)
+                if handle.mode == "preview":
+                    final_text = _preview_run(handle, store, facts, prompt, log)
+                    return
+                if handle.mode == "apply" and store.edl.hash() != (handle.preview or {}).get("base_hash"):
+                    # Checked again INSIDE the lock: an edit that landed between
+                    # the service's check and this thread taking the lock makes
+                    # the card stale — nothing runs, the service re-plans.
+                    handle.stale = True
+                    final_text = STALE_PREVIEW_TEXT
+                    log.set_status("done")
+                    log.set_reply(final_text)
+                    return
                 result = run_plan(store, handle.plan, facts, emit=log.emit,
                                   cancel_event=handle.cancel_event, prompt=prompt,
                                   run_id=handle.run_id, consented_downloads=handle.consented_downloads,
-                                  contract_hint=handle.contract_hint)
+                                  contract_hint=handle.contract_hint,
+                                  expect=_apply_expect(handle))
                 handle.result = result
+                if result.mismatch:
+                    final_text = _repreview(handle, store, result, facts, prompt, log)
+                    return
                 if result.rollback:
                     final_text = _pause_after_rollback(store, handle, result, facts, prompt, log)
                     return
@@ -1220,9 +1371,11 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
             finally:
                 locks.clear_prompt_run(sid, handle.run_id)
     except Exception as e:  # noqa: BLE001 — the thread must always close the bus
-        final_text = f"Prompt run failed: {type(e).__name__}: {e}"
-        log.set_status("failed", error=final_text)
+        final_text = _run_failed_text(e)
+        # the frame first: it is what the client needs (final sweep 3 r2 —
+        # on a full disk the status write raised and only `done` got out)
         log.emit({"type": "error", "message": final_text})
+        log.set_status("failed", error=final_text)
     finally:
         handle.final_text = final_text
         if not log.bus.closed:
@@ -1234,11 +1387,111 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
                 pass
 
 
+def _contract_words(prompt: str, plan: Plan, facts: TimelineFacts) -> str:
+    """The words the contract judges: the ones the planner READ (final sweep
+    3 r2). "slow down the pour shot" was planned on clip 2 (its media is
+    r_pour) and then judged as "every clip"; "spped up the secnd clip" was
+    planned from the typo-fixed words and judged from the raw ones — both
+    were rolled back with a question."""
+    import re as _re
+    from .expanders import clip_names_to_numbers
+    said = prompt
+    m = _re.search(r"I read that as “([^”]{1,400})”", plan.reply or "")
+    if m:
+        said = m.group(1)
+    try:
+        return clip_names_to_numbers(said, facts)
+    except Exception:  # noqa: BLE001 — the judge must run on the raw words rather than not at all
+        return said
+
+
+#: A full disk, said as the rest of the app says it (main.py's import and
+#: dispatch errors), never as an errno and a path.
+DISK_FULL_TEXT = "The disk is full — free up some space on this Mac and try again."
+
+
+def _run_failed_text(e: BaseException) -> str:
+    import errno as _errno
+    if isinstance(e, OSError) and getattr(e, "errno", None) == _errno.ENOSPC:
+        return DISK_FULL_TEXT
+    return f"Prompt run failed: {type(e).__name__}: {e}"
+
+
+#: What an Apply says when the timeline moved under its card.
+STALE_PREVIEW_TEXT = "The timeline changed since the preview, so nothing was applied."
+
+
+def _apply_expect(handle: RunHandle):
+    if handle.mode != "apply" or not handle.preview:
+        return None
+    from .preview import apply_check
+    return apply_check(handle.preview)
+
+
+def _preview_run(handle: RunHandle, live: EDLStore, facts: TimelineFacts, prompt: str, log: RunLog) -> str:
+    """The dry run (preview.py): the plan on a scratch copy of the session,
+    judged by the K3 net, then a confirm card built from the EDL diff. The
+    live store is only READ (its hash and a deep copy of its tree)."""
+    from . import preview as _pv
+    base_hash = live.edl.hash()
+    before = live.edl.model_copy(deep=True)
+    scratch = _pv.scratch_store(live, handle.run_id)
+    try:
+        result = run_plan(scratch, handle.plan, facts, emit=log.emit, cancel_event=handle.cancel_event,
+                          prompt=prompt, run_id=handle.run_id, consented_downloads=handle.consented_downloads,
+                          contract_hint=handle.contract_hint, dry_run=True)
+        handle.result = result
+        if handle.cancel_event.is_set() and not result.error:
+            # A Cancel acknowledged while the dry run (or its diff) finished:
+            # no card, no question — nothing was, or will be, changed.
+            text = "Cancelled — nothing was changed."
+            log.set_status("cancelled", error=text)
+            log.set_reply(text)
+            log.emit({"type": "text_delta", "text": text})
+            return text
+        if result.rollback:
+            # The same question a real run asks — saved in the LIVE session.
+            return _pause_after_rollback(live, handle, result, facts, prompt, log)
+        if result.error:
+            from .summary import compose_reply
+            log.set_status("cancelled" if result.cancelled else "failed", error=result.error)
+            text = compose_reply(handle.plan, result, None)
+            log.set_reply(text)
+            return text
+        from .changes import canonical
+        fingerprint = canonical(result.after, before, _pv.path_map(scratch, live))
+        return _pv.pause_for_confirm(
+            live, plan=handle.plan, prompt=prompt, facts=facts, before=before, after=result.after,
+            results=result.results_for("make_shorts"), base_hash=base_hash, fingerprint=fingerprint,
+            log=log, ui_state=handle.ui_state, contract_hint=handle.contract_hint,
+            consented=handle.consented_downloads, note=(handle.preview or {}).get("note"),
+            strip_note=(handle.preview or {}).get("strip_note", (handle.preview or {}).get("note")))
+    finally:
+        _pv.discard_scratch(scratch)
+
+
+def _repreview(handle: RunHandle, live: EDLStore, result: ExecResult, facts: TimelineFacts, prompt: str,
+               log: RunLog) -> str:
+    """An Apply whose result differed from its card was rolled back: show
+    what it WOULD do now, as a fresh card (never commit what nobody saw)."""
+    from . import preview as _pv
+    from .changes import canonical
+    before = result.edl_before
+    return _pv.pause_for_confirm(
+        live, plan=handle.plan, prompt=prompt, facts=facts, before=before, after=result.after,
+        results=result.results_for("make_shorts"), base_hash=before.hash(),
+        fingerprint=canonical(result.after, before), log=log, ui_state=handle.ui_state,
+        contract_hint=handle.contract_hint, consented=handle.consented_downloads,
+        note="Applying it came out differently from the preview, so nothing was applied. Here is what it "
+             "would do now.")
+
+
 def start_run(store_resolver: Callable[[str], EDLStore], sid: str, plan: Plan,
               facts: TimelineFacts, *, prompt: str, history_writer: Any = None,
               bus: RunBus | None = None, run_id: str | None = None,
               consented_downloads: frozenset[str] = frozenset(),
-              contract_hint: dict[str, Any] | None = None) -> RunHandle:
+              contract_hint: dict[str, Any] | None = None, mode: str = "run",
+              preview: dict[str, Any] | None = None, ui_state: dict | None = None) -> RunHandle:
     """Spawn the daemon run thread; returns immediately with the handle the
     service subscribes to. `bus` lets the service pre-publish the planning
     events (`brain`, `plan`) on the same bus so a reconnect replays them.
@@ -1247,8 +1500,11 @@ def start_run(store_resolver: Callable[[str], EDLStore], sid: str, plan: Plan,
     session_dir = Path(store_resolver(sid).dir)
     record = RunRecord(run_id=run_id, plan_id=plan.id, prompt=prompt, brain=plan.brain)
     log = RunLog(session_dir, record, bus=bus)
+    if mode not in ("run", "preview", "apply"):
+        raise ValueError(f"unknown run mode {mode!r}")
     handle = RunHandle(run_id=run_id, sid=sid, plan=plan, log=log,
-                       consented_downloads=frozenset(consented_downloads), contract_hint=contract_hint)
+                       consented_downloads=frozenset(consented_downloads), contract_hint=contract_hint,
+                       mode=mode, preview=preview, ui_state=ui_state)
     with _RUNS_GUARD:
         RUNS[sid] = handle
     t = threading.Thread(target=_run_thread, args=(handle, store_resolver, facts, prompt, history_writer),

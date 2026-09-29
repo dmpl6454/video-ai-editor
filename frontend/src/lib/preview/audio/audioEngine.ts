@@ -28,7 +28,8 @@ import { buildAudioPlan, type AudioPlan } from './audioPlan'
 import { limitingFrames } from './limiting'
 import { AudioChunks, chunkReader, type PcmReader } from './audioChunks'
 import { SAMPLE_RATE } from './curves'
-import { LIMITER_WARMUP_S, MixGraph, RAMP_S, renderOffline, sourceRange } from './mixGraph'
+import { BLOCK_SAMPLES, LIMITER_WARMUP_S, MixGraph, RAMP_S, renderOffline, sourceRange } from './mixGraph'
+import { limiterWorkletReady, loadLimiterWorklet } from './limiterWorklet'
 
 const SR = SAMPLE_RATE
 export const WINDOW_S = 4
@@ -37,6 +38,10 @@ export const PREFETCH_S = 8
 /** Suspend the context this long after a stop's ramp (§3.5). */
 const SUSPEND_AFTER_MS = 20
 const WHEN_RUNNING_POLL_MS = 20
+/** soundHold: the sound this far past a start (s) — and the rest of the
+ *  1 s block it reaches into, the graph schedules whole blocks — must be in
+ *  memory before picture and sound run. */
+const HOLD_AHEAD_S = 0.3
 
 export interface AudioEngineOptions {
   chunks?: AudioChunks
@@ -108,6 +113,9 @@ export class AudioEngine implements AudioSink {
   private keys = new Map<string, string | null>()
   /** The context whose output timestamps are of the RENDERED time (WebKit). */
   private renderedTimestamps: AudioContext | null = null
+  /** soundLoadingFrames(), and its key (a change is told). */
+  private loading: Array<[number, number]> = []
+  private loadingKey = ''
   readonly stats = { starts: 0, reanchors: 0, stops: 0, applied: 0, interrupted: 0, missing: 0, warmups: 0 }
 
   constructor(opts: AudioEngineOptions = {}) {
@@ -147,6 +155,7 @@ export class AudioEngine implements AudioSink {
         loudnessGainDb: loudnessDb,
         silent: (src) => this.reader.silent(src),
         peak: (src, a, b) => this.reader.peak?.(src, a, b) ?? null,
+        exactLimiter: this.ctx !== null && limiterWorkletReady(this.ctx),
       })
     } finally {
       this.planning = null
@@ -186,6 +195,63 @@ export class AudioEngine implements AudioSink {
     this.prepare(p.edl, p.placements, p.info)
     if (this.running && this.pending) this.apply(Math.ceil(this.schedSample()))
     this.onLimitingChange?.()
+  }
+
+  /** The live graph's limiter is the alimiter worklet (or it has none): the
+   *  mix over the ceiling is the server's. False before the first prepare. */
+  get exactLimiter(): boolean {
+    return this.graph?.exactLimiter ?? false
+  }
+
+  /** Output frame ranges this run could not play, or cannot yet, because
+   *  their sound chunks were not in memory (final sweep 3, run 3): APPROX
+   *  'audio:pending' — the preview is silent there, the export is not.
+   *  Empty while stopped. */
+  soundLoadingFrames(): Array<[number, number]> {
+    return this.loading
+  }
+
+  /** Re-read the graph's gaps; tell the engine when they changed. */
+  private noteGaps(): void {
+    const g = this.graph
+    const R = (this.program ?? this.pending)?.info.R
+    const frames = g && R && this.running ? limitingFrames(g.soundGaps(), R) : []
+    const key = frames.map(([a, b]) => `${a}-${b}`).join(',')
+    if (key === this.loadingKey) return
+    this.loadingKey = key
+    this.loading = frames
+    this.onLimitingChange?.()
+  }
+
+  /** Before a start at output sample `fromSample` (inside the user's
+   *  gesture): null when the sound under it is in memory; else resumes the
+   *  context, loads it, and resolves true once it is — false after
+   *  `timeoutMs` (INSTANT_PREVIEW_SPEC §11.1: buffering ≤ 700 ms, together
+   *  with the picture). A source with no proxy yet is not waited for (it is
+   *  silence, and the engine labels it). */
+  soundHold(fromSample: number, timeoutMs: number): Promise<boolean> | null {
+    const prog = this.pending ?? this.program
+    if (!prog) return null
+    const p1 = (Math.floor((fromSample + HOLD_AHEAD_S * SR) / BLOCK_SAMPLES) + 1) * BLOCK_SAMPLES
+    const loads: Array<Promise<void>> = []
+    for (const c of prog.plan.clips) {
+      if (!this.keyOf(c.src)) continue
+      const r = sourceRange(c, Math.max(fromSample, c.out0), Math.min(p1, c.out0 + c.n))
+      if (r && !this.reader.ready(c.src, r[0], r[1])) loads.push(this.reader.load(c.src, r[0], r[1]))
+    }
+    if (!loads.length) return null
+    const ctx = this.context_()
+    if (ctx.state !== 'running') void ctx.resume().catch(() => { /* reported by statechange */ })
+    const later = this.opts.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
+    // a hold nobody started after (paused meanwhile): suspend what we resumed
+    const token = this.stopToken
+    later(() => {
+      if (token === this.stopToken && !this.running && ctx.state === 'running') this.suspendOwn(ctx)
+    }, timeoutMs + 100)
+    return new Promise<boolean>((resolve) => {
+      later(() => resolve(false), timeoutMs)
+      void Promise.allSettled(loads).then(() => resolve(true))
+    })
   }
 
   /** Output frame ranges where the master limiter may work (APPROX). */
@@ -328,10 +394,20 @@ export class AudioEngine implements AudioSink {
 
   private context_(): AudioContext {
     if (!this.ctx) {
-      this.ctx = (this.opts.createContext ?? makeContext)()
-      this.ctx.addEventListener?.('statechange', () => this.onState())
+      const ctx = (this.opts.createContext ?? makeContext)()
+      this.ctx = ctx
+      ctx.addEventListener?.('statechange', () => this.onState())
+      void loadLimiterWorklet(ctx).then((ok) => { if (ok && this.ctx === ctx) this.limiterReady() })
     }
     return this.ctx
+  }
+
+  /** The alimiter worklet is registered on the context: the graph's limiter
+   *  stages move onto it, and the plans drop their `limiting` ranges (the
+   *  mix over the ceiling is the server's now) — the engine reclassifies. */
+  private limiterReady(): void {
+    this.graph?.upgradeLimiter()
+    for (const p of [this.program, this.pending]) if (p) this.refreshLimiting(p)
   }
 
   private onState(): void {
@@ -459,6 +535,7 @@ export class AudioEngine implements AudioSink {
     this.stopTimer()
     const g = this.graph
     if (g && this.ctx) g.stopAll(this.ctx.currentTime, Math.max(0.001, rampMs / 1000))
+    this.noteGaps()
   }
 
   private startTimer(): void {
@@ -491,9 +568,11 @@ export class AudioEngine implements AudioSink {
         if (this.running && this.graph === g) {
           const q = Math.max(0, Math.floor(this.schedSample()))
           g.schedule(q, q + WINDOW_S * SR)
+          this.noteGaps()
         }
       })
     }
+    this.noteGaps()
   }
 
   /** Render output samples [p0, p1) of the current program offline — the

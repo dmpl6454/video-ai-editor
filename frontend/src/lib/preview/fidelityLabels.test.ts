@@ -15,6 +15,7 @@ describe('the ≈ chip words', () => {
     expect(approxLabel('audio:voice:reverb')).toBe('Voice effect: Hall')
     expect(approxLabel('blend:soft_light')).toBe('Blend: Soft Light')
     expect(approxLabel('audio:limiting')).toBe('Limiter on loud sound')
+    expect(approxLabel('audio:pending')).toBe('Sound loading')
     expect(approxLabel('something:new')).toBe('something:new')
     expect(approxSummary(['audio:voice:deep', 'anim:in:spin', 'audio:voice:deep']))
       .toBe('Approximate preview: Voice effect: Deep, Spin In animation. The export is exact.')

@@ -9,7 +9,7 @@ import * as dv from '../lib/dragVisuals'
 import { baseName, isAudioPath } from '../lib/paths'
 import { keyframeTimes } from '../lib/overlay'
 import {
-  drawnSpan, edlTimeFromOutput, layoutTime, renderTime, v1Layout,
+  drawnSpan, edlTimeFromOutput, layoutTime, renderTime, v1Layout, withLinkedText,
   type LayoutClip, type V1Layout,
 } from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
@@ -434,8 +434,10 @@ export function Timeline() {
     const lc: LayoutClip[] = v1.clips.filter(isMediaClip).map((c) => ({
       id: c.id, start: c.start, duration: clipDuration(c),
     }))
-    const layout = v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration })),
-      edl?.canvas?.fps)
+    // `withLinkedText`: a caption made from a voiceover / PIP is drawn on
+    // that clip's clock (final sweep 3 r2), as the export plays it.
+    const layout = withLinkedText(v1Layout(lc, trs.map((tr) => ({ at: tr.at, duration: tr.duration })),
+      edl?.canvas?.fps), edl)
     return { ...layout, clips: lc, layout }
   }, [edl])
 
@@ -1379,12 +1381,13 @@ export function Timeline() {
         // this label sits under are render time. Properties shows the EDL's
         // own (layout) values; that is its coordinate space.
         edgeSec = side === 'l' ? r.start : r.end
-        label = `${formatTimecode(renderTime(v1Seams, r.start), fps)} → ${formatTimecode(renderTime(v1Seams, r.end), fps)}`
+        const oc = overlayClockOf(drag.clipId, drag.origStart)
+        label = `${formatTimecode(oc.toDrawn(r.start), fps)} → ${formatTimecode(oc.toDrawn(r.end), fps)}`
       }
       // Overlay edges are layout values here and the guide must sit on the
       // pulled lane. Media edges stay in the clip's own space: a v1 clip's pull
       // is a per-clip slot (`v1Shift`), not a coordinate.
-      if (drag.clipKind !== 'media') edgeSec = renderTime(v1Seams, edgeSec)
+      if (drag.clipKind !== 'media') edgeSec = overlayClockOf(drag.clipId, drag.origStart).toDrawn(edgeSec)
       const ex = labelWidth + Math.max(0, edgeSec) * zoom
       ctx.strokeStyle = dv.ACCENT
       ctx.lineWidth = dv.DRAG_BORDER_W
@@ -1703,9 +1706,23 @@ export function Timeline() {
   // seam's layout time — the documented snap rule), then snapped against the
   // EDL's own edges. Shared by the live guide and the release path so the
   // preview is the landing.
-  function overlayEdgeDelta(origEdge: number, dt: number, ignoreClipId?: string): number {
-    const target = layoutTime(v1Seams, renderTime(v1Seams, origEdge) + dt)
+  function overlayEdgeDelta(origEdge: number, dt: number, ignoreClipId?: string, origStart = origEdge): number {
+    const oc = overlayClockOf(ignoreClipId, origStart)
+    const target = oc.fromDrawn(oc.toDrawn(origEdge) + dt)
     return snapTime(Math.max(0, target), ignoreClipId) - origEdge
+  }
+
+  // An overlay's drawn (render) clock. A caption LINKED to a voiceover / PIP
+  // (`linkedTextSpans`, final sweep 3 r2) is drawn pulled by that clip's
+  // pull, so a drag moves it by exactly the pointer's travel; `renderTime` /
+  // `layoutTime` would jump it by the difference (a word, after a 1 s fade).
+  function overlayClockOf(clipId: string | undefined, origStart: number) {
+    const lk = clipId ? v1LayoutAll.linked?.get(clipId) : undefined
+    if (!lk) {
+      return { toDrawn: (t: number) => renderTime(v1Seams, t), fromDrawn: (r: number) => layoutTime(v1Seams, r) }
+    }
+    const pull = origStart - lk.start
+    return { toDrawn: (t: number) => t - pull, fromDrawn: (r: number) => r + pull }
   }
 
   // A trimmed clip's current END in its own space. Media: the EFFECTIVE end
@@ -1726,7 +1743,7 @@ export function Timeline() {
     const origEdge = side === 'l' ? drag.origStart : trimOrigEnd(drag)
     const moved = drag.clipKind === 'media'
       ? snapTime(origEdge + dt, drag.clipId)
-      : origEdge + overlayEdgeDelta(origEdge, dt, drag.clipId)
+      : origEdge + overlayEdgeDelta(origEdge, dt, drag.clipId, drag.origStart)
     return toFrameGrid(moved, fps) - origEdge
   }
 
@@ -1774,9 +1791,10 @@ export function Timeline() {
     const dt = dxPx / zoom
     const durSec = draggedClip ? clipDuration(draggedClip) : drag.origOut - drag.origIn
     const isMedia = drag.clipKind === 'media'
+    const oclock = overlayClockOf(drag.clipId, drag.origStart)
     const raw = isMedia
       ? Math.max(0, drag.origStart + dt)
-      : Math.max(0, layoutTime(v1Seams, renderTime(v1Seams, drag.origStart) + dt))
+      : Math.max(0, oclock.fromDrawn(oclock.toDrawn(drag.origStart) + dt))
     // Snap whichever edge is nearer a target: the start, or the end.
     let snapped = raw
     let snapT: number | null = null
@@ -1801,7 +1819,7 @@ export function Timeline() {
     // start; every other lane draws at render time.
     const drawnOf = (t: number) => (dest?.id === 'v1'
       ? t - (v1Shift.get(drag.clipId) ?? 0)
-      : renderTime(v1Seams, t))
+      : isMedia ? renderTime(v1Seams, t) : oclock.toDrawn(t))
     const landT = willReorder && dest ? dragResolve.reorderLanding(dest, newStart, drag.clipId) : newStart
     const rawX = (hc ? hc.x : labelWidth + drag.origStart * zoom) + (px - drag.grabX)
     const moved = !refused && (laneChange || Math.abs(newStart - drag.origStart) > 1e-9)

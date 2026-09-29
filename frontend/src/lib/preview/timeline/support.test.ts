@@ -180,6 +180,26 @@ describe('support.classify (§7)', () => {
       { k0: pm.clipStart[1], k1: pm.clipStart[1] + 1, mode: MODE_PENDING, reasons: ['proxy:pending'] }])
   })
 
+  // Final sweep 3 (HIGH): a music bed whose proxy was not known yet played
+  // silent in Instant preview and the range still read EXACT (no chip). A
+  // lane clip whose source has no proxy yet is APPROX 'audio:pending' over
+  // its window; a muted lane says nothing (nothing is missing).
+  it('a lane clip whose sound is not loaded yet is APPROX audio:pending, not EXACT silence', () => {
+    const bedOnly = (muted: boolean) => mapOf(gaps, (e) => {
+      const music = e.tracks!.find((t) => t.id === 'music')!
+      ;(music as Record<string, unknown>).muted = muted
+      ;(music.clips[0] as Record<string, unknown>).src = 'bed'
+      ;(music.clips[0] as Record<string, unknown>).out = 1.0
+    })
+    const { edl, pm } = bedOnly(false)
+    const s = classify(pm, edl, { phase: 1, proxyState: (src) => (src === 'bed' ? 'pending' : 'ready') })
+    expect(s.ranges[0]).toEqual({ k0: 0, k1: 30, mode: MODE_APPROX, reasons: ['audio:pending'] })
+    expect(classify(pm, edl, { phase: 1 }).ranges[0].mode).toBe(MODE_EXACT)
+    const muted = bedOnly(true)
+    const m = classify(muted.pm, muted.edl, { phase: 1, proxyState: (src) => (src === 'bed' ? 'pending' : 'ready') })
+    expect(m.ranges.some((r) => r.reasons.includes('audio:pending'))).toBe(false)
+  })
+
   it('a structural mismatch (R14) demotes exactly its range to BAKED', () => {
     const { edl, pm } = mapOf(gaps)
     const s = classify(pm, edl, { phase: 1, demote: [[10, 20]] })
@@ -234,6 +254,17 @@ describe('support.classify (§7)', () => {
     expect(s.ranges.filter((r) => r.reasons.includes('audio:limiting')).map((r) => [r.k0, r.k1, r.mode]))
       .toEqual([[0, 5, MODE_APPROX], [20, pm.total, MODE_APPROX]])
     expect(classify(pm, edl, { phase: 1, limiting: [] }).ranges.some((r) => r.reasons.includes('audio:limiting'))).toBe(false)
+  })
+
+  // Final sweep 3, run 3: sound the live preview could not play because its
+  // chunks were not in memory yet (AudioSink.soundLoadingFrames) is silence
+  // the export does not have — APPROX 'audio:pending', never EXACT.
+  it('ranges whose sound is still loading are APPROX audio:pending', () => {
+    const { edl, pm } = mapOf(gaps)
+    const s = classify(pm, edl, { phase: 1, soundLoading: [[-3, 5], [20, 1e9]] })
+    expect(s.ranges.filter((r) => r.reasons.includes('audio:pending')).map((r) => [r.k0, r.k1, r.mode]))
+      .toEqual([[0, 5, MODE_APPROX], [20, pm.total, MODE_APPROX]])
+    expect(classify(pm, edl, { phase: 1, soundLoading: [] }).ranges.some((r) => r.reasons.includes('audio:pending'))).toBe(false)
   })
 
   it('a non-standard project rate refuses the engine (R1)', () => {

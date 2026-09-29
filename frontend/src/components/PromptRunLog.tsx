@@ -18,7 +18,7 @@ import { useState } from 'react'
 import { useStore } from '../store'
 import { toast } from '../toast'
 import { usePromptStore, isBusy } from '../lib/promptStore'
-import { brainLabel, createdProjects, humanBytes, humanDuration, type ChildRun, type StepRow, type VerifyCheck } from '../lib/promptEvents'
+import { brainLabel, createdProjects, humanBytes, humanDuration, replySentence, RUN_WITHOUT_RESULT, type ChildRun, type StepRow, type VerifyCheck } from '../lib/promptEvents'
 import { errorMessage } from '../store'
 import { checksHeadline, checkValues, shownChecks } from '../lib/checkProse'
 import { editorProse, toolTitle } from '../lib/opLabels'
@@ -57,15 +57,21 @@ export function stepSummary(s: StepRow): string {
  *  nothing is NOT a green tick, and a replacement is said out loud. */
 export function collapsedSummary(p: {
   steps: readonly StepRow[]; verify: { checks: VerifyCheck[] } | null; reply: string; headline: string | null
+  nothing?: boolean
 }): { tone: 'pass' | 'fail' | 'info'; text: string } {
   const failed = !!p.verify && p.verify.checks.some((c) => c.pass === false && c.headline !== false)
   if (failed) return { tone: 'fail', text: p.headline ?? 'A check failed' }
+  // A preview that would change nothing: its dry-run steps are not "done"
+  // (final sweep 3 r2 — it read "✓ 1 step done").
+  if (p.nothing) return { tone: 'info', text: `Nothing to change — ${editorProse(firstSentence(replySentence(p.reply)))}` }
   const real = p.steps.filter((s) => s.tool !== 'verify_render')
   const applied = real.filter((s) => s.status === 'ok' && s.effect !== 'none')
   const notice = real.map((s) => s.summary ?? '').find((t) => /^replaced\b/i.test(t.trim()))
   if (notice) return { tone: 'info', text: editorProse(notice) }
   if (applied.length === 0) {
-    const why = editorProse(firstSentence(p.reply)) || 'Nothing to change'
+    // No reply at all: the run ended without reporting (a full disk) — not
+    // "Nothing to change" (final sweep 3 r2).
+    const why = editorProse(firstSentence(p.reply)) || (p.reply.trim() ? 'Nothing to change' : RUN_WITHOUT_RESULT)
     return { tone: 'info', text: why }
   }
   return { tone: 'pass', text: p.headline ?? `${applied.length} step${applied.length === 1 ? '' : 's'} done` }
@@ -85,6 +91,7 @@ export function PromptRunLog() {
   const steps = usePromptStore((s) => s.steps)
   const verify = usePromptStore((s) => s.verify)
   const reply = usePromptStore((s) => s.reply)
+  const nothingToApply = usePromptStore((s) => !!s.nothingToApply)
   const lastError = usePromptStore((s) => s.lastError)
   const opSeen = usePromptStore((s) => s.opSeen)
   const opRef = usePromptStore((s) => s.opRef)
@@ -127,7 +134,7 @@ export function PromptRunLog() {
 
   const collapsed = status === 'done' && openFor !== runKey
   if (collapsed) {
-    const chip = collapsedSummary({ steps, verify, reply, headline: checksHeadline(verify) })
+    const chip = collapsedSummary({ steps, verify, reply, headline: checksHeadline(verify), nothing: nothingToApply })
     const g: IconName = chip.tone === 'fail' ? 'close' : chip.tone === 'info' ? 'info' : 'check'
     return (
       <section className="prompt-log is-collapsed" aria-label="Prompt run">

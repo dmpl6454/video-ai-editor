@@ -41,6 +41,9 @@ export interface TextClip {
   anim_out?: string | null
   anim_dur?: number | null
   speaker?: string | null
+  /** A caption made from a voiceover / PIP clip's words: that clip's id. Its
+   *  start/end are on the clip's clock (`timelineLayout.linkedTextSpans`). */
+  linked_to?: string | null
 }
 
 export type AnyClip = Clip | TextClip

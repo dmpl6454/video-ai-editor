@@ -39,6 +39,14 @@ _ISOLATED_DATA_ROOT = Path(tempfile.mkdtemp(prefix="vae-test-user-data-"))
 # before any proxy below can redirect it: name its directory first (review
 # RD3 — test runs appended to, and rotated, the owner's app.log).
 os.environ.setdefault("VAI_LOG_DIR", str(_ISOLATED_DATA_ROOT / "logs"))
+# 0.8.0 "Preview, then apply": the key-free Prompt bar dry-runs a plan and
+# waits for Apply by default. The prompt suites test PLAN SEMANTICS — what a
+# phrasing commits — so their harness runs with the auto-apply switch (the
+# setting "Ask before applying Prompt bar edits" OFF), explicitly, here.
+# The preview suites (tests/test_prompt_preview*.py) turn it back on per test
+# with monkeypatch.setenv("VAI_PROMPT_CONFIRM", "1"); one test pins the
+# shipped default (ON) with the variable removed.
+os.environ.setdefault("VAI_PROMPT_CONFIRM", "0")
 
 from video_ai_editor import platformutil  # noqa: E402
 from video_ai_editor.api import hardening as _hardening  # noqa: E402

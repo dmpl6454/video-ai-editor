@@ -177,7 +177,10 @@ describe('lanes (music / voice-over / audio)', () => {
     const v = one(p, 'v')
     expect(v.out0).toBe(1800 * 48)
     expect(v.n).toBe(48000)                                  // all of its 1 s
-    expect(one(p, 'late').out0).toBe(2500 * 48)
+    // 'late' (laid 0.2 s after v's end) is pulled by the 0.5 s seam but never
+    // before v, which plays whole to 2.8, stops (final sweep 3, round 2:
+    // `schema.sound_render_windows` — it played 0.3 s over v from 2.5)
+    expect(one(p, 'late').out0).toBe(2800 * 48)
   })
 
   it('a split voice-over across a seam stays back to back (one run, one pull)', () => {

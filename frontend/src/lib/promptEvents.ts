@@ -81,10 +81,45 @@ export interface VerifyCheck {
 export interface VerifyEvent {
   type: 'verify'; plan_id: string; checks: VerifyCheck[]; passed: number; total: number; rendered: boolean
 }
-export interface ClarifyEvent { type: 'clarify'; token: string; plan_id: string; questions: NeedsInput[]; expires_in_s: number }
+/** 0.8.0 "Preview, then apply": what a dry run WOULD change, from the EDL
+ *  diff (agent/prompt/preview.py). Rides on the `clarify` frame whose only
+ *  question is Apply, so a client that does not know it still gets a yes/no. */
+export interface PreviewInfo {
+  summary: string
+  lines: string[]
+  more: number
+  total: number
+  /** The lines past the cap ("and N more changes" opens to show them). */
+  hidden?: string[]
+  note?: string | null
+  nothing_changed?: string
+}
+export interface ClarifyEvent {
+  type: 'clarify'; token: string; plan_id: string; questions: NeedsInput[]; expires_in_s: number
+  preview?: PreviewInfo | null
+}
+
+/** A wire `preview` → PreviewInfo, or null when it is not one (tolerant of
+ *  an older or partial backend, like every other reader here). */
+export function normalizePreview(raw: unknown): PreviewInfo | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const lines = Array.isArray(r.lines) ? r.lines.filter((x): x is string => typeof x === 'string') : []
+  if (typeof r.summary !== 'string' || !lines.length) return null
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d)
+  return {
+    summary: r.summary,
+    lines,
+    more: Math.max(0, num(r.more, 0)),
+    total: Math.max(lines.length, num(r.total, lines.length)),
+    hidden: Array.isArray(r.hidden) ? r.hidden.filter((x): x is string => typeof x === 'string') : [],
+    note: typeof r.note === 'string' && r.note ? r.note : null,
+    nothing_changed: typeof r.nothing_changed === 'string' ? r.nothing_changed : 'Nothing has changed yet.',
+  }
+}
 
 export type PromptEvent =
-  | { type: 'text_delta'; text: string }
+  | { type: 'text_delta'; text: string; outcome?: string }
   | { type: 'tool_use'; name: string; args: Record<string, unknown>; id: string }
   | { type: 'tool_result'; name: string; result: unknown; id: string; is_error?: boolean }
   | { type: 'op'; op: Op }
@@ -132,7 +167,11 @@ export interface StepRow {
   progress?: number; summary?: string; effect?: 'none'; error?: string
   args?: Record<string, unknown>; result?: unknown
 }
-export interface ClarifyState { token: string; planId: string; questions: NeedsInput[]; expiresInS: number }
+export interface ClarifyState {
+  token: string; planId: string; questions: NeedsInput[]; expiresInS: number
+  /** Set when this pause is a preview card (Apply / Change), not a question. */
+  preview?: PreviewInfo | null
+}
 /** A project a shorts run created and finished (`finish_short` records, QA-068). */
 export interface ChildRun { session: string; name: string | null; status: string }
 
@@ -153,11 +192,15 @@ export interface PromptRunState {
   unknownEvents: number
   /** Projects the run created and finished, in order (QA-068: Open buttons). */
   children: ChildRun[]
+  /** The preview found nothing to change (`text_delta.outcome`
+   *  "nothing_to_apply"): its dry-run steps are not "done" (final sweep 3 r2). */
+  nothingToApply?: boolean
 }
 
 export const EMPTY_RUN: PromptRunState = {
   status: 'idle', brain: null, attempts: [], plan: null, steps: [], verify: null,
   reply: '', clarify: null, lastError: null, opSeen: false, opRef: null, unknownEvents: 0, children: [],
+  nothingToApply: false,
 }
 
 /** The state a fresh turn starts from: everything cleared, status `planning`. */
@@ -241,7 +284,8 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
   switch (evt.type) {
     case 'text_delta': {
       const e = evt as Extract<PromptEvent, { type: 'text_delta' }>
-      return { ...state, reply: state.reply + e.text }
+      return { ...state, reply: state.reply + e.text,
+               nothingToApply: !!state.nothingToApply || e.outcome === NOTHING_TO_APPLY }
     }
     case 'brain': {
       const e = evt as BrainEvent
@@ -290,7 +334,8 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
     case 'clarify': {
       const e = evt as ClarifyEvent
       return { ...state, status: 'clarify',
-               clarify: { token: e.token, planId: e.plan_id, questions: e.questions, expiresInS: e.expires_in_s } }
+               clarify: { token: e.token, planId: e.plan_id, questions: e.questions, expiresInS: e.expires_in_s,
+                          preview: normalizePreview(e.preview) } }
     }
     case 'op':
       return { ...state, opSeen: true, opRef: promptOpRef((evt as Extract<PromptEvent, { type: 'op' }>).op) }
@@ -330,13 +375,49 @@ export function runProgress(steps: StepRow[]): number | null {
 /** The one-line terminal announcement for the live region (spec §5.4). */
 export function terminalAnnouncement(state: PromptRunState): string | null {
   if (state.status === 'done') {
+    // Final sweep 3 r2: a preview that would change nothing streamed its dry
+    // run's steps as "ok" and was announced "Done" — nothing was done.
+    if (state.nothingToApply) return `Nothing to change — ${replySentence(state.reply)}`
     if (state.verify) return `Done — ${state.verify.passed} of ${state.verify.total} checks passed`
+    if (state.plan && state.plan.steps.length && !state.reply.trim() && !state.opSeen) return RUN_WITHOUT_RESULT
+    // An undo / redo changes the timeline with no plan steps: say what it
+    // undid, not "Answered" (final sweep 3 r2)
+    if (!(state.plan && state.plan.steps.length) && state.opSeen && state.reply.trim()) return replySentence(state.reply)
     return state.plan && state.plan.steps.length ? 'Done' : 'Answered'
   }
   if (state.status === 'cancelled') return 'Cancelled — the timeline is unchanged'
   if (state.status === 'error') return `Failed — ${state.lastError ?? 'unknown error'}`
-  if (state.status === 'clarify') return 'One question before running'
+  if (state.status === 'clarify') {
+    const p = state.clarify?.preview
+    return p ? previewAnnouncement(p) : 'One question before running'
+  }
   return null
+}
+
+/** The `text_delta.outcome` of a preview that would change nothing. */
+export const NOTHING_TO_APPLY = 'nothing_to_apply'
+/** A run that ended with a plan but no text, op or card (a failure the
+ *  server could not report): never "Nothing to change" (final sweep 3 r2). */
+export const RUN_WITHOUT_RESULT = 'The run ended without a result — nothing was changed.'
+
+/** A reply without its "via Recipes — " lead, for a one-line announcement. */
+export function replySentence(reply: string): string {
+  return (reply ?? '').replace(/^\s*via [^—\n]{1,40} — /, '').trim()
+}
+
+/** What a screen reader hears when a preview card appears (spec: the card
+ *  and the result are both announced). */
+export function previewAnnouncement(p: PreviewInfo): string {
+  // Final sweep 3: the note ("The timeline changed since the preview, so
+  // nothing was applied") and what the card would do were never heard — a
+  // screen reader got only the count, with focus back on Apply.
+  const n = p.total
+  const note = p.note ? `${p.note.trim().replace(/[.!?]?$/, '.')} ` : ''
+  const first = p.lines.slice(0, 2).join('; ')
+  const rest = n - Math.min(2, p.lines.length)
+  const what = first ? `${first}${rest > 0 ? `; and ${rest} more` : ''}. ` : ''
+  return `Preview ready: ${n} change${n === 1 ? '' : 's'}. ${note}${what}` +
+    `${p.nothing_changed || 'Nothing has changed yet.'} Enter applies, Escape goes back to the prompt to change it.`
 }
 
 // ---------------------------------------------------------------------------

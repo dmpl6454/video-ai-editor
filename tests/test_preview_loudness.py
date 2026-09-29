@@ -89,3 +89,78 @@ def test_preview_with_music_and_no_target_is_untouched(tmp_path: Path):
     out = render_preview(edl, tmp_path, height=180).path
     assert integrated_loudness(out) < -30.0
     assert not (tmp_path / "cache" / "preview_loudness.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Final QA (render-audio): a first render whose pass-1 gain is stale must not
+# leave the −1 dBFS limiter's squash, taken at the WRONG gain, in the file.
+
+def _sine_clip(p: Path, *, freq: int, dur: float) -> Path:
+    subprocess.run(["ffmpeg", "-y", "-v", "error",
+                    "-f", "lavfi", "-i", f"color=c=gray:s=320x180:d={dur}:r=30",
+                    "-f", "lavfi", "-i", f"aevalsrc=0.8*sin(2*PI*{freq}*t):s=48000:d={dur}:c=stereo",
+                    "-shortest", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "pcm_s16le", str(p)], check=True, capture_output=True)
+    return p
+
+
+def _overlap_edl(a: Path, b: Path) -> EDL:
+    edl = EDL(canvas=Canvas(w=320, h=180, fps=30), tracks=[
+        Track(id="v1", type="video", clips=[Clip(id="a", src=str(a), in_=0.0, out=6.0, start=0.0)]),
+        Track(id="v2", type="video", z=1, clips=[Clip(id="b", src=str(b), in_=0.0, out=3.0, start=1.5)]),
+    ])
+    edl.canvas.loudness_lufs = -16.0
+    edl.recompute_duration()
+    return edl
+
+
+def _window_stats(path: Path, t0: float, t1: float) -> tuple[float, float]:
+    """(RMS dBFS, sample peak) of `path`'s audio between t0 and t1."""
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-ss", str(t0), "-t", str(t1 - t0),
+                          "-map", "0:a", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+                         check=True, capture_output=True).stdout
+    x = np.frombuffer(raw, dtype=np.float32).astype(np.float64)
+    assert x.size > 0
+    return 20 * np.log10(np.sqrt(np.mean(x * x)) + 1e-12), float(np.max(np.abs(x)))
+
+
+def test_a_stale_first_pass_gain_does_not_squash_the_loud_overlap(tmp_path: Path):
+    a = _sine_clip(tmp_path / "loudA.mov", freq=440, dur=6.0)
+    b = _sine_clip(tmp_path / "loudB.mov", freq=330, dur=3.0)
+    fresh_dir, seeded_dir = tmp_path / "fresh", tmp_path / "seeded"
+    fresh_dir.mkdir()
+    seeded_dir.mkdir()
+    edl = _overlap_edl(a, b)
+
+    fresh = render_preview(edl, fresh_dir, height=180).path       # first render of a session
+    state = PL._read_state(fresh_dir)
+    pre, gain = state["pre_gain_lufs"], state["gains"][PL.audio_key(edl)]
+
+    # The reference: the same sound rendered in ONE pass at the recorded gain.
+    PL._remember(seeded_dir, pre)
+    one_pass = render_preview(edl, seeded_dir, height=180).path
+    assert PL._read_state(seeded_dir)["gains"][PL.audio_key(edl)] == pytest.approx(gain, abs=0.05)
+
+    rms_f, peak_f = _window_stats(fresh, 2.0, 4.0)                # the overlap
+    rms_o, peak_o = _window_stats(one_pass, 2.0, 4.0)
+    assert abs(rms_f - rms_o) <= 0.25, f"overlap {rms_f:.2f} dB vs one-pass {rms_o:.2f} dB"
+    assert peak_f == pytest.approx(peak_o, rel=0.03), (peak_f, peak_o)
+    out_f, _ = _window_stats(fresh, 5.0, 5.9)                      # outside it
+    out_o, _ = _window_stats(one_pass, 5.0, 5.9)
+    assert abs(out_f - out_o) <= 0.25, (out_f, out_o)
+
+
+def test_a_first_pass_the_limiter_never_touched_is_regained_not_rerendered(tmp_path: Path, monkeypatch):
+    """Quiet dialogue: pass 1 stayed under −1 dBFS, so the cheap in-place
+    re-gain is exact and no second audio render is paid."""
+    from video_ai_editor.render import compositor
+    calls: list[str] = []
+    real_regain, real_remux = PL.regain, compositor._remux_with_new_audio
+    monkeypatch.setattr(PL, "regain", lambda p, d: (calls.append("regain"), real_regain(p, d)))
+    monkeypatch.setattr(compositor, "_remux_with_new_audio",
+                        lambda *a, **k: (calls.append("remux"), real_remux(*a, **k)))
+    edl = _edl(_talk(tmp_path / "talk.mov", peak=0.022), lufs=-16.0)
+    out = render_preview(edl, tmp_path, height=180).path
+    assert calls == ["regain"], calls
+    assert abs(integrated_loudness(out) - (-16.0)) <= 1.5

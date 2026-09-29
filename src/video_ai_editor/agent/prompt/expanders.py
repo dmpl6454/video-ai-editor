@@ -21,6 +21,7 @@ re-exported here so `recipes.__getattr__` finds every name in one place.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from . import grammar as G
@@ -230,6 +231,17 @@ def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                         style=style, position=position, target=target, max_chars=max_chars, model=model,
                         language=language),),
             postconditions=tuple(pcs), downloads=tuple(downloads), notes=tuple(notes))
+    if f.speech_sources > 1:
+        # Final sweep 3: a tone-only product shot, then a talking clip — the
+        # transcript path read the FIRST main-track clip alone and laid 0
+        # captions. auto_caption hears every clip that speaks and the
+        # voice-over (caption_sources), as the Captions panel does.
+        model, dl, mnotes = _caption_model(f, it, ctx)
+        return Expansion(
+            steps=(step("auto_caption", STAGE_PREREQ if not f.has_transcript else STAGE_CAPTIONS,
+                        "captions from every clip that speaks and the voice-over",
+                        style=style, position=position, max_chars=max_chars, model=model),),
+            postconditions=tuple(pcs), downloads=tuple(dl), notes=tuple(notes) + tuple(mnotes))
     return Expansion(
         steps=(step("add_caption_track", STAGE_CAPTIONS, "captions from the persisted transcript (no model)",
                     style=style, position=position),),
@@ -278,7 +290,10 @@ def _x_remove_silences(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     return Expansion(
         steps=(step("remove_silences", STAGE_CUTS, "cut the silent pauses on v1", track="v1",
                     threshold_db=float(it.get("threshold_db", -30)), min_dur=float(it.get("min_dur", 0.5)),
-                    keep_pad=float(it.get("keep_pad", 0.1))),),
+                    keep_pad=float(it.get("keep_pad", 0.1)),
+                    # final sweep 3 r2: a B-roll / product shot with no sound
+                    # of its own is not a pause — it was deleted whole
+                    keep_silent_clips=True),),
         postconditions=tuple(pcs))
 
 
@@ -641,8 +656,40 @@ def _range_clips_whole(it: Intent, f: TimelineFacts, verb: str) -> tuple[list[st
     return [cid for cid, s0, e0 in spans if s0 >= a - 0.05 and e0 <= b + 0.05], None
 
 
+#: "so it's 9 seconds", "so it lasts 16 seconds", "to fit 9 seconds": a
+#: target LENGTH for the whole video, not an amount of speed.
+_TARGET_LEN_RE = re.compile(r"\bso\s+(?:that\s+)?(?:it|the video|the whole thing)(?:'s|\s+is|\s+lasts|\s+runs|\s+ends up)"
+                            r"|\b(?:to\s+fit|to\s+last|lasts?)\s+(?:in\s+)?\d")
+_EXPLICIT_FACTOR_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:x|×|times|%|percent)\b|\b(?:double|twice|half|triple)\b")
+
+
+def _speed_for_length(it: Intent, f: TimelineFacts, clips: list[str]) -> tuple[Intent, str | None]:
+    """Final sweep 3: "speed up the whole thing so it's 9 seconds" played at
+    1.25x (9.6 s) — the length is the ask: factor = length now / length
+    wanted. A length the direction contradicts is a question."""
+    clause = (it.clause or "").lower()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)\b", clause)
+    target = it.get("duration_s") or (float(m.group(1)) if m else None)
+    if not target or clips != ["$v1_all"] or it.get("preset") or not _TARGET_LEN_RE.search(clause) \
+            or _EXPLICIT_FACTOR_RE.search(clause):
+        return it, None
+    vend = float(f.video_end or f.duration or 0.0)
+    if vend <= 0:
+        return it, None
+    x = round(vend / float(target), 3)
+    faster = (it.get("factor") or 1.25) >= 1
+    if (faster and x <= 1.0) or (not faster and x >= 1.0) or not 0.25 <= x <= 4.0:
+        return it, (f"The video is {vend:.1f}s now — {float(target):g}s would need {x:g}x, which is not "
+                    f"{'faster' if faster else 'slower'} (or is outside 0.25x-4x). Say the speed, like '1.5x'.")
+    from dataclasses import replace
+    return replace(it, slots={**it.slots, "factor": x}), None
+
+
 def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     pre, clips, q = _clip_targets(it, f, "speed up" if (it.get("factor") or 1.25) >= 1 else "slow down")
+    if q:
+        return Expansion(notes=(q,))
+    it, q = _speed_for_length(it, f, clips)
     if q:
         return Expansion(notes=(q,))
     preset = it.get("preset")
@@ -758,6 +805,18 @@ def _x_split(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         else:
             why = f"{at:g}s is not inside the video ({vend:.1f}s long) — it is past the end."
         return Expansion(notes=(f"Where should I split? {why}",))
+    more = [float(t) for t in (it.get("_more_times") or ())]
+    if more:
+        # "split at 2 and 10 seconds": every point, or a question for one
+        # that is not inside the video (never a silent half)
+        outside = [t for t in more if not 0 < t < vend]
+        if outside:
+            return Expansion(notes=(f"Where should I split? {outside[0]:g}s is not inside the video "
+                                    f"({vend:.1f}s long).",))
+        points = sorted({round(t, 3) for t in (at, *more)})
+        return Expansion(steps=tuple(step("split_at", STAGE_CUTS, f"split at {t:g}s", track="v1", time=t)
+                                     for t in points),
+                         postconditions=(pc("tool_ok", "the splits were made", tool="split_at"),))
     return _split_step(at)
 
 
@@ -972,11 +1031,36 @@ LOWER_THIRD_S = 4.0
 TITLE_S = 3.0
 
 
+_HERE_RE = re.compile(r"\bhere\b|\b(?:at|under|where)\s+(?:the\s+)?(?:playhead|cursor)(?:\s+is)?\b")
+
+
+def _unquoted(text: str) -> str:
+    """`text` without its quoted words ("add a title 'Right here'")."""
+    return re.sub(r"[\"“”'‘][^\"“”‘’]{1,200}[\"“”'’]", " ", text.lower())
+
+
 def _title_span(it: Intent, f: TimelineFacts, default_dur: float) -> tuple[float, float]:
     """(start, end) for an on-screen card from the `at`/`dur` slots — "at the
     start" is the default, "at the end" backs off from the tail."""
     dur = float(it.get("dur") or default_dur)
     at = it.get("at")
+    words = str(it.get("text") or it.get("name") or "").strip().lower()
+    place = _unquoted(it.clause or "")
+    if words and not re.search(r"[\"“”'‘’]", it.clause or ""):
+        # "saying here we go" is the title's words (quoted ones are gone
+        # already: "add a title 'Last' on the last clip" kept its clip)
+        place = place.replace(words, " ")
+    if at is None and f.playhead is not None and _HERE_RE.search(place):
+        # final sweep 3: "add a title here saying Look!" went to 0:00
+        at = float(f.playhead)
+    first_secs = re.search(r"\bfirst\s+(?:\d|few|couple)|\b(?:the\s+)?(?:very\s+)?(?:start|beginning)\b", place)
+    on_clip = _named_v1_clip(place, f) if at is None or (at == "start" and not first_secs) else None
+    if on_clip is not None:
+        # final sweep 3 r2: "add a title 'Pour' on clip 2" went to 0:00 and
+        # replaced the step-1 title there — it starts on that clip now and
+        # ends with it at the latest
+        c_start, c_end = on_clip
+        return round(c_start, 3), round(min(c_end, c_start + dur), 3)
     if at in (None, "start"):
         start = 0.0
     elif at == "end":
@@ -990,6 +1074,81 @@ def _title_span(it: Intent, f: TimelineFacts, default_dur: float) -> tuple[float
         start = max(0.0, float(at))
     end = min(f.duration, start + dur) if f.duration > 0 else start + dur
     return round(start, 3), round(end, 3)
+
+
+def _named_v1_clip(place: str, f: TimelineFacts) -> tuple[float, float] | None:
+    """(start, end) of the ONE main-track clip `place` names ("on clip 2",
+    "over the second clip", "on the last clip", "on the pour shot"), else None."""
+    from . import grammar as G
+    v1 = sorted((c for c in f.clips if c.track == "v1"), key=lambda c: c.start)
+    if not v1:
+        return None
+    ref = G.clip_ref_of(place) or clip_by_name(place, f)
+    if not ref or not isinstance(ref, str):
+        return None
+    pick = None
+    if ref == "$v1_first":
+        pick = v1[0]
+    elif ref == "$v1_last":
+        pick = v1[-1]
+    elif ref.startswith(G.NTH_REF):
+        n = ref[len(G.NTH_REF):]
+        if n.lstrip("-").isdigit() and 1 <= abs(int(n)) <= len(v1):
+            pick = v1[int(n) - 1] if int(n) > 0 else v1[int(n)]
+    elif ref.startswith(G.AT_REF):
+        t = float(ref[len(G.AT_REF):])
+        pick = next((c for c in v1 if c.start - 1e-6 <= t < c.start + c.duration), None)
+    elif ref == "$selected" and f.selection:
+        pick = next((c for c in v1 if c.id == f.selection), None)
+    elif not ref.startswith("$"):
+        pick = next((c for c in v1 if c.id == ref), None)
+    if pick is None:
+        return None
+    return float(pick.start), float(pick.start + pick.duration)
+
+
+def clip_by_name(text: str, f: TimelineFacts) -> str | None:
+    """The id of the ONE main-track clip a noun phrase names by its media or
+    shot name — "the pour shot", "the r_pour clip" (final sweep 3 r2); None
+    when no clip or several clips match."""
+    t = (text or "").lower()
+    words = re.findall(r"\bthe\s+([a-z0-9][\w.-]{1,40})\s+(?:shot|clip|video|footage|scene)\b", t)
+    if not words:
+        return None
+    v1 = [c for c in f.clips if c.track == "v1" and getattr(c, "name", "")]
+    for w in words:
+        w = w.rsplit(".", 1)[0]
+        hits = [c for c in v1 if _name_matches(w, str(c.name))]
+        if len(hits) == 1:
+            return hits[0].id
+    return None
+
+
+_NAMED_CLIP_RE = re.compile(r"\bthe\s+([a-z0-9][\w.-]{1,40})\s+(shot|clip|video|footage|scene)\b", re.I)
+
+
+def clip_names_to_numbers(prompt: str, facts: TimelineFacts) -> str:
+    """"slow down the pour shot" → "slow down clip 2" when exactly ONE
+    main-track clip's media is named that (final sweep 3 r2: no rule read a
+    clip by its name, so "the pour shot" widened to EVERY clip). Quoted words
+    are left alone; a word that names no clip, or several, is left as it was."""
+    v1 = sorted((c for c in facts.clips if c.track == "v1"), key=lambda c: c.start)
+    if len(v1) < 2:
+        return prompt
+    number = {c.id: i + 1 for i, c in enumerate(v1)}
+    parts = re.split(r"([\"“”'‘’][^\"“”'‘’]{1,200}[\"“”'‘’])", prompt)
+
+    def _sub(m: re.Match) -> str:
+        cid = clip_by_name(m.group(0), facts)
+        return f"clip {number[cid]}" if cid in number else m.group(0)
+    return "".join(p if i % 2 else _NAMED_CLIP_RE.sub(_sub, p) for i, p in enumerate(parts))
+
+
+def _name_matches(word: str, name: str) -> bool:
+    stem = Path(name).stem.lower()
+    stem = re.sub(r"\.normali[sz]ed$", "", stem)
+    parts = [p for p in re.split(r"[^a-z0-9]+", stem) if p]
+    return word == stem or word in parts
 
 
 def _x_lower_third(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1069,10 +1228,37 @@ def _x_title(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         args["size"] = round(float(args["size"]) * float(look["size_scale"]), 1)
     if look.get("upper") is not None:
         args["upper"] = bool(look["upper"])
+    _place_new_title(args, look, f)
     return Expansion(
         steps=(step("add_text", STAGE_TEXT, "title text overlay", **args),),
         postconditions=(pc("text_present", "the text is on screen", contains=text[:120]),
                         pc("overlays_inside_safe_zone", "text stays clear of the platform UI")))
+
+
+def _place_new_title(args: dict[str, Any], look: dict[str, Any], f: TimelineFacts) -> None:
+    """A new title's outline, box, font, motion and place from its own words
+    (final sweep 3 r2, HIGH: "small … at the bottom", "top right corner",
+    "in a black box", "with no outline", "slides in" all got the default big
+    centred look). Places stay inside the platform safe zone the
+    `overlays_inside_safe_zone` check holds the title to."""
+    from .presets import safe_zone_for
+    if look.get("stroke_w") is not None:
+        args["stroke_w"] = float(look["stroke_w"])
+    if look.get("background") is not None:
+        args["background"] = look["background"] or None
+    if look.get("font"):
+        args["font"] = look["font"]
+    for k in ("anim_in", "anim_out"):
+        if look.get(k):
+            args[k] = look[k]
+    z = safe_zone_for(f.aspect)
+    h, w = float(f.canvas_h or 1080), float(f.canvas_w or 1920)
+    y = {"top": z.y_min + 0.07, "middle": 0.5, "bottom": z.lower_third_y}.get(str(look.get("position") or ""))
+    if y is not None:
+        args["y"] = round(h * y, 1)
+    x = {"left": 0.3, "right": min(0.7, z.x_max - 0.15)}.get(str(look.get("_x") or ""))
+    if x is not None:
+        args["x"] = round(w * x, 1)
 
 
 def _x_brand(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1225,14 +1411,12 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     pcs = [pc("transitions_count_geq", "transitions were added", n=len(seams),
               type=types[0] if len(types) == 1 or len(steps) == 1 else None)]
     notes.append(f"{len(seams)} × {label} ({duration:g}s)")
-    if f.has_captions and "captions" not in ctx.recipes:
-        # A cross-fade shortens the timeline and does not ripple overlays, so
-        # existing captions would overhang; re-lay them after the seams move.
-        steps.append(step("add_caption_track", STAGE_CAPTIONS, "re-lay captions after transitions shortened the timeline",
-                          style=f.caption_style or "ig_chunky", position="bottom"))
-        pcs += [pc("captions_within_extent", "no caption runs past the video"),
-                pc("captions_sync", "captions stay in sync across cuts", tol=0.1)]
-        notes.append("captions re-laid so they follow the shortened timeline")
+    # final sweep 3 r2 (HIGH): existing captions are NOT re-laid. The re-lay
+    # rebuilt them from the FIRST v1 clip's transcript — a voice-over's or a
+    # second clip's captions were lost, restyled or merged, and the safety
+    # net turned "add a crossfade" into a dead-end question. The renderer
+    # already maps every overlay through the seam overlap
+    # (EDL.transition_overlap), so captions stay on the words they belong to.
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs), notes=tuple(notes))
 
 
@@ -1540,17 +1724,25 @@ def _music_fade(edge: str, duration_s: float | None, f: TimelineFacts, ctx: Cont
         notes=(f"music fades {what}; the bed ends with the video",))
 
 
+_EVERY_CLIP_RE = re.compile(r"\b(?:every|each|all(?:\s+(?:the|of the|my))?)\s+(?:clips?|shots?|parts?)\b")
+
+
 def _picture_fade(it: Intent, edge: str, target: str, f: TimelineFacts) -> Expansion:
     if not f.v1_clip_ids and "v1" not in f.track_ids:
         return Expansion(notes=("there is no clip on the timeline to fade",))
     d = _fade_seconds(it, FADE_DEFAULT_S, f)
     ref = it.get("clip_ref")
+    each = False
     if ref is not None:
         ref, q = CX.bind_clip(ref, f)
         if q:
             return Expansion(notes=(q,))
-        ref = None if ref == "$v1_all" else ref
-    fc = f.clip(ref) if ref else None
+        # "fade out every clip" fades each clip; "fade out the video" (also
+        # $v1_all) fades the video's own ends (final sweep 3: every-clip
+        # asks faded only the last clip)
+        each = ref == "$v1_all" and bool(_EVERY_CLIP_RE.search((it.clause or "").lower()))
+        ref = "$v1_all" if each else None if ref == "$v1_all" else ref
+    fc = f.clip(ref) if ref and not each else None
     if fc is not None and re.fullmatch(r"v\d+", fc.track or "") and fc.track != "v1":
         return _overlay_fade(fc.id, edge, d)
     picture = target == "video"
@@ -1576,7 +1768,9 @@ def _picture_fade(it: Intent, edge: str, target: str, f: TimelineFacts) -> Expan
         if edge in ("out", "both"):
             _add(last, out_s=d)
     where = {"in": "in at the start", "out": "out at the end", "both": "in at the start and out at the end"}[edge]
-    if ref:
+    if each:
+        where = {"in": "in", "out": "out", "both": "in and out"}[edge] + " on every clip"
+    elif ref:
         where = {"in": "in", "out": "out", "both": "in and out"}[edge] + " on the named clip"
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs),
                      notes=(f"{'picture and sound' if picture else 'sound'} fade {where} ({d:g}s)",))

@@ -77,3 +77,6 @@ mobile/expo-env.d.ts
 tools/fm-planner/.build/
 tools/fm-planner/.binpath
 presets/music/*.wav
+
+# tempfile.mkdtemp dirs a test or lane left at the repo root
+/tmp*/

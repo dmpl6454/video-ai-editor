@@ -90,10 +90,20 @@ def norm(text: str) -> str:
     # "3db" / "2dB": a glued unit has no word boundary before "db", so every
     # `\bdb\b` reader missed it and "turn it up 3db" was dropped
     t = _GLUED_DB_RE.sub(r"\1 \2", t)
+    # final sweep 3 r2: "clip2 1.5x" / "clip3 black and white" named no clip
+    # (no space), so the change widened to every clip
+    t = GLUED_CLIP_RE.sub(r"\1 \2", t)
     return t
 
 
 _GLUED_DB_RE = re.compile(r"(\d)(db|decibels?)\b")
+GLUED_CLIP_RE = re.compile(r"\b(clips?|shots?|scenes?)(\d{1,2})\b")
+#: "except the first", "but the second", "but the last one": a bare ordinal
+#: in an except tail is a clip (final sweep 3 r2 — "all clips except the
+#: first to 2x" sped up all three)
+_EXCEPT_ORD_RE = re.compile(r"^(?:the\s+)?(first|second|third|fourth|fifth|sixth|last|final|\d{1,2}(?:st|nd|rd|th))"
+                            r"(?:\s+(?:one|clip|shot))?\b(?!\s+(?:half|part|piece|seconds?|minutes?|frames?|few|couple"
+                            r"|\d))")
 
 
 _QUOTE_RE = re.compile(r"[\"“”']([^\"“”']{1,200})[\"“”']")
@@ -585,7 +595,7 @@ _ORD_ANY = r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth
 _ORD_LIST_RE = re.compile(rf"\b(?:the\s+)?({_ORD_ANY})((?:\s*,\s*(?:the\s+)?{_ORD_ANY})*)\s+(?:and|&)\s+(?:the\s+)?({_ORD_ANY})\s+{_PIECE}\b")
 _ORD_ONE_RE = re.compile(rf"\b({_ORD_ANY})\s+{_PIECE}\b")
 _NUM_LIST_RE = re.compile(rf"\b{_PIECE}\s+(?:#\s*|number\s+|no\.?\s*|nr\.?\s*)?({_NUMW})((?:\s*(?:,|and|&)\s*(?:{_PIECE}\s+)?(?:#\s*|number\s+|nr\.?\s*)?{_NUMW})*)\b"
-                          r"(?!\d)(?!\s*(?:%|°|x\b|db\b|s\b|sec|secs\b|seconds?\b|deg|degrees?\b|px\b|fps\b|k\b|p\b|times\b))")
+                          r"(?!\d)(?!\.\d)(?!\s*(?:%|°|x\b|db\b|s\b|sec|secs\b|seconds?\b|deg|degrees?\b|px\b|fps\b|k\b|p\b|times\b))")
 _FIRST_N_RE = re.compile(rf"\b(?:first|opening)\s+({_NUMW})\s+{_PIECE}\b")
 _LAST_N_RE = re.compile(rf"\b(?:last|final|closing)\s+({_NUMW})\s+{_PIECE}\b")
 _PENULT_RE = re.compile(rf"\b(?:second[- ]to[- ]last|next[- ]to[- ]last|penultimate|second[- ]last)\s+{_PIECE}\b")
@@ -610,13 +620,19 @@ _PRONOUN_RE = re.compile(r"\b(?:it|them|that\s+one|this\s+one|the\s+same|those|t
 
 Media = Literal["v1", "music", "voice", "captions", "text", "overlay", "vo", "master", "sticker"]
 
+#: What a sticker is called — ONE vocabulary for the planner's animation
+#: reader (anim_expanders) and this reading (the contract): the planner read
+#: "animate the logo" as the sticker and the contract did not, so the net
+#: rolled a correct animation back (final sweep 3).
+STICKER_NOUNS = r"stickers?|emojis?|logos?|gifs?"
+
 _MEDIA_RX: tuple[tuple[str, re.Pattern], ...] = (
     ("captions", re.compile(r"\b(?:captions?|subtitles?|subs|captoins?)\b")),
     ("vo", re.compile(r"\bvoice[- ]?overs?\b|\bvo\b|\bnarration\s+track\b|\bvoice\s+track\b")),
     ("music", re.compile(r"\b(?:music|musci|song|soundtrack|bgm|tune|score|bed|backing\s+track|background\s+music|beat)\b")),
     ("text", re.compile(r"\b(?:title|titles|text|texts|heading|headline|lower[- ]?third|label|caption\s+text)\b")),
     ("overlay", re.compile(r"\b(?:overlays?|pips?|picture[- ]in[- ]pictures?|top\s+clip|b-?roll)\b")),
-    ("sticker", re.compile(r"\b(?:stickers?|emojis?)\b")),
+    ("sticker", re.compile(rf"\b(?:{STICKER_NOUNS})\b")),
     ("voice", re.compile(r"\b(?:voice|vocals?|dialogue|speech|talking|narration|original\s+(?:audio|sound)|clip\s+audio)\b")),
 )
 
@@ -767,7 +783,11 @@ def scope_of(clause: str) -> Scope:
     ex_media: tuple[str, ...] = ()
     main = t
     m = _EXCEPT_RE.search(t)
-    if m and (clip_refs(m.group(1)) or media_of(m.group(1))):
+    bare = _EXCEPT_ORD_RE.match(m.group(1)) if m and not clip_refs(m.group(1)) else None
+    if m and bare is not None and _ord(bare.group(1).replace("final", "last")) is not None:
+        ex_refs = (_ord(bare.group(1).replace("final", "last")),)
+        main = t[:m.start()]
+    elif m and (clip_refs(m.group(1)) or media_of(m.group(1))):
         ex_refs = tuple(clip_refs(m.group(1)))
         ex_media = media_of(m.group(1))
         main = t[:m.start()]
@@ -817,8 +837,16 @@ _ELIDED_ORD_RE = re.compile(rf"^(?:and\s+|then\s+)?(?:make\s+|give\s+|do\s+|put\
                             r"(?!\s+(?:\d|one|two|three|four|five|few|half|part|piece|bit|second|seconds|minute|time)\b)")
 #: A clause with no object at all ("… and black and white", "then 2x") is the
 #: same thing as the one before it.
+def is_bare_continuation(clause: str) -> bool:
+    """"and brighter", "1.5x", "black and white": a clause that only says
+    HOW — it is about the clip the previous clause named."""
+    return bool(_BARE_CONTINUATION_RE.search(strip_quotes(norm(clause))))
+
+
 _BARE_CONTINUATION_RE = re.compile(r"^(?:make\s+it\s+|and\s+)?(?:\d+(?:\.\d+)?\s*x|black and white|b\s*and\s*w|mono|"
-                                   r"warm|cool|faster|slower|reversed?|backwards|muted?|flipped|louder|quieter)$")
+                                   r"warm|cool|faster|slower|reversed?|backwards|muted?|flipped|louder|quieter|"
+                                   # final sweep 3: "make clip 1 black and white and brighter" graded every clip
+                                   r"brighter|darker|dimmer|sharper|more vivid|more saturated|less saturated)$")
 
 
 # --------------------------------------------------------------------------

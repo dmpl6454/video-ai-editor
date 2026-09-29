@@ -52,6 +52,16 @@ describe('limiting ranges', () => {
     expect(p.approx).toContain('limiting')
   })
 
+  // P2 limiter tail: through the alimiter worklet the mix over the ceiling
+  // is the server's, so the plan names no range (no "Limiter on loud sound").
+  it('are none when the mix plays through the alimiter worklet', () => {
+    const e = bed()
+    const p = planFromProgram(e, buildProgramMap(e, lookup), lookup, { peak: () => 0.6, exactLimiter: true })
+    expect(p.master.ceilingDb).toBe(0)
+    expect(p.limiting).toEqual([])
+    expect(p.approx).not.toContain('limiting')
+  })
+
   it('count the clip gain, the envelope maximum and the bus gain', () => {
     expect(plan(bed({ gain_db: -12 }), () => 0.6).limiting).toEqual([])       // 0.6 + 0.15 → 0.77
     expect(plan(bed({ gain_db: -12, gain_env: { keyframes: [[0, 0], [1, 12]] } }), () => 0.6).limiting.length).toBe(1)

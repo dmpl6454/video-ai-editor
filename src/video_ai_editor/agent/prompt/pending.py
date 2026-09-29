@@ -101,10 +101,13 @@ def pending_path(session_dir: Path) -> Path:
 
 
 def save_pending(session_dir: Path, *, plan: Plan, prompt: str, facts: TimelineFacts,
-                 ui_state: dict | None = None, rollback: dict[str, Any] | None = None) -> dict[str, Any]:
+                 ui_state: dict | None = None, rollback: dict[str, Any] | None = None,
+                 preview: dict[str, Any] | None = None) -> dict[str, Any]:
     """`rollback` (the K3 net's card): the rolled-back plan's step signature and
     the reasons — a pick must never replay that plan, nor license what the
-    net refused (Final sweep 2)."""
+    net refused (Final sweep 2). `preview` (0.8.0, preview.py): the dry run's
+    change list, base hash and fingerprint — the record is then a `confirm`
+    pending state whose only question is Apply."""
     now = time.time()
     record = {
         "token": f"q_{uuid4().hex[:10]}", "plan": plan.model_dump(), "prompt": prompt,
@@ -113,6 +116,8 @@ def save_pending(session_dir: Path, *, plan: Plan, prompt: str, facts: TimelineF
     }
     if rollback:
         record["rollback"] = rollback
+    if preview:
+        record["preview"] = preview
     pending_path(session_dir).write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
     return record
 
@@ -141,6 +146,11 @@ def pending_is_valid(record: dict[str, Any], facts: TimelineFacts | None, *,
     if facts is not None and record.get("facts_hash") != facts_hash(facts):
         return False, "the timeline changed since the question was asked"
     return True, None
+
+
+def is_preview(record: dict[str, Any] | None) -> bool:
+    """A `confirm` pending state: a previewed plan waiting for Apply."""
+    return isinstance(record, dict) and isinstance(record.get("preview"), dict)
 
 
 def pending_plan(record: dict[str, Any]) -> Plan:
@@ -388,5 +398,5 @@ def _mentions(value: Any, placeholder: str) -> bool:
 
 
 __all__ = ["normalise_answer", "facts_hash", "pending_path", "save_pending", "load_pending",
-           "clear_pending", "pending_is_valid", "pending_plan", "blocking_questions",
+           "clear_pending", "pending_is_valid", "is_preview", "pending_plan", "blocking_questions",
            "parse_answer_for", "try_parse_answer", "apply_answers"]

@@ -91,7 +91,11 @@ def display_name_for(session_dir: Path | None, src: str) -> str:
             stem = stem[: -len(".normalized.mp4")] + ".mp4"
         name = _display_from_disk(stem)
     if tag and (origin != p):
-        return f"{name} ({tag})"
+        # every step the file went through, in order: "talk.mp4 (reframed,
+        # denoised)" (final sweep 3 r2 — only the last step was named)
+        from .agent.media_origin import steps_of
+        tags = [t for t in dict.fromkeys(_DERIVED_TAGS.get(w) for w in steps_of(p)) if t]
+        return f"{name} ({', '.join(tags) if len(tags) > 1 else tag})"
     if tag and origin == p:
         return f"{tag.capitalize()} clip"
     return name

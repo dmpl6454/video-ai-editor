@@ -29,6 +29,7 @@ import { drawProgramFrame, preloadCanvasBackgrounds, uploadProgramFrame } from '
 import { canvasBgDraw } from './render/canvasBg'
 import { canvasBgImageState } from './render/canvasBgImages'
 import { ExternalPauses, type ExternalCause } from './engineExternal'
+import { SoundHold } from './engineSoundHold'
 import { BakeSplice } from './engineBake'
 import { FrameLoop, StallWatch, type PresentedMeta } from './engineLoop'
 import { DegradedTier } from './engineDegraded'
@@ -86,6 +87,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   private readonly sought = new SoughtFrame()
   private readonly degraded: DegradedTier
   private readonly recovery: EngineRecovery
+  /** play() waiting for the sound under its start (engineSoundHold.ts). */
+  private readonly soundHold: SoundHold
   private destroyed = false
 
   // clock / audio
@@ -170,6 +173,19 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
       onHidden: () => this.sources.suspend(true),
       onShown: () => this.sources.suspend(false),
       elementMoved: () => { this.elementFrame = -1 },
+    })
+    this.soundHold = new SoundHold({
+      sink: () => this.sink,
+      isPlaying: () => this._playing,
+      isDestroyed: () => this.destroyed,
+      setBuffering: (on) => {
+        this.buffering = on
+        this.emit('buffering', { buffering: on, k: this.target })
+        this.emitStatus()
+      },
+      run: () => {
+        if (this.video && this.lane) this.runPlayback(this.video, this.lane, this.target)
+      },
     })
     this.degraded = new DegradedTier({
       root: () => this.root,
@@ -387,7 +403,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   }
 
   private reclassify(emit = true): void {
-    const s = this.feed.classify(this.sink.limitingFrames?.(), this.sink.loudnessOffDb?.())
+    const s = this.feed.classify(this.sink.limitingFrames?.(), this.sink.loudnessOffDb?.(), this.sink.soundLoadingFrames?.())
     if (s) this.support = s
     if (emit) this.emitStatus()
   }
@@ -608,6 +624,16 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     // element's first presentation came from 1.3 s on and was drawn (C1)
     this.runStart.begin(k, elementAt)
     lane.setPlayhead(k, true)
+    // The sound under the start not in memory yet (a fresh import's chunks
+    // still loading, final sweep 3 run 3): picture and sound wait for it
+    // together, buffering, at most SOUND_HOLD_MS (§11.1) — the sink resumes
+    // its context here, inside the gesture.
+    if (this.soundHold.begin(samplesForFrames(k, this.R))) return
+    this.runPlayback(video, lane, k)
+  }
+
+  /** play()'s second half: laneA and the sound start together from `k`. */
+  private runPlayback(video: HTMLVideoElement, lane: LaneA, k: number): void {
     const playCalledAt = performance.now()
     const p = video.play()
     if (p && typeof p.catch === 'function') {
@@ -634,6 +660,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
 
   private stopPlayback(why: string): void {
     void why
+    this.soundHold.cancel()
     const video = this.video
     this._playing = false
     this.buffering = false
@@ -662,6 +689,14 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     if (!pm || pm.total === 0) return
     k = Math.max(0, Math.min(pm.total - 1, Math.round(k)))
     this.target = k
+    if (this._playing && this.soundHold.active) {
+      // nothing runs yet (play() is waiting for the sound at the old place):
+      // stand at the new place and wait for ITS sound
+      this.stopPlayback('seek')
+      this.seek(k)
+      this.play()
+      return
+    }
     if (this._playing) {
       // stop the sound where the picture is; restart both at the new place,
       // on a frame of the NEW position (see PLAYING_SEEK_WAIT_MS)
@@ -777,6 +812,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     if (this.destroyed) return
     this.destroyed = true
     this._playing = false
+    this.soundHold.cancel()
     this.loop.stop()
     this.external.cancelResume()
     this.seeker.clearTimer()

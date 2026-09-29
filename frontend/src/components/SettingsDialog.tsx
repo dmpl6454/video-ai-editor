@@ -24,6 +24,8 @@ import { bannerSentence, mediaToolsProblem, type MediaToolsProblem } from '../li
 import { useModelDownload } from '../lib/useModelDownload'
 import { registerSettingsOpener } from '../lib/settingsOpen'
 import { INSTANT_PREVIEW_HELP, PREVIEW_ENGINE_CHOICES, previewEngineNote } from '../lib/previewEngineSetting'
+import { PROMPT_APPLY_HELP, PROMPT_APPLY_LABEL, normalizePromptSettings, promptApplyNote } from '../lib/promptApplySetting'
+import type { PromptSettingsWire } from '../api'
 import { cacheLine, canSaveKey, freedMessage, keyInputProblem, keyStatusLine, modelConsentText,
          weightRows, type KeyStatus } from '../lib/settingsModel'
 import { BRAINS_HEADING, BRAINS_HELP, BrainRows, CHECK_AGAIN } from './BrainRows'
@@ -44,6 +46,7 @@ export function SettingsDialog() {
             className="settings-dialog">
       <ClaudeKeySection />
       <BrainsSection />
+      <PromptBarSection />
       <ModelsSection />
       <MediaToolsSection />
       <InstantPreviewSection />
@@ -333,6 +336,54 @@ function MediaToolsSection() {
       <div className="settings-actions">
         <button type="button" disabled={checking} onClick={check}>{checking ? 'Checking…' : CHECK_AGAIN}</button>
       </div>
+    </Section>
+  )
+}
+
+// ---------------------------------------------------------------- Prompt bar
+
+/** "Ask before applying Prompt bar edits" (0.8.0): ON = a preview card and
+ *  nothing changes until Apply; OFF = edits apply at once. */
+function PromptBarSection() {
+  const loopback = isLoopbackOrigin()
+  const [setting, setSetting] = useState<PromptSettingsWire | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const id = useId()
+  const helpId = useId()
+
+  useEffect(() => {
+    api.promptSettings()
+      .then((r) => { const s = normalizePromptSettings(r); if (s) setSetting(s); else setError('The editor sent an unreadable answer.') })
+      .catch((e) => setError(errorMessage(e)))
+  }, [])
+
+  const locked = !loopback || busy || !setting || setting.source === 'env'
+  const toggle = async (on: boolean) => {
+    if (locked) return
+    setBusy(true)
+    setError(null)
+    try {
+      const s = normalizePromptSettings(await api.setPromptSettings(on))
+      if (s) setSetting(s)
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Section icon="enter" title="Prompt bar">
+      <p className="settings-help" id={helpId}>{PROMPT_APPLY_HELP}</p>
+      <div className="settings-actions">
+        <input id={id} type="checkbox" role="switch" data-testid="prompt-confirm-switch"
+               checked={setting?.confirm_before_apply ?? true} disabled={locked}
+               aria-describedby={helpId} onChange={(e) => void toggle(e.target.checked)} />
+        <label htmlFor={id} className="settings-row-name">{PROMPT_APPLY_LABEL}</label>
+      </div>
+      {!loopback && <p className="settings-status" data-tone="muted">{DESKTOP_ONLY}</p>}
+      {setting && <p className="settings-status" aria-live="polite">{promptApplyNote(setting)}</p>}
+      {error && <p className="settings-status" data-tone="warn" role="alert">{error}</p>}
     </Section>
   )
 }

@@ -1024,7 +1024,7 @@ def _add_uploaded_music(store, dst: Path, duration: float, duck: bool | None,
     eff = placed.effective_duration if placed is not None else duration
     # where it plays: its run's pull (a song appended after another moves
     # with it, `schema.sound_pulls`)
-    r_start = lay_start - sound_pulls(lane.clips, edl.v1_seam_table()).get(clip_id, 0.0)
+    r_start = lay_start - sound_pulls(lane.clips, edl.v1_seam_table(), video_extent).get(clip_id, 0.0)
     past = r_start + eff - video_end if video_extent > 0.05 else 0.0
     answer = {"clip_id": clip_id, "start": at,
               "past_video_s": round(past, 3) if past > 0.05 else 0.0,

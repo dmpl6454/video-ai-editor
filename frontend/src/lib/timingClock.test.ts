@@ -117,6 +117,49 @@ describe('Timing section clock', () => {
     expect(s2.end).toBeCloseTo(13.0, 9)
   })
 
+  it('a music bed laid to v1\'s end shows End where the programme end cuts it, as its Timeline block', () => {
+    // Final QA run 3 (P3): `schema.sound_render_windows` cuts a run laid to
+    // or past v1's LAYOUT end (20) where that end plays (18.5, after three
+    // 0.5 s dissolves). The Timeline block stopped at 18.5; the Inspector read
+    // End 20:00 and Duration 20:00 — a second and a half the export never plays.
+    const edl = dissolvedEdl()
+    const bed = { id: 'bed', track: 'music', src: 'song.m4a', in: 0, out: 20, start: 0 }
+    edl.tracks.push({ id: 'music', type: 'music', z: 30, clips: [bed] } as unknown as EDL['tracks'][number])
+    const clip = bed as unknown as AnyClip
+    const shown = shownTiming({ start: 0, end: 20 }, timingClockOf(edl, 'music', clip))
+    const block = renderSpanOf(edl, 'music', clip)
+    expect(block.end).toBeCloseTo(18.5, 9)
+    expect(shown.start).toBeCloseTo(0, 9)
+    expect(shown.end).toBeCloseTo(block.end, 9)
+    // Laid 5 s past v1's end: only that deliberate part extends the programme.
+    const past = { ...bed, out: 25 } as unknown as AnyClip
+    const edl2 = dissolvedEdl()
+    edl2.tracks.push({ id: 'music', type: 'music', z: 30, clips: [past] } as unknown as EDL['tracks'][number])
+    const shown2 = shownTiming({ start: 0, end: 25 }, timingClockOf(edl2, 'music', past))
+    expect(shown2.end).toBeCloseTo(23.5, 9)
+    expect(shown2.end).toBeCloseTo(renderSpanOf(edl2, 'music', past).end, 9)
+  })
+
+  it('a bed piece wholly past its run\'s cut shows no length, and a typed End still trims the source', () => {
+    const edl = dissolvedEdl()
+    const a = { id: 'a', track: 'music', src: 'song.m4a', in: 0, out: 19, start: 0 }
+    const b = { id: 'b', track: 'music', src: 'song.m4a', in: 19, out: 20.2, start: 19 }
+    edl.tracks.push({ id: 'music', type: 'music', z: 30, clips: [a, b] } as unknown as EDL['tracks'][number])
+    const clipB = b as unknown as AnyClip
+    const clock = timingClockOf(edl, 'music', clipB)
+    const shown = shownTiming({ start: 19, end: 20.2 }, clock)
+    expect(renderSpanOf(edl, 'music', clipB).dropped).toBe(true)
+    expect(shown.start).toBeCloseTo(19, 9)
+    expect(shown.end).toBeCloseTo(19, 9)                 // Duration 0, as the block
+    // The piece that plays: its End is the cut (render_time(20.2) = 18.7).
+    const shownA = shownTiming({ start: 0, end: 19 }, timingClockOf(edl, 'music', a as unknown as AnyClip))
+    expect(shownA.end).toBeCloseTo(18.7, 9)
+    // End typed on the ruler still means "this much of the clip": 18.0 -> out 18.
+    const e = clockedEdit('end', 18.0, shownA.start, timingClockOf(edl, 'music', a as unknown as AnyClip))!
+    expect(mediaTimingEdit({ in: 0, out: 19, start: 0, speed: 1 }, e.field, e.value))
+      .toEqual({ tool: 'trim_clip', args: { out: 18 } })
+  })
+
   it('is the identity without transitions, and refuses a non-number', () => {
     expect(shownTiming({ start: 3, end: 4 }, LAYOUT_CLOCK)).toEqual({ start: 3, end: 4 })
     expect(clockedEdit('duration', 2, 3, LAYOUT_CLOCK)).toEqual({ field: 'end', value: 5 })

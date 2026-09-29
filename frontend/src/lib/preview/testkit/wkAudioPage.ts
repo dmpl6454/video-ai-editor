@@ -9,6 +9,7 @@ import { AudioChunks, chunkReader } from '../audio/audioChunks'
 import { AudioEngine } from '../audio/audioEngine'
 import { planFromProgram, type AudioPlan } from '../audio/audioPlan'
 import { LIMITER_LATENCY, limiterMakeupUndo, renderOffline } from '../audio/mixGraph'
+import { loadLimiterWorklet } from '../audio/limiterWorklet'
 import type { EdlLike } from '../timeline/framePlan'
 import { sourceFromJson, type SourceInfoJson } from '../timeline/frameMap'
 import { audioPlacements, buildProgramMap, lookupFromJson } from '../timeline/programMap'
@@ -59,12 +60,18 @@ function loadCase(c: CaseJson) {
   return { lookup, chunks, reader }
 }
 
-async function planOf(c: CaseJson): Promise<{ plan: AudioPlan; reader: ReturnType<typeof chunkReader>; chunks: AudioChunks }> {
+/** `?limiter=compressor` renders through the DynamicsCompressorNode
+ *  fallback (and plans for it); default: the alimiter worklet wherever this
+ *  engine registers it, as the app does. */
+const limiterChoice: 'auto' | 'compressor' = q.get('limiter') === 'compressor' ? 'compressor' : 'auto'
+
+async function planOf(c: CaseJson, exactLimiter = false): Promise<{ plan: AudioPlan; reader: ReturnType<typeof chunkReader>; chunks: AudioChunks }> {
   const { lookup, chunks, reader } = loadCase(c)
   for (const s of Object.values(c.sources)) await chunks.layout(s.key)
   const pm = buildProgramMap(c.edl, lookup)
   const plan = planFromProgram(c.edl, pm, lookup, {
     loudnessGainDb: c.loudness_gain_db ?? null, silent: (s) => reader.silent(s), peak: (s, a, b) => reader.peak?.(s, a, b) ?? null,
+    exactLimiter,
   })
   return { plan, reader, chunks }
 }
@@ -171,11 +178,16 @@ const scenarios: Record<string, () => Promise<Result>> = {
   async render() {
     const name = q.get('case') ?? ''
     const c = await json<CaseJson>(`${MEDIA}/cases/${name}.json`)
-    const { plan, reader } = await planOf(c)
+    // Plan as the app does: for the limiter this engine will play through.
+    const worklet = limiterChoice === 'auto' && await loadLimiterWorklet(new OfflineAudioContext(2, 128, SR))
+    const { plan, reader } = await planOf(c, worklet)
     const [p0, p1] = c.range
     const t0 = performance.now()
-    const { L, R, stats } = await renderOffline(plan, reader, p0, p1)
-    return { name, ms: +(performance.now() - t0).toFixed(1), plan: planSummary(plan), stats, L: b64(L), R: b64(R) }
+    const { L, R, stats, exactLimiter } = await renderOffline(plan, reader, p0, p1, undefined, limiterChoice)
+    return {
+      name, ms: +(performance.now() - t0).toFixed(1), plan: planSummary(plan), stats, L: b64(L), R: b64(R),
+      limiter: limiterChoice, workletLoaded: worklet, exactLimiter,
+    }
   },
 
   /** The same offline render N times: WebKit's OfflineAudioContext must be
@@ -233,6 +245,55 @@ const scenarios: Record<string, () => Promise<Result>> = {
       } })
     }
     return { name, n, diffs }
+  },
+
+  /** P2 limiter tail: the LIVE sink over a loud mixed case, tapped at its
+   *  output. The engine registers the alimiter worklet on its context and
+   *  moves the master's limiter onto it (its plan then names no `limiting`
+   *  range); played from sample 0, the tap is the server's render. */
+  async live_limiter() {
+    const name = q.get('case') ?? ''
+    const c = await json<CaseJson>(`${MEDIA}/cases/${name}.json`)
+    const { lookup } = loadCase(c)
+    const pm = buildProgramMap(c.edl, lookup)
+    const info = {
+      R: pm.R, totalFrames: pm.total, renderHash: 'test',
+      lookup: (src: string) => (c.sources[src] ? { info: sourceFromJson(c.sources[src].info), proxy: { key: c.sources[src].key } } : null),
+    }
+    const ctx = new AudioContext({ sampleRate: SR, latencyHint: 'interactive' })
+    await ctx.audioWorklet.addModule('/pages/audio_tap.js')
+    const tap = new AudioWorkletNode(ctx, 'tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] })
+    const blocks: Array<{ frame: number; L: Float32Array }> = []
+    tap.port.onmessage = (e: MessageEvent) => { blocks.push(e.data as { frame: number; L: Float32Array }) }
+    tap.connect(ctx.destination)
+    const engine = new AudioEngine({ proxyBase: `${MEDIA}/proxies`, createContext: () => ctx, destination: () => tap })
+    let limitingChanges = 0
+    engine.onLimitingChange = () => { limitingChanges++ }
+    engine.prepare(c.edl, audioPlacements(pm, lookup), info)
+    const exactAtPrepare = engine.exactLimiter
+    const framesAtPrepare = engine.limitingFrames()
+    await Promise.all(Object.keys(c.sources).map((src) => engine.reader.load(src, 0, 6 * SR)))
+    for (let i = 0; i < 100 && !engine.exactLimiter; i++) await new Promise((r) => setTimeout(r, 20))
+    const framesAfter = engine.limitingFrames()
+    await ctx.resume()
+    const at = ctx.currentTime + 0.1
+    engine.start(at, 0)
+    const seconds = Math.min(3.2, c.range[1] / SR)
+    await new Promise((r) => setTimeout(r, (seconds + 0.2) * 1000))
+    engine.stop(5)
+    await new Promise((r) => setTimeout(r, 100))
+    tap.port.postMessage('flush')
+    await new Promise((r) => setTimeout(r, 50))
+    const first = blocks.length ? blocks[0].frame : 0
+    const last = blocks.length ? blocks[blocks.length - 1].frame + blocks[blocks.length - 1].L.length : 0
+    const L = new Float32Array(Math.max(0, last - first))
+    for (const b of blocks) L.set(b.L, b.frame - first)
+    const res = {
+      name, at, seconds, firstFrame: first, sampleRate: ctx.sampleRate, L: b64(L), stats: engine.stats,
+      exactAtPrepare, exactLimiter: engine.exactLimiter, framesAtPrepare, framesAfter, limitingChanges,
+    }
+    engine.dispose()
+    return res
   },
 
   /** The LIVE sink on a real AudioContext, tapped at its output: start at an

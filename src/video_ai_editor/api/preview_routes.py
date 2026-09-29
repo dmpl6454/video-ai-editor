@@ -200,8 +200,8 @@ def _summary(key: str) -> dict:
     idx = P.live_index(key) or {}
     out = {"key": key, "state": idx.get("state", "pending"),
            "index_url": f"/api/proxies/{key}/index.json"}
-    for f in ("w", "h", "frames", "src_rate", "span_frames", "spans", "codec",
-              "init_key", "error"):
+    for f in ("w", "h", "frames", "has_video", "src_rate", "span_frames", "spans",
+              "codec", "init_key", "error"):
         if f in idx:
             out[f] = idx[f]
     if "audio" in idx:

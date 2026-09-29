@@ -31,6 +31,7 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import { clarifyHelp, coerceAnswer, defaultAnswers, escapeTarget, isGate, kindOf, missingRequired, neededLine,
          optionsFor, totalDownloadBytes, visibleQuestions, type Answers } from '../lib/clarifyDefaults'
 import { humanBytes, humanDuration, type NeedsInput, type Plan } from '../lib/promptEvents'
+import { cardMayTakeFocusNow } from '../lib/cardFocus'
 import { clarifyEnterAction } from '../lib/clarifyKeys'
 
 interface Props {
@@ -50,7 +51,10 @@ export function ClarifyCard({ questions: allQuestions, plan, busy = false, onSub
   const firstRef = useRef<HTMLElement | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { firstRef.current?.focus() }, [])
+  // Only when focus is on nothing or inside the card's own host (the Prompt
+  // bar / the Chat pane): never away from a field the person is typing in
+  // (lib/cardFocus, final sweep 3 r2).
+  useEffect(() => { if (cardMayTakeFocusNow(rootRef.current)) firstRef.current?.focus() }, [])
 
   const missing = useMemo(() => missingRequired(questions, answers), [questions, answers])
   // A gate card is one question — a `confirm` or a feature gate (`gate_<tool>`,

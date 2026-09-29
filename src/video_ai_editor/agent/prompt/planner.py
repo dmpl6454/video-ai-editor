@@ -36,6 +36,7 @@ import math
 import re
 from typing import Any, Iterable
 
+from . import anim_expanders as AXP
 from . import clip_slots as CS
 from . import grammar as G
 from . import scope_planner as SP
@@ -44,7 +45,7 @@ from . import semantics as M
 from . import slots as S
 from .facts import TimelineFacts
 from .langs import needs_translation
-from .expanders import EXPANDERS, audit_expansion, estimate_seconds, expand_auto_edit, step_cost
+from .expanders import EXPANDERS, audit_expansion, clip_names_to_numbers, estimate_seconds, expand_auto_edit, step_cost
 from .recipes import (ASK, REASK_PREFIX, RECIPE_BY_NAME, Context, Expansion, Intent, consumes_answer,
                       dropped_note, is_blank_answer, normalize_slots, placeholder, pc, reask, was_reasked)
 from .recipes import ask as _ask
@@ -121,7 +122,11 @@ def _original_case(text: str, prompt: str | None) -> str:
     Hinglish verb the normaliser rewrote, say)."""
     if not prompt or not text:
         return text
-    pattern = r"\s+".join(re.escape(w) for w in text.split())
+    # "and" / "with" may have been typed "&" / "w/" (final sweep 3 r2: 'Like &
+    # Subscribe' became 'LIKE AND SUBSCRIBE')
+    alt = {"and": r"(?:and|&)", "with": r"(?:with|w/)"}
+    pattern = r"\s*".join(alt.get(w.lower(), re.escape(w)) for w in text.split()) if any(
+        w.lower() in alt for w in text.split()) else r"\s+".join(re.escape(w) for w in text.split())
     m = re.search(pattern, prompt.replace("’", "'"), flags=re.IGNORECASE)
     return m.group(0) if m else text
 
@@ -144,6 +149,8 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
     q0 = None
     if c.quoted_text:
         q0 = next((q for q in w.quoted_text if q.lower() == c.quoted_text[0].lower()), c.quoted_text[0])
+        if "&" in (prompt or "") or "w/" in (prompt or ""):
+            q0 = _original_case(q0, prompt)       # final sweep 3 r2: 'Like & Subscribe' as typed
     lang = c.language or w.language
     platform = c.platform or w.platform
     lufs = c.lufs if c.lufs is not None else w.lufs
@@ -296,6 +303,12 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
                 said = re.search(r"\b(?:saying|that says|which says|reading|that reads|says)\s+(.+)$", text, re.I)
                 if said:
                     text = said.group(1).strip(" .!?\"'“”")
+                # final sweep 3 r2: "add the title Step 2 on clip 2" titled
+                # "Step 2 on clip 2" — the clip is where it goes, not a word
+                text = _TITLE_ON_CLIP_RE.sub("", text).strip() or text
+                if _NO_WORDS_RE.fullmatch(text.strip(" .!?").lower()):
+                    # "write a catchy title for this" was titled 'FOR THIS'
+                    text = None
                 # Final QA r2: "make the title red", "the Summer Trip text
                 # bigger", "title font size 80" — words that only describe a
                 # LOOK are not a new title's wording. They were added as a
@@ -315,8 +328,9 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
             at, dur = float(rng.start), float(rng.end) - float(rng.start)
         if restyle:
             return {"text": None, "_restyle": True, "_look": text_look_of(hit.clause)}
-        # "add a red title 'Intro'": the new title's own colour
-        new_look = {k: v for k, v in text_look_of(M.strip_quotes(hit.clause)).items() if k == "color"} if text else {}
+        # "add a red title 'Intro'": the new title's own colour — and (final
+        # sweep 3 r2, HIGH) its place, size, outline, box, font and motion
+        new_look = new_title_look(hit.clause, text) if text else {}
         return {"text": text, "name": name, "handle": handle, "dur": dur, "at": at, "_look": new_look or None,
                 "_style": "label_tag" if c.caption_position == "top" else "bold_pop",
                 "_lower_third": is_name_card}
@@ -456,9 +470,11 @@ _SMALLER_RE = re.compile(r"\b(?:smaller|tinier|less big|reduce (?:the )?size|siz
 _SIZE_PX_RE = re.compile(r"\bsize\s+(?:to\s+)?(\d{2,3})\b|\b(\d{2,3})\s*(?:px|pixels?|pt)\b")
 _UPPER_RE = re.compile(r"\b(?:all caps|all-caps|upper ?case|capitals|caps lock|in caps)\b")
 _LOWER_CASE_RE = re.compile(r"\b(?:lower ?case|sentence case|normal case|no caps|not all caps)\b")
-_NO_OUTLINE_RE = re.compile(r"\b(?:no|remove (?:the )?|without (?:an? )?)(?:outline|stroke|border)\b")
+#: final sweep 3 r2: "with no outline" never matched — "no" had no space
+#: after it, so only "nooutline" did and the title kept its 6 px outline.
+_NO_OUTLINE_RE = re.compile(r"\b(?:no\s+|remove (?:the )?|without (?:an? )?)(?:outline|stroke|border)\b")
 _OUTLINE_RE = re.compile(r"\b(?:outline|stroke|border)\b")
-_NO_BOX_RE = re.compile(r"\b(?:no|remove (?:the )?|without (?:an? )?)(?:background|box|backdrop)\b")
+_NO_BOX_RE = re.compile(r"\b(?:no\s+|remove (?:the )?|without (?:an? )?)(?:background|box|backdrop)\b")
 _BOX_RE = re.compile(r"\b(?:background|box|backdrop|highlight)\b")
 #: Words that only describe how a text LOOKS (Final QA r2).
 _STYLE_WORD_RE = re.compile(
@@ -739,6 +755,61 @@ def text_look_of(clause: str) -> dict[str, Any]:
     if pos and not re.search(r"\b(?:box|background|outline)\b", clause):
         out["position"] = {"centre": "center", "center": "middle"}.get(pos.group(1), pos.group(1))
     return out
+
+
+#: What follows "a title" when no words were given ("a catchy title for this").
+_NO_WORDS_RE = re.compile(r"(?:for|about|on|to)\s+(?:this|it|that|me|us|the\s+(?:video|clip|reel|edit)|this\s+(?:video|clip|"
+                          r"reel|edit)|my\s+(?:video|clip|reel))(?:\s+(?:please|pls|now))?")
+_TITLE_ON_CLIP_RE = re.compile(
+    r"\s+(?:on|over|during|across|for|above)\s+(?:the\s+)?(?:clip\s+(?:\d{1,2}|one|two|three|four|five|six)"
+    r"|(?:first|second|third|fourth|fifth|last|final)\s+(?:clip|shot)|this\s+clip|[\w-]+\s+(?:shot|clip))\s*$",
+    re.I)
+_BOX_COLOUR_RE = re.compile(r"\b(?:in|on|with|inside)\s+(?:a|an|the)\s+(" + "|".join(_COLOUR_HEX)
+                            + r")\s+(?:box|background|banner|backdrop|bar|block)\b")
+_CORNER_RE = re.compile(r"\b(?:top|bottom|upper|lower)[- ]?(left|right)\b|\b(left|right)[- ]?(?:top|bottom)\b"
+                        r"|\b(?:on|at|to)\s+the\s+(left|right)(?:\s+(?:side|edge))?\b(?!\s+(?:of|clip|shot))")
+_PLACE_RE = re.compile(r"\b(top|bottom|middle|center|centre|upper|lower)\b")
+_SIZE_WORD_RE = re.compile(r"\b(tiny|small|little|big|huge|giant)\b(?!\s+(?:clip|shot|video))")
+_TITLE_ANIM_RE = re.compile(r"\b(fades?|fading|slides?|sliding|pops?|popping|drops?)\s+(in|up|down|out)\b"
+                            r"|\b(?:with\s+a\s+)?(fade|slide|pop)[- ](in|up|down|out)\b")
+
+
+def new_title_look(clause: str, text: str | None) -> dict[str, Any]:
+    """The look a NEW title's own clause asks for (final sweep 3 r2, HIGH):
+    colour, size words, outline, box (and its colour — "in a black box" was
+    black TEXT), font, top / middle / bottom and a left / right corner, and
+    fade / slide / pop in. The title's own words never count."""
+    rest = M.strip_quotes(clause or "").lower()
+    if text:
+        rest = rest.replace(str(text).lower(), " ")
+    look = {k: v for k, v in text_look_of(rest).items()
+            if k in ("color", "size", "size_scale", "stroke_w", "background", "font")}
+    if m := _BOX_COLOUR_RE.search(rest):
+        look["background"] = _COLOUR_HEX[m.group(1)] + "CC"
+        rest_wo_box = rest[:m.start()] + " " + rest[m.end():]
+        if (c := _COLOUR_RE.search(rest_wo_box)) is not None:
+            look["color"] = (c.group(2) or _COLOUR_HEX[c.group(1)]).upper()
+        else:
+            look.pop("color", None)
+            if look["background"].upper().startswith(("#FFFFFF", "#FFD400", "#FFFF00", "#A4FF00")):
+                look["color"] = "#000000"          # dark words on a light box
+    if "size" not in look and "size_scale" not in look and (m := _SIZE_WORD_RE.search(rest)):
+        look["size_scale"] = {"tiny": 0.45, "small": 0.6, "little": 0.6, "big": 1.2, "huge": 1.5,
+                              "giant": 1.5}[m.group(1)]
+    if m := _PLACE_RE.search(rest):
+        look["position"] = {"upper": "top", "lower": "bottom", "center": "middle", "centre": "middle"}.get(
+            m.group(1), m.group(1))
+    if m := _CORNER_RE.search(rest):
+        look["_x"] = m.group(1) or m.group(2) or m.group(3)
+    if m := _TITLE_ANIM_RE.search(rest):
+        verb = (m.group(1) or m.group(3) or "").rstrip("s").replace("fading", "fade").replace("sliding", "slide") \
+            .replace("popping", "pop")
+        way = m.group(2) or m.group(4)
+        kind = {"fade": "fade", "slide": "slide_down" if way == "down" else "slide_up", "pop": "pop",
+                "drop": "slide_down"}.get(verb)
+        if kind:
+            look["anim_out" if way == "out" else "anim_in"] = kind
+    return look
 
 
 def _captions_new(clause: str) -> bool:
@@ -1051,6 +1122,15 @@ def _merge_intents(intents: Iterable[Intent]) -> list[Intent]:
     by_name: dict[str, Intent] = {}
     order: list[str] = []
     for it in intents:
+        if it.recipe in by_name and _another_title(by_name[it.recipe], it):
+            # Final sweep 3: "add a title 'Step 2' at 8s and a title 'Step 3' at
+            # 14s" is TWO titles — merging kept only the last one's slots.
+            # The extra rides on the first; `_expand_all` expands each.
+            prev = by_name[it.recipe]
+            more = (*(prev.get("_more") or ()), it)
+            by_name[it.recipe] = Intent(prev.recipe, {**prev.slots, "_more": more}, max(prev.score, it.score),
+                                        prev.clause)
+            continue
         if it.recipe in by_name:
             prev = by_name[it.recipe]
             merged = {**prev.slots, **{k: v for k, v in it.slots.items() if v not in (None, (), "")}}
@@ -1061,6 +1141,26 @@ def _merge_intents(intents: Iterable[Intent]) -> list[Intent]:
             by_name[it.recipe] = it
             order.append(it.recipe)
     return [by_name[n] for n in order]
+
+
+def _another_title(prev: Intent, it: Intent) -> bool:
+    """`it` is a second NEW title with words of its own (not a restyle or a
+    retime of the first, and not the same words said twice)."""
+    if it.recipe != "title":
+        return False
+    if any(x.get(k) for x in (prev, it) for k in ("_restyle", "_retime", "_lower_third", "name", "handle")):
+        return False
+    a, b = (str(prev.get("text") or "").strip(), str(it.get("text") or "").strip())
+    return bool(a and b) and a.lower() != b.lower()
+
+
+def _join_expansions(a: Expansion, b: Expansion) -> Expansion:
+    return Expansion(steps=a.steps + b.steps, postconditions=a.postconditions + b.postconditions,
+                     questions=a.questions + tuple(q for q in b.questions if q not in a.questions),
+                     downloads=a.downloads + tuple(d for d in b.downloads if d not in a.downloads),
+                     notes=a.notes + tuple(n for n in b.notes if n not in a.notes),
+                     content_brain=a.content_brain or b.content_brain,
+                     prerequisites=a.prerequisites + b.prerequisites)
 
 
 def _ordered(intents: list[Intent]) -> list[Intent]:
@@ -1083,7 +1183,10 @@ def _expand_all(intents: list[Intent], facts: TimelineFacts, exclusions: frozens
             if it.recipe == "_audit":
                 expansions[it.recipe] = audit_expansion()
                 continue
-            expansions[it.recipe] = EXPANDERS[it.recipe](it, facts, ctx)
+            x = EXPANDERS[it.recipe](it, facts, ctx)
+            for extra in it.get("_more") or ():
+                x = _join_expansions(x, EXPANDERS[it.recipe](extra, facts, ctx))
+            expansions[it.recipe] = x
             wanted.extend(p for p in expansions[it.recipe].prerequisites
                           if p.recipe not in names and p.recipe not in exclusions)
         if not wanted:
@@ -1132,6 +1235,43 @@ def _compose_durations(pcs: list[Postcondition], facts: TimelineFacts) -> list[P
     first = pcs.index(durs[0])
     rest = [p for p in pcs if p.check != "duration_between"]
     return rest[:first] + [one] + rest[first:]
+
+
+def _speeds_in_duration(pcs: list[Postcondition], steps: list, facts: TimelineFacts) -> list[Postcondition]:
+    """final sweep 3 r2 (LOW): "cut everything between 5 and 6 seconds and
+    speed up clip 1" applied exactly what its card said and then reported
+    "✗ the duration matches: measured 10.2 s, expected 11.00" — the cut's
+    expectation did not count the speed change on clip 1. A one-clip speed
+    step the cut does not touch shortens (or lengthens) the expectation by
+    what that clip loses; one the cut overlaps cannot be composed, and the
+    duration check is left to the steps' own checks."""
+    durs = [p for p in pcs if p.check == "duration_between"]
+    speeds = [st for st in steps if getattr(st, "tool", None) == "set_speed"
+              and isinstance(st.args.get("factor"), (int, float)) and float(st.args["factor"]) > 0
+              and isinstance(st.args.get("clip_id"), str) and st.args["clip_id"] != "$v1_all"]
+    if len(durs) != 1 or not speeds:
+        return pcs
+    a = durs[0].args
+    if a.get("target") is None and (a.get("start") is None or a.get("end") is None):
+        return pcs
+    v1 = sorted((c for c in facts.clips if c.track == "v1"), key=lambda c: c.start)
+    ids = [c.id for c in v1]
+    target = float(a["target"]) if a.get("target") is not None else \
+        float(facts.video_end or facts.duration or 0.0) - (float(a["end"]) - float(a["start"]))
+    for st in speeds:
+        ref = str(st.args["clip_id"])
+        idx = 0 if ref == "$v1_first" else len(ids) - 1 if ref == "$v1_last" else \
+            (int(ref.split(":", 1)[1]) - 1 if ref.startswith("$v1_nth:") and ref.split(":", 1)[1].isdigit()
+             else ids.index(ref) if ref in ids else None)
+        if idx is None or not 0 <= idx < len(v1):
+            return [p for p in pcs if p is not durs[0]]
+        c = v1[idx]
+        if a.get("start") is not None and float(a["start"]) < c.start + c.duration and float(a["end"]) > c.start:
+            return [p for p in pcs if p is not durs[0]]
+        now = float(c.speed or 1.0)
+        target -= c.duration - c.duration * now / float(st.args["factor"])
+    one = durs[0].model_copy(update={"args": {**a, "target": round(target, 3), "start": None, "end": None}})
+    return [one if p is durs[0] else p for p in pcs]
 
 
 def _dedupe_postconditions(pcs: list[Postcondition]) -> list[Postcondition]:
@@ -1271,7 +1411,8 @@ def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozense
                           kind="confirm", options=[("yes", "Start"), ("no", "Cancel")]))
     questions = _cap_questions(front + questions)
 
-    postconditions = _dedupe_postconditions(_compose_durations(postconditions, facts))
+    postconditions = _dedupe_postconditions(_speeds_in_duration(_compose_durations(postconditions, facts),
+                                                                steps, facts))
     recipes_in = [it.recipe for it in ordered if it.recipe not in ("_audit",)] or \
         [it.recipe for it in ordered if it.recipe == "_audit"]
     headline = "auto_edit" if any(i.recipe == "auto_edit" for i in intents) else "+".join(recipes_in)
@@ -1599,7 +1740,7 @@ def _bind_pronouns(intents: list[Intent], facts: TimelineFacts, clauses: tuple[s
                     slots["target"] = "voice"      # "split at 6s then mute the second half" muted the MUSIC
                 it = Intent(it.recipe, slots, it.score, it.clause)
             elif prev is not None and (_IT_WORD_RE.search(text) or (it.recipe == "color_look" and re.search(
-                    r"\b(?:it|this|that)\b", text) and ref is None)):
+                    r"\b(?:it|this|that)\b", text) and ref is None) or (ref is None and M.is_bare_continuation(text))):
                 slots = {**it.slots, "clip_ref": prev}
                 if it.recipe in ("volume", "mute") and slots.get("target") == "music" \
                         and not _MUSIC_WORD_RE.search(text) and _IT_WORD_RE.search(text):
@@ -1636,6 +1777,10 @@ _TEXT_PLACE_RE = re.compile(r"\b(?:title|text|heading|headline|lower[- ]?third|l
                             r"|center|centre)\b|\b(?:top|bottom|middle|center|centre)\b.*\b(?:title|text|heading)\b")
 
 
+_NEW_QUOTED_TITLE_RE = re.compile(r"\b(?:add|put|insert|create|place|write|drop|throw)\s+(?:in\s+)?(?:an?\s+|the\s+)?"
+                                  r"(?:new\s+)?(?:title|text|heading|headline)\s*[:\-]?\s*[\"“'‘]")
+
+
 def _text_place_hits(det: G.Detection) -> G.Detection:
     """K3: "put the title at the top" / "move the title to the bottom" is a
     title's LOOK (`set_text_style` position) — the grammar reads it as the
@@ -1646,6 +1791,11 @@ def _text_place_hits(det: G.Detection) -> G.Detection:
     for h in det.hits:
         if (h.intent == "transform" and _TEXT_PLACE_RE.search(h.clause)
                 and not re.search(r"\b(?:sticker|emoji|overlay|pip|logo|opacity|transparen|corner)\w*", h.clause)):
+            h = _r(h, intent="title")
+            changed = True
+        elif h.intent == "fade" and _NEW_QUOTED_TITLE_RE.search(h.clause):
+            # final sweep 3 r2: "add title 'Intro' that fades in" faded clip 1
+            # and added no title — the fade is the new title's own In
             h = _r(h, intent="title")
             changed = True
         hits.append(h)
@@ -1721,6 +1871,18 @@ _CLIPW = r"(?:(?:the\s+)?(?:first|second|third|fourth|fifth|last|final|\d{1,2}(?
 #: Plain phrasings the phrase table has no row for, said the way it does
 #: (Final sweep 2): each rewrite is the SAME edit in the grammar's words.
 _REWORDS: tuple[tuple[re.Pattern, str], ...] = (
+    # final sweep 3 r2 (CRITICAL): "revert clip 2 to normal speed" was read
+    # as a bare "undo" and undid the LAST edit (a mute on clip 3) at once
+    (re.compile(rf"\b(?:revert|undo|reset|return|put)\s+({_CLIPW})\s+(?:back\s+)?to\s+(?:its\s+|the\s+)?"
+                r"(?:normal|regular|original|default|real)\s+speed\b", re.I), r"set \1 to normal speed"),
+    # final sweep 3 r2: "give the logo a zoom in intro and a spin outro" asked
+    # for an end-card handle — an intro / outro MOTION is the In / Out
+    (re.compile(r"\bgive\s+(.+?)\s+an?\s+([a-z]+)(?:\s+in)?\s+(?:intro|entrance)\s+(?:and|&)\s+an?\s+"
+                r"([a-z]+)(?:\s+out)?\s+(?:outro|exit)\b", re.I), r"make \1 \2 in and \3 out"),
+    # final sweep 3 r2 (LOW): "cut everything between 5 and 6 seconds and speed
+    # up clip 1" split at the first "and" — "6 seconds" was "Not done"
+    (re.compile(r"\bbetween\s+(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)?\s+and\s+(\d+(?:\.\d+)?)\s*"
+                r"(s|secs?|seconds?)\b", re.I), r"from \1 to \2 \3"),
     # "put clip 1 between clip 2 and clip 3" added a TRANSITION
     (re.compile(rf"\b(?:put|move|place|drag|stick|slot|insert)\s+({_CLIPW})\s+(?:in\s+)?between\s+({_CLIPW})\s+"
                 rf"(?:and|&)\s+({_CLIPW})", re.I), r"move \1 after \2"),
@@ -1920,7 +2082,7 @@ def _v1_spans_of(facts: TimelineFacts):
 def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None = None,
          allow_downloads: bool = True) -> Plan:
     """The recipes brain (§1.2): grammar → intents → recipes → steps."""
-    prompt = _reword(prompt)
+    prompt = clip_names_to_numbers(_reword(prompt), facts)
     if (gap := _gap_reply(prompt, facts)) is not None:
         return gap
     said, done = _facts_reading(prompt, facts)
@@ -1936,6 +2098,7 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
             det2 = SF.rewrite_hits(_text_place_hits(G.detect(fixed)), facts)
             if [h for h in det2.hits if h.intent != "ask"] and det2.confidence >= G.NORMALISE_THRESHOLD:
                 det, prompt, typo_note = det2, fixed, f"I read that as “{fixed}”"
+    det, split_times = _absorb_split_times(det)
     conf = det.confidence
     if det.hits and det.hits[0].intent in ("undo", "redo"):
         verb = det.hits[0].intent
@@ -1972,6 +2135,10 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
         _absorb_style_clauses(_bind_pronouns([bind(h, det.slots, prompt) for h in hits], facts, det.clauses), det),
         det, facts)
     intents = _carry_music_fades(intents, det.clauses)
+    intents = AXP.pair_animation_sides(intents, det.clauses)
+    if split_times:
+        intents = [Intent(it.recipe, {**it.slots, "_more_times": split_times}, it.score, it.clause)
+                   if it.recipe == "split" and it.get("clip_ref") is None else it for it in intents]
     exclusions = frozenset(x for x in det.exclusions if x in RECIPE_BY_NAME)
     prefix = None
     if G.NORMALISE_THRESHOLD <= conf < G.RUN_THRESHOLD:
@@ -1991,6 +2158,14 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
     else:
         p = compose(intents, facts, exclusions=exclusions, confidence=conf, reply_prefix=prefix,
                     hook_text=hook_text, allow_downloads=allow_downloads, brain="recipes")
+    missed = _not_done(det, intents)
+    if missed and p.steps and not p.needs_input:
+        # Final sweep 3: "set the overlay to screen blend and make it full
+        # screen" planned the blend and said nothing of the rest — the
+        # person pressed Apply thinking both were done.
+        said = "; ".join(f"'{c}'" for c in missed[:3])
+        line = f"Not done: {said} — I don't know that edit yet."
+        p = p.with_(reply=f"{p.reply} {line}".strip() if p.reply else line)
     if conf < G.NORMALISE_THRESHOLD:
         # §2.7: below 0.4 the plan is a guess — ask, offering it as the first option.
         return p.with_(steps=[], postconditions=[], downloads_needed=[], estimated_seconds=None,
@@ -2001,6 +2176,34 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
     return p
 
 
+_BARE_TIME_RE = re.compile(r"^(?:and\s+|then\s+)?(?:at\s+)?(\d{1,4}(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?$")
+
+
+def _absorb_split_times(det: G.Detection) -> tuple[G.Detection, tuple[float, ...]]:
+    """"split at 2 and 10 seconds" / "split at 2s, 5s and 10s": the bare times
+    after a split clause are more split points (final sweep 3: only the first
+    was split, and the rest were read as nothing)."""
+    from dataclasses import replace
+    if not any(h.intent == "split" for h in det.hits):
+        return det, ()
+    bare = [(c, m) for c in det.unmatched if (m := _BARE_TIME_RE.match(c.strip()))]
+    if not bare:
+        return det, ()
+    drop = {c for c, _ in bare}
+    times = tuple(float(m.group(1)) for _, m in bare)
+    return replace(det, clauses=tuple(c for c in det.clauses if c not in drop),
+                   unmatched=tuple(c for c in det.unmatched if c not in drop)), times
+
+
+def _not_done(det: G.Detection, intents: list[Intent]) -> list[str]:
+    """Clauses with editing words that nothing in the plan reads — neither a
+    grammar hit nor an intent the fix-ups made of them. "thanks" or
+    "whatever" (no editing words) are not an edit left undone."""
+    from .brains.content import unanchored_prompt
+    read = {h.clause for h in det.hits} | {it.clause for it in intents}
+    return [c for c in det.unmatched if c not in read and not unanchored_prompt(c)]
+
+
 #: Words a typo'd prompt most often means (Final QA r2, `plan_as`).
 _TYPO_VOCAB: tuple[str, ...] = (
     "the", "clip", "clips", "first", "second", "third", "fourth", "fifth", "last", "middle", "speed", "up",
@@ -2008,6 +2211,9 @@ _TYPO_VOCAB: tuple[str, ...] = (
     "delete", "remove", "duplicate", "split", "caption", "captions", "volume", "louder", "quieter", "mute",
     "black", "white", "warm", "cool", "zoom", "rotate", "freeze", "transition", "transitions", "please",
     "bigger", "smaller",
+    # final sweep 3 r2 (LOW): real words that sit one slip from a vocabulary
+    # word — "move SALE to 9 seconds" became "remove …" ("Which part should I cut?")
+    "move", "moved", "moving", "playhead", "shift", "place",
 )
 
 

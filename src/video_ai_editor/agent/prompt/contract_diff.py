@@ -458,10 +458,31 @@ def _lane_dump(edl: EDL, tid: str) -> str:
     return _dump(t.model_dump() if t else None)
 
 
+#: A layer's TIMING fields — what the main lane's layer-follow (P3) moves.
+_LAYER_TIME = frozenset({"start", "in_", "out"})
+
+
+def _only_retimed(before: EDL, after: EDL, tid: str) -> bool:
+    """True when lane `tid` differs ONLY in its clips' start / in / out —
+    the same clips, nothing restyled, added or removed. A PIP that moved
+    with the picture under it is `overlay:time`, licensed by the main-lane
+    edit that moved it; a zoom, blend or effect stays `overlay:change`."""
+    tb, ta = before.get_track(tid), after.get_track(tid)
+    if tb is None or ta is None:
+        return False
+    if _dump(tb.model_dump(exclude={"clips"})) != _dump(ta.model_dump(exclude={"clips"})):
+        return False
+    if [c.id for c in tb.clips] != [c.id for c in ta.clips]:
+        return False
+    return all(_dump(b.model_dump(exclude=_LAYER_TIME)) == _dump(a.model_dump(exclude=_LAYER_TIME))
+               for b, a in zip(tb.clips, ta.clips))
+
+
 def _diff_lanes(d: Diff, before: EDL, after: EDL) -> None:
     for tid, cat in (("vo", "vo"), ("v2", "overlay"), ("v3", "overlay")):
         if _lane_dump(before, tid) != _lane_dump(after, tid):
-            d.categories.add(f"{cat}:change")
+            timing = cat == "overlay" and _only_retimed(before, after, tid)
+            d.categories.add(f"{cat}:time" if timing else f"{cat}:change")
     bs = [(_dump(c.model_dump())) for t in before.tracks for c in t.clips if isinstance(c, Sticker)]
     as_ = [(_dump(c.model_dump())) for t in after.tracks for c in t.clips if isinstance(c, Sticker)]
     if bs != as_:

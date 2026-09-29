@@ -35,6 +35,7 @@ from .clip_expanders import _label, bind_clip
 from .facts import TimelineFacts
 from .recipes import Context, Expansion, Intent, pc, step
 from .schema import STAGE_LOOK
+from .semantics import STICKER_NOUNS
 
 # --------------------------------------------------------------------------
 # 1. Reading a clause (clip_slots.READERS)
@@ -59,7 +60,7 @@ _FROM_RE = re.compile(r"\bfrom\s+(?:the\s+)?(left|right|top|above|bottom|below)\
 _TO_SIDE = {"left": "slide_left", "right": "slide_right", "top": "slide_up", "up": "slide_up",
             "bottom": "slide_down", "down": "slide_down"}
 _TO_RE = re.compile(r"\b(?:to|towards?|off)\s+(?:the\s+)?(left|right|top|bottom)\b")
-_STICKER_RE = re.compile(r"\b(?:stickers?|emojis?|logos?|gifs?)\b")
+_STICKER_RE = re.compile(rf"\b(?:{STICKER_NOUNS})\b")
 _OVERLAY_RE = re.compile(r"\b(?:overlays?|pips?|picture[- ]in[- ]picture|top\s+(?:clip|layer|video)|upper\s+(?:clip|layer))\b")
 _TEXT_RE = re.compile(r"\b(?:titles?|text|captions?|subtitles?|lower[- ]?thirds?|hooks?)\b")
 _ALL_RE = re.compile(r"\b(?:every|all)\s+(?:the\s+)?(?:clips?|shots?)\b|\beverything\b")
@@ -86,7 +87,12 @@ def motion_in(clause: str) -> dict[str, Any]:
     for w, rx in _INOUT_RX:
         if rx.search(clause):
             rest = _strip(clause, [w, "zoom in", "zoom out"])
-            out = bool(_OUT_RE.search(rest)) and not re.search(r"\bin\s+and\s+out\b", rest)
+            both = bool(re.search(r"\bin\s+and\s+(?:then\s+)?out\b", rest))
+            if both and IN_OUT_WORDS[w][0] and IN_OUT_WORDS[w][1]:
+                # final sweep 3 r2: "fade the overlay in and out" planned the
+                # In alone — both sides, one set_animation
+                return {"kind": "in", "preset": IN_OUT_WORDS[w][0], "_also": {"out": IN_OUT_WORDS[w][1]}}
+            out = bool(_OUT_RE.search(rest))
             kind = "out" if out else "in"
             pid = IN_OUT_WORDS[w][0 if kind == "in" else 1]
             return {"kind": kind, "preset": pid}
@@ -316,10 +322,54 @@ def x_animation(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         args[f"{kind}_duration"] = round(min(hi, max(lo, float(dur))), 2)
     words = {"in": "In", "out": "Out", "combo": "Combo"}[kind]
     check = {"clip_id": target.get("clip_id") or ids, kind: pid}
+    # final sweep 3 r2: the other side said in the same sentence ("pop in and
+    # spin out", "fade … in and out") — it was dropped without a word
+    for side, other in (it.get("_also") or {}).items():
+        if kind != "combo" and side in ("in", "out") and side != kind and A.preset(side, other) is not None:
+            args[side] = other
+            check[side] = other
+            label = f"{label} + {A.preset(side, other).label}"
+            words = "In and Out"
     return Expansion(
         steps=(step("set_animation", STAGE_LOOK, f"{label} ({words}) on {who}", **args),),
         postconditions=(pc("animation_is", f"{who} animates {label}", **check),),
         notes=(f"{who} {'loops' if kind == 'combo' else 'animates'} {label} ({words})",))
 
 
-__all__ = ["motion_in", "read_animation", "x_animation"]
+def pair_animation_sides(intents: list, clauses: tuple[str, ...]) -> list:
+    """One animation for "make the logo pop in and spin out" (the grammar
+    splits it into two clauses and the merge kept only the Out), and "fade it
+    out" after an animation on a sticker / overlay is THAT thing's Out — it
+    faded the last video clip (final sweep 3 r2)."""
+    from .recipes import Intent
+    out: list = []
+    for it in intents:
+        prev = out[-1] if out else None
+        if prev is not None and prev.recipe == "animation" and prev.get("kind") in ("in", "out") \
+                and prev.get("preset") and not prev.get("off"):
+            side = None
+            other = None
+            if it.recipe == "animation" and it.get("kind") in ("in", "out") and it.get("kind") != prev.get("kind") \
+                    and it.get("preset") and not it.get("off") and _same_target(prev, it):
+                side, other = it.get("kind"), it.get("preset")
+            elif it.recipe == "fade" and prev.get("target") in ("sticker", "overlay") and not it.get("clip_ref") \
+                    and re.search(r"\b(?:it|them|this|that)\b", it.clause or "") \
+                    and re.search(r"\bout\b", it.clause or "") and not re.search(r"\bin\b", it.clause or ""):
+                side, other = "out", "fade_out"
+            if side is not None and side not in (prev.get("_also") or {}):
+                out[-1] = Intent(prev.recipe, {**prev.slots, "_also": {**(prev.get("_also") or {}), side: other}},
+                                 max(prev.score, it.score), prev.clause)
+                continue
+        out.append(it)
+    return out
+
+
+def _same_target(a, b) -> bool:
+    """`b` names nothing of its own, or the same thing as `a`."""
+    keys = ("target", "clip_ref", "nth", "all")
+    if not any(b.get(k) for k in keys):
+        return True
+    return all(a.get(k) == b.get(k) for k in keys if b.get(k))
+
+
+__all__ = ["motion_in", "read_animation", "x_animation", "pair_animation_sides"]

@@ -135,5 +135,62 @@ def sound_windows(clips, seams: SeamTable, video_end: float
     return sound_render_windows(list(clips), list(seams), float(video_end))
 
 
+def linked_text_windows(edl: EDL) -> dict[str, tuple[float, float] | None]:
+    """Text id → render window of every text clip LINKED to a sound-lane or
+    PIP clip that still exists (`TextClip.linked_to`, final sweep 3 r2).
+
+    A linked caption is stored on its clip's own clock (`clip.start` plus how
+    far into the clip its words are heard), so it plays at
+    ``rs + (cue.start − clip.start)`` of that clip's render window — the
+    sound lane's (`sound_windows`) or the PIP's (`render_window` over its
+    footprint, `pip.pip_layout_end`) — and stops no later than the clip
+    does. None: the clip is not heard there (past its run's cut) or the cue
+    falls outside it, and the renderer drops it. A text clip that is not
+    linked, or whose clip is gone, is absent: the caller uses
+    `render_window` (the layout clock) for it, as for every other overlay.
+    Mirrored by `frontend/src/lib/timelineLayout.linkedTextSpan`."""
+    from ..edl.schema import Clip, TextClip, sound_lane
+    seams = seam_table(edl)
+    hosts: dict[str, tuple] = {}
+    for t in edl.tracks:
+        for c in t.clips:
+            if isinstance(c, Clip):
+                hosts[c.id] = (t, c)
+    lane_windows: dict[str, dict[str, tuple[float, float]]] = {}
+    out: dict[str, tuple[float, float] | None] = {}
+    for t in edl.tracks:
+        for x in t.clips:
+            link = getattr(x, "linked_to", None)
+            if not isinstance(x, TextClip) or not link or link not in hosts:
+                continue
+            lane, c = hosts[link]
+            if sound_lane(lane):
+                if lane.id not in lane_windows:
+                    lane_windows[lane.id] = sound_windows(lane.clips, seams, edl.video_extent())
+                win = lane_windows[lane.id].get(c.id)
+            elif lane.type == "video" and lane.id != "v1":
+                win = render_window(seams, float(c.start), float(c.start) + float(c.effective_duration))
+            else:
+                continue                        # not a caption source: the layout clock
+            if win is None:
+                out[x.id] = None
+                continue
+            rs = win[0] + (float(x.start) - float(c.start))
+            re = min(win[0] + (float(x.end) - float(c.start)), win[1])
+            out[x.id] = (rs, re) if re - rs > SEAM_EPS else None
+    return out
+
+
+def text_window(seams: SeamTable, linked: dict[str, tuple[float, float] | None],
+                clip_id: str | None, start: float, end: float
+                ) -> tuple[float, float] | None:
+    """Where one text / sticker overlay plays: its linked clip's window
+    (`linked_text_windows`) when it has one, else `render_window`."""
+    if clip_id is not None and clip_id in linked:
+        return linked[clip_id]
+    return render_window(seams, start, end)
+
+
 __all__ = ["SeamTable", "SEAM_EPS", "seam_table", "overlap_before",
-           "render_time", "render_window", "sound_window", "sound_windows"]
+           "render_time", "render_window", "sound_window", "sound_windows",
+           "linked_text_windows", "text_window"]

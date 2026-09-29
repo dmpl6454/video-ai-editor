@@ -10,7 +10,11 @@ import type { SourceInfo } from '../timeline/frameMap'
 import { buildProgramMap } from '../timeline/programMap'
 import type { PcmReader } from './audioChunks'
 import { clipGainAt, planFromProgram, type AudioPlan } from './audioPlan'
-import { asCtx, type FakeCompressor, FakeContext, FakeGain, type FakeNode, FakeOfflineContext, FakeParam, FakeSource, type ParamEvent } from './fakeAudio'
+import {
+  asCtx, type FakeCompressor, FakeContext, FakeGain, type FakeNode, FakeOfflineContext, FakeParam, FakeSource, FakeWorkletNode,
+  installFakeWorklet, type ParamEvent,
+} from './fakeAudio'
+import { LIMITER_PROCESSOR, loadLimiterWorklet } from './limiterWorklet'
 import {
   BLOCK_SAMPLES, channelMatrix, curvePositions, duckValueAt, duckWindows, holdAndRamp, LIMITER_LATENCY, limiterMakeupUndo, masterLatency, MixGraph,
   RAMP_S, sourceRange, trackedValue,
@@ -392,5 +396,86 @@ describe('master with a loudness gain on a mixed programme', () => {
     expect(d2.dirtyBuses.size).toBeGreaterThan(0)
     expect(chain(ctx).filter((s) => s.startsWith('lim'))).toEqual(['lim0'])
     expect(g.latency).toBe(LIMITER_LATENCY)
+  })
+})
+
+// P2 limiter tail (0.8.0 final QA): where the alimiter worklet is registered
+// the master's limiter stages are it — the server's limiter sample for
+// sample (alimiter.test.ts; tests/wk/test_wk_audio.py) — padded to the same
+// look-ahead, needing no warm-up and no makeup undo; elsewhere, and when a
+// test asks for it, the DynamicsCompressorNode fallback.
+describe('master limiter: the alimiter worklet', () => {
+  const mixed = () => planOf(edl({ v1: [{ id: 'a', start: 0, out: 1 }], music: [{ id: 'm', start: 0, out: 1 }] }))
+  const loudMixed = (gainDb: number) => {
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 1 }], music: [{ id: 'm', start: 0, out: 1 }] })
+    e.canvas = { fps: 30, loudness_lufs: -16 } as EdlLike['canvas']
+    return planFromProgram(e, buildProgramMap(e, () => SRC), () => SRC, { loudnessGainDb: gainDb })
+  }
+  const worklets = (ctx: FakeContext) => ctx.nodes.filter((n): n is FakeWorkletNode => n instanceof FakeWorkletNode)
+
+  it('replaces the compressor once registered: same latency, no warm-up, unity output gain', async () => {
+    const ctx = new FakeContext()
+    const undo = installFakeWorklet(ctx)
+    try {
+      expect(await loadLimiterWorklet(asCtx(ctx))).toBe(true)
+      expect(ctx.audioWorklet!.modules).toHaveLength(1)
+      expect(await loadLimiterWorklet(asCtx(ctx))).toBe(true)             // once per context
+      expect(ctx.audioWorklet!.modules).toHaveLength(1)
+      ctx.currentTime = 1
+      const g = new MixGraph(asCtx(ctx), loudMixed(-12), { reader: reader(), compensateLatency: true })
+      expect(ctx.nodes.some((n) => n.kind === 'compressor')).toBe(false)
+      const [mix, post] = worklets(ctx)
+      expect(mix.processor).toBe(LIMITER_PROCESSOR)
+      expect(mix.options.processorOptions).toEqual({ limit: 1, autoLevel: false, attackMs: 5, releaseMs: 50, latency: LIMITER_LATENCY })
+      expect(post.options.processorOptions).toMatchObject({ limit: 0.891251, latency: LIMITER_LATENCY })
+      expect(mix.parameters.get('limit')!.value).toBe(1)
+      for (const w of [mix, post]) expect((w.outputs[0].to as FakeGain).gain.value).toBe(1)
+      expect(g.latency).toBe(2 * LIMITER_LATENCY)
+      expect(g.exactLimiter).toBe(true)
+      expect(g.limiterWarm()).toBe(true)                                   // born now, warm at once
+      expect(g.upgradeLimiter()).toBe(false)
+    } finally { undo() }
+  })
+
+  it('a ceiling change moves the worklet\'s limit param to the server\'s limit', async () => {
+    const ctx = new FakeContext()
+    const undo = installFakeWorklet(ctx)
+    try {
+      await loadLimiterWorklet(asCtx(ctx))
+      const g = new MixGraph(asCtx(ctx), mixed(), { reader: reader() })
+      // a lone v1 with a loudness target: the same one stage, at −1 dBFS
+      const e = edl({ v1: [{ id: 'a', start: 0, out: 1 }] })
+      e.canvas = { fps: 30, loudness_lufs: -16 } as EdlLike['canvas']
+      g.idlePlan(planFromProgram(e, buildProgramMap(e, () => SRC), () => SRC, { loudnessGainDb: -3 }))
+      const [w] = worklets(ctx)
+      expect(worklets(ctx)).toHaveLength(1)
+      expect(w.parameters.get('limit')!.value).toBe(0.891251)
+    } finally { undo() }
+  })
+
+  it('keeps the compressor where the module is refused, when asked, and upgrades when it lands late', async () => {
+    const refused = new FakeContext()
+    let undo = installFakeWorklet(refused, true)
+    try {
+      expect(await loadLimiterWorklet(asCtx(refused))).toBe(false)
+      const g = new MixGraph(asCtx(refused), mixed(), { reader: reader() })
+      expect(g.exactLimiter).toBe(false)
+      expect(refused.nodes.some((n) => n.kind === 'compressor')).toBe(true)
+    } finally { undo() }
+
+    const ctx = new FakeContext()
+    undo = installFakeWorklet(ctx)
+    try {
+      const g = new MixGraph(asCtx(ctx), mixed(), { reader: reader() })       // built before the module landed
+      expect(g.exactLimiter).toBe(false)
+      await loadLimiterWorklet(asCtx(ctx))
+      const forced = new MixGraph(asCtx(ctx), mixed(), { reader: reader(), limiter: 'compressor' })
+      expect(forced.exactLimiter).toBe(false)
+      expect(forced.upgradeLimiter()).toBe(false)
+      expect(g.upgradeLimiter()).toBe(true)
+      expect(g.exactLimiter).toBe(true)
+      expect(g.latency).toBe(LIMITER_LATENCY)
+      expect(worklets(ctx)).toHaveLength(1)
+    } finally { undo() }
   })
 })
