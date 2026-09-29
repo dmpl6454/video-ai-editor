@@ -268,6 +268,59 @@ def test_hall_convolves_with_the_tables_impulse_response(media):
     assert abs(rt60 - p["rt60"]) < 0.15 * p["rt60"]
 
 
+#: The reverb stage as it has always been emitted (ffmpeg >= 7.0, which has
+#: afir's `irnorm`); the probe=True text must stay byte-identical to this.
+_AFIR_WITH_IRNORM = "afir=gtype=none:irnorm=-1:irgain=1:dry=1:wet=1"
+
+
+def _reverb_stage(monkeypatch, has_irnorm: bool) -> str:
+    monkeypatch.setattr(audio_mix, "_afir_has_irnorm", lambda: has_irnorm)
+    p = V.PRESET_BY_ID["reverb"].stages[0].params
+    return audio_mix._stage_filters("reverb", p, "a0", 0)
+
+
+def test_reverb_graph_drops_irnorm_when_afir_lacks_it(monkeypatch):
+    """ffmpeg 6.1 (Ubuntu 24.04 apt) has no `irnorm` on afir (7.0 added it):
+    the option makes ffmpeg exit 8, failing every export/preview that carries
+    the Hall effect. gtype=none already means no auto gain, so it is left out
+    there; with the option present the text is exactly what it always was."""
+    without = _reverb_stage(monkeypatch, False)
+    assert "irnorm" not in without
+    assert "afir=gtype=none:irgain=1:dry=1:wet=1" in without
+    with_ = _reverb_stage(monkeypatch, True)
+    assert _AFIR_WITH_IRNORM in with_
+    assert with_.replace(":irnorm=-1", "") == without
+
+
+def test_afir_irnorm_probe_reads_the_binarys_help(monkeypatch):
+    """The probe asks the ffmpeg on PATH (`-h filter=afir`) once, and falls
+    back to the option being present when ffmpeg cannot be asked."""
+    audio_mix._afir_has_irnorm.cache_clear()
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=FAKE_HELP[0], stderr="")
+
+    monkeypatch.setattr(audio_mix.subprocess, "run", fake_run)
+    try:
+        FAKE_HELP = ["  gtype <int> set gain\n  irgain <float>\n"]  # the 6.1 option list
+        assert audio_mix._afir_has_irnorm() is False
+        assert audio_mix._afir_has_irnorm() is False and len(calls) == 1  # cached
+        assert calls[0][-2:] == ["-h", "filter=afir"]
+        audio_mix._afir_has_irnorm.cache_clear()
+        FAKE_HELP[0] = "  irnorm <float> set IR norm\n  irlink <boolean>\n"
+        assert audio_mix._afir_has_irnorm() is True
+        audio_mix._afir_has_irnorm.cache_clear()
+
+        def boom(cmd, **kw):
+            raise FileNotFoundError(cmd[0])
+        monkeypatch.setattr(audio_mix.subprocess, "run", boom)
+        assert audio_mix._afir_has_irnorm() is True
+    finally:
+        audio_mix._afir_has_irnorm.cache_clear()
+
+
 @pytest.mark.parametrize("pid,low,mid,high", [
     # band energies of white noise, out − in (dB): <200 Hz, 900-1800 Hz, >6 kHz
     ("telephone", (-60, -18), (0, 6), (-80, -20)),

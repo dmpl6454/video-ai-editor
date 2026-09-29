@@ -26,6 +26,18 @@ def _store(tmp_path: Path, spans=((0.0, 10.0), (10.0, 10.0), (20.0, 20.0))) -> E
     return s
 
 
+def _sticker_png(tmp_path: Path) -> str:
+    """A tiny PNG sticker made locally. These tests are about ripple/duplicate
+    logic, not emoji artwork: `add_sticker(emoji=...)` needs the emoji cache or
+    an installed colour emoji font (gate X3: never the network), which CI
+    runners lack, so a `src` sticker keeps them hermetic."""
+    from PIL import Image
+    p = tmp_path / "sticker.png"
+    if not p.exists():
+        Image.new("RGBA", (32, 32), (255, 120, 0, 255)).save(p)
+    return str(p)
+
+
 def _v1_ids(s: EDLStore) -> list[str]:
     return [c.id for c in s.edl.get_track("v1").clips]
 
@@ -118,7 +130,8 @@ def test_duplicating_a_cue_in_a_packed_lane_is_refused_not_teleported(tmp_path):
 
 def test_sticker_duplicate_and_bulk_duplicate_cover_overlays(tmp_path):
     s = _store(tmp_path)
-    st = dispatch(s, "add_sticker", {"emoji": "🔥", "start": 1.0, "end": 2.0})["sticker_id"]
+    png = _sticker_png(tmp_path)
+    st = dispatch(s, "add_sticker", {"src": png, "start": 1.0, "end": 2.0})["sticker_id"]
     tid = dispatch(s, "add_text", {"text": "T", "start": 3.0, "end": 4.0})["id"]
     one = dispatch(s, "duplicate_clip", {"clip_id": st})["new_clip_id"]
     assert one.startswith("st_") and (_overlay(s, one).start, _overlay(s, one).end) == (2.0, 3.0)
@@ -145,9 +158,10 @@ def test_bulk_delete_matches_sequential_ripple_delete(tmp_path):
     spans = ((0.0, 4.0), (4.0, 4.0), (8.0, 4.0), (12.0, 4.0))
     a = _store(tmp_path / "a", spans)
     b = _store(tmp_path / "b", spans)
+    png = _sticker_png(tmp_path)
     for s in (a, b):
         dispatch(s, "add_text", {"text": "one", "start": 5.0, "end": 6.0, "role": "super"})
-        dispatch(s, "add_sticker", {"emoji": "🔥", "start": 13.0, "end": 14.0})
+        dispatch(s, "add_sticker", {"src": png, "start": 13.0, "end": 14.0})
     dispatch(a, "bulk_delete", {"clip_ids": ["c_0", "c_2"]})
     dispatch(b, "ripple_delete", {"clip_id": "c_2"})
     dispatch(b, "ripple_delete", {"clip_id": "c_0"})

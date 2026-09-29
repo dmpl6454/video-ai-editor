@@ -237,7 +237,14 @@ def test_frame_map_json_is_ten_times_faster_at_300_clips(mix):
     cold_ms = _best_ms(cold, 7)
     warm_ms = _best_ms(lambda: F.frame_map_json(edl, infos), 7)
     ref_ms = _best_ms(lambda: ref.frame_map_json(edl, infos), 3)
-    budget = timing_budget(BEFORE_MS / SPEEDUP)
+    # The absolute 14.7 ms figure was recorded on the dev Mac (quiet: cold
+    # 8-12 ms). A slower machine stretches the fast path and the frozen scalar
+    # reference alike, so when the same-run reference shows the machine is
+    # slower the bound is machine-relative: the same >= SPEEDUP over the
+    # scalar map. Measured on the ubuntu CI runner: cold 33.5 ms vs reference
+    # 387.5 ms (11.6x, mixed) and cold 28.6 ms vs 364.7 ms (12.8x, plain),
+    # both inside ref/SPEEDUP; a fast path that lost its 10x still fails.
+    budget = max(timing_budget(BEFORE_MS / SPEEDUP), ref_ms / SPEEDUP)
     print(f"\nframe_map_json 300 clips / {fast['total']} frames ({'mixed' if mix else 'plain'}): "
           f"cold {cold_ms:.1f} ms, memoised {warm_ms:.1f} ms, scalar reference {ref_ms:.1f} ms "
           f"(budget {budget:.1f} ms at load/core {load_per_core():.2f})")

@@ -317,6 +317,11 @@ def _synth_piper(voice, text: str, dst: Path) -> tuple[np.ndarray, int]:
     return _read_wav(dst)
 
 
+def piper_voice_available(name: str = EN_VOICE) -> bool:
+    """The Piper voice is cached locally (never triggers `ensure_voice`)."""
+    return _tts.voice_paths(name)[0].exists()
+
+
 def say_available(voice: str = HI_SAY_VOICE) -> bool:
     """macOS `say` has the named system voice (Lekha is the hi_IN voice)."""
     say = shutil.which("say")
@@ -425,5 +430,5 @@ def load_narration(out_dir: Path, *, lang: str = "en") -> Narration | None:
 
 __all__ = ["PAUSE_S", "GAP_S", "VOICED_THRESHOLD", "PART_PAD_S", "EN_VOICE", "HI_VOICE",
            "PLANTED_FILLERS", "FILLER_SPOKEN", "CONTENT_LIKE_SENTENCE", "SCRIPT_EN", "SCRIPT_HI", "HindiVoiceUnavailable",
-           "Utterance", "Narration", "hindi_backend", "say_available",
+           "Utterance", "Narration", "hindi_backend", "piper_voice_available", "say_available",
            "synthesize_narration", "load_narration"]

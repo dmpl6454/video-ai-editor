@@ -5,6 +5,7 @@ served init and bar-read, so a route that served the wrong bytes fails here.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -334,8 +335,9 @@ def test_no_cache_src_route(client, tmp_path):
 
 def test_media_rows_gain_stream_and_proxy_fields(client, tmp_path):
     sid, src = _session_with_master(client, tmp_path, frames=60, rate="25")
+    # json.dumps, not "%s": a Windows path's backslashes are invalid JSON escapes
     (src.parent / "ingest.json").write_text(
-        '{"src": "%s", "normalized": "%s", "probe": {"duration": 2.4}}' % (src, src))
+        json.dumps({"src": str(src), "normalized": str(src), "probe": {"duration": 2.4}}))
     rows = client.get(f"/api/sessions/{sid}/media").json()["media"]
     row = next(r for r in rows if Path(r["src"]).resolve() == src.resolve())
     assert row["proxy"]["state"] == "none" and "frames" not in row   # no probe on this path

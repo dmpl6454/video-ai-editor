@@ -20,12 +20,17 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from video_ai_editor import platformutil as _pu
 from video_ai_editor.ingest import proxy as P
 from video_ai_editor.ingest.proxy_queue import ProxyManager
 
 from proxy_fixtures import (decode_audio_f32, decode_gray, decode_yuv420, decoded_frame_count,
                             make_barcode_master, make_flat_master, read_barcode, sample_nals,
                             sps_vui, y_psnr)
+
+# proc.kill() is SIGKILL on POSIX (returncode -9) and TerminateProcess on
+# Windows (returncode 1); the retry log/error text carries "exit <code>".
+_KILL_EXIT = "exit 1" if _pu.IS_WINDOWS else "exit -9"
 
 
 @pytest.fixture
@@ -323,11 +328,18 @@ def test_cancel_stops_the_encode_and_a_later_ensure_resumes(workdir, manager, tm
                               audio=False)
     key = manager.ensure(src)
     assert _wait_for(lambda: P.span_path(key, 0).is_file())
+    t_seen = time.monotonic()
     assert manager.cancel(src) is True
     assert manager.wait_idle(20)
+    t_idle = time.monotonic()
     info = P.load_source(key)
     done = [n for n in range(info.spans) if P.span_path(key, n).is_file()]
-    assert 0 < len(done) < info.spans, "cancel did not stop the build"
+    # (the message is a diagnostic for a Windows CI run: 15/15 spans with a
+    # small span-0-to-idle time means the whole 900-frame encode outran the
+    # cancel, a fast-runner race; a large one means the kill did not land)
+    assert 0 < len(done) < info.spans, (
+        f"cancel did not stop the build: {len(done)}/{info.spans} spans, "
+        f"{t_idle - t_seen:.2f} s from span 0 to idle, stats={manager.stats}")
     assert _wait_for(lambda: _ffmpeg_children() == 0, 5)
     assert not list(P.proxy_dir(key).rglob(".*.part"))
     # Resume: only the missing spans are encoded, and the result is complete.
@@ -473,7 +485,7 @@ def test_an_encode_whose_pipe_closes_early_is_retried_from_its_first_missing_spa
     assert len(inits) == 2 and P.avcc_of(inits[0]) == P.avcc_of(inits[1])
     # what was logged: the exit code, where it stopped and where it resumes
     msg = "\n".join(m for m in app_log.messages if "stopped early" in m)
-    assert "exit -9" in msg and "at frame 70" in msg and "retry 1/" in msg and "from frame 60" in msg, app_log.messages
+    assert _KILL_EXIT in msg and "at frame 70" in msg and "retry 1/" in msg and "from frame 60" in msg, app_log.messages
     # frame identity across the two encodes, proven by decoding
     samples = [s for n in range(5) for s in spans[n]]
     bars = [read_barcode(f) for f in decode_gray(P.avcc_of(inits[0]), samples[::25], 640, 360)]
@@ -496,7 +508,7 @@ def test_an_encode_that_keeps_stopping_early_is_marked_failed_with_the_reason(
     assert waits == [P.ENCODE_BACKOFF_S * 2 ** i for i in range(P.ENCODE_RETRIES)]
     # the reason the route hands the UI (410 proxy_failed → message)
     assert "stopped early" in idx["error"] and f"{1 + P.ENCODE_RETRIES} times" in idx["error"]
-    assert "exit -9" in idx["error"], idx["error"]
+    assert _KILL_EXIT in idx["error"], idx["error"]
     assert manager.stats["failures"] == 1
     assert not any("proxy job failed" in m for m in app_log.messages), app_log.messages
     assert sum("stopped early" in m for m in app_log.messages) == P.ENCODE_RETRIES
@@ -579,8 +591,14 @@ def test_encode_is_niced(workdir, tmp_path, monkeypatch):
     P.run_encode(info, 0, 10, on_span=lambda n, s: None)
     enc = [a for a in seen if "libx264" in a]
     assert len(enc) == 1
-    assert enc[0] == _pu.low_priority_argv(enc[0][3:])
-    assert enc[0][1:3] == ["-n", "10"] and enc[0][3] == _pu.FFMPEG
+    # POSIX prefixes `nice -n 10` (3 items); Windows returns argv unchanged
+    # (it lowers priority through creationflags instead) and `nice` may be absent.
+    n = len(_pu.low_priority_argv(["x"])) - 1
+    assert n in (0, 3)
+    assert enc[0] == _pu.low_priority_argv(enc[0][n:])
+    if n:
+        assert enc[0][1:3] == ["-n", "10"]
+    assert enc[0][n] == _pu.FFMPEG
 
 
 def test_a_busy_eager_build_does_not_hold_back_another_sources_preview(workdir, manager, tmp_path):

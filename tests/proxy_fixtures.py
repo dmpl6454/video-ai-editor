@@ -128,10 +128,13 @@ def decode_gray(avcc: bytes, samples: list[bytes], w: int, h: int) -> np.ndarray
     # Through a temp FILE, not stdin: `subprocess.run(input=…)` into ffmpeg's
     # raw-h264 demuxer stalls on this macOS (measured: a 1.5 MB stream never
     # finished in 40 s, while the same bytes from a file decode in 0.5 s).
-    with tempfile.NamedTemporaryFile(suffix=".h264") as fh:
-        fh.write(annexb(avcc, samples))
-        fh.flush()
-        out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "h264", "-i", fh.name,
+    # The file is written and CLOSED before ffmpeg opens it: a held-open
+    # NamedTemporaryFile cannot be opened by a second process on Windows
+    # (ffmpeg exited -13, EACCES).
+    with tempfile.TemporaryDirectory() as td:
+        es = Path(td) / "es.h264"
+        es.write_bytes(annexb(avcc, samples))
+        out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "h264", "-i", str(es),
                               "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
                              capture_output=True, check=True)
     arr = np.frombuffer(out.stdout, dtype=np.uint8)
@@ -179,10 +182,10 @@ def make_flat_master(path: Path, *, y: int, u: int, v: int, frames: int = 6, w: 
 def decode_yuv420(avcc: bytes, samples: list[bytes], w: int, h: int) -> list[tuple]:
     """Decode samples to their stored 8-bit 4:2:0 planes, per frame (Y, U, V)
     — no range or matrix conversion, the numbers a decoder hands WebKit."""
-    with tempfile.NamedTemporaryFile(suffix=".h264") as fh:
-        fh.write(annexb(avcc, samples))
-        fh.flush()
-        out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "h264", "-i", fh.name,
+    with tempfile.TemporaryDirectory() as td:   # closed before ffmpeg reads it (Windows EACCES)
+        es = Path(td) / "es.h264"
+        es.write_bytes(annexb(avcc, samples))
+        out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "h264", "-i", str(es),
                               "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"],
                              capture_output=True, check=True).stdout
     fs = w * h * 3 // 2

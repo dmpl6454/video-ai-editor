@@ -411,5 +411,12 @@ def test_accurate_hinglish_on_hindi_speech_retranscribes_without_the_translation
     s = _step(p, "auto_caption")
     assert s.args["target"] == "hinglish" and s.args["language"] == "hi"
     assert not p.downloads_needed and not p.blocking_questions
+    from video_ai_editor.agent.dispatch import whisper_model_on_disk
+    model = s.args.get("model") or "large-v3"
+    if not whisper_model_on_disk(model):
+        # The guard below refuses "auto_caption.model: '<m>' is not downloaded"
+        # on a machine with no whisper cache (CI). Everything above (the plan
+        # itself) already ran; only the guard needs the cached model.
+        pytest.skip(f"whisper model {model!r} is not cached here (the executor guard never downloads one)")
     X.guard_step("auto_caption", s.args, HINDI)                        # no model to fetch
     V.validate_plan(p, HINDI)

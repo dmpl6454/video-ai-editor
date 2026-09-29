@@ -11,6 +11,7 @@ sorting, postcondition fill, and that the input plan is never mutated.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -168,7 +169,10 @@ def test_luts_are_bundled_names_never_paths(facts):
 def test_real_files_the_plan_was_not_offered_are_refused(facts, offered, tmp_path):
     _, other = offered
     home_file = next((p for p in Path.home().iterdir() if p.is_file()), None)
-    cases = ["/etc/passwd", "~", "../../etc/passwd", str(other), str(tmp_path), str(Path.home())]
+    # /etc/passwd does not exist on Windows; the rule under test is "a REAL file
+    # nobody offered is refused", so use one that exists on the running OS.
+    system_file = os.environ.get("COMSPEC", sys.executable) if os.name == "nt" else "/etc/passwd"
+    cases = [system_file, "~", "../../etc/passwd", str(other), str(tmp_path), str(Path.home())]
     if home_file is not None:
         cases.append(str(home_file))
     for bad in cases:

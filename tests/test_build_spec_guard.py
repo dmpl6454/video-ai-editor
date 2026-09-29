@@ -15,6 +15,7 @@ No PyInstaller run and no git-status assertion here: CI never runs the
 build, so those checks would be vacuous. This pins the script text.
 """
 from __future__ import annotations
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,42 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "build_app.sh"
+
+
+def _working_bash() -> str | None:
+    """A bash that can run scripts, or None.
+
+    `shutil.which("bash")` is the WSL launcher (System32\\bash.exe) on the
+    Windows runners: with no distro installed it prints UTF-16 "no installed
+    distributions" text and exits 1, which says nothing about our scripts.
+    On Windows prefer Git Bash; everywhere, accept a candidate only if
+    `bash -c` really runs and answers."""
+    candidates: list[str] = []
+    if os.name == "nt":
+        roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)")]
+        candidates += [str(Path(r) / "Git" / "bin" / "bash.exe") for r in roots if r]
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(str(Path(local) / "Programs" / "Git" / "bin" / "bash.exe"))
+        git = shutil.which("git")
+        if git:                                     # <Git>\cmd\git.exe -> <Git>\bin\bash.exe
+            candidates.append(str(Path(git).resolve().parent.parent / "bin" / "bash.exe"))
+    found = shutil.which("bash")
+    if found:
+        candidates.append(found)
+    for cand in candidates:
+        if not Path(cand).is_file():
+            continue
+        try:
+            probe = subprocess.run([cand, "-c", "echo vai-bash-ok"], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == b"vai-bash-ok":
+            return cand
+    return None
+
+
+BASH_SKIP = "no working bash (on Windows `bash` is the WSL launcher without a distro, and Git Bash was not found)"
 
 
 def _code() -> str:
@@ -59,7 +96,11 @@ def test_build_app_sh_add_data_sources_are_absolute():
 
 
 def test_build_app_sh_parses():
-    if shutil.which("bash") is None:
-        pytest.skip("bash not available")
-    proc = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
+    bash = _working_bash()
+    if bash is None:
+        pytest.skip(BASH_SKIP)
+    # Fed on stdin with CRLF folded to LF: a Windows checkout may translate line
+    # endings, which is not what this test is about (the script never runs there).
+    proc = subprocess.run([bash, "-n"], input=SCRIPT.read_bytes().replace(b"\r\n", b"\n"),
+                          capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")

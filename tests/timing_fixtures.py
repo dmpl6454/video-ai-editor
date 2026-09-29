@@ -51,7 +51,8 @@ def _raw_gray_frames(path: Path, w: int, h: int) -> list[bytes]:
     proc = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
          "-vf", f"scale={w}:{h}:flags=neighbor,format=gray",
-         "-vsync", "passthrough", "-f", "rawvideo", "-"],
+         # -fps_mode (ffmpeg >= 5.1); the old -vsync was removed in ffmpeg 9.
+         "-fps_mode", "passthrough", "-f", "rawvideo", "-"],
         check=True, capture_output=True,
     )
     buf = proc.stdout

@@ -298,7 +298,11 @@ def test_real_report_on_this_machine_never_raises_and_always_explains(monkeypatc
     for r in rep["brains"]:
         assert isinstance(r["available"], bool) and r["detail"]
         if not r["available"]:
-            assert r["fix"] or r["id"] == "local_model" and "Apple silicon" in r["detail"], r
+            # Unavailable must come with a user action, or with a detail that
+            # names the platform limit when there is nothing a user can do
+            # (Apple Intelligence off macOS, MLX off Apple silicon: fix is None).
+            platform_limit = {"apple_intelligence": "macOS only", "local_model": "Apple silicon"}.get(r["id"])
+            assert r["fix"] or (platform_limit and platform_limit in r["detail"]), r
     assert rows["recipes"]["available"]
     cached = router.brains_report()
     assert cached["generated_at"] == rep["generated_at"], "memoised for 60 s"

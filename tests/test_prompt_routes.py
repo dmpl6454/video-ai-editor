@@ -218,7 +218,10 @@ def test_brains_route_is_honest_about_this_machine(app_env):
     for b in rows.values():
         assert {"label", "order", "in_ladder", "available", "detail", "fix", "action", "model"} <= set(b)
         if not b["available"]:
-            assert b["fix"], f"{b['id']} is unavailable without a fix"
+            # A fix, or (nothing a user can do off macOS / Apple silicon) a detail naming the platform limit.
+            platform_limit = {"apple_intelligence": "macOS only", "local_model": "Apple silicon"}.get(b["id"])
+            assert b["fix"] or (platform_limit and platform_limit in b["detail"]), \
+                f"{b['id']} is unavailable with neither a fix nor a stated platform limit: {b}"
     assert rows["claude"]["available"] is False                     # ANTHROPIC_API_KEY="" in the gate
     assert body["cloud_allowed"] in (True, False)
     fresh = client.get("/api/prompt/brains?refresh=1").json()

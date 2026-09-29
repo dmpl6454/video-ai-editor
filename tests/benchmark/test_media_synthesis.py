@@ -24,6 +24,7 @@ import json
 import re
 import socket
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -40,14 +41,36 @@ from . import media as MEDIA
 from .harness import EgressAttempted, EgressGuard, PromptRun, clone_session_dir, parse_sse
 from .media import (BED_LUFS, BED_SECONDS, LOOP_FIXTURE_SECONDS, MediaSet, build_media_set,
                     ensure_preset_beds, media_key)
-from .narration import CONTENT_LIKE_SENTENCE, GAP_S, PAUSE_S, PLANTED_FILLERS, hindi_backend
+from .narration import (CONTENT_LIKE_SENTENCE, EN_VOICE, GAP_S, PAUSE_S, PLANTED_FILLERS,
+                        hindi_backend, piper_voice_available)
 
 _SILENCE = re.compile(r"silence_start: ([\d.]+)|silence_duration: ([\d.]+)")
 
 
+def _build_media_or_skip() -> MediaSet:
+    """`build_media_set()` synthesizes the narration with Piper and raises
+    FileNotFoundError when the voice is not cached; CI runners have no voice
+    and the suite never downloads one. `piper_voice_available` only looks at
+    the cache (never `ensure_voice`), so the probe cannot trigger a download."""
+    if not piper_voice_available(EN_VOICE):
+        pytest.skip(f"Piper voice {EN_VOICE} is not cached (no downloads in CI)")
+    return build_media_set()
+
+
 @pytest.fixture(scope="module")
 def media() -> MediaSet:
-    return build_media_set()
+    return _build_media_or_skip()
+
+
+def test_media_fixture_skips_cleanly_when_the_piper_voice_is_not_cached(monkeypatch):
+    """Rehearses the CI runner: with the voice absent the fixture skips (with
+    the reason below) and never reaches the synthesizer."""
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "piper_voice_available", lambda name=EN_VOICE: False)
+    monkeypatch.setattr(mod, "build_media_set",
+                        lambda *a, **k: pytest.fail("build_media_set must not run without the voice"))
+    with pytest.raises(pytest.skip.Exception, match=r"Piper voice en_US-amy-medium is not cached \(no downloads in CI\)"):
+        _build_media_or_skip()
 
 
 # --- narration ground truth --------------------------------------------------
@@ -169,6 +192,31 @@ def test_socket_guard_trips_on_urlopen_and_allows_loopback():
     # restored: the patched functions are gone
     assert socket.create_connection.__name__ == "create_connection"
     assert socket.getaddrinfo.__module__ in ("socket", "_socket")
+
+
+def test_socket_guard_works_without_af_unix(monkeypatch):
+    """Windows CPython has no `socket.AF_UNIX`; the guard must still install,
+    allow loopback and refuse a remote host."""
+    monkeypatch.delattr(socket, "AF_UNIX", raising=False)
+    assert not hasattr(socket, "AF_UNIX")
+    with EgressGuard() as guard:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        try:
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.settimeout(2)
+            client.connect(server.getsockname())
+            client.close()
+            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            with pytest.raises(EgressAttempted):
+                remote.connect(("203.0.113.9", 80))
+            with pytest.raises(EgressAttempted):
+                remote.connect_ex(("203.0.113.9", 80))
+            remote.close()
+        finally:
+            server.close()
+    assert [a.split(":")[0] for a in guard.attempts] == ["connect", "connect_ex"]
 
 
 def test_clone_session_dir_rewrites_every_absolute_path(tmp_path: Path):

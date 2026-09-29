@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from lan_fixtures import CLIENT_HEADERS, lan_home, lan_peer, pair_a_device  # noqa: F401
 
+from video_ai_editor import platformutil as _pu
 from video_ai_editor.main import app
 
 
@@ -320,6 +321,8 @@ def test_a_revoke_is_not_undone_by_a_racing_touch(lan_home):
     assert pairing.device_for_token(token) is None
 
 
+@pytest.mark.skipif(_pu.IS_WINDOWS, reason="NTFS has no POSIX mode bits (st_mode is always 0o666 "
+                    "for a writable file); the user-profile ACL protects settings.json there")
 def test_settings_json_is_not_world_readable(lan_home):
     """It is the only record of which phones are paired — every device id,
     name and last_seen. On a shared Mac the process umask made it 0644."""

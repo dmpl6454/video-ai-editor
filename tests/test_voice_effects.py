@@ -67,9 +67,9 @@ def test_the_browser_table_and_the_dsp_golden_are_current():
     """frontend/src/lib/voice/voiceFxTable.ts IS payload(), and the golden is
     what ffmpeg does with today's filter text (regenerate with
     tests/gen_voice_fx_goldens.py)."""
-    assert gen.TABLE_TS.read_text() == gen.table_ts(), "regenerate: tests/gen_voice_fx_goldens.py"
+    assert gen.TABLE_TS.read_text(encoding="utf-8") == gen.table_ts(), "regenerate: tests/gen_voice_fx_goldens.py"
     import json
-    doc = json.loads(gen.GOLDEN.read_text())
+    doc = json.loads(gen.GOLDEN.read_text(encoding="utf-8"))
     fresh = json.loads(json.dumps(gen.generate()))
     assert doc["cases"] == fresh["cases"] and doc["reverb_ir"] == fresh["reverb_ir"], "regenerate the golden"
 

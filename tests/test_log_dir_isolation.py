@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from video_ai_editor import platformutil as _pu
+
 LOG = ("import logging, sys\n"
        "{pre}"
        "from video_ai_editor.api import hardening\n"
@@ -23,9 +25,22 @@ LOG = ("import logging, sys\n"
        "print([getattr(h, 'baseFilename', None) for h in logging.getLogger('video_ai_editor').handlers])\n")
 
 
+def _home_env(tmp: Path) -> dict:
+    """The environment that points every per-OS profile location at tmp/home:
+    POSIX resolves the profile from HOME (macOS ~/Library/Application Support,
+    Linux ~/.local/share), Windows from APPDATA/LOCALAPPDATA/USERPROFILE and
+    never from HOME, so a probe that only sets HOME would write into the real
+    profile of the account running the tests."""
+    home = tmp / "home"
+    return {"HOME": str(home), "USERPROFILE": str(home),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "APPDATA": str(home / "AppData" / "Roaming"),
+            "LOCALAPPDATA": str(home / "AppData" / "Local")}
+
+
 def _run(tmp: Path, env_extra: dict, pre: str = "") -> str:
     env = {k: v for k, v in os.environ.items() if k not in ("VAI_LOG_DIR", "WORKDIR", "PYTEST_CURRENT_TEST")}
-    env.update({"HOME": str(tmp / "home"), **env_extra})
+    env.update({**_home_env(tmp), **env_extra})
     r = subprocess.run([sys.executable, "-c", LOG.format(pre=pre)], env=env, capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, r.stderr[-2000:]
@@ -33,7 +48,18 @@ def _run(tmp: Path, env_extra: dict, pre: str = "") -> str:
 
 
 def _profile_logs(tmp: Path) -> Path:
-    return tmp / "home" / "Library" / "Application Support" / "Video AI Editor" / "logs"
+    """Where the app puts app.log for the redirected home, on THIS OS, resolved
+    by the same helper the app uses (hardening._log_dir -> user_data_dir)."""
+    saved = {k: os.environ.get(k) for k in _home_env(tmp)}
+    os.environ.update(_home_env(tmp))
+    try:
+        return _pu.user_data_dir("Video AI Editor") / "logs"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_vai_log_dir_names_the_log_directory(tmp_path):

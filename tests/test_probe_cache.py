@@ -30,7 +30,8 @@ def counted(monkeypatch):
     real = subprocess.run
 
     def run(cmd, *a, **k):
-        if cmd and str(cmd[0]).endswith("ffprobe"):
+        # "ffprobe" on POSIX, "ffprobe.exe" on Windows: compare the stem, not the suffix.
+        if cmd and Path(str(cmd[0])).stem.lower() == "ffprobe":
             calls.append(list(cmd))
         return real(cmd, *a, **k)
 

@@ -272,6 +272,15 @@ def test_tool_smoke(tool: str, session: EDLStore, tmp_path: Path):
     if tool == "render_preview":
         # Render is gated: only smoke-test if ffmpeg + a working clip
         pytest.skip("render covered by render_smoke")
+    if tool == "transcribe":
+        # The prompt/agent path never fetches a model (dispatch.transcribe_tool
+        # refuses "model ... not downloaded"), and a CI runner has no whisper
+        # cache. Use the dispatcher's own probe, the one the refusal uses.
+        from video_ai_editor import config
+        from video_ai_editor.agent.dispatch import whisper_model_on_disk
+        model = args.get("model") or config.WHISPER_MODEL
+        if not whisper_model_on_disk(model):
+            pytest.skip(f"whisper model {model!r} is not cached here (the agent path never downloads one)")
     if tool == "remove_marker":
         # Add a marker first
         m = dispatch(session, "add_marker", {"time": 0.5, "label": "x"})

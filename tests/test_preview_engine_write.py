@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from video_ai_editor import platformutil as _pu
 from video_ai_editor import preview_setting
 from video_ai_editor.api import hardening, pairing
 from video_ai_editor.main import app
@@ -58,6 +59,8 @@ def test_each_engine_is_stored_and_read_back(client, settings_file, engine):
     assert client.get(ROUTE).json()["eager_proxies"] is (engine != "server")
 
 
+@pytest.mark.skipif(_pu.IS_WINDOWS, reason="NTFS has no POSIX mode bits (st_mode is always 0o666 "
+                    "for a writable file); the user-profile ACL protects settings.json there")
 def test_the_write_keeps_every_other_setting(client, settings_file):
     settings_file.parent.mkdir(parents=True)
     settings_file.write_text(json.dumps({"version": 1, "lan_enabled": True,

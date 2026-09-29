@@ -114,16 +114,19 @@ class EgressGuard:
         orig_connect_ex = socket.socket.connect_ex
         orig_create = socket.create_connection
         orig_gai = socket.getaddrinfo
+        # Windows CPython has no socket.AF_UNIX; there every socket is IP, so
+        # `family != None` is simply True and the loopback check decides.
+        af_unix = getattr(socket, "AF_UNIX", None)
 
         def connect(sock, address):
             host = _host_of(address)
-            if sock.family != socket.AF_UNIX and not _is_loopback_host(host):
+            if sock.family != af_unix and not _is_loopback_host(host):
                 guard._record(host, "connect")
             return orig_connect(sock, address)
 
         def connect_ex(sock, address):
             host = _host_of(address)
-            if sock.family != socket.AF_UNIX and not _is_loopback_host(host):
+            if sock.family != af_unix and not _is_loopback_host(host):
                 guard._record(host, "connect_ex")
             return orig_connect_ex(sock, address)
 

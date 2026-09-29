@@ -68,14 +68,23 @@ class _Sampler:
         def loop() -> None:
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
+                # name -> nice -> name: the niced probe is `nice -n 10 ffprobe`,
+                # and on Linux `nice` raises its own niceness and THEN exec()s
+                # the target. Reading nice first and comm second could pair
+                # nice=0 (still the starting `nice` image, or pre-nice) with
+                # comm=ffprobe (after the exec) - an impossible pair. A pair is
+                # recorded only when both name reads agree, i.e. the process did
+                # not change image between them; the nice value is then the one
+                # that image really ran at. The LOW comparison is untouched.
+                name = _proc_name(pid)
+                if name is None:
+                    return
                 try:
                     nice = os.getpriority(os.PRIO_PROCESS, pid)
                 except OSError:
                     return
-                name = _proc_name(pid)
-                if name is None:
-                    return
-                rows.append((name, nice))
+                if _proc_name(pid) == name:
+                    rows.append((name, nice))
                 time.sleep(0.002)
 
         t = threading.Thread(target=loop, daemon=True)

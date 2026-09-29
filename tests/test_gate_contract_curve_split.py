@@ -94,7 +94,26 @@ def test_plain_edits_do_not_read_as_composite(phrase):
     assert not Contract.read(phrase).composite, phrase
 
 
-@pytest.mark.usefixtures("desktop_posture", "no_downloads")
+@pytest.fixture
+def generated_music_beds(tmp_path, monkeypatch):
+    """Hermetic music beds. The recipes expander asks "Which music?" when
+    `presets.music_beds()` is empty, and a CI runner has no generated
+    presets/music (the beds are build products, not checked in). Synthesise
+    them (lavfi, ffmpeg only, deterministic) into tmp_path and point
+    `music_dir` there, so the test never depends on the developer's cache."""
+    from video_ai_editor.agent.prompt import presets
+    beds_dir = tmp_path / "music_beds"
+    try:
+        beds = presets.generate_music_beds(beds_dir)
+    except Exception as e:  # ffmpeg missing / lavfi aevalsrc unsupported / ebur128 unparsable
+        pytest.skip(f"music beds cannot be generated here: {type(e).__name__}: {str(e)[:120]}")
+    if not beds:
+        pytest.skip("music beds cannot be generated here: generate_music_beds returned none")
+    monkeypatch.setattr(presets, "music_dir", lambda: beds_dir)
+    return beds
+
+
+@pytest.mark.usefixtures("desktop_posture", "no_downloads", "generated_music_beds")
 def test_cut_to_the_beat_commits_on_the_key_free_ladder(tmp_path):
     from video_ai_editor.agent.prompt import service
     st = F.make_store(tmp_path)

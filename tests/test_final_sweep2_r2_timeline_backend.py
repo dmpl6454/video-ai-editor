@@ -200,6 +200,17 @@ def test_a_drag_reorder_and_a_move_that_closes_a_legacy_gap_still_work(tmp_path,
 
 # ------------------------------------------------ 3. overlapping stickers get their own lane
 
+def _sticker_png(tmp_path: Path) -> str:
+    """A tiny PNG sticker made locally. The lane logic under test is not about
+    emoji artwork: `add_sticker(emoji=...)` needs the emoji cache or an installed
+    colour emoji font (gate X3: never the network), which CI runners lack."""
+    from PIL import Image
+    p = tmp_path / "sticker.png"
+    if not p.exists():
+        Image.new("RGBA", (32, 32), (255, 120, 0, 255)).save(p)
+    return str(p)
+
+
 def _sticker_lanes(st: EDLStore) -> dict[str, list[tuple[float, float]]]:
     return {t.id: [(c.start, c.end) for c in t.clips]
             for t in st.edl.tracks if t.type == "sticker" and t.clips}
@@ -207,15 +218,16 @@ def _sticker_lanes(st: EDLStore) -> dict[str, list[tuple[float, float]]]:
 
 def test_two_stickers_at_the_same_time_land_on_different_lanes(tmp_path, media):
     st = _three(tmp_path / "s", media)
-    a = dispatch(st, "add_sticker", {"emoji": "\U0001f52a", "start": 2.0, "end": 5.0})["sticker_id"]
-    out = dispatch(st, "add_sticker", {"emoji": "⭐", "start": 0.0, "end": 3.0})
+    png = _sticker_png(tmp_path)
+    a = dispatch(st, "add_sticker", {"src": png, "start": 2.0, "end": 5.0})["sticker_id"]
+    out = dispatch(st, "add_sticker", {"src": png, "start": 0.0, "end": 3.0})
     b = out["sticker_id"]
     assert out["sticker_count"] == 2     # every sticker lane counts
     ta, tb = st.edl.get_clip(a)[0], st.edl.get_clip(b)[0]
     assert ta.id != tb.id, _sticker_lanes(st)
     assert ta.type == tb.type == "sticker" and ta.z == tb.z
     # One that overlaps neither goes back on the first lane.
-    c = dispatch(st, "add_sticker", {"emoji": "\U0001f525", "start": 6.0, "end": 8.0})["sticker_id"]
+    c = dispatch(st, "add_sticker", {"src": png, "start": 6.0, "end": 8.0})["sticker_id"]
     assert st.edl.get_clip(c)[0].id == "stickers"
 
 

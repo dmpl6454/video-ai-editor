@@ -47,7 +47,8 @@ def frame_rgb(video: Path, index: int) -> np.ndarray:
     w, h = (int(v) for v in probe.stdout.strip().split(",")[:2])
     raw = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(video),
-         "-vf", f"select=eq(n\\,{index})", "-vsync", "0", "-frames:v", "1",
+         # "-fps_mode passthrough" == the old "-vsync 0"; -vsync was removed in ffmpeg 9.
+         "-vf", f"select=eq(n\\,{index})", "-fps_mode", "passthrough", "-frames:v", "1",
          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         capture_output=True, check=True).stdout
     assert len(raw) == w * h * 3, f"frame {index} not decoded ({len(raw)} bytes)"

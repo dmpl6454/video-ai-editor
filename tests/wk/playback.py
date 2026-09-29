@@ -46,6 +46,9 @@ QUIET_LOAD_PER_CORE = 0.35
 
 
 def load_per_core() -> float:
+    # os.getloadavg does not exist on Windows: no load reading, treat as quiet.
+    if not hasattr(_os, "getloadavg"):
+        return 0.0
     try:
         return _os.getloadavg()[0] / max(1, _os.cpu_count() or 1)
     except OSError:

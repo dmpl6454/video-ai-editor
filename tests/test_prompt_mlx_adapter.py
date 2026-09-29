@@ -154,7 +154,7 @@ def test_plan_loads_offline_from_a_directory_and_expands_the_draft(tmp_path, exp
     res = b.plan(request(), timeout_s=5)
     assert res.ok and res.brain == "local_model" and res.model == SEVEN_B
     assert h.offline_at_load == ["1"], "HF_HUB_OFFLINE must be set before load()"
-    assert len(h.loads) == 1 and Path(h.loads[0]).is_dir() and "/" in h.loads[0]
+    assert len(h.loads) == 1 and Path(h.loads[0]).is_dir() and len(Path(h.loads[0]).parts) > 1
     assert h.loads[0] != SEVEN_B                      # never a repo id
     assert [s.tool for s in res.plan.steps] == ["recipe:remove_silences", "recipe:captions"]
     # The model's free-text reply is dropped (QA-018 live pass: it described
@@ -334,10 +334,17 @@ def test_real_machine_availability_is_honest(monkeypatch):
     b = mlx_brain.MLXBrain(frozen=False)
     av = b.availability()
     tier = b.tier()
+    mlx_missing = importlib.util.find_spec("mlx_lm") is None
     if tier is None:
-        assert not av["available"] and "GB of RAM" in av["detail"]
+        # The product checks installation before RAM: without mlx_lm the answer is
+        # the pip one (with its fix); with it, the RAM message.
+        assert not av["available"]
+        if mlx_missing:
+            assert av["detail"] == "not installed (pip)" and av["fix"] == mlx_brain.PIP_FIX
+        else:
+            assert "GB of RAM" in av["detail"]
         return
-    if importlib.util.find_spec("mlx_lm") is None:
+    if mlx_missing:
         assert av == {"available": False, "detail": "not installed (pip)", "fix": mlx_brain.PIP_FIX,
                       "action": "install", "model": tier.id}
         return

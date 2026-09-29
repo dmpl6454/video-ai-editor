@@ -25,6 +25,7 @@ exercised in the last section, which skips until P's module is on disk.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -70,6 +71,13 @@ def _refused(tool: str, facts, **args) -> str:
 
 
 # ---------------------------------------------------------------- posture
+
+def _system_file() -> str:
+    """A real file the session never offered. /etc/passwd does not exist on
+    Windows, and the validator (rightly) turns a fabricated path into a
+    question instead of refusing it, so use the command interpreter there."""
+    return os.environ.get("COMSPEC", sys.executable) if os.name == "nt" else "/etc/passwd"
+
 
 def test_desktop_posture_is_the_one_under_test():
     assert config.restrict_paths_active() is False
@@ -331,7 +339,7 @@ def _validate():
     ("add_effect", {"clip_id": "c", "type": "lut", "params": {"src": "/x.cube"}}),
     ("apply_lut", {"clip_id": "$v1_all", "lut_path": "/x.cube"}),
     ("add_sticker", {"emoji": "🔥", "start": 0, "end": 1}),
-    ("add_music", {"src": "/etc/passwd"}),
+    ("add_music", {"src": _system_file()}),
     ("add_music", {"src": "upbeat_120bpm.wav", "gain_db": -12}),
     ("set_speed", {"clip_id": "$v1_all", "factor": 9.0}),
 ])

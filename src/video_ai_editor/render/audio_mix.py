@@ -11,6 +11,8 @@ filter chain text, and the final audio label to map.
 from __future__ import annotations
 import contextlib
 import contextvars
+import functools
+import subprocess
 from pathlib import Path
 from typing import Iterator
 from ..edl import EDL
@@ -456,6 +458,25 @@ def _reverb_ir_expr(k: dict, channel: int) -> str:
             f"*exp(-{k['a']:.17g}*(n-{int(k['P'])}))*(2*({x}-floor({x}))-1)")
 
 
+@functools.lru_cache(maxsize=1)
+def _afir_has_irnorm() -> bool:
+    """Whether the ffmpeg on PATH has afir's `irnorm` option (added in 7.0;
+    Ubuntu 24.04's ffmpeg 6.1 lacks it and exits 8 on the unknown option).
+    Asked once per process from `-h filter=afir`; if ffmpeg cannot be asked
+    the option is assumed present, which is the graph as it always was."""
+    from .. import platformutil as _pu
+    try:
+        out = subprocess.run([_pu.FFMPEG, "-hide_banner", "-h", "filter=afir"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=15, **_pu.SUBPROCESS_FLAGS)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    text = (out.stdout or "") + (out.stderr or "")
+    if not text.strip():
+        return True
+    return "irnorm" in text
+
+
 def _stage_filters(kind: str, p: dict, tag: str, idx: int) -> str:
     from ..edl import voice_effects as _vfx
     if kind == "pitch":
@@ -486,8 +507,12 @@ def _stage_filters(kind: str, p: dict, tag: str, idx: int) -> str:
         # The IR is a second input, so the chain is cut here and resumed
         # after `afir` (no auto gain, no norm: the IR's own levels are the
         # effect's, and the preview convolves with the same samples).
+        # `irnorm=-1` (no IR normalisation) exists from ffmpeg 7.0; older
+        # builds have no such option and normalise only through `gtype`,
+        # which `none` already turns off.
+        irnorm = ":irnorm=-1" if _afir_has_irnorm() else ""
         return (f"[{b}_x];aevalsrc=exprs='{irs}':s=48000:d={_vfx.REVERB_IR_SECONDS:g}[{b}_ir];"
-                f"[{b}_x][{b}_ir]afir=gtype=none:irnorm=-1:irgain=1:dry=1:wet=1")
+                f"[{b}_x][{b}_ir]afir=gtype=none{irnorm}:irgain=1:dry=1:wet=1")
     raise ValueError(f"unknown voice-effect stage {kind!r}")
 
 
