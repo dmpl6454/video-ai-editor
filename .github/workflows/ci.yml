@@ -13,9 +13,13 @@ concurrency:
 
 jobs:
   backend:
-    name: backend (pytest)
+    name: backend (pytest, ubuntu ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       # Tests that need network or proprietary models skip cleanly when these
       # are unset; we make sure the env is empty here so CI never hits a real
@@ -46,15 +50,28 @@ jobs:
         # group (playwright, py2app, pyinstaller) is auto-included by default.
         run: uv sync --frozen --extra dev
 
-      - name: Run pytest
-        run: uv run pytest -q --tb=short
+      - name: Run pytest (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        # The suite outgrew one runner: ~7,800 tests, and the 0.8.0 push ran
+        # about 60 tests/min on ubuntu (over two hours single-process), so the
+        # job was killed at its budget. Shard by file, round-robin over the
+        # sorted list: every shard is deterministic and the union is exactly
+        # `pytest tests` (testpaths); addopts' `-m 'not benchmark'` still applies.
+        shell: bash
+        run: |
+          files=$(find tests -name 'test_*.py' | sort | awk -v n="${{ matrix.shard }}" -v k="${{ strategy.job-total }}" 'NR % k == n % k')
+          echo "$(echo "$files" | wc -l | tr -d ' ') test files in shard ${{ matrix.shard }}/${{ strategy.job-total }}"
+          uv run pytest -q --tb=short --durations=10 $files
         # Heavy-AI tests (RIFE, Real-ESRGAN, LaMa, pyannote) skip cleanly on
         # CI because the binaries / models aren't installed — that's by design.
 
   backend-windows:
-    name: backend (pytest, windows)
+    name: backend (pytest, windows ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       ANTHROPIC_API_KEY: ""
       HUGGINGFACE_TOKEN: ""
@@ -97,14 +114,27 @@ jobs:
         run: uv sync --frozen --extra dev
         # Note: py2app (dependency-group dev) installs but is mac-only dead code.
 
-      - name: Run pytest
-        run: uv run pytest -q --tb=short
+      - name: Run pytest (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        # The suite outgrew one runner: ~7,800 tests, and the 0.8.0 push ran
+        # about 60 tests/min on ubuntu (over two hours single-process), so the
+        # job was killed at its budget. Shard by file, round-robin over the
+        # sorted list: every shard is deterministic and the union is exactly
+        # `pytest tests` (testpaths); addopts' `-m 'not benchmark'` still applies.
+        shell: bash
+        run: |
+          files=$(find tests -name 'test_*.py' | sort | awk -v n="${{ matrix.shard }}" -v k="${{ strategy.job-total }}" 'NR % k == n % k')
+          echo "$(echo "$files" | wc -l | tr -d ' ') test files in shard ${{ matrix.shard }}/${{ strategy.job-total }}"
+          uv run pytest -q --tb=short --durations=10 $files
         # Heavy-AI tests skip cleanly (no binaries/models on the runner).
 
   backend-macos:
-    name: backend (pytest, macos)
+    name: backend (pytest, macos ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       ANTHROPIC_API_KEY: ""
       HUGGINGFACE_TOKEN: ""
@@ -143,8 +173,17 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --extra dev
 
-      - name: Run pytest
-        run: uv run pytest -q --tb=short
+      - name: Run pytest (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        # The suite outgrew one runner: ~7,800 tests, and the 0.8.0 push ran
+        # about 60 tests/min on ubuntu (over two hours single-process), so the
+        # job was killed at its budget. Shard by file, round-robin over the
+        # sorted list: every shard is deterministic and the union is exactly
+        # `pytest tests` (testpaths); addopts' `-m 'not benchmark'` still applies.
+        shell: bash
+        run: |
+          files=$(find tests -name 'test_*.py' | sort | awk -v n="${{ matrix.shard }}" -v k="${{ strategy.job-total }}" 'NR % k == n % k')
+          echo "$(echo "$files" | wc -l | tr -d ' ') test files in shard ${{ matrix.shard }}/${{ strategy.job-total }}"
+          uv run pytest -q --tb=short --durations=10 $files
         # Same as the other backend jobs: heavy-AI tests skip cleanly because
         # the binaries/models aren't on the runner. `brew install ffmpeg` (not
         # ffmpeg-full) has no libvidstab, so `stabilize` skips too — that is
@@ -165,6 +204,7 @@ jobs:
       # Going through PYTHONPATH bypasses that mechanism entirely, so this step
       # tests the app rather than the runner's Spotlight state.
       - name: Boot the backend (execution smoke test)
+        if: matrix.shard == 1
         env:
           PYTHONPATH: src
         run: |
