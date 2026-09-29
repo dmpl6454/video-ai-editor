@@ -168,9 +168,13 @@ def test_streamcopy_with_music_reencodes_audio_only(tmp_path: Path, run_spy):
     run_spy.calls.clear()
     out = render_preview(edl, tmp_path, height=180).path
 
-    assert run_spy.has("concat", "copy", "[afinal]"), (
+    # the audio graph ends in the padded label ([acap]: the sound is padded with
+    # silence to the plan's sample count, the NTSC tail fix); it is still the
+    # ONLY thing encoded, the picture is copied
+    assert run_spy.has("concat", "copy", "[acap]"), (
         "music-mix warm edit should copy video and re-encode only audio"
     )
+    assert run_spy.has_sub("apad=whole_len="), "the sound must reach the end of the picture"
     info = _probe(out)
     assert {s["codec_type"] for s in info["streams"]} == {"video", "audio"}
     assert abs(float(info["format"]["duration"]) - 4.0) < 0.3

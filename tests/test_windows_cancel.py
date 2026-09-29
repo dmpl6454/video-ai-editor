@@ -288,7 +288,9 @@ def test_posix_start_is_exactly_popen(monkeypatch, recorded_popen):
     monkeypatch.setattr(_pu, "_ntdll", lambda: pytest.fail("ntdll on POSIX"))
     proc = _pu.popen_in_tree(["ffmpeg", "-i", "a"], stdin=subprocess.DEVNULL)
     assert proc.argv == ["ffmpeg", "-i", "a"]
-    assert recorded_popen == [{"stdin": subprocess.DEVNULL}]
+    # exactly Popen with the platform's spawn flags merged (on a real Windows
+    # host SUBPROCESS_FLAGS is creationflags=CREATE_NO_WINDOW, empty elsewhere)
+    assert recorded_popen == [{**_pu.SUBPROCESS_FLAGS, "stdin": subprocess.DEVNULL}]
     assert not hasattr(proc, _pu._TREE_JOB_ATTR)
 
 

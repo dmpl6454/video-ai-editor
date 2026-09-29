@@ -43,14 +43,16 @@ GOLDENS = lib.load_goldens()
 BEFORE_MS = 140.0
 SPEEDUP = 10.0
 #: Windows only (`sys.platform == "win32"`), where the vectorised path against
-#: the interpreter is a smaller ratio than on the other two systems: the
-#: x86_64 runner measured 9.48x (cold 20.29 ms vs reference 192.39 ms, mixed,
-#: run 36599751632; `ref/10` = 19.24 ms missed by 5 %), ubuntu x86_64 11.6x
-#: (33.5 vs 387.5 ms, mixed) and 12.8x (plain), both inside `ref/10`. 9.4 is
-#: that ONE reading, rounded down to the tenth; no spread is assumed. The
-#: test prints cold, reference and budget, so the next Windows runs give the
-#: spread, and this figure follows them.
-WINDOWS_SPEEDUP = 9.4
+#: the interpreter is a smaller and less steady ratio than on the other two
+#: systems. Four readings on the x86_64 runner (cold vs the scalar reference of
+#: the same run): 9.48x (20.29 vs 192.39 ms, mixed, run 36599751632), 8.54x
+#: (38.48 vs 328.7 ms, plain, run 36601831900), 8.75x (40.00 vs 349.9 ms,
+#: plain) and 8.17x (46.12 vs 377.0 ms, mixed, both run 36613338127); ubuntu
+#: x86_64 read 11.6x and 12.8x. 7.0 is the lowest Windows reading (8.17x) less
+#: 15 %, so a slower runner does not fail a healthy build and a fast path that
+#: has lost a third of its advantage still does. The test prints cold,
+#: reference and budget, so further runs refine this figure.
+WINDOWS_SPEEDUP = 7.0
 
 
 def _json(d: dict) -> str:
@@ -252,8 +254,9 @@ def _cold_budget_ms(ref_ms: float) -> float:
 
 
 @pytest.mark.parametrize("platform,ref_ms,cold_ms,inside", [
-    ("win32", 192.39, 20.29, True),          # the Windows reading (9.48x)
-    ("win32", 192.39, 21.0, False),          # 9.16x: slower than anything measured there
+    ("win32", 192.39, 20.29, True),          # the fastest Windows reading (9.48x)
+    ("win32", 377.0, 46.12, True),           # the slowest Windows reading (8.17x)
+    ("win32", 192.39, 30.0, False),          # 6.4x: a fast path that lost a third of its advantage
     ("linux", 387.5, 33.5, True),            # ubuntu, mixed (11.6x)
     ("linux", 387.5, 40.0, False),           # 9.7x on ubuntu is a regression: the line is 10x
     ("darwin", 387.5, 40.0, False),          # and on a slow or loaded Mac
