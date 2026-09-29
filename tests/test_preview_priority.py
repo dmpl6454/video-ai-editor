@@ -138,8 +138,11 @@ def _session(client, tmp_path: Path, seconds: float = 4.0) -> str:
     return sid
 
 
-BASE = os.getpriority(os.PRIO_PROCESS, 0)
-LOW = min(19, BASE + 10) if os.uname().sysname == "Linux" else min(20, BASE + 10)
+if hasattr(os, "getpriority"):
+    BASE = os.getpriority(os.PRIO_PROCESS, 0)
+    LOW = min(19, BASE + 10) if os.uname().sysname == "Linux" else min(20, BASE + 10)
+else:  # Windows: pytestmark skips every test, but the module must still import
+    BASE = LOW = 0
 
 
 def test_priority_low_renders_with_niced_ffmpeg(client, tmp_path, monkeypatch):

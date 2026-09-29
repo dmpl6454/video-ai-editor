@@ -25,7 +25,14 @@ import pytest
 
 from video_ai_editor.render.frame_map import SourceInfo, audio_placements, build_program_map
 
-from tests.wk import audio_fixture as fx
+import sys
+from pathlib import Path
+
+# The house way to reach tests/wk helpers (see test_render_audio_tail.py):
+# `from tests.wk import …` only works when the repo root is on sys.path,
+# which `python -m pytest` gives and CI's `uv run pytest` does not.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from wk import audio_fixture as fx  # noqa: E402
 
 R2997 = Fraction(30000, 1001)
 LATE = 0.1

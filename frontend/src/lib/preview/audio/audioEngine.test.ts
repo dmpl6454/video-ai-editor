@@ -266,7 +266,15 @@ describe('the clock and pauses nobody issued', () => {
 
 describe('the master limiter\'s APPROX ranges (gate RX)', () => {
   const mixed = edl([{ id: 'a', start: 0, out: 20 }], [{ id: 'm', src: '/bed.m4a', start: 2, out: 4 }])
-  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
+  // The layouts land through the fake fetch's Response.json(), which takes a
+  // different number of turns per Node version (CI's 22 needs more than the
+  // ten microtasks that suffice on 25): pump timer turns until the bed's
+  // layout is known, then the microtasks that carry Promise.all →
+  // refreshLimiting. Bounded, so a real fault still fails instead of hanging.
+  const settle = async (engine: AudioEngine) => {
+    for (let i = 0; i < 50 && !engine.chunks.layoutNow('bbbb'); i++) await new Promise((r) => setTimeout(r, 0))
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+  }
 
   it('are unbounded until the layouts land, then re-derived from the recorded peaks', async () => {
     const { engine, prepare } = setup({ peak: 0.2 })
@@ -274,7 +282,7 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     engine.onLimitingChange = () => { told++ }
     prepare(mixed)
     expect(engine.limitingFrames()).toEqual([[0, 601]])                  // no peak known: all of it
-    await settle()
+    await settle(engine)
     expect(engine.limitingFrames()).toEqual([])                          // (0.2 + 0.2) / 0.97 < 1
     expect(told).toBe(1)
   })
@@ -284,7 +292,7 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
   it('are re-derived when a layout read while the sound was being built lands', async () => {
     const { engine, prepare } = setup({ peak: 0.2 })
     prepare(mixed)
-    await settle()
+    await settle(engine)
     expect(engine.limitingFrames()).toEqual([])
     let told = 0
     engine.onLimitingChange = () => { told++ }
@@ -308,7 +316,7 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
       engine.onLimitingChange = () => { told++ }
       prepare(mixed)
       expect(engine.exactLimiter).toBe(false)                            // the compressor until then
-      await settle()
+      await settle(engine)
       expect(ctx.audioWorklet!.modules).toHaveLength(1)
       expect(engine.exactLimiter).toBe(true)
       expect(ctx.nodes.some((n) => n instanceof FakeWorkletNode && !n.disconnected)).toBe(true)
@@ -324,7 +332,7 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     const undo = installFakeWorklet(ctx, true)
     try {
       prepare(mixed)
-      await settle()
+      await settle(engine)
       expect(engine.exactLimiter).toBe(false)
       expect(engine.limitingFrames()).toEqual([[59 - 3, 180 + 3 + 1]])
     } finally { undo() }
@@ -335,12 +343,12 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     let told = 0
     engine.onLimitingChange = () => { told++ }
     prepare(mixed)
-    await settle()
+    await settle(engine)
     expect(engine.limitingFrames()).toEqual([[59 - 3, 180 + 3 + 1]])    // the bed's 2-6 s ± 100 ms ± a frame
     expect(told).toBe(1)
     prepare(mixed)
     expect(engine.limitingFrames()).toEqual([[56, 184]])
-    await settle()
+    await settle(engine)
     expect(told).toBe(1)
   })
 })

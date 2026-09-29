@@ -120,7 +120,10 @@ describe('AudioChunks', () => {
     chunks.onLayoutChange = (key) => told.push(key)
     const first = await chunks.layout('k')
     expect(first.chunkPeak).toBeNull()
-    for (let i = 0; i < 20; i++) await Promise.resolve()
+    // the re-reads go through Response.json(), whose turn count differs per
+    // Node version: pump timer turns until the peaks land (bounded)
+    for (let i = 0; i < 50 && chunks.layoutNow('k')!.chunkPeak === null; i++) await new Promise((r) => setTimeout(r, 0))
+    for (let i = 0; i < 10; i++) await Promise.resolve()
     expect(chunks.layoutNow('k')!.chunkPeak).toEqual([0.1, 0.2, 0.1])
     expect((await chunks.layout('k')).samples).toBe(2500)
     expect(told).toEqual(['k'])
