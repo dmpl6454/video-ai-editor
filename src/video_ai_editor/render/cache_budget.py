@@ -421,3 +421,94 @@ def proxy_usage(root: Path) -> dict:
     pool = proxy_entries(root)
     return {"bytes": sum(e.size for e in pool), "files": len(pool),
             "budget_bytes": proxy_budget_bytes()}
+
+
+# ---- final QA r4: the Prompt bar's dry-run artefacts, their own LRU class -----
+#
+# `agent/prompt/artefacts.py` keeps what a preview's dry run derived (a
+# whisper transcript, a denoised or reframed render) under
+# ``<workdir>/.prompt_preview/artefacts/<kind>/<key>/`` so Apply does not do
+# the work twice. Entries are self-contained copies, nothing points at them,
+# so the eviction unit is one whole entry directory: a half-evicted entry
+# would otherwise read as a miss and be dropped anyway. Recency is the
+# entry's marker file (transcript.json / manifest.json), touched on every
+# hit. A cancelled or dropped card leaves its entries here to age out.
+
+#: Marker files of the two entry kinds (touched on a hit).
+ARTEFACT_MARKERS: tuple[str, ...] = ("transcript.json", "manifest.json")
+
+
+def artefact_budget_bytes() -> int:
+    """Byte cap of the dry-run artefacts (VAI_PROMPT_ARTEFACT_CACHE_MB, default 2048)."""
+    return _env_mb("VAI_PROMPT_ARTEFACT_CACHE_MB", 2048)
+
+
+def artefact_units(root: Path) -> list[Entry]:
+    """One `Entry` per artefact entry directory: its total bytes and the
+    marker's mtime (the directory's own when the marker is missing, i.e. an
+    entry still being written or already torn)."""
+    out: list[Entry] = []
+    root = Path(root)
+    if not root.is_dir():
+        return out
+    for kind in root.iterdir():
+        if not kind.is_dir() or kind.name.startswith("."):
+            continue
+        for unit in kind.iterdir():
+            if not unit.is_dir() or unit.name.startswith("."):
+                continue
+            size = 0
+            for p in unit.rglob("*"):
+                try:
+                    if p.is_file():
+                        size += int(p.stat().st_size)
+                except OSError:
+                    continue
+            mtime = None
+            for name in ARTEFACT_MARKERS:
+                try:
+                    mtime = float((unit / name).stat().st_mtime)
+                    break
+                except OSError:
+                    continue
+            if mtime is None:
+                try:
+                    mtime = float(unit.stat().st_mtime)
+                except OSError:
+                    continue
+            out.append(Entry(unit, size, mtime))
+    return out
+
+
+def enforce_artefacts(root: Path, *, budget: int | None = None,
+                      protect: Iterable = ()) -> list[Path]:
+    """Trim the artefacts area to its byte budget, least recently used entry
+    first, whole entries at a time. `protect` (the entry being written) and
+    entries touched within PROTECT_RECENT_S (a run reading one) stay. Never
+    raises — the cache must not fail the step that just filled it."""
+    removed: list[Path] = []
+    try:
+        pool = artefact_units(Path(root))
+        limit = artefact_budget_bytes() if budget is None else budget
+        keep = _resolved(protect)
+        now = time.time()
+        total = sum(e.size for e in pool)
+        for e in sorted(pool, key=lambda e: e.mtime):
+            if total <= limit:
+                break
+            if e.path in keep or now - e.mtime < PROTECT_RECENT_S:
+                continue
+            _pu.rmtree_with_retry(e.path)
+            if e.path.exists():
+                continue
+            total -= e.size
+            removed.append(e.path)
+    except Exception:
+        pass
+    return removed
+
+
+def artefact_usage(root: Path) -> dict:
+    pool = artefact_units(Path(root))
+    return {"bytes": sum(e.size for e in pool), "entries": len(pool),
+            "budget_bytes": artefact_budget_bytes()}

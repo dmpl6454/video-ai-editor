@@ -51,7 +51,7 @@ from k3_corpus_lib import (  # noqa: E402
     ASK, aspects, bgs, blends, both, cap_look, captions, canvas_is, collateral, color_fx, cov_is, dur,
     either, eq, every, gains, ins_are, lut_names, media_v1, music, music_db, music_is, music_silenced,
     music_track, near, only, pristine, rotation, spd, split_at, text_look, text_state, text_time, texts,
-    transitions, v1, zoomed_in, zoomed_out,
+    the_text, transitions, v1, zoomed_in, zoomed_out,
 )
 from test_prompt_capcut_sweep import _question_text, _session, _turn, media  # noqa: E402,F401
 from video_ai_editor.agent.dispatch import dispatch  # noqa: E402
@@ -114,6 +114,10 @@ def _b_muted(st, ids):
     dispatch(st, "set_clip_muted", {"clip_id": ids["B"], "muted": True})
 
 
+def _c_muted(st, ids):
+    dispatch(st, "set_clip_muted", {"clip_id": ids["C"], "muted": True})
+
+
 def _b_reversed(st, ids):
     dispatch(st, "set_clip_reverse", {"clip_id": ids["B"], "reverse": True})
 
@@ -138,6 +142,61 @@ def _b2x_then_mute_a(st, ids):
 def _b2x_undone(st, ids):
     dispatch(st, "set_speed", {"clip_id": ids["B"], "factor": 2.0})
     dispatch(st, "undo", {})
+
+
+# ---- run 4 (Q3) setups: looks with a strength, a colour grade, markers ----------------
+
+def _warm_b(st, ids):
+    dispatch(st, "apply_lut", {"clip_id": ids["B"], "src": "warm.cube", "intensity": 0.6})
+
+
+def _warm_all(st, ids):
+    for k in "ABC":
+        dispatch(st, "apply_lut", {"clip_id": ids[k], "src": "warm.cube", "intensity": 0.6})
+
+
+def _bright_b(st, ids):
+    dispatch(st, "color_grade", {"clip_id": ids["B"], "brightness": 0.1})
+
+
+def _marker(st, ids):
+    dispatch(st, "add_marker", {"time": 6.0, "label": "cut here"})
+
+
+def _two_markers(st, ids):
+    dispatch(st, "add_marker", {"time": 4.0, "label": "intro"})
+    dispatch(st, "add_marker", {"time": 8.0, "label": "outro"})
+
+
+def lut_strength(c, name: str) -> float:
+    return next((float(x.params.get("intensity", 1.0)) for x in c.effects
+                 if x.type == "lut" and str(x.params.get("src", "")).endswith(name)), 0.0)
+
+
+def text_anim(word: str, *, anim_in: str | None = None, anim_out: str | None = None):
+    """The text keeps its words and time and carries the animation asked;
+    no CLIP faded (run 4: "fade the title in" faded the first clip)."""
+    def chk(e, ids):
+        t = the_text(e, word)
+        eq((round(t.start, 2), round(t.end, 2)), (0.0, 3.0))
+        if anim_in is not None:
+            eq(t.anim_in, anim_in)
+        if anim_out is not None:
+            eq(t.anim_out, anim_out)
+        assert all(pristine(c) for c in v1(e)), [c.model_dump(exclude_defaults=True) for c in v1(e)]
+    return chk
+
+
+def from_playhead(pred):
+    """A range from the playhead (5.5 s, inside clip B) to the end: the lane
+    is split there — [0-4] [4-5.5] [5.5-8] [8-12] in source seconds — the
+    pieces from 5.5 s on satisfy `pred`, the ones before are untouched."""
+    def chk(e, ids):
+        cl = v1(e)
+        eq([round(c.in_, 2) for c in cl], [0.0, 4.0, 5.5, 8.0])
+        assert pristine(cl[0]) and pristine(cl[1]), [c.model_dump(exclude_defaults=True) for c in cl[:2]]
+        assert pred(cl[2]) and pred(cl[3]), [c.model_dump(exclude_defaults=True) for c in cl[2:]]
+    return chk
 
 
 def _mono_b(st, ids):
@@ -293,7 +352,9 @@ CORPUS: list[P] = [
     P("make the whole thing slower", every(slower)),
     P("half speed on the first clip", only("A", speed_is(0.5))),
     P("clip 2 at double speed", only("B", speed_is(2.0)), touch="vm"),
-    P("make the last clip 30% faster", only("C", speed_is(1.3))),
+    # final sweep 4: "clip 30%" is no longer read as clip 30, so this is the edit now — and the
+    # bed follows the shorter picture, like the other last-clip speed rows (touch "vm")
+    P("make the last clip 30% faster", only("C", speed_is(1.3)), touch="vm"),
     P("make the first clip 40% slower", only("A", speed_is(0.6))),
     P("slow everything down by 50%", every(speed_is(0.5))),
     P("set the speed of this clip back to normal", only("B", speed_is(1.0)), pre=_b2x),
@@ -342,7 +403,9 @@ CORPUS: list[P] = [
     P("make the dialogue quieter", every(quieter)),
     P("volume of clip 1 down by 6 db", only("A", db_is(-6.0))),
     P("set clip 3 volume to -10 db", only("C", db_is(-10.0))),
-    P("music volume 50%", music_is(-6.0), touch="m"),
+    # run 4: a percentage is OF THE CURRENT level (−14 dB → −20.02), never a
+    # level on the dB scale (it SET −6 dB, 8 dB louder than the person heard)
+    P("music volume 50%", music_is(-20.02), touch="m"),
     P("turn the music way down", music_db(lambda g: g < -14), touch="m"),
     P("make the song softer", music_db(lambda g: g < -14), touch="m"),
     P("louder music pls", music_db(lambda g: g > -14), touch="m"),
@@ -656,6 +719,60 @@ CORPUS: list[P] = [
     P("take clip 3, make it 2x and black and white", only("C", lambda c: speed_is(2.0)(c) and mono(c)),
       touch="vm"),
 
+    # ---- run 4 (Q3): the run-3 leftovers, each a misreading the card showed truthfully --
+    # a percentage is OF THE CURRENT level (−14 dB bed), never a level on the dB scale
+    P("set the music to half", music_is(-20.02), touch="m"),
+    P("music volume 200%", music_is(-7.98), touch="m"),
+    P("turn the music down to 25%", music_is(-26.04), touch="m"),
+    P("music at 100%", ASK, touch="m"),
+    # the strength of the look the clips ALREADY carry, on those clips
+    P("make the warm look stronger", only("B", lambda c: abs(lut_strength(c, "warm.cube") - 0.8) < 0.01), pre=_warm_b),
+    P("make the warm look weaker", every(lambda c: abs(lut_strength(c, "warm.cube") - 0.4) < 0.01), pre=_warm_all),
+    P("make the warm look stronger", ASK),                       # no warm look anywhere: a question, not a fresh apply
+    # the whole video's tail, not its pauses
+    P("shorten the video by 3 seconds", both(cov_is((0.0, 9.0)), cut_only), touch="vmt"),
+    P("make the video 2 seconds shorter", both(cov_is((0.0, 10.0)), cut_only), touch="vmt"),
+    P("cut 3 seconds from the video", both(cov_is((0.0, 9.0)), cut_only), touch="vmt"),
+    # a text's own animation, and both clauses of a retime
+    P("fade the title in", text_anim("Summer", anim_in="fade"), touch="t", pre=_summer),
+    P("make the title fade in", text_anim("Summer", anim_in="fade"), touch="t", pre=_summer),
+    P("fade the title out", text_anim("Summer", anim_out="fade"), touch="t", pre=_summer),
+    P("make the title appear at 3s and disappear at 7s", text_time("Summer", 3.0, 7.0), touch="t", pre=_summer),
+    # multiples of the clip's OWN speed (clip 2 at 2x); a step from the clip's own grade
+    P("twice as fast", lambda e, ids: eq([spd(c) for c in v1(e)], [2.0, 4.0, 2.0]), touch="vm", pre=_b2x),
+    P("half speed", lambda e, ids: eq([spd(c) for c in v1(e)], [0.5, 1.0, 0.5]), touch="vm", pre=_b2x),
+    P("double the speed of clip 2", lambda e, ids: eq([spd(c) for c in v1(e)], [1.0, 4.0, 1.0]), touch="vm", pre=_b2x),
+    P("brighter still", lambda e, ids: eq([color_fx(c).get("brightness") for c in v1(e)], [0.1, 0.2, 0.1]), pre=_bright_b),
+    # ranges anchored on the UI: the playhead (5.5 s, inside clip 2) and a marker (6 s)
+    P("from here to the end make it black and white", from_playhead(mono)),
+    P("mute from here to the end", from_playhead(muted)),
+    P("mute everything after the playhead", from_playhead(muted)),
+    P("speed up everything after the playhead", from_playhead(faster), touch="vm"),
+    P("delete from here to the end", both(cov_is((0.0, 5.5)), cut_only), touch="vmt"),
+    P("cut from the playhead to the end", both(cov_is((0.0, 5.5)), cut_only), touch="vmt"),
+    P("delete everything after the playhead", both(cov_is((0.0, 5.5)), cut_only), touch="vmt"),
+    P("keep from here to the end", both(cov_is((5.5, 12.0)), cut_only), touch="vmt"),
+    P("trim from the start to the playhead", both(cov_is((5.5, 12.0)), cut_only), touch="vmt"),
+    P("cut everything up to here", both(cov_is((5.5, 12.0)), cut_only), touch="vmt"),
+    P("cut from the marker to the end", both(cov_is((0.0, 6.0)), cut_only), touch="vmt", pre=_marker),
+    P("delete everything before the marker", both(cov_is((6.0, 12.0)), cut_only), touch="vmt", pre=_marker),
+    P("cut from the intro marker to the end", both(cov_is((0.0, 4.0)), cut_only), touch="vmt", pre=_two_markers),
+    P("cut from the marker to the end", ASK, touch="vmt"),                      # no marker: one clear question
+    P("cut from the marker to the end", ASK, touch="vmt", pre=_two_markers),    # which marker?
+    P("mute everything after the marker", ASK, pre=_marker),                    # 6 s is inside clip 2, not on the playhead
+    P("split at the marker", split_at(6.0), pre=_marker),
+    P("split at the cut here marker", split_at(6.0), pre=_marker),
+    P("split at the marker", ASK, pre=_two_markers),                            # which marker?
+    P("split at the marker", ASK),                                              # no marker
+    # one line, two texts: each restyle lands on the text it names
+    P("make the Day One title red and the SALE text blue",
+      both(text_look("Day One", color="#FF3B30"), text_look("SALE", color="#0A84FF", keep=(5.0, 7.0))),
+      touch="t", pre=_two_texts, ui=NO_SEL),
+    P("make the Day One text bigger and the SALE text yellow",
+      both(text_look("Day One", bigger=True), text_look("SALE", color="#FFD400", keep=(5.0, 7.0))),
+      touch="t", pre=_two_texts, ui=NO_SEL),
+    P("fade the Day One title in", text_look("Day One"), touch="t", pre=_two_texts, ui=NO_SEL),
+
     # ---- vague / nonsense: nothing may change without a real reading -------------------
     P("do something cool", ASK, touch=""),
     P("fix it", ASK, touch=""),
@@ -670,6 +787,23 @@ CORPUS: list[P] = [
     P("fade n out", either(only("A", fade_in), only("C", fade_out), only("AC", lambda c: fade_in(c) or fade_out(c))),
       touch="vm"),
     P("change the look", ASK),
+
+    # ---- final sweep 4 (the editor-ux / prompt-assistant findings on 0.8.0 rc) ------------
+    P("silence the first two clips", only("AB", muted)),
+    P("un-mute clip 3", only("C", lambda c: not muted(c)), pre=_c_muted),
+    P("take the warm off clip 1", lambda e, ids: eq([lut_names(c) for c in v1(e)], [[], ["warm.cube"], ["warm.cube"]]),
+      pre=_warm_all),
+    P("scale clip 1 down to 80%", only("A", zoomed_out)),
+    P("cut out the part between clip 1 and clip 3", ins_are(0.0, 8.0), touch="vmt"),
+    P("remove the 2 seconds after the playhead", both(cov_is((0.0, 5.5), (7.5, 12.0)), cut_only), touch="vmt"),
+    P("delete from 1s to the playhead", both(cov_is((0.0, 1.0), (5.5, 12.0)), cut_only), touch="vmt"),
+    P("lower the music while the coach is talking", lambda e, ids: eq(music_track(e).duck is not None, True), touch="m"),
+    P("add a countdown", lambda e, ids: eq([(t.text, round(t.start, 2)) for t in texts(e)], [("3", 5.5), ("2", 6.5), ("1", 7.5)]),
+      touch="t"),
+    P("the title should show for the whole video", text_time("Summer", 0.0, 12.0), touch="t", pre=_summer),
+    P("make the last clip 20% brighter", only("C", lambda c: color_fx(c).get("brightness", 0) > 0.15)),
+    P("split every clip in half", ins_are(0.0, 2.0, 4.0, 6.0, 8.0, 10.0), touch="v"),
+    P("make the voiceover 3 dB quieter", ASK),                # no voice-over lane here: a question, never a model download
 ]
 
 #: HELD OUT: written after the net and the semantics were tuned on CORPUS,

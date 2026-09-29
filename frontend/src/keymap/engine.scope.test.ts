@@ -71,6 +71,19 @@ describe('shouldRun: the command scope rule', () => {
     for (const chord of ['Mod+KeyZ', 'KeyJ', 'KeyK', 'KeyL', 'Shift+Space']) expect(shouldRun('default', chord, checkbox), chord).toBe(true)
   })
 
+  it('⌘, (Open Settings) is global: it runs from the Prompt bar textarea and brain pill like ⌘E (final sweep 4)', async () => {
+    const { COMMANDS } = await import('./commands')
+    const settings = COMMANDS.find((c) => c.id === 'openSettings')!
+    const exportCmd = COMMANDS.find((c) => c.id === 'exportVideo')!
+    const promptTextarea = el('TEXTAREA', { inside: ['data-keymap-ignore', '.prompt-bar'] })
+    const brainPill = el('BUTTON', { inside: ['data-keymap-ignore', '.prompt-bar'] })
+    expect(settings.scope).toBe('global')
+    for (const t of [promptTextarea, brainPill, button]) {
+      expect(shouldRun(settings.scope, 'Mod+Comma', t)).toBe(shouldRun(exportCmd.scope, 'Mod+KeyE', t))
+      expect(shouldRun(settings.scope, 'Mod+Comma', t)).toBe(true)
+    }
+  })
+
   it('runs a global command inside [data-keymap-ignore]; a default one does not', () => {
     expect(shouldRun('global', 'Alt+Digit8', mediaRow)).toBe(true)
     expect(shouldRun('global', 'Alt+Digit1', aiCheckbox)).toBe(true)

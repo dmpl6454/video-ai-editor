@@ -4,7 +4,9 @@ The Prompt bar (above the preview; `/` focuses it) turns one sentence into a
 verified edit. It works with **no cloud key**: a grammar-and-recipe planner
 answers most prompts instantly, an on-device language model normalises the
 rest, and Claude is used only when you add a key. Every run tells you which
-brain answered and why a better one was not available.
+brain answered and why a better one was not available. Since 0.8.0 a key-free
+run is **preview, then apply**: the bar shows what it would change and changes
+nothing until you press Apply (see below).
 
 ## The brain ladder
 
@@ -96,14 +98,70 @@ Clauses combine (`, and, then, aur, phir`) and Hinglish verbs are understood
    audit), with the brain badge and an estimate. Transitions come before
    captions because a cross-fade shortens the timeline; captions are laid
    afterwards so no cue runs past the picture.
-2. **Steps** — each tool with progress; a step that had nothing to do says
+2. **Preview** (key-free brains, when "Ask before applying Prompt bar edits"
+   is on) — the plan is dry-run on a throwaway copy of the project and the
+   card lists every change it would make; nothing has happened yet. Apply
+   runs the same plan for real; Change drops it. Details in the next section.
+3. **Steps** — each tool with progress; a step that had nothing to do says
    `ok · no effect` ("remove_fillers: nothing to cut") rather than pretending.
-3. **Verify** — measured postconditions, from the EDL, the transcript mapped
+4. **Verify** — measured postconditions, from the EDL, the transcript mapped
    through `agent/timemap`, ffprobe or a 360p render: "captions cover 96 % of
    speech", "−14.3 LUFS (target −14)", "no overlay outside the 9:16 safe
    zone". Failed checks come first in the reply, with measured vs expected.
-4. **One undo step** — a whole prompt run is one op; ⌘Z takes all of it back.
+5. **One undo step** — a whole prompt run is one op; ⌘Z takes all of it back.
    Sessions created by `make shorts` are kept.
+
+## Preview, then apply (0.8.0)
+
+Without a Claude key, pressing Enter no longer edits. The plan from Recipes,
+Apple Intelligence or the local model is run as a **dry run** on a scratch
+copy of the project (`agent/prompt/preview.py::scratch_store` — a throwaway
+store beside the sessions holding a deep copy of the live timeline, transcript
+and speakers; every file a tool writes lands there and is deleted; render-only
+tools are skipped, `make shorts` saves no sessions, nothing is committed and
+no undo step is written). The **K3 safety net** judges the dry run exactly as
+it judges a real run, so a plan that would make a wrong edit becomes the same
+"I undid that: … Which did you mean?" question, never a card.
+
+**How the card is built.** Its lines come from the difference between the live
+timeline and the scratch copy — never from the plan's text. `changes.py`
+flattens both timelines under stable keys (a clip's gain, a transition at a
+seam, the canvas size), `change_rules.py` turns groups of changed keys into
+sentences (a clip's speed before and after, with its length before and
+after; a transition's seam, look and length; a title's words, look and
+times) and `change_words.py` holds the editor words; a rule may claim
+only the keys it explains, and every key no rule claims gets a generic line,
+so **the card never omits a change**. The card opens with "Nothing has changed
+yet.", lists every line (scrolls; "and N more changes" opens the rest), and
+says what it will do with a screen reader announcement of the same text. The
+chat pane gets the same list as text with a yes/no question.
+
+**Apply / Change.** **Apply** (↵, the focused default) runs the SAME plan on
+the live project in one batch — one op, one ⌘Z. Before it commits, the result
+must match the preview (same changes, or the very same lines); if the timeline
+changed while the card was open, or the card expired (ten minutes, like any
+clarification), nothing is applied and the prompt is planned again into a
+fresh card — never a stale apply. **Change** (Esc) drops the card, puts the
+cursor back in your sentence and commits nothing. Typing a new sentence while
+a card is open replaces it; typing `yes` / `no` in the bar (or the chat pane)
+applies or drops it; `undo` typed while a card is open drops the card and
+undoes nothing. A preview that could not be made because the disk is full
+says so instead of "Nothing to change".
+
+**The setting.** Settings › Prompt bar › **"Ask before applying Prompt bar
+edits"** — **on by default**. Off restores the pre-0.8.0 behaviour: the plan
+runs as soon as it is planned. The value lives with the app settings
+(`settings.json` → `prompt.confirm_before_apply`, `GET`/`PUT
+/api/settings/prompt`, loopback + same-origin + JSON like every other app
+setting); `VAI_PROMPT_CONFIRM=1|0` overrides it for a developer or a test
+harness (`prompt_setting.py`). The Claude rung, and the chat assistant with a
+key, are never previewed.
+
+**The safety net does not depend on the card.** With the switch off, the K3
+safety net still judges every run inside the same batch — a wrong edit is
+still rolled back before it is committed — only the card is skipped. With it
+on you get both: the net on the dry run, the card, the net again on the real
+run, and the preview-versus-result check before the commit.
 
 ## The questions you may get
 
@@ -117,6 +175,7 @@ The planner asks only when it cannot know:
 | **Which ratio?** | the source is already vertical and no platform was named | `9:16`, `16:9`, `1:1`, `4:5` |
 | **First use downloads … Download or skip?** | a model or voice is not on disk (MADLAD 3 GB, large-v3 3.1 GB, a Piper voice 60 MB) | `download` or `skip` — skipping drops the dependent steps and the reply says so |
 | **This will take about N minutes. Start?** | the estimate is over 90 s | `yes` or `no` |
+| **The preview card** ("Nothing has changed yet." + the change list) | a key-free plan, with "Ask before applying Prompt bar edits" on | **Apply** (↵) or **Change** (Esc); `yes` / `no` typed in the bar or the chat pane |
 | **A model's own question** ("Rotate by how much?") | Apple Intelligence, the local model or Claude planned the edit but needs one more fact | type the answer in the card; the request is planned again with it ("… — 90 degrees"). A complete new request typed instead is planned on its own |
 
 Nothing in the prompt path downloads without a **yes** — "no cloud key" is
@@ -181,6 +240,8 @@ VAI_BRAIN=auto                # recipes | fm | mlx | cloud | auto
 VAI_MLX_MODEL=                # override the RAM-tier model id
 VAI_PROMPT_CLOUD=1            # 0 disables the Claude rung even with a key
 VAI_FM_HELPER=                # path to a built fm-planner (dev; the .app bundles it)
+VAI_PROMPT_CONFIRM=           # unset = Settings › Prompt bar › "Ask before applying Prompt bar edits" (on by default);
+                              # 1 | 0 overrides it for this run (prompt_setting.py)
 VAE_PHONE_PAIRING=            # unset/0 = the iPhone companion and LAN pairing are OFF (0.7.1 default);
                               # 1 | true | yes restores them (api/pairing.py::PHONE_PAIRING_ENABLED)
 ```
@@ -188,10 +249,16 @@ VAE_PHONE_PAIRING=            # unset/0 = the iPhone companion and LAN pairing a
 ## Where things live
 
 `agent/prompt/` — schema, facts, slots, grammar, recipes, planner, validate,
-presets, executor, verify, pending, service, summary, runlog;
+presets, executor, verify, pending, service, summary, runlog; preview, then
+apply: `preview.py` (the dry run, the scratch store, the apply check),
+`changes.py` + `change_rules.py` + `change_words.py` (the card's lines from
+the timeline diff), `prompt_setting.py` (the switch);
 `agent/prompt/brains/` — the four brains, the router, JSON repair, content
 tasks; `tools/fm-planner/` — the Apple Intelligence helper;
-`api/prompt_routes.py` — `/api/sessions/{sid}/prompt*`, `/api/prompt/*`;
+`api/prompt_routes.py` — `/api/sessions/{sid}/prompt*`, `/api/prompt/*`,
+`GET`/`PUT /api/settings/prompt`;
+`frontend/src/components/PromptPreviewCard.tsx` + `lib/promptApplySetting.ts`
+— the card and the Settings switch;
 `presets/{text_styles,transitions,templates,music}` — the presets (beds are
 generated by `scripts/gen_music_beds.py`); `tests/benchmark/` — the
 CapCut-parity benchmark (`docs/BENCHMARK.md`).

@@ -58,6 +58,20 @@ interface Config {
    *  overwritten ahead of the playhead (3 stale frames, spec §10 "wk-only"),
    *  so its logic run skips this long after an answer. WebKit: 0. */
   staleMs?: number
+  /** end_restart: how long the round waits at the end before playing again
+   *  (a user presses Space hundreds of ms after playback stopped, past the
+   *  engine's own-pause window; the soak's loop plays again within 20 ms). */
+  pauseBeforePlayMs?: number
+  /** end_restart: keep the main thread busy this long right after play()
+   *  (the app's click handler: the store update, React's render of the
+   *  transport and the timeline). laneA's remove/append then lands after
+   *  the parked element — 16.7 ms before the media duration — has run off
+   *  the end: WebKit fires 'ended' (measured in the app: 'ended' 7-27 ms
+   *  after 'playing'; here the remove came in 8-16 ms and won the race). */
+  busyAfterPlayMs?: number
+  /** end_restart: report the element's events for every round, not only
+   *  the suspicious ones. */
+  traceAll?: boolean
 }
 
 interface Draw { k: number; bar: number; playing: boolean; at: number }
@@ -451,12 +465,52 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
     const envLog: string[] = []
     const noteEnv = (what: string) => { envEvents++; if (envLog.length < 40) envLog.push(`${what}@${now().toFixed(0)}`) }
     document.addEventListener('visibilitychange', () => noteEnv(`vis:${document.visibilityState}`))
-    engine.on('pause-external', (e) => noteEnv(`ext:${e.cause}`))
+    // An 'element' pause of an element that ran off the media end is the
+    // engine's own doing (final sweep 4: played from the last frame while
+    // its run seek waited), never the environment's: it counts as a stop.
+    let endedPauses = 0
+    const v0 = engine.internals.video!
+    engine.on('pause-external', (e) => {
+      const dur = engine.internals.lane?.mediaSource?.duration ?? Infinity
+      if (e.cause === 'element' && (v0.ended || v0.currentTime >= dur - 0.05)) endedPauses++
+      else noteEnv(`ext:${e.cause}`)
+    })
     const want = cfg.edits ?? 10
     let clean = 0
+    // The element's own story of each round (a stuck round must say what
+    // WebKit did with the element: every event with where it stood, every
+    // SourceBuffer update with what it held, the engine's frames).
+    const v = engine.internals.video!
+    let roundT = now()
+    const ev: Array<Record<string, unknown>> = []
+    const rangesOf = (tr: TimeRanges | undefined) =>
+      tr ? Array.from({ length: tr.length }, (_, j) => [+tr.start(j).toFixed(3), +tr.end(j).toFixed(3)]) : null
+    const note = (e: string, extra: Record<string, unknown> = {}) => {
+      if (ev.length >= 400) ev.shift()
+      const sb = engine.internals.lane?.sourceBuffer as SourceBuffer | null | undefined
+      let sbr: unknown
+      try { sbr = rangesOf(sb?.buffered) } catch { sbr = 'n/a' }
+      ev.push({ ms: +(now() - roundT).toFixed(1), e, t: +v.currentTime.toFixed(4), rs: v.readyState, sk: v.seeking, p: v.paused,
+        dur: +((engine.internals.lane?.mediaSource?.duration ?? NaN)).toFixed(3), vb: rangesOf(v.buffered), sb: sbr, ...extra })
+    }
+    for (const e of ['seeking', 'seeked', 'waiting', 'playing', 'play', 'pause', 'ended', 'stalled', 'durationchange',
+      'loadeddata', 'canplay', 'canplaythrough', 'suspend', 'emptied', 'error']) v.addEventListener(e, () => note(e))
+    let sbHooked: SourceBuffer | null = null
+    const hookSb = () => {
+      const sb = engine.internals.lane?.sourceBuffer as SourceBuffer | null | undefined
+      if (!sb || sb === sbHooked) return
+      sbHooked = sb
+      sb.addEventListener('updateend', () => note('sb:updateend', { lane: engine.internals.lane?.buffered }))
+      sb.addEventListener('abort', () => note('sb:abort'))
+      sb.addEventListener('error', () => note('sb:error'))
+    }
+    engine.on('frame', (f) => note(`frame:${f.k}`, { playing: f.playing, drawn: f.drawn }))
+    engine.on('buffering', (b) => note(`buffering:${b.buffering}`, { k: b.k }))
+    engine.on('status', (st) => note(`status`, { playing: st.playing, buffering: st.buffering, k: st.presentedK }))
     for (let i = 0; clean < want && i < want + 6; i++) {
       const env0 = envEvents
       const pm = engine.program!
+      hookSb()
       ctl.play(secs(pm.total - 45))
       const t0 = now()
       while (now() - t0 < 8000 && (engine.playing || engine.presentedK < pm.total - 3)) {
@@ -465,13 +519,27 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
       }
       const endK = engine.presentedK
       const reachedEnd = endK >= pm.total - 3
+      // the user's pause at the end (final sweep 4: WebKit's 'ended' on the
+      // parked element played again from the last frame, see RunSeek)
+      if (cfg.pauseBeforePlayMs) await sleep(cfg.pauseBeforePlayMs)
       const how = clean % 2 === 0 ? 'fromEnd' : 'fromZero'
       const stopsBefore = stops.length
+      // keep the last 40 events before play (the stop at the end, the park seek)
+      ev.splice(0, Math.max(0, ev.length - 40))
       const t1 = now()
+      const prevT = roundT
+      roundT = t1
+      for (const x of ev) x.ms = +((x.ms as number) - (t1 - prevT)).toFixed(1)
+      const seek0 = engine.internals.seekCounters()
+      const stall0 = engine.stats.stallRestarts
+      const ended0 = endedPauses
+      const deferred0 = engine.internals.runSeekStats.deferred
+      note('play', { how, endK, seek: seek0, elementAt: v.currentTime })
       ctl.play(how === 'fromEnd' ? secs(endK) : 0)
+      if (cfg.busyAfterPlayMs) { const s = now(); while (now() - s < cfg.busyAfterPlayMs) { /* the app's render work */ } }
+      note('played', { seek: engine.internals.seekCounters(), target: engine.targetK, lane: engine.internals.lane?.buffered })
       // a trace of the element for the round's report (a stuck round must
       // say where the element stood, and whether frames kept coming)
-      const v = engine.internals.video!
       const trace: Array<Record<string, unknown>> = []
       const drawn0 = engine.stats.framesDrawn
       const held0 = engine.stats.heldFrames
@@ -480,6 +548,7 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
         const vb = v.buffered
         trace.push({ ms: +(now() - t1).toFixed(0), t: +v.currentTime.toFixed(3), rs: v.readyState, p: v.paused, s: v.seeking,
           k: engine.presentedK, drawn: engine.stats.framesDrawn - drawn0, held: engine.stats.heldFrames - held0,
+          dur: +((engine.internals.lane?.mediaSource?.duration ?? NaN)).toFixed(3),
           vb: Array.from({ length: vb.length }, (_, j) => [+vb.start(j).toFixed(2), +vb.end(j).toFixed(2)]) })
       }
       const waitedMs = now() - t1
@@ -487,17 +556,25 @@ const scenarios: Record<string, (cfg: Config) => Promise<Result>> = {
       const lane = engine.internals.lane!
       const env = envEvents - env0
       const ok = reachedEnd && engine.playing && k >= 20 && k < 200
-      const why = ok ? null : {
+      // a round the watchdog rescued (a stop after play, a stall restart) is
+      // reported like a failed one: it is the same defect, caught in time
+      const stallRestarts = engine.stats.stallRestarts - stall0
+      const suspicious = !ok || stops.length > stopsBefore || stallRestarts > 0 || !!cfg.traceAll
+      const why = !suspicious ? null : {
         buffered: lane.buffered, sb: bufferedOf(r), target: engine.targetK, status: { ...engine.status, ranges: 0 },
         video: { t: +v.currentTime.toFixed(3), paused: v.paused, seeking: v.seeking, readyState: v.readyState },
         laneStats: lane.stats, store: { pending: engine.internals.store.pending, bytes: engine.internals.store.bytes },
         ring: r.ring.slice(-3).map((d) => ({ ...d, bar: fmt(d.bar) })), envLog: envLog.slice(-6),
         stops: stops.slice(-4).map((x) => ({ ms: +(x.at - t0).toFixed(0), k: x.k })),
-        engineStats: { ...engine.stats }, trace,
+        engineStats: { ...engine.stats }, seek: engine.internals.seekCounters(), trace, events: ev.slice(),
       }
+      ev.length = 0
       if (env === 0) clean++
       rounds.push({ how, endK, reachedEnd, total: pm.total, playing: engine.playing, k, env, waitedMs: +waitedMs.toFixed(0), why,
-        stopsAfterPlay: stops.length - stopsBefore,
+        stopsAfterPlay: stops.length - stopsBefore, stallRestarts, endedPauses: endedPauses - ended0,
+        // run seeks that waited for the start's append (RunSeek): the start
+        // is never buffered when the end is reached, so every round defers
+        deferred: engine.internals.runSeekStats.deferred - deferred0,
         firstStop: stops[stopsBefore] ? { ms: +(stops[stopsBefore].at - t1).toFixed(0), k: stops[stopsBefore].k } : null, ok })
       ctl.pause()
       await sleep(200)

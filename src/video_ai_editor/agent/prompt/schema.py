@@ -501,7 +501,7 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     # bold / place, each checked only when asked. Its WORDS are the
     # contract's business (it must not change them).
     _spec("text_style_is", "the text has the requested look", clip_id=None, color=None, size=None, font=None,
-          bold=None, position=None),
+          bold=None, position=None, anim_in=None, anim_out=None),
     # Wave E (F2): the CapCut canvas background / blend mode the renderer
     # reads. `type` None = black bars (no background); color/blur checked
     # only when given.
@@ -643,7 +643,8 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "set_text": [_pc("text_present", "the text says the new words", contains=f"{ARG_REF}text")],
     "set_text_style": [_pc("text_style_is", "the text has the requested look", clip_id=f"{ARG_REF}clip_id",
                            color=f"{ARG_REF}color", size=f"{ARG_REF}size", font=f"{ARG_REF}font",
-                           bold=f"{ARG_REF}bold", position=f"{ARG_REF}position")],
+                           bold=f"{ARG_REF}bold", position=f"{ARG_REF}position",
+                           anim_in=f"{ARG_REF}anim_in", anim_out=f"{ARG_REF}anim_out")],
     "add_super_text": [_pc("text_present", "the text is on screen"),
                        _pc("overlays_inside_safe_zone", "text stays clear of the platform UI")],
     "apply_text_template": [_pc("text_present", "the text is on screen"),

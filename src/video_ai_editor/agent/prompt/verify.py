@@ -373,7 +373,24 @@ def _clip_targets(ctx: VerifyCtx, clip_id: Any) -> list[str]:
         return ids[:1]
     if clip_id == "$v1_last":
         return ids[-1:]
+    if clip_id in ("$playhead", "$selected"):
+        # run 4: the ONE clip the sentinel names on the verified timeline —
+        # after "split at the playhead" the right half, whose id the plan
+        # never knew ("from here to the end" was graded against every clip)
+        one = _ui_sentinel_clip(ctx, clip_id)
+        return [one.id] if one is not None else ids
     return ids
+
+
+def _ui_sentinel_clip(ctx: VerifyCtx, ref: str) -> Clip | None:
+    f = ctx.facts_before
+    if ref == "$selected":
+        hit = ctx.edl.get_clip(str(f.selection)) if f.selection else None
+        return hit[1] if hit and isinstance(hit[1], Clip) else None
+    ph = f.playhead
+    if ph is None:
+        return None
+    return next((c for c in v1_clips(ctx.edl) if c.start - 1e-6 <= ph < c.start + c.effective_duration - 1e-6), None)
 
 
 def _ok(pc: Postcondition, passed: bool | None, measured: Any, expected: Any, *,
@@ -1039,6 +1056,9 @@ def _clips_for_ref(ctx: VerifyCtx, ref: Any) -> list[Clip]:
         return clips[:1]
     if ref == "$v1_last":
         return clips[-1:]
+    if ref in ("$playhead", "$selected"):
+        one = _ui_sentinel_clip(ctx, ref)
+        return [one] if one is not None else clips
     if ref and ref not in CLIP_SENTINELS:
         hit = ctx.edl.get_clip(str(ref))
         return [hit[1]] if hit and isinstance(hit[1], Clip) else []
@@ -1248,6 +1268,11 @@ def c_text_style_is(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         want = {"top": (0.0, 0.34), "middle": (0.34, 0.66), "center": (0.34, 0.66), "bottom": (0.66, 1.0)}[place]
         if not want[0] <= frac <= want[1]:
             bad.append(f"at y {frac:.2f}")
+    for side in ("anim_in", "anim_out"):
+        # run 4: "fade the title in" — the text's own In / Out animation
+        want_anim = _arg(pc, side)
+        if want_anim is not None and (getattr(t, side, None) or "") != str(want_anim):
+            bad.append(f"{side.replace('_', ' ')} {getattr(t, side, None) or 'none'}")
     return _ok(pc, not bad, ", ".join(bad) or "as asked", "as asked")
 
 

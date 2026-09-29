@@ -45,6 +45,16 @@ def lut_names(c: Clip) -> list[str]:
     return [Path(str(x.params.get("src", ""))).name for x in c.effects if x.type == "lut"]
 
 
+def lut_intensity(c: Clip, name: str) -> float:
+    """The strength of the look `name` on `c` (1.0 when the LUT carries none;
+    0.0 when the clip has no such look) — run 4, "make the warm look stronger"."""
+    for x in c.effects:
+        if x.type == "lut" and Path(str(x.params.get("src", ""))).name == name:
+            v = x.params.get("intensity", 1.0)
+            return float(v) if isinstance(v, (int, float)) else 1.0
+    return 0.0
+
+
 def color_params(c: Clip) -> dict[str, float]:
     out: dict[str, float] = {}
     for x in c.effects:

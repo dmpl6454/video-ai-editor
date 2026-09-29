@@ -694,11 +694,16 @@ TEXT_TOOLS = [
        ["clip_id", "text"]),
     _t("set_text_style",
        "Restyle an existing text overlay (title, lower third, label): colour, size, font or "
-       "bold, outline, box, ALL CAPS and top/middle/bottom placement. What it SAYS, its timing "
-       "and its animation stay as they are.",
+       "bold, outline, box, ALL CAPS, top/middle/bottom placement and its In / Out animation "
+       "(anim_in / anim_out; \"\" = none). What it SAYS and its timing stay as they are; keys "
+       "you leave out are left alone.",
        "text",
        {
            "clip_id": {"type": "string", "description": "The text clip's id"},
+           "anim_in": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down", ""],
+                       "description": "In animation, or \"\" for none"},
+           "anim_out": {"type": "string", "enum": ["pop", "fade", "slide_up", "slide_down", ""],
+                        "description": "Out animation, or \"\" for none"},
            "color": {"type": "string", "description": "#RRGGBB text fill"},
            "size": {"type": "number", "description": "Font size in canvas px"},
            "size_scale": {"type": "number", "description": "Multiply the current size (1.25 = bigger)"},

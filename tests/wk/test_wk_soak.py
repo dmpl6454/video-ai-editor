@@ -270,14 +270,22 @@ def test_process_footprint_reads_this_process_and_sees_it_grow():
     show up in it (the measurement the soak's slope rests on)."""
     if process_footprint(os.getpid()) is None:
         pytest.skip("proc_pid_rusage needs macOS")
+    import mmap
     before = process_footprint(os.getpid())["footprint"]
-    block = bytearray(128 * MB)
-    for i in range(0, len(block), 4096):
-        block[i] = 1
-    after = process_footprint(os.getpid())
+    # An anonymous mmap, not a bytearray: in a long pytest process malloc can
+    # hand a 128 MB bytearray back out of large regions it freed earlier but
+    # still owns, and those pages are ALREADY in phys_footprint, so before ==
+    # after exactly (the 0.8.0 release gate saw this in a shard that had run
+    # 600 tests). A fresh mapping is new memory by construction.
+    block = mmap.mmap(-1, 128 * MB)
+    try:
+        for i in range(0, 128 * MB, 4096):
+            block[i] = 1
+        after = process_footprint(os.getpid())
+    finally:
+        block.close()
     assert after["footprint"] - before >= 100 * MB, (before, after)
     assert after["peak"] >= after["footprint"]
-    del block
 
 
 @pytest.fixture(scope="module")
@@ -450,13 +458,70 @@ def test_play_again_at_the_end_restarts_from_the_start(env):
     soak, the start's spans are no longer cached when the end is reached.
     A round the environment touched (the page hidden, a pause WebKit made:
     another window over the 4 px harness window) is reported and replaced,
-    up to 6 times; every other round must reach the end and restart."""
+    up to 6 times; every other round must reach the end and restart.
+
+    Final QA r4 (1 round in 10-40): the run's seek was issued while the start
+    was not buffered, and WebKit completed it at the END of the append that
+    followed (measured 'seeked' at t = 3.0 s with [0, 3] s just appended),
+    then moved the element to every later append's end; frame 0 was drawn
+    once and the run stood still, `buffering` up. The engine now issues the
+    run's seek only once the start frame is appended (engineSeek.RunSeek), so
+    every round defers it here (``deferred``), and a round the stall watchdog
+    had to rescue (a stop after play, a restart) counts as failed too."""
     run = env.wk("end_restart", env.config("restart", "end-restart", edits=10, spanCacheBytes=16 * MB), timeout=900)
     r = run.result
     _report("end-restart", rounds=r["rounds"], clean=r["clean"], envRounds=r["envRounds"], failed=r["failed"])
     assert r["clean"] >= 8, ("the environment kept hiding the window", r["rounds"])
-    assert r["failed"] == 0, [x for x in r["rounds"] if x["env"] == 0 and not x["ok"]]
+    clean = [x for x in r["rounds"] if x["env"] == 0]
+    assert r["failed"] == 0, [x for x in clean if not x["ok"]]
+    assert all(x["stallRestarts"] == 0 and x["stopsAfterPlay"] == 0 for x in clean), [x for x in clean if x["why"]]
+    assert all(x["deferred"] >= 1 for x in clean), [x for x in clean if x["deferred"] < 1]
     assert r["judge"]["bad"] == 0, r["judge"]
+
+
+#: The user's pause at the end before Space (past the engine's own-pause window).
+PAUSE_AT_END_MS = 1500
+#: The app's main-thread work right after play() (the store update, React's
+#: render of the transport and the timeline), measured 10-30 ms.
+BUSY_AFTER_PLAY_MS = 40
+
+
+def _assert_restart_rounds(r: dict, want_clean: int) -> None:
+    assert not r.get("fatal"), r.get("fatal")
+    assert r["clean"] >= want_clean, ("the environment kept hiding the window", r["rounds"])
+    clean = [x for x in r["rounds"] if x["env"] == 0]
+    assert r["failed"] == 0, [x for x in clean if not x["ok"]]
+    # the element played from the last frame ran off the media end ('ended',
+    # then an 'element' pause): the round is a stop, never an env round
+    assert all(x["endedPauses"] == 0 for x in clean), [x for x in clean if x["endedPauses"]]
+    assert all(x["stallRestarts"] == 0 and x["stopsAfterPlay"] == 0 for x in clean), [x for x in clean if x["stopsAfterPlay"] or x["stallRestarts"]]
+    assert all(x["deferred"] >= 1 for x in clean), [x for x in clean if x["deferred"] < 1]
+    assert r["judge"]["bad"] == 0, r["judge"]
+
+
+@pytest.mark.wk
+def test_play_again_after_a_pause_at_the_end_restarts_from_the_start(env):
+    """Final sweep 4: the same loop, but the round waits PAUSE_AT_END_MS at
+    the end before playing again — a user's Space, not the soak's 20 ms —
+    and the main thread is busy BUSY_AFTER_PLAY_MS right after play(), as
+    the app's click handler is (the store update, React's render).
+    Measured in WebKit (the app in Playwright WebKit, 1 round in 3 to 9 in
+    10): with the start not buffered the run's seek is deferred (RunSeek)
+    but the element was played at once from where it stood, the last frame,
+    16.7 ms before the media duration; laneA's remove of the old window came
+    after that (the main thread was busy), so the element reached the
+    duration, fired 'ended' and paused itself; the deferred seek then landed
+    on a paused element, and the pause — past the engine's own-pause window
+    — was taken for an external one ('element'): playback stopped at once
+    (or, inside the window, 1 s later at frame 0). The element must stay
+    parked until its run seek is issued, and play then."""
+    run = env.wk("end_restart", env.config("restart", "end-restart-paused", edits=10, spanCacheBytes=16 * MB,
+                                           pauseBeforePlayMs=PAUSE_AT_END_MS, busyAfterPlayMs=BUSY_AFTER_PLAY_MS),
+                 timeout=900)
+    r = run.result
+    _report("end-restart-paused", rounds=[{k: v for k, v in x.items() if k != "why"} for x in r["rounds"]],
+            clean=r["clean"], envRounds=r["envRounds"], failed=r["failed"])
+    _assert_restart_rounds(r, 8)
 
 
 @pytest.mark.wk
@@ -530,6 +595,32 @@ def test_playwright_edit_script_element_budget(pw, env):
     assert r["applied"] >= 90 and r["engineCreated"] == 1, r
     assert r["created"] <= MAX_MEDIA_ELEMENTS and r["maxLive"] <= MAX_MEDIA_ELEMENTS, r
     assert r["judge"]["bad"] == 0, r["judge"]
+
+
+@pytest.mark.parametrize("pause_ms", [0, PAUSE_AT_END_MS], ids=["at_once", "after_a_pause"])
+def test_playwright_play_again_at_the_end(pw, env, pause_ms):
+    """The end-restart loop's logic in Playwright Chromium and WebKit, played
+    again at once and after the user's pause with the app's busy main thread
+    (final sweep 4: Playwright WebKit fires 'ended' on the element played
+    from the last frame like WKWebView; Chromium stalls at the end of the
+    buffered data instead — both must restart)."""
+    cfg = env.config("restart", f"end-restart-pw-{pw.engine_name}-{pause_ms}", edits=6, spanCacheBytes=16 * MB,
+                     pauseBeforePlayMs=pause_ms, busyAfterPlayMs=BUSY_AFTER_PLAY_MS if pause_ms else 0,
+                     staleMs=400 if pw.engine_name == "chromium" else 0)
+    page = pw.new_page(viewport={"width": 800, "height": 600})
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        page.goto(f"{env.backend.base}/wk/soak.html?scenario=end_restart&cfg={cfg}&token=pw"
+                  f"&mailbox={env.pages.url('').rstrip('/')}")
+        page.wait_for_function("window.__result !== undefined", timeout=600_000)
+        r = page.evaluate("window.__result")
+    finally:
+        page.close()
+    assert errors == [], errors
+    _report(f"pw-{pw.engine_name}-end-restart-{pause_ms}", rounds=[{k: v for k, v in x.items() if k != "why"} for x in r["rounds"]],
+            clean=r["clean"], envRounds=r["envRounds"], failed=r["failed"])
+    _assert_restart_rounds(r, 5)
 
 
 # ----------------------------------------------------------------- P1-M1

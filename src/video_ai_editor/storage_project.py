@@ -401,26 +401,49 @@ def _assert_timeline_importable(unpack: Path) -> None:
             f"timeline rather than your project") from e
 
 
+def _bundled_file(unpack: Path, relative: object) -> Path | None:
+    """A manifest media path, accepted only as a REGULAR FILE under the
+    archive's own `media/` folder — the only place `_write_archive` ever puts
+    one (`media/<name>` and `media/<name>.ingest.json`).
+
+    Final sweep 4: `_inside(unpack, …)` alone let a manifest name one of the
+    archive's OWN state files — `edl.json`, or `.` for the whole unpack root —
+    as bundled media. Media is moved BEFORE the state files are copied, so
+    the timeline was moved into uploads/imported and `_write_state_files`
+    skipped the file it no longer found: the project opened EMPTY, one Save
+    away from overwriting the user's good copy. Nothing legitimate lives
+    outside `media/`, so anything else is skipped, not repaired."""
+    path = _inside(unpack, relative)
+    if path is None:
+        return None
+    try:
+        media_root = (unpack / "media").resolve()
+    except (OSError, ValueError):
+        return None
+    if not path.is_relative_to(media_root) or not path.is_file():
+        return None
+    return path
+
+
 def _import_media(manifest: dict, unpack: Path, imported: Path) -> dict[str, str]:
     """Move bundled media into the session, returning the old->new src map."""
     src_remap: dict[str, str] = {}
     for entry in manifest.get("media", []):
         if not isinstance(entry, dict):
             continue
-        bundled = _inside(unpack, entry.get("bundled"))
+        bundled = _bundled_file(unpack, entry.get("bundled"))
         if bundled is None:
-            _log.warning("load_project: refusing manifest entry that escapes the "
-                         "archive: %r", entry.get("bundled"))
-            continue
-        if not bundled.exists():
+            if isinstance(entry.get("bundled"), str) and entry.get("bundled"):
+                _log.warning("load_project: skipping manifest media entry that is not "
+                             "a file under the archive's media/: %r", entry.get("bundled"))
             continue
         orig = entry.get("orig")
         if not isinstance(orig, str) or not orig:
             continue
         # `.name` on the RESOLVED path, not on the raw manifest string: the raw
         # string is what we just refused to trust.
-        ingest = _inside(unpack, entry.get("ingest")) if entry.get("ingest") else None
-        if ingest is not None and ingest.is_file():
+        ingest = _bundled_file(unpack, entry.get("ingest")) if entry.get("ingest") else None
+        if ingest is not None:
             # Its own directory, so the transcript sits beside the media the
             # way ingest_upload lays it out and `_current_v1_ingest_json`
             # finds it (QA-033).
@@ -451,6 +474,15 @@ def _write_ingest(bundled: Path, dst: Path, media: Path) -> None:
 
 def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> None:
     """Copy the state files in, rewriting bundled media paths to the new ones."""
+    # Final sweep 4, the second lock: `_assert_timeline_importable` proved
+    # edl.json readable BEFORE the media move. Should anything take it away
+    # in between, refuse — `_materialise_session` removes the half-made
+    # session — rather than fall through to the silent `continue` below and
+    # open a blank project in the user's place.
+    edl_src = _inside(unpack, "edl.json")
+    if edl_src is None or not edl_src.is_file():
+        raise ValueError("that .vae's edl.json went missing while its media was being "
+                         "imported — refusing to open an empty project in its place")
     names = ["edl.json", *_STATE_FILES]
     snap_dir = _inside(unpack, "snapshots")
     if snap_dir is not None and snap_dir.is_dir():

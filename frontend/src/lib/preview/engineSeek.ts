@@ -235,6 +235,69 @@ export class SoughtFrame {
   }
 }
 
+/** What the run seek reads from laneA. */
+export interface RunSeekLane {
+  isReady(k: number): boolean
+  seekTime(k: number): number
+}
+
+/** The element seek that starts a run — play() from a frame the element does
+ *  not stand on, a seek while playing — issued only once frame k is in the
+ *  SourceBuffer, like the paused seek (RD2 fixer: "readiness is checked again
+ *  at the moment of the assignment"). Measured in WKWebView (final QA r4,
+ *  tests/wk/test_wk_soak.py end-restart, 1 round in 10-40): play from 0 after
+ *  the end assigned currentTime while only [84.5, 96] s was buffered; laneA
+ *  removed that window and appended [0, 1), [0, 2), [0, 3) s, and WebKit
+ *  completed the seek at t = 3.0 — the end of what had just landed, not the
+ *  target — fired 'waiting', and then moved the element to every later
+ *  append's end (4, 5, … 30 s) while presenting nothing: frame 0 was drawn
+ *  once, the run stood still with `buffering` up, and the stall watchdog took
+ *  it for a wait for data. A seek issued after the frame is appended completes
+ *  on the frame (the paused path's 30/30). */
+export class RunSeek {
+  /** The frame a run is waiting to seek to (−1: none). */
+  k = -1
+  readonly stats = { deferred: 0 }
+  private readonly assign: (k: number, t: number) => void
+
+  /** `assign(k, t)`: set the element's currentTime to t for frame k. */
+  constructor(assign: (k: number, t: number) => void) {
+    this.assign = assign
+  }
+
+  get pending(): boolean {
+    return this.k >= 0
+  }
+
+  /** A run starts at k: the element seeks now when the frame is buffered
+   *  (true), else once laneA appends it (onAppended). */
+  begin(k: number, lane: RunSeekLane): boolean {
+    if (lane.isReady(k)) {
+      this.k = -1
+      this.assign(k, lane.seekTime(k))
+      return true
+    }
+    this.k = k
+    this.stats.deferred++
+    return false
+  }
+
+  /** laneA appended [a, b): the waiting seek is issued if its frame is among
+   *  them and holds what the program wants there. */
+  onAppended(a: number, b: number, lane: RunSeekLane): boolean {
+    const k = this.k
+    if (k < 0 || k < a || k >= b || !lane.isReady(k)) return false
+    this.k = -1
+    this.assign(k, lane.seekTime(k))
+    return true
+  }
+
+  /** The run stopped or restarted elsewhere: the waiting seek never happens. */
+  cancel(): void {
+    this.k = -1
+  }
+}
+
 /** A playing run that starts AWAY from the frame on screen (play() from 0
  *  after the end, a seek while playing): until a frame of the new position is
  *  presented, WebKit still presents frames of the OLD position and fires

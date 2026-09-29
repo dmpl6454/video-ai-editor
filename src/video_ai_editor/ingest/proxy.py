@@ -46,12 +46,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import struct
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -98,6 +100,17 @@ PROFILE = "high"
 LEVEL = "4.1"
 PRESET = "veryfast"
 ENCODE_THREADS = 2
+#: An encode whose ffmpeg left before every frame was out — killed under
+#: memory pressure, a pipe error, a crash; never a cancel — is started again
+#: from its first missing span this many times, waiting ENCODE_BACKOFF_S,
+#: then twice that, ... between attempts (``encode_spans``). Only after the
+#: last one is the proxy marked failed, with the exit code and ffmpeg's last
+#: words as the reason (Final QA r4: the early EOF raised out of the job, the
+#: span was never built until something asked for it again).
+ENCODE_RETRIES = 3
+ENCODE_BACKOFF_S = 0.25
+
+_log = logging.getLogger("video_ai_editor")
 
 
 #: Spec §15 open decision 1, settled by measurement (2026-09-26, the 82
@@ -139,6 +152,19 @@ KEY_LEN = 24
 
 class ProxyError(RuntimeError):
     """A proxy could not be built as specified (count mismatch, bad output)."""
+
+
+class EncodeInterrupted(ProxyError):
+    """ffmpeg's output ended before frames [f0, f1) were all out and nobody
+    cancelled it (a non-zero exit, or the pipe closed in the middle of a
+    box). Retryable: ``encode_spans`` starts again at ``resume_frame``."""
+
+    def __init__(self, f0: int, f1: int, done: int, returncode: int | None, stderr_tail: str):
+        self.f0, self.f1, self.frames_done = f0, f1, done
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+        super().__init__(f"proxy encode of frames [{f0}, {f1}) stopped early at frame {f0 + done} "
+                         f"(ffmpeg exit {returncode}): {stderr_tail or 'no message'}")
 
 
 # ---- where proxies live -----------------------------------------------------
@@ -655,6 +681,9 @@ class FragmentReader:
         self._read = read
         self.init = b""
         self._pending_sizes: list[int] = []
+        #: The stream ended in the MIDDLE of a box (the pipe closed under a
+        #: killed or crashed ffmpeg), not between two boxes.
+        self.truncated = False
 
     def _exact(self, n: int) -> bytes:
         parts, left = [], n
@@ -675,13 +704,19 @@ class FragmentReader:
                 return
             size, typ_b = struct.unpack(">I4s", head)
             typ = typ_b.decode("latin1")
-            if size == 1:
-                large = self._exact(8)
-                size = struct.unpack(">Q", large)[0]
-                head += large
-            if size < len(head):
-                raise ProxyError(f"corrupt box {typ!r} in encoder output")
-            body = self._exact(size - len(head))
+            try:
+                if size == 1:
+                    large = self._exact(8)
+                    size = struct.unpack(">Q", large)[0]
+                    head += large
+                if size < len(head):
+                    raise ProxyError(f"corrupt box {typ!r} in encoder output")
+                body = self._exact(size - len(head))
+            except EOFError:
+                # the pipe closed inside this box: the samples before it are
+                # good, the caller decides what the short count means
+                self.truncated = True
+                return
             if typ in ("ftyp", "moov"):
                 init_parts.append(head + body)
                 if typ == "moov":
@@ -876,13 +911,74 @@ def run_encode(info: SourceInfo, f0: int, f1: int, *,
     if overflow:
         raise ProxyError(f"proxy encode of frames [{f0}, {f1}) produced more than "
                          f"{f1 - f0} frames (frame identity would break)")
+    tail = b"".join(err).decode("utf-8", "replace")[-400:].strip()
+    if count < f1 - f0 and (proc.returncode != 0 or reader.truncated):
+        # ffmpeg left early (killed, crashed, the pipe broke): not a fact
+        # about the source, so the caller may try again from where it stopped
+        raise EncodeInterrupted(f0, f1, count, proc.returncode, tail)
     if proc.returncode != 0:
-        tail = b"".join(err).decode("utf-8", "replace")[-400:]
         raise ProxyError(f"proxy encode failed ({proc.returncode}): {tail}")
     if count != f1 - f0:
         raise ProxyError(f"proxy encode of frames [{f0}, {f1}) produced {count} "
                          f"frames (frame identity would break)")
     return count
+
+
+def _backoff_wait(cancel: "threading.Event | _EventLike | None", seconds: float) -> None:
+    """Sleep ``seconds`` between two attempts, leaving at once on a cancel."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(0.05, left))
+
+
+def encode_spans(info: SourceInfo, f0: int, f1: int, *,
+                 on_init: Callable[[bytes], None] | None = None,
+                 on_span: Callable[[int, list[bytes]], None],
+                 cancel: "threading.Event | _EventLike | None" = None,
+                 low_priority: bool = True,
+                 retries: int = ENCODE_RETRIES) -> int:
+    """``run_encode`` that survives an ffmpeg leaving early: an
+    :class:`EncodeInterrupted` (the pipe closed mid-box, a non-zero exit with
+    frames still owed — never a cancel) is logged with its exit code and
+    stderr tail, and the encode starts again at the first span it did not hand
+    out, ``retries`` times with backoff. Then it is a :class:`ProxyError`
+    naming the attempts, the exit code and ffmpeg's last words — what
+    ``mark_failed`` stores and the proxy route hands the UI."""
+    S = info.span_frames
+    start = f0
+    total = 0
+    attempt = 1
+    while True:
+        handed = [start]
+
+        def hand(n: int, samples: list[bytes], _handed=handed) -> None:
+            on_span(n, samples)
+            _handed[0] = (n + 1) * S
+
+        try:
+            total += run_encode(info, start, f1, on_init=on_init, on_span=hand,
+                                cancel=cancel, low_priority=low_priority)
+            return total
+        except EncodeInterrupted as e:
+            done = min(handed[0], f1) - start
+            total += done
+            start = min(handed[0], f1)
+            if attempt > retries:
+                raise ProxyError(f"proxy encode stopped early {attempt} times, last at frame "
+                                 f"{e.f0 + e.frames_done} of [{f0}, {f1}) (ffmpeg exit "
+                                 f"{e.returncode}): {e.stderr_tail or 'no message'}") from e
+            delay = ENCODE_BACKOFF_S * 2 ** (attempt - 1)
+            _log.warning("proxy encode of %s frames [%d, %d) stopped early at frame %d (ffmpeg exit %s): "
+                         "%s; retry %d/%d from frame %d in %.2f s",
+                         info.key, e.f0, e.f1, e.f0 + e.frames_done, e.returncode,
+                         e.stderr_tail or "no message", attempt, retries, start, delay)
+            attempt += 1
+            _backoff_wait(cancel, delay)
 
 
 def init_path(key: str) -> Path:
@@ -1055,10 +1151,11 @@ def media_facts(info: SourceInfo | None) -> dict:
 
 __all__ = [
     "RECIPE_VERSION", "SHORT_EDGE", "SPAN_SECONDS", "AUDIO_RATE", "AUDIO_CHUNK_SAMPLES", "AUDIO_FILTER",
-    "TIMESCALE", "ProxyError", "Cancelled", "SourceInfo", "proxies_root", "proxy_dir",
+    "TIMESCALE", "ProxyError", "EncodeInterrupted", "Cancelled", "SourceInfo", "proxies_root", "proxy_dir",
     "proxy_key", "is_valid_key", "probe_source", "load_source", "save_source",
     "static_index", "live_index", "read_index", "write_index", "mark_failed",
-    "add_ref", "refs", "run_encode", "accept_init", "write_span", "build_audio",
+    "add_ref", "refs", "run_encode", "encode_spans", "ENCODE_RETRIES", "ENCODE_BACKOFF_S",
+    "accept_init", "write_span", "build_audio",
     "audio_done", "missing_spans", "span_range", "span_path", "chunk_path",
     "init_path", "pack_span", "unpack_span", "avcc_of", "codec_string",
     "proxy_dimensions", "media_facts", "recipe", "crf", "encode_args",

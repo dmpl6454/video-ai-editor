@@ -3295,6 +3295,7 @@ def auto_caption(store: EDLStore, args: dict, *,
         if source.kind == "v1":
             run["segments_tl"], run["extent"] = _timeline_segments(
                 store, run["tx_dict"].get("segments", []), source.src)
+            run["clock"] = _v1_render_clock(store.edl)     # compared where it is shown
         else:
             run["segments_tl"], run["extent"] = sound_segments(
                 store.edl, source, run["tx_dict"].get("segments", []))
@@ -3402,11 +3403,24 @@ def auto_caption(store: EDLStore, args: dict, *,
             "sample": sample}
 
 
+def _v1_render_clock(edl: EDL):
+    """`f(t) -> (None, render t)` for main-track cues (stored on the layout
+    clock): where each is SHOWN (render/clock.render_time), the clock the
+    sound-lane and PIP cues come in on (`caption_sources.sound_clock`), so
+    `merge_tiers` compares every tier where it is seen and heard. Final
+    sweep 4: the tiers used to be compared in LAYOUT time, through
+    `layout_time`, which collapses a cross-fade window onto its seam — a
+    voiceover cue inside a dissolve became zero-length and was dropped."""
+    from ..render.clock import render_time, seam_table
+    seams = seam_table(edl)
+    return lambda t: (None, render_time(seams, float(t)))
+
+
 def _caption_span(clock, a: float, b: float, text: str) -> tuple[float, float, tuple]:
-    """One cue as `merge_tiers` takes it: its LAYOUT span (what the tiers
+    """One cue as `merge_tiers` takes it: its RENDER span (what the tiers
     are compared in) and, as the payload, the text, the clip it is linked to
-    and its span on that clip's clock (final sweep 3 r2). A main-track cue
-    (`clock` None) is on the layout clock and linked to nothing."""
+    and its span on its own clock (final sweep 3 r2: a sound-lane cue is on
+    its clip's clock; a main-track cue, link None, on the layout clock)."""
     if clock is None:
         return a, b, (text, None, a, b, b)
     link, a_l = clock(a)
@@ -3415,12 +3429,10 @@ def _caption_span(clock, a: float, b: float, text: str) -> tuple[float, float, t
 
 
 def _caption_stored(a_l: float, b_l: float, payload: tuple) -> tuple[str, str | None, float, float]:
-    """`(text, link, start, end)` a placed span is stored with. A linked cue
-    keeps its own clock; an end `merge_tiers` trimmed (held into the next
-    cue) is pulled in by the same amount."""
+    """`(text, link, start, end)` a placed span is stored with. A cue keeps
+    its own clock; an end `merge_tiers` trimmed (held into the next cue) is
+    pulled in by the same amount."""
     text, link, a, b, b_l0 = payload
-    if link is None:
-        return text, None, a_l, b_l
     return text, link, a, max(a, b - (b_l0 - b_l))
 
 
@@ -3480,9 +3492,12 @@ def _auto_caption_one(store: EDLStore, source, *, is_primary: bool, language, mo
         if set_progress is not None:
             set_progress(base + frac * share)
 
-    tx = transcribe(src, language=language, model_size=model, backend="auto",
-                    task=task, on_progress=_on_progress,
-                    should_cancel=should_cancel)
+    # Final QA r4: the prompt run's artefact cache carries a previewed pass
+    # to Apply (agent/prompt/artefacts.py; a no-op outside a prompt run).
+    from .prompt.artefacts import cached_transcribe
+    tx = cached_transcribe(transcribe, src, language=language, model_size=model, backend="auto",
+                           task=task, on_progress=_on_progress,
+                           should_cancel=should_cancel)
     tx_dict = tx.model_dump()
     spoken = (tx.language or "").lower()
     # With task="translate" the text is English whatever was spoken, and
@@ -7095,8 +7110,12 @@ def transcribe_tool(store: EDLStore, args: dict, *,
     def _should_cancel() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
-    tx = _T.transcribe(Path(src), model_size=model, on_progress=_on_progress,
-                       should_cancel=_should_cancel)
+    # Final QA r4: through the prompt run's artefact cache, so a previewed
+    # pass is not run again on Apply (agent/prompt/artefacts.py; a no-op
+    # outside a prompt run).
+    from .prompt.artefacts import cached_transcribe
+    tx = cached_transcribe(_T.transcribe, Path(src), model_size=model, on_progress=_on_progress,
+                           should_cancel=_should_cancel)
     tx_dict = tx.model_dump()
 
     ingest_json = _current_v1_ingest_json(store)
@@ -8377,6 +8396,16 @@ def set_text_style(store: EDLStore, args: dict) -> dict:
             st.font = "Inter-Black"
             changed.append("bold")
     c.style = st
+    for side in ("anim_in", "anim_out"):
+        # run 4: "fade the title in" — the text's own In / Out animation
+        # (it used to fade the first CLIP's picture); "" clears it
+        if side in args and args[side] is not None:
+            want = str(args[side]).strip().lower() or None
+            if want is not None and want not in ("pop", "fade", "slide_up", "slide_down"):
+                raise ValueError(f"{side} must be one of pop, fade, slide_up, slide_down or \"\", got {args[side]!r}")
+            if getattr(c, side, None) != want:
+                setattr(c, side, want)
+                changed.append(f"{side.replace('_', ' ')} {want or 'none'}")
     place = args.get("position")
     if place is not None:
         if place not in _TEXT_PLACES:

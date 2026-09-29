@@ -6,8 +6,11 @@ trusting the encoder's frame count.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
+import logging
 import os
+import struct
 import subprocess
 import time
 from fractions import Fraction
@@ -334,9 +337,35 @@ def test_cancel_stops_the_encode_and_a_later_ensure_resumes(workdir, manager, tm
     assert len(_all_samples(key)) == 900
 
 
-def test_eager_builds_pause_during_an_export(workdir, manager, tmp_path):
+def _pipe_closes_mid_box(monkeypatch, when) -> dict:
+    """Make the encoder's pipe close in the MIDDLE of an mdat whenever the
+    reader meets end-of-file while ``when()`` holds: the EOF a header read
+    meets is turned into a plausible mdat header, so the body read is the one
+    that finds the pipe closed (Final QA r4: 2 runs in 15 met the export's
+    kill mid-box and ``_exact`` raised EOFError out of ``samples()``; the
+    other 13 met it between boxes, which ``samples()`` treats as the end).
+    Returns a counter of the injections."""
+    real = P.FragmentReader._exact
+    hits = {"n": 0}
+
+    def fake(self, n):
+        try:
+            return real(self, n)
+        except EOFError:
+            if n == 8 and when():
+                hits["n"] += 1
+                return struct.pack(">I4s", 4096, b"mdat")
+            raise
+
+    monkeypatch.setattr(P.FragmentReader, "_exact", fake)
+    return hits
+
+
+def test_eager_builds_pause_during_an_export(workdir, manager, tmp_path, monkeypatch):
     src = make_barcode_master(tmp_path / "exp.mp4", frames=900, rate="30", w=960, h=540,
                               audio=False)
+    # deterministic: the export's kill always lands in the middle of a box
+    hits = _pipe_closes_mid_box(monkeypatch, manager._export_event.is_set)
     key = manager.ensure(src)
     assert _wait_for(lambda: P.span_path(key, 0).is_file())
     with manager.export_in_progress():
@@ -350,11 +379,167 @@ def test_eager_builds_pause_during_an_export(workdir, manager, tmp_path):
         missing = next(n for n in range(info.spans) if not P.span_path(key, n).is_file())
         assert manager.request_span(key, missing, timeout=10) is not None
     assert manager.wait_idle(180)
+    assert hits["n"] >= 1, "the injected mid-box EOF never fired"
     assert manager.stats["paused"] >= 1
+    assert manager.stats["failures"] == 0
     assert P.live_index(key)["state"] == "ready"
     bars = [read_barcode(f) for f in
             decode_gray(_avcc(key), _all_samples(key)[::50], 960, 540)]
     assert bars == list(range(0, 900, 50))
+
+
+class _KillAtSample:
+    """An encode whose ffmpeg dies (SIGKILL, as under memory pressure) once
+    ``at`` samples are out, on the attempts named in ``on``: the reader then
+    meets the closed pipe in the middle of the next box."""
+
+    def __init__(self, monkeypatch, at: int, on):
+        self.at = at
+        self.on = on
+        self.spawns: list[list[str]] = []
+        self.procs: list = []
+        self.reads = 0
+        real_spawn = P._spawn
+        real_exact = P.FragmentReader._exact
+        tester = self
+
+        def spawn(argv, low_priority):
+            proc = real_spawn(argv, low_priority)
+            tester.spawns.append(list(argv))
+            tester.procs.append(proc)
+            tester.reads = 0
+            return proc
+
+        def exact(reader, n):
+            attempt = len(tester.spawns)
+            if n != 8 and tester.on(attempt):
+                # every box after the init pair carries one sample (mdat)
+                tester.reads += 1
+                if tester.reads > 2 * tester.at + 2:
+                    tester.procs[-1].kill()
+                    tester.procs[-1].wait()
+                    raise EOFError
+            return real_exact(reader, n)
+
+        monkeypatch.setattr(P, "_spawn", spawn)
+        monkeypatch.setattr(P.FragmentReader, "_exact", exact)
+
+
+class _AppLog(logging.Handler):
+    """The app logger's records (it does not propagate to pytest's caplog)."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def app_log():
+    h = _AppLog()
+    logger = logging.getLogger("video_ai_editor")
+    logger.addHandler(h)
+    try:
+        yield h
+    finally:
+        logger.removeHandler(h)
+
+
+def test_an_encode_whose_pipe_closes_early_is_retried_from_its_first_missing_span(
+        workdir, tmp_path, monkeypatch, app_log):
+    src = make_barcode_master(tmp_path / "eof.mp4", frames=300, rate="30", w=640, h=360,
+                              audio=False)
+    info = P.probe_source(src)
+    assert info.span_frames == 60 and info.spans == 5
+    kill = _KillAtSample(monkeypatch, at=70, on=lambda attempt: attempt == 1)
+    waits: list[float] = []
+    monkeypatch.setattr(P, "_backoff_wait", lambda cancel, s: waits.append(s))
+    spans: dict[int, list[bytes]] = {}
+    inits: list[bytes] = []
+
+    def on_span(n, samples):
+        assert n not in spans, f"span {n} handed out twice"
+        spans[n] = samples
+
+    count = P.encode_spans(info, 0, 300, on_init=inits.append, on_span=on_span)
+    assert count == 300
+    assert sorted(spans) == [0, 1, 2, 3, 4] and all(len(s) == 60 for s in spans.values())
+    # the second encode started at the first span the first one did not hand out
+    assert len(kill.spawns) == 2
+    assert kill.spawns[1] == P.encode_args(info, 60, 300)
+    assert waits == [P.ENCODE_BACKOFF_S]
+    assert len(inits) == 2 and P.avcc_of(inits[0]) == P.avcc_of(inits[1])
+    # what was logged: the exit code, where it stopped and where it resumes
+    msg = "\n".join(m for m in app_log.messages if "stopped early" in m)
+    assert "exit -9" in msg and "at frame 70" in msg and "retry 1/" in msg and "from frame 60" in msg, app_log.messages
+    # frame identity across the two encodes, proven by decoding
+    samples = [s for n in range(5) for s in spans[n]]
+    bars = [read_barcode(f) for f in decode_gray(P.avcc_of(inits[0]), samples[::25], 640, 360)]
+    assert bars == list(range(0, 300, 25))
+
+
+def test_an_encode_that_keeps_stopping_early_is_marked_failed_with_the_reason(
+        workdir, manager, tmp_path, monkeypatch, app_log):
+    src = make_barcode_master(tmp_path / "dead.mp4", frames=120, rate="30", w=640, h=360,
+                              audio=False)
+    kill = _KillAtSample(monkeypatch, at=5, on=lambda attempt: True)
+    waits: list[float] = []
+    monkeypatch.setattr(P, "_backoff_wait", lambda cancel, s: waits.append(s))
+    key = manager.ensure(src)
+    assert manager.wait_idle(60)
+    idx = P.live_index(key)
+    assert idx["state"] == "failed", idx
+    # a bounded number of attempts, backing off between them
+    assert len(kill.spawns) == 1 + P.ENCODE_RETRIES
+    assert waits == [P.ENCODE_BACKOFF_S * 2 ** i for i in range(P.ENCODE_RETRIES)]
+    # the reason the route hands the UI (410 proxy_failed → message)
+    assert "stopped early" in idx["error"] and f"{1 + P.ENCODE_RETRIES} times" in idx["error"]
+    assert "exit -9" in idx["error"], idx["error"]
+    assert manager.stats["failures"] == 1
+    assert not any("proxy job failed" in m for m in app_log.messages), app_log.messages
+    assert sum("stopped early" in m for m in app_log.messages) == P.ENCODE_RETRIES
+    # no ffmpeg outlives the job
+    assert not any(p.poll() is None for p in kill.procs)
+
+
+@pytest.mark.parametrize("boom", [
+    pytest.param(lambda: OSError(errno.EIO, "Input/output error"), id="io-error-from-the-span-writer"),
+    pytest.param(lambda: FileNotFoundError(2, "No such file or directory: 'ffmpeg'"),
+                 id="ffmpeg-binary-gone"),
+])
+def test_a_worker_exception_marks_the_key_failed_once_not_retried_on_every_poll(
+        workdir, manager, tmp_path, monkeypatch, app_log, boom):
+    """An exception that is not a ProxyError (the volume under WORKDIR gone —
+    EIO from the span writer; the ffmpeg binary gone — FileNotFoundError from
+    Popen) used to land in the worker's generic handler, which logged it and
+    persisted nothing: the index stayed 'pending', the span route answered
+    202, and the engine's next poll queued the same doomed encode (final
+    sweep 4). It is a failure like a ProxyError: marked once, 410 from then on."""
+    src = make_barcode_master(tmp_path / "m.mp4", frames=150, rate="30", audio=False)
+    key = manager.ensure(src, eager=False)
+    assert manager.info(key, str(src)) is not None
+    attempts: list[tuple[int, int]] = []
+
+    def failing_encode(info, f0, f1, **kw):
+        attempts.append((f0, f1))
+        raise boom()
+
+    monkeypatch.setattr(P, "encode_spans", failing_encode)
+    for _ in range(4):                       # four polls of GET .../proxy/<key>/v/0000.bin
+        assert manager.request_span(key, 0, timeout=1.0) is None
+        assert manager.wait_idle(5)
+    idx = P.live_index(key) or {}
+    assert manager._failed(key), (f"after a worker exception the key must be failed so the route "
+                                  f"answers at once; state={idx.get('state')!r}, encode attempts={attempts}")
+    assert len(attempts) == 1, f"the same doomed encode ran on every poll: {attempts}"
+    # what the route hands the UI (410 proxy_failed → message) names the exception
+    assert idx["state"] == "failed"
+    assert type(boom()).__name__ in idx["error"] and str(boom()) in idx["error"], idx["error"]
+    assert manager.stats["failures"] == 1
+    # logged once, with the traceback, like before
+    assert sum("proxy job failed" in m for m in app_log.messages) == 1, app_log.messages
 
 
 def test_proxy_lru_evicts_old_spans_and_orphaned_proxies(workdir, manager, tmp_path):

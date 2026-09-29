@@ -296,8 +296,11 @@ export const COMMANDS: Command[] = [
   // the timeline or a button it jumps to the bar with the text selected.
   { id: 'focusPrompt', label: 'Focus the Prompt bar', category: 'Navigation',
     run: () => usePromptStore.getState().focus() },
-  // ⌘, / Ctrl+, — the platform's Settings shortcut (QA-063-SETTINGS).
-  { id: 'openSettings', label: 'Open Settings', category: 'Navigation',
+  // ⌘, / Ctrl+, — the platform's Settings shortcut (QA-063-SETTINGS). Global,
+  // like ⌘E: a ⌘ chord types nothing, so it must work from the Prompt bar's
+  // textarea and brain pill too (final sweep 4: it was dead there, and the
+  // "Ask before applying" switch lives in Settings).
+  { id: 'openSettings', label: 'Open Settings', category: 'Navigation', scope: 'global',
     run: () => openSettings() },
   // ⌥⌘K (Premiere's Keyboard Shortcuts chord) and ⌘E (CapCut / Final Cut
   // Export): the "Customize keyboard shortcuts" button and the Export button.

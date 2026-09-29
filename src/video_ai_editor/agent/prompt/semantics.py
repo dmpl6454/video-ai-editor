@@ -73,6 +73,8 @@ TYPOS: dict[str, str] = {
     "reverese": "reverse", "revrse": "reverse", "revers": "reverse", "mtue": "mute", "muet": "mute", "fdae": "fade",
     "splti": "split", "zoon": "zoom", "zom": "zoom", "titel": "title", "tittle": "title", "nr": "number",
     "bigr": "bigger", "biggr": "bigger", "smallr": "smaller", "fad": "fade",
+    # final sweep 4
+    "trm": "trim", "adn": "and", "wihte": "white", "whtie": "white", "clpi": "clip", "secodn": "second",
 }
 _TYPO_RE = re.compile(r"\b(" + "|".join(sorted(map(re.escape, TYPOS), key=len, reverse=True)) + r")\b")
 
@@ -93,6 +95,8 @@ def norm(text: str) -> str:
     # final sweep 3 r2: "clip2 1.5x" / "clip3 black and white" named no clip
     # (no space), so the change widened to every clip
     t = GLUED_CLIP_RE.sub(r"\1 \2", t)
+    # final sweep 4: "un-mute" / "un mute" read as "mute"
+    t = re.sub(r"\bun[- ](mute|flip|reverse|duck|zoom)", r"un\1", t)
     return t
 
 
@@ -246,6 +250,20 @@ _DIR_WORDS: dict[str, dict[str, str]] = {
         "up": r"\bzoom(?:s|ed|ing)?\s+in\b|\bpunch(?:es|ed|ing)?[- ]?in\b|\bpush[- ]in\b|\bcloser\b|\bmore\s+zoom\b",
         "down": r"\bzoom(?:s|ed|ing)?[- ]?out\b|\bpull\s+back\b|\bwider\b|\bless\s+zoom\b",
     },
+    # run 4: the STRENGTH of a look already on the clip ("make the warm look
+    # stronger" applied warm to every clip at 80 %; "weaker" turned it UP)
+    "look": {
+        "up": (r"\bstronger\b|\bstrengthen\b|\bintensif\w*|\bmore\s+intense\b|\bheavier\b|\bharder\b|\bpunchier\b"
+               r"|\bmore\s+(?:pronounced|obvious|visible|noticeable)\b|\bcrank\s+(?:it\s+|the\s+(?:\w+\s+){0,2})?up\b"
+               r"|\b(?:turn|dial|push|bump)\s+(?:it\s+|the\s+(?:\w+\s+){0,2})?up\b|\bmore\s+of\s+(?:it|the\s+\w+)\b"
+               r"|\bless\s+subtle\b|\bmax(?:imum|ed)?\b|\bfull\s+strength\b"),
+        "down": (r"\bweaker\b|\bweaken\b|\bsubtler\b|\bmore\s+subtle\b|\bless\s+intense\b|\bless\s+strong\b|\bsofter\b"
+                 r"|\bgentler\b|\blighter\b|\bmilder\b|\btone\s+(?:it\s+|the\s+(?:\w+\s+){0,2})?down\b"
+                 r"|\bdial\s+(?:it\s+|the\s+(?:\w+\s+){0,2})?(?:back|down)\b|\bease\s+(?:off|up)\b|\bback\s+off\b"
+                 r"|\b(?:turn|bring)\s+(?:it\s+|the\s+(?:\w+\s+){0,2})?down\b|\bless\s+of\s+(?:it|the\s+\w+)\b"
+                 r"|\bnot\s+(?:so|as|that)\s+(?:strong|intense|heavy|much)\b|\btoo\s+(?:strong|intense|heavy|much)\b"
+                 r"|\bhalf\s+(?:the\s+)?strength\b"),
+    },
 }
 _DIR_RX = {axis: {d: re.compile(p) for d, p in rows.items()} for axis, rows in _DIR_WORDS.items()}
 
@@ -295,6 +313,11 @@ class SpeedAsk:
     direction: Direction | None = None
     factor: float | None = None
     relative: bool = False               # "50% faster": relative to 1x (never to the current speed)
+    #: run 4: a MULTIPLE of the current speed — "twice as fast", "double the
+    #: speed", "3 times faster", "half speed", "by half" — `factor` multiplies
+    #: what the clip plays now (a 2x clip made "twice as fast" plays 4x; it
+    #: used to be set to 2x again and reported done)
+    scale: bool = False
     ambiguous: str | None = None
 
 
@@ -304,7 +327,9 @@ _TIMESW_RE = re.compile(r"\b(twice|double|triple|thrice|quadruple)\s+(?:as\s+fas
 _AS_LONG_RE = re.compile(r"\b(twice|double|half)\s+as\s+long\b")
 _NOT_CLIP_LENGTH_RE = re.compile(r"\b(?:title|text|caption|subtitle|music|song|transition|fade|freeze|hold|sticker"
                                  r"|heading|label|video)s?\b")
-_HALF_RE = re.compile(r"\bhalf[- ]?speed\b|\bhalf\s+(?:the\s+speed|as\s+fast)\b|\bhalve\s+the\s+speed\b|\bslow[- ]?mo(?:tion)?\b|\bslo[- ]?mo\b|\bslowmo\b")
+_HALF_RE = re.compile(r"\bhalf[- ]?speed\b|\bhalf\s+(?:the\s+speed|as\s+fast)\b|\bhalve\s+the\s+speed\b")
+#: A NAMED speed, 0.5x on the dial, whatever the clip plays now.
+_SLOWMO_RE = re.compile(r"\bslow[- ]?mo(?:tion)?\b|\bslo[- ]?mo\b|\bslowmo\b")
 _QUARTER_RE = re.compile(r"(?<!three\s)(?<!three-)(?<!3\s)(?<!3-)\bquarter[- ]?speed\b")
 #: Speeds said as fractions (final sweep 2 r2: "three quarter speed" read as
 #: "quarter speed", 0.25x; "by a third" fell to the 0.8x / 1.25x defaults).
@@ -328,8 +353,10 @@ def speed_ask(clause: str) -> SpeedAsk:
 
     Rules (each one a sweep-round finding):
       * "reset / normal / regular speed / back to 1x" → 1.0;
-      * "N times faster" → N, "N times slower" → 1/N, "twice as fast" → 2;
-      * "half speed / slow motion" → 0.5, "quarter speed" → 0.25;
+      * "N times faster" → ×N, "N times slower" → ×1/N, "twice as fast" /
+        "double the speed" → ×2, "half speed" / "by half" → ×0.5, "quarter
+        speed" → ×0.25 — MULTIPLES of the clip's current speed (`scale`);
+      * "slow motion" → 0.5 (a named speed, whatever the clip plays now);
       * "N% faster" / "speed up by N%" → 1 + N/100; "N% slower" / "slow
         down by N%" → 1 - N/100 (≥ 100% slower asks); "at/to N% speed" → N/100;
       * "Nx" → N — but a direction that contradicts it ("slow it down to
@@ -352,18 +379,19 @@ def speed_ask(clause: str) -> SpeedAsk:
         word = m.group(2)
         if n and n > 0:
             if word.startswith("slower"):
-                return SpeedAsk(direction="down", factor=round(1.0 / n, 4), relative=True)
-            return SpeedAsk(direction="up", factor=n, relative=True)
+                return SpeedAsk(direction="down", factor=round(1.0 / n, 4), relative=True, scale=True)
+            return SpeedAsk(direction="up", factor=n, relative=True, scale=True)
     if (m := _AS_LONG_RE.search(t)) and not _NOT_CLIP_LENGTH_RE.search(t):
         # final sweep 2 r2: "make clip 2 (take) twice as long" is half speed
         return SpeedAsk(direction="down" if m.group(1) in ("twice", "double") else "up",
-                        factor={"twice": 0.5, "double": 0.5, "half": 2.0}[m.group(1)], relative=True)
+                        factor={"twice": 0.5, "double": 0.5, "half": 2.0}[m.group(1)], relative=True, scale=True)
     if m := _TIMESW_RE.search(t):
         w = (m.group(1) or m.group(0).split("-")[0].split()[0]).lower()
         f = _TIMES_WORDS.get(w, 2.0)
-        return _checked(d, f)
-    if re.search(r"\bby half\b|\bin half\b", t) and d in ("down", "up"):
-        return SpeedAsk(direction=d, factor=0.5 if d == "down" else 2.0, relative=True)
+        return _checked(d, f, scale=True)
+    if re.search(r"\bby half\b|\bin half\b|\bto half\b", t) and d in ("down", "up"):
+        # final sweep 4: "slow it to half" played at 0.8x
+        return SpeedAsk(direction=d, factor=0.5 if d == "down" else 2.0, relative=True, scale=True)
     if m := _FRAC_ABS_RE.search(t):
         num, den = (_FRAC_NUM[m.group(1)], _FRAC_DEN[m.group(2)]) if m.group(1) else (int(m.group(3)), int(m.group(4)))
         if 0 < num < den:
@@ -376,8 +404,10 @@ def speed_ask(clause: str) -> SpeedAsk:
             f = 1 + num / den if way == "up" else 1 - num / den
             return SpeedAsk(direction=way, factor=round(f, 4), relative=True)
     if _QUARTER_RE.search(t):
-        return _checked(d if d != "up" else "up", 0.25)
+        return _checked(d if d != "up" else "up", 0.25, scale=True)
     if _HALF_RE.search(t):
+        return _checked(d, 0.5, scale=True)
+    if _SLOWMO_RE.search(t):
         return _checked(d, 0.5)
     for m in _PCT_RE.finditer(t):
         n = float(m.group(1))
@@ -419,7 +449,7 @@ SPEED_WORD_RE = re.compile(r"\bspeed\w*|\bsped\b|\bfast\w*|\bslow\w*|\bslo[- ]?m
                            r"|\bquick\w*|\btime[- ]?lapse\b|\bhurry\b|\baccelerat\w*|\bdecelerat\w*|\bramp\b|\bcurve\b")
 
 
-def _checked(d: Direction | None, f: float) -> SpeedAsk:
+def _checked(d: Direction | None, f: float, *, scale: bool = False) -> SpeedAsk:
     if f <= 0:
         return SpeedAsk(direction=d, ambiguous="A speed must be above 0x — what speed?")
     if d == "up" and f < 1.0:
@@ -428,7 +458,7 @@ def _checked(d: Direction | None, f: float) -> SpeedAsk:
     if d == "down" and f > 1.0:
         return SpeedAsk(direction=d, factor=f,
                         ambiguous=f"Slow down to {f:g}x would speed it up — slower, or {f:g}x?")
-    return SpeedAsk(direction=d or ("up" if f > 1 else "down" if f < 1 else "reset"), factor=f)
+    return SpeedAsk(direction=d or ("up" if f > 1 else "down" if f < 1 else "reset"), factor=f, scale=scale)
 
 
 def default_speed(d: Direction | None) -> float | None:
@@ -438,7 +468,8 @@ def default_speed(d: Direction | None) -> float | None:
 @dataclass(frozen=True)
 class LevelAsk:
     """What a clause asks of a level. `delta_db` a change ("by 6 dB", "down
-    4 db"), `db` an absolute level ("to -6 dB", "-6db", "50%" → -6 dB)."""
+    4 db", and every percentage: "50%" → −6.02 dB from the CURRENT level,
+    "200%" → +6.02), `db` an absolute level ("to -6 dB", "-6db")."""
     direction: Direction | None = None
     delta_db: float | None = None
     db: float | None = None
@@ -454,7 +485,11 @@ _LVL_PCT_RE = re.compile(r"(?P<by>\bby\s+)?(?P<to>\b(?:to|at)\s+)?(?P<n>\d+(?:\.
 
 
 def pct_to_db(pct: float) -> float:
-    return round(20 * math.log10(max(pct, 0.1) / 100.0), 1)
+    """A percentage of the CURRENT level as a gain change: 50 % → −6.02 dB,
+    200 % → +6.02 dB, 100 % → 0 (run 4: a percentage is a ratio, so it is
+    always relative to what plays now — "music volume 50%" on a −14 dB bed
+    used to SET −6 dB, 8 dB louder than the person heard)."""
+    return round(20 * math.log10(max(pct, 0.1) / 100.0), 2)
 
 
 def level_ask(clause: str) -> LevelAsk:
@@ -480,8 +515,17 @@ def level_ask(clause: str) -> LevelAsk:
             if d == "down":
                 return LevelAsk(direction="down", delta_db=pct_to_db(max(1.0, 100 - n)))
             if d == "up":
-                return LevelAsk(direction="up", delta_db=round(20 * math.log10(1 + n / 100), 1))
-        return LevelAsk(direction=d, db=pct_to_db(n))
+                return LevelAsk(direction="up", delta_db=round(20 * math.log10(1 + n / 100), 2))
+        # run 4: "music volume 50%", "set the music to 50%", "200%" — a
+        # percentage is OF THE CURRENT LEVEL, a change, never a level on
+        # the dB scale ("50%" set −6 dB and made a −14 dB bed louder)
+        delta = pct_to_db(n)
+        if d == "down" and delta > 0 or d == "up" and delta < 0:
+            return LevelAsk(direction=d, ambiguous=f"{n:g}% would make it {'louder' if delta > 0 else 'quieter'} "
+                                                   f"— {'quieter' if d == 'down' else 'louder'}, or {n:g}%?")
+        if abs(delta) < 0.005:
+            return LevelAsk(direction=d, ambiguous="100% is the level it already plays at — what level should it be?")
+        return LevelAsk(direction=d or ("up" if delta > 0 else "down"), delta_db=delta)
     if _LVL_NOUN_RE.search(t) and direction(t, "speed") is None:
         if m := (_BARE_LVL_RE.search(t) or _BARE_DIR_RE.search(t)):
             return _bare_level(m, d)
@@ -491,12 +535,16 @@ def level_ask(clause: str) -> LevelAsk:
 #: A level number said without "dB" (final sweep 2 r2: "clip 2 volume +2"
 #: took -6 dB to -12 dB, "bring the music down to -25" set -20 — the number
 #: was ignored and the recipe's 6 dB step applied). Only next to a level word.
+#: final sweep 4: the bed / track / voice nouns too ("drop the bed to -30"
+#: stepped 6 dB; "voice up 3" stepped 6 dB) — never "clip" ("lower clip 2"
+#: is a clip number, not 2 dB)
 _LVL_NOUN_RE = re.compile(r"\b(?:volume|level|gain|music|song|soundtrack|bgm|audio|sound|voice[- ]?overs?|vo|loud\w*"
-                          r"|quiet\w*)\b")
+                          r"|quiet\w*|bed|track|tune|score|beat|voice|vocals?|speech|dialogue|narration)\b")
 _BARE_TAIL = (r"(?P<sign>-|minus\s+|\+|plus\s+)?(?P<n>\d+(?:\.\d+)?)(?![\d.:])"
               r"(?!\s*(?:%|percent|x\b|°|deg|s\b|sec|secs\b|seconds?\b|m\b|min|minutes?\b|times\b|db\b|decibels?"
               r"|px\b|fps\b|k\b|p\b|st\b|nd\b|rd\b|th\b))")
-_BARE_LVL_RE = re.compile(r"\b(?:volume|level|gain|music|song|soundtrack|bgm|audio|sound|voice[- ]?overs?|vo)\s+"
+_BARE_LVL_RE = re.compile(r"\b(?:volume|level|gain|music|song|soundtrack|bgm|audio|sound|voice[- ]?overs?|vo"
+                          r"|bed|track|tune|score|beat|voice|vocals?|speech|dialogue|narration)\s+"
                           r"(?:(?:volume|level|gain)\s+)?(?:(?P<to>to|at|=)\s*)?" + _BARE_TAIL)
 _BARE_DIR_RE = re.compile(r"\b(?:down|up)\s+(?:(?P<to>to)\s+)?" + _BARE_TAIL)
 
@@ -607,8 +655,8 @@ _CLIP_AT_RE = re.compile(rf"\b{_PIECE}\s+(?:at|around|that\s+starts\s+at|startin
 _PLAYHEAD_CLIP_RE = re.compile(r"\b(?:clip|shot|one|part|bit)\s+(?:under|at|beneath|below|on|by)\s+the\s+"
                                r"(?:playhead|cursor|scrubber)\b|\bthe\s+clip\s+i'?m\s+on\b"
                                r"|\bthe\s+clip\s+(?:where|that)\s+the\s+(?:playhead|cursor)\s+is\b")
-_INTRO_RE = re.compile(r"\bthe\s+(?:intro|opening|beginning\s+clip)\b(?!\s+(?:text|title|music|song|card|line|hook)\b)")
-_OUTRO_RE = re.compile(r"\bthe\s+(?:outro|ending)\b(?!\s+(?:text|title|music|song|card|line|screen)\b)")
+_INTRO_RE = re.compile(r"\bthe\s+(?:intro|opening|beginning\s+clip)\b(?!\s+(?:text|title|music|song|card|line|hook|marker)\b)")
+_OUTRO_RE = re.compile(r"\bthe\s+(?:outro|ending)\b(?!\s+(?:text|title|music|song|card|line|screen|marker)\b)")
 _ALL_RE = re.compile(r"\b(?:everything|every\s+(?:clip|shot|single\s+clip|part|scene|one)|all\s+(?:the\s+|of\s+the\s+)?"
                      r"(?:clips|shots|scenes|parts|footage|videos?)|all\s+of\s+(?:it|them)|each\s+(?:clip|shot|one)"
                      r"|(?:the\s+)?(?:whole|entire|full)\s+(?:video|thing|clip|timeline|edit|project|movie|footage)"
@@ -628,7 +676,9 @@ STICKER_NOUNS = r"stickers?|emojis?|logos?|gifs?"
 
 _MEDIA_RX: tuple[tuple[str, re.Pattern], ...] = (
     ("captions", re.compile(r"\b(?:captions?|subtitles?|subs|captoins?)\b")),
-    ("vo", re.compile(r"\bvoice[- ]?overs?\b|\bvo\b|\bnarration\s+track\b|\bvoice\s+track\b")),
+    # final sweep 4: a bare "narration" names the voice-over lane too (the
+    # planner lowers that lane when the project has one)
+    ("vo", re.compile(r"\bvoice[- ]?overs?\b|\bvo\b|\bnarrations?\b|\bvoice\s+track\b")),
     ("music", re.compile(r"\b(?:music|musci|song|soundtrack|bgm|tune|score|bed|backing\s+track|background\s+music|beat)\b")),
     ("text", re.compile(r"\b(?:title|titles|text|texts|heading|headline|lower[- ]?third|label|caption\s+text)\b")),
     ("overlay", re.compile(r"\b(?:overlays?|pips?|picture[- ]in[- ]pictures?|top\s+clip|b-?roll)\b")),
@@ -695,9 +745,33 @@ def _expand_clip_ranges(t: str) -> str:
     return _CLIP_RANGE_RE.sub(sub, t)
 
 
+#: "between clip 1 and clip 3" / "between the first and third clips": the
+#: clips STRICTLY between the two named (final sweep 4: it deleted clips 1
+#: AND 3 and kept clip 2). Adjacent clips name a seam and are left as read.
+_BETWEEN_RE = re.compile(rf"\bbetween\s+(?:the\s+)?(?:{_PIECE}\s+(?:#\s*|number\s+)?({_NUMW})|({_ORD_ANY}))"
+                         rf"(?:\s+{_PIECE})?\s+(?:and|&)\s+(?:the\s+)?(?:{_PIECE}\s+(?:#\s*|number\s+)?({_NUMW})|({_ORD_ANY}))"
+                         rf"(?:\s+{_PIECE})?\b")
+
+
+def between_clips(text: str) -> tuple[int, int] | None:
+    """(a, b) when `text` says "between clip A and clip B" with 1-based
+    numbers or ordinals, else None."""
+    m = _BETWEEN_RE.search(_expand_clip_ranges(strip_quotes(norm(text))))
+    if not m:
+        return None
+    a = _numref(m.group(1)) if m.group(1) else _ord(m.group(2))
+    b = _numref(m.group(3)) if m.group(3) else _ord(m.group(4))
+    if not isinstance(a, int) or not isinstance(b, int) or a <= 0 or b <= 0:
+        return None
+    return (min(a, b), max(a, b))
+
+
 def clip_refs(text: str) -> list[ClipRef]:
     """Every main-lane clip `text` names, in order, without duplicates."""
     t = _expand_clip_ranges(strip_quotes(norm(text)))
+    if (bt := between_clips(t)) and bt[1] - bt[0] >= 2 and not re.search(
+            r"\btransitions?\b|\bdissolve|\bcross\s?fade|\bwipe|\bswap\b|\bswitch\b|\bmove\b", t):
+        return list(range(bt[0] + 1, bt[1]))
     out: list[ClipRef] = []
 
     def add(r: ClipRef | None) -> None:
@@ -887,6 +961,137 @@ _FIRST_AND_LAST_RE = re.compile(r"\b(?:first|opening)\s+and\s+(?:the\s+)?(?:very
 _EDGE_BY_RE = re.compile(r"\b(?:the\s+)?(start|beginning|front|head|end|ending|back|tail)\s+by\s+"
                          r"(\d+(?:\.\d+)?|a|one|two|three|four|five)\s*(s|sec|secs|seconds?|m|min|mins|minutes?)\b")
 
+#: run 4: "shorten the video by 3 seconds", "make it 3 seconds shorter", "cut
+#: 3 seconds from the video" — the WHOLE video's tail, never the silences
+#: (it ran a tighten pass that cut 5 s of pauses). The object must be the
+#: video itself: a clip's own length ("shorten clip 2 by 1 s") is a clip edit.
+_WHOLE = (r"(?:it|this|that|everything|the\s+(?:whole\s+|entire\s+|full\s+)?(?:video|clip|timeline|thing|edit|cut|film"
+          r"|movie|footage|reel|piece|sequence|project))")
+_NUM_S = (rf"(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half\s+a)\s*"
+          r"(s|sec|secs|seconds?|m|min|mins|minutes?)\b")
+_WHOLE_BY_RE = re.compile(
+    rf"\b(?:shorten|trim|cut|reduce|crop|clip|tighten|bring)\s+{_WHOLE}\s+(?:down\s+|back\s+)?by\s+{_NUM_S}"
+    rf"|\bmake\s+{_WHOLE}\s+(?:about\s+|around\s+|roughly\s+)?{_NUM_S}\s+shorter\b"
+    rf"|\b(?:cut|trim|take|knock|shave|lose|drop|remove|chop)\s+(?:about\s+|around\s+|roughly\s+)?{_NUM_S}\s+"
+    rf"(?:off|from|out\s+of|of)\s+{_WHOLE}\b"
+    rf"|\b{_NUM_S}\s+shorter\b(?!\s+(?:title|text|caption|clip|shot|transition|fade))")
+
+
+def whole_video_by(text: str) -> float | None:
+    """Seconds a clause asks to take off the WHOLE video ("shorten the video
+    by 3 seconds", "make it 2 seconds shorter"), or None."""
+    t = strip_quotes(norm(text))
+    if re.search(r"\b(?:title|text|caption|subtitle|music|song|transition|fade|freeze|hold|sticker|intro|outro|clip\s+\d"
+                 r"|(?:first|second|third|fourth|fifth|last|final)\s+(?:clip|shot))\b", t):
+        return None
+    m = _WHOLE_BY_RE.search(t)
+    if not m:
+        return None
+    num, unit = next(((a, b) for a, b in zip(m.groups()[0::2], m.groups()[1::2]) if a is not None), (None, None))
+    n = fraction_seconds(f"{num} second") if num and "half" in num else _num_word(num or "")
+    if n is None and num in ("a", "an"):
+        n = 1.0
+    if not n or n <= 0:
+        return None
+    return float(n * 60 if unit and unit.startswith("m") else n)
+
+
+@dataclass(frozen=True)
+class UIRange:
+    """A time range anchored on the UI, not on a number (run 4): "from here
+    to the end", "everything after the playhead", "up to the marker".
+    `anchor` is "playhead" or "marker"; `label` the marker's name when one
+    is said; `side` "from" (anchor → end) or "to" (start → anchor)."""
+    anchor: Literal["playhead", "marker"]
+    side: Literal["from", "to"]
+    label: str | None = None
+    #: final sweep 4: a duration before the anchor ("the 2 seconds after the
+    #: playhead", "the second before the playhead") — the range is that long,
+    #: not everything to the end; and a numeric start ("from 1s to the
+    #: playhead") — the range starts there, not at 0
+    span_s: float | None = None
+    from_s: float | None = None
+
+
+_SPAN_NUM = (r"(?:(?P<sn>\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|half\s+a|a|an)\s+)?"
+             r"(?P<su>s|sec|secs|seconds?|m|min|mins|minutes?)")
+_ANCHOR = (r"(?:(?P<ph>here|this\s+point|this\s+spot|the\s+playhead|the\s+cursor|the\s+scrubber|where\s+i\s+am"
+           r"|the\s+current\s+(?:position|time|frame))"
+           r"|(?P<mk>(?:the|my)\s+(?:(?P<lbl>[\w' -]{1,30}?)\s+)?marker(?:\s+(?:called|named|labell?ed)\s+(?P<lbl2>[\w' -]{1,30}?))?))")
+_EXPLICIT_ANCHOR = (r"(?:(?P<ph>the\s+playhead|the\s+cursor|the\s+scrubber)"
+                    r"|(?P<mk>(?:the|my)\s+(?:(?P<lbl>[\w' -]{1,30}?)\s+)?marker(?:\s+(?:called|named|labell?ed)\s+(?P<lbl2>[\w' -]{1,30}?))?))")
+_TO_END = r"(?:on(?:wards?)?|forwards?|to\s+the\s+(?:very\s+)?end|till\s+the\s+end|until\s+the\s+end|through\s+the\s+end|to\s+the\s+finish)"
+#: one `_ANCHOR` per pattern (a pattern may not repeat a group name)
+_UI_FROM_RES = tuple(re.compile(p) for p in (
+    # "the 2 seconds after the playhead" (a span), checked first
+    rf"\b(?:the\s+|those\s+|these\s+)?{_SPAN_NUM}\s+(?:after|past|beyond|following|from)\s+{_ANCHOR}\b",
+    rf"\b(?:from|starting\s+(?:at|from)|beginning\s+(?:at|from))\s+{_ANCHOR}\s+{_TO_END}\b",
+    # "from here" alone stays the clip under the playhead; an explicit noun is the range
+    rf"\b(?:from|starting\s+(?:at|from))\s+{_EXPLICIT_ANCHOR}\b(?!\s+(?:to|till|until|-|–)\s+\d)",
+    rf"\b(?:after|past|beyond|following)\s+{_ANCHOR}\b(?!\s*,?\s*(?:to|till|until)\s+\d)",
+    rf"\b(?:the\s+rest|everything|all)\s+(?:of\s+(?:it|the\s+video|this)\s+)?(?:from|after|past|beyond)\s+{_ANCHOR}\b",
+    rf"\b{_ANCHOR}\s+{_TO_END}\b",
+))
+_UI_TO_RES = tuple(re.compile(p) for p in (
+    # "the 3 seconds before the playhead" (a span); "from 1s to the playhead" (a start)
+    rf"\b(?:the\s+|those\s+|these\s+)?{_SPAN_NUM}\s+(?:before|ahead\s+of|prior\s+to|leading\s+up\s+to|up\s+to)\s+{_ANCHOR}\b",
+    rf"\bfrom\s+(?:(?P<fm>\d{{1,2}}):(?P<fs>\d{{2}}(?:\.\d+)?)|(?P<fn>\d+(?:\.\d+)?)\s*(?P<fu>s|sec|secs|seconds?|m|min|mins|minutes?)?)"
+    rf"\s+(?:up\s+)?(?:to|till|until|through)\s+{_ANCHOR}\b",
+    rf"\b(?:from\s+the\s+(?:start|beginning|top)\s+)?(?:up\s+)?(?:to|till|until|through)\s+{_ANCHOR}\b",
+    rf"\b(?:before|ahead\s+of|prior\s+to|leading\s+up\s+to)\s+{_ANCHOR}\b",
+    rf"\b(?:everything|all|the\s+part|the\s+bit)\s+(?:of\s+(?:it|the\s+video)\s+)?(?:before|up\s+to|until)\s+{_ANCHOR}\b",
+))
+_UI_NOT_RE = re.compile(r"\bmarker\s+(?:at|@)\s+\d|\badd\s+(?:a\s+)?marker\b|\bplace\s+(?:a\s+)?marker\b|\bdrop\s+(?:a\s+)?marker\b"
+                        r"|\bput\s+(?:a\s+)?marker\b|\bmark\s+(?:this|here|the)\b|\bremove\s+(?:the\s+)?markers?\b"
+                        r"|\bdelete\s+(?:the\s+|all\s+(?:the\s+)?)?markers?\b|\bclear\s+(?:the\s+)?markers?\b"
+                        r"|\bgo\s+to\s+(?:the\s+)?(?:marker|playhead)\b|\bjump\s+to\b")
+_POSITION_WORD_RE = re.compile(r"first|last|next|previous|second|third|red|blue|green|yellow|amber|new|old")
+
+
+def ui_range(text: str) -> UIRange | None:
+    """The playhead- or marker-anchored range a clause names, or None. A
+    numeric range in the same clause wins ("from 0:02 to here" is not read),
+    and "from here" alone is still the clip under the playhead."""
+    t = strip_quotes(norm(text))
+    if _UI_NOT_RE.search(t) or _RANGE_RE.search(t):
+        return None
+    hits: list[tuple[int, str, re.Match]] = []
+    for side, rxs in (("from", _UI_FROM_RES), ("to", _UI_TO_RES)):
+        for rx in rxs:
+            m = rx.search(t)
+            if m and "su" in m.groupdict() and m.group("su") and m.group("sn") is None \
+                    and m.group("su") not in ("second", "minute"):
+                continue                # "it's after the playhead": no span there
+            if m:
+                hits.append((m.start(), side, m))
+    if not hits:
+        return None
+    hits.sort(key=lambda x: x[0])
+    if len({side for _s, side, _m in hits}) > 1:
+        return None                     # anchored on both ends: not one range
+    _s, side, m = hits[0]
+    gd = m.groupdict()
+    if side == "to" and not gd.get("fn") and not gd.get("fm") and re.search(
+            r"\bfrom\s+(?:here|this\s+point|the\s+playhead|the\s+cursor|(?:the|my)\s+(?:\w+\s+)?marker)\b",
+            t[:m.start() + 1]):
+        return None                     # "from here to the marker": both ends anchored
+    anchor = "playhead" if m.group("ph") else "marker"
+    label = (m.group("lbl2") or m.group("lbl") or "").strip() or None
+    if label and _POSITION_WORD_RE.fullmatch(label):
+        label = None                    # a position word, not a name
+    span_s = from_s = None
+    if gd.get("su"):
+        n = gd.get("sn")
+        v = (fraction_seconds(f"{n} second") if n and "half" in n else 1.0 if n in (None, "a", "an")
+             else _num_word(n))
+        if v:
+            span_s = round(float(v) * (60.0 if gd["su"].startswith("m") else 1.0), 3)
+    if gd.get("fm") is not None:
+        from_s = round(int(gd["fm"]) * 60 + float(gd["fs"]), 3)
+    elif gd.get("fn") is not None:
+        from_s = round(float(gd["fn"]) * (60.0 if (gd.get("fu") or "").startswith("m") else 1.0), 3)
+    return UIRange(anchor=anchor, side=side, label=label, span_s=span_s, from_s=from_s)  # type: ignore[arg-type]
+
 
 def time_refs(text: str) -> list[TimeRef]:
     t = strip_quotes(norm(text))
@@ -912,6 +1117,8 @@ def time_refs(text: str) -> list[TimeRef]:
         if n:
             v = n * 60 if m.group(3).startswith("m") else n
             out.append(TimeRef("first" if m.group(1) in ("start", "beginning", "front", "head") else "last", float(v)))
+    if not out and (by := whole_video_by(t)) is not None:
+        out.append(TimeRef("last", by))          # "shorten the video by 3 seconds": its tail
     if not out:
         for m in _FROM_EDGE_RE.finditer(t):
             n = _num_word(m.group(1))
@@ -938,7 +1145,10 @@ def time_refs(text: str) -> list[TimeRef]:
 
 _KEEP_RE = re.compile(r"\b(?:only|just)\s+keep\b|\bkeep\s+(?:only|just)\b|\bkeep\b.+\bonly\b|\bleave\s+(?:only|just)\b"
                       r"|\bkeep\s+(?:the\s+)?(?:first|last|opening|closing|final|middle|beginning|end)\b"
-                      r"|\bkeep\s+(?:seconds?|from|between)\b|\btrim\s+(?:it\s+|this\s+|the\s+video\s+)?down\s+to\b")
+                      r"|\bkeep\s+(?:seconds?|from|between)\b|\btrim\s+(?:it\s+|this\s+|the\s+video\s+)?down\s+to\b"
+                      # final sweep 4: "keep 3s through 9s"
+                      r"|\bkeep\s+(?:everything\s+)?\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?|m|min|mins|minutes?)?\s*"
+                      r"(?:to|-|–|until|till|through|thru)\s*\d")
 _KEEP_NOT_RE = re.compile(r"\bkeep\s+(?:the\s+)?(?:music|audio|sound|captions?|text|title|volume|pitch)\b"
                           r"|\bbut\s+keep\b|\bkeep(?:ing)?\s+(?:it|them)\s+(?:the\s+same|as)\b")
 
@@ -997,6 +1207,14 @@ def ambiguities(prompt: str, *, video_end: float | None = None, clip_count: int 
             for r in clip_refs(t):
                 if isinstance(r, int) and r > 0 and r > clip_count:
                     qs.append(f"There are only {clip_count} clips — which one did you mean?")
+        bt = between_clips(t)
+        if bt and bt[1] - bt[0] == 1 and re.search(r"\b(?:cut|delete|delet|remove|get rid of|lose|drop|mute|silence)\b", t) \
+                and not re.search(r"\btransitions?\b|\bdissolve|\bcross\s?fade|\bwipe|\bgap\b|\bspace\b", t):
+            # final sweep 4: "cut out the part between clip 1 and clip 2" —
+            # there is no clip between two neighbours, only the cut
+            qs.append(f"There is nothing between clip {bt[0]} and clip {bt[1]} — they sit next to each other. "
+                      f"Did you mean the cut between them (say 'add a transition between clip {bt[0]} and clip "
+                      f"{bt[1]}'), or a clip by its number?")
     return list(dict.fromkeys(qs))
 
 
@@ -1004,4 +1222,4 @@ __all__ = ["Direction", "Axis", "TYPOS", "fix_typos", "norm", "strip_quotes", "c
            "default_speed", "LevelAsk", "level_ask", "pct_to_db", "SizeAsk", "size_ask", "ClipRef", "Scope",
            "clip_refs", "media_of", "scope_of", "reference_split", "resolve_scopes", "TimeRef", "time_refs", "keeps_only",
            "rotation_degrees", "fraction_seconds", "ZOOM_WORD_RE", "SPEED_WORD_RE",
-           "ambiguities"]
+           "whole_video_by", "UIRange", "ui_range", "ambiguities"]

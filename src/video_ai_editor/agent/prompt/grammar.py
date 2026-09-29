@@ -187,10 +187,46 @@ _ORDINAL_PAIR_RE = re.compile(rf"\b({ORDINAL})\s+and\s+((?:the\s+)?{ORDINAL})\b|
                               rf"|\bbetween\s+(?:the\s+)?{CLIP_NOUN}\s+\d{{1,2}}\s+and\s+(?:the\s+)?{CLIP_NOUN}\s+\d{{1,2}}\b")
 
 
+_ENUM_N = r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)(?!\s*(?:s|sec|secs|seconds?|%|x)\b)(?!\.\d)"
+_ENUM_NOUN = r"(?:clips?|shots?|scenes?|segments?)"
+#: "clip 2 and clip 4", "clip 1, clip 3 and clip 5": the noun said once per
+#: number (final sweep 4: the clause split made "make clip 2" / "clip 4
+#: black and white" — the look landed on one clip and the net rolled back).
+_ENUM_NUM_RE = re.compile(rf"(?<!\bbetween )\b(?:the\s+)?{_ENUM_NOUN}\s+(?:#\s*|number\s+)?({_ENUM_N})"
+                          rf"((?:\s*,\s*(?:the\s+)?{_ENUM_NOUN}\s+(?:#\s*|number\s+)?{_ENUM_N})*)"
+                          rf"\s+(?:and|&)\s+(?:the\s+)?{_ENUM_NOUN}\s+(?:#\s*|number\s+)?({_ENUM_N})\b")
+#: "the second clip and the fourth clip" → "the second and fourth clips".
+_ENUM_ORD_RE = re.compile(rf"(?<!\bbetween )\b(?:the\s+)?({ORDINAL})\s+{_ENUM_NOUN}"
+                          rf"((?:\s*,\s*(?:the\s+)?{ORDINAL}\s+{_ENUM_NOUN})*)\s+(?:and|&)\s+(?:the\s+)?({ORDINAL})\s+{_ENUM_NOUN}\b")
+
+
+_CLIP_LIST_RE = re.compile(rf"\b{_ENUM_NOUN}\s+{_ENUM_N}(?:\s*,\s*{_ENUM_N})+\s+(?:and|&)\s+{_ENUM_N}\b"
+                           rf"|\bthe\s+{ORDINAL}(?:\s*,\s*{ORDINAL})+\s+(?:and|&)\s+{ORDINAL}\s+{_ENUM_NOUN}\b")
+_IN_OUT_OVER_RE = re.compile(r"\b(?:in|out)\s+(?:over|for|in)\s+(?:\d+(?:\.\d+)?|half a|a|one|two|three)\s*(?:s|sec|secs|seconds?)?"
+                             r"\s+and\s+(?:in|out)\s+(?:over|for|in)\s+(?:\d+(?:\.\d+)?|half a|a|one|two|three)\s*(?:s|sec|secs|seconds?)?\b")
+
+
+def join_clip_enumerations(text: str) -> str:
+    """One clip list from a repeated-noun enumeration: "clip 2 and clip 4" →
+    "clips 2 and 4", "the second clip and the fourth clip" → "the second and
+    fourth clips". Anything else is returned as it was."""
+    def _nums(m: re.Match) -> str:
+        mids = re.findall(rf"\b{_ENUM_NOUN}\s+(?:#\s*|number\s+)?({_ENUM_N})", m.group(2) or "")
+        nums = [m.group(1), *mids, m.group(3)]
+        return "clips " + ", ".join(nums[:-1]) + f" and {nums[-1]}"
+
+    def _ords(m: re.Match) -> str:
+        mids = re.findall(rf"\b({ORDINAL})\s+{_ENUM_NOUN}", m.group(2) or "")
+        words = [m.group(1), *mids, m.group(3)]
+        return "the " + ", ".join(words[:-1]) + f" and {words[-1]} clips"
+
+    return _ENUM_ORD_RE.sub(_ords, _ENUM_NUM_RE.sub(_nums, text))
+
+
 def split_clauses(prompt: str) -> list[str]:
     """Clauses of a normalised prompt. Quoted spans are opaque (an `and`
     inside quotes is text, and the quotes are restored afterwards)."""
-    text = S.normalize(prompt)
+    text = join_clip_enumerations(S.normalize(prompt))
     if not text:
         return []
     keep: dict[str, str] = {}
@@ -205,6 +241,11 @@ def split_clauses(prompt: str) -> list[str]:
     # comma belongs to the edit before it (it was a clause of its own, read
     # as nothing, and the music went up the default 6 dB).
     text = _AMOUNT_TAIL_RE.sub(_stash, text)
+    # Final sweep 4: "clips 1, 3 and 5" is one list; "in over 1 second and
+    # out over 3" is one fade's two edges (the tail was a clause of its own,
+    # read as nothing).
+    text = _CLIP_LIST_RE.sub(_stash, text)
+    text = _IN_OUT_OVER_RE.sub(_stash, text)
     # Final QA: "add a lower third saying Jane Doe, Producer" — the comma is
     # the card's second line, not a second edit.
     text = _LOWER_THIRD_TWO_LINES_RE.sub(_stash, text)
@@ -234,15 +275,17 @@ _PIECE = rf"(?:{CLIP_NOUN}|one|part|bit|section|piece)"
 _NTH_CLIP_RE = re.compile(rf"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|opening|(\d{{1,2}})(?:st|nd|rd|th))"
                           rf"\s+{_PIECE}\b")
 _CLIP_NUM_RE = re.compile(rf"\b{CLIP_NOUN}\s+(?:#\s*|number\s+|no\.?\s*)?(\d{{1,2}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
-                          r"(?!\s*(?:s|sec|secs|seconds?|%|x)\b)(?!\.\d)")   # "every clip 1.5x" is a speed
+                          # "every clip 1.5x" is a speed; final sweep 4: "the last
+                          # clip 20% brighter" is not clip 20 ("%" has no word boundary)
+                          r"(?!\s*(?:s|sec|secs|seconds?|x)\b)(?!\s*(?:%|percent))(?!\.\d)")
 _NUM_WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 _PENULT_RE = re.compile(rf"\b(?:second[- ]to[- ]last|next[- ]to[- ]last|penultimate|second[- ]last)\s+{_PIECE}\b")
 _MIDDLE_RE = re.compile(rf"\bmiddle\s+{_PIECE}\b|\bin the middle\b")
 _LAST_CLIP_RE = re.compile(rf"\b(?:last|final|closing)\s+{_PIECE}\b")
 #: "the intro" / "the outro" of a multi-clip edit are its first / last clip
 #: ("the intro drags, speed it up" sped up EVERY clip).
-_INTRO_RE = re.compile(r"\bthe\s+(?:intro|opening)\b(?!\s+(?:text|title|music|song|card|line|hook)\b)")
-_OUTRO_RE = re.compile(r"\bthe\s+(?:outro|ending)\b(?!\s+(?:text|title|music|song|card|line|screen)\b)")
+_INTRO_RE = re.compile(r"\bthe\s+(?:intro|opening)\b(?!\s+(?:text|title|music|song|card|line|hook|marker)\b)")
+_OUTRO_RE = re.compile(r"\bthe\s+(?:outro|ending)\b(?!\s+(?:text|title|music|song|card|line|screen|marker)\b)")
 _CLIP_AT_RE = re.compile(rf"\b{CLIP_NOUN}\s+(?:at|around|that starts at|starting at)\s+"
                          r"(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?)\b")
 _THIS_CLIP_RE = re.compile(rf"\b(?:this|that|the selected|selected|current|the current)\s+(?:{CLIP_NOUN}|one|part|bit|section|portion)\b"
@@ -422,6 +465,12 @@ REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn o
                   # white to every clip (Final sweep 2)
                   r"|\b(?:take|turn|switch|strip|get)\s+(?:the\s+|that\s+|this\s+)?"
                   r"(?:black and white|b ?& ?w|b and w|mono(?:chrome)?|gr[ae]y ?scale|sepia)\s+(?:off|out)\b"
+                  # final sweep 4: a look named by its one word between the verb
+                  # and the particle ("take the warm off clip 1" re-APPLIED warm)
+                  r"|\b(?:take|strip|peel|get)\s+(?:the\s+|that\s+|this\s+)?"
+                  r"(?:warm|cool|cold|cinematic|teal[- ]orange|punchy?|vivid|faded|vintage|retro|film|moody|golden"
+                  r"|sunset|icy|matte|nostalgic|blockbuster|filmic)\s+(?:look\s+|filter\s+|lut\s+|grade\s+|tone\s+)?"
+                  r"(?:off|out)\b"
                   # the particle after the object: "take the warm filter off"
                   # (it APPLIED the warm look), "turn the captions off";
                   # Final QA: or `out`, with up to four words before the noun
@@ -458,7 +507,7 @@ _ZOOM = (r"^(?!.*\btransitions?\b)(?!.*\bhook\b)(?!.*\b(?:music|volume|audio|sou
          r"(?!.*\b(?:between|at|on)\s+(?:the\s+|every\s+|each\s+|all\s+(?:the\s+)?)?(?:cuts?|seams?|scene changes?|clip changes?)\b)"
          r".*?(?:\b(?:zoom|push)(?:s|ed|ing)?[- ]?(?:in|out|into)\b|\bpunch(?:es|ed|ing)?[- ]?in(?:to)?\b"
          r"|\bken[- ]?burns\b|\bpan (?:and|&) zoom\b|\bslow(?:ly)? zoom|\bzoom (?:effect|animation)\b"
-         r"|\b(?:zoom|scale|enlarge|magnify)\b[^%]*?\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)"
+         r"|\b(?:zoom|scale|enlarge|magnify|shrink)\b[^%]*?\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)"
          # final sweep 2 r2: "zoom clip 1 to 2x" set the clip's SPEED to 2x
          r"|^(?!.*\b(?:speed|fast\w*|slow\w*|pace|playback)\b).*\b(?:zoom|scale|enlarge|magnify)\b.*?(?<![\w.])\d+(?:\.\d+)?\s*x\b"
          r"|\bzoom (?:it|this|that|the [\w ]{0,20}?clip)\b)")
@@ -495,6 +544,12 @@ TRANSFORM_REQUEST = (
     rf"|\b(?:move|put|place|position|drag|shift|slide|push)\s+(?:the\s+|my\s+|that\s+|this\s+)?{_OVERLAY_NOUN}\s+"
     r"(?:(?:to|into|in|at|on|towards?)\s+)(?:the\s+)?(?:(?:top|bottom|upper|lower)(?:[- ](?:left|right))?|left|right"
     r"|(?:top|bottom|upper|lower)?\s*(?:left|right)?\s*corner|cent(?:er|re)|middle)\b"
+    # final sweep 4: a picture-in-picture ("put the kitchen after shot over
+    # the kitchen before shot as a picture in picture") — an honest reply
+    # with where to do it, never the Trim / Speed / Title menu
+    r"|\b(?:as\s+an?\s+|(?:add|make|create|build|do)\s+(?:an?\s+|the\s+)?)(?:pip|picture[- ]in[- ]picture)\b(?!\s*(?:lane|track|row))"
+    rf"|\b(?:put|place|add|overlay|layer|stack|show)\s+(?:the\s+)?(?:[\w'-]+\s+){{0,4}}?{CLIP_NOUN}(?:\s+\d{{1,2}})?\s+"
+    rf"(?:over|on\s+top\s+of|above|onto)\s+(?:the\s+)?(?:[\w'-]+\s+){{0,4}}?{CLIP_NOUN}(?:\s+\d{{1,2}})?\b"
 )
 
 #: (regex, intent, score) checked in order BEFORE the phrase table (§2.3).
@@ -518,6 +573,9 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # before the remove-feature and Ken Burns zoom rows.
     (_AV.ANIM_PHRASE, "animation", EXACT),
     (TRANSFORM_REQUEST, "transform", EXACT),
+    # Final sweep 4: a 3 · 2 · 1 countdown is a title (three cards), before
+    # the sticker row ("countdown sticker") and the generic menu.
+    (r"\bcount\s?down\b", "title", EXACT),
     (REMOVE_FEATURE, "remove_feature", EXACT),
     # Final QA: taking the VOICE-OVER itself away ("remove the voiceover",
     # "delete the narration", "take the voiceover out") offered a NEW spoken
@@ -532,6 +590,13 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     (_ZOOM, "zoom", EXACT),
     # "export in 4k" is the 4K export preset, not an AI upscale of every clip.
     (r"\bexport\b(?!.*\bupscal)(?=.*\b(?:4k|uhd|2160p)\b)", "export_preset", EXACT),
+    # Final sweep 4: "delete everything between the first and third clips" /
+    # "cut out the part between clip 1 and clip 3" — the clips between two
+    # named ones (the transitions row read the seam words first).
+    (rf"^(?!.*\b(?:transitions?|dissolves?|cross ?fades?|wipes?|fades?|gaps?|space)\b)"
+     r"\b(?:delete|remove|cut(?:\s+out)?|get rid of|lose|drop|trash|erase|ditch|scrap|kill|take out)\b.*"
+     rf"\bbetween\s+(?:the\s+)?(?:{ORDINAL}|{CLIP_NOUN}\s+\d{{1,2}})(?:\s+{CLIP_NOUN})?\s+(?:and|&)\s+"
+     rf"(?:the\s+)?(?:{ORDINAL}|{CLIP_NOUN}\s+\d{{1,2}})", "delete_clip", EXACT),
     # A CLIP taken out wins over the range trim below ("remove the first clip"
     # has `first` in it, which `_HAS_RANGE` reads as a range with no length).
     (_DELETE_CLIP, "delete_clip", EXACT),
@@ -542,7 +607,7 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
     # planned a range cut and asked "Which part should I cut?" forever.
     (rf"\b(?:cut|chop|slice|snip)\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot)\s+"
      rf"|{CLIP_PHRASE}\s+)?"
-     r"(?:(?:right\s+)?(?:at|@)\s+(?:\d|the playhead\b|the cursor\b|this point\b)|here\b|in (?:two|half) at\b)", "split", EXACT),
+     r"(?:(?:right\s+)?(?:at|@)\s+(?:\d|the playhead\b|the cursor\b|this point\b|the (?:[\w'-]+ ){0,2}marker\b)|here\b|in (?:two|half) at\b)", "split", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:ums?|uhs?|umms?|filler(?:s| words?)|hesitations?|stutters?)\b", "remove_fillers", EXACT),
     (r"\bcut\s+(?:out\s+|away\s+)?(?:the\s+|all\s+(?:the\s+)?|every\s+)?(?:silences?|pauses?|dead air|gaps?|quiet parts?)\b", "remove_silences", EXACT),
     (r"\bcut\s+(?:it\s+|this\s+|the\s+video\s+)?(?:up\s+)?into\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some)\s*(?:shorts?|clips?|parts?|pieces?|highlights?|reels?|segments?|videos?)\b|\bcut\s+(?:it\s+)?into\s+shorts\b", "shorts", EXACT),
@@ -555,8 +620,13 @@ _MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|back
 #: The programme's own sound (v1 clip audio), as the object of a level / mute.
 _VOICE_NOUN = (r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound"
                r"|original video (?:audio|sound)|original clip (?:audio|sound))")
-#: The voice-over lane, as the object of a level request (review RE).
-_VO_NOUN = r"(?:voice[- ]?overs?|vo|narration track|voice track)"
+#: The voice-over lane, as the object of a level request (review RE). Final
+#: sweep 4: a bare "narration" too — on a project with a voice-over lane it
+#: names that lane (the expander falls back to the clips' own sound when
+#: there is none).
+_VO_NOUN = r"(?:voice[- ]?overs?|vo|narrations?(?:\s+track)?|voice track)"
+#: An amount inside a level phrase ("make the voiceover 3 dB quieter").
+_LVL_AMT = r"(?:[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|decibels?|%|percent)\s+)?"
 #: What "fade the ___ in/out" may name besides the music.
 _FADE_OBJECT = (r"video|clip|clips|first clip|last clip|opening clip|final clip|picture|image|footage|start|end|"
                 r"beginning|ending|intro|outro|audio|sound|voice|whole thing|whole video")
@@ -585,7 +655,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                        (r"\bums?\b|\buhs?\b|\bfillers?\b", SYNONYM)),
     "remove_silences": ((r"\b(?:remove|delete|strip|drop|kill|trim|take out|edit out|cut)\s+(?:the\s+|all\s+(?:the\s+)?|every\s+|any\s+|long\s+|awkward\s+)?(?:silences?|silent (?:parts?|bits?|gaps?)|pauses?|dead air|gaps?|quiet parts?)\b|\bsilence removal\b|\bjump ?cut (?:it|this|the pauses)\b|\bauto[- ]?cut the (?:silence|pauses)\b", EXACT),
                         (r"\bsilences?\b|\bpauses?\b|\bdead air\b|\bawkward gaps?\b", SYNONYM)),
-    "tighten": ((r"\btighten(?: it| this| the video| up| it up| this up)?\b|\bmake (?:it|this) (?:tighter|snappier|punchier|faster paced)\b|\bremove (?:the )?(?:silences?|pauses?) and (?:the )?(?:fillers?|filler words|ums)\b|\b(?:silences?|pauses?) and (?:fillers?|filler words|ums)\b|\bjump ?cut (?:it|this|the video)\b|\bcut the (?:fat|fluff|dead weight)\b|\btrim the fat\b|\bshorten (?:it|this|the video)\b|\btrim (?:it|this) down\b|\bsmart cut\b", EXACT),
+    "tighten": ((r"\btighten(?: it| this| the video| up| it up| this up)?\b|\bmake (?:it|this) (?:tighter|snappier|punchier|faster paced)\b|\bremove (?:the )?(?:silences?|pauses?) and (?:the )?(?:fillers?|filler words|ums)\b|\b(?:silences?|pauses?) and (?:fillers?|filler words|ums)\b|\bjump ?cut (?:it|this|the video)\b|\bcut the (?:fat|fluff|dead weight)\b|\btrim the fat\b|\bshorten (?:it|this|the video)\b(?!\s+(?:down\s+)?by\s+(?:\d|a\b|an\b|one\b|two\b|three\b|half\b))|\btrim (?:it|this) down\b(?!\s+by\s+\d)|\bsmart cut\b", EXACT),
                 (r"\bsnappier\b|\bpacier\b|\bfaster paced\b|\bless rambling\b|\bconcise\b", SYNONYM)),
     "shorts": ((r"\b(?:make|create|generate|give me|produce|extract|pull|find|get)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|a few|several|some|a couple of)?\s*(?:short|vertical|quick|viral|best)?\s*(?:shorts?|clips?|highlights?|reels?|snippets?|teasers?|moments)\b(?! (?:transitions?|captions?))(?!\s+(?:#\s*|number\s+)?(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b)|\bhighlights? reel\b|\bbest (?:bits|moments|parts)\b|\bsplit (?:it|this) into (?:\d+|shorts|clips)\b|\bchop (?:it|this) (?:up )?into\b|\bmake shorts\b|\bshorts out of (?:this|it)\b", EXACT),
                (r"\bhighlights?\b|\bclip (?:it|this) up\b|\bviral moments?\b", SYNONYM)),
@@ -594,9 +664,20 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                  # 9:16 for youtube shorts" ran a whole automatic edit
                  r"|the (?:(?:aspect )?ratio|format|size|shape|frame|canvas size|video size|dimensions))?\s*(?:to|into)?\s*(?:vertical|portrait|landscape|horizontal|square|9:16|16:9|1:1|4:5|1080x1920|1920x1080|widescreen)\b|\b(?:auto[- ]?)?reframe\b|\bvertical version\b|\bportrait mode\b|\baspect ratio\b|\bcrop (?:it|this) (?:to|for)\b|\bfit (?:it|this) (?:to|for) (?:reels|tiktok|shorts|instagram|youtube|story|stories)\b|\bresize (?:it|this|the video) for\b|\bsubject[- ]track(?:ed|ing)? crop\b"
                  # QA-018 live pass: "make it fit a phone screen", "turn this into a phone video"
-                 r"|\b(?:fit|for|into|onto)\s+(?:a\s+|the\s+)?(?:phone|mobile)(?:\s+(?:screen|video|format))?\b", EXACT),
+                 r"|\b(?:fit|for|into|onto)\s+(?:a\s+|the\s+)?(?:phone|mobile)(?:\s+(?:screen|video|format))?\b"
+                 # final sweep 4: "back to widescreen" / "back to portrait"
+                 r"|\bback\s+to\s+(?:widescreen|landscape|horizontal|portrait|vertical|square|16:9|9:16|1:1|4:5)\b", EXACT),
                 (r"\bvertical\b|\bportrait\b|\blandscape\b|\bsquare\b|\b9:16\b|\b16:9\b|\b1:1\b|\b4:5\b", SYNONYM)),
     "duck": ((r"\bduck(?:ing)?\b|\blower the music (?:under|behind|when|during)\b|\bmusic (?:under|behind|below) (?:my|the) (?:voice|speech|talking|dialogue)\b|\bquiet(?:er)? (?:the )?music (?:when|while|under)\b|\bmusic (?:quieter|softer|lower|down) (?:when|while|under|during)\b|\bturn (?:the )?music down (?:when|while|under)\b|\bsidechain\b|\bauto[- ]?duck\b"
+             # final sweep 4: said in the third person — "lower the music
+             # while the coach is talking", "drop the music when she speaks",
+             # "keep the music under his voice" (a static -6 dB before)
+             rf"|\b(?:lower|drop|dip|reduce|quiet(?:en)?|turn\s+down|bring\s+down|pull\s+down|soften|duck)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+"
+             r"(?:(?:down|a\s+bit|a\s+little)\s+)?(?:while|when|whenever|as|during|if)\s+(?:i|he|she|they|we|someone|anyone|somebody|people|the\s+\w+|my\s+\w+|our\s+\w+)\s+"
+             r"(?:is\s+|are\s+|am\s+|'s\s+|'re\s+|start\w*\s+)?(?:talk|speak|say|narrat)\w*"
+             rf"|\b(?:keep|put|sit|have|hold)\s+(?:the\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+(?:down\s+|low\s+|lower\s+)?(?:under|underneath|beneath|below|behind)\s+"
+             r"(?:the|his|her|their|my|our|your)\s+(?:\w+'s\s+)?(?:voice|speech|talking|dialogue|narration|words)\b"
+             rf"|\b{_MUSIC_NOUN}\s+(?:under|underneath|beneath|below|behind)\s+(?:his|her|their|our|your)\s+(?:\w+'s\s+)?(?:voice|speech|talking|dialogue|narration)\b"
              # QA-018 paraphrases ("have the song dip under speech", "stop the
              # music from lowering when I talk", "keep the soundtrack steady")
              r"|\b(?:music|song|track|soundtrack|tune|bed)\s+(?:dip|dips|duck|ducks|drop|drops|lower|lowers|go(?:es)? down)\s+(?:under|when|while|during|whenever|for)\b"
@@ -651,6 +732,11 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
               # music" cut the pauses (remove_silences) instead of muting
               r"|\bsilence\s+(?:the\s+|my\s+|all\s+(?:the\s+)?)?(?:original|clip|clips'?|camera|video|footage)\s+"
               r"(?:audio|sound)\b"
+              # final sweep 4: the VERB "silence" on a clip ("silence the first
+              # two clips") ran remove_silences over the whole track — footage
+              # deleted from every clip, nothing muted
+              rf"|\bsilence\s+(?:(?!(?:silences?|pauses?|gaps?|dead)\b)[\w'-]+\s+){{0,4}}?"
+              rf"(?:{CLIP_NOUN}|it|them|this|that|everything|ones?)\b"
               rf"|\b(?:un)?mute\b", EXACT),),
     "volume": ((rf"\b(?:turn|bring|put|set|make|drop|lower|raise|reduce|increase|boost|pull|dial|knock|lift|push|decrease)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
                 rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?(?:\s+(?:volume|level|gain))?\b"
@@ -663,7 +749,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 r"(?:[\w'-]+\s+){0,5}?(?:at|to)\s+[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|decibels?|%)"
                 rf"|\b(?:{_MUSIC_NOUN})\s+(?:ka\s+volume\s+|ki\s+awaa?z\s+)?(?:thoda\s+|thodi\s+|aur\s+)?(?:kam|dheere|dheema|dheemi|halka|halki|zyada|jyada|tez|badha\w*)\b"
                 rf"|\b(?:volume|level|gain) (?:of|on|for) (?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
-                rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:quieter|softer|louder|lower)\b"
+                rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) {_LVL_AMT}(?:quieter|softer|louder|lower)\b"
                 # QA-018 paraphrases: "a touch softer", "less loud", "quiet the music a little"
                 rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:a\s+(?:touch|bit|little|tad|notch)\s+|a\s+lot\s+|much\s+|way\s+)?(?:quieter|softer|louder|lower|less loud|more quiet)\b"
                 rf"|\bquiet(?:en)?\s+(?:down\s+)?(?:the\s+|my\s+)?(?:background\s+)?{_MUSIC_NOUN}\b(?!\s+(?:down\s+)?(?:when|while|under|during))"
@@ -705,7 +791,7 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"\s+(?:the\s+|my\s+)?{_VO_NOUN}(?:'s)?\s*(?:volume|level|gain)?\s*(?:down|up|lower|louder|quieter|softer|higher|to|by|at)\b"
                 rf"|\b(?:lower|raise|reduce|increase|boost|decrease|drop)\s+(?:the\s+|my\s+)?{_VO_NOUN}\b"
                 rf"|\b{_VO_NOUN}(?:'s)?\s+(?:volume|level|gain)\b"
-                rf"|\bmake\s+(?:the\s+|my\s+)?{_VO_NOUN}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?(?:louder|quieter|softer)\b", EXACT),),
+                rf"|\bmake\s+(?:the\s+|my\s+)?{_VO_NOUN}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+)?{_LVL_AMT}(?:louder|quieter|softer)\b", EXACT),),
     # QA-037: "reverse the clip", "play it backwards", "ulta chala do"; the
     # forwards-again wording is read by `reverse_off`. "reverse that" / "reverse
     # the last edit" is an undo and "reverse the order" a reorder, so neither
@@ -767,8 +853,8 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 r"|\bstill frame\b", EXACT),),
     # A split at a named time ("split at 3 seconds", "split the clip at 1:05");
     # "split it into 3 shorts" is the shorts intent.
-    "split": ((r"\bsplit\s+(?:it\s+|this\s+|that\s+|here\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot|timeline)\s+)?(?:at|@)\s+(?:\d|the playhead\b)"
-               r"|\bsplit (?:it |the clip )?(?:at|on) the playhead\b|\bcut (?:it|the clip) in (?:two|half) at\b"
+    "split": ((r"\bsplit\s+(?:it\s+|this\s+|that\s+|here\s+|the\s+(?:\w+\s+)?(?:clip|video|footage|shot|timeline)\s+)?(?:at|@)\s+(?:\d|the playhead\b|the (?:[\w'-]+ ){0,2}marker\b)"
+               r"|\bsplit (?:it |the clip )?(?:at|on) the (?:playhead|(?:[\w'-]+ ){0,2}marker)\b|\bcut (?:it|the clip) in (?:two|half) at\b"
                # CapCut's Split button: "split here", "split this clip" = at the playhead
                r"|\bsplit\s+(?:it\s+|this\s+|that\s+|the\s+(?:\w+\s+)?clip\s+)?(?:right\s+)?(?:here|now|at the cursor)\b"
                r"|^split(?:\s+(?:it|this|that|the (?:\w+ )?clip|this clip))?$"
@@ -787,6 +873,8 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                    rf"|\bswap\s+(?:the\s+)?(?:{ORDINAL}|{CLIP_NOUN}\s+\d)"
                    rf"|\bswitch\s+(?:the\s+)?(?:order of\s+(?:the\s+)?)?(?:{ORDINAL})\s+(?:and|&)\s+(?:the\s+)?{ORDINAL}\s+{CLIP_NOUN}"
                    r"|\breverse\s+the\s+(?:order|sequence)\s+of\s+(?:the\s+|all\s+(?:the\s+)?)?clips\b"
+                   # final sweep 4: "reverse the order" alone got the menu
+                   r"|\breverse\s+the\s+(?:clip\s+|clips'?\s+)?(?:order|sequence)\b"
                    rf"|\bmake\s+{CLIP_PHRASE}\s+(?:the\s+)?(?:first|last)(?:\s+(?:one|clip))?\b", EXACT),),
     "zoom": ((_ZOOM, EXACT),),
     "rotate": ((r"^rotate(?:\s+(?:it|this|that|the\s+[\w ]{0,20}?(?:clip|video|shot)))?$"
@@ -829,11 +917,16 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     # voiceover", "remove the voice effect" (voice_vocab.py).
     "voice_effect": ((_VV.VOICE_PHRASE, EXACT),),
     "animation": ((_AV.ANIM_PHRASE, EXACT),),
-    "trim": ((rf"\b(?:trim|cut|remove|delete|drop|chop|lose|take (?:off|out)|get rid of|skip|shave)\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?:first|last|opening|closing|intro|outro)?\s*(?=.*{_HAS_RANGE})|\btrim (?:it|this|the (?:start|end|beginning|intro|outro|clip|video))\b|\bstart (?:it |the video )?(?:at|from)\s+\d|\bend (?:it |the video )?at\s+\d|\bkeep (?:only )?(?:the )?(?:first|last)\b|\bremove the (?:intro|outro|beginning|ending)\b|\bcut (?:the )?(?:intro|outro|beginning|ending|start|end)\b", EXACT),
+    "trim": ((rf"\b(?:trim|cut|remove|delete|drop|chop|lose|take (?:off|out)|get rid of|skip|shave)\s+(?:off\s+|out\s+|away\s+)?(?:the\s+)?(?:first|last|opening|closing|intro|outro)?\s*(?=.*{_HAS_RANGE})|\btrim (?:it|this|the (?:start|end|beginning|intro|outro|clip|video))\b|\bstart (?:it |the video )?(?:at|from)\s+\d|\bend (?:it |the video )?at\s+\d|\bkeep (?:only )?(?:the )?(?:first|last)\b|\bremove the (?:intro|outro|beginning|ending)\b|\bcut (?:the )?(?:intro|outro|beginning|ending|start|end)\b"
+              # final sweep 4: "keep 3s through 9s" (a range to KEEP, no "only")
+              r"|\bkeep\s+(?:only\s+|just\s+)?(?:everything\s+|the\s+(?:part|bit|section)\s+)?(?:from\s+|between\s+)?\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?|m|min|mins|minutes?)?\s*(?:to|-|–|until|till|through|thru|and)\s*\d", EXACT),
              (r"\btrim\b|\bshorter\b|\bchop\b", SYNONYM)),
     # "write 'The End' over the last 2 seconds" (review RD3): quoted words
     # written / put / typed somewhere are a title.
-    "title": ((r"\b(?:write|type|put|add|show|display|overlay)\s+(?:the\s+(?:words?|text|line)\s+)?[\"'][^\"']+[\"']\s+(?:over|on|across|at|during|for|in)\b|\blower[- ]?third\b|\bname (?:tag|plate|card|strap|title|banner)\b|\bnameplate\b|\bstrap(?:line)?\b|\b(?:add|put|show|display|write|overlay)\s+(?:a\s+|the\s+|some\s+|my\s+)?(?:title|text|caption text|label|heading|headline|super|on[- ]screen text|text overlay|name)\b|\btitle (?:card|it|this)\b|\bintroduce (?:me|him|her|them|the speaker|the guest)\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b", EXACT),
+    "title": ((r"\b(?:write|type|put|add|show|display|overlay)\s+(?:the\s+(?:words?|text|line)\s+)?[\"'][^\"']+[\"']\s+(?:over|on|across|at|during|for|in)\b"
+               # final sweep 4: "… and 'AFTER' on clip 3" — a second quoted
+               # title with its own place, no verb of its own
+               r"|^[\"'“”‘’]q[\"'“”‘’]\s+(?:over|on|across|at|during|for|in)\b|\blower[- ]?third\b|\bname (?:tag|plate|card|strap|title|banner)\b|\bnameplate\b|\bstrap(?:line)?\b|\b(?:add|put|show|display|write|overlay)\s+(?:a\s+|the\s+|some\s+|my\s+)?(?:title|text|caption text|label|heading|headline|super|on[- ]screen text|text overlay|name)\b|\btitle (?:card|it|this)\b|\bintroduce (?:me|him|her|them|the speaker|the guest)\b|\bname and handle\b|\bspeaker name\b|\bwho'?s talking\b", EXACT),
               (r"\btext\b|\btitle\b|\blabel\b|\bheadline\b", SYNONYM)),
     "brand": ((r"\bbrand(?:ing| kit| it| this|ed)?\b|\bwatermark\b|\bmy (?:handle|logo|colou?rs|brand)\b|\bapply (?:my |the )?(?:brand|kit)\b|\badd (?:my |the |a )?(?:handle|watermark|logo)\b|\bbrand colou?rs\b|\bhashtags?\b", EXACT),
               (r"\bhandle\b|\blogo\b|\b@\w+\b", SYNONYM)),
@@ -857,7 +950,10 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
     # "lower the voiceover by 6 dB" planned a NEW voice-over (a 60 MB voice
     # download, then "what should it say?"). A new one needs a creation verb,
     # quoted words, or the noun on its own.
-    "voiceover": ((r"\b(?:add|put|record|generate|create|make|need|want|give(?:\s+(?:it|me))?|write|lay|include|do)\s+"
+    # Final sweep 4: never with a LEVEL word in the clause — "make the
+    # voiceover 3 dB quieter" asked to download a 60 MB Piper voice.
+    "voiceover": ((r"(?!.*\b(?:quieter|louder|softer|less loud|more quiet|volume|level|gain|\d+(?:\.\d+)?\s*(?:d\s?b|decibels?))\b)"
+                   r"\b(?:add|put|record|generate|create|make|need|want|give(?:\s+(?:it|me))?|write|lay|include|do)\s+"
                    r"(?:a\s+|an\s+|some\s+|the\s+|my\s+)?(?:[\w'-]+\s+){0,2}?(?:voice[- ]?over|narration|narrator)\b"
                    r"|^(?:an?\s+|some\s+)?(?:ai\s+)?(?:voice[- ]?over|narration)$"
                    r"|\bvoice[- ]?over\s+(?:saying|that says|reading|of the|for the)\b|\bnarrate\b|\btts\b|\btext[- ]to[- ]speech\b|\bai voice\b|\b(?:add|put|record|generate|make|have)\s+(?:a\s+|an\s+|some\s+|the\s+)?(?:\w+\s+)?voice\s+(?:say(?:ing)?|read(?:ing)?|that says|line|clip|narration)\b|\bvoice (?:say|saying|read|reading)\b|\bsay(?:ing)?\s+[\"“'].+[\"”']|\bread (?:this|it|the text) (?:out|aloud)\b|\bspoken (?:intro|outro|line)\b", EXACT),

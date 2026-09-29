@@ -155,13 +155,21 @@ def _zoom_level(clause: str, m: re.Match, direction: str) -> float:
     before = clause[:m.start()]
     to_level = re.search(r"\bto\s*$", before) is not None
     by = re.search(r"\bby\s*$", before) is not None
-    if direction == "out":
-        level = pct / 100.0 if to_level else 1.0 - pct / 100.0
-    elif to_level and pct >= 100 or (not by and pct >= 100):
+    if to_level:
+        # final sweep 4: "scale clip 1 down to 80%" is 80 % whichever way the
+        # verb points (it read 180 %: a zoom IN)
+        level = pct / 100.0
+    elif direction == "out":
+        level = 1.0 - pct / 100.0
+    elif not by and pct >= 100:
         level = pct / 100.0
     else:
         level = 1.0 + pct / 100.0
     return round(min(5.0, max(0.1, level)), 3)
+
+
+#: "scale it down", "shrink clip 1", "make it smaller": a zoom OUT.
+_ZOOM_DOWN_RE = re.compile(r"\b(?:scale|size|zoom|shrink|reduce|make)\b.*\b(?:down|smaller)\b|\bshrink\w*\b|\breduce\b")
 
 
 def _zoom(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
@@ -171,7 +179,7 @@ def _zoom(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
         # "reset the zoom on clip 2" put transitions on every seam
         return {"clip_ref": clip_ref(hit), "direction": "out", "scale": 1.0, "_reset": True, "style": "static"}
     out: dict[str, Any] = {"clip_ref": clip_ref(hit),
-                           "direction": "out" if _ZOOM_OUT_RE.search(clause) else "in"}
+                           "direction": "out" if _ZOOM_OUT_RE.search(clause) or _ZOOM_DOWN_RE.search(clause) else "in"}
     m = _PCT_RE.search(clause)
     mx = _TIMES_X_RE.search(clause)
     if m:
@@ -209,7 +217,12 @@ _PROP_RE = (
 )
 _DOWN_RE = re.compile(r"\b(?:lower|reduce|decrease|drop|lessen|less|turn down|tone down|dial (?:down|back)|darker|darken|"
                       r"dimmer|flatter|desaturate|down|too bright|oversaturated|too saturated)\b")
-_ADJ_PCT_RE = re.compile(r"\bby\s+(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)")
+#: "by 20%" — and "20% brighter" (final sweep 4: read as clip 20, then a default step)
+_ADJ_PCT_RE = re.compile(r"(?:\bby\s+)?\b(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)")
+#: final sweep 4: "brightness +0.2" / "-0.1" (a signed slider amount) and
+#: "by half" — both were dropped for the default step
+_ADJ_SIGNED_RE = re.compile(r"(?<![\w.])([+-])\s*(\d*\.?\d+)(?![\d.])(?!\s*(?:%|percent|d\s?b|x\b|s\b|sec))")
+_ADJ_HALF_RE = re.compile(r"\b(?:by|to)\s+half\b|\bhalve\b|\bhalf\s+(?:the|as\s+much)\b")
 
 
 def _adjust(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
@@ -224,6 +237,11 @@ def _adjust(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     m = _ADJ_PCT_RE.search(clause)
     if m:
         out["amount"] = float(m.group(1)) / 100.0
+    elif (s := _ADJ_SIGNED_RE.search(clause)) and float(s.group(2)) <= 1.0:
+        out["amount"] = float(s.group(2))
+        out["change"] = "down" if s.group(1) == "-" else "up"
+    elif _ADJ_HALF_RE.search(clause):
+        out["amount"] = 0.5
     return out
 
 
@@ -260,7 +278,10 @@ _REMOVE_WHAT: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\b(?:captions?|subtitles?|subs)\b"), "captions"),
     (re.compile(r"\b(?:transitions?|cross[- ]?fades?|dissolves?)\b"), "transition"),
     (re.compile(r"\b(?:filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading)\b"
-                r"|\b(?:black and white|b ?& ?w|b and w|mono(?:chrome)?|gr[ae]y ?scale|sepia)\s+(?:off|out)\b"), "filter"),
+                r"|\b(?:black and white|b ?& ?w|b and w|mono(?:chrome)?|gr[ae]y ?scale|sepia)\s+(?:off|out)\b"
+                # final sweep 4: "take the warm off clip 1"
+                r"|\b(?:warm|cool|cold|cinematic|teal[- ]orange|punchy?|vivid|faded|vintage|retro|film|moody|golden"
+                r"|sunset|icy|matte|nostalgic|blockbuster|filmic)\s+(?:off|out)\b"), "filter"),
     (re.compile(r"\b(?:text|titles?|lower thirds?|hooks?|headlines?)\b"), "text"),
 )
 _PLURAL_REMOVE_RE = re.compile(r"\b(?:all|every|both|those|these)\b|\b(?:captions|subtitles|subs|transitions|crossfades|"
@@ -363,8 +384,10 @@ def _flip(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     "flip it back", "remove the mirror") or toggles (None)."""
     clause = hit.clause
     vertical = bool(re.search(r"\bvertical(?:ly)?\b|\btop to bottom\b|\bbottom to top\b", clause))
-    horizontal = bool(re.search(r"\bhorizontal(?:ly)?\b|\bleft to right\b|\bright to left\b|\bsideways\b"
-                                r"|\bmirror", clause))
+    # "mirror" alone is CapCut's Mirror (horizontal); final sweep 4: "mirror
+    # … vertically" names ONE axis — it flipped both
+    horizontal = bool(re.search(r"\bhorizontal(?:ly)?\b|\bleft to right\b|\bright to left\b|\bsideways\b", clause)) \
+        or (bool(re.search(r"\bmirror", clause)) and not vertical)
     axis = "both" if vertical and horizontal else ("vertical" if vertical else "horizontal")
     off = bool(re.search(r"\bun-?flip|\bun-?mirror|\bflip\w*\s+(?:it\s+|this\s+|that\s+|[\w ]{0,24}?\s+)?back\b"
                          r"|\bno longer (?:flip|mirror)|\b(?:remove|undo|turn off|take off)\s+(?:the\s+)?(?:flip|mirror)",
@@ -466,6 +489,8 @@ def seam_index(clause: str) -> int | None:
     """The seam a transition clause names: "between the first and second
     clip" → 1, "between clips 2 and 3" → 2, "after the second clip" → 2,
     "between the first two clips" → 1, "between the last two clips" → -1."""
+    # final sweep 4: "between clips 1-2" / "clips 2 to 3" name the seam too
+    clause = re.sub(rf"\b({G.CLIP_NOUN})\s+(\d{{1,2}})\s*(?:-|–|to)\s*(\d{{1,2}})\b", r"\1 \2 and \3", clause)
     if _SEAM_FIRST_TWO_RE.search(clause):
         return 1
     if _SEAM_LAST_TWO_RE.search(clause):
@@ -520,9 +545,15 @@ def clip_extras(r: str, hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
             return {"clip_ref": ref, "_range": rng, "target": "voice"}
         return {}
     if r == "freeze":
-        if _AT_START_RE.search(clause):
+        edge = "start" if _AT_START_RE.search(clause) else "end" if _AT_END_RE.search(clause) else None
+        ref = G.clip_ref_of(clause)
+        if edge and ref not in (None, "$v1_all"):
+            # final sweep 4: "freeze the first frame of clip 2" froze clip 1's
+            # frame (0 s) — the edge is that clip's
+            return {"_clip_ref": ref, "_clip_edge": edge}
+        if edge == "start":
             return {"at": 0.0}
-        return {"_at_end": True} if _AT_END_RE.search(clause) else {}
+        return {"_at_end": True} if edge == "end" else {}
     if r == "trim":
         return {} if c.range else ({"range": bare_range(clause)} if bare_range(clause) else {})
     if r == "title":

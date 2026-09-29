@@ -22,7 +22,12 @@ THE DRY RUN (`scratch_store`, executor `run_plan(dry_run=True)`):
     `save_as_sessions=False` and reports its picks), no op, no history entry,
     no undo step;
   * the blocking checks and the prompt contract judge it exactly as they
-    judge a real run: a failure becomes the same question it is today.
+    judge a real run: a failure becomes the same question it is today;
+  * what it DERIVES — a whisper transcript, a denoised, reframed or matted
+    render — goes to the content-addressed artefact cache beside the scratch
+    copies (`.prompt_preview/artefacts/`, artefacts.py), so Apply does the
+    heavy work once: it reads an entry whose key (tool, input file identity,
+    parameters, model version) still matches and derives again otherwise.
 
 THE CARD. The change list comes from the EDL diff (`changes.summarize`),
 never from the plan text. The run pauses as a `confirm` pending state
@@ -50,6 +55,10 @@ from typing import Any
 from ...edl import EDLStore
 from ...edl.schema import EDL
 from . import changes as C
+#: The dry-run artefact cache under PREVIEW_DIR (final QA r4, artefacts.py):
+#: what a preview derived — a transcript, a denoised or reframed render —
+#: carried to Apply so heavy work runs once. Kept out of `_sweep`.
+from .artefacts import ARTEFACT_DIR
 from .schema import NeedsInput, NeedsInputOption, Plan
 
 #: Scratch copies live beside the sessions, never inside one.
@@ -144,6 +153,8 @@ def _sweep(root: Path) -> None:
         return
     cutoff = time.time() - STALE_SCRATCH_S
     for d in root.iterdir():
+        if d.name == ARTEFACT_DIR:
+            continue            # the dry-run artefacts: their own LRU (artefacts.py), not an age
         try:
             if d.is_dir() and d.stat().st_mtime < cutoff:
                 shutil.rmtree(d, ignore_errors=True)
@@ -303,7 +314,7 @@ def preview_plan(record: dict[str, Any]) -> Plan:
     return plan
 
 
-__all__ = ["PREVIEW_DIR", "DRY_RUN_SKIP", "APPLY_KEY", "APPLY_QUESTION", "NOTHING_CHANGED_YET",
+__all__ = ["PREVIEW_DIR", "ARTEFACT_DIR", "DRY_RUN_SKIP", "APPLY_KEY", "APPLY_QUESTION", "NOTHING_CHANGED_YET",
            "apply_question", "wants_preview", "is_apply_yes", "scratch_store", "discard_scratch",
            "path_map", "shorts_lines", "lines_for", "summary_line", "reply_text", "pause_for_confirm",
            "apply_check", "public_view", "preview_plan"]

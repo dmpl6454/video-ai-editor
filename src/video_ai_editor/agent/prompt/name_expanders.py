@@ -379,7 +379,12 @@ def x_restyle_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> 
         said.append("no outline" if not look["stroke_w"] else "an outline")
     if "background" in look:
         said.append("a box behind it" if look["background"] else "no box")
-    check = {k: look[k] for k in ("color", "size", "font", "bold", "position") if k in look}
+    for side, word in (("anim_in", "in"), ("anim_out", "out")):
+        if side in look:
+            # run 4: "fade the title in" — the text's own animation
+            kind = str(look[side] or "").replace("_", " ")
+            said.append(f"{kind}s {word}" if kind else f"no {word} animation")
+    check = {k: look[k] for k in ("color", "size", "font", "bold", "position", "anim_in", "anim_out") if k in look}
     return Expansion(
         steps=(step("set_text_style", STAGE_TEXT, f"restyle {_text_label(t)}: " + ", ".join(said),
                     clip_id=t.id, **look),),

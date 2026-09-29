@@ -21,9 +21,11 @@ expander in `expanders.py` (which registers these in `EXPANDERS`).
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
-from .facts import TimelineFacts
+from .facts import ClipFact, TimelineFacts
 from .grammar import AT_REF, NTH_REF
 from .recipes import Context, Expansion, Intent, pc, step
 from .schema import STAGE_CUTS, STAGE_LOOK, Step
@@ -117,6 +119,130 @@ def bind_clip(ref: Any, f: TimelineFacts) -> tuple[str | None, str | None]:
             return hit, None
         return None, f"Which clip? The playhead ({t:g}s) is not over a clip on the main track."
     return ref, None
+
+
+# --------------------------------------------------------------------------
+# 1b. A clip named by its footage (final sweep 3 r2, final sweep 4)
+# --------------------------------------------------------------------------
+
+#: "the kitchen before shot", "the before shots", "both before clips": one
+#: to three name words after a determiner, before a clip noun. Final sweep 4:
+#: ONE word only was read, so "the kitchen before shot" named nothing and the
+#: look went on every clip; a plural now names every clip whose footage
+#: carries the word.
+NAMED_CLIP_RE = re.compile(r"\b(?:the|both|all\s+the|all|every|each|my|those|these)\s+(?:(?:two|three|four|five|\d)\s+)?"
+                           r"((?:[a-z0-9][\w.'-]*\s+){1,3}?)(shots?|clips?|videos?|footage|scenes?|takes?)\b", re.I)
+#: A file stem said on its own ("re_kitchen_before").
+_BARE_STEM_RE = re.compile(r"(?<![\w.])([a-z0-9]+(?:[_-][a-z0-9]+)+)(?:\.[a-z0-9]{2,4})?(?![\w.])", re.I)
+#: Words before a clip noun that are positions or determiners, never names.
+_NAME_STOP = frozenset(
+    "first second third fourth fifth sixth seventh eighth ninth tenth last final opening closing middle selected "
+    "current this that next previous whole entire same other new old main top bottom every each all both two three "
+    "four five one a an the my of and or on in at to for with over under from by video clip shot clips shots intro "
+    "outro beginning ending end start penultimate".split())
+
+
+def _stem_parts(name: str) -> tuple[str, list[str]]:
+    stem = re.sub(r"\.normali[sz]ed$", "", Path(name).stem.lower())
+    return stem, [p for p in re.split(r"[^a-z0-9]+", stem) if p]
+
+
+def _v1_named(f: TimelineFacts) -> list[ClipFact]:
+    return sorted((c for c in f.clips if c.track == "v1" and getattr(c, "name", "")), key=lambda c: c.start)
+
+
+def clips_by_name(words: list[str], f: TimelineFacts) -> list[str]:
+    """Ids of the main-track clips whose footage name carries EVERY word
+    ("kitchen before" ⊂ re_kitchen_before), in timeline order."""
+    ws = [w.lower().rsplit(".", 1)[0] for w in words if w]
+    if not ws:
+        return []
+    out: list[str] = []
+    for c in _v1_named(f):
+        stem, parts = _stem_parts(str(c.name))
+        if (len(ws) == 1 and ws[0] == stem) or all(w in parts for w in ws) \
+                or "".join(ws) == re.sub(r"[^a-z0-9]", "", stem):
+            out.append(c.id)
+    return out
+
+
+def named_clips(text: str, f: TimelineFacts) -> list[tuple[re.Match, list[str], bool]]:
+    """(match, ids, plural) for every "the <words> shot(s)" phrase in `text`
+    whose words are names (not positions)."""
+    res = []
+    for m in NAMED_CLIP_RE.finditer(text or ""):
+        words = m.group(1).split()
+        if not words or any(w.lower().strip("'") in _NAME_STOP for w in words):
+            continue
+        noun = m.group(2).lower()
+        res.append((m, clips_by_name(words, f), noun.endswith("s") and noun != "footage"))
+    return res
+
+
+def clip_by_name(text: str, f: TimelineFacts) -> str | None:
+    """The id of the ONE main-track clip `text` names by its footage — "the
+    pour shot", "the kitchen before shot", "re_kitchen_before"; None when no
+    clip or several clips match."""
+    for _m, ids, _plural in named_clips(text, f):
+        if len(ids) == 1:
+            return ids[0]
+    for m in _BARE_STEM_RE.finditer(text or ""):
+        ids = clips_by_name([m.group(1)], f)
+        if len(ids) == 1:
+            return ids[0]
+    return None
+
+
+def names_to_numbers(prompt: str, f: TimelineFacts) -> str:
+    """"slow down the pour shot" → "slow down clip 2"; "make the before shots
+    black and white" → "make clips 2 and 4 black and white"; "re_kitchen_before
+    and re_living_before" → "clip 2 and clip 4". Quoted words are left alone;
+    a name that matches nothing (or several, said in the singular) is left as
+    it was, so the expander can ask."""
+    v1 = sorted((c for c in f.clips if c.track == "v1"), key=lambda c: c.start)
+    if len(v1) < 2:
+        return prompt
+    number = {c.id: i + 1 for i, c in enumerate(v1)}
+
+    def _list(ids: list[str]) -> str:
+        nums = [str(number[i]) for i in ids if i in number]
+        return f"clip {nums[0]}" if len(nums) == 1 else "clips " + ", ".join(nums[:-1]) + f" and {nums[-1]}"
+
+    def _sub(m: re.Match) -> str:
+        words = m.group(1).split()
+        if not words or any(w.lower().strip("'") in _NAME_STOP for w in words):
+            return m.group(0)
+        noun = m.group(2).lower()
+        ids = clips_by_name(words, f)
+        plural = noun.endswith("s") and noun != "footage"
+        if len(ids) == 1 or (plural and len(ids) >= 2):
+            return _list(ids)
+        return m.group(0)
+
+    def _bare(m: re.Match) -> str:
+        ids = clips_by_name([m.group(1)], f)
+        return _list(ids) if len(ids) == 1 else m.group(0)
+
+    parts = re.split(r"([\"“”'‘’][^\"“”'‘’]{1,200}[\"“”'‘’])", prompt)
+    return "".join(p if i % 2 else _BARE_STEM_RE.sub(_bare, NAMED_CLIP_RE.sub(_sub, p)) for i, p in enumerate(parts))
+
+
+def named_clip_question(clause: str, f: TimelineFacts) -> str | None:
+    """The question to ask when `clause` names a clip by a footage name that
+    matches nothing, or several clips in the singular — instead of the edit
+    silently widening to every clip (final sweep 4)."""
+    v1 = _v1_named(f)
+    for m, ids, plural in named_clips(clause, f):
+        words = " ".join(m.group(1).split())
+        if not ids:
+            names = ", ".join(f"clip {i + 1} ({_stem_parts(str(c.name))[0]})" for i, c in enumerate(v1))[:240]
+            return (f"Which clip? Nothing on the main track is called '{words}'"
+                    + (f" — the clips are {names}." if names else "."))
+        if len(ids) > 1 and not plural:
+            labels = ", ".join(_label(i, f) for i in ids)
+            return (f"Which clip? '{words}' matches {len(ids)} clips ({labels}) — name one, or say "
+                    f"'the {words} {m.group(2).lower().rstrip('s')}s' for all of them.")
+    return None
 
 
 def one_clip(it: Intent, f: TimelineFacts, verb: str) -> tuple[str | None, str | None]:
@@ -352,12 +478,35 @@ def x_adjust(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     else:
         value = (ADJUST_UP if change == "up" else ADJUST_DOWN)[prop]
     value = round(value, 3)
+    if it.get("clip_ref") is None and (nq := named_clip_question(it.clause or "", f)):
+        return _ask(nq)                  # final sweep 4: a shot name that names nothing is a question
     ref = it.get("clip_ref") or "$v1_all"
     cid, q = bind_clip(ref, f)
     if q:
         return _ask(q)
     word = {"brightness": ("brighter", "darker"), "contrast": ("more contrast", "less contrast"),
             "saturation": ("more saturated", "less saturated")}[prop][0 if change == "up" else 1]
+    if amount is None:
+        # run 4: "brighter still" — a STEP from each clip's current grade
+        # (it set brightness 0.1 on a clip already at 0.1: no change, and the
+        # net rolled the run back). Clips at the neutral value plan as before.
+        main = [c for c in f.clips if c.id in set(f.v1_clip_ids) and c.freeze is None]
+        targets = main if cid == "$v1_all" else [c for c in main if c.id == cid]
+        neutral = 0.0 if prop == "brightness" else 1.0
+        graded = [c for c in targets if abs(float(c.color.get(prop, neutral)) - neutral) > 1e-6]
+        if graded:
+            lo, hi = (-1.0, 1.0) if prop == "brightness" else (0.0, 3.0)
+            per = []
+            for c in targets[:20]:
+                cur = float(c.color.get(prop, neutral))
+                new = cur + value if prop == "brightness" else cur * value
+                per.append((c.id, round(min(hi, max(lo, new)), 3)))
+            return Expansion(
+                steps=tuple(step("color_grade", STAGE_LOOK, f"{_label(c, f)}: {prop} {v:g} ({word})", clip_id=c, **{prop: v})
+                            for c, v in per),
+                postconditions=(pc("effect_present", f"the {prop} change is applied", type="color", track="v1",
+                                   all=cid == "$v1_all"),),
+                notes=(f"{_label(cid, f)} {word} ({prop} " + ", ".join(f"{v:g}" for _c, v in per) + ")",))
     return Expansion(
         steps=(step("color_grade", STAGE_LOOK, f"{_label(cid, f)}: {prop} {value:g} ({word})",
                     clip_id=cid, **{prop: value}),),
@@ -390,6 +539,13 @@ def range_targets(rng: Any, f: TimelineFacts, verb: str) -> tuple[list[Step], li
         if inside is None:
             return [], [cid for cid, a, _b in spans if a >= start - _TOL_S], None
         if inside[0] != spans[-1][0]:
+            if f.playhead is not None and abs(float(f.playhead) - start) <= _TOL_S:
+                # run 4: "from here to the end" — split at the playhead; the
+                # right half is `$playhead` on the LIVE timeline (the executor
+                # resolves it after the split), the clips after it are known
+                after = [cid for cid, a, _b in spans if a >= inside[2] - _TOL_S]
+                return ([step("split_at", STAGE_CUTS, f"split at the playhead ({start:g}s)", track="v1",
+                              time=round(start, 3))], ["$playhead", *after], None)
             last = spans[-1]
             n = [cid for cid, _a, _b in spans].index(inside[0]) + 1
             return [], [], (f"The last {end - start:g}s start inside clip {n} at {start:g}s, across a cut. "

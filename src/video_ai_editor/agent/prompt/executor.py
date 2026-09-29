@@ -60,6 +60,7 @@ from . import live as _live
 from .runlog import RunBus, RunLog, RunRecord, new_run_id
 from .schema import CLIP_SENTINELS, PLAN_DENY, SEAM_SENTINEL, Plan, Step
 from .service import SNAPSHOT_DIR, TRANSCRIPT_WAIT_S
+from . import artefacts as _artefacts
 
 _D = importlib.import_module("video_ai_editor.agent.dispatch")
 
@@ -579,6 +580,9 @@ class ExecResult:
     dry_run: bool = False
     #: Apply only: why the live result differed from the card (rolled back).
     mismatch: str | None = None
+    #: A step failed because the disk is full (final sweep 4): the error text
+    #: is DISK_FULL_TEXT, and the bar may offer the free-space hint.
+    disk_full: bool = False
 
     @property
     def applied(self) -> int:
@@ -751,6 +755,10 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
         dispatch_args = dict(args)
         if dry_run and tool == "make_shorts":
             dispatch_args["save_as_sessions"] = False
+        # Final QA r4: a derived render the dry run made is laid into the
+        # live cache before Apply's handler runs; a dry run captures its own
+        # (artefacts.py; None outside a preview/apply run).
+        carry = _artefacts.StepCarry.begin(store, tool, dispatch_args, dry_run=dry_run)
         if _handler_reports_progress(tool) or n > 1:
             def _sub_progress(p: float, _k=k) -> None:
                 _progress((_k + max(0.0, min(1.0, float(p)))) / n)
@@ -759,6 +767,8 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
         else:
             with _ProgressTicker(_progress, estimated_step_seconds(tool, facts.duration)):
                 result = _D.dispatch(store, tool, dispatch_args, cancel_event=cancel_event)
+        if carry is not None:
+            carry.end()
         outcome.results.append(result if isinstance(result, dict) else {"result": result})
         if n > 1:
             _progress((k + 1) / n)
@@ -851,14 +861,18 @@ def safety_net(store: EDLStore, plan: Plan, result: "ExecResult", facts: Timelin
         try:
             from .contract import Contract
             said = _contract_words(prompt, plan, facts)
+            # run 4: the markers and the picture's end the words are measured
+            # against ("from the marker to the end") — as the plan saw them
+            ui = {"markers": tuple(getattr(facts, "markers", ()) or ()),
+                  "video_end": float(facts.video_end or facts.duration or 0.0) or None}
             con = Contract.read(said, selection=facts.selection, playhead=facts.playhead,
-                                picked=tuple(hint.get("picked") or ()))
+                                picked=tuple(hint.get("picked") or ()), **ui)
             found = [v.as_dict() for v in con.judge(result.edl_before, store.edl)]
             refused = {(r.get("kind"), r.get("message")) for r in (hint.get("refused") or [])}
             if refused and hint.get("picked"):
                 # a pick licenses its family, never the very thing the net
                 # refused on the first run (Final sweep 2)
-                plain = Contract.read(said, selection=facts.selection, playhead=facts.playhead)
+                plain = Contract.read(said, selection=facts.selection, playhead=facts.playhead, **ui)
                 have = {(v["kind"], v["message"]) for v in found}
                 found += [v.as_dict() for v in plain.judge(result.edl_before, store.edl)
                           if (v.kind, v.message) in refused and (v.kind, v.message) not in have]
@@ -1064,14 +1078,19 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
         snapshot.discard()
         i, step, err = failed_step if failed_step else (len(result.steps), None, e)
         tool = step.tool if step else "plan"
+        # Final sweep 4: a full disk is said the way the rest of the app says
+        # it — never "[Errno 28] No space left on device" on the card
+        err_text = DISK_FULL_TEXT if _is_disk_full(err) else str(err)
+        if _is_disk_full(err):
+            result.disk_full = True
         result.steps.append(StepOutcome(index=i, tool=tool, args=[dict(step.args)] if step else [],
-                                        status="failed", error=str(err)))
-        emit({"type": "tool_result", "name": tool, "result": {"error": str(err)},
+                                        status="failed", error=err_text))
+        emit({"type": "tool_result", "name": tool, "result": {"error": err_text},
               "id": f"{validated.id}_s{i}", "is_error": True})
         emit({"type": "step", "index": i, "total": total, "tool": tool, "status": "failed",
-              "error": str(err)})
+              "error": err_text})
         restored = " Transcript restored." if result.restored_files else ""
-        result.error = (f"Step {i + 1}/{total} {tool} failed: {err}. "
+        result.error = (f"Step {i + 1}/{total} {tool} failed: {err_text.rstrip('.')}. "
                         f"Timeline unchanged.{restored}")
         result.new_sessions = _sessions_created(result)
         emit({"type": "error", "message": _with_kept_sessions(result.error, result.new_sessions)})
@@ -1330,11 +1349,14 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
                     log.set_status("done")
                     log.set_reply(final_text)
                     return
-                result = run_plan(store, handle.plan, facts, emit=log.emit,
-                                  cancel_event=handle.cancel_event, prompt=prompt,
-                                  run_id=handle.run_id, consented_downloads=handle.consented_downloads,
-                                  contract_hint=handle.contract_hint,
-                                  expect=_apply_expect(handle))
+                # Final QA r4: an Apply reads the dry run's artefacts (a
+                # plain run never touches that area) — artefacts.for_mode.
+                with _artefacts.for_mode(store.dir, handle.mode):
+                    result = run_plan(store, handle.plan, facts, emit=log.emit,
+                                      cancel_event=handle.cancel_event, prompt=prompt,
+                                      run_id=handle.run_id, consented_downloads=handle.consented_downloads,
+                                      contract_hint=handle.contract_hint,
+                                      expect=_apply_expect(handle))
                 handle.result = result
                 if result.mismatch:
                     final_text = _repreview(handle, store, result, facts, prompt, log)
@@ -1410,9 +1432,24 @@ def _contract_words(prompt: str, plan: Plan, facts: TimelineFacts) -> str:
 DISK_FULL_TEXT = "The disk is full — free up some space on this Mac and try again."
 
 
-def _run_failed_text(e: BaseException) -> str:
+def _is_disk_full(e: BaseException | None) -> bool:
+    """ENOSPC / EDQUOT anywhere in the exception chain, or ffmpeg's own words
+    for it (final sweep 4: a step that hit a full disk showed "[Errno 28] No
+    space left on device" on the card) — the same walk proxy_queue does."""
     import errno as _errno
-    if isinstance(e, OSError) and getattr(e, "errno", None) == _errno.ENOSPC:
+    seen = 0
+    while e is not None and seen < 8:
+        if isinstance(e, OSError) and getattr(e, "errno", None) in (_errno.ENOSPC, getattr(_errno, "EDQUOT", -1)):
+            return True
+        if "No space left on device" in str(e):
+            return True
+        e = e.__cause__ or e.__context__
+        seen += 1
+    return False
+
+
+def _run_failed_text(e: BaseException) -> str:
+    if _is_disk_full(e):
         return DISK_FULL_TEXT
     return f"Prompt run failed: {type(e).__name__}: {e}"
 
@@ -1437,9 +1474,13 @@ def _preview_run(handle: RunHandle, live: EDLStore, facts: TimelineFacts, prompt
     before = live.edl.model_copy(deep=True)
     scratch = _pv.scratch_store(live, handle.run_id)
     try:
-        result = run_plan(scratch, handle.plan, facts, emit=log.emit, cancel_event=handle.cancel_event,
-                          prompt=prompt, run_id=handle.run_id, consented_downloads=handle.consented_downloads,
-                          contract_hint=handle.contract_hint, dry_run=True)
+        # Final QA r4: the dry run writes what it derives (a transcript, a
+        # denoised render) to the artefact cache beside the scratch copies,
+        # never into the live session; Apply reads it back (artefacts.py).
+        with _artefacts.for_mode(live.dir, "preview"):
+            result = run_plan(scratch, handle.plan, facts, emit=log.emit, cancel_event=handle.cancel_event,
+                              prompt=prompt, run_id=handle.run_id, consented_downloads=handle.consented_downloads,
+                              contract_hint=handle.contract_hint, dry_run=True)
         handle.result = result
         if handle.cancel_event.is_set() and not result.error:
             # A Cancel acknowledged while the dry run (or its diff) finished:

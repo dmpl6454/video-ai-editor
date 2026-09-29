@@ -71,7 +71,8 @@ ONE_LINERS = [
     ("trim the music to the video length", "fit_music", [("fit_music_to_video", {})]),
     # second sweep: the same misroutes in other words
     ("music at -18db", "volume", [("set_volume", {"target": "music", "db": -18.0})]),
-    ("set music volume to 50%", "volume", [("set_volume", {"target": "music", "db": -6.0})]),
+    # run 4: 50 % OF THE CURRENT level (the fixture's bed is at −14 dB), never −6 dB on the dial
+    ("set music volume to 50%", "volume", [("set_volume", {"target": "music", "db": -20.02})]),
     ("make my voice louder", "volume", [("set_volume", {"target": "v1", "db": 6.0})]),
     ("turn up the voice", "volume", [("set_volume", {"target": "v1", "db": 6.0})]),
     ("music kam karo", "volume", [("set_volume", {"target": "music", "db": -20.0})]),

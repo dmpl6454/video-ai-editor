@@ -36,8 +36,11 @@ instead (``clip.start + (R − rs)``) and linked to the clip
 (`dispatch._follow_sounds`). Stored in layout time and placed through
 `render_time`, a voiceover's captions drifted a word early after a later
 transition and 2 s early after a trim before it — the voiceover is one
-sound run, the cues were not. `layout_time` is still what `merge_tiers`
-compares against the main track's cues (`sound_clock`).
+sound run, the cues were not. `merge_tiers` compares every tier on the
+RENDER clock (`sound_clock` for a sound / PIP source, `dispatch.
+_v1_render_clock` for the main track); `layout_time` is the ruler's map for
+callers that need a layout instant (the desktop's `timelineLayout.
+layoutTime` mirrors it).
 
 Where two sources speak at once, the voiceover wins: a narrated vlog's own
 ambient footage speech under the narration is not stacked on top of it
@@ -193,14 +196,19 @@ def sound_segments(edl: EDL, source: SpeechSource,
 
 
 def sound_clock(edl: EDL, source: SpeechSource):
-    """For a SOUND-lane or PIP-lane source: `f(t) -> (clip id, layout t)` —
+    """For a SOUND-lane or PIP-lane source: `f(t) -> (clip id, render t)` —
     the clip a cue stored at `t` on `sound_segments`' clock belongs to (the
-    last one starting at or before it) and the layout time the ruler draws
-    it at (`layout_time` of where it is heard). The layout time is what
-    `merge_tiers` compares against the main track's cues; the clip id is
-    what the cue is linked to."""
+    last one starting at or before it) and the RENDER instant it is heard
+    at. That instant is what `merge_tiers` compares against the main track's
+    cues (`dispatch._v1_render_clock` puts those on the same clock); the clip
+    id is what the cue is linked to.
+
+    Final sweep 4: this used to hand back `layout_time` of the instant, which
+    maps EVERY instant inside a cross-fade window onto the seam — so a cue
+    that started and ended inside a 1 s dissolve (a 2x voiceover's word, a
+    short phrase) became a zero-length span and `merge_tiers` dropped it: the
+    word was heard and had no caption."""
     wins = _source_windows(edl, source)
-    seams = list(edl.v1_seam_table())
 
     def at(t: float) -> tuple[str | None, float]:
         if not wins:
@@ -209,7 +217,7 @@ def sound_clock(edl: EDL, source: SpeechSource):
         for w in wins:
             if float(w[0].start) <= t + _EPS:
                 c, rs, _re = w
-        return c.id, layout_time(seams, rs + (t - float(c.start)))
+        return c.id, rs + (t - float(c.start))
     return at
 
 

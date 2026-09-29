@@ -2,8 +2,74 @@
 // that behaves like WebKit measured in review RD2: an assignment of the SAME
 // time while that seek is still pending fires no second 'seeking'.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ElementSeeker, PRESENT_WAIT_MS, PlayingSeekGate, SoughtFrame } from './engineSeek'
+import { ElementSeeker, PRESENT_WAIT_MS, PlayingSeekGate, RunSeek, SoughtFrame } from './engineSeek'
 import type { LaneA } from './media/laneA'
+
+// The seek that starts a run (play(), a seek while playing) is never issued
+// into a hole. Measured in WKWebView (final QA r4, tests/wk/test_wk_soak.py
+// end-restart, 1 round in 10-40): play from 0 with the window still at the
+// end assigned currentTime = 0.0167 s while [84.5, 96] was buffered; laneA
+// then removed that window and appended [0, 1), [0, 2), [0, 3), and WebKit
+// completed the seek at t = 3.0 — the end of what had just landed — fired
+// 'waiting', and moved the element to every later append's end (4, 5, …
+// 30 s) while presenting nothing: frame 0 was drawn once, and the run stood
+// still with `buffering` up, so the stall watchdog took it for a wait.
+describe('RunSeek (the seek that starts a run)', () => {
+  function rig(ready: Set<number>) {
+    const assigned: Array<[number, number]> = []
+    const lane = { isReady: (k: number) => ready.has(k), seekTime: (k: number) => (k + 0.5) / 30 }
+    const rs = new RunSeek((k, t) => assigned.push([k, +t.toFixed(4)]))
+    return { rs, lane, assigned }
+  }
+
+  it('a run from a buffered frame seeks the element at once', () => {
+    const { rs, lane, assigned } = rig(new Set([120]))
+    expect(rs.begin(120, lane)).toBe(true)
+    expect(assigned).toEqual([[120, 4.0167]])
+    expect(rs.pending).toBe(false)
+  })
+
+  it('a run from a frame not buffered yet waits for its append, then seeks exactly once', () => {
+    const ready = new Set<number>()
+    const { rs, lane, assigned } = rig(ready)
+    expect(rs.begin(0, lane)).toBe(false)
+    expect(rs.pending).toBe(true)
+    expect(assigned).toEqual([])
+    // unrelated frames land: nothing
+    for (let k = 2535; k < 2880; k++) ready.add(k)
+    expect(rs.onAppended(2535, 2880, lane)).toBe(false)
+    // the frame lands with its window
+    for (let k = 0; k < 30; k++) ready.add(k)
+    expect(rs.onAppended(0, 30, lane)).toBe(true)
+    expect(assigned).toEqual([[0, 0.0167]])
+    expect(rs.pending).toBe(false)
+    // later appends do not seek again
+    for (let k = 30; k < 60; k++) ready.add(k)
+    expect(rs.onAppended(30, 60, lane)).toBe(false)
+    expect(assigned.length).toBe(1)
+  })
+
+  it('an append that covers the frame but leaves it stale does not seek', () => {
+    const { rs, lane, assigned } = rig(new Set())
+    rs.begin(7, lane)
+    expect(rs.onAppended(0, 30, lane)).toBe(false)     // appended, yet not the wanted content
+    expect(assigned).toEqual([])
+    expect(rs.pending).toBe(true)
+  })
+
+  it('a stop drops the waiting seek; a new run replaces it', () => {
+    const { rs, lane, assigned } = rig(new Set([300]))
+    rs.begin(0, lane)
+    rs.cancel()
+    expect(rs.onAppended(0, 30, { isReady: () => true, seekTime: lane.seekTime })).toBe(false)
+    expect(assigned).toEqual([])
+    rs.begin(5, lane)
+    expect(rs.begin(300, lane)).toBe(true)          // the newer run
+    expect(rs.pending).toBe(false)
+    expect(rs.onAppended(0, 30, { isReady: () => true, seekTime: lane.seekTime })).toBe(false)
+    expect(assigned).toEqual([[300, 10.0167]])
+  })
+})
 
 class FakeVideo {
   seeking = false

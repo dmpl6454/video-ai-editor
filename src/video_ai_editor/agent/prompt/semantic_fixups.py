@@ -57,7 +57,7 @@ _NO_SOUND_RE = re.compile(r"\bno (?:sound|audio)\b|\bwithout (?:sound|audio)\b|\
 #: "turn the audio back on for clip 2": the clip's own sound, unmuted
 _SOUND_ON_RE = re.compile(r"\b(?:sound|audio)\s+back\s+on\b|\bturn\s+(?:the\s+)?(?:sound|audio)\s+(?:back\s+)?on\b"
                           r"|\bbring\s+(?:the\s+)?(?:sound|audio)\s+back\b")
-_TRIM_VERB_RE = re.compile(r"\b(?:cut|trim|remove|delete|chop|take|lose|drop|shave|get rid of)\b")
+_TRIM_VERB_RE = re.compile(r"\b(?:cut|trim|remove|delete|chop|take|lose|drop|shave|shorten|knock|get rid of)\b")
 _BACKWARDS_RE = re.compile(r"\b(?:go|goes|going|run|runs|play|plays)\s+backwards?\b|\bbackwards\b|\bin reverse\b")
 _DELETE_VERB_RE = re.compile(r"\b(?:delete|remove|get rid of|lose|drop|trash|erase|ditch|scrap|kill|cut out|take out)\b")
 _FEATURE_RE = re.compile(r"\b(?:speed|ramp|curve|filters?|luts?|looks?|effects?|transitions?|cross ?fades?|dissolves?"
@@ -123,6 +123,13 @@ def rewrite_hits(det: G.Detection, facts: TimelineFacts) -> G.Detection:
             new = "delete_clip"
         elif h.intent == "delete_clip" and _PART_OF_RE.search(c) and not M.time_refs(c):
             new = "trim"                                # part of a clip is not the clip
+        elif h.intent == "tighten" and M.whole_video_by(c) is not None:
+            new = "trim"                                # run 4: "shorten the video by 3 seconds" is its tail, not its pauses
+        elif h.intent == "fade" and _TEXT_NOUN_RE.search(c) and not _PICTURE_OR_SOUND_RE.search(c) \
+                and not M.clip_refs(c) and set(M.media_of(c)) <= {"text"}:
+            new = "title"                               # run 4: "fade the title in" faded the first CLIP's picture
+        elif h.intent == "delete_clip" and M.ui_range(c) is not None:
+            new = "trim"                                # "delete everything after the playhead": a range cut
         if new and new != h.intent:
             h = replace(h, intent=new)
             changed = True
@@ -174,6 +181,10 @@ _PART_OF_RE = re.compile(r"\b(?:the|a|some)\s+(?:middle|centre|center|start|end|
 _COLOUR_WORD_RE = re.compile(r"\b(?:red|blue|green|yellow|white|black|pink|orange|purple|violet|cyan|gold|grey|gray"
                              r"|lime|teal|magenta|brown|navy|silver)\b|#[0-9a-f]{6}\b")
 _FADE_NOUN_RE = re.compile(r"\bfades?\b|\bfade[- ](?:ins?|outs?)\b")
+#: A fade clause about the PICTURE or the SOUND, not a text ("fade the video
+#: in under the title", "fade the audio out").
+_PICTURE_OR_SOUND_RE = re.compile(r"\b(?:video|picture|footage|clip|clips|shot|screen|image|visuals?|black|audio|sound"
+                                  r"|music|song|voice|volume|track)\b")
 _TURN_IT_RE = re.compile(r"\bturn\s+(?:it|them|this|that)\s+(?:up|down)\b")
 
 
@@ -185,6 +196,8 @@ def _orphan_reading(clause: str, prev: list[str]) -> str | None:
         return "mute"
     if M.keeps_only(c) and [x for x in M.time_refs(c) if x.kind != "at"] and not M.clip_refs(c):
         return "trim"                   # "keep 4s-8s only"
+    if M.ui_range(c) is not None and (M.keeps_only(c) or _TRIM_VERB_RE.search(c)) and not _FEATURE_RE.search(c):
+        return "trim"                   # run 4: "keep from here to the end", "delete everything before the marker"
     if _TRIM_VERB_RE.search(c) and [x for x in M.time_refs(c) if x.kind in ("first", "last", "range")] \
             and not M.clip_refs(c) and not _FEATURE_RE.search(c):
         return "trim"                   # "remove seconds 10 through 12", "take 2 seconds off the end"
@@ -258,6 +271,11 @@ def fix_intents(intents: list[Intent], det: G.Detection, facts: TimelineFacts) -
     for it in intents:
         sc = scopes.get(it.clause)
         slots = dict(it.slots)
+        bt = M.between_clips(it.clause or "")
+        if it.recipe in _PER_CLIP and bt and bt[1] - bt[0] >= 2 and sc is not None and sc.refs:
+            # final sweep 4: "cut out the part between clip 1 and clip 3" is
+            # clip 2 — the grammar's own reader had picked clip 1
+            slots["clip_ref"] = None
         if it.recipe in _PER_CLIP and sc is not None and len(sc.refs) == 1 and not sc.all and not sc.carried \
                 and slots.get("clip_ref") in (None, "$v1_all") and not M.time_refs(it.clause):
             ref = _ref_sentinel(sc.refs[0], facts)

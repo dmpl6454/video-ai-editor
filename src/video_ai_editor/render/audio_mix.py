@@ -138,6 +138,26 @@ _EXPORT_GAIN: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "vai_export_gain_db", default=None)
 _EXPORT_MEASURE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "vai_export_measure", default=False)
+_EXPORT_CEILING: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vai_export_ceiling", default=False)
+
+
+@contextlib.contextmanager
+def export_ceiling_scope() -> Iterator[None]:
+    """Within this scope an export with NO loudness target still ends in the
+    true-peak limiter on a lone lane (final sweep 4): the audio-only export
+    enters it when its measuring pass found the raw mix over
+    `EXPORT_TRUE_PEAK_DBTP` — one Inspector slider now reaches +20 dB, and a
+    −3 dBFS clip at +12 dB went out to WAV with every sample at full scale
+    (mp4/m4a were held by `delivery_peak`). A lane under the ceiling never
+    enters it and goes out exactly as it was. Nothing changes with a
+    target set (the limiter already ends that chain) or inside the measure
+    scope (pass 1 reads the raw mix)."""
+    tok = _EXPORT_CEILING.set(True)
+    try:
+        yield
+    finally:
+        _EXPORT_CEILING.reset(tok)
 
 
 @contextlib.contextmanager
@@ -178,7 +198,9 @@ def _export_master(edl: EDL, *, mixed: bool) -> str:
       * a target with no measurement (a caller that did not run pass 1):
         single-pass loudnorm, then the same true-peak limiter;
       * no target: the limiter only where lanes were MIXED (a summed bed and
-        voice can pass full scale); a lone v1 track is left exactly as is.
+        voice can pass full scale) or inside `export_ceiling_scope` (the
+        audio-only export measured a lone lane over the ceiling); otherwise
+        a lone v1 track is left exactly as is.
     """
     if _EXPORT_MEASURE.get():
         return ""
@@ -190,7 +212,7 @@ def _export_master(edl: EDL, *, mixed: bool) -> str:
         # loudnorm's own TP=-1 is a sample-peak ride at its 192 kHz rate — the
         # limiter after it is what holds the delivered true peak.
         return f"loudnorm=I={float(lufs):.1f}:TP=-1:LRA=11,{true_peak_limiter()}"
-    return true_peak_limiter() if mixed else ""
+    return true_peak_limiter() if (mixed or _EXPORT_CEILING.get()) else ""
 
 
 class PreviewLoudness:

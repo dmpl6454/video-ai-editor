@@ -15,7 +15,7 @@ from . import semantics as M
 from .contract import (TOL_DB, TOL_SPEED, _COLOURS, _TEXT_ADD_RE, _TEXT_REMOVE_RE, _TEXT_RESTYLE_RE,
                        _TEXT_RETEXT_RE, _TEXT_RETIME_RE, ClauseRead, Violation, _Ctx, _msg_clip, _rule_licensed,
                        families_of)
-from .contract_diff import ClipDelta, color_params, coverage, lut_names, media_v1
+from .contract_diff import ClipDelta, color_params, coverage, lut_intensity, lut_names, media_v1
 
 # --------------------------------------------------------------------------
 # 5. Scope: an attribute may only change on the clips its clauses name
@@ -74,6 +74,12 @@ def _rule_scope(ctx: _Ctx) -> list[Violation]:
         allowed: set[str] = set()
         open_scope = False
         for r in reads:
+            if r.ui_span is not None:
+                # run 4: "from here to the end make it black and white" — the
+                # clips the playhead / marker range covers (the one under the
+                # anchor is split; its right half is a piece of it)
+                allowed |= _span_overlap_ids(ctx, [r.ui_span])
+                continue
             if M.time_refs(r.t) and not r.scope.refs:
                 # final sweep 2 r2: "make the first 4 seconds black and white"
                 # put the look on every clip — a time range names the clips it covers
@@ -126,7 +132,17 @@ def _satisfies_any(ctx: _Ctx, alts: list[set[str]], ok: Callable[[ClipDelta, Cli
 
 
 def _clause_is_timed(r: ClauseRead) -> bool:
-    return bool(M.time_refs(r.t))
+    return bool(M.time_refs(r.t)) or r.ui_span is not None
+
+
+def _span_overlap_ids(ctx: _Ctx, spans: list[tuple[float, float]]) -> set[str]:
+    out: set[str] = set()
+    for a, b in spans:
+        for c in ctx.v1:
+            s0, e0 = c.start, c.start + c.effective_duration
+            if s0 < b - 1e-3 and e0 > a + 1e-3:
+                out.add(c.id)
+    return out
 
 
 def _rule_speed(ctx: _Ctx) -> list[Violation]:
@@ -174,6 +190,10 @@ def _rule_speed(ctx: _Ctx) -> list[Violation]:
 
         def ok(dl: ClipDelta, p: Clip) -> bool:
             b, a = float(dl.before.speed_factor), float(p.speed_factor)
+            if sa.factor is not None and sa.scale:
+                # run 4: "twice as fast" / "half speed" multiply the clip's OWN
+                # speed (within the planner's 0.25–4x bounds)
+                return abs(a - min(4.0, max(0.25, b * sa.factor))) <= TOL_SPEED
             if sa.factor is not None:
                 return abs(a - sa.factor) <= TOL_SPEED
             # no amount: a step from the clip's own speed, never a leap past
@@ -384,7 +404,14 @@ def _rule_level(ctx: _Ctx) -> list[Violation]:
                 # "volume to 0%" (−60 dB) is the quietest a clip goes (−40 dB) or a mute
                 return abs(a - la.db) <= TOL_DB or (la.db < -40.0 and (a <= -40.0 + 1e-6 or bool(p.audio.mute)))
             if la.delta_db is not None:
-                return abs(a - (b + la.delta_db)) <= TOL_DB
+                # the planner's level bounds: "volume to 0%" (−60 dB) lands on
+                # the quietest a clip goes (−40 dB) or a mute
+                want = b + la.delta_db
+                if want <= -40.0 + 1e-6:
+                    return a <= -40.0 + TOL_DB or bool(p.audio.mute)
+                if want >= 6.0 - 1e-6:
+                    return a >= 6.0 - TOL_DB
+                return abs(a - want) <= TOL_DB
             return a > b + 1e-6 if up else a < b - 1e-6
         if "vo" in media or (ctx.after.get_track("vo") and ctx.after.get_track("vo").clips and "voice" in media
                              and "vo:change" in ctx.d.categories):
@@ -461,6 +488,29 @@ def _rule_look(ctx: _Ctx) -> list[Violation]:
                                                           "got one"))
             continue
         lut = next((name for pat, name in _LOOK_LUT if re.search(pat, t)), None)
+        strength = M.direction(t, "look")
+        if strength in ("up", "down") and not re.search(r"\b(?:apply|add|put|give|use|slap|throw)\b", t):
+            # run 4: "make the warm look stronger / weaker" — the look the
+            # clips ALREADY carry moves that way, on those clips; a clip that
+            # GAINS a look, or one whose look went the other way, is wrong
+            for dl in ctx.d.clips:
+                for p in dl.pieces:
+                    gained = set(lut_names(p)) - set(lut_names(dl.before))
+                    if gained and (lut is None or lut in gained):
+                        out.append(Violation("unasked", r.text, f"it asked to change the strength of a look, but "
+                                                                f"{_msg_clip(ctx, dl.id)} got a new one"))
+                        break
+                    for name in set(lut_names(p)) & set(lut_names(dl.before)):
+                        if lut is not None and name != lut:
+                            continue
+                        b, a = lut_intensity(dl.before, name), lut_intensity(p, name)
+                        if (strength == "up" and a < b - 1e-6) or (strength == "down" and a > b + 1e-6):
+                            out.append(Violation("direction", r.text, f"it asked for {'stronger' if strength == 'up' else 'weaker'}"
+                                                 f", but the look on {_msg_clip(ctx, dl.id)} went from {b:.0%} to {a:.0%}"))
+                            break
+                if out:
+                    break
+            continue
         if lut is None or _clause_is_timed(r) or set(r.scope.media) & {"captions", "text", "music", "overlay"}:
             continue
         alts = ctx.targets(r)
@@ -662,6 +712,23 @@ def _rule_structure(ctx: _Ctx) -> list[Violation]:
             continue
         times = [x for x in M.time_refs(t) if x.kind != "at"]
         keep = M.keeps_only(t)
+        if r.ui_span is not None and not times:
+            # run 4: "delete everything after the playhead" / "keep from here
+            # to the end" — the span the playhead / marker names, exactly
+            a, b = r.ui_span
+            got = _timeline_to_source(ctx.before, a, b)
+            if got is None:
+                exact = False
+                continue
+            if keep:
+                from .contract_diff import _merge
+                want = {k: _merge(v) for k, v in got.items()}
+                if not _cov_equal(after_cov, want):
+                    out.append(Violation("partial", r.text, "what is left is not what was asked to keep "
+                                         f"({_fmt_cov(want)} expected, {_fmt_cov(after_cov)} kept)"))
+                return out
+            expected_removals.append(got)
+            continue
         if keep:
             if r.scope.refs:
                 ids = [ctx.resolve(x) for x in r.scope.refs]
@@ -895,6 +962,13 @@ def _named_text(ctx: _Ctx, r: ClauseRead, texts: list[TextClip]) -> list[TextCli
     return texts if len(texts) == 1 else None
 
 
+def _restyle_names_text(r: ClauseRead) -> bool:
+    """The clause names WHICH text by its own words ("the SALE text"), not
+    just "the title"."""
+    return bool(re.search(r"\b(?:the|my|this|that|our)\s+(?:[\w']+\s+){1,3}?(?:title|text|heading|headline|label|super)\b",
+                          M.norm(r.text))) and bool(_TEXT_RESTYLE_RE.search(r.t) or _TEXT_RETIME_RE.search(r.t))
+
+
 def _rule_titles(ctx: _Ctx) -> list[Violation]:
     out = []
     before_t = [c for t in ctx.before.tracks if t.id != "captions" for c in t.clips if isinstance(c, TextClip)
@@ -937,7 +1011,11 @@ def _rule_titles(ctx: _Ctx) -> list[Violation]:
                                                       "which one"))
             continue
         tid = {x.id for x in targets}
-        for cid in changed_ids - tid:
+        # run 4: "make the Day One title red and the SALE text blue" — a text
+        # another clause of the same request names is that clause's business
+        named_elsewhere = {x.id for o in ctx.c.reads if o is not r and "text" in o.families
+                           for x in (_named_text(ctx, o, before_t) or []) if _restyle_names_text(o)}
+        for cid in changed_ids - tid - named_elsewhere:
             out.append(Violation("scope", r.text, "it changed a title the request did not name"))
         for x in targets:
             a = after_map.get(x.id)

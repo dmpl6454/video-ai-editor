@@ -171,6 +171,18 @@ def _x_captions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     look = it.get("_look") or {}
     if look and not it.get("_new") and not it.get("target"):
         return _x_caption_look(look, f)
+    x = _x_captions_add(it, f, ctx)
+    if look and x.steps:
+        # final sweep 4: "auto captions in yellow" laid plain white captions
+        # — the look rides on the same plan as its own step
+        style = _x_caption_look(look, f.with_(has_captions=True))
+        from dataclasses import replace as _r
+        x = _r(x, steps=x.steps + style.steps, postconditions=x.postconditions + style.postconditions,
+               notes=x.notes + style.notes)
+    return x
+
+
+def _x_captions_add(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     if (f.has_captions and not it.get("_new") and not it.get("target") and not it.get("model_upgrade")
             and not it.get("style")):
         return Expansion(notes=(CAPTIONS_KEPT_REPLY,))
@@ -558,11 +570,80 @@ _LOOK_OPTIONS: tuple[tuple[str, str], ...] = (
     ("punch.cube", "Punchy"), ("faded.cube", "Faded"), ("mono.cube", "Black and white"))
 
 
+#: run 4: one step of a look's strength ("stronger" / "weaker").
+LOOK_STRENGTH_STEP = 0.2
+
+
+def _x_look_strength(it: Intent, f: TimelineFacts, look: str, way: str) -> Expansion:
+    """"make the warm look stronger" / "tone the filter down": the strength
+    of the look the clips ALREADY carry moves by `LOOK_STRENGTH_STEP`, on
+    those clips only (it re-applied warm at 80 % to every clip — and "weaker"
+    turned it UP). A named clip narrows it; a look nowhere on the timeline
+    is a question, never a fresh apply."""
+    main = [c for c in f.clips if c.id in set(f.v1_clip_ids) and c.freeze is None]
+    ref = it.get("clip_ref")
+    if ref not in (None, "$v1_all"):
+        cid, q = CX.bind_clip(ref, f)
+        if q:
+            return Expansion(notes=(q,))
+        ids = list(f.v1_clip_ids)
+        # final sweep 4: "$v1_first" / "$v1_last" are sentinels, not ids —
+        # "the warm look on clip 1" filtered every clip out and said "no warm look"
+        cid = {"$v1_first": ids[0] if ids else cid, "$v1_last": ids[-1] if ids else cid}.get(cid, cid)
+        main = [c for c in main if c.id == cid]
+    carrying = [c for c in main if look in c.look_intensity]
+    name = look.replace(".cube", "").replace("_", " ")
+    if not carrying:
+        if ref not in (None, "$v1_all") and main:
+            return Expansion(notes=(f"{CX._label(main[0].id, f).capitalize()} has no {name} look to make "
+                                    f"{'stronger' if way == 'up' else 'weaker'} — say 'apply the {name} look to it' first.",))
+        return Expansion(notes=(f"There is no {name} look on the timeline to make {'stronger' if way == 'up' else 'weaker'} "
+                                f"— say 'apply the {name} look' first.",))
+    steps, pcs, notes = [], [], []
+    for c in carrying[:20]:
+        cur = float(c.look_intensity[look])
+        new = round(min(1.0, max(0.0, cur + (LOOK_STRENGTH_STEP if way == "up" else -LOOK_STRENGTH_STEP))), 2)
+        if abs(new - cur) < 0.005:
+            notes.append(f"{CX._label(c.id, f)}: the {name} look is already at {'full' if way == 'up' else 'zero'} strength")
+            continue
+        steps.append(step("apply_lut", STAGE_LOOK, f"{CX._label(c.id, f)}: {name} look {cur:.0%} → {new:.0%}",
+                          clip_id=c.id, src=look, intensity=new))
+        pcs.append(pc("effect_present", "the look is applied", type="lut", track="v1", all=False, clip_id=c.id))
+        notes.append(f"{CX._label(c.id, f)}: {name} look {cur:.0%} → {new:.0%}")
+    if not steps:
+        return Expansion(notes=tuple(notes))
+    return Expansion(steps=tuple(steps), postconditions=tuple(pcs), notes=tuple(notes))
+
+
 def _x_color_look(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     look = it.get("look")
     intensity = float(it.get("intensity", 0.8))
     intensity = min(1.0, max(0.0, intensity))
+    if it.get("_strength") in ("up", "down") and it.get("_range") is None and not it.get("_half"):
+        if not look:
+            carried = sorted({lk for c in f.clips if c.id in set(f.v1_clip_ids) for lk in c.looks})
+            if len(carried) == 1:
+                look = carried[0]                 # "make the look stronger": the one look there is
+            elif carried:
+                return Expansion(notes=("Which look? The clips carry " + ", ".join(x.replace(".cube", "") for x in carried)
+                                        + " — say like 'make the warm look stronger'.",))
+            else:
+                return Expansion(notes=("There is no look on the timeline to change the strength of — say like "
+                                        "'apply the warm look' first.",))
+        return _x_look_strength(it, f, look, str(it.get("_strength")))
     if (it.get("_range") is not None or it.get("_half")) and it.get("clip_ref") is None and look:
+        if it.get("_ui_anchor") is not None:
+            # "from here to the end make it black and white": split at the
+            # playhead, the look on the right half and every clip after it
+            pre, ids, q = CX.range_targets(it.get("_range"), f, "change the look of")
+            if q or not ids:
+                return Expansion(notes=(q or "That range covers no clip — which clip should get the look?",))
+            return Expansion(
+                steps=tuple(pre) + tuple(step("apply_lut", STAGE_LOOK, f"apply the {look.replace('.cube', '')} look to "
+                                              f"{CX._label(cid, f)}", clip_id=cid, src=look, intensity=intensity)
+                                         for cid in ids),
+                postconditions=tuple(pc("effect_present", "the look is applied", type="lut", track="v1", all=False,
+                                        clip_id=cid) for cid in ids))
         ids, q = _range_clips_whole(it, f, "change the look of")
         if q or not ids:
             return Expansion(notes=(q or "That range covers no whole clip — which clip should get the look?",))
@@ -571,6 +652,10 @@ def _x_color_look(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                              f"{CX._label(cid, f)}", clip_id=cid, src=look, intensity=intensity) for cid in ids),
             postconditions=tuple(pc("effect_present", "the look is applied", type="lut", track="v1", all=False,
                                     clip_id=cid) for cid in ids))
+    if it.get("clip_ref") is None and (nq := CX.named_clip_question(it.clause or "", f)):
+        # final sweep 4: "make the garage shot black and white" with no such
+        # footage asked nothing and greyed every clip
+        return Expansion(notes=(nq,))
     clip, q = CX.bind_clip(it.get("clip_ref") or "$v1_all", f)
     if q:
         return Expansion(notes=(q,))
@@ -658,22 +743,34 @@ def _range_clips_whole(it: Intent, f: TimelineFacts, verb: str) -> tuple[list[st
 
 #: "so it's 9 seconds", "so it lasts 16 seconds", "to fit 9 seconds": a
 #: target LENGTH for the whole video, not an amount of speed.
-_TARGET_LEN_RE = re.compile(r"\bso\s+(?:that\s+)?(?:it|the video|the whole thing)(?:'s|\s+is|\s+lasts|\s+runs|\s+ends up)"
-                            r"|\b(?:to\s+fit|to\s+last|lasts?)\s+(?:in\s+)?\d")
+_TARGET_LEN_RE = re.compile(r"\bso\s+(?:that\s+)?(?:it|the video|the whole thing|the clip)(?:'s|\s+is|\s+lasts|\s+runs|\s+ends up)"
+                            r"|\b(?:to\s+fit|to\s+last|lasts?)\s+(?:in\s+)?\d"
+                            # final sweep 4: "speed clip 1 up until it's 2 seconds long"
+                            r"|\buntil\s+(?:it'?s|it\s+is|the\s+clip\s+is|the\s+video\s+is)\s+\d")
+_TARGET_LEN_CLIP_RE = re.compile(r"\bso\s+(?:that\s+)?(?:it|the\s+clip)(?:'s|\s+is|\s+lasts|\s+runs|\s+ends\s+up)\s+\d"
+                                 r"|\buntil\s+(?:it'?s|it\s+is|the\s+clip\s+is)\s+\d|\bto\s+(?:fit|last)\s+(?:in\s+)?\d")
 _EXPLICIT_FACTOR_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:x|×|times|%|percent)\b|\b(?:double|twice|half|triple)\b")
 
 
 def _speed_for_length(it: Intent, f: TimelineFacts, clips: list[str]) -> tuple[Intent, str | None]:
     """Final sweep 3: "speed up the whole thing so it's 9 seconds" played at
     1.25x (9.6 s) — the length is the ask: factor = length now / length
-    wanted. A length the direction contradicts is a question."""
+    wanted. A length the direction contradicts is a question. Final sweep 4:
+    one named clip's length too ("until it's 2 seconds long" played 1.25x)."""
     clause = (it.clause or "").lower()
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)\b", clause)
     target = it.get("duration_s") or (float(m.group(1)) if m else None)
-    if not target or clips != ["$v1_all"] or it.get("preset") or not _TARGET_LEN_RE.search(clause) \
-            or _EXPLICIT_FACTOR_RE.search(clause):
+    if not target or it.get("preset") or not _TARGET_LEN_RE.search(clause) or _EXPLICIT_FACTOR_RE.search(clause):
         return it, None
-    vend = float(f.video_end or f.duration or 0.0)
+    if clips == ["$v1_all"]:
+        vend = float(f.video_end or f.duration or 0.0)
+    elif len(clips) == 1 and it.get("_range") is None and not it.get("_half") and _TARGET_LEN_CLIP_RE.search(clause):
+        # one named clip's length ("slow down the last 3 seconds" is a RANGE,
+        # never a 3 s target for the last clip)
+        fact = NX._concrete_clip(clips[0], f)[0]
+        vend = float(fact.duration) if fact is not None else 0.0
+    else:
+        return it, None
     if vend <= 0:
         return it, None
     x = round(vend / float(target), 3)
@@ -719,6 +816,23 @@ def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         cur = NX._concrete_clip(clips[0], f)[0]
         if cur is not None and cur.curve is None and abs(float(cur.speed) - 1.0) > 1e-6:
             factor = round(float(cur.speed) * float(factor), 3)
+    if it.get("_scale") and not pre and clips:
+        # run 4: "twice as fast", "half speed", "3 times faster" MULTIPLY each
+        # clip's own speed (a 2x clip made "twice as fast" was set to 2x again
+        # and reported done; "half speed" took it to 0.5x)
+        main = [c for c in f.clips if c.id in set(f.v1_clip_ids) and c.freeze is None]
+        named = main if clips == ["$v1_all"] else [c for c in main if c.id in {NX._concrete_clip(x, f)[0].id
+                                                                              for x in clips
+                                                                              if NX._concrete_clip(x, f)[0] is not None}]
+        if named and all(c.curve is None for c in named) and any(abs(float(c.speed) - 1.0) > 1e-6 for c in named):
+            per = [(c.id, round(min(4.0, max(0.25, float(c.speed) * float(factor))), 3)) for c in named[:20]]
+            same = len({x for _c, x in per}) == 1
+            return Expansion(steps=tuple(step("set_speed", STAGE_CUTS, f"{CX._label(cid, f)} at {x:g}×", clip_id=cid,
+                                              factor=x) for cid, x in per),
+                             postconditions=tuple(pc("speed_equals", "the speed matches", clip_id=cid, factor=x)
+                                                  for cid, x in per),
+                             notes=((f"{'every clip' if clips == ['$v1_all'] else CX._label(per[0][0], f)} "
+                                     f"×{float(factor):g} from its own speed" + (f" → {per[0][1]:g}×" if same else ""),)))
     if it.get("_step") and not pre and clips == ["$v1_all"]:
         # final sweep 2 r2: "a bit slower" with clip 2 at 2x set EVERY clip to
         # 0.8x (2x → 0.8x) — each clip steps from its own speed
@@ -754,6 +868,13 @@ def _moment(it: Intent, f: TimelineFacts) -> float | None:
     """The moment a freeze or a split is at: the one the prompt names, else
     the playhead."""
     at = it.get("at")
+    if at is None and it.get("_clip_edge") and it.get("_clip_ref"):
+        # final sweep 4: "freeze the first / last frame of clip 2" — THAT
+        # clip's edge (it froze 0 s, clip 1's frame)
+        cid, _q = CX.bind_clip(it.get("_clip_ref"), f)
+        span = CX._span_of(cid, f) if cid else None
+        if span is not None:
+            at = span[0] if it.get("_clip_edge") == "start" else max(span[0], span[1] - 1.0 / max(1, f.fps))
     if at is None and it.get("_at_end"):
         # "freeze the last frame" / "freeze at the end": the final frame.
         at = max(0.0, f.duration - 1.0 / max(1, f.fps))
@@ -792,6 +913,16 @@ def _split_step(at: float) -> Expansion:
 
 
 def _x_split(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    if it.get("_every") and it.get("_half"):
+        # final sweep 4: "split every clip in half" — one split per main-track
+        # clip at its midpoint (it split the selected clip once)
+        spans = CX.v1_spans(f) or []
+        if not spans:
+            return Expansion(notes=("There is no clip on the main track to split.",))
+        pts = [round((a + b) / 2, 3) for _cid, a, b in spans if b - a > 0.2][:24]
+        return Expansion(steps=tuple(step("split_at", STAGE_CUTS, f"split at {t:g}s", track="v1", time=t) for t in pts),
+                         postconditions=(pc("tool_ok", "the splits were made", tool="split_at"),),
+                         notes=(f"split every clip in half ({len(pts)} splits)",))
     if it.get("clip_ref") is not None or it.get("_half"):
         return _split_named_clip(it, f)
     at = _moment(it, f)
@@ -1031,7 +1162,7 @@ LOWER_THIRD_S = 4.0
 TITLE_S = 3.0
 
 
-_HERE_RE = re.compile(r"\bhere\b|\b(?:at|under|where)\s+(?:the\s+)?(?:playhead|cursor)(?:\s+is)?\b")
+_HERE_RE = re.compile(r"\bhere\b|\b(?:at|under|where|from)\s+(?:the\s+)?(?:playhead|cursor|scrubber)(?:\s+is)?\b")
 
 
 def _unquoted(text: str) -> str:
@@ -1109,46 +1240,38 @@ def _named_v1_clip(place: str, f: TimelineFacts) -> tuple[float, float] | None:
 
 def clip_by_name(text: str, f: TimelineFacts) -> str | None:
     """The id of the ONE main-track clip a noun phrase names by its media or
-    shot name — "the pour shot", "the r_pour clip" (final sweep 3 r2); None
-    when no clip or several clips match."""
-    t = (text or "").lower()
-    words = re.findall(r"\bthe\s+([a-z0-9][\w.-]{1,40})\s+(?:shot|clip|video|footage|scene)\b", t)
-    if not words:
-        return None
-    v1 = [c for c in f.clips if c.track == "v1" and getattr(c, "name", "")]
-    for w in words:
-        w = w.rsplit(".", 1)[0]
-        hits = [c for c in v1 if _name_matches(w, str(c.name))]
-        if len(hits) == 1:
-            return hits[0].id
-    return None
+    shot name — "the pour shot", "the kitchen before shot", "re_kitchen_before"
+    (final sweep 3 r2, final sweep 4: `clip_expanders.clip_by_name`)."""
+    return CX.clip_by_name(text, f)
 
 
-_NAMED_CLIP_RE = re.compile(r"\bthe\s+([a-z0-9][\w.-]{1,40})\s+(shot|clip|video|footage|scene)\b", re.I)
+#: hh:mm:ss or hh:mm:ss:ff (SMPTE) — the frames need the project's fps.
+_TIMECODE_RE = re.compile(r"(?<![\w:.])(\d{1,2}):(\d{2}):(\d{2})(?::(\d{2}))?(?![\w:.])")
+
+
+def timecodes_to_seconds(prompt: str, fps: int | float | None) -> str:
+    """"00:00:07:15" → "7.5s" at 30 fps, "00:01:02" → "62s" (final sweep 4:
+    the split / cut readers knew mm:ss only, so a timecode asked "which
+    part?" or "where should I split?")."""
+    rate = float(fps or 30) or 30.0
+
+    def _sub(m: re.Match) -> str:
+        h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        ff = int(m.group(4)) if m.group(4) is not None else 0
+        secs = h * 3600 + mi * 60 + s + ff / rate
+        return f"{round(secs, 3):g}s"
+    return _TIMECODE_RE.sub(_sub, prompt or "")
 
 
 def clip_names_to_numbers(prompt: str, facts: TimelineFacts) -> str:
-    """"slow down the pour shot" → "slow down clip 2" when exactly ONE
-    main-track clip's media is named that (final sweep 3 r2: no rule read a
-    clip by its name, so "the pour shot" widened to EVERY clip). Quoted words
-    are left alone; a word that names no clip, or several, is left as it was."""
-    v1 = sorted((c for c in facts.clips if c.track == "v1"), key=lambda c: c.start)
-    if len(v1) < 2:
-        return prompt
-    number = {c.id: i + 1 for i, c in enumerate(v1)}
-    parts = re.split(r"([\"“”'‘’][^\"“”'‘’]{1,200}[\"“”'‘’])", prompt)
-
-    def _sub(m: re.Match) -> str:
-        cid = clip_by_name(m.group(0), facts)
-        return f"clip {number[cid]}" if cid in number else m.group(0)
-    return "".join(p if i % 2 else _NAMED_CLIP_RE.sub(_sub, p) for i, p in enumerate(parts))
-
-
-def _name_matches(word: str, name: str) -> bool:
-    stem = Path(name).stem.lower()
-    stem = re.sub(r"\.normali[sz]ed$", "", stem)
-    parts = [p for p in re.split(r"[^a-z0-9]+", stem) if p]
-    return word == stem or word in parts
+    """"slow down the pour shot" → "slow down clip 2", "the before shots" →
+    "clips 2 and 4" (final sweep 3 r2 / final sweep 4: no rule read a clip
+    by its name, so a named shot widened to EVERY clip). Quoted words are
+    left alone; a name that matches nothing is left as it was, so the
+    expander asks instead of widening (`clip_expanders.names_to_numbers`).
+    A timecode becomes seconds at the project's fps (the same pre-pass the
+    contract reads)."""
+    return timecodes_to_seconds(CX.names_to_numbers(prompt, facts), facts.fps)
 
 
 def _x_lower_third(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -1204,6 +1327,8 @@ def _x_title(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                                 "handle": it.get("handle") or (rest.strip() or None)})
     if it.get("name") or it.get("handle") or it.get("_lower_third"):
         return _x_lower_third(it, f, ctx)
+    if it.get("_countdown"):
+        return _x_countdown(it, f)
     start, end = _title_span(it, f, TITLE_S)
     if not text:
         # `$arg:text` binds the check to the answer on resume, and ties the
@@ -1229,10 +1354,68 @@ def _x_title(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     if look.get("upper") is not None:
         args["upper"] = bool(look["upper"])
     _place_new_title(args, look, f)
+    if _texts_overlapping(f, start, end) and _named_v1_clip(_unquoted(it.clause or ""), f) is not None:
+        # final sweep 4: a second title ON A CLIP that already has one was
+        # REPLACING it (add_text's overlap rule), and the safety net refused
+        # the plan — a stacked title gets its own lane, as the Text panel's.
+        # A title placed by time alone still replaces the one at that spot
+        # (and says so), as before.
+        args["allow_stack"] = True
     return Expansion(
         steps=(step("add_text", STAGE_TEXT, "title text overlay", **args),),
         postconditions=(pc("text_present", "the text is on screen", contains=text[:120]),
                         pc("overlays_inside_safe_zone", "text stays clear of the platform UI")))
+
+
+def _texts_overlapping(f: TimelineFacts, start: float, end: float) -> bool:
+    return any(t.role not in ("caption", "watermark") and float(t.start) < end - 1e-6 and float(t.end) > start + 1e-6
+               for t in f.texts)
+
+
+COUNTDOWN_CARD_S = 1.0
+
+
+def _x_countdown(it: Intent, f: TimelineFacts) -> Expansion:
+    """A 3 · 2 · 1 countdown (final sweep 4: "add a countdown" got the
+    generic Trim / Speed / Title menu): three one-second cards "3", "2", "1"
+    on their own lane, starting at the named clip's start, a named time, or
+    the playhead — so it counts down instead of showing one static card."""
+    from .presets import text_styles
+    at = it.get("at")
+    place = _unquoted(it.clause or "")
+    on_clip = _named_v1_clip(place, f) if at is None else None
+    if on_clip is not None:
+        start = float(on_clip[0])
+    elif at is not None and at not in ("start", "end"):
+        start = max(0.0, float(at))
+    elif at == "start":
+        start = 0.0
+    else:
+        start = float(f.playhead) if f.playhead is not None and at != "end" else 0.0
+    vend = float(f.video_end or f.duration or 0.0)
+    if at == "end" and vend > 0:
+        start = max(0.0, vend - 3 * COUNTDOWN_CARD_S)
+    if vend > 0 and start >= vend - 0.05:
+        return Expansion(notes=(f"Where should the countdown go? {start:g}s is at the end of the {vend:.1f}s video — "
+                                "say like 'add a countdown at 0:10' or 'on clip 2'.",))
+    preset = (text_styles() or {}).get("bold_pop")
+    steps_, pcs = [], []
+    for i, word in enumerate(("3", "2", "1")):
+        s = round(start + i * COUNTDOWN_CARD_S, 3)
+        e = round(s + COUNTDOWN_CARD_S, 3)
+        if vend > 0:
+            e = min(e, round(vend, 3))
+        if e - s < 0.1:
+            break
+        if preset is not None:
+            args = preset.add_text_args(text=word, start=s, end=e, canvas_w=f.canvas_w, canvas_h=f.canvas_h, aspect=f.aspect)
+        else:
+            args = {"text": word, "start": s, "end": e, "role": "super"}
+        args["allow_stack"] = True
+        steps_.append(step("add_text", STAGE_TEXT, f"countdown card {word}", **args))
+        pcs.append(pc("text_present", f"the {word} card is on screen", contains=word, start_geq=round(s - 0.01, 3)))
+    return Expansion(steps=tuple(steps_), postconditions=tuple(pcs),
+                     notes=(f"3 · 2 · 1 countdown at {start:g}–{start + len(steps_) * COUNTDOWN_CARD_S:g}s",))
 
 
 def _place_new_title(args: dict[str, Any], look: dict[str, Any], f: TimelineFacts) -> None:
@@ -1806,6 +1989,10 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     delta = float(it.get("_delta_db") or VOLUME_STEP_DB)
     if it.get("clip_ref") is not None and target != "music":
         return _clip_volume(it, f, change, db, delta)
+    if target == "vo" and it.get("_vo_soft") and not any(c.track == "vo" for c in f.clips):
+        # final sweep 4: "the narration" on a project with no voice-over lane
+        # is the clips' own speech, not a missing lane to ask about
+        target = "voice"
     if target == "vo":
         vo = [c for c in f.clips if c.track == "vo"]
         track = "vo"
@@ -1846,7 +2033,7 @@ def _x_volume(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         level = current + (delta if change == "up" else -delta)
     else:
         level = float(db)
-    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
+    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 2)
     if db is not None and target == "music" and f.music_gain_db is not None and abs(level - current) < 0.05:
         # "turn the music down to 20%" on a bed already at -14 dB (20 % IS
         # -14 dB): say so instead of a step that changes nothing and verifies.
@@ -1887,7 +2074,7 @@ def _clip_volume(it: Intent, f: TimelineFacts, change: Any, db: Any, delta: floa
     else:
         current = fact.gain_db if fact is not None else 0.0
     level = float(db) if db is not None else current + (delta if change == "up" else -delta)
-    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 1)
+    level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, level)), 2)
     who = "every clip's" if cid == "v1" else ("the clip's" if fact is None else f"{CX._label(cid, f)}'s")
     if abs(level - current) < 0.05:
         edge = "loudest" if level >= VOLUME_MAX_DB else ("quietest" if level <= VOLUME_MIN_DB else "")
@@ -1910,7 +2097,7 @@ def _clip_volumes_relative(f: TimelineFacts, change: Any, delta: float, *, ids: 
     step_db = delta if change == "up" else -delta
     steps, pcs = [], []
     for c in clips[:20]:
-        level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, c.gain_db + step_db)), 1)
+        level = round(min(VOLUME_MAX_DB, max(VOLUME_MIN_DB, c.gain_db + step_db)), 2)
         steps.append(step("set_volume", STAGE_AUDIO, f"{CX._label(c.id, f)}: {c.gain_db:g} → {level:g} dB",
                           target=c.id, db=level))
         pcs.append(pc("volume_db", f"{CX._label(c.id, f)}'s level is set", target=c.id, db=level))

@@ -25,6 +25,9 @@ const SPEC_COMMAND: Record<string, string> = {
 }
 const NEW_IDS = ['toggleToolPanel', 'showInspector', 'showChat', 'openShortcuts', 'exportVideo', 'addText',
   'cycleRegion', 'cycleRegionBack']
+// Final sweep 4: ⌘, (Open Settings) is global like ⌘E — a ⌘ chord types
+// nothing, and Settings holds the Prompt bar's "Ask before applying" switch.
+const GLOBAL_IDS = [...NEW_IDS, 'openSettings']
 const run = (id: string) => COMMAND_BY_ID[id].run({} as Store)
 
 describe('the Panels commands come from the rail\'s own list', () => {
@@ -77,12 +80,12 @@ describe('the Panels commands come from the rail\'s own list', () => {
   })
 
   it('keeps every pre-existing command on the default scope (⌘Z stays out of AI forms)', () => {
-    const scoped = new Set([...RAIL_ITEMS.map((r) => r.command), ...NEW_IDS])
+    const scoped = new Set([...RAIL_ITEMS.map((r) => r.command), ...GLOBAL_IDS])
     for (const c of COMMANDS) {
       if (scoped.has(c.id)) continue
       expect(c.scope ?? 'default', c.id).toBe('default')
     }
-    for (const id of NEW_IDS) {
+    for (const id of GLOBAL_IDS) {
       expect(COMMAND_BY_ID[id].scope, id).toBe(id.startsWith('cycleRegion') ? 'anywhere' : 'global')
     }
   })

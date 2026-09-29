@@ -64,7 +64,9 @@ def test_speed_reading(phrase, direction, factor, ambiguous):
     ("turn the music up 3 db", "up", 3.0, None),
     ("set clip 3 volume to -10 db", None, None, -10.0),           # absolute
     ("music -6db", None, None, -6.0),
-    ("music volume 50%", None, None, -6.0),
+    ("music volume 50%", "down", -6.02, None),                    # run 4: a percentage OF THE CURRENT level
+    ("music volume 200%", "up", 6.02, None),
+    ("set the music to 50%", "down", -6.02, None),
     ("the music's way too loud", "down", None, None),
     ("make the music not so loud", "down", None, None),
     ("music thoda kam karo", "down", None, None),                 # Hinglish

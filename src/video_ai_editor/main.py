@@ -2950,15 +2950,25 @@ async def load_project_endpoint(request: Request, file: UploadFile = File(...)):
     WORKDIR.mkdir(parents=True, exist_ok=True)
     _assert_room_for(request, WORKDIR)
     await _stream_upload_to(file, tmp)
+    # Final sweep 4: the probe + inflate + media move + state rewrite is plain
+    # CPU/IO — ~2 s per GB of project — and it used to run as a synchronous
+    # call inside this `async def`, so the single uvicorn loop served nothing
+    # (no SSE frame, no preview span, no thumbnail, no /livez) until the
+    # project was open, and the desktop's fetches (no timeout) simply hung.
+    # Same shape and same fix as /upload (QA-007). An HTTPException raised in
+    # the threadpool propagates unchanged, so 415/422/507 keep their status.
+    from starlette.concurrency import run_in_threadpool
     try:
-        sid = _open_project_archive(tmp, name)
+        sid = await run_in_threadpool(_open_project_archive, tmp, name)
     finally:
         # Every exit — 200, 415, 422 — leaves no `_import_*` behind in WORKDIR.
         tmp.unlink(missing_ok=True)
     # QA-099: a second open of the same .vae (or one saved from a project
     # still here) gets "<name> (opened <date>)", not an identical picker row.
     now = time.localtime()
-    name_reopened_copy(sid, f"{time.strftime('%b', now)} {now.tm_mday}, {time.strftime('%H:%M', now)}")
+    await run_in_threadpool(
+        name_reopened_copy, sid,
+        f"{time.strftime('%b', now)} {now.tm_mday}, {time.strftime('%H:%M', now)}")
     return {"id": sid}
 
 

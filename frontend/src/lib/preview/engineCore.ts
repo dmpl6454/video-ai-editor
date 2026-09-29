@@ -24,7 +24,7 @@ import { AudioSync } from './clock/audioSync'
 import { ProgramFeed } from './engineFeed'
 import { layoutCanvas, mountEngineDom } from './engineDom'
 import { NullAudioSink, engineUnsupportedReason, type EngineOptions } from './engineOptions'
-import { ElementSeeker, PlayingSeekGate, RunStartGate, SoughtFrame } from './engineSeek'
+import { ElementSeeker, PlayingSeekGate, RunSeek, RunStartGate, SoughtFrame } from './engineSeek'
 import { drawProgramFrame, preloadCanvasBackgrounds, uploadProgramFrame } from './engineDraw'
 import { canvasBgDraw } from './render/canvasBg'
 import { canvasBgImageState } from './render/canvasBgImages'
@@ -83,6 +83,23 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   private readonly external: ExternalPauses
   private readonly playingSeek = new PlayingSeekGate()
   private readonly runStart = new RunStartGate()
+  /** The seek that starts a run, issued only once its frame is buffered
+   *  (engineSeek.ts RunSeek): a seek into a hole completes at the end of
+   *  whatever laneA appends next (measured, final QA r4). */
+  private readonly runSeek = new RunSeek((k, t) => {
+    const video = this.video
+    if (!video) return
+    this.seeker.assign(video, t)
+    this.elementFrame = k
+    // A deferred run seek keeps the element PARKED until here (final sweep 4):
+    // played at once from where it stood — the last frame, 16 ms before the
+    // media duration, after the end — WebKit ran it off the end, fired
+    // 'ended' and paused it; the seek then landed on a paused element and
+    // the pause was taken for an external one ('element'). It plays now,
+    // from the run's own frame (once the run really started: not while
+    // play() still waits for the sound under its start, soundHold).
+    if (this._playing && !this.soundHold.active && video.paused) this.playElement(video)
+  })
   private readonly stall = new StallWatch()
   private readonly sought = new SoughtFrame()
   private readonly degraded: DegradedTier
@@ -236,6 +253,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
       settled: () => !this._playing && this.presented === this.target && !this.pendingDraw(),
       /** currentTime assignments vs 'seeking' events (equal when no seek is pending). */
       seekCounters: () => ({ issued: this.seeker.issued, seen: this.seeker.seen }),
+      /** Run seeks that waited for their frame's append (RunSeek). */
+      runSeekStats: this.runSeek.stats,
     }
   }
 
@@ -297,6 +316,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     if (!this.video || this.mode === 'server') return
     this.lane?.destroy()
     this.elementFrame = -1
+    this.runSeek.cancel()
     this.compositor?.invalidateTexture()
     const lane = new LaneA({
       rate: this.R, media: browserMedia(this.video),
@@ -590,6 +610,16 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     // An overwrite of the frame the element shows: WebKit hands back black
     // for it until the re-seek completes (the upload waits for 'seeked').
     if (this.elementFrame >= a && this.elementFrame < b) this.elementFrame = -1
+    // the run waiting for its start frame: seek the element now that it is
+    // here (outside laneA's append loop — an assignment in there would sit
+    // between an append and WebKit's re-enqueue)
+    if (this._playing && this.runSeek.pending && this.runSeek.k >= a && this.runSeek.k < b) {
+      const lane = this.lane
+      const k = this.runSeek.k
+      queueMicrotask(() => {
+        if (this._playing && this.lane === lane && lane && this.runSeek.k === k) this.runSeek.onAppended(a, b, lane)
+      })
+    }
     if (!this._playing && this.target >= a && this.target < b) {
       if (this.compositor?.textureContent !== this.want[this.target] || this.presented !== this.target) this.showPaused()
     }
@@ -611,10 +641,13 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     // the element must stand where the canvas does
     lane.hold(false)
     const elementAt = this.seeker.inFlight >= 0 ? -1 : this.elementFrame
+    this.runSeek.cancel()
     if (elementAt !== k) {
       this.seeker.finish()
-      this.seeker.assign(video, lane.seekTime(k))
-      this.elementFrame = k
+      // now if frame k is buffered; else once laneA has appended it (a seek
+      // into a hole completes at the end of the next append, RunSeek)
+      this.elementFrame = -1
+      this.runSeek.begin(k, lane)
     }
     this._playing = true
     this.buffering = false
@@ -635,6 +668,18 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   /** play()'s second half: laneA and the sound start together from `k`. */
   private runPlayback(video: HTMLVideoElement, lane: LaneA, k: number): void {
     const playCalledAt = performance.now()
+    // the element plays now when it stands on (or is seeking to) the run's
+    // frame; with its run seek deferred it stays parked and plays the moment
+    // that seek is issued (RunSeek's assign), never from the old position
+    if (!this.runSeek.pending) this.playElement(video)
+    this.audio.play(playCalledAt, lane.seekTime(k))
+    this.loop.start(video)
+    this.stall.arm(playCalledAt)
+    this.emitStatus()
+  }
+
+  /** `video.play()` for the run: a refusal ends the run as a pause. */
+  private playElement(video: HTMLVideoElement): void {
     const p = video.play()
     if (p && typeof p.catch === 'function') {
       p.catch((e: unknown) => {
@@ -646,10 +691,6 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
         }
       })
     }
-    this.audio.play(playCalledAt, lane.seekTime(k))
-    this.loop.start(video)
-    this.stall.arm(playCalledAt)
-    this.emitStatus()
   }
 
   pause(): void {
@@ -661,6 +702,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   private stopPlayback(why: string): void {
     void why
     this.soundHold.cancel()
+    this.runSeek.cancel()
     const video = this.video
     this._playing = false
     this.buffering = false
@@ -706,7 +748,15 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
       this.runStart.begin(k, this.presented)
       this.stall.arm(performance.now())
       this.lane?.setPlayhead(k, true)
-      if (this.video && this.lane) this.seeker.assign(this.video, this.lane.seekTime(k))
+      // the element seeks now if k is buffered, else once it is (RunSeek);
+      // until then it is parked — its old position is not wanted, and run
+      // on from near the end it would reach the media duration ('ended')
+      this.runSeek.cancel()
+      this.elementFrame = -1
+      if (this.video && this.lane && !this.runSeek.begin(k, this.lane) && !this.video.paused) {
+        this.external.expectOwnPause()
+        this.video.pause()
+      }
       this.sources.prefetch()
       return
     }
@@ -756,7 +806,8 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     // (a run not yet presented at its start: the window belongs THERE)
     this.lane?.setPlayhead(this.runStart.pending ? this.target : this.presented, true)
     this.sources.prefetch()
-    if (this.video) this.external.watch(this.video)
+    // (an element parked for its deferred run seek is paused by US)
+    if (this.video && !this.runSeek.pending) this.external.watch(this.video)
     if (this.stall.check(this.presented, this.buffering, performance.now(), this.video?.currentTime)) this.restartStalled()
   }
 
@@ -813,6 +864,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
     this.destroyed = true
     this._playing = false
     this.soundHold.cancel()
+    this.runSeek.cancel()
     this.loop.stop()
     this.external.cancelResume()
     this.seeker.clearTimer()

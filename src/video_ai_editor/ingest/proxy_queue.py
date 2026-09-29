@@ -19,6 +19,19 @@ Spec: docs/design/INSTANT_PREVIEW_SPEC.md §4.4, §5.1 "Scheduling", §11.4.
     re-queued; it resumes from its first missing span afterwards, so nothing
     already written is redone. On-demand spans still run: they are what the
     user is looking at.
+  * RETRIED. An ffmpeg that leaves before its frames are out — killed under
+    memory pressure, the pipe closed in the middle of a box — is not a
+    failure yet: ``proxy.encode_spans`` starts it again from the first span
+    it did not hand out, ``proxy.ENCODE_RETRIES`` times with backoff, and
+    only then marks the proxy failed with the exit code and ffmpeg's last
+    words (the route's 410 message). A cancel or an export pause is never
+    retried (Final QA r4: the early EOF escaped the job as ``EOFError`` and
+    the span was not built until something asked for it again). Any other
+    exception out of a job — EIO from the span writer, ``FileNotFoundError``
+    from Popen when ffmpeg is gone — marks the proxy failed as well (final
+    sweep 4: the worker only logged it, the index stayed pending and every
+    poll of the span route queued the same doomed encode); ENOSPC alone is
+    a hold, not a failure.
   * CANCELLABLE. Jobs of one source share a ``render.cancel.PROXIES`` scope
     keyed by the source's realpath; a new key for the same path (the file
     was rewritten) supersedes the old build. ``cancel(src)`` stops it.
@@ -348,7 +361,19 @@ class ProxyManager:
                     self.stats["disk_full"] += 1
                     _log.warning("proxy job failed: disk full (%s)", job.key)
                 else:
+                    # failed for good, like a ProxyError: the volume under
+                    # WORKDIR gone (EIO from the span writer), the ffmpeg
+                    # binary gone (FileNotFoundError from Popen), a bug. Mark
+                    # it, so the routes answer 410 on the next poll instead of
+                    # queueing the same doomed encode on every one (final
+                    # sweep 4: the index stayed 'pending' for good).
                     _log.warning("proxy job failed", exc_info=True)
+                    self.stats["failures"] += 1
+                    try:
+                        P.mark_failed(job.key, f"{type(e).__name__}: {e}")
+                    except Exception:        # a proxy dir that cannot be written
+                        _log.warning("proxy failure of %s could not be recorded", job.key,
+                                     exc_info=True)
             finally:
                 with self._cv:
                     self._busy -= 1
@@ -419,9 +444,9 @@ class ProxyManager:
                 with self._cv:
                     self._cv.notify_all()
             for f0, f1 in self._missing_runs(info):
-                P.run_encode(info, f0, f1, on_init=lambda b: P.accept_init(info, b),
-                             on_span=self._span_writer(info),
-                             cancel=_Either(ev, self._export_event))
+                P.encode_spans(info, f0, f1, on_init=lambda b: P.accept_init(info, b),
+                               on_span=self._span_writer(info),
+                               cancel=_Either(ev, self._export_event))
             self.stats["eager_builds"] += 1
         except P.Cancelled:
             paused = self._exports > 0 and not ev.is_set()
@@ -451,8 +476,8 @@ class ProxyManager:
         try:
             f0 = P.span_range(info, todo[0])[0]
             f1 = P.span_range(info, todo[-1])[1]
-            P.run_encode(info, f0, f1, on_init=lambda b: P.accept_init(info, b),
-                         on_span=self._span_writer(info), cancel=ev)
+            P.encode_spans(info, f0, f1, on_init=lambda b: P.accept_init(info, b),
+                           on_span=self._span_writer(info), cancel=ev)
             self.stats["span_jobs"] += 1
         except P.Cancelled:
             pass

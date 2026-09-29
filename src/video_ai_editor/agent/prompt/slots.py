@@ -64,6 +64,9 @@ def normalize(text: str) -> str:
     t = _ONE_UNIT_RE.sub(r"\1 1 \2", t)
     # final sweep 3 r2: "clip2 1.5x" named no clip (no space) → every clip
     t = re.sub(r"\b(clips?|shots?|scenes?)(\d{1,2})\b", r"\1 \2", t)
+    # final sweep 4: "un-mute" / "un mute" was tokenised as "mute" (the clip
+    # stayed muted); the same for un-flip / un-reverse / un-duck
+    t = re.sub(r"\bun[- ](mute|flip|reverse|duck|zoom)", r"un\1", t)
     return _WS_RE.sub(" ", t).strip()
 
 
@@ -370,6 +373,8 @@ CLIP_REF_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(?:the )?first clip\b|\bopening clip\b|\bintro clip\b", "$v1_first"),
     (r"\b(?:the )?last clip\b|\bfinal clip\b|\bclosing clip\b|\boutro clip\b", "$v1_last"),
     (r"\bat the playhead\b|\bfrom here\b|\bright here\b|\bat the cursor\b"
+     # final sweep 4: "from the playhead", "starting at the playhead" put a title at 0 s
+     r"|\bfrom the (?:playhead|cursor|scrubber)\b|\bstarting (?:at|from) (?:here|the (?:playhead|cursor|scrubber))\b"
      # "the clip under the playhead" was every clip (Final sweep 2)
      r"|\b(?:clip|shot|one|part|bit)\s+(?:under|at|beneath|below|on|by)\s+the\s+(?:playhead|cursor|scrubber)\b"
      r"|\bthe\s+clip\s+i'?m\s+on\b|\bthe\s+clip\s+(?:where|that)\s+the\s+(?:playhead|cursor)\s+is\b", "$playhead"),
@@ -700,7 +705,7 @@ def extract(prompt: str) -> Slots:
             lufs = -lufs
 
     at_start = bool(re.search(r"\bat the (?:start|beginning|top|open(?:ing)?)\b|\bin the first\b|\bintro\b|\bopening\b", t_noq))
-    at_end = bool(re.search(r"\bat the end\b|\bat the close\b|\boutro\b|\bending\b|\bfinal seconds\b|\bto finish\b|\bclosing\b", t_noq))
+    at_end = bool(re.search(r"\bat the (?:very )?end\b|\bat the close\b|\boutro\b|\bending\b|\bfinal seconds\b|\bto finish\b|\bclosing\b", t_noq))
     smooth = bool(re.search(r"\bsmooth\b|\binterpolat\w*\b|\bbuttery\b", t_noq))
     replace_existing = bool(re.search(r"\banother\b|\breplace\b|\bdifferent\b|\bswap\b|\bchange the music\b|\bnew music\b|\bnew track\b", t_noq))
 

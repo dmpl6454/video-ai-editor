@@ -111,6 +111,11 @@ class ClipFact(BaseModel):
     gain_db: float = 0.0
     effects: list[str] = Field(default_factory=list)  # effect types, chain order
     looks: list[str] = Field(default_factory=list)    # the LUT files' names ("mono.cube"), chain order
+    #: run 4: each look's strength ("warm.cube" → 0.6) — "make the warm look
+    #: stronger" steps from it; and the clip's colour grade (brightness /
+    #: contrast / saturation) — "brighter still" steps from THAT
+    look_intensity: dict[str, float] = Field(default_factory=dict)
+    color: dict[str, float] = Field(default_factory=dict)
     src_duration: float | None = None                 # the source file's length, when probed
     flip_h: bool = False
     flip_v: bool = False
@@ -166,6 +171,9 @@ class TimelineFacts(BaseModel):
     track_ids: list[str] = Field(default_factory=list)
     selection: str | None = None
     playhead: float | None = None
+    #: run 4: the ruler's markers, (time, label) in time order — "cut from
+    #: the marker to the end", "everything before the 'intro' marker"
+    markers: list[tuple[float, str]] = Field(default_factory=list)
     has_transcript: bool = False
     #: Distinct audible speech sources (each file the main track plays, the
     #: voice-over, overlay and audio lanes — `agent/caption_sources`). Over
@@ -596,6 +604,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         track_ids=[t.id for t in edl.tracks],
         selection=str(selection) if selection else None,
         playhead=float(playhead) if isinstance(playhead, (int, float)) else None,
+        markers=sorted((round(float(m.time), 4), str(m.label or "")) for m in (getattr(edl, "markers", None) or [])),
         has_transcript=words_total > 0, transcript_pending=transcript_pending,
         speech_sources=_speech_source_count(edl),
         transcript_backend=backend, language=language, words=words_total,
@@ -677,6 +686,11 @@ def _edit_facts(store: Any, edl: Any) -> tuple[list[ClipFact], list[TextFact], l
                 effects=[e.type for e in c.effects], src_duration=probed.get(src),
                 looks=[Path(str(e.params.get("src") or e.params.get("lut_path") or "")).name
                        for e in c.effects if e.type == "lut"],
+                look_intensity={Path(str(e.params.get("src") or e.params.get("lut_path") or "")).name:
+                                float(e.params.get("intensity", 1.0) or 0.0)
+                                for e in c.effects if e.type == "lut"},
+                color={k: float(v) for e in c.effects if e.type in ("color", "color_grade")
+                       for k, v in (e.params or {}).items() if isinstance(v, (int, float))},
                 # the MIRROR the picture shows: Transform.flip_* XOR a legacy
                 # Effects-panel Flip H / V (review RE, one mirror model)
                 flip_h=bool(getattr(c.transform, "flip_h", False)) != (_fx_count(c, "hflip") % 2 == 1),

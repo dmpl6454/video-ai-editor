@@ -571,9 +571,12 @@ CASES: list[Case] = [
     Case("make it vertical for tiktok", _canvas(1080, 1920)),
     # ---- sound -------------------------------------------------------------
     Case("turn the music down", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-20.0})),
-    Case("turn the music down to 10%", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-20.0})),
-    Case("turn the music down to 20%", ASKS, question="already at -14 dB"),
-    Case("set the music volume to 30%", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-10.5})),
+    # run 4: a percentage is OF THE CURRENT level (−14 dB bed): 10 % → −20 dB
+    # from it, 20 % → −13.98, 30 % → −10.46 (they used to be levels on the
+    # dB scale, so "down to 30%" made the bed LOUDER and "to 20%" said "already")
+    Case("turn the music down to 10%", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-34.0})),
+    Case("turn the music down to 20%", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-27.98})),
+    Case("set the music volume to 30%", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-24.46})),
     Case("mute the music", lambda e, ids: _eq(music(e).muted, True)),
     Case("mute the second clip", lambda e, ids: _only(e, ids, ids["B"], lambda c: c.audio.mute)),
     Case("mute this clip", lambda e, ids: _only(e, ids, ids["B"], lambda c: c.audio.mute)),
@@ -742,7 +745,7 @@ CASES: list[Case] = [
     Case("make the music quieter by 6 dB", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-20.0})),
     Case("turn the music up by 4 dB", lambda e, ids: _eq({c.audio.gain_db for c in music(e).clips}, {-10.0})),
     Case("make my voice louder", lambda e, ids: _eq(gains(e), [6.0, 3.0, 6.0]), pre=_pre_gain_b),
-    Case("lower the volume of the last clip by 50%", lambda e, ids: _eq(gains(e), [0.0, 0.0, -6.0])),
+    Case("lower the volume of the last clip by 50%", lambda e, ids: _eq(gains(e), [0.0, 0.0, -6.02])),
     # ---- flip / mirror -----------------------------------------------------
     Case("flip the second clip", lambda e, ids: _eq(flips(e), [(False, False), (True, False), (False, False)])),
     Case("mirror this clip", lambda e, ids: _eq(flips(e), [(False, False), (True, False), (False, False)])),

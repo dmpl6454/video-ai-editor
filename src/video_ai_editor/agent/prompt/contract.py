@@ -77,7 +77,9 @@ _FAMILY_RX: tuple[tuple[str, str], ...] = (
     ("loudness", r"\blufs\b|\bloudness\b|\bnormali[sz]"),
     ("effect", r"\beffects?\b|\bvignett|\bgrain\b|\bglitch\b|\bvhs\b|\bglow\b|\brgb split\b|\bsharpen|\bblur"
                r"|\bfilters?\b|\bvintage\b"),
-    ("look", r"\blook\b|\bfilter\b|\blut\b|\bgrade\b|\bgrading\b|\btone\b|\bvibe\b|\bblack and white\b|\bb\s*and\s*w\b|\bb&w\b"
+    # final sweep 4: the plurals too ("remove all looks" was refused as
+    # "it added a colour look")
+    ("look", r"\blooks?\b|\bfilters?\b|\bluts?\b|\bgrades?\b|\bgrading\b|\btone\b|\bvibe\b|\bblack and white\b|\bb\s*and\s*w\b|\bb&w\b"
              r"|\bgr[ae]y\s*scale\b|\bmono(?:chrome)?\b|\bwarm|\bcool(?:er)?\b|\bcold\b|\bcinematic\b|\bteal\b|\bpunch|\bvivid\b"
              r"|\bfaded\b|\bfilm\b|\bvintage\b|\bretro\b|\bsepia\b|\bnoir\b|\bpop\b|\bcolou?r(?:s|ful)?\b|\bblak\b|\bmatte\b"),
     ("adjust", r"\bbright|\bdark|\bdim\b|\bcontrast\b|\bsaturat|\bvibran|\bexposure\b|\bwashed\b|\bvivid\b|\bdesaturat"),
@@ -89,12 +91,16 @@ _FAMILY_RX: tuple[tuple[str, str], ...] = (
                    r"|\bbetween\s+(?:the\s+|all\s+|every\s+|each\s+)?(?:clips|shots|every|each|all|clip\s+\d|the\s+\w+\s+(?:and|&))"
                    r"|\bat every cut\b|\bat each cut\b|\bslide transition|\bzoom transition"),
     ("captions", r"\bcaptions?\b|\bsubtitles?\b|\bsubs\b|\bcaptoins?\b|\bcc\b|\btranslat"),
-    ("text", r"\btitles?\b|\btext\b|\bheading\b|\bheadline\b|\blower[- ]?third\b|\blabel\b|\bon screen\b|\bon-screen\b"
+    ("text", r"\btitles?\b|\btext\b|\bheading\b|\bheadline\b|\blower[- ]?third\b|\blabel\b|\bon screen\b|\bon-screen\b|\bcount\s?down\b"
              # final sweep 2 r2: "SALE should show until the end" names a text by its words
              r"|\b(?:should|must|needs to|has to)\s+(?:show|stay|be on screen|stay on screen)\s+(?:until|till|to)\b"
              r"|\bsuper\b|\bname card\b|\bwords?\b|[\"“”']"),
     ("music", r"\bmusic|\bmusci\b|\bsong\b|\bsoundtrack\b|\bbgm\b|\btune\b|\bbed\b|\bbacking track\b"),
-    ("duck", r"\bduck|\bsidechain\b|\bunder (?:my|the) voice\b|\bwhen i (?:talk|speak)\b|\bwhile i (?:talk|speak)\b"),
+    # final sweep 4: ducking said in the third person too ("while the coach
+    # is talking", "whenever someone speaks", "under his voice")
+    ("duck", r"\bduck|\bsidechain\b|\bunder (?:my|the|his|her|their|our|your) (?:\w+'s )?voice\b"
+             r"|\b(?:when|while|whenever|as|during|if) (?:i|he|she|they|we|someone|anyone|somebody|people|the \w+|my \w+|our \w+) "
+             r"(?:is |are |am |'s |'re |start\w* )?(?:talk|speak|say|narrat)\w*"),
     ("cut", r"\bcut\b|\btrim|\bdelet|\bdelte\b|\bremove\b|\bchop|\blose\b|\bdrop\b|\bget rid of\b|\bshorten|\bshorter\b"
             r"|\bkeep\b|\bsilence|\bpauses?\b|\bdead air\b|\bfillers?\b|\bumm?s?\b|\buhs?\b|\bcut out\b|\bcrop out\b"
             r"|\bseconds? long\b|\bmake (?:it|the video|this) \d+(?:\.\d+)?\s*(?:s|sec|seconds?)\b|\bstrip\b|\berase\b"
@@ -154,12 +160,18 @@ _TEXT_RETEXT_RE = re.compile(r"\brename\b|\breplace\b|\breword|\bto say\b|\bto r
 _TEXT_REMOVE_RE = re.compile(r"\b(?:remove|delete|delet|get rid of|take (?:off|out|away)|clear|hide|drop|lose|kill|erase|ditch)\b")
 _TEXT_RETIME_RE = re.compile(r"\bmove\b|\blater\b|\bearlier\b|\bshow(?:s)? up\b|\bappear|\bdisappear|\buntil\b|\btill\b"
                              r"|\blasts?\b|\blonger\b|\bshorter\b|\bextend|\bshorten|\bstay|\bfrom\s+\d|\bat\s+\d|\bfor\s+\d"
-                             r"|\bstart(?:s)? at\b|\bend(?:s)? at\b|\bon screen for\b|\bseconds?\b")
+                             r"|\bstart(?:s)? at\b|\bend(?:s)? at\b|\bon screen for\b|\bseconds?\b"
+                             # final sweep 4: "the title should show for the whole video" (the
+                             # right retime was rolled back as "moved a title in time")
+                             r"|\b(?:show|shows|showing|stay|stays|last|run|remain|keep|be)\b.*\b(?:whole|entire|full)\s+"
+                             r"(?:video|time|clip|thing|length)\b|\bthroughout\b|\bthe\s+whole\s+(?:time|way)\b")
 _TEXT_RESTYLE_RE = re.compile(rf"\b(?:{_COLOURS})\b|#[0-9a-f]{{6}}|\bbigger\b|\bsmaller\b|\blarger\b|\bbiger\b|\bsize\b|\bfont\b"
                               r"|\b(?:twice|double|triple|half)\s+as\s+(?:big|large)\b|\bhalf\s+the\s+size\b"
                               r"|\bbold|\bitalic\b|\boutline|\bstroke\b|\bshadow|\bbox\b|\bbackground\b|\btop\b|\bbottom\b"
                               r"|\bmiddle\b|\bcent(?:er|re)\b|\bleft\b|\bright\b|\bposition\b|\bcaps\b|\buppercase\b"
-                              r"|\blowercase\b|\banton\b|\bbebas\b|\bmontserrat\b|\binter\b|\bcolou?r\b")
+                              r"|\blowercase\b|\banton\b|\bbebas\b|\bmontserrat\b|\binter\b|\bcolou?r\b"
+                              # run 4: the text's own In / Out animation ("fade the title in")
+                              r"|\bfade|\bfading\b|\bslide|\bsliding\b|\bpops?\b|\bpopping\b|\banimat")
 _NEG_BEFORE = r"\b(?:no|without|don'?t|dont|do not|never|skip|bina|minus|not)\s+(?:\w+\s+){0,2}"
 
 
@@ -222,6 +234,10 @@ class ClauseRead:
     families: set[str]
     scope: M.Scope
     inherited: bool = False
+    #: run 4: the timeline span a playhead- / marker-anchored range names
+    #: ("from here to the end", "before the marker"), bound when the contract
+    #: is read — None when the clause names none or the anchor is unknown
+    ui_span: tuple[float, float] | None = None
 
     @property
     def t(self) -> str:
@@ -246,13 +262,19 @@ class Contract:
     #: intents the user explicitly picked ("which did you mean?") — they
     #: license their families even when the prompt's words do not.
     picked: tuple[str, ...] = ()
+    #: run 4: the ruler's markers (time, label) and where the picture ended
+    #: BEFORE the run — what "from the marker to the end" is measured against
+    markers: tuple[tuple[float, str], ...] = ()
+    video_end: float | None = None
     reads: list[ClauseRead] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @classmethod
     def read(cls, prompt: str, *, selection: str | None = None, playhead: float | None = None,
-             picked: Iterable[str] = ()) -> "Contract":
-        c = cls(prompt=prompt, selection=selection, playhead=playhead, picked=tuple(picked))
+             picked: Iterable[str] = (), markers: Iterable[tuple[float, str]] = (),
+             video_end: float | None = None) -> "Contract":
+        c = cls(prompt=prompt, selection=selection, playhead=playhead, picked=tuple(picked),
+                markers=tuple((float(t), str(lbl)) for t, lbl in markers), video_end=video_end)
         cls_ = M.clauses(prompt)
         scopes = M.resolve_scopes(cls_)
         prev: set[str] = set()
@@ -263,10 +285,34 @@ class Contract:
             if not meaningful and prev and not re.search(r"\b(?:undo|redo)\b", text):
                 fams = set(prev)
                 inherited = True
-            c.reads.append(ClauseRead(text=text, families=fams, scope=sc, inherited=inherited))
+            c.reads.append(ClauseRead(text=text, families=fams, scope=sc, inherited=inherited,
+                                      ui_span=c._ui_span(text)))
             if fams:
                 prev = fams
         return c
+
+    def _ui_span(self, text: str) -> tuple[float, float] | None:
+        """The (start, end) a UI-anchored range in `text` covers, or None."""
+        ur = M.ui_range(text)
+        if ur is None or not self.video_end or self.video_end <= 0:
+            return None
+        if ur.anchor == "playhead":
+            t = self.playhead
+        else:
+            marks = list(self.markers)
+            if ur.label:
+                want = ur.label.lower().strip()
+                marks = [m for m in marks if want == m[1].lower().strip()] or [m for m in marks if want in m[1].lower()]
+            t = marks[0][0] if len(marks) == 1 else None
+        if t is None:
+            return None
+        a, b = (float(t), float(self.video_end)) if ur.side == "from" else (0.0, float(t))
+        if ur.span_s is not None:
+            # final sweep 4: "the 2 seconds after the playhead" is that span
+            a, b = (a, min(b, a + float(ur.span_s))) if ur.side == "from" else (max(0.0, b - float(ur.span_s)), b)
+        elif ur.from_s is not None:
+            a = float(ur.from_s)
+        return (a, b) if b > a + 1e-6 else None
 
     # -- helpers ---------------------------------------------------------
     @property

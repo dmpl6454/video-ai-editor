@@ -2759,9 +2759,25 @@ def _measure_mix(edl: EDL, *, fps, cache_dir: Path | None,
                  gain_db: float | None = None) -> tuple[float, float | None] | None:
     """(integrated LUFS, true peak dBTP or None) of the timeline's mix: the
     RAW mix (pass 1), or with `gain_db` the MASTERED one — that static gain
-    and the export's true-peak limiter, exactly the render's master stage."""
+    and the export's true-peak limiter, exactly the render's master stage.
+    None without a loudness target (`_raw_mix_true_peak` measures one)."""
     if getattr(edl.canvas, "loudness_lufs", None) is None:
         return None
+    return _measure_mix_graph(edl, fps=fps, cache_dir=cache_dir, gain_db=gain_db)
+
+
+def _raw_mix_true_peak(edl: EDL, *, fps, cache_dir: Path | None) -> float | None:
+    """The RAW mix's true peak (dBTP), target or not — what the audio-only
+    export asks with Loudness Off to know whether a lone lane needs the
+    limiter (final sweep 4, `audio_mix.export_ceiling_scope`); None when
+    the measurement failed. Same audio-only pass as `measure_mix_loudness`,
+    ended on the raw mix (`export_measure_scope`)."""
+    got = _measure_mix_graph(edl, fps=fps, cache_dir=cache_dir, gain_db=None)
+    return None if got is None else got[1]
+
+
+def _measure_mix_graph(edl: EDL, *, fps, cache_dir: Path | None,
+                       gain_db: float | None) -> tuple[float, float | None] | None:
     from .audio_mix import apply_solo, export_gain_scope, export_measure_scope
     from .reverse import with_reversed_sources
     edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
@@ -3027,6 +3043,31 @@ def _export_mastering_gain(edl: EDL, *, fps, cache_dir: Path,
         raise JobCancelled() from None
 
 
+def _audio_export_holds_ceiling(edl: EDL, *, fps, cache_dir: Path,
+                                cancel_event) -> bool:
+    """Whether an audio-only export with Loudness OFF must still master
+    through the true-peak limiter (final sweep 4): its raw mix's true peak is
+    over `EXPORT_TRUE_PEAK_DBTP`. A WAV is the PCM master as is — no AAC
+    delivery hold — and one Inspector slider now reaches +20 dB, so a lone
+    −3 dBFS lane at +12 dB went out with every sample at full scale. False
+    with a target (the limiter already ends that chain), for a lane under the
+    ceiling (it goes out exactly as it was) and when the measurement failed
+    (the export itself then says why)."""
+    if getattr(edl.canvas, "loudness_lufs", None) is not None:
+        return False
+    from .audio_mix import EXPORT_TRUE_PEAK_DBTP
+    try:
+        if cancel_event is not None and _cancel.current() is None:
+            with _cancel.scope(cancel_event):
+                tp = _raw_mix_true_peak(edl, fps=fps, cache_dir=cache_dir)
+        else:
+            tp = _raw_mix_true_peak(edl, fps=fps, cache_dir=cache_dir)
+    except _cancel.RenderCancelled:
+        from ..api.jobs import JobCancelled
+        raise JobCancelled() from None
+    return tp is not None and tp > EXPORT_TRUE_PEAK_DBTP
+
+
 #: Mastered re-measures `_mastering_gain` makes at most, the error (LU) it
 #: stops under, the most make-up it adds over the static gain, and the least
 #: loudness (LU per dB of gain) the limiter must still let through for more
@@ -3090,16 +3131,26 @@ def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,
     """The timeline's sound alone, mastered exactly like a video export's
     (QA-100): pass 1 measures the mix, pass 2 renders `_audio_only_graph`
     with the static gain + true-peak limiter into `dst` (.m4a AAC or 24-bit
-    .wav, by its suffix). Nothing of the picture is decoded or encoded."""
-    from .audio_mix import apply_solo, export_gain_scope
+    .wav, by its suffix). Nothing of the picture is decoded or encoded.
+
+    With Loudness OFF pass 1 instead measures the raw mix's true peak, and a
+    lone lane over the ceiling is mastered through the limiter all the same
+    (`_audio_export_holds_ceiling`, final sweep 4): a WAV is the PCM master
+    as is, and a +12 dB lane went out hard-clipped."""
+    import contextlib as _ctx
+    from .audio_mix import apply_solo, export_ceiling_scope, export_gain_scope
     from .reverse import with_reversed_sources
     ext = dst.suffix.lstrip(".").lower()
     gain = _export_mastering_gain(edl, fps=fps, cache_dir=cache_dir,
                                   cancel_event=cancel_event)
+    ceiling = (export_ceiling_scope()
+               if _audio_export_holds_ceiling(edl, fps=fps, cache_dir=cache_dir,
+                                              cancel_event=cancel_event)
+               else _ctx.nullcontext())
     edl = with_reversed_sources(apply_solo(edl), cache_dir, fps)
     from .speed_audio import prepare as _prepare_curve_audio
     _prepare_curve_audio(edl, cache_dir, fps)
-    with export_gain_scope(gain):
+    with export_gain_scope(gain), ceiling:
         inputs, fc, label = _audio_only_graph(edl, fps=fps, first_input=0,
                                               apply_loudnorm=True)
     tmp = _part_path(dst)
