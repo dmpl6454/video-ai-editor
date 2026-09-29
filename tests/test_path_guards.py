@@ -70,16 +70,36 @@ def _advertised_path_args() -> set[tuple[str, str]]:
     return found
 
 
-def _handler_source(tool: str) -> str:
-    """Source text of the handler DISPATCH maps `tool` to."""
-    from video_ai_editor.agent.dispatch import DISPATCH
-    fn = DISPATCH[tool]
+#: Shared guard helpers a handler may route a path through instead of calling
+#: `_safe_src` inline. Each one is pinned by
+#: test_guard_helpers_call_the_guard_themselves, so naming one here cannot
+#: hide a missing guard. `_resolve_lut_src`: apply_lut + add_effect type lut
+#: (final sweep 2).
+_GUARD_HELPERS = {"_resolve_lut_src": "_safe_src("}
+
+
+def _function_source(name: str) -> str:
     tree = ast.parse(DISPATCH_PY.read_text(encoding="utf-8"))
     lines = DISPATCH_PY.read_text(encoding="utf-8").splitlines()
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == fn.__name__:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
             return "\n".join(lines[node.lineno - 1:node.end_lineno])
-    raise AssertionError(f"no source found for {tool} -> {fn.__name__}")
+    raise AssertionError(f"no source found for {name}")
+
+
+def _handler_source(tool: str) -> str:
+    """Source text of the handler DISPATCH maps `tool` to, plus the source of
+    any `_GUARD_HELPERS` entry it calls."""
+    from video_ai_editor.agent.dispatch import DISPATCH
+    src = _function_source(DISPATCH[tool].__name__)
+    helpers = [_function_source(h) for h in _GUARD_HELPERS if f"{h}(" in src]
+    return "\n".join([src, *helpers])
+
+
+def test_guard_helpers_call_the_guard_themselves():
+    for helper, guard in _GUARD_HELPERS.items():
+        assert guard in _function_source(helper), (
+            f"{helper} is listed as a guard helper but never calls {guard}")
 
 
 # --- 1. coverage -------------------------------------------------------------
@@ -100,7 +120,7 @@ def test_every_advertised_path_arg_has_a_table_entry():
 
 def test_the_guard_count_is_pinned():
     """A bare count, so a rename cannot quietly shrink the table."""
-    assert len(EXPECTED_GUARDS) == 24  # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt: bundled font name, render/fonts.py)
+    assert len(EXPECTED_GUARDS) == 25  # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt: bundled font name, render/fonts.py); +1 K3 set_text_style.font (exempt, same rule)
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 11
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "write") == 3
 

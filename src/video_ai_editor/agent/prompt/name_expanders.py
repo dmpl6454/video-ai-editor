@@ -319,6 +319,75 @@ def x_retext(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         notes=(f"'{target.text[:40]}' now says '{new}'",))
 
 
+def named_texts(clause: str, texts: list[TextFact], f: TimelineFacts) -> list[TextFact]:
+    """The texts a clause means (K3): the ones whose words it quotes ("the
+    Summer Trip title", "the SALE text"), else the selected text, else all
+    of them (the caller asks when that is more than one)."""
+    said = f" {_norm_words(clause or '')} "
+    named = [t for t in texts if _norm_words(t.text.split(chr(10))[0])
+             and f" {_norm_words(t.text.split(chr(10))[0])} " in said]
+    if named:
+        return named
+    return [t for t in texts if t.id == f.selection] or texts
+
+
+def x_restyle_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> Expansion:
+    """Restyle an EXISTING text (K3): "make the title red", "make the Summer
+    Trip text bigger", "change the title font to Anton", "put the title at
+    the top" — one `set_text_style` step on the text the clause names. Its
+    words, timing and animation are never touched (they used to become a
+    NEW title reading "red" that replaced the user's own)."""
+    look = dict(it.get("_look") or {})
+    texts = [t for t in f.texts if t.role not in ("watermark", "caption")]
+    if not texts:
+        return _ask("There is no title on the timeline to restyle. To add one, say like "
+                    "\"add a title saying 'Summer Trip'\".")
+    if not look:
+        return _ask("How should the title look? Say like 'make the title red', 'make the title bigger', "
+                    "'make the title bold' or 'put the title at the top'.")
+    cand = named_texts(it.clause, texts, f)
+    every = bool(re.search(r"\b(?:all|every|each|both)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:texts?|titles?|words)\b",
+                           it.clause or ""))
+    if len(cand) > 1 and not every:
+        listing = "; ".join(_text_label(t) for t in cand[:4])
+        return _ask(f"Which text? There are {len(cand)}: {listing}. Say like \"make the "
+                    f"'{cand[0].text.split(chr(10))[0][:16]}' text …\", or select it first.")
+    if every and len(cand) > 1:
+        # "make all the text red" asked which text (Final sweep 2)
+        parts = [x_restyle_text(Intent(it.recipe, it.slots, it.score, f"the {t.text.split(chr(10))[0]} text"), f, ctx)
+                 for t in cand[:12]]
+        return Expansion(steps=tuple(s for p in parts for s in p.steps),
+                         postconditions=tuple(c for p in parts for c in p.postconditions),
+                         notes=(f"restyled all {len(cand)} texts",))
+    t = cand[0]
+    said = []
+    if "color" in look:
+        said.append(f"colour {look['color']}")
+    if "size" in look:
+        said.append(f"size {look['size']:g} px")
+    elif "size_scale" in look:
+        said.append("bigger" if look["size_scale"] > 1 else "smaller")
+    if "font" in look:
+        said.append(f"font {look['font']}")
+    elif look.get("bold"):
+        said.append("bold")
+    if "position" in look:
+        said.append(f"at the {look['position']}")
+    if "upper" in look:
+        said.append("ALL CAPS" if look["upper"] else "normal case")
+    if "stroke_w" in look:
+        said.append("no outline" if not look["stroke_w"] else "an outline")
+    if "background" in look:
+        said.append("a box behind it" if look["background"] else "no box")
+    check = {k: look[k] for k in ("color", "size", "font", "bold", "position") if k in look}
+    return Expansion(
+        steps=(step("set_text_style", STAGE_TEXT, f"restyle {_text_label(t)}: " + ", ".join(said),
+                    clip_id=t.id, **look),),
+        postconditions=(pc("text_style_is", "the text has the requested look", clip_id=t.id, **check),
+                        pc("text_present", "the text keeps its words", contains=t.text[:60])),
+        notes=(f"{_text_label(t)}: " + ", ".join(said),))
+
+
 def x_retime_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> Expansion:
     """Move / lengthen / shorten an EXISTING text (Final QA r3): "make the
     title longer" (×1.5), "move the title to 4 seconds" (same length),
@@ -328,7 +397,7 @@ def x_retime_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> E
     if not texts:
         return _ask("There is no text on the timeline to move or lengthen. To add one, say like "
                     "\"add a title saying 'Summer Trip' for 5 seconds\".")
-    cand = [t for t in texts if t.id == f.selection] or texts
+    cand = named_texts(it.clause, texts, f)
     if len(cand) > 1:
         listing = "; ".join(_text_label(t) for t in cand[:4])
         return _ask(f"Which text? There are {len(cand)}: {listing}. Select it first, then say it again.")
@@ -343,8 +412,17 @@ def x_retime_text(it: Intent, f: TimelineFacts, ctx: Context | None = None) -> E
         e = s + dur
     elif "end" in r:
         s, e = s0, float(r["end"])
+    elif "extend" in r:
+        s, e = s0, e0 + float(r["extend"])          # "extend the SALE text by 2 seconds"
     elif "dur" in r:
         s, e = s0, s0 + float(r["dur"])
+    elif "shift" in r:
+        s, e = s0 + float(r["shift"]), e0 + float(r["shift"])
+        if s < -1e-6:
+            return _ask(f"The title {_text_label(t)} already starts at {s0:g}s — it can move at most "
+                        f"{s0:g}s earlier. Say like 'show the title from 0s to {dur:g}s'.")
+    elif "to_end" in r:
+        s, e = s0, float(f.video_end or f.duration or e0)
     else:
         s, e = s0, s0 + dur * float(r.get("factor") or 1.0)
     vend = float(f.video_end or f.duration or e)
@@ -546,4 +624,5 @@ def x_flip(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs), notes=tuple(notes))
 
 
-__all__ = ["FILTER_TYPES", "GRADE_TYPES", "x_remove_feature", "x_clip_length", "x_flip", "x_retime_text"]
+__all__ = ["FILTER_TYPES", "GRADE_TYPES", "x_remove_feature", "x_clip_length", "x_flip", "x_retime_text",
+           "x_restyle_text", "named_texts"]

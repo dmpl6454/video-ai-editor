@@ -18,6 +18,13 @@ const DEFAULT_RETRY_S = 0.2
 const DEFAULT_MAX_WAIT_S = 30
 /** Network errors (not HTTP statuses) retried before a chunk load fails. */
 const NETWORK_RETRIES = 3
+/** Re-reads (ms apart) of an index whose sound is still being built: its
+ *  recorded peaks come with the built sound (K2, 0.8.0 QA). ~40 s in all. */
+const LAYOUT_RECHECK_MS = [250, 500, 1000, 1000, 2000, 2000, 4000, 4000, 8000, 8000, 8000]
+
+/** The index was read while the sound was still being built (no sample
+ *  count, no recorded peaks): it is re-read until it is. */
+const building = (l: AudioLayout) => !l.silent && l.samples === null
 
 export interface AudioLayout {
   rate: number
@@ -110,7 +117,12 @@ export class AudioChunks {
   private readonly inflight = new Map<string, Promise<Pcm>>()
   private readonly layouts = new Map<string, Promise<AudioLayout>>()
   private readonly known = new Map<string, AudioLayout>()
+  private readonly rechecking = new Set<string>()
+  private gen = 0
   private held = 0
+  /** A layout learned again changed (the sound was built after the first
+   *  read): its peaks and sample count are known now. */
+  onLayoutChange: ((key: string) => void) | null = null
   /** Counters for telemetry and tests. */
   readonly stats = { fetched: 0, decoded: 0, hits: 0, evicted: 0, retries: 0 }
 
@@ -138,12 +150,44 @@ export class AudioChunks {
       p = this.get(`${this.base}/${key}/index.json`).then(async (r) => {
         const l = parseLayout(await r.json())
         this.known.set(key, l)
+        if (building(l)) this.recheck(key)
         return l
       })
       p.catch(() => this.layouts.delete(key))
       this.layouts.set(key, p)
     }
     return p
+  }
+
+  /** Re-read `key`'s index until its sound is built (K2, 0.8.0 QA: a layout
+   *  read while it was being built stayed peak-less for the page's life, and
+   *  every fresh upload showed "≈ Limiter on loud sound"). */
+  private recheck(key: string): void {
+    if (this.rechecking.has(key)) return
+    this.rechecking.add(key)
+    const gen = this.gen
+    void (async () => {
+      try {
+        for (const ms of LAYOUT_RECHECK_MS) {
+          await this.sleep(ms)
+          if (gen !== this.gen) return
+          let l: AudioLayout
+          try {
+            l = parseLayout(await (await this.get(`${this.base}/${key}/index.json`)).json())
+          } catch {
+            continue
+          }
+          if (gen !== this.gen) return
+          if (building(l)) continue
+          this.known.set(key, l)
+          this.layouts.set(key, Promise.resolve(l))
+          this.onLayoutChange?.(key)
+          return
+        }
+      } finally {
+        this.rechecking.delete(key)
+      }
+    })()
   }
 
   /** The layout if it has already been fetched. */
@@ -200,6 +244,7 @@ export class AudioChunks {
   clear(): void {
     this.lru.clear()
     this.held = 0
+    this.gen++
   }
 
   private async get(url: string): Promise<Response> {

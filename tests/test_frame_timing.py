@@ -95,7 +95,11 @@ def test_edit_times_are_quantised_and_idempotent(tmp_path, media):
     dispatch(s, "split_at", {"time": 7.7777})
     c = _v1(s)[-1]
     dispatch(s, "trim_clip", {"clip_id": c.id, "out": c.out - 0.3123})
-    dispatch(s, "move_clip", {"clip_id": c.id, "new_start": c.start + 0.5019})
+    # A reorder drag (close_gap): a plain main-lane move into free space is
+    # refused since final sweep 2 r2, and the requested time is quantised
+    # either way.
+    dispatch(s, "move_clip", {"clip_id": c.id, "new_start": c.start - 0.5019,
+                              "close_gap": True})
     for c in _v1(s):
         for x in (c.in_, c.out, c.start):
             assert _on_grid(x), (c.id, x)

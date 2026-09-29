@@ -458,8 +458,10 @@ def _natural_clip_frames(c: Clip, fps) -> int:
 # `_v1_frame_plan` read it, so the picture chain's trim, the audio chain's
 # sample count, the chunk key and `frame_map` (which enters the same scope)
 # all agree. At the project rate the scope is empty: nothing changes there.
+# The scope holds (render rate, spans, project rate): the plan's END is
+# resampled the same way (`_rate_scope_end`).
 
-_V1_RATE_SPANS: "contextvars.ContextVar[tuple[object, dict] | None]" = contextvars.ContextVar(
+_V1_RATE_SPANS: "contextvars.ContextVar[tuple[object, dict, object] | None]" = contextvars.ContextVar(
     "vae_v1_rate_spans", default=None)
 
 
@@ -474,6 +476,20 @@ def _rate_span(c: Clip, fps) -> tuple[int, int] | None:
     if cur is None or fps is None or _tb.rate_of(fps) != cur[0]:
         return None
     return cur[1].get(_rate_key(c))
+
+
+def _rate_scope_end(total_duration: float, fps) -> int:
+    """The v1 plan's end frame at `fps`. Under a rate scope it is the
+    project-grid end resampled with the SAME rounding as the spans
+    (`v1_rate_spans`); `frame_of(total, fps)` rounded the float seconds on
+    the render grid instead and disagreed on half frames — a 111-frame 30 fps
+    clip spans round(92.5) = 92 frames at 25 fps, the tail asked for 93, and
+    the export ended on a black frame with ~40 ms of silence (final QA,
+    run 2)."""
+    cur = _V1_RATE_SPANS.get()
+    if cur is None or fps is None or _tb.rate_of(fps) != cur[0]:
+        return _tb.frame_of(total_duration, fps)
+    return round(_tb.frame_of(total_duration, cur[2]) * (cur[0] / cur[2]))
 
 
 def rate_span_override(c: Clip, fps) -> int | None:
@@ -512,7 +528,8 @@ def v1_rate_scope(edl: EDL, fps):
     (a no-op at the project rate). Re-entrant; thread pools that copy the
     context (chunks, segments, reverse) inherit it."""
     spans = v1_rate_spans(_video_clips(edl), fps, getattr(edl.canvas, "fps", None))
-    tok = _V1_RATE_SPANS.set(None if spans is None else (_tb.rate_of(fps), spans))
+    tok = _V1_RATE_SPANS.set(None if spans is None else (
+        _tb.rate_of(fps), spans, _tb.rate_of(edl.canvas.fps)))
     try:
         yield
     finally:
@@ -684,7 +701,7 @@ def _v1_frame_plan(clips: list[Clip], total_duration: float,
         n = clip_frames(c, fps)
         plan.append(("clip", i, n))
         cursor = max(cursor, sf) + n
-    tail = _tb.frame_of(total_duration, fps) - cursor
+    tail = _rate_scope_end(total_duration, fps) - cursor
     if tail >= 1:
         plan.append(("gap", None, tail))
     return plan

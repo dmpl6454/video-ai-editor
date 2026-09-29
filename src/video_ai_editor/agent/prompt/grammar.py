@@ -148,10 +148,11 @@ _SPLIT_RE = re.compile(r"\s*(?:,|;|\bthen\b|\band then\b|\band also\b|\band\b|\b
 
 #: `and` inside these phrases joins words, not clauses.
 _PROTECTED = (
-    "black and white", "you know", "so basically", "name and handle", "hook and", "back and forth",
+    "black and white", "b and w", "you know", "so basically", "name and handle", "hook and", "back and forth",
     "in and out", "cut and pulse", "silences and fillers", "silences and filler words",
     "fillers and silences", "pauses and fillers", "ums and uhs", "ums and ahs", "um and uh",
     "clean and", "warm and", "loud and clear", "rock and roll", "drum and bass",
+    "second and a half", "seconds and a half", "sec and a half", "one and a half",
 )
 
 
@@ -316,10 +317,15 @@ def exclusions_in(clause: str) -> list[str]:
 _DUCK_OFF_RE = re.compile(
     r"\b(?:turn(?:ed)?|switch(?:ed)?|shut)\s+(?:the\s+)?(?:music\s+)?(?:(?:auto[- ]?)?duck(?:ing)?\s+)?off\b"
     r"|\b(?:turn|switch)\s+off\b|\bstop(?:ped)?\s+(?:the\s+)?(?:auto[- ]?)?(?:duck|sidechain)"
+    r"|\bstop(?:ped)?\s+(?:the\s+)?(?:music|song|track|soundtrack|bed)\s+(?:from\s+)?(?:duck|sidechain)"
     r"|\bdisabl\w*|\bdeactivat\w*|\bdon'?t\b|\bdo not\b|\bno\b|\bwithout\b|\bnever\b|\bnot\b"
     r"|\bun-?duck\w*|\bremove (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\b(?:duck(?:ing)?|sidechain) off\b"
     r"|\b(?:kill|cancel|drop) (?:the )?(?:auto[- ]?)?(?:duck|sidechain)\w*|\bnahi\b|\bband karo\b|\bmat\b"
     r"|\b(?:undo|revert|get rid of|lose|remove) (?:the |all (?:the )?|that )?(?:auto[- ]?)?(?:duck|sidechain)\w*"
+    # final sweep 2 r2: "remove the music ducking" turned ducking ON
+    r"|\b(?:undo|revert|get rid of|lose|remove|clear|kill|cancel|drop|disable|take off|turn off|switch off|stop)\s+"
+    r"(?:the\s+|all\s+(?:the\s+)?|that\s+|any\s+)?(?:background\s+)?(?:music|song|soundtrack|bed)(?:'s)?\s+"
+    r"(?:auto[- ]?)?(?:duck|sidechain)\w*"
     # QA-018 paraphrases: "stop the music from lowering when I talk", "keep
     # the soundtrack steady under my voice" — ducking OFF, said in effects.
     r"|\bstop(?:ped)?\s+(?:the\s+)?(?:background\s+)?(?:music|song|track|soundtrack|tune|bed)\s+from\s+"
@@ -392,6 +398,11 @@ REMOVE_FEATURE = (r"\b(?:remove|delete|get rid of|take off|take out|clear|turn o
                   r"|\b(?:remove|delete|get rid of|take off|take out|clear|turn off|switch off|drop|lose|kill|strip)"
                   r"\s+(?:the\s+|all\s+(?:the\s+)?|my\s+|that\s+|this\s+)?" + FX_NOUN + r"\b"
                   r"|\b(?:take|turn|switch|strip|get)\s+(?:the\s+|that\s+|this\s+)?" + FX_NOUN + r"\s+off\b"
+                  # a LOOK named by its words alone: "take the black and white
+                  # off" / "turn the black and white off" APPLIED black and
+                  # white to every clip (Final sweep 2)
+                  r"|\b(?:take|turn|switch|strip|get)\s+(?:the\s+|that\s+|this\s+)?"
+                  r"(?:black and white|b ?& ?w|b and w|mono(?:chrome)?|gr[ae]y ?scale|sepia)\s+(?:off|out)\b"
                   # the particle after the object: "take the warm filter off"
                   # (it APPLIED the warm look), "turn the captions off";
                   # Final QA: or `out`, with up to four words before the noun
@@ -429,6 +440,8 @@ _ZOOM = (r"^(?!.*\btransitions?\b)(?!.*\bhook\b)(?!.*\b(?:music|volume|audio|sou
          r".*?(?:\b(?:zoom|push)(?:s|ed|ing)?[- ]?(?:in|out|into)\b|\bpunch(?:es|ed|ing)?[- ]?in(?:to)?\b"
          r"|\bken[- ]?burns\b|\bpan (?:and|&) zoom\b|\bslow(?:ly)? zoom|\bzoom (?:effect|animation)\b"
          r"|\b(?:zoom|scale|enlarge|magnify)\b[^%]*?\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)"
+         # final sweep 2 r2: "zoom clip 1 to 2x" set the clip's SPEED to 2x
+         r"|^(?!.*\b(?:speed|fast\w*|slow\w*|pace|playback)\b).*\b(?:zoom|scale|enlarge|magnify)\b.*?(?<![\w.])\d+(?:\.\d+)?\s*x\b"
          r"|\bzoom (?:it|this|that|the [\w ]{0,20}?clip)\b)")
 
 #: The overlay nouns a retext / a removal by name may name.
@@ -521,7 +534,8 @@ CUT_PRECEDENCE: tuple[tuple[str, str, float], ...] = (
 #: The music bed, as the object of a level / fade / mute / fit request.
 _MUSIC_NOUN = r"(?:music|song|track|bed|bgm|soundtrack|tune|score|music bed|background music|backing track)"
 #: The programme's own sound (v1 clip audio), as the object of a level / mute.
-_VOICE_NOUN = r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound)"
+_VOICE_NOUN = (r"(?:voice|vocals?|speech|dialogue|narration|original audio|original sound|clip audio|video audio|video sound"
+               r"|original video (?:audio|sound)|original clip (?:audio|sound))")
 #: The voice-over lane, as the object of a level request (review RE).
 _VO_NOUN = r"(?:voice[- ]?overs?|vo|narration track|voice track)"
 #: What "fade the ___ in/out" may name besides the music.
@@ -620,6 +634,10 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                 rf"|\b(?:turn|bring|crank|pump|dial|knock|push|pull)\s+(?:up|down)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
                 rf"|\b(?:{_MUSIC_NOUN}|{_VOICE_NOUN})(?:'s)?\s+(?:volume|level|gain)\b"
                 rf"|\b(?:{_MUSIC_NOUN})(?:'s)?\s+(?:volume\s+|level\s+|gain\s+)?(?:at|to|=)?\s*[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|%)"
+                # final sweep 2 r2: "put the music under the voiceover at -20 dB"
+                # was the add-music recipe ("music is already on the timeline")
+                rf"|\b(?:put|set|keep|sit|place|have|bring)\s+(?:the\s+|my\s+)?(?:background\s+)?{_MUSIC_NOUN}\s+"
+                r"(?:[\w'-]+\s+){0,5}?(?:at|to)\s+[-+]?\d+(?:\.\d+)?\s*(?:d\s?b|decibels?|%)"
                 rf"|\b(?:{_MUSIC_NOUN})\s+(?:ka\s+volume\s+|ki\s+awaa?z\s+)?(?:thoda\s+|thodi\s+|aur\s+)?(?:kam|dheere|dheema|dheemi|halka|halki|zyada|jyada|tez|badha\w*)\b"
                 rf"|\b(?:volume|level|gain) (?:of|on|for) (?:the\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN})\b"
                 rf"|\bmake (?:the\s+|my\s+)?(?:background\s+)?(?:{_MUSIC_NOUN}|{_VOICE_NOUN}) (?:quieter|softer|louder|lower)\b"
@@ -693,7 +711,14 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                     # black and white" was unread; Apple Intelligence then graded it)
                     rf"|\b(?:make|turn)\s+{CLIP_PHRASE}\s+(?:more\s+)?(?:cinematic|warm(?:er)?|cool(?:er)?|cold(?:er)?"
                     r"|punchy|punchier|vivid|faded|vintage|retro|moody|black and white|monochrome|b ?and ?w"
-                    r"|gr[ae]yscale)\b", EXACT),
+                    r"|gr[ae]yscale)\b"
+                    # final sweep 2 r2: a look on a TIME RANGE ("make the first 4
+                    # seconds black and white" put it on every clip)
+                    r"|\b(?:first|last|opening|final|closing)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|ten)\s*"
+                    r"(?:s|sec|secs|seconds?)\b.*\b(?:black and white|b ?and ?w|mono(?:chrome)?|gr[ae]yscale|cinematic"
+                    r"|warm(?:er)?|cool(?:er)?|vintage|retro|moody)\b"
+                    r"|\b(?:first|second|last|other|latter)\s+half\b.*\b(?:black and white|b ?and ?w|mono(?:chrome)?"
+                    r"|gr[ae]yscale|cinematic|warm(?:er)?|cool(?:er)?|vintage|retro|moody)\b", EXACT),
                    (r"\bcinematic\b|\bwarm\b|\bvintage\b|\bcolou?rs?\b|\bfilter\b|\bmoody\b", SYNONYM)),
     "clean_audio": ((r"\b(?:clean(?: up)?|fix|improve|enhance|de-?noise|denoise|reduce (?:the )?(?:background )?noise (?:in|on|of))\s+(?:up\s+)?(?:the\s+|my\s+|this\s+)?(?:audio|sound|voice|speech|mic|recording|hiss|hum|background noise|noise)\b|\bnoise (?:reduction|removal|cancel\w*)\b|\bremove (?:the )?(?:background )?(?:noise|hiss|hum|buzz|static)\b|\bdenois\w+\b|\baudio (?:clean ?up|enhance\w*|repair)\b|\bmake (?:the )?(?:audio|sound|voice) (?:clearer|cleaner|better|crisper)\b|\bbackground noise\b", EXACT),
                     (r"\bnoisy\b|\bhiss\b|\bhum\b|\bmuffled\b|\baudio\b", SYNONYM)),
@@ -708,7 +733,9 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                r"|^(?!.*\b(?:music|song|track|beat)\b).*\b(?:drags?|dragging|feels? (?:too )?(?:slow|long)|(?:is|are|feels?) too slow)\b", EXACT),
               (r"\b(?:slow|speed)\s+(?:that|the\s+[\w ]{0,20}?(?:clip|video|footage|shot|part|bit|section))\s+(?:down|up)\b"
                # Final QA r3: "slow clip 3 down", "speed clip two up"
-               rf"|\b(?:slow|speed)\s+{CLIP_PHRASE}\s+(?:(?:a\s+)?(?:little|bit|lot|touch)\s+)?(?:down|up)\b|\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b", EXACT),
+               rf"|\b(?:slow|speed)\s+{CLIP_PHRASE}\s+(?:(?:a\s+)?(?:little|bit|lot|touch)\s+)?(?:down|up)\b|\bspeed (?:it|this|the (?:video|clip|footage)|everything)?\s*(?:up|down)\b|\b(?:slow|speed) (?:it|this|the (?:video|clip|footage))? ?(?:down|up)\b|\bslow[- ]?mo(?:tion)?\b|\bslowmo\b|\b\d+(?:\.\d+)?\s*x\b(?![\dx:])|\b(?:double|half|quarter|twice the|half the|1\.5x|2x|0\.5x) (?:the )?speed\b|\bfaster\b|\bslower\b|\btime[- ]?lapse\b|\bplayback (?:speed|rate)\b|\bfast[- ]?forward\b|\bmake (?:it|this) (?:faster|slower|quicker)\b|\bspeed ramp\b|\btwice as fast\b"
+               # final sweep 2 r2: "make clip 2 (take) twice as long" is its speed
+               rf"|\b(?:make|have|let)\s+{CLIP_PHRASE}\s+(?:take\s+|last\s+|play\s+)?(?:twice|half)\s+as\s+long\b", EXACT),
               (r"\bspeed\b|\bquick(?:er)?\b|\btempo of the video\b", SYNONYM)),
     # CapCut's Freeze (wave D): hold the frame at a moment. "freeze frame"
     # used to reach the on-device model and come back as a title (RD2).
@@ -740,11 +767,15 @@ PHRASES: dict[str, tuple[tuple[str, float], ...]] = {
                    rf"|\bmake\s+{CLIP_PHRASE}\s+(?:the\s+)?(?:first|last)(?:\s+(?:one|clip))?\b", EXACT),),
     "zoom": ((_ZOOM, EXACT),),
     "rotate": ((r"^rotate(?:\s+(?:it|this|that|the\s+[\w ]{0,20}?(?:clip|video|shot)))?$"
-                r"|\brotat(?:e|ed|ing)\b(?=.*?\b\d{1,3}\s*(?:°|degrees?|deg)\b|.*?\b(?:upside down|sideways|clockwise|counter[- ]?clockwise|anti[- ]?clockwise)\b)"
+                r"|\brotat(?:e|ed|ing)\b(?=.*?\b\d{1,3}\s*(?:°|degrees?\b|deg\b)|.*?\b(?:by\s+)?(?:90|180|270|45)\b(?!\s*(?:%|x\b|s\b|sec))|.*?\b(?:upside down|sideways|clockwise|counter[- ]?clockwise|anti[- ]?clockwise)\b)"
                 r"|\b(?:turn|flip)\s+(?:it|this|that|the\s+[\w ]{0,20}?(?:clip|video|shot)"
                 r"|(?:clip|shot)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten))\s+upside down\b"
                 r"|\bstraighten\s+(?:it|this|the\s+[\w ]{0,20}?(?:clip|video|shot))\s+by\s+\d", EXACT),),
     "adjust": ((r"\b(?:brighten|darken|desaturate)\b"
+                # final sweep 2 r2: "make clip 1 more saturated" was unread
+                rf"|\b(?:make|turn|get)\s+{CLIP_PHRASE}\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+|way\s+|slightly\s+)?"
+                r"(?:brighter|darker|lighter|dimmer|more saturated|less saturated|more colou?rful|less colou?rful"
+                r"|more contrasty|less contrasty|flatter)\b"
                 r"|\b(?:make|turn|get)\s+(?:it|this|that|everything|the\s+[\w ]{0,24}?)\s+(?:a\s+(?:bit|little|touch|lot)\s+|much\s+|way\s+|slightly\s+)?"
                 r"(?:brighter|darker|lighter|dimmer|more saturated|less saturated|more colou?rful|less colou?rful|more contrasty|less contrasty|flatter)\b"
                 r"|\b(?:increase|boost|raise|bump(?: up)?|up|turn up|crank(?: up)?|add(?: more| some)?|more|lower|reduce|decrease|drop|lessen|turn down|less|tone down|dial (?:up|down|back))\s+"
@@ -881,6 +912,8 @@ _TIE_BREAKS: tuple[tuple[str, str], ...] = (
     ("voice_effect", "speed"), ("voice_effect", "transitions"), ("voice_effect", "color_look"),
     ("voice_effect", "trim"),
     ("delete_clip", "trim"), ("zoom", "transitions"), ("zoom", "reframe"),
+    # final sweep 2 r2: "zoom clip 1 to 2x" / "scale clip 3 to 1.5x" is a size
+    ("zoom", "speed"),
     # Wave E (F1): an animation names its motion and its clip / sticker.
     ("animation", "zoom"), ("animation", "rotate"), ("animation", "fade"), ("animation", "sticker"),
     ("animation", "stabilize"), ("animation", "remove_feature"), ("animation", "title"),
@@ -901,10 +934,24 @@ _SPEED_CURVE_FIRST_RE = re.compile(
     r"(?:the\s+|its\s+|any\s+|this\s+|that\s+)?speed[- ]?(?:ramp|curve)s?\b")
 
 
+#: An EXISTING title's timing (final sweep 2 r2): "make the title last 2
+#: seconds longer" SHORTENED it, "title 1 second shorter" asked which part of
+#: the VIDEO to cut, "start the title at 0:02" added a second title. Checked
+#: before the cut rows, which read "shorter" / "start at" as a trim.
+_TEXT_RETIME_FIRST_RE = re.compile(
+    r"^(?:(?:please\s+)?(?:make|have|let|set|get|move|shift|start|begin|end|extend|shorten|lengthen)\s+)?"
+    r"(?:the\s+|my\s+|this\s+|that\s+)?(?:title|heading|headline)\s+"
+    r"(?!.*\b(?:add|new|another|insert|write|put|says?|saying|reads?|reading|clips?|video|music|song)\b)(?!.*[\"“])"
+    r"(?:.*\b(?:longer|shorter|lasts?|later|earlier|until|till)\b"
+    r"|(?:(?:to\s+)?(?:start|begin|end|appear|disappear)s?\s+)?(?:at|from)\s+\d)")
+
+
 def _resolve_clause(clause: str) -> tuple[str, float] | None:
     """The single best intent for one clause."""
     if _SPEED_CURVE_FIRST_RE.search(clause):
         return "speed", EXACT
+    if _TEXT_RETIME_FIRST_RE.search(clause):
+        return "title", EXACT
     for rx, intent, score in _CUT_COMPILED:
         if rx.search(clause):
             return intent, score
@@ -958,6 +1005,11 @@ def _template_hit(clause: str) -> str | None:
 # --------------------------------------------------------------------------
 
 _UNDO_ONLY = re.compile(r"^(?:undo|redo)\b")
+#: "… and make it red / bigger / bold": a look for the text the clause before added
+_LOOK_WORD = (r"(?:red|yellow|white|black|green|blue|pink|orange|purple|cyan|gold|grey|gray|lime|teal|bigger|smaller"
+              r"|larger|huge|bold|bolder|italic|uppercase|all caps|caps)")
+_IT_LOOK_RE = re.compile(rf"^(?:and\s+|then\s+)*(?:make|turn|set|colou?r|have|give)\s+(?:it|them)\s+"
+                         rf"(?:(?:a\s+)?(?:bit\s+|little\s+|lot\s+)?{_LOOK_WORD}\s*(?:and\s+|,\s*)?)+$")
 
 
 def _clause_slots(clause: str, whole: S.Slots) -> S.Slots:
@@ -1020,6 +1072,8 @@ def detect(prompt: str) -> Detection:
         template = _template_hit(positive)
         if template and (resolved is None or resolved[0] != "shorts"):
             resolved = ("auto_edit", EXACT)
+        if resolved is None and hits and hits[-1].intent in ("title", "captions") and _IT_LOOK_RE.match(positive):
+            continue                       # "add a title 'Intro' and make it red": the title's own look
         if resolved is None:
             unmatched.append(clause)
             continue

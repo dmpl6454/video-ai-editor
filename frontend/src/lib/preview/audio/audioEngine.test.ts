@@ -275,6 +275,24 @@ describe('the master limiter\'s APPROX ranges (gate RX)', () => {
     expect(told).toBe(1)
   })
 
+  // K2 (0.8.0 QA): a layout first read while the sound was being built has
+  // no peaks; when its re-read lands, the ranges are re-derived and told.
+  it('are re-derived when a layout read while the sound was being built lands', async () => {
+    const { engine, prepare } = setup({ peak: 0.2 })
+    prepare(mixed)
+    await settle()
+    expect(engine.limitingFrames()).toEqual([])
+    let told = 0
+    engine.onLimitingChange = () => { told++ }
+    // the layout of the bed changes under the engine (a re-read with peaks
+    // over the ceiling this time): the engine re-derives and says so
+    const layout = engine.chunks.layoutNow('bbbb')!
+    ;(engine.chunks as unknown as { known: Map<string, unknown> }).known.set('bbbb', { ...layout, chunkPeak: new Array(60).fill(0.9) })
+    engine.chunks.onLayoutChange?.('bbbb')
+    expect(engine.limitingFrames()).not.toEqual([])
+    expect(told).toBe(1)
+  })
+
   it('narrow to where the lanes overlap when the peaks say so; a later prepare needs no telling', async () => {
     const { engine, prepare } = setup({ peak: 0.7 })
     let told = 0
@@ -306,24 +324,39 @@ describe('the project loudness gain', () => {
     engine.onLimitingChange = () => { told++ }
     prepare(target)
     expect(engine.plannedMaster()).toEqual({ gain: 1, ceilingDb: null })    // nothing known yet: raw
-    expect(engine.loudnessCurrent()).toBe(false)                           // …and APPROX
+    // K2 (0.8.0 QA): not measured yet is no verdict (no "≈ Loudness" on
+    // every fresh project); the controller measures it promptly instead
+    expect(engine.loudnessOffDb()).toBeUndefined()
     gain = 10.8
     measuredFor = info.renderHash
     engine.refreshLoudness()
     expect(engine.plannedMaster()!.gain).toBeCloseTo(10 ** (10.8 / 20), 9)
     expect(engine.plannedMaster()!.ceilingDb).not.toBeNull()              // the limiter follows the lift
-    expect(engine.loudnessCurrent()).toBe(true)
+    expect(engine.loudnessOffDb()).toBe(0)                                  // plays the measured gain
     expect(told).toBe(1)                                                   // the engine reclassifies
   })
 
+  it('reports how far the gain it plays is from the measured one', () => {
+    let gain: number | null = 4
+    let measuredFor: string | null = null
+    const { engine, prepare } = setup({ loudnessGainDb: () => gain, loudnessCurrent: (h) => h === measuredFor })
+    prepare(target)                                                        // plays the last-known 4 dB
+    expect(engine.loudnessOffDb()).toBeUndefined()                         // …not measured: no verdict
+    gain = 10.8
+    measuredFor = info.renderHash                                          // measured, not re-planned yet
+    expect(engine.loudnessOffDb()).toBeCloseTo(6.8, 9)                      // audible: APPROX
+    engine.refreshLoudness()
+    expect(engine.loudnessOffDb()).toBe(0)
+  })
+
   it('says nothing without a target, or without a loudness source (test harnesses)', () => {
-    const a = setup({ loudnessGainDb: () => 6, loudnessCurrent: () => false })
+    const a = setup({ loudnessGainDb: () => 6, loudnessCurrent: () => true })
     a.prepare(base)                                                        // no loudness_lufs
-    expect(a.engine.loudnessCurrent()).toBeUndefined()
+    expect(a.engine.loudnessOffDb()).toBeUndefined()
     expect(a.engine.plannedMaster()!.gain).toBe(1)
     const b = setup()
     b.prepare(target)
-    expect(b.engine.loudnessCurrent()).toBeUndefined()
+    expect(b.engine.loudnessOffDb()).toBeUndefined()
   })
 })
 

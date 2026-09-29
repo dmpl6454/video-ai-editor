@@ -21,9 +21,13 @@
 // * Loudness (§3.6, §7). For a project with a loudness target the sound
 //   plays the server preview's master gain (`GET /preview_loudness?h=`),
 //   asked for with every hashed timeline and again when a preview of the
-//   current hash lands. Until the gain was measured for this render's sound
-//   the frames are APPROX 'audio:loudness' (Final QA r3: the sound played
-//   the raw mix, ~11 dB under the export, marked EXACT).
+//   current hash lands (Final QA r3: the sound played the raw mix, ~11 dB
+//   under the export). A gain not measured yet for this render's sound is
+//   no chip (K2, 0.8.0 QA: "≈ Loudness" sat on every fresh project): it is
+//   telemetry (`view().loudness`, `loudnessLog`) and makes the server render
+//   that measures it urgent (`renderUrgent`); the frames are APPROX
+//   'audio:loudness' only when the sound plays more than 1 dB off the
+//   measured gain (AudioSink.loudnessOffDb).
 // * Transport. `play()` is synchronous: the store calls it inside the key or
 //   click handler, so the engine's `laneA.play()` and `AudioContext.resume()`
 //   run in the user's gesture (§3.5).
@@ -55,6 +59,10 @@ export interface ControllerView {
    *  `audio:voice:deep` …) — what the "≈" chip names (review RE). */
   reasons: readonly string[]
   presentedK: number
+  /** The project loudness gain (telemetry, K2): 'pending' until the server
+   *  has measured it for this render's sound, 'measured' after; null: no
+   *  loudness target. Not a chip — see ControllerView.reasons. */
+  loudness: 'pending' | 'measured' | null
 }
 
 export interface ControllerOptions {
@@ -89,6 +97,15 @@ export interface LoudnessSource {
 }
 
 interface LoudnessAnswer { hash: string; gainDb: number | null; current: boolean }
+
+/** Loudness telemetry (K2): a render whose gain the server had not measured
+ *  yet, and — once measured — how long that took and how far the gain the
+ *  sound had been playing was from it (null: none, the raw mix). */
+export type LoudnessEvent =
+  | { type: 'pending'; render_hash: string; played_db: number | null }
+  | { type: 'measured'; render_hash: string; played_db: number | null; measured_db: number; diff_db: number; waited_ms: number }
+
+const LOUDNESS_LOG_KEPT = 32
 
 interface ProxySummary {
   key?: string
@@ -135,11 +152,16 @@ export class PreviewController {
   private loud: LoudnessAnswer | null = null
   private loudPending: string | null = null
   private loudGen = 0
+  /** When each render hash still waiting for its measured gain started to
+   *  wait (telemetry). */
+  private loudWaitSince = new Map<string, number>()
+  /** Loudness telemetry, newest last (K2). */
+  readonly loudnessLog: LoudnessEvent[] = []
   /** One-shot answers the divergence checker reads instead of the network. */
   private readonly served = new Map<string, FrameMapBody>()
   /** The EDL object last handed over (the store's subscription skips it). */
   appliedEdl: EdlLike | null = null
-  readonly stats = { applied: 0, verified: 0, mismatches: 0, splices: 0, hashSyncs: 0, sourceLookups: 0 }
+  readonly stats = { applied: 0, verified: 0, mismatches: 0, splices: 0, hashSyncs: 0, sourceLookups: 0, loudnessMeasured: 0 }
 
   constructor(opts: ControllerOptions) {
     this.opts = opts
@@ -481,7 +503,9 @@ export class PreviewController {
       }
       if (gen !== this.loudGen || this.disposed) return
       const g = body.gain_db
-      this.setLoudness({ hash: h, gainDb: typeof g === 'number' && Number.isFinite(g) ? g : null, current: body.current === true })
+      const answer = { hash: h, gainDb: typeof g === 'number' && Number.isFinite(g) ? g : null, current: body.current === true }
+      this.logLoudness(answer)
+      this.setLoudness(answer)
       return
     }
     // no answer: the carried-over verdict no longer holds for this hash
@@ -495,6 +519,42 @@ export class PreviewController {
     this.loudPending = pending
     const after = [this.loudness.gainDb(), this.loudness.current(h)]
     if (before[0] !== after[0] || before[1] !== after[1]) this.sinkRef?.refreshLoudness?.()
+    this.emitView()
+  }
+
+  /** The gain of the current render's sound is not measured yet (a loudness
+   *  target, and no current answer for this hash — a carried-over verdict
+   *  counts as not measured until its answer confirms it). */
+  loudnessPending(): boolean {
+    if (!this.hash || !this.hasLoudnessTarget()) return false
+    return !(this.loud && this.loud.hash === this.hash && this.loud.current)
+  }
+
+  /** Telemetry for an answer (K2): the first not-measured answer of a hash,
+   *  and the measured one that ends its wait. */
+  private logLoudness(a: LoudnessAnswer): void {
+    const since = this.loudWaitSince.get(a.hash)
+    if (!a.current) {
+      if (since !== undefined) return
+      this.loudWaitSince.set(a.hash, Date.now())
+      this.pushLoudnessEvent({ type: 'pending', render_hash: a.hash, played_db: a.gainDb })
+      return
+    }
+    if (since === undefined || a.gainDb === null) return
+    this.loudWaitSince.delete(a.hash)
+    const played = this.loud?.gainDb ?? null   // what the sound was playing meanwhile
+    this.stats.loudnessMeasured++
+    this.pushLoudnessEvent({
+      type: 'measured', render_hash: a.hash, played_db: played, measured_db: a.gainDb,
+      diff_db: Math.round(Math.abs((played ?? 0) - a.gainDb) * 100) / 100, waited_ms: Math.max(0, Date.now() - since),
+    })
+  }
+
+  private pushLoudnessEvent(e: LoudnessEvent): void {
+    this.loudnessLog.push(e)
+    if (this.loudnessLog.length > LOUDNESS_LOG_KEPT) this.loudnessLog.shift()
+    // a hash no longer current will never be measured for this view
+    for (const h of this.loudWaitSince.keys()) if (h !== this.hash && h !== e.render_hash) this.loudWaitSince.delete(h)
   }
 
   private splice(): void {
@@ -506,6 +566,13 @@ export class PreviewController {
    *  soon (250 ms), not at the 1.5 s idle cadence (§4.1 step 8). */
   needsBake(): boolean {
     return (this.engineRef?.status.ranges ?? []).some((r) => r.mode === MODE_BAKED)
+  }
+
+  /** The background server render is wanted soon: BAKED ranges, or a
+   *  loudness gain it has to measure (K2: the sound is right within a second
+   *  or two instead of after the idle cadence). */
+  renderUrgent(): boolean {
+    return this.needsBake() || this.loudnessPending()
   }
 
   // ------------------------------------------------------------ transport
@@ -569,7 +636,8 @@ export class PreviewController {
   view(): ControllerView {
     const engine = this.engineRef
     const st = engine?.status
-    if (!engine || !st) return { live: false, playing: false, wait: null, modeAtPlayhead: 0, reasons: [], presentedK: 0 }
+    const loudness = !this.hash || !this.hasLoudnessTarget() ? null : this.loudnessPending() ? 'pending' : 'measured'
+    if (!engine || !st) return { live: false, playing: false, wait: null, modeAtPlayhead: 0, reasons: [], presentedK: 0, loudness }
     const k = engine.playing ? engine.presentedK : engine.targetK
     const range = st.ranges.find((r) => k >= r.k0 && k < r.k1)
     const mode = range?.mode ?? 0
@@ -579,14 +647,14 @@ export class PreviewController {
     else if (mode === MODE_BAKED && !engine.isBakedFrame(k)) wait = 'baking'
     return {
       live: st.mode === 'client', playing: st.playing, wait, modeAtPlayhead: mode,
-      reasons: range?.reasons ?? [], presentedK: st.presentedK,
+      reasons: range?.reasons ?? [], presentedK: st.presentedK, loudness,
     }
   }
 
   private emitView(): void {
     if (!this.opts.onView) return
     const v = this.view()
-    const key = `${v.live}|${v.playing}|${v.wait}|${v.modeAtPlayhead}|${v.reasons.join(',')}`
+    const key = `${v.live}|${v.playing}|${v.wait}|${v.modeAtPlayhead}|${v.reasons.join(',')}|${v.loudness}`
     if (key === this.lastView) return
     this.lastView = key
     this.opts.onView(v)

@@ -20,7 +20,15 @@ from video_ai_editor.agent.dispatch import dispatch
 
 @pytest.fixture
 def store(tmp_path: Path) -> EDLStore:
-    return EDLStore(tmp_path)
+    # Cuts at 1, 2, 3 and 5 s: add_transition refuses a time that is not a
+    # cut (final sweep 2), and these tests are about removal.
+    from video_ai_editor.edl.schema import Clip
+    st = EDLStore(tmp_path)
+    v1 = st.edl.get_track("v1")
+    for i, (a, b) in enumerate([(0, 1), (1, 2), (2, 3), (3, 5), (5, 8)]):
+        v1.clips.append(Clip(id=f"c{i}", src=str(tmp_path / "a.mp4"), in_=a, out=b, start=a))
+    st.edl.recompute_duration()
+    return st
 
 
 def _transitions(store: EDLStore):

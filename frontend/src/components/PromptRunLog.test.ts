@@ -109,6 +109,31 @@ describe('the rendered run log', () => {
     expect(html).not.toContain('class="val"')             // the old nowrap columns are gone
   })
 
+  it('marks a failed ADVISORY check as kept, never a blocking one (K3)', async () => {
+    vi.resetModules()
+    const { usePromptStore } = await import('../lib/promptStore')
+    const checks: VerifyCheck[] = [
+      { check: 'captions_cover', human: 'captions cover the speech', pass: false, measured: 0.71, expected: 0.9,
+        headline: true, blocking: false },
+      { check: 'speed_equals', human: 'the speed matches', pass: true, measured: 2, expected: 2, headline: true,
+        blocking: true },
+    ]
+    Object.assign(usePromptStore.getInitialState(), {
+      status: 'error', prompt: 'add captions', runId: 'r3', opSeen: true, logOpen: true, opRef: null, plan: null,
+      steps: [{ index: 0, tool: 'add_caption_track', status: 'ok', summary: 'laid captions' }],
+      verify: { type: 'verify', plan_id: 'p', checks, passed: 1, total: 2, rendered: false },
+    })
+    const { PromptRunLog } = await import('./PromptRunLog')
+    const html = renderToStaticMarkup(createElement(PromptRunLog))
+    expect(html.match(/advisory · the edit was kept/g)).toHaveLength(1)
+  })
+
+  it('names the safety net step in editor language (K3)', async () => {
+    const { toolTitle } = await import('../lib/opLabels')
+    expect(toolTitle('safety_net')).toBe('Safety check')
+    expect(toolTitle('set_text_style')).toBe('Text style')
+  })
+
   it('labels steps in editor language, the tool id only as a hover title (QA-101)', async () => {
     const html = await seed('error')
     const visible = html.replace(/title="[^"]*"/g, '')

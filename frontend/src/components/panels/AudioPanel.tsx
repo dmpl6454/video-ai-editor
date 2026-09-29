@@ -6,11 +6,12 @@ import { useSliderCommit } from '../../lib/useSliderCommit'
 import { Icon } from '../Icon'
 import { VoRecorder } from '../VoRecorder'
 import { DeepLinks } from '../rail/DeepLinkRow'
+import { addMusicFile } from '../../lib/musicImport'
 import './panels.css'
 
 // The Audio tool panel (docs/design/LEFT_RAIL_SPEC.md §2.5): music, voiceover
 // and the mix, moved out of the Media panel in R1 with their behaviour
-// unchanged — "Add music…" (upload + onto the Music lane, or library only),
+// unchanged — "Add music…" (upload + onto the Music lane, always),
 // VoRecorder (Record voiceover / Import audio file as voiceover) and the music
 // on the timeline (per-clip volume, Duck under speech). Then the AI audio
 // deep links (R5): Reduce noise, Isolate vocals, Isolate instrumental and AI
@@ -21,7 +22,6 @@ import './panels.css'
 
 export function AudioPanel({ active = false }: { active?: boolean }) {
   const uploadAudio = useStore((s) => s.uploadAudio)
-  const addToTimeline = useStore((s) => s.importAddToTimeline)
   const audioRef = useRef<HTMLInputElement>(null)
   return (
     <div className="audio-panel">
@@ -29,9 +29,7 @@ export function AudioPanel({ active = false }: { active?: boolean }) {
       <button
         className="panel-btn"
         onClick={() => audioRef.current?.click()}
-        title={addToTimeline
-          ? 'Pick an audio file — it lands on the Music track'
-          : 'Pick an audio file — it goes to the media list only'}
+        title="Pick an audio file — it lands on the Music track"
       >
         <Icon name="music" /> Add music…
       </button>
@@ -44,7 +42,9 @@ export function AudioPanel({ active = false }: { active?: boolean }) {
           const f = e.target.files?.[0]
           // Cleared so picking the same file again still imports.
           e.target.value = ''
-          if (f) void uploadAudio(f)
+          // Always onto the Music lane (lib/musicImport), whatever Media's
+          // "Add imports to the timeline" says.
+          if (f) void addMusicFile(f, uploadAudio)
         }}
       />
       <MusicPanel />

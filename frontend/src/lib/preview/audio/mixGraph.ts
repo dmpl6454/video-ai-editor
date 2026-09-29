@@ -15,7 +15,9 @@
 //               generation of a lane out and the new one in over 5 ms)
 //             → bus GainNode (track mute / solo) → [music: duck GainNode]
 //   master    → gain (mix auto-level × loudness) → [limiter: Dynamics-
-//               Compressor, APPROX, its 6 ms look-ahead compensated] → out
+//               Compressor, APPROX, its 6 ms look-ahead compensated]
+//               → [post: a mixed programme's loudness gain → a second
+//               limiter at −1 dBFS, the server preview's order] → out
 //               (transport: 5 ms ramps on pause) → destination
 //
 // Parameter-only edits rewrite automation from a context time with
@@ -62,6 +64,17 @@ export function limiterMakeupUndo(thresholdDb: number, ratio = LIMITER_RATIO): n
   const t = Math.min(0, thresholdDb)
   return Math.pow(10, (0.6 * t * (1 - 1 / ratio)) / 20)
 }
+
+/** Samples of look-ahead a planned master adds: one LIMITER_LATENCY per
+ *  limiter stage (the mix limiter, and a mixed programme's loudness
+ *  limiter after it — `MasterPlan.post`). */
+export function masterLatency(m: AudioPlan['master']): number {
+  return ((m.ceilingDb !== null ? 1 : 0) + (m.post ? 1 : 0)) * LIMITER_LATENCY
+}
+
+/** A master's STRUCTURE (which limiter stages exist): a change rebuilds it
+ *  and, since the look-ahead moves, reschedules every lane. */
+const masterShape = (m: AudioPlan['master']): string => `${m.ceilingDb !== null}|${m.post !== undefined}`
 
 export interface Anchor {
   /** Context time at which output sample `sample` is HEARD. */
@@ -173,6 +186,8 @@ export class MixGraph {
   private master!: GainNode
   private limiter: DynamicsCompressorNode | null = null
   private limiterGain: GainNode | null = null
+  /** The loudness stage after the mix limiter (`MasterPlan.post`). */
+  private post: { gain: GainNode; lim: DynamicsCompressorNode; undo: GainNode } | null = null
   private buses = new Map<string, BusNodes>()
   /** The one node feeding `master`: the lanes summed TWO AT A TIME in
    *  creation order (`attachToMaster`), never N inputs on one node. */
@@ -201,7 +216,7 @@ export class MixGraph {
 
   /** Samples the master adds before the output (the limiter's look-ahead). */
   get latency(): number {
-    return this.limiter ? LIMITER_LATENCY : 0
+    return ((this.limiter ? 1 : 0) + (this.post ? 1 : 0)) * LIMITER_LATENCY
   }
 
   /** Context time a source must START at for output sample `p` to be heard
@@ -225,25 +240,65 @@ export class MixGraph {
 
   // ------------------------------------------------------------ structure
 
+  /** A hard-knee limiter at `ceiling` dBFS and the gain undoing its makeup. */
+  private limiterStage(ceiling: number): [DynamicsCompressorNode, GainNode] {
+    const lim = this.ctx.createDynamicsCompressor()
+    lim.threshold.value = ceiling
+    lim.knee.value = 0
+    lim.ratio.value = LIMITER_RATIO
+    lim.attack.value = 0.001
+    lim.release.value = 0.05
+    const g = this.ctx.createGain()
+    g.gain.value = limiterMakeupUndo(ceiling)
+    lim.connect(g)
+    return [lim, g]
+  }
+
   private buildMaster(): void {
     this.master = this.ctx.createGain()
     this.master.gain.value = this.plan.master.gain
     const ceiling = this.plan.master.ceilingDb
+    let tail: AudioNode = this.master
     if (ceiling !== null) {
-      const lim = this.ctx.createDynamicsCompressor()
-      lim.threshold.value = ceiling
-      lim.knee.value = 0
-      lim.ratio.value = LIMITER_RATIO
-      lim.attack.value = 0.001
-      lim.release.value = 0.05
-      const g = this.ctx.createGain()
-      g.gain.value = limiterMakeupUndo(ceiling)
-      this.master.connect(lim).connect(g).connect(this.out)
+      const [lim, g] = this.limiterStage(ceiling)
+      tail.connect(lim)
+      tail = g
       this.limiter = lim
       this.limiterGain = g
       this.limiterBorn = this.ctx.currentTime
-    } else {
-      this.master.connect(this.out)
+    }
+    const post = this.plan.master.post
+    if (post) {
+      // mix → [mix limiter] → loudness gain → −1 dBFS limiter (the server
+      // preview's order, `audio_mix._preview_norm_chain`)
+      const gain = this.ctx.createGain()
+      gain.gain.value = post.gain
+      const [lim, undo] = this.limiterStage(post.ceilingDb)
+      tail.connect(gain).connect(lim)
+      tail = undo
+      this.post = { gain, lim, undo }
+      this.limiterBorn = this.ctx.currentTime
+    }
+    tail.connect(this.out)
+  }
+
+  /** Set the master's parameters to `m` (same structure) — ramped from `t`,
+   *  or at once when `t` is null (nothing scheduled). */
+  private applyMasterParams(m: AudioPlan['master'], t: number | null): void {
+    const set = (param: AudioParam, v: number) => {
+      if (t === null) { param.cancelScheduledValues(0); param.value = v } else holdAndRamp(param, t, v)
+    }
+    set(this.master.gain, m.gain)
+    if (this.limiter && m.ceilingDb !== null) {
+      if (t === null) this.limiter.threshold.value = m.ceilingDb
+      else this.limiter.threshold.setValueAtTime(m.ceilingDb, t)
+      set(this.limiterGain!.gain, limiterMakeupUndo(m.ceilingDb))
+    }
+    if (this.post && m.post) {
+      set(this.post.gain.gain, m.post.gain)
+      if (t === null) this.post.lim.threshold.value = m.post.ceilingDb
+      else this.post.lim.threshold.setValueAtTime(m.post.ceilingDb, t)
+      set(this.post.undo.gain, limiterMakeupUndo(m.post.ceilingDb))
     }
   }
 
@@ -545,8 +600,8 @@ export class MixGraph {
     const diff = diffPlans(this.plan, next)
     const prev = this.plan
     const t = this.when(p)
-    if ((prev.master.ceilingDb === null) !== (next.master.ceilingDb === null)) {
-      // The limiter (and its latency) came or went: everything moves.
+    if (masterShape(prev.master) !== masterShape(next.master)) {
+      // A limiter stage (and its latency) came or went: everything moves.
       for (const b of next.buses) diff.dirtyBuses.add(b.id)
       for (const b of prev.buses) diff.dirtyBuses.add(b.id)
     }
@@ -566,15 +621,8 @@ export class MixGraph {
     }
     if (diff.busGains) for (const b of next.buses) holdAndRamp(this.bus(b.id).gain.gain, t, b.gain)
     if (diff.master) {
-      if ((prev.master.ceilingDb === null) === (next.master.ceilingDb === null)) {
-        holdAndRamp(this.master.gain, t, next.master.gain)
-        if (this.limiter && next.master.ceilingDb !== null) {
-          this.limiter.threshold.setValueAtTime(next.master.ceilingDb, t)
-          holdAndRamp(this.limiterGain!.gain, t, limiterMakeupUndo(next.master.ceilingDb))
-        }
-      } else {
-        this.rebuildMaster()
-      }
+      if (masterShape(prev.master) === masterShape(next.master)) this.applyMasterParams(next.master, t)
+      else this.rebuildMaster()
     }
     if (diff.duck) this.applyDuck(p)
     if (diff.dirtyBuses.size) {
@@ -632,15 +680,19 @@ export class MixGraph {
     const old = this.master
     const oldLim = this.limiter
     const oldGain = this.limiterGain
+    const oldPost = this.post
     this.limiter = null
     this.limiterGain = null
+    this.post = null
     this.buildMaster()
     // the lanes' pairwise sum (`attachToMaster`) moves over as one node
     if (this.sumTail) {
       try { this.sumTail.disconnect(old) } catch { /* not connected */ }
       this.sumTail.connect(this.master)
     }
-    for (const n of [old, oldLim, oldGain]) { try { n?.disconnect() } catch { /* gone */ } }
+    for (const n of [old, oldLim, oldGain, oldPost?.gain, oldPost?.lim, oldPost?.undo]) {
+      try { n?.disconnect() } catch { /* gone */ }
+    }
   }
 
   /** The music duck (APPROX trapezoid): the bed dips to `floor` from 60 ms
@@ -743,16 +795,8 @@ export class MixGraph {
       g.cancelScheduledValues(0)
       g.value = b.gain
     }
-    if ((prev.master.ceilingDb === null) !== (next.master.ceilingDb === null)) {
-      this.rebuildMaster()
-    } else {
-      this.master.gain.cancelScheduledValues(0)
-      this.master.gain.value = next.master.gain
-      if (this.limiter && next.master.ceilingDb !== null) {
-        this.limiter.threshold.value = next.master.ceilingDb
-        this.limiterGain!.gain.value = limiterMakeupUndo(next.master.ceilingDb)
-      }
-    }
+    if (masterShape(prev.master) !== masterShape(next.master)) this.rebuildMaster()
+    else this.applyMasterParams(next.master, null)
   }
 
   /** DynamicsCompressorNode starts fully compressed and releases over its
@@ -909,9 +953,8 @@ async function renderOfflineOnce(plan: AudioPlan, reader: PcmReader, p0: number,
                                   make: MakeOffline): Promise<OfflineRender> {
   // A limiter needs its warm-up (LIMITER_WARMUP_S of silence) and adds its
   // look-ahead; both are rendered and trimmed.
-  const lim = plan.master.ceilingDb !== null
-  const pre = lim ? Math.round(LIMITER_WARMUP_S * SR) : 0
-  const lat = lim ? LIMITER_LATENCY : 0
+  const lat = masterLatency(plan.master)
+  const pre = lat > 0 ? Math.round(LIMITER_WARMUP_S * SR) : 0
   const len = Math.max(1, pre + lat + p1 - p0)
   const ctx = make(2, len, SR)
   const g = new MixGraph(ctx, plan, { reader, compensateLatency: false })

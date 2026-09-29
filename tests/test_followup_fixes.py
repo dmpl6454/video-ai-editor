@@ -99,8 +99,10 @@ def test_add_sticker_cascades_off_an_exact_position_collision(tmp_path):
         dispatch(store, "add_sticker",
                  {"src": str(png), "start": 0.0, "end": 3.0, "position": list(pos)})
 
+    # Same window → each on its own sticker lane (final sweep 2 r2); the
+    # cascade still runs across every lane.
     pts = [(s.transform.x, s.transform.y)
-           for s in store.edl.get_track("stickers").clips]
+           for t in store.edl.tracks if t.type == "sticker" for s in t.clips]
     assert len(pts) == 3
     assert len(set(pts)) == 3, f"stickers share a hit box: {pts}"
 

@@ -193,6 +193,11 @@ def test_paraphrases_the_grammar_cannot_read_still_reach_the_model(prompt, inten
     reading (no intent phrase matches, recipes confidence 0.00) but speak
     about the edit — they are what the on-device model is for."""
     routed, spawned = _route_fm(prompt, intents)
+    if prompt == "I want the backing track to sit lower" and routed.brain == "recipes":
+        # K3: the shared semantics read this one without the model (the bed,
+        # and "lower") — still the music's volume, never "add music".
+        assert routed.plan is not None and tool in [s.tool for s in routed.plan.steps], routed.plan
+        return
     assert "plan" in spawned
     assert routed.brain == "apple_intelligence" and routed.plan is not None, routed.attempts
     if tool:

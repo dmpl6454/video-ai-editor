@@ -123,7 +123,7 @@ export function CanvasSection({ clipId, clip, sessionId, send }: CanvasSectionPr
           </div>
           <label className="canvas-custom">
             <span>Custom</span>
-            <input type="color" aria-label="Custom background colour" value={(color ?? '#000000').toLowerCase()}
+            <input type="color" className="canvas-well" aria-label="Custom background colour" value={(color ?? '#000000').toLowerCase()}
                    onChange={(e) => {
                      const v = e.target.value.toUpperCase()
                      if (v !== color) set({ type: 'color', color: v })

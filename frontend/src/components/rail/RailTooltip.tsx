@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { TIP_DELAY_MS, TIP_GRACE_MS, tipPosition } from './railTip'
+import { TIP_DELAY_MS, TIP_GRACE_MS, pointInRect, tipPosition } from './railTip'
 import './rail.css'
 
 // ONE tooltip for the shell's icon controls (docs/design/LEFT_RAIL_SPEC.md
@@ -12,7 +12,10 @@ import './rail.css'
 //   shows   after 400 ms of hover, or of keyboard (:focus-visible) focus
 //   hides   on Esc, pointer-down, any scroll, blur, or pointer-leave — leaving
 //           has a 120 ms grace so the pointer can move ONTO the tip
-//           (WCAG 1.4.13 hoverable), and staying on it keeps it
+//           (WCAG 1.4.13 hoverable), and staying on it keeps it. The tip is
+//           `pointer-events: none` so a click lands on the panel control it
+//           covers (final QA: it ate the first click on the panel's top row);
+//           "on the tip" is therefore a geometry test on pointermove
 //   places  right of rail controls (.rail), below everything else; clamped to
 //           the viewport
 //
@@ -28,6 +31,7 @@ export function RailTooltip() {
     let showTimer = 0
     let hideTimer = 0
     let current: HTMLElement | null = null
+    let onTip = false
 
     const show = (el: HTMLElement) => {
       if (!el.isConnected || el.getClientRects().length === 0) return
@@ -50,6 +54,7 @@ export function RailTooltip() {
       window.clearTimeout(hideTimer)
       tip.hidden = true
       current = null
+      onTip = false
     }
     const arm = (el: HTMLElement) => {
       window.clearTimeout(hideTimer)
@@ -57,6 +62,7 @@ export function RailTooltip() {
       window.clearTimeout(showTimer)
       showTimer = window.setTimeout(() => show(el), TIP_DELAY_MS)
     }
+    const keep = () => window.clearTimeout(hideTimer)
     const softHide = () => {
       window.clearTimeout(showTimer)
       window.clearTimeout(hideTimer)
@@ -65,14 +71,29 @@ export function RailTooltip() {
     const tipOwner = (t: EventTarget | null) =>
       t instanceof Element ? t.closest<HTMLElement>('[data-tip]') : null
 
+    // Over the shown tip, what lies UNDER it is not being hovered: its
+    // pointerover/out must neither re-arm nor start the hide.
+    const overTip = (e: PointerEvent) =>
+      !tip.hidden && pointInRect(e.clientX, e.clientY, tip.getBoundingClientRect())
     const onOver = (e: PointerEvent) => {
       const el = tipOwner(e.target)
-      if (el) arm(el)
+      if (el && !overTip(e)) arm(el)
     }
     const onOut = (e: PointerEvent) => {
       const el = tipOwner(e.target)
       const to = e.relatedTarget as Node | null
-      if (el && !(to && (el.contains(to) || tip.contains(to)))) softHide()
+      if (el && !(to && el.contains(to)) && !overTip(e)) softHide()
+    }
+    // Hoverable without taking pointer events: entering the tip's box within
+    // the grace keeps it; leaving the box (not back onto its control) starts
+    // the grace again.
+    const onMove = (e: PointerEvent) => {
+      if (tip.hidden) return
+      const inside = overTip(e)
+      if (inside === onTip) return
+      onTip = inside
+      if (inside) keep()
+      else if (!(current && e.target instanceof Node && current.contains(e.target))) softHide()
     }
     const onFocusIn = (e: FocusEvent) => {
       const el = tipOwner(e.target)
@@ -87,10 +108,10 @@ export function RailTooltip() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !tip.hidden) hide()
     }
-    const keep = () => window.clearTimeout(hideTimer)
 
     document.addEventListener('pointerover', onOver)
     document.addEventListener('pointerout', onOut)
+    document.addEventListener('pointermove', onMove, { passive: true })
     document.addEventListener('focusin', onFocusIn)
     document.addEventListener('focusout', onFocusOut)
     document.addEventListener('pointerdown', hide, true)
@@ -98,20 +119,17 @@ export function RailTooltip() {
     window.addEventListener('blur', hide)
     // Bubble phase: the keymap engine lets Escape propagate (engine.ts).
     document.addEventListener('keydown', onKey)
-    tip.addEventListener('pointerenter', keep)
-    tip.addEventListener('pointerleave', softHide)
     return () => {
       hide()
       document.removeEventListener('pointerover', onOver)
       document.removeEventListener('pointerout', onOut)
+      document.removeEventListener('pointermove', onMove)
       document.removeEventListener('focusin', onFocusIn)
       document.removeEventListener('focusout', onFocusOut)
       document.removeEventListener('pointerdown', hide, true)
       document.removeEventListener('scroll', hide, true)
       window.removeEventListener('blur', hide)
       document.removeEventListener('keydown', onKey)
-      tip.removeEventListener('pointerenter', keep)
-      tip.removeEventListener('pointerleave', softHide)
     }
   }, [])
 

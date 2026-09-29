@@ -49,9 +49,11 @@ export interface AudioEngineOptions {
    *  loudness target (APPROX, §7): the server preview's master gain, from
    *  GET /preview_loudness (PreviewController). */
   loudnessGainDb?: () => number | null
-  /** Whether that gain was measured for the sound of `renderHash` (else the
-   *  frames are APPROX 'audio:loudness'). Without it the sink says nothing
-   *  about loudness (test harnesses that set the gain themselves). */
+  /** Whether that gain was measured for the sound of `renderHash`: then
+   *  loudnessOffDb() says how far the gain played is from it (over 1 dB the
+   *  frames are APPROX 'audio:loudness'); not measured yet says nothing (K2,
+   *  0.8.0 QA). Without it the sink says nothing about loudness (test
+   *  harnesses that set the gain themselves). */
   loudnessCurrent?: (renderHash: string) => boolean
   /** The context stopped without us (suspended/interrupted by the system).
    *  The engine should pause the picture at the same k. */
@@ -68,6 +70,8 @@ interface Program {
   placements: readonly AudioPlacement[]
   info: AudioProgramInfo
   plan: AudioPlan
+  /** The loudness gain (dB) the plan plays; null: none (the raw mix). */
+  loudnessDb: number | null
 }
 
 function makeContext(): AudioContext {
@@ -110,6 +114,12 @@ export class AudioEngine implements AudioSink {
     this.opts = opts
     this.chunks = opts.chunks ?? new AudioChunks({ base: opts.proxyBase })
     this.reader = chunkReader(this.chunks, (src) => this.keyOf(src))
+    // a layout read while its sound was being built landed built (K2): its
+    // peaks bound the limiter's ranges now
+    this.chunks.onLayoutChange = () => {
+      const p = this.pending ?? this.program
+      if (p) this.refreshLimiting(p)
+    }
   }
 
   // ------------------------------------------------------------ program
@@ -129,11 +139,12 @@ export class AudioEngine implements AudioSink {
    *  prepare there is no program yet, and every source read as silent). */
   private planning: AudioProgramInfo | null = null
 
-  private planOf(edl: EdlLike, placements: readonly AudioPlacement[], program: AudioProgramInfo): AudioPlan {
+  private planOf(edl: EdlLike, placements: readonly AudioPlacement[], program: AudioProgramInfo,
+    loudnessDb: number | null): AudioPlan {
     this.planning = program
     try {
       return buildAudioPlan(edl, placements, program.R, {
-        loudnessGainDb: this.opts.loudnessGainDb?.() ?? null,
+        loudnessGainDb: loudnessDb,
         silent: (src) => this.reader.silent(src),
         peak: (src, a, b) => this.reader.peak?.(src, a, b) ?? null,
       })
@@ -148,17 +159,22 @@ export class AudioEngine implements AudioSink {
     return (this.pending ?? this.program)?.plan.master ?? null
   }
 
-  /** For the engine's classify (§7): the loudness gain the newest program
-   *  plays is the one measured for its render (true), or a last-known /
-   *  missing one (false: APPROX 'audio:loudness'). Undefined when the
+  /** For the engine's classify (§7): how far (dB) the loudness gain the
+   *  newest program plays (none: 0 dB, the raw mix) is from the gain the
+   *  server measured for its render's sound. Over 1 dB the frames are APPROX
+   *  'audio:loudness'. Undefined when that gain is not measured yet (K2,
+   *  0.8.0 QA: no "≈ Loudness" on every fresh project — the controller has
+   *  it measured promptly and keeps the wait in its telemetry), when the
    *  project has no loudness target, or no loudness source was given. */
-  loudnessCurrent(): boolean | undefined {
+  loudnessOffDb(): number | undefined {
     const p = this.pending ?? this.program
     const current = this.opts.loudnessCurrent
     if (!p || !current) return undefined
     const lufs = (p.edl.canvas as { loudness_lufs?: number | null } | undefined)?.loudness_lufs
     if (lufs === null || lufs === undefined) return undefined
-    return current(p.info.renderHash) && (this.opts.loudnessGainDb?.() ?? null) !== null
+    const measured = this.opts.loudnessGainDb?.() ?? null
+    if (measured === null || !current(p.info.renderHash)) return undefined
+    return Math.abs((p.loudnessDb ?? 0) - measured)
   }
 
   /** The loudness gain (or whether it is current) changed: re-plan the newest
@@ -182,7 +198,7 @@ export class AudioEngine implements AudioSink {
    *  so the limiting ranges (only) are re-derived and the engine told. */
   private refreshLimiting(prog: Program): void {
     if (prog !== this.program && prog !== this.pending) return
-    const again = this.planOf(prog.edl, prog.placements, prog.info)
+    const again = this.planOf(prog.edl, prog.placements, prog.info, prog.loudnessDb)
     const same = again.limiting.length === prog.plan.limiting.length &&
       again.limiting.every(([a, b], i) => a === prog.plan.limiting[i][0] && b === prog.plan.limiting[i][1])
     if (same) return
@@ -192,8 +208,9 @@ export class AudioEngine implements AudioSink {
 
   prepare(edl: EdlLike, placements: readonly AudioPlacement[], program: AudioProgramInfo): void {
     this.keys.clear()
-    const plan = this.planOf(edl, placements, program)
-    const next: Program = { edl, placements, info: program, plan }
+    const loudnessDb = this.opts.loudnessGainDb?.() ?? null
+    const plan = this.planOf(edl, placements, program, loudnessDb)
+    const next: Program = { edl, placements, info: program, plan, loudnessDb }
     // Layouts first: the reader needs them to answer ready()/copy().
     const layouts: Array<Promise<unknown>> = []
     for (const c of plan.clips) {
@@ -494,6 +511,7 @@ export class AudioEngine implements AudioSink {
     const ctx = this.ctx
     this.ctx = null
     if (ctx) void ctx.close().catch(() => { /* closed */ })
+    this.chunks.onLayoutChange = null
     this.chunks.clear()
   }
 }

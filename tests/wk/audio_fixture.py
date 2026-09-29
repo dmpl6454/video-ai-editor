@@ -95,6 +95,18 @@ def tone_source(path: Path, seconds: float, lf: float, rf: float, *, video: bool
     return path
 
 
+def sine_source(path: Path, seconds: float, freq: float, amp: float, *, video: bool = True) -> Path:
+    """AAC in mp4 (m4a without video): a pure `amp` sine on both channels, no
+    tick — a steady level for the loudness-limiter case (`hot_loud_edl`)."""
+    if not path.exists():
+        a = ["-f", "lavfi", "-i", f"aevalsrc=exprs='{amp}*sin(2*PI*{freq}*t)|{amp}*sin(2*PI*{freq}*t)':s={SR}:d={seconds}"]
+        v = ["-f", "lavfi", "-i", f"color=c=gray:s=64x36:r=30:d={seconds}"] if video else []
+        _run(["ffmpeg", "-v", "error", "-y", *v, *a,
+              *(["-c:v", "libx264", "-preset", "ultrafast"] if video else []),
+              "-c:a", "aac", "-b:a", "256k", "-shortest", str(path)])
+    return path
+
+
 def lossless_twin(src: Path, dst: Path) -> Path:
     """`src` with its sound decoded once, from the start, to float PCM (the
     picture copied): the samples the proxy FLAC holds, in a container the
@@ -324,6 +336,21 @@ def hot_edl(c30: str, c2997: str):
     e.get_track("a1").clips.append(_clip(c2997, "q", 1.2, 5.0, 7.0))
     e.get_track("vo").clips.append(_clip(c30, "r", 1.4, 6.0, 7.5))
     e.get_track("music").clips.append(_clip(c2997, "s", 1.6, 1.0, 3.0))
+    e.recompute_duration()
+    return e, 30
+
+
+def hot_loud_edl(v: str, bed: str):
+    """Final QA (engine): a loud mix under a NEGATIVE loudness gain. The
+    server's preview limits the raw mix at 0.97 BEFORE the loudness gain
+    (`alimiter=limit=0.97` → `volume` → `alimiter` −1 dBFS); a client with
+    one limiter after the whole gain never reached its ceiling and played up
+    to 4 dB louder, EXACT and with no chip. Two 0.8 sines (raw peak 1.6):
+    v1 and the music bed, 0-5 s, loudness target on (the default −16)."""
+    e = empty_edl(Canvas(w=64, h=36, fps=30))
+    e.canvas.loudness_lufs = -16.0
+    e.get_track("v1").clips.append(_clip(v, "v", 0.0, 0.0, 5.0))
+    e.get_track("music").clips.append(_clip(bed, "m", 0.0, 0.0, 5.0))
     e.recompute_duration()
     return e, 30
 

@@ -101,12 +101,20 @@ def test_sticker_route_serves_images_but_not_arbitrary_files(client, tmp_path):
 def test_mcp_refuses_cors_simple_content_types(client, ctype):
     """A cross-origin page can POST text/plain (or a form) with no preflight.
     /mcp used to parse such a body as JSON-RPC and run the tool; it must be a
-    415 before any tool runs, while application/json keeps working."""
+    415 before any tool runs, while application/json keeps working.
+
+    SEC-SAME-ORIGIN: a foreign Origin is now refused by the middleware (403)
+    before the route's own content-type check; the 415 stays the route's
+    answer to a client that names no foreign origin."""
     headers = {"Origin": "https://evil.example"}
     if ctype:
         headers["Content-Type"] = ctype
     body = (b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":'
             b'{"name":"add_text","arguments":{"text":"pwned","start":0,"end":1}}}')
+    r = client.post("/mcp", headers=headers, content=body)
+    assert r.status_code == 403, (r.status_code, r.text)
+    assert r.json()["error"]["code"] == "CROSS_ORIGIN_WRITE"
+    del headers["Origin"]
     r = client.post("/mcp", headers=headers, content=body)
     assert r.status_code == 415, (r.status_code, r.text)
 

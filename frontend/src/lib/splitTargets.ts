@@ -15,9 +15,18 @@
  * B's head, a slot not a coordinate), every other lane through `layoutTime`
  * (a crossfade snaps to the seam). Both are the inverses the Timeline already
  * uses for drops on those lanes, so a split lands where a drop would.
+ *
+ * SOUND lanes (vo, music, type "audio") are the exception: a sound clip
+ * plays WHOLE from where its run starts (`soundPull`/`soundSpan`), so the
+ * overlay inverse — which adds every upstream overlap — cut a voiceover one
+ * second after the playhead behind two 0.5 s dissolves (final sweep 2). A
+ * sound clip decodes through its own pull: `t = playhead + soundPull(clip)`,
+ * the exact inverse of `drawnSpan`'s sound branch.
  */
-import { clipEnd, type EDL } from '../types'
-import { layoutTime, v1SeamsOf, v1TimeFromOutput } from './timelineLayout'
+import { clipEnd, isMediaClip, type AnyClip, type EDL } from '../types'
+import {
+  isSoundLane, layoutTime, renderSpanOf, soundPull, v1SeamsOf, v1TimeFromOutput,
+} from './timelineLayout'
 
 export interface SplitTarget {
   track: string
@@ -25,11 +34,36 @@ export interface SplitTarget {
   time: number
 }
 
-/** The layout time `split_at(track, …)` needs for the playhead on `trackId`. */
-export function splitTimeFor(edl: EDL | null | undefined, trackId: string, playhead: number): number {
-  return trackId === 'v1'
-    ? v1TimeFromOutput(edl, playhead)
-    : layoutTime(v1SeamsOf(edl), playhead)
+/**
+ * The layout time `split_at(track, …)` needs for the playhead on `trackId`.
+ * On a sound lane pass the `clip` being cut: its time is its own pull, not
+ * the overlay inverse (without one — a paste, a drop — the overlay inverse
+ * still places a NEW clip where the playhead is).
+ */
+export function splitTimeFor(
+  edl: EDL | null | undefined, trackId: string, playhead: number, clip?: AnyClip | null,
+): number {
+  if (trackId === 'v1') return v1TimeFromOutput(edl, playhead)
+  const seams = v1SeamsOf(edl)
+  const track = edl?.tracks.find((t) => t.id === trackId)
+  if (clip && isSoundLane(trackId, track?.type)) {
+    return playhead + soundPull(seams, clip, track?.clips)
+  }
+  return layoutTime(seams, playhead)
+}
+
+/** The media clip on SOUND lane `trackId` audible at render instant
+ *  `playhead` (where the Timeline draws it); undefined off a sound lane. */
+export function soundClipUnder(
+  edl: EDL | null | undefined, trackId: string, playhead: number,
+): AnyClip | undefined {
+  const track = edl?.tracks.find((t) => t.id === trackId)
+  if (!track || !isSoundLane(trackId, track.type)) return undefined
+  return track.clips.find((c) => {
+    if (!isMediaClip(c)) return false
+    const sp = renderSpanOf(edl, trackId, c)
+    return !sp.dropped && sp.start <= playhead && playhead < sp.end
+  })
 }
 
 /**
@@ -43,9 +77,13 @@ export function splitTargets(
   const out: SplitTarget[] = []
   if (edl && selected.size) {
     for (const tk of edl.tracks) {
-      const time = splitTimeFor(edl, tk.id, playhead)
-      const hit = tk.clips.some((c) => selected.has(c.id) && c.start <= time && time < clipEnd(c))
-      if (hit && !out.some((o) => o.track === tk.id)) out.push({ track: tk.id, time })
+      if (out.some((o) => o.track === tk.id)) continue
+      for (const c of tk.clips) {
+        if (!selected.has(c.id)) continue
+        // per clip: a sound clip decodes through its own run's pull
+        const time = splitTimeFor(edl, tk.id, playhead, c)
+        if (c.start <= time && time < clipEnd(c)) { out.push({ track: tk.id, time }); break }
+      }
     }
   }
   if (!out.length) out.push({ track: 'v1', time: splitTimeFor(edl, 'v1', playhead) })

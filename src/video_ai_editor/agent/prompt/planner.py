@@ -38,6 +38,9 @@ from typing import Any, Iterable
 
 from . import clip_slots as CS
 from . import grammar as G
+from . import scope_planner as SP
+from . import semantic_fixups as SF
+from . import semantics as M
 from . import slots as S
 from .facts import TimelineFacts
 from .langs import needs_translation
@@ -45,7 +48,7 @@ from .expanders import EXPANDERS, audit_expansion, estimate_seconds, expand_auto
 from .recipes import (ASK, REASK_PREFIX, RECIPE_BY_NAME, Context, Expansion, Intent, consumes_answer,
                       dropped_note, is_blank_answer, normalize_slots, placeholder, pc, reask, was_reasked)
 from .recipes import ask as _ask
-from .schema import (ARG_REF, LONG_RUN_SECONDS, STAGE_PREREQ, DownloadNeeded, NeedsInput, Plan, Postcondition,
+from .schema import (ARG_REF, LONG_RUN_SECONDS, STAGE_AUDIO, STAGE_CUTS, STAGE_PREREQ, DownloadNeeded, NeedsInput, Plan, Postcondition,
                      Step)
 
 #: Recipes whose steps re-time v1 (so later positional maths is stale).
@@ -163,6 +166,11 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
     if r == "duck":
         # QA-031: the negation lives in the clause ("turn off ducking").
         out = {"_mood": w.mood, "enabled": False if G.duck_off(hit.clause) else None}
+        head, tail = M.reference_split(hit.clause)
+        if tail and not _MUSIC_WORD_RE.search(head) and _VOICE_WORD_RE.search(head):
+            # "duck the video sound under the voiceover": only the MUSIC ducks
+            # (it turned ducking on for the music, and the clips kept their level)
+            out["_programme"] = True
         db = _DB_RE.search(hit.clause)
         if db and db.group("n") and not db.group("by"):
             v = float(db.group("n"))
@@ -193,7 +201,7 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
     if r in ("clean_audio", "loudness"):
         return {"lufs": lufs, "_platform": platform}
     if r == "speed":
-        if _SPEED_RESET_RE.search(hit.clause):
+        if _SPEED_RESET_RE.search(hit.clause) or M.direction(hit.clause, "speed") == "reset":
             # Final QA: "reset the speed", "normal speed", "remove the speed
             # change" set 1.25x (the default factor) — even on a 1x clip.
             # Normal is 1x, and a factor of 1 also clears a curve.
@@ -201,10 +209,28 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
         # Review RD2: a named curve is its preset; "speed ramp/curve" with no
         # name asks which (`_curve`) — never a constant factor.
         preset = _speed_preset_in(hit.clause)
-        return {"factor": None if preset else (c.speed or w.speed), "preset": preset, "clip_ref": c.clip_ref,
-                "_smooth": c.smooth, "_curve": bool(_CURVE_WORD_RE.search(hit.clause))}
+        # K3: the shared reading of direction and amount ("reduce the speed"
+        # → slower, "2 times faster" → 2x, "30% slower" → 0.7x); the old slot
+        # table had no row for most of them and fell to the 1.25x default.
+        sa = M.speed_ask(hit.clause)
+        factor = c.speed or w.speed
+        by_default = sa.factor is None and sa.direction in ("up", "down") and not re.search(r"\d", hit.clause)
+        if sa.factor is not None and not sa.ambiguous:
+            factor = sa.factor
+        elif sa.direction in ("up", "down") and (factor is None or (factor > 1) != (sa.direction == "up")):
+            factor = M.default_speed(sa.direction)
+        return {"factor": None if preset else factor, "preset": preset, "clip_ref": c.clip_ref,
+                "_smooth": c.smooth, "_curve": bool(_CURVE_WORD_RE.search(hit.clause)),
+                # "a bit slower" names no amount: a step from the clip's OWN
+                # speed (2x went to 0.8x, 2.5 times slower)
+                "_step": by_default}
     if r == "freeze":
-        return {"at": _at_seconds(hit.clause), "duration_s": c.duration_s}
+        # K3: "freeze on 6 seconds" — the moment is not also the hold length
+        dur = S.extract(_AT_TIME_RE.sub(" ", hit.clause)).duration_s if _AT_TIME_RE.search(hit.clause) else c.duration_s
+        frac = M.fraction_seconds(hit.clause)
+        if frac is not None:
+            dur = frac                   # "for half a second" held the 3 s default
+        return {"at": _at_seconds(hit.clause), "duration_s": dur}
     if r == "split":
         # Final QA r3: the clip a split names, and "in half" (its midpoint)
         ref = G.clip_ref_of(hit.clause)
@@ -215,7 +241,20 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
     if r == "trim":
         # Final QA r3: "keep only the first 10 seconds" is the range to KEEP —
         # it used to be cut, deleting exactly what the user wanted.
-        return {"range": c.range or w.range, "_keep": bool(_KEEP_RE.search(hit.clause))}
+        rng = c.range or w.range or _range_of(hit.clause)
+        out = {"range": rng, "_keep": bool(_KEEP_RE.search(hit.clause)) or M.keeps_only(hit.clause)}
+        if _MUSIC_OBJECT_RE.search(hit.clause):
+            # final sweep 2 r2: "remove the last 3 seconds of the music" cut the
+            # VIDEO's last 3 s; the object is the music clip
+            mt = _MUSIC_TO_RE.search(hit.clause)
+            out["_music"] = {"end_at": float(mt.group(1))} if mt else True
+            return out
+        ref = G.clip_ref_of(hit.clause)
+        if rng is not None and rng.kind in ("first", "last") and ref not in (None, "$v1_all", "$playhead"):
+            # "cut the first 2 seconds of clip 3": the range is inside THAT
+            # clip — it cut the whole video's first 2 seconds
+            out["_clip_ref"] = ref
+        return out
     if r == "title":
         # A proper-noun run is a NAME only on a name card: `NAME_RE` also
         # reads "a title that says Big Launch" as name="Big Launch", which is
@@ -242,10 +281,21 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
             retime = _title_retime(hit.clause)
             if retime is not None:
                 return {"text": None, "_retime": retime}
+        if text is None and not name and not is_name_card and _TEXT_REF_RE.search(hit.clause) \
+                and not _NEW_TEXT_VERB_RE.search(hit.clause) and text_look_of(hit.clause) \
+                and (not _TITLE_TEXT_RE.search(hit.clause) or _SIZE_PCT_RE.search(hit.clause)):
+            # "font size 72 for the title": a look for the title the user has
+            # (it asked "What should the title say?")
+            return {"text": None, "_restyle": True, "_look": text_look_of(hit.clause)}
         if text is None and not name:
             m = _TITLE_TEXT_RE.search(hit.clause)
             if m and len(m.group(1).split()) <= 8:
                 text = _original_case(m.group(1).strip(), prompt)
+                # K3: "put a title at the top saying hi" — the words after
+                # "saying" are the title; the place before it is not.
+                said = re.search(r"\b(?:saying|that says|which says|reading|that reads|says)\s+(.+)$", text, re.I)
+                if said:
+                    text = said.group(1).strip(" .!?\"'“”")
                 # Final QA r2: "make the title red", "the Summer Trip text
                 # bigger", "title font size 80" — words that only describe a
                 # LOOK are not a new title's wording. They were added as a
@@ -264,8 +314,10 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
                 and rng.end > rng.start:
             at, dur = float(rng.start), float(rng.end) - float(rng.start)
         if restyle:
-            return {"text": None, "_restyle": True}
-        return {"text": text, "name": name, "handle": handle, "dur": dur, "at": at,
+            return {"text": None, "_restyle": True, "_look": text_look_of(hit.clause)}
+        # "add a red title 'Intro'": the new title's own colour
+        new_look = {k: v for k, v in text_look_of(M.strip_quotes(hit.clause)).items() if k == "color"} if text else {}
+        return {"text": text, "name": name, "handle": handle, "dur": dur, "at": at, "_look": new_look or None,
                 "_style": "label_tag" if c.caption_position == "top" else "bold_pop",
                 "_lower_third": is_name_card}
     if r == "retext":
@@ -290,6 +342,11 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
         t = _TR_RETIME_RE.search(hit.clause)
         if t and not c.transition_type and c.duration_s is None:
             out["_retime"] = 1.5 if (t.group(1) or t.group(2)) in ("longer", "slower") else 1 / 1.5
+        elif c.duration_s is not None and not c.transition_type and not c.transition_look:
+            # "make all transitions 1 second long": the EXISTING transitions'
+            # length, each keeping its type (they became 0.4 s dissolves —
+            # the length was dropped because no type was named)
+            out["_to_duration"] = float(c.duration_s)
         return out
     if r == "export_preset":
         return {"platform": platform, "_ratio": c.ratio or w.ratio}
@@ -305,6 +362,17 @@ def _base_slots(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> 
                 # and then dropped on the floor — no trim, no check, no note.
                 "_duration_s": c.duration_s or w.duration_s}
     return {}
+
+
+def _range_of(clause: str) -> Any:
+    """The shared time reading as a slot range, when the slot table read none
+    ("remove seconds 10 through 12", "take 2 seconds off the end")."""
+    for x in M.time_refs(clause):
+        if x.kind in ("first", "last"):
+            return S.TimeRange(kind=x.kind, end=x.a)
+        if x.kind == "range" and x.b is not None:
+            return S.TimeRange(kind="abs", start=x.a, end=x.b)
+    return None
 
 
 #: A trim clause that names the part to KEEP (Final QA r3).
@@ -325,7 +393,7 @@ _SPEED_RESET_RE = re.compile(
     r"(?:speed\s+(?:change|ramp|curve|up|effect|adjustment)s?|slow[- ]?(?:mo(?:tion)?|down)|speed[- ]?up)\b"
     r"|\bback\s+to\s+(?:1x|1\s*x|100\s*%)|\bun-?(?:speed|slow)\b")
 #: "at 3 seconds", "at 0:05", "at 1.5s" (the moment a freeze or a split is at).
-_AT_TIME_RE = re.compile(r"\b(?:at|@)\s+(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b)")
+_AT_TIME_RE = re.compile(r"\b(?:at|@|on)\s+(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b)")
 
 
 #: A retext's new wording follows one of these (the most specific first).
@@ -379,6 +447,10 @@ _COLOUR_HEX: dict[str, str] = {
     "gold": "#FFC300", "grey": "#8E8E93", "gray": "#8E8E93", "lime": "#A4FF00", "teal": "#30B0C7",
 }
 _COLOUR_RE = re.compile(r"\b(" + "|".join(_COLOUR_HEX) + r")\b|(#[0-9a-f]{6})\b")
+_SIZE_TIMES_RE = re.compile(r"\b(?:twice|two times|2x|double|three times|3x|triple)\s+(?:as\s+)?(?:big|large|the size)\b"
+                            r"|\bdouble\s+(?:its\s+|the\s+)?size\b|\bhalf\s+(?:the|its)\s+size\b|\bhalf\s+as\s+big\b")
+_SIZE_PCT_RE = re.compile(r"\b(?P<n>\d{1,3})\s*(?:%|percent)\s+(?P<dir>bigger|larger|smaller)\b"
+                          r"|\bsize\s+(?P<dir2>up|down)\s+(?:by\s+)?(?P<n2>\d{1,3})\s*(?:%|percent)?(?!\s*(?:px|pt|pixels?))\b")
 _BIGGER_RE = re.compile(r"\b(?:bigger|larger|large|huge|increase (?:the )?size|size up|more readable)\b")
 _SMALLER_RE = re.compile(r"\b(?:smaller|tinier|less big|reduce (?:the )?size|size down)\b")
 _SIZE_PX_RE = re.compile(r"\bsize\s+(?:to\s+)?(\d{2,3})\b|\b(\d{2,3})\s*(?:px|pixels?|pt)\b")
@@ -394,7 +466,12 @@ _STYLE_WORD_RE = re.compile(
     r"|font|size|sized|px|pixels?|pt|points?|bold|bolder|italic|underlined?|outlined?|outlines?|stroke"
     r"|shadows?|glow|caps|uppercase|upper|lowercase|lower|case|colou?red|colou?rs?|thicker|thinner|heavier"
     r"|brighter|darker|with|a|an|and|the|in|more|less|much|bit|little|lot|slightly|very|really|border"
-    r"|box|background|highlight|\d+(?:\.\d+)?)")
+    r"|box|background|highlight|\d+(?:\.\d+)?"
+    # K3: the words around a look ("title text red please", "change the title
+    # font to Anton", "put the title at the top", "make teh title biger")
+    r"|to|of|at|on|it|please|pls|plz|text|title|heading|typeface|anton|bebas|montserrat|inter|top|bottom|middle"
+    r"|center|centre|screen|position|biger|bigg?er|larger|colour|up|higher|lower\s*down"
+    r"|twice|double|triple|half|times|as|its|2x|3x|two|three)")
 #: A clause that restyles an EXISTING text rather than adding one.
 _RESTYLE_VERB_RE = re.compile(r"\b(?:make|turn|change|set|colou?r|recolou?r|resize|style|restyle|give)\b")
 
@@ -418,9 +495,44 @@ _TR_NAMED_RETIME_RE = re.compile(
     r"(?:s|sec|secs|seconds?)\b(?:\s+long)?)")
 
 
+#: ONE existing transition named by its place: "the second transition",
+#: "the last transition", "the 1st transition".
+_TR_NTH_RE = re.compile(r"\b(?:the\s+)?(first|second|third|fourth|fifth|last|final|1st|2nd|3rd|4th|5th)\s+"
+                        r"(?:transition|crossfade|cross fade|dissolve|wipe|fade)\b(?!s)")
+_TR_NTH = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4, "fifth": 5,
+           "5th": 5, "last": -1, "final": -1}
+
+
+def _nth_transition_edit(clause: str) -> dict[str, Any] | None:
+    """final sweep 2 r2: "make the second transition 1 second" set BOTH to
+    1 s, and "change the first transition to a wipe" also changed its length.
+    The edit is bound to the ONE seam the ordinal names."""
+    m = _TR_NTH_RE.search(clause)
+    if not m or not re.search(r"\b(?:make|set|change|turn|switch|convert|replace|swap|lengthen|shorten|extend)\b", clause):
+        return None
+    out: dict[str, Any] = {"_nth": _TR_NTH[m.group(1)], "type": None, "look": None, "at": None, "duration": None}
+    tail = clause[m.end():]
+    dst = re.search(r"\b(?:in)?to\s+(?:a\s+|an\s+|the\s+)?(.+)$|\b(?:with|for)\s+(?:a\s+|an\s+)?(.+)$", tail)
+    if dst:
+        out["type"] = S.transition_type_of(dst.group(1) or dst.group(2))
+    n = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)\b", tail)
+    if n:
+        out["duration"] = float(n.group(1))
+    elif re.search(r"\b(?:longer|slower)\b", tail):
+        out["_retime"] = 1.5
+    elif re.search(r"\b(?:shorter|faster|quicker)\b", tail):
+        out["_retime"] = 1 / 1.5
+    if out["type"] is None and out["duration"] is None and "_retime" not in out:
+        return None
+    return out
+
+
 def _existing_transition_edit(clause: str) -> dict[str, Any] | None:
     """Slots that change or retime the EXISTING transitions of ONE type the
     clause names by name (Final QA r3), or None."""
+    nth = _nth_transition_edit(clause)
+    if nth is not None:
+        return nth
     for rx in (_TR_WITH_RE, _TR_CHANGE_RE):
         m = rx.search(clause)
         if m:
@@ -461,8 +573,30 @@ _RT_DUR_RE = re.compile(
     rf"(?<!the )\blasts?\s+(?:for\s+)?{_TS}\b|\b(?:stay|stays|remain|remains|be)\b.*?\bfor\s+{_TS}\b"
     rf"|\b(?:extend|extended|lengthen|shorten|shortened|trim|cut|make|set|change)\b.*?\b(?:to\s+)?{_TS}\s*"
     rf"(?:long\b)?$|\bfor\s+{_TS}\b")
+_RT_BY_RE = re.compile(rf"\b(extend|lengthen|longer|shorten|shorter|trim)\b.*?\bby\s+{_TS}")
 _RT_LONGER_RE = re.compile(r"\b(?:longer|lengthen|extend|stay\s+(?:on\s+)?(?:screen\s+)?longer)\b")
 _RT_SHORTER_RE = re.compile(r"\b(?:shorter|shorten)\b")
+
+
+#: "2 seconds longer", "1 second shorter", "half a second longer" (a change
+#: to an existing text's length, never its new length).
+_RT_MORE_RE = re.compile(r"\b(\d+(?:\.\d+)?|a|one|two|three|four|five|half\s+a)\s*(?:s|sec|secs|seconds?)\s+(longer|shorter)\b")
+_WORD_SECS = {"a": 1.0, "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0, "five": 5.0}
+_RT_START_AT_RE = re.compile(r"^(?:start|begin|show)\s+(?:the\s+|my\s+)?(?:title|text|heading|headline)\s+(?:at|from)\s+"
+                             r"(\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?$")
+
+
+def _clock_or_secs(v: str) -> float:
+    if ":" in v:
+        mm, ss = v.split(":", 1)
+        return round(int(mm) * 60 + float(ss), 3)
+    return float(v)
+
+
+#: K3: "move the title 2 seconds later", "… 1 s earlier".
+_RT_SHIFT_RE = re.compile(rf"\b(?:by\s+)?{_TS}\s+(later|earlier|sooner)\b")
+#: K3: "make the title last until the end (of the video)".
+_RT_TO_END_RE = re.compile(r"\b(?:until|till|to|through)\s+the\s+(?:very\s+)?end\b|\bthe\s+(?:whole|entire)\s+(?:video|time)\b")
 
 
 def _title_retime(clause: str) -> dict[str, float] | None:
@@ -471,6 +605,11 @@ def _title_retime(clause: str) -> dict[str, float] | None:
     no time)."""
     if not _TEXT_REF_RE.search(clause) or _NEW_TEXT_VERB_RE.search(clause) or re.search(r"[\"“]", clause):
         return None
+    if m := _RT_SHIFT_RE.search(clause):
+        n = float(m.group(1))
+        return {"shift": n if m.group(2) == "later" else -n}
+    if _RT_TO_END_RE.search(clause):
+        return {"to_end": 1.0}
     if m := _RT_RANGE_RE.search(clause):
         a = float(m.group(1) or m.group(3))
         b = float(m.group(2) or m.group(4))
@@ -479,6 +618,18 @@ def _title_retime(clause: str) -> dict[str, float] | None:
         return {"start": float(next(g for g in m.groups() if g is not None))}
     if m := _RT_END_RE.search(clause):
         return {"end": float(next(g for g in m.groups() if g is not None))}
+    if m := _RT_BY_RE.search(clause):
+        # "extend the SALE text by 2 seconds" said it was already on screen
+        n = float(m.group(2))
+        return {"extend": n if m.group(1) in ("extend", "lengthen", "longer") else -n}
+    if m := _RT_MORE_RE.search(clause):
+        # final sweep 2 r2: "make the title last 2 seconds longer" read "last
+        # 2 seconds" as the new length and SHORTENED a 3 s title to 2 s
+        n = M.fraction_seconds(m.group(0)) or _WORD_SECS.get(m.group(1), None) or float(m.group(1))
+        return {"extend": n if m.group(2) == "longer" else -n}
+    if m := _RT_START_AT_RE.search(clause):
+        # "start the title at 0:02"
+        return {"start": _clock_or_secs(m.group(1))}
     if m := _RT_DUR_RE.search(clause):
         return {"dur": float(next(g for g in m.groups() if g is not None))}
     if _RT_LONGER_RE.search(clause):
@@ -494,6 +645,8 @@ def _is_style_only(words: str, clause: str) -> bool:
         return False
     # "add a title red" is odd but explicit — only a restyle verb (or none at
     # all: "title font size 80") makes these words a look change
+    if _TEXT_REF_RE.search(clause) and re.search(r"\b(?:put|move|place|position|shift|bring)\b", clause):
+        return True           # K3: "put THE title at the top" places the existing one
     return bool(_RESTYLE_VERB_RE.search(clause)) or not re.search(r"\b(?:add|put|write|insert|create)\b", clause)
 
 
@@ -511,12 +664,27 @@ def _caption_look_of(clause: str) -> dict[str, Any]:
                            + re.escape(m.group(0)), clause):
         look["color"] = (m.group(2) or _COLOUR_HEX[m.group(1)]).upper()
     px = _SIZE_PX_RE.search(clause)
+    times = _SIZE_TIMES_RE.search(clause)
+    pct = _SIZE_PCT_RE.search(clause)
     if px:
         look["size"] = float(px.group(1) or px.group(2))
+    elif pct and 0 < float(pct.group("n") or pct.group("n2")) < 400:
+        # final sweep 2 r2: "text 50% bigger", "title size up by 20" added a
+        # NEW title reading "50% bigger"
+        n = float(pct.group("n") or pct.group("n2")) / 100.0
+        up = (pct.group("dir") or pct.group("dir2") or "") in ("bigger", "larger", "up")
+        look["_grow"] = round(1 + n if up else max(0.1, 1 - n), 3)
+    elif times:
+        # "twice as big" / "double the size" / "half the size" (it added a
+        # NEW title reading "twice as big")
+        look["_grow"] = 0.5 if times.group(0).startswith("half") else (3.0 if "three" in times.group(0)
+                                                                        or "triple" in times.group(0) else 2.0)
     elif _BIGGER_RE.search(clause):
         look["_grow"] = 1.25
     elif _SMALLER_RE.search(clause):
         look["_grow"] = 0.8
+    if _BOLD_RE.search(clause):
+        look["_bold"] = True
     if _UPPER_RE.search(clause):
         look["upper"] = True
     elif _LOWER_CASE_RE.search(clause):
@@ -532,11 +700,45 @@ def _caption_look_of(clause: str) -> dict[str, Any]:
     # Final QA r2: "put the captions IN the middle", "captions at the top
     # please" — a place on its own is a look change too (it re-laid every
     # cue in a different style).
-    pos = re.search(r"\b(?:to|at|on|in)\s+the\s+(top|bottom|middle|center|centre)\b", clause)
+    pos = re.search(r"\b(?:to|at|on|in|up)\s+(?:the\s+)?(top|bottom|middle|center|centre)\b", clause)
     if pos and (look or re.search(r"\b(?:move|shift|place|position|raise|drop|bring|put|captions?|subtitles?|subs)\b",
                                   clause)):
         look["position"] = {"middle": "center", "centre": "center"}.get(pos.group(1), pos.group(1))
     return look
+
+
+_FONT_NAMES = (("anton", "Anton-Regular"), ("bebas", "BebasNeue-Regular"), ("montserrat", "Montserrat-Bold"),
+               ("inter", "Inter-Bold"))
+_BOLD_RE = re.compile(r"\bbold(?:er)?\b|\bheavier\b|\bthicker (?:font|letters|text)\b")
+
+
+def text_look_of(clause: str) -> dict[str, Any]:
+    """K3: the `set_text_style` args a title / text restyle clause asks for
+    (colour, size or bigger / smaller, font or bold, case, outline, box,
+    top / middle / bottom) — {} when it names none."""
+    look = _caption_look_of(clause)
+    out: dict[str, Any] = {}
+    if "color" in look:
+        out["color"] = look["color"]
+    if "size" in look:
+        out["size"] = look["size"]
+    elif "_grow" in look:
+        out["size_scale"] = look["_grow"]
+    elif re.search(r"\bbiger\b|\bbigg?er\b", clause):
+        out["size_scale"] = 1.25
+    for k in ("upper", "stroke_w"):
+        if k in look:
+            out[k] = look[k]
+    if "background" in look:
+        out["background"] = look["background"]
+    if m := re.search(r"\b(anton|bebas|montserrat|inter)\b", clause):
+        out["font"] = dict(_FONT_NAMES)[m.group(1)]
+    elif _BOLD_RE.search(clause):
+        out["bold"] = True
+    pos = re.search(r"\b(top|bottom|middle|center|centre)\b", clause)
+    if pos and not re.search(r"\b(?:box|background|outline)\b", clause):
+        out["position"] = {"centre": "center", "center": "middle"}.get(pos.group(1), pos.group(1))
+    return out
 
 
 def _captions_new(clause: str) -> bool:
@@ -605,6 +807,14 @@ _FADE_START_RE = re.compile(r"\bfrom black\b|\bfade\b.*\b(?:start|beginning|intr
 _FADE_END_RE = re.compile(r"\bto black\b|\bfade\b.*\b(?:end|ending|outro|close)\b")
 
 
+#: A fade REMOVAL: "take the fade off", "remove the fades", "no fade on clip 2".
+_FADE_OFF_RE = re.compile(
+    r"\b(?:remove|delete|get rid of|clear|kill|strip|lose|ditch|undo|cancel)\s+(?:the\s+|all\s+(?:the\s+)?|any\s+|my\s+"
+    r"|that\s+|this\s+|both\s+)?(?:\w+\s+)?(?:fades?|fade[- ](?:ins?|outs?))\b"
+    r"|\b(?:take|turn|switch|get)\s+(?:the\s+|all\s+(?:the\s+)?|that\s+|this\s+|both\s+)?(?:\w+\s+)?"
+    r"(?:fades?|fade[- ](?:ins?|outs?))\s+off\b|\bno\s+(?:more\s+)?fades?\b|\bwithout\s+(?:the\s+|any\s+)?fades?\b")
+
+
 def _fade_edges(clause: str) -> set[str]:
     """The edges ("in" / "out") a fade clause names, from the first direction
     word after each "fade"; "in and out" names both."""
@@ -631,10 +841,17 @@ def _fade_edges(clause: str) -> set[str]:
 _VO_WORD_RE = re.compile(r"\bvoice[- ]?overs?\b|\bvo\b|\bnarration track\b|\bvoice track\b")
 
 
-def _volume_slots(clause: str, music: bool) -> dict[str, Any]:
-    out: dict[str, Any] = {"target": "music" if music or not _VOICE_WORD_RE.search(clause) else "voice"}
-    if not music and _VO_WORD_RE.search(clause):
+def _volume_slots(clause: str, music: bool, head: str | None = None) -> dict[str, Any]:
+    # the TARGET is read from the words before a reference phrase ("lower the
+    # clip audio to -18 dB under the voiceover" lowered the VOICEOVER); the
+    # amount from the whole clause ("put the music under the voiceover at -20 dB")
+    h = clause if head is None else head
+    out: dict[str, Any] = {"target": "music" if music or not _VOICE_WORD_RE.search(h) else "voice"}
+    if not music and _VO_WORD_RE.search(h):
         out["target"] = "vo"
+    if M.direction(clause, "level") == "reset":
+        out["db"] = 0.0             # "back to normal" is the source's own level
+        return out
     down, up = bool(_DOWN_RE.search(clause)), bool(_UP_RE.search(clause))
     change = "down" if down and not up else ("up" if up and not down else None)
     m = _DB_RE.search(clause)
@@ -642,7 +859,12 @@ def _volume_slots(clause: str, music: bool) -> dict[str, Any]:
     if m:
         n = float(m.group("n"))
         negative = (m.group("sign") or "").strip() in ("-", "minus")
-        if m.group("by") or (change and not m.group("to") and not m.group("sign")):
+        plus = (m.group("sign") or "").strip() in ("+", "plus") and not m.group("to")
+        if plus and not change:
+            # "music +3db": an explicit plus is a change (it set +3 dB, 17 dB
+            # louder than asked); a bare "-6db" / "to 3 dB" stays a level
+            change = "up"
+        if m.group("by") or plus or (change and not m.group("to") and not m.group("sign")):
             # Final QA r2: "bring the music down 4db" / "music up 3 db" — a
             # direction word with no "to/at" and no sign is a CHANGE. It was
             # read as a level: -12 dB music went to -4 dB ("down" made it
@@ -660,7 +882,20 @@ def _volume_slots(clause: str, music: bool) -> dict[str, Any]:
         else:
             out["db"] = round(20.0 * math.log10(n / 100.0), 1)
     else:
-        out["change"] = change or "down"
+        # "clip 2 volume +2", "bring the music down to -25": a level number
+        # without "dB" is read like one with it (it was dropped for a 6 dB step)
+        la = M.level_ask(clause)
+        if la.db is not None and la.direction != "reset":
+            out["db"] = la.db
+        elif la.delta_db is not None:
+            out["_delta_db"] = abs(la.delta_db)
+            out["change"] = "up" if la.delta_db > 0 else "down"
+        else:
+            out["change"] = change or "down"
+            if re.search(r"\ba\s+lot\b|\bway\s+(?:down|up|quieter|louder)\b|\bmuch\b", clause):
+                out["_delta_db"] = 12.0          # "lower clip 2 a lot"
+            elif re.search(r"\ba\s+(?:little|bit|touch|tad)\b|\bslightly\b", clause):
+                out["_delta_db"] = 3.0
     return out
 
 
@@ -670,6 +905,16 @@ _MUTE_ALL_RE = re.compile(r"\b(?:everything|all (?:of )?(?:the )?(?:audio|sounds
                           r"|the whole (?:mix|audio|soundtrack)|all sound)\b")
 _EXCEPT_RE = re.compile(r"\b(?:except|but|apart from|other than|besides|save|leaving|keep(?:ing)?)\s+(?:for\s+)?"
                         r"(?:the\s+|my\s+|our\s+|just\s+|only\s+)?([\w'-]+(?:[ -](?:over|track|audio|sound|bed))?)")
+
+
+#: A cut / trim whose OBJECT is the music ("the last 3 seconds of the music",
+#: "trim the song to 6 seconds", "cut the music at 8 seconds").
+_MUSIC_OBJECT_RE = re.compile(
+    r"\b(?:of|off|from)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:music|song|soundtrack|bgm|bed|tune)\b"
+    r"|\b(?:trim|cut|shorten|end|stop|chop)\s+(?:the\s+|my\s+)?(?:background\s+)?(?:music|song|soundtrack|bgm|bed|tune)\s+"
+    r"(?:to|at|after)\s+\d")
+_MUSIC_TO_RE = re.compile(r"\b(?:music|song|soundtrack|bgm|bed|tune)\s+(?:to|at|after)\s+(\d+(?:\.\d+)?)\s*"
+                          r"(?:s|sec|secs|seconds?)?\b")
 
 
 def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
@@ -686,6 +931,11 @@ def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
         # the user wants to hear.
         m = _EXCEPT_RE.search(clause)
         keep = None
+        keep_clip = G.clip_ref_of(clause[m.start():]) if m else None
+        if keep_clip not in (None, "$v1_all"):
+            # final sweep 2 r2: "mute everything except clip 1" muted only the music
+            return {"_everything": True, "_keep": None, "_keep_clip": keep_clip, "_keep_word": None,
+                    "muted": not re.search(r"\bunmute\b", clause)}
         if m:
             what = m.group(1)
             keep = ("vo" if re.search(r"voice[- ]?over|narrat|\bvo\b", what)
@@ -694,13 +944,42 @@ def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
         return {"_everything": True, "_keep": keep, "_keep_word": m.group(1) if m else None,
                 "muted": not re.search(r"\bunmute\b", clause)}
     if r == "mute":
+        head = re.split(r"\b(?:but|except|apart from|other than|besides|and keep|keep(?:ing)?)\b", clause)[0]
+        if music and not _MUSIC_WORD_RE.search(head) and _VOICE_WORD_RE.search(head):
+            music = False                  # "mute all clips but keep music" muted the MUSIC
+        if not music and _VO_WORD_RE.search(head):
+            # final sweep 2 r2: "mute the voice over" muted every CLIP
+            return {"target": "vo", "muted": not re.search(r"\bunmute\b", clause)}
         return {"target": "music" if music or not _VOICE_WORD_RE.search(clause) else "voice",
                 "muted": not re.search(r"\bunmute|\bturn (?:the )?\w* ?(?:back )?on\b|\b(?:chalu|on) (?:karo|kar do|kardo|do)\b",
                                        clause)}
     if r == "volume":
+        ref_head, ref_tail = M.reference_split(clause)
+        if ref_tail:
+            return _volume_slots(clause, bool(_MUSIC_WORD_RE.search(ref_head)), head=ref_head)
+        head = re.split(r"\b(?:except|but not|other than|apart from|besides|excluding|but (?:leave|keep)|leaving"
+                        r"|and (?:leave|keep))\b", clause)[0]
+        if music and not _MUSIC_WORD_RE.search(head):
+            # "turn down all the clips except the music": the music is the one
+            # lane to leave alone (it lowered ONLY the music); final sweep 2
+            # r2: "… but leave the music" lowered the music
+            rest = re.sub(r"\b(?:except|but not|other than|apart from|besides|excluding|but (?:leave|keep)|leaving"
+                          r"|and (?:leave|keep))\s+(?:for\s+)?(?:the\s+|my\s+)?"
+                          r"(?:background\s+)?(?:music|song|track|bed|bgm|soundtrack|tune|score)\b(?:\s+(?:alone|as it is))?",
+                          " ", clause)
+            out = _volume_slots(rest, False)
+            if out.get("target") == "music":
+                out["target"] = "voice"
+            return out
         return _volume_slots(clause, music)
     # fade
     target = "music" if music else ("audio" if re.search(r"\b(?:audio|sound|voice)\b", clause) else "video")
+    if _FADE_OFF_RE.search(clause):
+        # "take the fade off the last clip" / "remove the fades" ADDED fades
+        # final sweep 2 r2: "remove the fade in" also removed the fade OUT
+        off_edges = _fade_edges(clause)
+        return {"target": target, "_off": True, "clip_ref": c.clip_ref or G.clip_ref_of(clause),
+                "edge": next(iter(off_edges)) if len(off_edges) == 1 else "both"}
     edges = _fade_edges(clause)
     edge = "both" if len(edges) != 1 else next(iter(edges))
     if not edges:
@@ -708,7 +987,15 @@ def _level_slots(r: str, clause: str, c: S.Slots) -> dict[str, Any]:
     dur = c.duration_s
     if dur is None and c.range is not None and c.range.kind in ("first", "last"):
         dur = c.range.end if c.range.kind == "first" else (c.range.end or c.range.start)
-    return {"target": target, "edge": edge, "duration_s": dur, "clip_ref": c.clip_ref}
+    # each edge keeps its own length when two fade clauses merge ("music fade
+    # in 1s and fade out 3s")
+    per_edge = {"_in_s": dur} if edge == "in" and dur else {"_out_s": dur} if edge == "out" and dur else {}
+    rel = None
+    if dur is None and (m := re.search(r"\b(longer|slower|shorter|quicker|faster)\b", clause)):
+        # final sweep 2 r2: "make the fade out longer" set the same 1 s again
+        rel = "longer" if m.group(1) in ("longer", "slower") else "shorter"
+    return {"target": target, "edge": edge, "duration_s": dur, "clip_ref": c.clip_ref, **per_edge,
+            **({"_relative": rel} if rel else {})}
 
 
 def bind(hit: G.IntentHit, whole: S.Slots, prompt: str | None = None) -> Intent:
@@ -735,6 +1022,28 @@ def _merge_fades(a: dict[str, Any], b: dict[str, Any], merged: dict[str, Any]) -
         return {**merged, "edge": "both" if len(edges) == 2 else next(iter(edges))}
     pic, mus = (b, a) if ta == "music" else (a, b)
     return {**pic, "_music_edge": mus.get("edge") or "out", "_music_duration_s": mus.get("duration_s")}
+
+
+_PICTURE_WORD_RE = re.compile(r"\b(?:video|clips?|picture|image|footage|shots?|screen|black|visuals?|scene)\b")
+
+
+def _carry_music_fades(intents: list[Intent], clauses: tuple[str, ...]) -> list[Intent]:
+    """"music fade in 1s and fade out 3s", "turn the music down and fade it
+    out": a fade clause that names no lane of its own (or says "it") after a
+    clause about the music is the MUSIC's fade — it faded the last clip's
+    picture and sound instead."""
+    order = list(clauses)
+    out: list[Intent] = []
+    for it in intents:
+        if it.recipe == "fade" and it.get("target") in (None, "video", "audio") and not it.get("clip_ref") \
+                and it.clause in order and not _PICTURE_WORD_RE.search(it.clause) \
+                and not M.media_of(it.clause):
+            i = order.index(it.clause)
+            prev = next((M.media_of(c) for c in reversed(order[:i]) if M.media_of(c) or M.clip_refs(c)), ())
+            if prev and prev[0] == "music":
+                it = Intent(it.recipe, {**it.slots, "target": "music"}, it.score, it.clause)
+        out.append(it)
+    return out
 
 
 def _merge_intents(intents: Iterable[Intent]) -> list[Intent]:
@@ -788,11 +1097,41 @@ def _dedupe_steps(steps: list[Step]) -> list[Step]:
     out: list[Step] = []
     for s in steps:
         key = s.tool + json.dumps(s.args, sort_keys=True, default=str)
-        if key in seen:
+        if key in seen and s.tool != "duplicate_clip":      # "duplicate it three times" is three copies
             continue
         seen.add(key)
         out.append(s)
     return out
+
+
+def _compose_durations(pcs: list[Postcondition], facts: TimelineFacts) -> list[Postcondition]:
+    """final sweep 2 r2: "cut the first 2 seconds and then speed up the rest
+    by 1.5x" committed the right 6.67 s and reported two false failures —
+    each step's expected duration was measured from the ORIGINAL timeline.
+    Several duration changes are ONE expectation, each applied to the result
+    of the one before (plan order), on the main lane the verifier measures."""
+    durs = [p for p in pcs if p.check == "duration_between"]
+    base = float(facts.video_end or facts.duration or 0.0)
+    if len(durs) < 2 or base <= 0:
+        return pcs
+    d, tol, ratio = base, 0.0, 0.0
+    for p in durs:
+        a = p.args
+        if a.get("target") is not None:
+            d = float(a["target"])
+        elif a.get("start") is not None and a.get("end") is not None:
+            d -= float(a["end"]) - float(a["start"])
+        elif a.get("factor"):
+            d /= float(a["factor"])
+        else:
+            return pcs              # an expectation we cannot compose: keep them as they were
+        tol = max(tol, float(a.get("tol") or 0.1))
+        ratio = max(ratio, float(a.get("tol_ratio") or 0.0))
+    one = durs[-1].model_copy(update={"args": {**durs[-1].args, "target": round(d, 3), "start": None, "end": None,
+                                               "factor": None, "tol": round(tol, 3), "tol_ratio": ratio or None}})
+    first = pcs.index(durs[0])
+    rest = [p for p in pcs if p.check != "duration_between"]
+    return rest[:first] + [one] + rest[first:]
 
 
 def _dedupe_postconditions(pcs: list[Postcondition]) -> list[Postcondition]:
@@ -932,7 +1271,7 @@ def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozense
                           kind="confirm", options=[("yes", "Start"), ("no", "Cancel")]))
     questions = _cap_questions(front + questions)
 
-    postconditions = _dedupe_postconditions(postconditions)
+    postconditions = _dedupe_postconditions(_compose_durations(postconditions, facts))
     recipes_in = [it.recipe for it in ordered if it.recipe not in ("_audit",)] or \
         [it.recipe for it in ordered if it.recipe == "_audit"]
     headline = "auto_edit" if any(i.recipe == "auto_edit" for i in intents) else "+".join(recipes_in)
@@ -1106,7 +1445,7 @@ _NOUN_GUESSES: tuple[tuple[str, str], ...] = (
 )
 
 
-def _guesses(prompt: str) -> list[tuple[str, str]]:
+def _guesses(prompt: str, fallback: bool = True) -> list[tuple[str, str]]:
     text = S.normalize(prompt)
     found: list[str] = []
     for pat, intent in _NOUN_GUESSES:
@@ -1123,12 +1462,58 @@ def _guesses(prompt: str) -> list[tuple[str, str]]:
     for pat, intent in _GUESS_WORDS:
         if intent not in found and re.search(rf"\b(?:{pat})", text):
             found.append(intent)
-    for fallback in ("trim", "speed", "title"):
+    for generic in (("trim", "speed", "title") if fallback else ()):
         if len(found) >= 3:
             break
-        if fallback not in found:
-            found.append(fallback)
+        if generic not in found:
+            found.append(generic)
     return [(i, _TITLES.get(i, i)) for i in found[:3]]
+
+
+#: final sweep 2 r2: the edits a rollback card may offer for each family of
+#: words the prompt names ("a bit slower" was offered "trim or title").
+_FAMILY_OPTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mute", ("mute", "volume")), ("level", ("volume", "mute", "loudness")), ("speed", ("speed", "clip_length", "freeze")),
+    ("look", ("color_look", "adjust", "remove_feature")), ("adjust", ("adjust", "color_look")),
+    ("fade", ("fade", "transitions")), ("rotate", ("rotate", "flip")), ("zoom", ("zoom", "canvas")),
+    ("flip", ("flip", "rotate")), ("text", ("title", "retext", "remove_feature")),
+    ("transition", ("transitions", "remove_feature")), ("music", ("music", "volume", "fit_music", "remove_music")),
+    ("order", ("move_clip",)), ("cut", ("trim", "delete_clip", "clip_length")), ("split", ("split", "trim")),
+    ("freeze", ("freeze",)), ("duplicate", ("duplicate",)), ("reverse", ("reverse",)), ("captions", ("captions",)),
+    ("vo", ("voiceover", "volume")), ("voice_fx", ("voice_effect",)), ("animation", ("animation",)),
+    ("canvas", ("reframe", "canvas")), ("canvas_bg", ("canvas",)), ("blend", ("blend",)), ("duck", ("duck", "volume")),
+)
+
+
+def safe_options(prompt: str, plan: Plan | None = None, avoid: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """The closest safe readings to offer after the K3 net rolled a run back
+    (executor._pause_after_rollback): the edits of the families the prompt's
+    words name first (the rolled-back plan's own intent when it is one of
+    them — a pick re-plans the same words as that edit, and the net judges
+    the result again), then the "did you mean" ranking — but only readings
+    related to those words. The generic trim / speed / title list is only
+    for a prompt that names no kind of edit at all."""
+    avoid = set(avoid)
+    from .contract import INTENT_FAMILIES, families_of
+    fams = set().union(*(families_of(c) for c in (M.clauses(prompt) or [prompt]))) - {"composite", "history"}
+    related: list[str] = []
+    for fam, intents in _FAMILY_OPTIONS:
+        if fam in fams:
+            related += [i for i in intents if i in RECIPE_BY_NAME and i not in related]
+    first = (plan.intent.split("+")[0] if plan and plan.intent else "")
+    out: list[str] = []
+    if first in RECIPE_BY_NAME and first not in avoid and (not fams or first in related
+                                                          or INTENT_FAMILIES.get(first, set()) & fams):
+        out.append(first)
+    out += [i for i in related if i not in avoid and i not in out]
+    for g, _l in _guesses(prompt, fallback=not fams):
+        if g in avoid or g in out:
+            continue
+        if not fams or g in related or INTENT_FAMILIES.get(g, set()) & fams:
+            out.append(g)
+    if not out and not fams:
+        out = [i for i in ("trim", "speed", "title") if i not in avoid]
+    return [(i, _TITLES.get(i, i)) for i in out[:3]]
 
 
 #: Recipes whose "it" / "this" may point at ONE clip (Final QA r2; r3: every
@@ -1208,10 +1593,18 @@ def _bind_pronouns(intents: list[Intent], facts: TimelineFacts, clauses: tuple[s
         text = it.clause or ""
         if it.recipe in _PRONOUN_RECIPES and ref in _PRONOUN_REFS:
             if split is not None and _SECOND_HALF_RE.search(text):
-                it = Intent(it.recipe, {**it.slots, "clip_ref": _second_half_ref(split, facts)}, it.score, it.clause)
+                slots = {**it.slots, "clip_ref": _second_half_ref(split, facts)}
+                if it.recipe in ("volume", "mute") and slots.get("target") == "music" \
+                        and not _MUSIC_WORD_RE.search(text):
+                    slots["target"] = "voice"      # "split at 6s then mute the second half" muted the MUSIC
+                it = Intent(it.recipe, slots, it.score, it.clause)
             elif prev is not None and (_IT_WORD_RE.search(text) or (it.recipe == "color_look" and re.search(
                     r"\b(?:it|this|that)\b", text) and ref is None)):
-                it = Intent(it.recipe, {**it.slots, "clip_ref": prev}, it.score, it.clause)
+                slots = {**it.slots, "clip_ref": prev}
+                if it.recipe in ("volume", "mute") and slots.get("target") == "music" \
+                        and not _MUSIC_WORD_RE.search(text) and _IT_WORD_RE.search(text):
+                    slots["target"] = "voice"      # "reverse clip 2 and turn it up 3db": the clip's sound
+                it = Intent(it.recipe, slots, it.score, it.clause)
             elif it.recipe == "color_look" and ref is None and re.search(r"\bthis\b", text) and facts.selection \
                     and facts.selection in set(facts.v1_clip_ids):
                 it = Intent(it.recipe, {**it.slots, "clip_ref": "$selected"}, it.score, it.clause)
@@ -1239,6 +1632,80 @@ _COUNT_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7
 MAX_HISTORY_STEPS = 20
 
 
+_TEXT_PLACE_RE = re.compile(r"\b(?:title|text|heading|headline|lower[- ]?third|label)\b.*\b(?:top|bottom|middle"
+                            r"|center|centre)\b|\b(?:top|bottom|middle|center|centre)\b.*\b(?:title|text|heading)\b")
+
+
+def _text_place_hits(det: G.Detection) -> G.Detection:
+    """K3: "put the title at the top" / "move the title to the bottom" is a
+    title's LOOK (`set_text_style` position) — the grammar reads it as the
+    read-only overlay `transform`, which answered "use the Inspector"."""
+    from dataclasses import replace as _r
+    hits = []
+    changed = False
+    for h in det.hits:
+        if (h.intent == "transform" and _TEXT_PLACE_RE.search(h.clause)
+                and not re.search(r"\b(?:sticker|emoji|overlay|pip|logo|opacity|transparen|corner)\w*", h.clause)):
+            h = _r(h, intent="title")
+            changed = True
+        hits.append(h)
+    return _r(det, hits=tuple(hits)) if changed else det
+
+
+_PLACE_IT_RE = re.compile(r"^(?:and\s+|then\s+)*(?:move|put|place|position|shift|bring|stick|set)\s+(?:it|them)\s+"
+                          r"(?:up\s+|down\s+)?(?:to|at|on|in|near)?\s*(?:the\s+)?(?:very\s+)?(top|bottom|middle|center|centre)\b")
+
+
+_IT_STYLE_RE = re.compile(r"^(?:and\s+|then\s+)*(?:make|turn|set|colou?r|have|give)\s+(?:it|them)\s+(.+)$")
+
+
+def _absorb_style_clauses(intents: list[Intent], det: G.Detection) -> list[Intent]:
+    """K3: "make the captions red and bigger", "make the title yellow and
+    bigger" — the grammar splits on "and", and the second clause ("bigger")
+    has no edit of its own, so it was dropped (only red was applied). A
+    clause made only of look words belongs to the restyle before it."""
+    hit_clauses = {h.clause for h in det.hits}
+    out = list(intents)
+    for i, c in enumerate(det.clauses):
+        if i > 0 and _PLACE_IT_RE.search(c) and any(
+                it.clause == det.clauses[i - 1] and ((it.recipe == "title" and it.get("_restyle"))
+                                                     or (it.recipe == "captions" and it.get("_look") is not None))
+                for it in out):
+            # "make the title bigger and move it to the top", "make the
+            # subtitles blue and move them up top": "it" is the text, and its
+            # place is part of the same restyle (it was dropped)
+            out = [it for it in out if it.clause != c]
+            prev = det.clauses[i - 1]
+            out = [Intent(it.recipe, {**it.slots, "_look": {**(it.get("_look") or {}), **(
+                text_look_of(c) if it.recipe == "title" else _caption_look_of(c))}}, it.score, it.clause)
+                   if it.clause == prev and it.recipe in ("title", "captions") else it for it in out]
+            continue
+        it_look = _IT_STYLE_RE.match(c)
+        if i > 0 and it_look and _is_style_only(it_look.group(1), c) and any(
+                it.clause == det.clauses[i - 1] and it.recipe == "title" and it.get("text")
+                and not it.get("_restyle") for it in out):
+            # final sweep 2 r2: "add a title 'Intro' and make it red" — "it"
+            # is the NEW title; its colour was dropped (a white title)
+            prev = det.clauses[i - 1]
+            out = [Intent(it.recipe, {**it.slots, "_look": {**(it.get("_look") or {}), **text_look_of(c)}},
+                          it.score, it.clause) if it.clause == prev and it.recipe == "title" else it
+                   for it in out if it.clause != c]
+            continue
+        if c in hit_clauses or i == 0 or not _is_style_only(c, c):
+            continue
+        prev = det.clauses[i - 1]
+        for k, it in enumerate(out):
+            if it.clause != prev:
+                continue
+            if it.recipe == "captions" and it.get("_look") is not None:
+                out[k] = Intent(it.recipe, {**it.slots, "_look": {**(it.get("_look") or {}), **_caption_look_of(c)}},
+                                it.score, it.clause)
+            elif it.recipe == "title" and it.get("_restyle"):
+                out[k] = Intent(it.recipe, {**it.slots, "_look": {**(it.get("_look") or {}), **text_look_of(c)}},
+                                it.score, it.clause)
+    return out
+
+
 def history_count(prompt: str) -> int:
     """How many edits an undo / redo prompt names ("undo the last 3 edits"),
     1 when it names none; capped at MAX_HISTORY_STEPS."""
@@ -1250,10 +1717,225 @@ def history_count(prompt: str) -> int:
     return max(1, min(MAX_HISTORY_STEPS, n))
 
 
+_CLIPW = r"(?:(?:the\s+)?(?:first|second|third|fourth|fifth|last|final|\d{1,2}(?:st|nd|rd|th))\s+(?:clip|shot)|clip\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)|(?:this|that|the selected)\s+clip|it)"
+#: Plain phrasings the phrase table has no row for, said the way it does
+#: (Final sweep 2): each rewrite is the SAME edit in the grammar's words.
+_REWORDS: tuple[tuple[re.Pattern, str], ...] = (
+    # "put clip 1 between clip 2 and clip 3" added a TRANSITION
+    (re.compile(rf"\b(?:put|move|place|drag|stick|slot|insert)\s+({_CLIPW})\s+(?:in\s+)?between\s+({_CLIPW})\s+"
+                rf"(?:and|&)\s+({_CLIPW})", re.I), r"move \1 after \2"),
+    # "switch clips 2 and 3" / "switch clip 2 with clip 3" was unread
+    (re.compile(r"\bswitch\s+(?:the\s+)?(clips?\s+\w+\s+(?:and|&|with)\s+(?:clip\s+)?\w+)", re.I), r"swap \1"),
+    (re.compile(r"\bswitch\s+((?:the\s+)?\w+\s+and\s+(?:the\s+)?\w+\s+clips)\b", re.I), r"swap \1"),
+    # final sweep 2 r2 (MEDIUM): clear requests that rolled back or dead-ended,
+    # each said the way the phrase table reads the SAME edit
+    (re.compile(rf"\b(?:swap|switch|exchange)\s+clip\s+(\d{{1,2}}|one|two|three|four|five)\s+(?:and|&|with)\s+"
+                rf"clip\s+(\d{{1,2}}|one|two|three|four|five)\b", re.I), r"swap clips \1 and \2"),
+    (re.compile(r"\b(move|put|place|drag)\s+((?:the\s+)?(?:first|second|third|fourth|fifth|last)\s+clip)\s+(after|before|behind)"
+                r"\s+the\s+(first|second|third|fourth|fifth|last)\b(?!\s+(?:clip|shot|one))", re.I), r"\1 \2 \3 the \4 clip"),
+    (re.compile(r"\b(slow|speed)\s+everything\s+(down|up)\b", re.I), r"\1 the video \2"),
+    (re.compile(rf"\b(lower|raise|drop|boost)\s+({_CLIPW})\s+(a\s+(?:lot|bit|little|touch)|way\s+(?:down|up)|much)\b", re.I),
+     lambda m: f"turn {m.group(2)} {'down' if m.group(1).lower() in ('lower', 'drop') else 'up'} {m.group(3)}"),
+    (re.compile(rf"\b(?:shorten|cut\s+down|trim\s+down)\s+({_CLIPW})\s+by\s+(?:a|one)\s+(second|sec)\b", re.I),
+     r"trim \1 by 1 \2"),
+    (re.compile(rf"\b(?:shorten|cut\s+down|trim\s+down)\s+({_CLIPW})\s+by\s+", re.I), r"trim \1 by "),
+    (re.compile(rf"\bsaturate\s+({_CLIPW}|the\s+video|everything)\s+(?:more|a\s+bit\s+more|a\s+little\s+more)\b",
+                re.I), r"make \1 more saturated"),
+    (re.compile(r"\b(remove|take\s+off|take\s+out|strip|get\s+rid\s+of|clear)\s+the\s+(black\s+and\s+white|b\s*&\s*w|b and w"
+                r"|mono(?:chrome)?|gr[ae]y\s*scale|sepia)\s+(from|off|on)\b", re.I), r"\1 the \2 filter \3"),
+    (re.compile(r"\bmake\s+the\s+(music|song|soundtrack)\s+twice\s+as\s+loud\b", re.I), r"turn the \1 up 6 db"),
+    (re.compile(r"\bmake\s+the\s+(music|song|soundtrack)\s+half\s+as\s+loud\b", re.I), r"turn the \1 down 6 db"),
+    (re.compile(r"\bfad\s+(in|out)\b", re.I), r"fade \1"),
+    (re.compile(r"\b(title|text|heading)\s+font\s+(\d{2,3})\b", re.I), r"\1 font size \2"),
+    (re.compile(r"^([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,3})\s+(?:should|must|needs to|has to)\s+(?:show|stay|be on screen|stay on screen"
+                r"|last|run)\s+(until|till|to)\s+the\s+end\b"), r"make the \1 text last until the end"),
+    # final sweep 2 r2: "replace the music with silence" ADDED a new bed
+    (re.compile(r"\b(?:replace|swap|switch)\s+(the\s+|my\s+)?(background\s+)?(music|song|soundtrack|bgm|bed)\s+"
+                r"(?:with|for)\s+(?:silence|nothing|no\s+music|no\s+sound|quiet)\b", re.I), r"remove \1\2\3"),
+    # final sweep 2 r2: both ends in one sentence committed only one end —
+    # "trim the start by 1s and the end by 1s", "remove the first and last second"
+    (re.compile(r"\b(trim|cut|remove|delete|chop|take)\s+(?:off\s+)?the\s+(?:start|beginning|front|head)\s+(?:by\s+)?"
+                r"(\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?))\s+and\s+(?:the\s+)?(?:end|ending|back|tail)\s+(?:by\s+)?"
+                r"(\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?))\b", re.I), r"\1 the first \2 and \1 the last \3"),
+    (re.compile(r"\b(trim|cut|remove|delete|chop|drop|lose)\s+(?:off\s+)?the\s+(?:very\s+)?first\s+and\s+(?:the\s+)?"
+                r"(?:very\s+)?last\s+((?:\d+(?:\.\d+)?|two|three|four|five)\s+)?(seconds?|secs?)\b", re.I),
+     lambda m: f"{m.group(1)} the first {(m.group(2) or '1 ').strip()} {m.group(3)} and {m.group(1)} the last "
+               f"{(m.group(2) or '1 ').strip()} {m.group(3)}"),
+    # final sweep 2 r2: "fade transitions everywhere, 1 sec" dropped the 1 s
+    (re.compile(r"(\btransitions?\b[^,;]*?)\s*,\s*((?:for\s+)?\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds?)"
+                r"(?:\s+(?:each|long|apiece))?)\s*$", re.I), r"\1 \2"),
+    # final sweep 2 r2: "add a caption 'Welcome' at 2 seconds" re-laid the
+    # transcript captions — one quoted line is ONE text
+    (re.compile(r"\b(add|put|insert|create|write|place)\s+(a|an|one)\s+(?:caption|subtitle)\s+(?=[\"'“‘])", re.I),
+     r"\1 \2 text "),
+    # "zoom abit on clip one" planned transitions
+    (re.compile(r"\babit\b", re.I), "a bit"), (re.compile(r"\balittle\b", re.I), "a little"),
+    # final sweep 2 r2: "make the title say Road Trip 2026" added a SECOND title
+    # reading "say Road Trip 2026"
+    (re.compile(r"\b(?:make|have|let|get)\s+((?:the|my|this|that)\s+(?:title|text|heading|headline|label))\s+"
+                r"(?:say|read)s?\s+(?=\S)", re.I), r"change \1 to say "),
+    # "divide the first clip at 2s" was unread
+    (re.compile(r"\bdivide\s+(.{0,40}?)\s+(at|in half|in two)\b", re.I), r"split \1 \2"),
+)
+
+
+_LANE_NOUN = (r"(?:music|song|soundtrack|background music|captions?|subtitles?|subs|transitions?|titles?|text"
+              r"|filters?|effects?|voice[- ]?overs?|narration|stickers?|watermark|logo)")
+#: "remove the music and the captions": the verb governs BOTH nouns (the
+#: captions were re-laid — "the captions" alone read as "add captions")
+_REMOVE_BOTH_RE = re.compile(
+    rf"\b(remove|delete|get rid of|take off|take out|clear|lose|ditch|kill|drop|strip)\s+((?:the|my|all(?:\s+the)?)\s+)?"
+    rf"({_LANE_NOUN})\s+(?:and|&|plus)\s+((?:the|my|all(?:\s+the)?)\s+)?({_LANE_NOUN})\b", re.I)
+
+
+def _reword(prompt: str) -> str:
+    out = prompt or ""
+    for rx, to in _REWORDS:
+        out = rx.sub(to, out)
+    out = _REMOVE_BOTH_RE.sub(lambda m: f"{m.group(1)} {m.group(2) or ''}{m.group(3)} and {m.group(1)} "
+                                        f"{m.group(4) or ''}{m.group(5)}", out)
+    return out
+
+
+#: final sweep 2 r2: "remove the gap" on a timeline with no gap removed
+#: SILENCES (3.8 s of footage); "remove clip 2 but keep the gap" closed it.
+_GAP_ONLY_RE = re.compile(r"^(?:please\s+)?(?:remove|close|delete|get rid of|kill|fill|cut out|take out|fix)\s+"
+                          r"(?:the\s+|all\s+(?:the\s+)?|any\s+|every\s+|that\s+|this\s+)?(?:empty\s+|black\s+)?gaps?"
+                          r"(?:\s+(?:between|on|in|from)\s+(?:the\s+)?(?:clips|main track|timeline|video|edit))?(?:\s+please)?$")
+_KEEP_GAP_RE = re.compile(r"\b(?:but|and|while)\s+(?:keep|leave)\s+(?:the\s+|a\s+|its\s+)?(?:gap|space|hole|spot|empty space)\b"
+                          r"|\bwithout\s+closing\s+(?:the\s+)?gap\b|\bleave\s+(?:a\s+|the\s+)?gap\b")
+
+
+def _gap_reply(prompt: str, facts: TimelineFacts) -> Plan | None:
+    t = S.normalize(prompt)
+    if _GAP_ONLY_RE.match(t):
+        spans = sorted((a, b) for _c, a, b in (_v1_spans_of(facts) or []))
+        gaps = [(b0, a1) for (_a0, b0), (a1, _b1) in zip(spans, spans[1:]) if a1 - b0 > 0.05]
+        if not gaps:
+            return Plan.new(intent="noop", brain="recipes", confidence=1.0, title="Nothing to do",
+                            reply="There is no gap on the main track — its clips always sit end to end. To cut "
+                                  "the quiet moments inside them, say 'remove the silences'.")
+        return None
+    if _KEEP_GAP_RE.search(t) and re.search(r"\b(?:remove|delete|cut|drop|take out|get rid of)\b", t):
+        return Plan.new(intent="noop", brain="recipes", confidence=1.0, title="Nothing changed",
+                        reply="The main track is magnetic: deleting a clip there always closes its gap, so I did not "
+                              "delete it. To keep the space, put a black or colour hold of the same length in its "
+                              "place — or say 'delete clip 2' to delete it and close the gap.")
+    return None
+
+
+_MUSIC_START_RE = re.compile(r"^(?:please\s+)?(?:start|begin|move|put|shift|have)\s+(?:the\s+|my\s+)?(?:background\s+)?"
+                             r"(?:music|song|soundtrack|bgm)\s+(?:to\s+)?(?:start\s+|come in\s+|begin\s+)?(?:at|from)\s+"
+                             r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?$")
+_MUSIC_HALF_RE = re.compile(r"^(?:(?:keep|have|put|play)\s+(?:the\s+)?)?(?:background\s+)?(?:music|song|soundtrack)\s+"
+                            r"(?:only\s+)?(?:in|for|during)\s+(?:only\s+)?the\s+first\s+half(?:\s+of\s+the\s+video)?(?:\s+only)?$")
+_NAMED_TEXT_LOOK_RE = re.compile(r"^(?:make|turn|colou?r)\s+(?:the\s+)?(.{2,40}?)\s+(" + "|".join(_COLOUR_HEX)
+                                 + r"|bigger|smaller|larger|bold|all caps)$")
+_MUSIC_LOOP_RE = re.compile(r"^(?:please\s+)?(?:loop|repeat)\s+(?:the\s+)?(?:background\s+)?(?:music|song|soundtrack|bed)\b")
+_VIDEO_LENGTH_RE = re.compile(r"^(?:please\s+)?make\s+(?:it|this|the\s+(?:whole\s+)?video|the\s+edit)\s+(?:exactly\s+)?"
+                              r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)(?:\s+long)?$")
+_RESET_CLIP_RE = re.compile(r"^(?:please\s+)?reset\s+((?:the\s+)?(?:first|second|third|fourth|fifth|last)\s+clip|clip\s+\w+"
+                            r"|this\s+clip|it)$")
+_EVERY_OTHER_RE = re.compile(r"^(?:please\s+)?(?:remove|delete|drop|cut)\s+every\s+(?:other|second|2nd)\s+clip$")
+_DELETE_OVERLAY_RE = re.compile(r"^(?:please\s+)?(?:delete|remove|get rid of|drop)\s+(?:the\s+)?(?:overlay|pip"
+                                r"|picture[- ]in[- ]picture)(?:\s+clip)?$")
+
+
+def _facts_reading(prompt: str, facts: TimelineFacts) -> tuple[str | None, Plan | None]:
+    """final sweep 2 r2 (MEDIUM): requests the phrase table answered with
+    "music is already on the timeline" or "I did not catch that", read here
+    with the timeline in hand. Returns (a prompt said the grammar's way, or
+    a finished Plan) — (None, None) when nothing here applies."""
+    t = S.normalize(prompt)
+    beds = sorted((c for c in facts.clips if c.track == "music"), key=lambda c: c.start)
+    vend = float(facts.video_end or facts.duration or 0.0)
+    if m := _MUSIC_START_RE.match(t):
+        if len(beds) != 1:
+            return None, Plan.new(intent="ask", brain="recipes", confidence=1.0, title="Question",
+                                  reply=("There is no music on the timeline to move — add some first?" if not beds else
+                                         "The music is in several pieces — which one should start there? Select it "
+                                         "and drag it on the Music lane."))
+        at = float(m.group(1))
+        return None, Plan.new(intent="music", brain="recipes", confidence=1.0, title="Move music",
+                              steps=[Step(tool="move_clip", args={"clip_id": beds[0].id, "new_start": at},
+                                          why=f"the music starts at {at:g}s", stage=STAGE_AUDIO)],
+                              postconditions=[Postcondition(check="tool_ok", args={"tool": "move_clip"},
+                                                            human="the music moved")],
+                              reply=f"the music now starts at {at:g}s")
+    if (m := _NAMED_TEXT_LOOK_RE.match(t)) and not re.search(r"\b(?:title|text|clip|video|music|captions?)\b", m.group(1)):
+        # "make Day One purple": the words of a text already there
+        name = m.group(1).strip()
+        if any(x.text.lower().split("\n")[0].strip() == name for x in facts.texts):
+            return f"make the {name} text {m.group(2)}", None
+    if _MUSIC_HALF_RE.match(t) and vend > 0:
+        return f"cut the music at {round(vend / 2, 2):g} seconds", None
+    if _MUSIC_LOOP_RE.match(t):
+        m_end = max((c.start + c.duration for c in beds), default=0.0)
+        return None, Plan.new(intent="noop", brain="recipes", confidence=1.0, title="Nothing to do",
+                              reply=("There is no music on the timeline to loop — say 'add music' for a bed that "
+                                     "repeats to the end." if not beds else
+                                     "The music already plays under the whole video — nothing to loop." if m_end >= vend - 0.05
+                                     else "The Prompt bar cannot repeat the music you have yet — say 'add music' for a "
+                                          "bed that loops to the end of the video."))
+    if (m := _VIDEO_LENGTH_RE.match(t)) and vend > 0:
+        n = float(m.group(1))
+        if abs(n - vend) < 0.05:
+            return None, Plan.new(intent="noop", brain="recipes", confidence=1.0, title="Nothing to do",
+                                  reply=f"The video is already {vend:g}s long.")
+        how = (f"cut the last {vend - n:g}s, or speed it up {vend / n:.2f}x? Say 'cut the last {vend - n:g} seconds' "
+               f"or 'speed the video up {vend / n:.2f}x'.") if n < vend else               (f"slow it down to {vend / n:.2f}x? Say 'slow the video down to {vend / n:.2f}x'.")
+        return None, Plan.new(intent="ask", brain="recipes", confidence=1.0, title="Question",
+                              reply=f"The video is {vend:g}s. To make it {n:g}s, should I {how}")
+    if m := _RESET_CLIP_RE.match(t):
+        what = m.group(1)
+        return None, Plan.new(intent="ask", brain="recipes", confidence=1.0, title="Question",
+                              reply=f"Reset what on {what} — its speed, zoom, look or volume? Say like 'reset the "
+                                    f"speed of {what}' or 'reset the zoom on {what}'.")
+    if _EVERY_OTHER_RE.match(t) and len(facts.v1_clip_ids) >= 2:
+        n = len(facts.v1_clip_ids)
+        nums = [str(i) for i in range(2, n + 1, 2)]
+        return (f"delete clip {nums[0]}" if len(nums) == 1 else
+                "delete clips " + ", ".join(nums[:-1]) + f" and {nums[-1]}"), None
+    if _DELETE_OVERLAY_RE.match(t):
+        over = [c for c in facts.clips if re.fullmatch(r"v\d+", c.track or "") and c.track != "v1"]
+        if len(over) != 1:
+            return None, Plan.new(intent="ask", brain="recipes", confidence=1.0, title="Question",
+                                  reply=("There is no overlay on the timeline to delete." if not over else
+                                         f"There are {len(over)} overlays — which one? Select it and press Delete, or "
+                                         f"say 'delete the overlay at 0:05'."))
+        return None, Plan.new(intent="delete_clip", brain="recipes", confidence=1.0, title="Delete overlay",
+                              steps=[Step(tool="bulk_delete", args={"clip_ids": [over[0].id]},
+                                          why="delete the overlay", stage=STAGE_CUTS)],
+                              postconditions=[Postcondition(check="clips_absent", args={"clip_ids": [over[0].id]},
+                                                            human="the overlay is gone")],
+                              reply="deleted the overlay")
+    return None, None
+
+
+def _v1_spans_of(facts: TimelineFacts):
+    from .clip_expanders import v1_spans
+    return v1_spans(facts)
+
+
 def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None = None,
          allow_downloads: bool = True) -> Plan:
     """The recipes brain (§1.2): grammar → intents → recipes → steps."""
-    det = G.detect(prompt)
+    prompt = _reword(prompt)
+    if (gap := _gap_reply(prompt, facts)) is not None:
+        return gap
+    said, done = _facts_reading(prompt, facts)
+    if done is not None:
+        return done
+    prompt = said or prompt
+    det = SF.rewrite_hits(_text_place_hits(G.detect(prompt)), facts)
+    typo_note = None
+    if not [h for h in det.hits if h.intent != "ask"]:
+        # K3: "spead up teh second clip" — retry with common slips fixed
+        fixed = SF.fix_typos(prompt)
+        if fixed.strip() and fixed != S.normalize(prompt):
+            det2 = SF.rewrite_hits(_text_place_hits(G.detect(fixed)), facts)
+            if [h for h in det2.hits if h.intent != "ask"] and det2.confidence >= G.NORMALISE_THRESHOLD:
+                det, prompt, typo_note = det2, fixed, f"I read that as “{fixed}”"
     conf = det.confidence
     if det.hits and det.hits[0].intent in ("undo", "redo"):
         verb = det.hits[0].intent
@@ -1262,6 +1944,13 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
                         title=verb.title() if n == 1 else f"{verb.title()} {n} edits",
                         reply=(f"{'Undoing' if verb == 'undo' else 'Redoing'} the last edit." if n == 1 else
                                f"{'Undoing' if verb == 'undo' else 'Redoing'} the last {n} edits."))
+    # K3: a clause whose direction, amount or scope cannot be read safely
+    # ASKS before anything is planned ("slow it down to 2x", "change the
+    # speed", "chop the first 20 seconds" on a 12 s video, "the 7th clip").
+    qs = M.ambiguities(prompt, video_end=facts.video_end or facts.duration or None,
+                       clip_count=len(facts.v1_clip_ids) if facts.v1_clip_ids else None)
+    if qs:
+        return Plan.new(intent="ask", brain="recipes", confidence=conf, title="Question", reply=qs[0][:400])
     if det.hits and all(h.intent == "ask" for h in det.hits):
         return Plan.new(intent="ask", brain="recipes", confidence=conf, title="Question", reply=_ask_reply(facts))
     replies = [_read_only_reply(h) for h in det.hits if h.intent in READ_ONLY_INTENTS]
@@ -1279,15 +1968,29 @@ def plan(prompt: str, facts: TimelineFacts, *, hook_text: tuple[str, str] | None
             needs_input=[_ask("intent", "I did not catch that. Which of these did you mean?",
                               options=_guesses(prompt))],
             reply="I did not understand that request.")
-    intents = _bind_pronouns([bind(h, det.slots, prompt) for h in hits], facts, det.clauses)
+    intents = SF.fix_intents(
+        _absorb_style_clauses(_bind_pronouns([bind(h, det.slots, prompt) for h in hits], facts, det.clauses), det),
+        det, facts)
+    intents = _carry_music_fades(intents, det.clauses)
     exclusions = frozenset(x for x in det.exclusions if x in RECIPE_BY_NAME)
     prefix = None
     if G.NORMALISE_THRESHOLD <= conf < G.RUN_THRESHOLD:
         prefix = "I read that as: " + ", ".join(_TITLES.get(h.intent, h.intent) for h in hits)
     if replies:
         prefix = "; ".join(x for x in (prefix, *dict.fromkeys(replies)) if x)
-    p = compose(intents, facts, exclusions=exclusions, confidence=conf, reply_prefix=prefix,
-                hook_text=hook_text, allow_downloads=allow_downloads, brain="recipes")
+    if typo_note:
+        prefix = "; ".join(x for x in (typo_note, prefix) if x)
+    groups = SP.fan_out(intents, list(det.clauses), facts)
+    if groups:
+        # K3: several clips named in one prompt — one composition per group
+        # (a group never repeats a recipe), merged in stage order.
+        p = SP.merge_plans([compose(g, facts, exclusions=exclusions, confidence=conf,
+                                    reply_prefix=prefix if i == 0 else None, hook_text=hook_text,
+                                    allow_downloads=allow_downloads, brain="recipes")
+                            for i, g in enumerate(groups)], base_duration=facts.duration or None)
+    else:
+        p = compose(intents, facts, exclusions=exclusions, confidence=conf, reply_prefix=prefix,
+                    hook_text=hook_text, allow_downloads=allow_downloads, brain="recipes")
     if conf < G.NORMALISE_THRESHOLD:
         # §2.7: below 0.4 the plan is a guess — ask, offering it as the first option.
         return p.with_(steps=[], postconditions=[], downloads_needed=[], estimated_seconds=None,
@@ -1304,6 +2007,7 @@ _TYPO_VOCAB: tuple[str, ...] = (
     "down", "slow", "fast", "faster", "slower", "reverse", "trim", "cut", "title", "text", "music", "video",
     "delete", "remove", "duplicate", "split", "caption", "captions", "volume", "louder", "quieter", "mute",
     "black", "white", "warm", "cool", "zoom", "rotate", "freeze", "transition", "transitions", "please",
+    "bigger", "smaller",
 )
 
 

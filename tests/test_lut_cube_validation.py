@@ -57,6 +57,21 @@ CASES = {
     "two_numbers": ("LUT_3D_SIZE 2\n0 0\n" + "\n".join(_rows(2).split("\n")[1:]) + "\n", False),
     "text_row": ("LUT_3D_SIZE 2\nfoo bar baz\n" + "\n".join(_rows(2).split("\n")[1:]) + "\n", False),
     "bad_domain": ("LUT_3D_SIZE 2\nDOMAIN_FOO 0 0 0\n" + _rows(2) + "\n", False),
+    # Final QA (run 2, round 2): lines split the way ffmpeg reads them —
+    # fgets, on "\n" only, at most 511 bytes at a time — not str.splitlines,
+    # which also splits on \r, \x85 (a byte of "Å", "ą", "Ņ", Cyrillic "х"
+    # in UTF-8), \x0b, \x0c and \x1c-\x1e.
+    "cr_only": (('TITLE "inv"\n' + GOOD).replace("\n", "\r"), False),
+    "cr_only_size_first": (GOOD.replace("\n", "\r"), False),
+    "utf8_comment": ("LUT_3D_SIZE 2\n# Graded by Åsa for the Malmö shoot\n" + _rows(2) + "\n", True),
+    "cyrillic_comment": ("LUT_3D_SIZE 2\n# х\n" + _rows(2) + "\n", True),
+    "utf8_title_before": ('TITLE "Malmö"\n# Åsa\n' + GOOD, True),
+    "vertical_tab_line": ("LUT_3D_SIZE 2\n\x0b\n" + _rows(2) + "\n", True),
+    "nbsp_line": (b"LUT_3D_SIZE 2\n\xa0\n" + _rows(2).encode() + b"\n", False),
+    "comment_511_bytes": ("LUT_3D_SIZE 2\n#" + "x" * 510 + "\n" + _rows(2) + "\n", True),
+    "comment_512_bytes": ("LUT_3D_SIZE 2\n#" + "x" * 511 + "\n" + _rows(2) + "\n", False),
+    "long_row_comment": ("LUT_3D_SIZE 2\n" + _rows(2).replace("\n", " # " + "y" * 600 + "\n", 1) + "\n", False),
+    "long_line_before_size": ("#" + "z" * 600 + "\n" + GOOD, True),
 }
 
 
@@ -71,7 +86,7 @@ def _ffmpeg_renders(path: Path) -> bool:
 def test_validator_agrees_with_ffmpeg(tmp_path: Path, name: str):
     body, renders = CASES[name]
     p = tmp_path / f"{name}.cube"
-    p.write_bytes(body.encode("utf-8"))
+    p.write_bytes(body if isinstance(body, bytes) else body.encode("utf-8"))
     assert _ffmpeg_renders(p) is renders, "fixture no longer describes this ffmpeg"
     if renders:
         validate_cube(p)
@@ -91,6 +106,24 @@ def test_a_1d_shaper_in_front_of_the_3d_table_is_rejected(tmp_path: Path):
 @pytest.mark.parametrize("lut", sorted(p.name for p in _LUTS.glob("*.cube")))
 def test_every_bundled_look_is_valid(lut: str):
     validate_cube(_LUTS / lut)
+
+
+def test_a_cr_only_cube_says_why_it_is_refused(tmp_path: Path):
+    """Old Mac (CR-only) line endings: ffmpeg reads the whole file as one
+    line ("3D LUT is empty"). It was accepted at import and then failed
+    every render; now the import refuses it and says what to do."""
+    p = tmp_path / "cr.cube"
+    p.write_bytes(('TITLE "inv"\n' + GOOD).replace("\n", "\r").encode())
+    with pytest.raises(InvalidLut, match="line endings") as e:
+        validate_cube(p, display_name="inv.cube")
+    assert "inv.cube" in str(e.value)
+
+
+def test_a_too_long_line_in_the_table_names_its_line(tmp_path: Path):
+    p = tmp_path / "long.cube"
+    p.write_text("LUT_3D_SIZE 2\n#" + "x" * 511 + "\n" + _rows(2) + "\n")
+    with pytest.raises(InvalidLut, match=r"line 2 .*too long"):
+        validate_cube(p)
 
 
 def test_messages_are_plain_and_name_the_file(tmp_path: Path):
@@ -144,7 +177,8 @@ def _upload(api, sid, name, body: str):
                     files={"file": (name, io.BytesIO(body.encode()), "text/plain")})
 
 
-@pytest.mark.parametrize("body,needle", [(ONE_D, "1D"), (TRUNCATED, "64"), (TOO_BIG, "256")])
+@pytest.mark.parametrize("body,needle", [(ONE_D, "1D"), (TRUNCATED, "64"), (TOO_BIG, "256"),
+                                         (('TITLE "inv"\n' + GOOD).replace("\n", "\r"), "line endings")])
 def test_lut_upload_rejects_a_cube_ffmpeg_cannot_render(api, tmp_path, body, needle):
     sid = api.post("/api/sessions").json()["id"]
     r = _upload(api, sid, "film.cube", body)
@@ -157,9 +191,10 @@ def test_lut_upload_rejects_a_cube_ffmpeg_cannot_render(api, tmp_path, body, nee
     assert not list((_main.session_dir(sid) / "uploads" / "luts").glob("*.cube"))
 
 
-def test_lut_upload_still_takes_a_good_cube(api, tmp_path):
+@pytest.mark.parametrize("body", [GOOD, "LUT_3D_SIZE 2\n# Graded by Åsa for the Malmö shoot\n" + _rows(2) + "\n"])
+def test_lut_upload_still_takes_a_good_cube(api, tmp_path, body):
     sid = api.post("/api/sessions").json()["id"]
-    r = _upload(api, sid, "mine.cube", GOOD)
+    r = _upload(api, sid, "mine.cube", body)
     assert r.status_code == 200, r.text
     assert Path(r.json()["path"]).exists()
 

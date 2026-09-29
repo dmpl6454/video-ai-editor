@@ -149,10 +149,14 @@ def _x_caption_look(look: dict[str, Any], f: TimelineFacts) -> Expansion:
     check = {k: v for k, v in args.items() if k in ("color", "size", "upper", "stroke_w", "position")}
     if "background" in args and args["background"]:
         check["background"] = args["background"]
+    bold_note = ("the captions already use the boldest weight (Inter Black) — pick another font in the "
+                 "Inspector (Captions)") if look.get("_bold") else None
+    if not args:
+        return Expansion(notes=(bold_note or CAPTIONS_KEPT_REPLY,))
     return Expansion(
         steps=(step("set_caption_style", STAGE_CAPTIONS, "restyle the captions: " + ", ".join(said), **args),),
         postconditions=(pc("caption_look", "the captions have the requested look", **check),),
-        notes=("captions: " + ", ".join(said),))
+        notes=tuple(["captions: " + ", ".join(said)] + ([bold_note] if bold_note else [])))
 
 
 #: Captions exist and the clause names nothing the Prompt bar can change on
@@ -420,6 +424,9 @@ def _x_music(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
 
 
 def _x_duck(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
+    if it.get("_programme"):
+        return Expansion(notes=("Ducking dips the music under speech — the clips' own sound cannot duck. To lower "
+                                "it under the voiceover, say 'lower the clip audio by 6 dB'.",))
     if it.get("enabled") is False:
         # QA-031: "turn off ducking" turns it OFF, and the check measures OFF.
         if not f.has_music and "music" not in ctx.recipes:
@@ -540,6 +547,15 @@ def _x_color_look(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     look = it.get("look")
     intensity = float(it.get("intensity", 0.8))
     intensity = min(1.0, max(0.0, intensity))
+    if (it.get("_range") is not None or it.get("_half")) and it.get("clip_ref") is None and look:
+        ids, q = _range_clips_whole(it, f, "change the look of")
+        if q or not ids:
+            return Expansion(notes=(q or "That range covers no whole clip — which clip should get the look?",))
+        return Expansion(
+            steps=tuple(step("apply_lut", STAGE_LOOK, f"apply the {look.replace('.cube', '')} look to "
+                             f"{CX._label(cid, f)}", clip_id=cid, src=look, intensity=intensity) for cid in ids),
+            postconditions=tuple(pc("effect_present", "the look is applied", type="lut", track="v1", all=False,
+                                    clip_id=cid) for cid in ids))
     clip, q = CX.bind_clip(it.get("clip_ref") or "$v1_all", f)
     if q:
         return Expansion(notes=(q,))
@@ -598,10 +614,31 @@ def _clip_targets(it: Intent, f: TimelineFacts, verb: str, default: str = "$v1_a
     ("the last 3 seconds") or neither (`default`). Wave D3 (E3): "speed up
     the second clip" used to speed up EVERY clip (the ordinal was never read)."""
     rng = it.get("_range")
+    if rng is None and it.get("_half") and it.get("clip_ref") is None:
+        vend = float(f.video_end or f.duration)
+        rng = S.TimeRange(kind=it.get("_half"), end=round(vend / 2, 3))
     if rng is not None and it.get("clip_ref") is None:
         return CX.range_targets(rng, f, verb)
     ref, q = CX.bind_clip(it.get("clip_ref") or default, f)
     return [], ([ref] if ref else []), q
+
+
+def _range_clips_whole(it: Intent, f: TimelineFacts, verb: str) -> tuple[list[str], str | None]:
+    """final sweep 2 r2: the clips a time range covers EXACTLY ("make the first
+    4 seconds black and white" put the look on every clip). A range edge inside
+    a clip asks — the look is never spread past what was named."""
+    rng = it.get("_range")
+    if rng is None and it.get("_half"):
+        rng = S.TimeRange(kind=it.get("_half"), end=round(float(f.video_end or f.duration) / 2, 3))
+    spans = CX.v1_spans(f)
+    vend = float(f.video_end or f.duration)
+    a, b = rng.resolve(vend)
+    edges = {round(x, 3) for _c, s0, e0 in spans for x in (s0, e0)}
+    bad = next((x for x in (a, b) if all(abs(x - e) > 0.05 for e in edges)), None)
+    if bad is not None:
+        return [], (f"{bad:g}s is inside a clip — should I {verb} only the whole clips, or split at {bad:g}s first? "
+                    f"Say like 'split at {bad:g}s', then '{verb} the first clip'.")
+    return [cid for cid, s0, e0 in spans if s0 >= a - 0.05 and e0 <= b + 0.05], None
 
 
 def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
@@ -631,6 +668,21 @@ def _x_speed(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         # Final QA r3: no number — the words' direction, never a speed-up for
         # a "slow … down" the direction table did not read.
         factor = 0.8 if S._SLOW_DOWN_WORDS_RE.search(it.clause or "") else 1.25
+    if it.get("_step") and not pre and len(clips) == 1 and clips != ["$v1_all"]:
+        cur = NX._concrete_clip(clips[0], f)[0]
+        if cur is not None and cur.curve is None and abs(float(cur.speed) - 1.0) > 1e-6:
+            factor = round(float(cur.speed) * float(factor), 3)
+    if it.get("_step") and not pre and clips == ["$v1_all"]:
+        # final sweep 2 r2: "a bit slower" with clip 2 at 2x set EVERY clip to
+        # 0.8x (2x → 0.8x) — each clip steps from its own speed
+        main = [c for c in f.clips if c.id in set(f.v1_clip_ids) and c.freeze is None]
+        if main and len({round(float(c.speed), 3) for c in main}) > 1 and all(c.curve is None for c in main):
+            per = [(c.id, round(min(4.0, max(0.25, float(c.speed) * float(factor))), 3)) for c in main[:20]]
+            return Expansion(steps=tuple(step("set_speed", STAGE_CUTS, f"{CX._label(cid, f)} at {x:g}×", clip_id=cid,
+                                              factor=x) for cid, x in per),
+                             postconditions=tuple(pc("speed_equals", "the speed matches", clip_id=cid, factor=x)
+                                                  for cid, x in per),
+                             notes=(f"every clip {'slower' if float(factor) < 1 else 'faster'} from its own speed",))
     factor = min(4.0, max(0.25, float(factor)))
     if factor == 1.0 and not pre and clips and clips != ["$v1_all"]:
         # Back to normal on a clip that already plays at 1x (Final QA: it
@@ -663,6 +715,10 @@ def _moment(it: Intent, f: TimelineFacts) -> float | None:
     return None if at is None else round(float(at), 3)
 
 
+#: The shortest hold `validate.ARG_BOUNDS` lets `freeze_frame` make.
+FREEZE_MIN_S = 0.5
+
+
 def _x_freeze(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     """CapCut's Freeze (wave D, freeze_frame): hold the frame at a moment."""
     at = _moment(it, f)
@@ -670,6 +726,11 @@ def _x_freeze(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         return Expansion(notes=(f"When should the frame freeze? {at:g}s is past the end of the {f.duration:.1f}s video."
                                 if at is not None else "When should the frame freeze? Say like 'freeze frame at 3 seconds'.",))
     dur = it.get("duration_s")
+    if dur is not None and float(dur) < FREEZE_MIN_S:
+        # "for a quarter second": below the shortest hold the editor makes —
+        # say so rather than hold the 3 s default
+        return Expansion(notes=(f"The shortest freeze is {FREEZE_MIN_S:g}s — hold the frame for {FREEZE_MIN_S:g}s? "
+                                f"Say 'freeze at {at:g}s for {FREEZE_MIN_S:g} seconds'.",))
     args: dict[str, Any] = {"time": at}
     if dur is not None:
         args["duration"] = float(dur)
@@ -766,10 +827,53 @@ def _x_reverse(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         postconditions=(pc("clip_reversed", human, clip_id=ref, reverse=rev),))
 
 
+def _trim_music(it: Intent, rng: Any, f: TimelineFacts) -> Expansion:
+    """final sweep 2 r2: "remove the last 3 seconds of the music" / "trim the
+    music to 6 seconds" / "cut the music at 8 seconds" trim the MUSIC clip
+    (they cut the video). Only one bed can be trimmed by these words."""
+    beds = sorted((c for c in f.clips if c.track == "music"), key=lambda c: c.start)
+    if not beds:
+        return Expansion(notes=("There is no music on the timeline to trim.",))
+    first, last = beds[0], beds[-1]
+    m_end = last.start + last.duration
+    spec = it.get("_music")
+    if isinstance(spec, dict) and spec.get("end_at") is not None:
+        kind, n = "end_at", float(spec["end_at"])
+    elif rng is not None and rng.kind in ("first", "last") and rng.end:
+        kind, n = rng.kind, float(rng.end)
+    else:
+        return Expansion(notes=("Which part of the music? Say like 'remove the last 3 seconds of the music' or "
+                                "'end the music at 8 seconds'.",))
+    if kind == "first":
+        c, cut = first, n
+        if cut >= c.duration - 0.1:
+            return Expansion(notes=(f"The first music clip is only {c.duration:g}s long — how much should go?",))
+        new_in = round(c.src_in + cut * (c.speed or 1.0), 3)
+        return Expansion(
+            steps=(step("trim_clip", STAGE_AUDIO, f"the music starts {cut:g}s later in the song", clip_id=c.id,
+                        **{"in": new_in}),),
+            postconditions=(pc("clip_duration", "the music's head is trimmed", clip_id=c.id,
+                               seconds=round(c.duration - cut, 3), tol=0.05),),
+            notes=(f"cut the first {cut:g}s of the music",))
+    end_at = m_end - n if kind == "last" else n
+    c = next((x for x in beds if x.start < end_at < x.start + x.duration - 1e-6), None)
+    if c is None or len([x for x in beds if x.start + x.duration > end_at + 1e-6]) > 1:
+        return Expansion(notes=(f"The music has {len(beds)} pieces — select the one to trim, then say it again.",)
+                         if len(beds) > 1 else (f"The music runs {first.start:g}–{m_end:g}s — where should it end?",))
+    new_out = round(c.src_in + (end_at - c.start) * (c.speed or 1.0), 3)
+    return Expansion(
+        steps=(step("trim_clip", STAGE_AUDIO, f"the music ends at {end_at:g}s", clip_id=c.id, out=new_out),),
+        postconditions=(pc("clip_duration", "the music ends earlier", clip_id=c.id,
+                           seconds=round(end_at - c.start, 3), tol=0.05),),
+        notes=(f"the music now ends at {end_at:g}s (it ran to {m_end:g}s); the video is unchanged",))
+
+
 def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     rng = it.get("range")
     if isinstance(rng, str):
         rng = S.extract(f"cut {rng}").range
+    if it.get("_music"):
+        return _trim_music(it, rng, f)
     if rng is None:
         return Expansion(questions=(ask("range", "Which part should I cut? Reply like 'the first 5 seconds' or 'from 0:05 to 0:12'.",
                                         kind="text"),),
@@ -779,6 +883,15 @@ def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     # music bed longer than the video stretched `duration`, so the range
     # landed past the video and cut the music.
     vend = float(f.video_end or f.duration)
+    if it.get("_clip_ref") is not None and rng.kind in ("first", "last") and rng.end and not it.get("_keep") \
+            and it.get("_max_s") is None:
+        return _trim_in_clip(it, rng, f)
+    if rng.kind in ("first", "last") and rng.end and vend > 0 and float(rng.end) >= vend - 1e-6 \
+            and not it.get("_keep") and it.get("_max_s") is None:
+        # "remove 15 seconds from the end" on a 12 s video clamped to a cut of
+        # the WHOLE main track — the picture went black under the music
+        return Expansion(notes=(f"The video is only {vend:g}s long — the {rng.kind} {float(rng.end):g}s is all of "
+                                "it. How much should go?",))
     start, end = rng.resolve(vend)
     if it.get("_keep") and it.get("_max_s") is None:
         return _keep_range(start, end, vend)
@@ -806,6 +919,30 @@ def _x_trim(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         steps=(step("cut_range", STAGE_CUTS, f"remove {start:.2f}–{end:.2f}s and close the gap",
                     track="v1", start=round(start, 3), end=round(end, 3)),),
         postconditions=(pc("duration_between", "the duration matches", start=round(start, 3), end=round(end, 3), tol=0.1),))
+
+
+def _trim_in_clip(it: Intent, rng: Any, f: TimelineFacts) -> Expansion:
+    """"cut the first 2 seconds of clip 3" / "trim the last second off clip
+    1": the range is measured inside the named clip's span on the timeline."""
+    cid, q = CX.bind_clip(it.get("_clip_ref"), f)
+    if q or cid is None:
+        return Expansion(notes=(q or "Which clip?",))
+    span = CX._span_of(cid, f)
+    if span is None:
+        return Expansion(notes=("Which part should I cut? Say it in video time, like 'from 9s to 10s'.",))
+    a, b = span
+    n = float(rng.end)
+    what = CX._label(cid, f)
+    if n >= (b - a) - 0.05:
+        return Expansion(notes=(f"{what.capitalize()} is only {b - a:g}s long — the {rng.kind} {n:g}s is all of it. "
+                                "Delete the clip, or how much should go?",))
+    start, end = (a, a + n) if rng.kind == "first" else (b - n, b)
+    return Expansion(
+        steps=(step("cut_range", STAGE_CUTS, f"remove the {rng.kind} {n:g}s of {what} ({start:.2f}–{end:.2f}s)",
+                    track="v1", start=round(start, 3), end=round(end, 3)),),
+        postconditions=(pc("duration_between", "the duration matches", start=round(start, 3), end=round(end, 3),
+                           tol=0.1),),
+        notes=(f"removed the {rng.kind} {n:g}s of {what}",))
 
 
 def _keep_range(start: float, end: float, vend: float) -> Expansion:
@@ -845,7 +982,10 @@ def _title_span(it: Intent, f: TimelineFacts, default_dur: float) -> tuple[float
     elif at == "end":
         # the PICTURE's end (Final QA r3): a long music bed put an end card
         # 28 s after the video ended
-        start = max(0.0, float(f.video_end or f.duration) - dur)
+        # K3: after a trim planned in the SAME prompt ("trim the last 2
+        # seconds and add a title at the end") the end is the trimmed one
+        vend = it.get("_video_end") if it.get("_video_end") is not None else (f.video_end or f.duration)
+        start = max(0.0, float(vend) - dur)
     else:
         start = max(0.0, float(at))
     end = min(f.duration, start + dur) if f.duration > 0 else start + dur
@@ -889,7 +1029,8 @@ TITLE_RESTYLE_REPLY = ("The Prompt bar cannot restyle a title yet — select it 
 def _x_title(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     from .presets import text_styles
     if it.get("_restyle"):
-        return Expansion(notes=(TITLE_RESTYLE_REPLY,))
+        # K3: a title's look is a plan edit now (set_text_style)
+        return NX.x_restyle_text(it, f, ctx)
     if it.get("_retime"):
         return NX.x_retime_text(it, f)
     text = (it.get("text") or "").strip()
@@ -918,6 +1059,16 @@ def _x_title(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                                     canvas_w=f.canvas_w, canvas_h=f.canvas_h, aspect=f.aspect)
     else:
         args = {"text": text[:120], "start": start, "end": end, "role": "super"}
+    look = it.get("_look") or {}
+    # final sweep 2 r2: "add a title 'Intro' and make it red" was white
+    if look.get("color"):
+        args["color"] = look["color"]
+    if look.get("size"):
+        args["size"] = float(look["size"])
+    elif look.get("size_scale") and args.get("size"):
+        args["size"] = round(float(args["size"]) * float(look["size_scale"]), 1)
+    if look.get("upper") is not None:
+        args["upper"] = bool(look["upper"])
     return Expansion(
         steps=(step("add_text", STAGE_TEXT, "title text overlay", **args),),
         postconditions=(pc("text_present", "the text is on screen", contains=text[:120]),
@@ -1003,8 +1154,11 @@ def _x_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     with the catalog's per-transition default duration unless the user
     said one. Stage 5 — before reframe/captions/text, because a cross-fade
     shortens the timeline and does not ripple overlays."""
-    if it.get("_from_type") or it.get("_retime"):
+    if it.get("_from_type") or it.get("_retime") or it.get("_nth") is not None \
+            or (it.get("_to_duration") is not None and f.transitions):
         return _change_existing_transitions(it, f, ctx)
+    if it.get("_to_duration") is not None and not it.get("duration"):
+        it = Intent(it.recipe, {**it.slots, "duration": it.get("_to_duration")}, it.score, it.clause)
     if not f.v1_boundaries and not (ctx.has_cut_steps and len(f.v1_clip_ids) >= 2):
         return Expansion(notes=("only one clip on v1 — there is no seam to put a transition on",))
     seam_index = it.get("_seam_index")
@@ -1100,14 +1254,23 @@ def _change_existing_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> 
         return Expansion(notes=("There are no transitions on the timeline to change — say like 'add a crossfade "
                                 "between every clip'.",))
     src = it.get("_from_type")
+    nth = it.get("_nth")
     picked = [tr for tr in f.transitions if canonical(tr.type) == canonical(src)] if src else list(f.transitions)
     if src and not picked and canonical(src) in _CROSSFADE_TYPES:
         # "the crossfade" / "the dissolve" names any cross-fade kind
         picked = [tr for tr in f.transitions if canonical(tr.type) in _CROSSFADE_TYPES]
+    if nth is not None:
+        # "the second transition": that one seam, in timeline order
+        ordered = sorted(f.transitions, key=lambda tr: tr.at)
+        k = int(nth) - 1 if int(nth) > 0 else len(ordered) + int(nth)
+        if not 0 <= k < len(ordered):
+            return Expansion(notes=(f"Which transition? There {'is' if len(ordered) == 1 else 'are'} "
+                                    f"{len(ordered)} on the timeline.",))
+        picked = [ordered[k]]
     if not picked:
         return Expansion(notes=(f"There is no {display_name(src)} transition on the timeline to change.",))
     steps, notes = [], []
-    if src and it.get("type"):
+    if (src or nth is not None) and it.get("type"):
         entry = transition_entry(str(it.get("type")))
         if entry is None:
             return Expansion(notes=(f"{it.get('type')!r} is not a transition in the catalog",))
@@ -1115,11 +1278,11 @@ def _change_existing_transitions(it: Intent, f: TimelineFacts, ctx: Context) -> 
             dur = float(it.get("duration") or tr.duration or entry.duration)
             steps.append(step("add_transition", STAGE_TRANSITIONS, f"{entry.name} at the {smpte(tr.at, f.fps)} seam",
                               at=tr.at, type=entry.name, duration=round(min(2.0, max(0.1, dur)), 3)))
-        notes.append(f"{len(picked)} × {display_name(src)} → {entry.label}")
+        notes.append(f"{len(picked)} × {display_name(src or picked[0].type)} → {entry.label}")
         check = pc("transitions_count_geq", "transitions were changed", n=len(picked), type=entry.name)
     else:
         factor = float(it.get("_retime") or 1.0)
-        to = it.get("duration") if src else None      # "make the glitch transition 1 second"
+        to = it.get("duration") if (src or nth is not None) else it.get("_to_duration")   # "… transition 1 second"
         for tr in picked:
             base = tr.duration if tr.duration is not None else (
                 (transition_entry(tr.type) or transition_entry("fade")).duration)
@@ -1307,8 +1470,14 @@ def _x_fade(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     last frame is inaudible)."""
     target = it.get("target") or "video"
     edge = it.get("edge") or "both"
+    if it.get("_off"):
+        return _fades_off(it, target, f, ctx)
+    if it.get("_relative"):
+        which = {"in": "fade in", "out": "fade out"}.get(edge, "fade")
+        return Expansion(notes=(f"How long should the {which} be? Say like 'make the {which} "
+                                f"{'2' if it.get('_relative') == 'longer' else '0.5'} seconds'.",))
     if target == "music":
-        return _music_fade(edge, it.get("duration_s"), f, ctx)
+        return _music_fade(edge, it.get("duration_s"), f, ctx, in_s=it.get("_in_s"), out_s=it.get("_out_s"))
     picture = _picture_fade(it, edge, target, f)
     if not it.get("_music_edge"):
         return picture
@@ -1318,12 +1487,51 @@ def _x_fade(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
                      notes=picture.notes + music.notes)
 
 
-def _music_fade(edge: str, duration_s: float | None, f: TimelineFacts, ctx: Context) -> Expansion:
+def _fades_off(it: Intent, target: str, f: TimelineFacts, ctx: Context) -> Expansion:
+    """"take the fade off the last clip" / "remove the fades": every fade on
+    the named clip (or on every main-track clip) goes to 0 — the picture's
+    and the sound's. It used to ADD a 1 s fade in and out."""
+    edge = it.get("edge") or "both"
+    sides = {"in": {"in_s": 0.0}, "out": {"out_s": 0.0}}.get(edge, {"in_s": 0.0, "out_s": 0.0})
+    if target == "music":
+        if _no_music(f, ctx):
+            return Expansion(notes=("there is no music on the timeline",))
+        msides = {{"in_s": "fade_in", "out_s": "fade_out"}[k]: v for k, v in sides.items()}
+        return Expansion(steps=(step("fit_music_to_video", STAGE_AUDIO, "take the music's fades off", **msides),),
+                         postconditions=(pc("music_within_video_extent", "music does not outlast the video"),),
+                         notes=("the music's fades are off",))
+    ref = it.get("clip_ref")
+    ids = list(f.v1_clip_ids)
+    if ref is not None and ref != "$v1_all":
+        cid, q = CX.bind_clip(ref, f)
+        if q:
+            return Expansion(notes=(q,))
+        cid = {"$v1_first": ids[0] if ids else None, "$v1_last": ids[-1] if ids else None}.get(cid, cid)
+        targets = [cid] if cid else []
+    else:
+        targets = ids
+    if not targets:
+        return Expansion(notes=("there is no clip on the timeline to take a fade off",))
+    steps: list[Step] = []
+    for cid in targets[:20]:
+        # only the side the words name ("remove the fade in" keeps the fade out)
+        if target == "video":
+            steps.append(step("set_video_fade", STAGE_TRANSITIONS, "no picture fade", clip_id=cid, **sides))
+        steps.append(step("add_fade", STAGE_AUDIO, "no sound fade", clip_id=cid, **sides))
+    what = CX._label(targets[0], f) if len(targets) == 1 else "every clip"
+    which = {"in": "fade-ins", "out": "fade-outs"}.get(edge, "fades")
+    return Expansion(steps=tuple(steps), notes=(f"took the {which} off {what}",))
+
+
+def _music_fade(edge: str, duration_s: float | None, f: TimelineFacts, ctx: Context, *,
+                in_s: float | None = None, out_s: float | None = None) -> Expansion:
     if _no_music(f, ctx):
         return Expansion(notes=("there is no music on the timeline to fade — add a track first",))
     it = Intent("fade", {"duration_s": duration_s})
-    fin = _fade_seconds(it, MUSIC_FADE_IN_S, f) if edge in ("in", "both") else None
-    fout = _fade_seconds(it, MUSIC_FADE_OUT_S, f) if edge in ("out", "both") else None
+    fin = _fade_seconds(Intent("fade", {"duration_s": in_s}) if in_s else it, MUSIC_FADE_IN_S, f) \
+        if edge in ("in", "both") else None
+    fout = _fade_seconds(Intent("fade", {"duration_s": out_s}) if out_s else it, MUSIC_FADE_OUT_S, f) \
+        if edge in ("out", "both") else None
     what = " and ".join(x for x in (f"in over {fin:g}s" if fin else "", f"out over {fout:g}s" if fout else "") if x)
     return Expansion(
         steps=(step("fit_music_to_video", STAGE_AUDIO, f"fade the music {what}", fade_in=fin, fade_out=fout),),
@@ -1534,6 +1742,14 @@ def _mute_everything(it: Intent, f: TimelineFacts, muted: bool) -> Expansion:
     verb = "mute" if muted else "unmute"
     keep = it.get("_keep")
     word = it.get("_keep_word")
+    keep_clip = None
+    if it.get("_keep_clip"):
+        cid, q = CX.bind_clip(it.get("_keep_clip"), f)
+        ids = list(f.v1_clip_ids)
+        cid = {"$v1_first": ids[0] if ids else None, "$v1_last": ids[-1] if ids else None}.get(cid, cid)
+        if q or cid not in ids:
+            return Expansion(notes=(q or "Which clip should keep its sound? Name it like 'clip 1'.",))
+        keep_clip = cid
     if word and keep is None:
         return Expansion(notes=(f"Which sound should keep playing? I don't know '{word}' — say like "
                                 "'mute everything except the voiceover' or '… except the music'.",))
@@ -1551,7 +1767,15 @@ def _mute_everything(it: Intent, f: TimelineFacts, muted: bool) -> Expansion:
         return Expansion(notes=(f"There is no {noun} on the timeline to keep playing — say 'mute everything' "
                                 "to mute all the sound.",))
     steps, pcs = [], []
-    if keep != "voice" and f.v1_clip_ids:
+    if keep_clip is not None:
+        # every main-track clip but the one named, one by one
+        for cid in f.v1_clip_ids:
+            if cid == keep_clip:
+                pcs.append(pc("clips_muted", f"{CX._label(cid, f)} keeps its sound", clip_id=cid, muted=False))
+                continue
+            steps.append(step("set_clip_muted", STAGE_AUDIO, f"{verb} {CX._label(cid, f)}", clip_id=cid, muted=muted))
+            pcs.append(pc("clips_muted", "the clip audio is muted", clip_id=cid, muted=muted))
+    elif keep != "voice" and f.v1_clip_ids:
         steps.append(step("set_clip_muted", STAGE_AUDIO, f"{verb} the main track's own sound",
                           clip_id="$v1_all", muted=muted))
         pcs.append(pc("clips_muted", "the main track's sound is muted" if muted else "the main track plays",
@@ -1578,7 +1802,8 @@ def _mute_everything(it: Intent, f: TimelineFacts, muted: bool) -> Expansion:
                           clip_id=cid, muted=muted))
     if not steps:
         return Expansion(notes=("There is no other sound on the timeline to mute.",))
-    kept = {"vo": "the voice-over", "music": "the music", "voice": "the main track's sound"}.get(keep or "")
+    kept = {"vo": "the voice-over", "music": "the music", "voice": "the main track's sound"}.get(keep or "") \
+        or (CX._label(keep_clip, f) if keep_clip else None)
     return Expansion(steps=tuple(steps), postconditions=tuple(pcs),
                      notes=((f"muted everything except {kept}" if kept else f"{verb}d every sound lane"),))
 
@@ -1590,6 +1815,13 @@ def _x_mute(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     verb = "mute" if muted else "unmute"
     if it.get("_everything"):
         return _mute_everything(it, f, muted)
+    if target == "vo":
+        if not any(c.track == "vo" for c in f.clips):
+            return Expansion(notes=(f"There is no voice-over on the timeline to {verb}.",))
+        return Expansion(
+            steps=(step("set_track_muted", STAGE_AUDIO, f"{verb} the voice-over", track="vo", muted=muted),),
+            postconditions=(pc("track_muted", "the voice-over is muted" if muted else "the voice-over plays",
+                               track="vo", muted=muted),))
     if target == "music":
         if _no_music(f, ctx):
             return Expansion(notes=(f"there is no music on the timeline to {verb}",))

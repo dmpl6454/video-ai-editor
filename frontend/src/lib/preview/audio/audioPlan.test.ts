@@ -12,7 +12,8 @@ import type { SourceInfo, SourceInfoJson } from '../timeline/frameMap'
 import { buildProgramMap, clipSample0 } from '../timeline/programMap'
 import { samplesForFrames } from '../timeline/timebase'
 import {
-  buildAudioPlan, clipGainAt, diffPlans, mergeIntervals, planFromProgram, renderWindow, soundWindow, totalSamples,
+  buildAudioPlan, clipGainAt, diffPlans, mergeIntervals, planFromProgram, renderWindow, soundPulls, soundWindow,
+  soundWindows, totalSamples,
   MIX_LIMIT, type AudioPlan, type ClipAudio,
 } from './audioPlan'
 import { afadeGainAt } from './curves'
@@ -198,6 +199,27 @@ describe('lanes (music / voice-over / audio)', () => {
     expect(v.fades.map((f) => [f.type, f.start])).toEqual([['out', 4400 * 48]])
   })
 
+  it('K1: a run laid to or past v1\'s end is cut where its layout end maps, its fade-out at the cut', () => {
+    // v1 renders 3.5 s (layout 4, one 0.5 s seam). `schema.sound_render_windows`.
+    const base = { v1: [{ id: 'a', start: 0, out: 2 }, { id: 'b', start: 2, out: 2 }],
+      transitions: [{ at: 2, duration: 0.5 }] }
+    const toEnd = one(plan(edl({ ...base, music: [{ id: 'm', start: 0, in: 0, out: 4, audio: { fade_out: 0.5 } }] })), 'm')
+    expect([toEnd.out0, toEnd.n]).toEqual([0, 3.5 * 48000])
+    expect(toEnd.fades.map((f) => [f.type, f.start])).toEqual([['out', 3000 * 48]])
+    const past = one(plan(edl({ ...base, music: [{ id: 'm', start: 0, in: 0, out: 5 }] })), 'm')
+    expect(past.n).toBe(4.5 * 48000)                          // render_time(5.0)
+    const late = one(plan(edl({ ...base, vo: [{ id: 'v', start: 4.5, in: 0, out: 1 }] })), 'v')
+    expect([late.out0, late.n]).toEqual([4000 * 48, 48000])     // placed past the end: whole
+    // final QA (run 2, round 2): a run ending INSIDE v1's layout (3.9 < 4)
+    // plays whole, even past the picture's 3.5 — its last words are heard
+    const inside = one(plan(edl({ ...base, vo: [{ id: 'v', start: 1, in: 0, out: 2.9 }] })), 'v')
+    expect(inside.n).toBe(2.9 * 48000)
+    const run = plan(edl({ ...base, music: [{ id: 'p', start: 0, in: 0, out: 3.8 },
+      { id: 'q', start: 3.8, in: 3.8, out: 4 }] }))
+    expect(one(run, 'p').n).toBe(3.5 * 48000)
+    expect(run.clips.some((c) => c.id === 'q')).toBe(false)   // wholly past the run's cut
+  })
+
   it('retimed lanes resample; muted lanes are not mixed at all', () => {
     const e = edl({ v1: [{ id: 'a', start: 0, out: 4 }],
       a1: [{ id: 's', start: 0, in: 1, out: 3, speed: 2, audio: { keep_pitch: false } }],
@@ -344,3 +366,26 @@ describe('plan diff (what an edit must touch)', () => {
 })
 
 export type { SourceInfoJson }
+
+describe('soundWindows (a detached sound follows its own picture)', () => {
+  // Final QA (run 2), `schema.sound_runs`: the sounds of adjacent v1 clips
+  // c1 [2, 4) and c2 [4, 6), fades of 0.5 at 2 and 4, detached back to back.
+  const seams: Array<[number, number]> = [[2, 0.5], [4, 0.5]]
+  const s1 = { id: 's1', src: 'c1.mp4', in: 0, out: 2, start: 2, linked_to: 'c1' }
+  const s2 = { id: 's2', src: 'c2.mp4', in: 0, out: 2, start: 4, linked_to: 'c2' }
+
+  it('starts each where its picture plays and plays it whole', () => {
+    const w = soundWindows([s1, s2], seams, 6)
+    expect(w.get(s1)).toEqual([expect.closeTo(1.5, 9), expect.closeTo(3.5, 9)])
+    expect(w.get(s2)).toEqual([expect.closeTo(3.0, 9), expect.closeTo(5.0, 9)])
+    const p = soundPulls([s1, s2], seams)
+    expect([p.get(s1), p.get(s2)]).toEqual([expect.closeTo(0.5, 9), expect.closeTo(1.0, 9)])
+  })
+
+  it('keeps unlinked abutting pieces as one run', () => {
+    const a = { ...s1, linked_to: undefined }
+    const b = { ...s2, linked_to: undefined }
+    const p = soundPulls([a, b], seams)
+    expect([p.get(a), p.get(b)]).toEqual([expect.closeTo(0.5, 9), expect.closeTo(0.5, 9)])
+  })
+})

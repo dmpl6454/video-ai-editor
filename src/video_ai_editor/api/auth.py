@@ -22,6 +22,11 @@ Four layers, because no single one of them is enough:
      armed.
   3. **`Sec-Fetch-Site: cross-site` refused.** Belt to the Host check's braces,
      and it costs one dict lookup. Native clients send no such header.
+     3b. **Every write is same-origin** (`same_origin`, SEC-SAME-ORIGIN): a
+     page on another PORT of this host is `same-site`, not `cross-site`, and a
+     multipart/text-plain POST needs no preflight, so every method but
+     GET/HEAD/OPTIONS must carry `same-origin`/`none` fetch metadata or, with
+     none, an Origin equal to the Host. Native clients send neither and pass.
   4. **`X-VAE-Client: 1` required.** A custom header is not a CORS-simple
      header, so a browser MUST preflight before sending it, and this app's CORS
      policy only allows `http://localhost:5173`. A page that cannot preflight
@@ -163,6 +168,51 @@ def _is_loopback(request: Request) -> bool:
     return host == "testclient" and bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
+#: Methods that change nothing; every other one must pass `same_origin`.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: `Sec-Fetch-Site` values a request from the app's own window can carry:
+#: its own page (`same-origin`) or a user-typed/top-level load (`none`).
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+def same_origin(request: Request) -> bool:
+    """True unless the request came from a page on ANOTHER origin.
+
+    The loopback-peer check cannot see this: a page at http://localhost:5173
+    (Vite's default port, i.e. any other dev project on this Mac) runs in a
+    local browser, so its fetch arrives from 127.0.0.1 too
+    (REVIEW-C3-KEY-CORS-5173).
+
+      * Fetch metadata decides whenever the browser sends it (every engine
+        the app runs in does): a different port on the same host is
+        `same-site`, another host `cross-site`; only `same-origin` (the app's
+        own page) and `none` (typed / top-level) pass. Page script cannot set
+        a `Sec-` header, so it cannot claim `same-origin`.
+      * Without fetch metadata, a named Origin must be the host:port this
+        request was addressed to (`null` never is).
+      * Neither header: a native client (the phone, an MCP client, curl) —
+        no browser page is involved, so there is no cross-site forgery to stop.
+
+    The Vite dev proxy rewrites Host to the backend's (its string shorthand
+    is `changeOrigin: true`) but forwards the browser's `same-origin`, so the
+    dev app still passes and a foreign page never does.
+
+    PairAuthMiddleware enforces this on every state-changing method; the
+    settings routes (settings_routes._same_origin) also apply it to reads.
+    """
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site:
+        return site in _OWN_FETCH_SITES
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        host = (request.headers.get("host") or "").strip().lower()
+        _, _, origin_host = origin.lower().partition("://")
+        if not host or origin_host.rstrip("/") != host:
+            return False
+    return True
+
+
 def host_header_allowed(raw: str) -> bool:
     """Accept loopback names, bare IP literals, and Starlette's `testserver`.
 
@@ -289,6 +339,19 @@ class PairAuthMiddleware(BaseHTTPMiddleware):
             return _reject(
                 status=421, code="MISDIRECTED_REQUEST", request_id=rid,
                 message=_misdirected_message(pairing.server_port(server[1] or 0)))
+        # --- layer 3b: a WRITE comes from the app's own page ------------------
+        # `cross-site` alone let a page on another port of this host through
+        # (it is `same-site`), and a multipart or text/plain POST needs no CORS
+        # preflight: any local dev server's page could create a session,
+        # upload into it, dispatch, rename or delete (SEC-SAME-ORIGIN). One
+        # rule for every state-changing method, before any route or the
+        # upload cap reads the body. Native clients (the paired phone, MCP)
+        # send neither header and pass; the Vite dev proxy forwards the
+        # browser's `same-origin` and passes.
+        if request.method not in _SAFE_METHODS and not same_origin(request):
+            return _reject(
+                status=403, code="CROSS_ORIGIN_WRITE", request_id=rid,
+                message="Changes can only be made from the editor's own window.")
         if request.headers.get("sec-fetch-site", "") == "cross-site":
             return _reject(
                 status=403, code="FORBIDDEN", request_id=rid,

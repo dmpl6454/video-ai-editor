@@ -213,8 +213,8 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("volume", "Make the music bed, the voice-over (vo) or the original sound (of every clip, or one clip) "
           "louder or quieter all the way through, or set its level in dB.",
           target=("music", "voice", "vo"), change=("up", "down"), db="number", clip_ref="text"),
-    _card("mute", "Mute or unmute the music bed or the original sound (of every clip, or one clip).",
-          target=("music", "voice"), muted=_YES_NO, clip_ref="text"),
+    _card("mute", "Mute or unmute the music bed, the voice-over (vo) or the original sound (of every clip, or one clip).",
+          target=("music", "voice", "vo"), muted=_YES_NO, clip_ref="text"),
     _card("fit_music", "Trim the music so it ends with the video, with a fade-out.", duration_s="number"),
     _card("remove_music", "Take the music bed off the timeline."),
     _card("auto_edit", "Do the whole edit for a platform.",

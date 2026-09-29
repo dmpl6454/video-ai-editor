@@ -216,8 +216,10 @@ def test_move_clip_close_gap_pulls_the_remaining_clips_left(tmp_path):
 
 
 def test_move_clip_without_close_gap_is_unchanged(tmp_path):
-    """The default stays a plain move: apply_template / b-roll callers place
-    clips at absolute times and must not have neighbours shuffle underneath."""
+    """Without close_gap nothing shuffles underneath the caller: neighbours
+    never move. On the MAIN lane a plain move that would open a gap is now
+    refused outright (final sweep 2 r2: the next unrelated edit silently
+    closed it again), so the lane is left exactly as it was."""
     store = _store(tmp_path)
     src = _mk_video(tmp_path / "v.mp4", 6.0)
     dispatch(store, "add_clip", {"src": str(src), "track": "v1",
@@ -225,9 +227,10 @@ def test_move_clip_without_close_gap_is_unchanged(tmp_path):
     dispatch(store, "split_at", {"track": "v1", "time": 2.0})
     first = store.edl.get_track("v1").clips[0].id
 
-    dispatch(store, "move_clip", {"clip_id": first, "new_start": 6.0})
+    with pytest.raises(ValueError, match="end to end"):
+        dispatch(store, "move_clip", {"clip_id": first, "new_start": 6.0})
     starts = sorted(c.start for c in store.edl.get_track("v1").clips)
-    assert starts == pytest.approx([2.0, 6.0]), "the gap at 0-2s must remain"
+    assert starts == pytest.approx([0.0, 2.0]), "neighbours must not move"
 
 
 # -------------------------------------------------------------- emoji in text

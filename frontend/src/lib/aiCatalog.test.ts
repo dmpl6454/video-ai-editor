@@ -5,9 +5,11 @@
 // runnable when the truth is unknown.
 import { describe, expect, it } from 'vitest'
 import {
-  AI_CATALOG, GATE_KEYS, GROUP_ORDER, clipRequirement, filterCatalog, gateFor,
+  AI_CATALOG, BEAT_MIN_SHOT_S, GATE_KEYS, GROUP_ORDER, clipRequirement, filterCatalog, gateFor,
   groupCatalog, motionTrackSeed, videoClipUnder, type CatalogEntry,
 } from './aiCatalog'
+import { buildArgs, fieldsFor, initialValues } from './schemaForm'
+import type { ToolSchema } from '../api'
 import type { FeatureReport } from '../api'
 import type { EDL } from '../types'
 
@@ -219,5 +221,25 @@ describe('videoClipUnder / motionTrackSeed', () => {
     expect(motionTrackSeed(edl, 'main')).toEqual({})
     expect(motionTrackSeed(edl, null)).toEqual({})
     expect(motionTrackSeed(null, 'emoji')).toEqual({})
+  })
+})
+
+// Final sweep 2: Run with the form's defaults sent {subdivision:4, min_shot:0}
+// and left 2-frame flash shots at the old clip edges. The Prompt-bar recipe
+// for the same tool passes MIN_SHOT_S (agent/prompt/heuristics.py, 0.8 s).
+describe('Cut to the beat defaults', () => {
+  it('runs with the recipe\'s minimum shot, not 0', () => {
+    // tools.py's auto_cut_to_beats schema, verbatim (min_shot default 0.0)
+    const schema: ToolSchema = { name: 'auto_cut_to_beats', description: '', cancellable: false, reports_progress: false,
+      input_schema: { type: 'object', required: [], properties: {
+        subdivision: { type: 'integer', default: 4 },
+        min_shot: { type: 'number', default: 0.0, minimum: 0 },
+      } } }
+    const fields = fieldsFor(schema, entry('auto_cut_to_beats'))
+    const ctx = { playhead: 0, inMark: null, outMark: null, captionTargetPref: null, captionSpeedPref: null }
+    const { args, errors } = buildArgs(fields, initialValues(fields, ctx))
+    expect(errors).toEqual({})
+    expect(args).toEqual({ subdivision: 4, min_shot: BEAT_MIN_SHOT_S })
+    expect(BEAT_MIN_SHOT_S).toBe(0.8)
   })
 })

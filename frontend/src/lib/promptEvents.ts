@@ -74,6 +74,9 @@ export interface StepEvent {
 export interface VerifyCheck {
   check: string; human: string; pass: boolean | null
   measured?: unknown; expected?: unknown; unit?: string; detail?: string; headline?: boolean
+  /** K3: a blocking check that fails rolls the run back; an advisory one
+   *  (blocking false) is reported and the edit is kept. */
+  blocking?: boolean
 }
 export interface VerifyEvent {
   type: 'verify'; plan_id: string; checks: VerifyCheck[]; passed: number; total: number; rendered: boolean

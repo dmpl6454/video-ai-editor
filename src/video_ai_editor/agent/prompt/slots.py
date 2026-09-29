@@ -237,6 +237,16 @@ def _transition_name_patterns() -> list[tuple[re.Pattern, str]]:
 
 
 def transition_type_of(text: str) -> str | None:
+    """`_transition_type_of`, also reading a plural ("change all transitions
+    to wipes" read no type and replaced them with cross dissolves — K3)."""
+    got = _transition_type_of(text)
+    if got is None:
+        got = _transition_type_of(re.sub(r"\b(wipe|dissolve|glitch|slide|zoom|fade|whip|flash|spin|blur)(?:e?s)\b",
+                                         r"\1", text))
+    return got
+
+
+def _transition_type_of(text: str) -> str | None:
     """The canonical transition look a phrase names ("Fade to Black", "whip
     pan", "zoomin", "smooth zoom" → fadeblack / whip / zoomin / zoomin), or
     None. Used by the slot extractor and by `recipes.normalize_slots` for a
@@ -357,7 +367,10 @@ CLIP_REF_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(?:this|the selected|selected|that|current) clip\b|\bselection\b|\bwhat i selected\b", "$selected"),
     (r"\b(?:the )?first clip\b|\bopening clip\b|\bintro clip\b", "$v1_first"),
     (r"\b(?:the )?last clip\b|\bfinal clip\b|\bclosing clip\b|\boutro clip\b", "$v1_last"),
-    (r"\bat the playhead\b|\bfrom here\b|\bright here\b|\bat the cursor\b", "$playhead"),
+    (r"\bat the playhead\b|\bfrom here\b|\bright here\b|\bat the cursor\b"
+     # "the clip under the playhead" was every clip (Final sweep 2)
+     r"|\b(?:clip|shot|one|part|bit)\s+(?:under|at|beneath|below|on|by)\s+the\s+(?:playhead|cursor|scrubber)\b"
+     r"|\bthe\s+clip\s+i'?m\s+on\b|\bthe\s+clip\s+(?:where|that)\s+the\s+(?:playhead|cursor)\s+is\b", "$playhead"),
     (r"\b(?:all|every|each) clips?\b|\bwhole (?:video|timeline|thing)\b|\bentire (?:video|timeline)\b|\beverything\b", "$v1_all"),
 )
 

@@ -304,6 +304,50 @@ describe('PreviewController', () => {
     expect(refresh).toHaveBeenCalledTimes(2)           // nothing changed: no re-plan
   })
 
+  // K2 (0.8.0 QA): "≈ Loudness" sat on every fresh project until the server
+  // had measured the gain. A gain not measured yet is no chip: it is in the
+  // telemetry (the view, the log) and makes the server render that measures
+  // it urgent (renderUrgent), so the sound is right within a second or two.
+  it('keeps a not-yet-measured gain in telemetry, asks for it urgently, and logs the measured difference', async () => {
+    const loud = edl([['A', 0, 4, 0]])
+    loud.canvas = { ...loud.canvas, loudness_lufs: -16 }
+    const answers: Record<string, unknown> = { [H1]: { gain_db: null, current: false, target_lufs: -16 } }
+    const views: Array<string | null> = []
+    const { ctl } = setup({
+      '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }),
+      '/preview_loudness': (url) => ({ status: 200, body: answers[new URL(url, 'http://x').searchParams.get('h')!] }),
+    }, { onView: (v: { loudness: string | null }) => views.push(v.loudness) })
+    expect(ctl.renderUrgent()).toBe(false)            // nothing applied yet
+    ctl.applyTimeline(loud, H1)
+    await settle()
+    expect(ctl.loudnessPending()).toBe(true)
+    expect(ctl.renderUrgent()).toBe(true)             // the render that measures it: soon
+    expect(ctl.view().loudness).toBe('pending')
+    expect(ctl.loudnessLog.map((e) => e.type)).toEqual(['pending'])
+    expect(ctl.loudnessLog[0]).toMatchObject({ render_hash: H1, played_db: null })
+    answers[H1] = { gain_db: 10.8, current: true, target_lufs: -16 }
+    ctl.onPreviewLanded(H1)
+    await settle()
+    expect(ctl.loudnessPending()).toBe(false)
+    expect(ctl.renderUrgent()).toBe(false)
+    expect(ctl.view().loudness).toBe('measured')
+    expect(views).toContain('pending')
+    expect(views.at(-1)).toBe('measured')
+    const m = ctl.loudnessLog.at(-1)!
+    expect(m).toMatchObject({ type: 'measured', render_hash: H1, played_db: null, measured_db: 10.8, diff_db: 10.8 })
+    expect(m.type === 'measured' && m.waited_ms >= 0).toBe(true)
+    expect(ctl.stats.loudnessMeasured).toBe(1)
+  })
+
+  it('has no loudness telemetry without a target', async () => {
+    const { ctl } = setup({ '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }) })
+    ctl.applyTimeline(edl([['A', 0, 4, 0]]), H1)
+    await settle()
+    expect(ctl.loudnessPending()).toBe(false)
+    expect(ctl.view().loudness).toBeNull()
+    expect(ctl.loudnessLog).toEqual([])
+  })
+
   it('asks for no loudness gain on a project without a target', async () => {
     const { ctl, srv } = setup({ '/proxy?': proxyRoute, '/frame_map': () => ({ status: 409, body: {} }) })
     ctl.applyTimeline(edl([['A', 0, 4, 0]]), H1)

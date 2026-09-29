@@ -288,6 +288,7 @@ function CheckRow({ c }: { c: VerifyCheck }) {
       <span className="human" title={c.check}>
         {c.human || c.check.replace(/_/g, ' ')}
         {c.headline === false && <small>info</small>}
+        {c.pass === false && c.blocking === false && <small>advisory · the edit was kept</small>}
         <span className="prompt-sr-only"> {label}</span>
       </span>
       {values && <span className="vals">{values}</span>}

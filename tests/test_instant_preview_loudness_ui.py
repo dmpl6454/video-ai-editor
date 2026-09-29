@@ -4,8 +4,10 @@
 The finding: on a project with the default −16 LUFS target, Instant preview
 (beta) played the raw mix — about 11 dB under the server preview and the
 export — and classed every frame EXACT, with no ≈ chip. The client now plays
-the server preview's master gain (GET /preview_loudness) and marks the frames
-APPROX ("Loudness") until that gain was measured for this sound.
+the server preview's master gain (GET /preview_loudness); until that gain is
+measured for this sound its telemetry says so (K2, 0.8.0 QA: an "≈ Loudness"
+chip on every fresh project was noise; the chip is for a measured miss over
+1 dB).
 
 Measured here on the LIVE sink: a ScriptProcessor tap on everything the app
 connects to its AudioContext's destination, while the app plays; against the
@@ -123,11 +125,13 @@ def test_instant_preview_plays_at_the_server_previews_loudness(engine, base_url,
         if page.locator('[data-preview-engine="client"]').count() == 0:
             assert engine.engine_name != "chromium", "headless Chromium runs the client preview"
             pytest.skip(f"{engine.engine_name}: the client preview does not run here")
-        # The idle server render measures this sound; its gain becomes
-        # current and the ≈ "Loudness" goes (the engine classed the whole
-        # timeline EXACT before, at the raw level).
+        # The server render measures this sound; its gain becomes current
+        # (the engine classed the whole timeline EXACT before, at the raw
+        # level). K2 (0.8.0 QA): a gain not measured yet is no "≈ Loudness"
+        # chip any more — the preview's telemetry says when it is measured.
         page.wait_for_function("""() => { const v = window.__vaeTest.useStore.getState().clientView
-            return !!v && v.live && !v.wait && !v.reasons.includes('audio:loudness') }""", timeout=90000)
+            return !!v && v.live && !v.wait && v.loudness === 'measured'
+              && !v.reasons.includes('audio:loudness') }""", timeout=90000)
         chip = page.locator('[data-fidelity="approx"]')
         assert chip.count() == 0 or "Loudness" not in (chip.first.get_attribute("aria-label") or "")
 

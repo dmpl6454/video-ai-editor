@@ -6,7 +6,7 @@ import type { EdlLike } from './framePlan'
 import type { SourceInfoJson } from './frameMap'
 import { buildProgramMap, KIND_BLEND, lookupFromJson } from './programMap'
 import {
-  classify, CUSTOM_TRANSITIONS, MODE_APPROX, MODE_BAKED, MODE_EXACT, MODE_PENDING, PHASE_CAPS,
+  classify, CUSTOM_TRANSITIONS, LOUDNESS_AUDIBLE_DB, MODE_APPROX, MODE_BAKED, MODE_EXACT, MODE_PENDING, PHASE_CAPS,
   POST_TRANSITIONS, type Phase,
 } from './support'
 
@@ -196,9 +196,36 @@ describe('support.classify (§7)', () => {
     const s = classify(pm, edl, { phase: 1 })
     expect(s.ranges[0]).toEqual({ k0: 0, k1: 30, mode: MODE_APPROX, reasons: ['audio:duck'] })
     expect(classify(pm, edl, { phase: 2, duckCurveReady: true }).ranges[0].mode).toBe(MODE_EXACT)
-    const stale = classify(pm, edl, { phase: 1, loudnessCurrent: false })
-    expect(stale.mode.every((m) => m === MODE_APPROX)).toBe(true)
-    expect(stale.ranges.every((r) => r.reasons.includes('audio:loudness'))).toBe(true)
+    const off = classify(pm, edl, { phase: 1, loudnessOffDb: 1.5 })
+    expect(off.mode.every((m) => m === MODE_APPROX)).toBe(true)
+    expect(off.ranges.every((r) => r.reasons.includes('audio:loudness'))).toBe(true)
+  })
+
+  // K2 (0.8.0 QA): every fresh project with the beta on showed "≈ Loudness"
+  // until the server had measured the gain. The chip is for a difference a
+  // person would notice: a gain not measured yet says nothing, and a measured
+  // one only when the sound plays more than 1 dB off it.
+  it('the loudness gain is APPROX only when it plays more than 1 dB off the measured one', () => {
+    const { edl, pm } = mapOf(gaps)
+    const loud = (o?: number) => classify(pm, edl, { phase: 1, loudnessOffDb: o }).ranges
+      .some((r) => r.reasons.includes('audio:loudness'))
+    expect(loud(undefined)).toBe(false)           // not measured yet: no chip
+    expect(loud(0)).toBe(false)
+    expect(loud(LOUDNESS_AUDIBLE_DB)).toBe(false) // 1 dB is not a difference anyone hears
+    expect(loud(1.01)).toBe(true)
+    expect(loud(11)).toBe(true)
+  })
+
+  it('a loudness verdict keeps the other reasons of the frame (the chip names each)', () => {
+    const { edl, pm } = mapOf(gaps, (e) => {
+      const v1 = e.tracks!.find((t) => t.id === 'v1')!
+      ;(v1.clips[0] as Record<string, unknown>).audio = { voice_effect: 'deep' }
+    })
+    const voiced = (o?: number) => classify(pm, edl, { phase: 1, loudnessOffDb: o }).ranges
+      .filter((r) => r.reasons.includes('audio:voice:deep'))
+    expect(voiced(undefined).length).toBeGreaterThan(0)
+    expect(voiced(6).map((r) => [r.k0, r.k1])).toEqual(voiced(undefined).map((r) => [r.k0, r.k1]))
+    for (const r of voiced(6)) expect(r.reasons).toEqual(['audio:loudness', 'audio:voice:deep'])
   })
 
   it('the master limiter\'s ranges are APPROX (gate RX: the browser limiter is not alimiter)', () => {

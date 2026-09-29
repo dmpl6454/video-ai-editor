@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import inspect
 import importlib
+import json
+import os
 import re
 import shutil
 import threading
@@ -516,6 +518,9 @@ class ExecResult:
     child_runs: list[dict[str, Any]] = field(default_factory=list)
     restored_files: list[str] = field(default_factory=list)
     downloads: list[str] = field(default_factory=list)        # artefact keys fetched on a consented run
+    #: K3: why the run was rolled back to a question (blocking checks that
+    #: failed, contract violations) — None when it was not.
+    rollback: list[dict[str, str]] | None = None
 
     @property
     def applied(self) -> int:
@@ -721,11 +726,97 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     return outcome
 
 
+class _NetRollback(Exception):
+    """Raised inside the executor's batch so `EDLStore.batch()` restores the
+    pre-run tree (K3 safety net)."""
+
+    def __init__(self, reasons: list[dict[str, str]]) -> None:
+        super().__init__("; ".join(r["message"] for r in reasons))
+        self.reasons = reasons
+
+
+#: `VAI_CONTRACT_SHADOW=<path>`: log what the net WOULD roll back (one JSON
+#: line per run) and roll nothing back — the calibration mode the K3 corpus
+#: and the existing suites were measured in before the net was switched on.
+_SHADOW_ENV = "VAI_CONTRACT_SHADOW"
+
+
+def safety_net(store: EDLStore, plan: Plan, result: "ExecResult", facts: TimelineFacts, prompt: str,
+               hint: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """K3: what stops a wrong edit being committed, checked on the LIVE tree
+    inside the run's batch, before the one commit:
+
+      1. every BLOCKING postcondition of the plan (verify.BLOCKING_CHECKS,
+         EDL-measured) must hold — a plan that did not do what it set out to
+         do is not kept "with issues";
+      2. the PROMPT CONTRACT (contract.py): what changed must fit what the
+         prompt said — direction, the clips / lanes it named, every clause
+         it can read, and no kind of change nobody asked for.
+
+    Returns the reasons to roll back ([] = commit). Never raises: a broken
+    net must not break a correct run (the error is logged)."""
+    contract_on = hint is not None
+    hint = hint or {}
+    if hint.get("skip") or store.edl.hash() == result.edl_before.hash():
+        return []
+    reasons: list[dict[str, str]] = []
+    try:
+        from .verify import blocking_failures
+        for c in blocking_failures(store, plan, result, facts):
+            reasons.append({"kind": "check", "clause": c.check,
+                            "message": f"{c.human} did not hold (measured {c.measured}, expected {c.expected})"})
+    except Exception as e:  # noqa: BLE001
+        _net_log(f"blocking checks failed to run: {type(e).__name__}: {e}")
+    # The contract reads the USER's words, so only a run the service started
+    # from a prompt carries a hint; a hand-built plan (tests, tools, the
+    # shorts finishing pass) is judged by its blocking checks alone.
+    if contract_on and hint.get("contract", True) and prompt and prompt.strip():
+        try:
+            from .contract import Contract
+            con = Contract.read(prompt, selection=facts.selection, playhead=facts.playhead,
+                                picked=tuple(hint.get("picked") or ()))
+            found = [v.as_dict() for v in con.judge(result.edl_before, store.edl)]
+            refused = {(r.get("kind"), r.get("message")) for r in (hint.get("refused") or [])}
+            if refused and hint.get("picked"):
+                # a pick licenses its family, never the very thing the net
+                # refused on the first run (Final sweep 2)
+                plain = Contract.read(prompt, selection=facts.selection, playhead=facts.playhead)
+                have = {(v["kind"], v["message"]) for v in found}
+                found += [v.as_dict() for v in plain.judge(result.edl_before, store.edl)
+                          if (v.kind, v.message) in refused and (v.kind, v.message) not in have]
+            if any(o.status == "skipped" for o in result.steps):
+                # An optional step failed and is reported as skipped: the
+                # clause it served is honestly "not done", not a wrong edit.
+                found = [v for v in found if v["kind"] != "partial"]
+            reasons.extend(found)
+            for err in con.errors:
+                _net_log(f"contract rule failed: {err}")
+        except Exception as e:  # noqa: BLE001
+            _net_log(f"contract failed to run: {type(e).__name__}: {e}")
+    shadow = os.environ.get(_SHADOW_ENV)
+    if shadow:
+        if reasons:
+            try:
+                with open(shadow, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"prompt": prompt, "plan": [s.tool for s in plan.steps],
+                                         "reasons": reasons}) + "\n")
+            except OSError:
+                pass
+        return []
+    return reasons
+
+
+def _net_log(msg: str) -> None:
+    import logging
+    logging.getLogger(__name__).warning("K3 safety net: %s", msg)
+
+
 def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
              cancel_event: threading.Event | None, prompt: str,
              run_id: str | None = None, validator: Callable[[Plan, TimelineFacts], Plan] | None = None,
              wait_transcript: bool = True, consented_downloads: frozenset[str] = frozenset(),
-             fetch: Callable[..., None] = _fetch_artefact) -> ExecResult:
+             fetch: Callable[..., None] = _fetch_artefact,
+             contract_hint: dict[str, Any] | None = None) -> ExecResult:
     """Execute `plan` on `store` (caller holds the session lock). Returns an
     `ExecResult`; never raises for a step failure — `result.error` carries
     the message and the timeline is guaranteed unchanged in that case.
@@ -823,6 +914,20 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
                         continue
                     failed_step = (i, step, e)
                     raise
+            net = safety_net(store, validated, result, facts, prompt, contract_hint)
+            if net:
+                raise _NetRollback(net)
+    except _NetRollback as nr:
+        # K3: the run did something the prompt did not ask for (or did not
+        # do what it asked): the batch already put the tree back — one
+        # atomic undo, nothing in history — and the reply becomes a question.
+        result.restored_files = snapshot.restore()
+        snapshot.discard()
+        result.rollback = nr.reasons
+        result.new_sessions = _sessions_created(result)
+        emit({"type": "step", "index": total, "total": total, "tool": "safety_net", "status": "failed",
+              "error": "rolled back: " + "; ".join(r["message"] for r in nr.reasons[:2])})
+        return result
     except JobCancelled:
         result.cancelled = True
         result.restored_files = snapshot.restore()
@@ -899,6 +1004,7 @@ class RunHandle:
     verify: dict[str, Any] | None = None
     final_text: str | None = None
     consented_downloads: frozenset[str] = frozenset()
+    contract_hint: dict[str, Any] | None = None
 
     @property
     def bus(self) -> RunBus:
@@ -973,7 +1079,8 @@ def _finish_children(store_resolver: Callable[[str], EDLStore], parent: ExecResu
                                     confidence=1.0, reply="finish short")
                 child_plan = from_intents(draft, child_facts).with_(brain=parent.plan.brain)
                 child = run_plan(child_store, child_plan, child_facts, emit=lambda e: None,
-                                 cancel_event=cancel_event, prompt=f"{prompt} (finish short)")
+                                 cancel_event=cancel_event, prompt=f"{prompt} (finish short)",
+                                 contract_hint={"contract": False})
             record.update(status="failed" if child.error else "ok", error=child.error,
                           applied=child.applied, op=child.op)
         except Exception as e:  # noqa: BLE001 — a child must never take the parent down
@@ -981,6 +1088,81 @@ def _finish_children(store_resolver: Callable[[str], EDLStore], parent: ExecResu
         parent.child_runs.append(record)
         emit({"type": "tool_result", "name": "finish_short", "result": record, "id": call_id,
               **({"is_error": True} if record["status"] != "ok" else {})})
+
+
+def step_signature(plan: Plan | None) -> list[list[Any]]:
+    """A plan's steps as comparable data (tool + args, in order)."""
+    return [[s.tool, json.loads(json.dumps(s.args, sort_keys=True, default=str))] for s in (plan.steps if plan else [])]
+
+
+def _replays(prompt: str, intent: str, facts: TimelineFacts, sig: list[list[Any]]) -> bool:
+    """Whether picking `intent` would re-plan the very steps `sig` names."""
+    if not sig:
+        return False
+    try:
+        from .planner import plan_as
+        return step_signature(plan_as(prompt, intent, facts, allow_downloads=False)) == sig
+    except Exception:  # noqa: BLE001 — an option that cannot plan is not a replay
+        return False
+
+
+def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResult, facts: TimelineFacts,
+                          prompt: str, log: RunLog) -> str:
+    """K3: the run was rolled back — the reply is a clarify card that says
+    what could not be done and offers the closest safe readings (a pick
+    re-plans the SAME prompt as that edit, like "I did not catch that").
+    Nothing is in history; the pending question survives a reload."""
+    from . import pending
+    from .contract import rollback_question
+    from .planner import safe_options
+    from .recipes import ask
+    from .service import CLARIFY_TTL_S, question_text, via
+    from .brains.base import BRAIN_LABELS
+    reasons = result.rollback or []
+    question = rollback_question([r["message"] for r in reasons])
+    # never re-offer the kind of edit the net just refused as unasked
+    said = " ".join(r["message"] for r in reasons if r.get("kind") == "unasked")
+    avoid = {intent for word, intent in (("voice-over", "voiceover"), ("noise reduction", "clean_audio"),
+                                         ("added music", "music")) if word in said}
+    # Final sweep 2: never offer a pick whose re-plan IS the plan just undone
+    # ("make the title twice as big" → 'title' → the same new title, and the
+    # pick licensed it)
+    sig = step_signature(handle.plan)
+    for _ in range(4):
+        options = safe_options(prompt, handle.plan, avoid)
+        again = {v for v, _l in options if _replays(prompt, v, facts, sig)}
+        if not again:
+            break
+        avoid |= again
+    if not options:
+        # final sweep 2 r2: nothing related left to offer — ask for the words
+        # (the answer re-plans the request with it), never unrelated picks
+        from .service import MODEL_QUESTION_INTENT, MODEL_QUESTION_KEY
+        question = question.replace(" Which did you mean?", " Which clip, and by how much?")
+        q = ask(MODEL_QUESTION_KEY, question, kind="text")
+        paused = Plan.new(intent=MODEL_QUESTION_INTENT, brain=handle.plan.brain, needs_input=[q], confidence=0.3,
+                          title="Which edit?", reply=None)
+        record = pending.save_pending(Path(store.dir), plan=paused, prompt=prompt, facts=facts, ui_state=None,
+                                      rollback={"steps": sig, "reasons": list(reasons)})
+        text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + question_text(q)
+        log.set_reply(text)
+        log.emit({"type": "text_delta", "text": text})
+        log.emit({"type": "clarify", "token": record["token"], "plan_id": paused.id,
+                  "questions": [q.model_dump()], "expires_in_s": CLARIFY_TTL_S})
+        log.set_status("clarify")
+        return text
+    q = ask("intent", question, options=options)
+    paused = Plan.new(intent="clarify", brain=handle.plan.brain, needs_input=[q], confidence=0.3,
+                      title="Which edit?", reply=None)
+    record = pending.save_pending(Path(store.dir), plan=paused, prompt=prompt, facts=facts, ui_state=None,
+                                  rollback={"steps": sig, "reasons": list(reasons)})
+    text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + question_text(q)
+    log.set_reply(text)
+    log.emit({"type": "text_delta", "text": text})
+    log.emit({"type": "clarify", "token": record["token"], "plan_id": paused.id,
+              "questions": [q.model_dump()], "expires_in_s": CLARIFY_TTL_S})
+    log.set_status("clarify")
+    return text
 
 
 def _wants_children(plan: Plan) -> bool:
@@ -1003,8 +1185,12 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
                 store = store_resolver(sid)
                 result = run_plan(store, handle.plan, facts, emit=log.emit,
                                   cancel_event=handle.cancel_event, prompt=prompt,
-                                  run_id=handle.run_id, consented_downloads=handle.consented_downloads)
+                                  run_id=handle.run_id, consented_downloads=handle.consented_downloads,
+                                  contract_hint=handle.contract_hint)
                 handle.result = result
+                if result.rollback:
+                    final_text = _pause_after_rollback(store, handle, result, facts, prompt, log)
+                    return
                 if result.error:
                     log.set_status("cancelled" if result.cancelled else "failed", error=result.error)
                     # The `error` frame already carried the bare message; the
@@ -1051,7 +1237,8 @@ def _run_thread(handle: RunHandle, store_resolver: Callable[[str], EDLStore],
 def start_run(store_resolver: Callable[[str], EDLStore], sid: str, plan: Plan,
               facts: TimelineFacts, *, prompt: str, history_writer: Any = None,
               bus: RunBus | None = None, run_id: str | None = None,
-              consented_downloads: frozenset[str] = frozenset()) -> RunHandle:
+              consented_downloads: frozenset[str] = frozenset(),
+              contract_hint: dict[str, Any] | None = None) -> RunHandle:
     """Spawn the daemon run thread; returns immediately with the handle the
     service subscribes to. `bus` lets the service pre-publish the planning
     events (`brain`, `plan`) on the same bus so a reconnect replays them.
@@ -1061,7 +1248,7 @@ def start_run(store_resolver: Callable[[str], EDLStore], sid: str, plan: Plan,
     record = RunRecord(run_id=run_id, plan_id=plan.id, prompt=prompt, brain=plan.brain)
     log = RunLog(session_dir, record, bus=bus)
     handle = RunHandle(run_id=run_id, sid=sid, plan=plan, log=log,
-                       consented_downloads=frozenset(consented_downloads))
+                       consented_downloads=frozenset(consented_downloads), contract_hint=contract_hint)
     with _RUNS_GUARD:
         RUNS[sid] = handle
     t = threading.Thread(target=_run_thread, args=(handle, store_resolver, facts, prompt, history_writer),
@@ -1071,7 +1258,7 @@ def start_run(store_resolver: Callable[[str], EDLStore], sid: str, plan: Plan,
     return handle
 
 
-__all__ = ["EXTRA_PLAN_ARGS", "StepRefused", "PlanValidationUnavailable", "guard_step",
+__all__ = ["EXTRA_PLAN_ARGS", "StepRefused", "safety_net", "PlanValidationUnavailable", "guard_step",
            "fetch_consented_downloads", "live_v1_seams", "MAX_SEAM_FANOUT",
            "resolve_clip_ref", "resolve_step_args", "SideEffectSnapshot", "StepOutcome",
            "ExecResult", "wait_for_upload_transcript", "run_plan", "RunHandle", "RUNS",

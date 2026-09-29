@@ -101,13 +101,18 @@ def pending_path(session_dir: Path) -> Path:
 
 
 def save_pending(session_dir: Path, *, plan: Plan, prompt: str, facts: TimelineFacts,
-                 ui_state: dict | None = None) -> dict[str, Any]:
+                 ui_state: dict | None = None, rollback: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`rollback` (the K3 net's card): the rolled-back plan's step signature and
+    the reasons — a pick must never replay that plan, nor license what the
+    net refused (Final sweep 2)."""
     now = time.time()
     record = {
         "token": f"q_{uuid4().hex[:10]}", "plan": plan.model_dump(), "prompt": prompt,
         "facts_hash": facts_hash(facts), "created": now, "expires": now + CLARIFY_TTL_S,
         "brain": plan.brain, "ui_state": ui_state or {},
     }
+    if rollback:
+        record["rollback"] = rollback
     pending_path(session_dir).write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
     return record
 

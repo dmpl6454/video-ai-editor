@@ -679,7 +679,8 @@ TEXT_TOOLS = [
            "allow_stack": {"type": "boolean", "default": False,
                            "description": "By default a new clip REPLACES existing "
                                           "text clips of the same role whose time "
-                                          "window overlaps. Pass true to keep both."},
+                                          "window overlaps. Pass true to keep both "
+                                          "(the new one goes on a free text lane)."},
        },
        ["text", "start", "end"]),
     _t("set_text",
@@ -691,6 +692,25 @@ TEXT_TOOLS = [
            "text": {"type": "string", "description": "The new wording"},
        },
        ["clip_id", "text"]),
+    _t("set_text_style",
+       "Restyle an existing text overlay (title, lower third, label): colour, size, font or "
+       "bold, outline, box, ALL CAPS and top/middle/bottom placement. What it SAYS, its timing "
+       "and its animation stay as they are.",
+       "text",
+       {
+           "clip_id": {"type": "string", "description": "The text clip's id"},
+           "color": {"type": "string", "description": "#RRGGBB text fill"},
+           "size": {"type": "number", "description": "Font size in canvas px"},
+           "size_scale": {"type": "number", "description": "Multiply the current size (1.25 = bigger)"},
+           "font": {"type": "string", "description": "Bundled font file stem, e.g. Anton-Regular, Inter-Black"},
+           "bold": {"type": "boolean", "description": "Use the heaviest bundled weight"},
+           "stroke": {"type": "string", "description": "#RRGGBB outline colour"},
+           "stroke_w": {"type": "number", "description": "Outline width in canvas px"},
+           "background": {"type": "string", "description": "#RRGGBB[AA] box behind the text; \"\" = none"},
+           "upper": {"type": "boolean", "description": "ALL CAPS"},
+           "position": {"type": "string", "enum": ["top", "middle", "center", "bottom"]},
+       },
+       ["clip_id"]),
     _t("apply_text_template",
        "Render a text overlay from a named preset bundle. Options: hashtag_chunky, "
        "callout_arrow, big_question, end_card_handle, countdown_3_2_1, watermark_handle.",
@@ -703,6 +723,10 @@ TEXT_TOOLS = [
                       "description": "Slot values: {text}, {handle}, {hashtag}"},
            "start": {"type": "number", "default": 0.0},
            "end": {"type": "number"},
+           "allow_stack": {"type": "boolean", "default": False,
+                           "description": "Keep overlapping texts (the new one goes "
+                                          "on a free text lane) instead of replacing "
+                                          "a same-role one."},
        },
        ["name"]),
     _t("list_text_styles",
@@ -1391,6 +1415,9 @@ _ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     # Same text bounds on the caption look (QA-107: size 1e6 / stroke_w 1e5
     # returned 200 and then every export 500'd). The models clamp too.
     ("set_caption_style", "size"): (1.0, 2000.0),
+    ("set_text_style", "size"): (1.0, 2000.0),
+    ("set_text_style", "size_scale"): (0.1, 10.0),
+    ("set_text_style", "stroke_w"): (0.0, 200.0),
     ("set_caption_style", "stroke_w"): (0.0, 200.0),
     ("set_pip_framing", "x"): (-10.0, 10.0),
     ("set_pip_framing", "y"): (-10.0, 10.0),

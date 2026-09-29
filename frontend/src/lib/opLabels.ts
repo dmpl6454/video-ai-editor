@@ -48,6 +48,8 @@ export const TOOL_TITLES: Record<string, string> = {
   prompt: 'Prompt', verify_render: 'Check the result', download: 'Download', finish_short: 'Finish short',
   repair_media_paths: 'Relink media', repair_chunks: 'Repair preview',
   set_animation: 'Animation',
+  // K3: restyle a title; the executor's net that rolls a wrong run back
+  set_text_style: 'Text style', safety_net: 'Safety check',
 }
 
 /** A title for a tool id: the table, else the id made readable. */
@@ -73,6 +75,19 @@ function transitionName(type: string): string {
   return (cat && lookupTransition(cat, type)?.display) || displayNameFor(type)
 }
 
+/** The look a summary names: the user's own `type` when it IS a look (in the
+ *  catalog, or with its own panel name — Glitch, Whip Pan Left), else the
+ *  alias's resolved look (wipe → Wipe Left). Never the render base "custom"
+ *  (final sweep 2: History called Glitch "Custom" and Whip "Slide Left"). */
+function pickedTransitionName(type: string, resolved?: string): string {
+  const cat = cachedTransitionCatalog()
+  const own = cat && lookupTransition(cat, type)
+  if (own) return own.display
+  const hasOwnName = displayNameFor(type) !== type.charAt(0).toUpperCase() + type.slice(1)
+  if (resolved && resolved !== 'custom' && !hasOwnName) return transitionName(resolved)
+  return transitionName(type)
+}
+
 // add_transition's summary: "Add radial transition …", or with an alias the
 // backend resolved "Add wipe → wipeleft transition …" (the look that renders).
 const TRANSITION_RE = /\b(Add|Replace)\s+([a-z0-9_]+)(?:\s+→\s+([a-z0-9_]+))?\s+transition\b/g
@@ -87,7 +102,7 @@ const captionStyleName = (v: string) => {
 export function cleanSummary(summary: string): string {
   let s = summary ?? ''
   s = s.replace(TRANSITION_RE, (_m, verb: string, type: string, resolved?: string) =>
-    `${verb} ${transitionName(resolved ?? type)} transition`)
+    `${verb} ${pickedTransitionName(type, resolved)} transition`)
   s = s.replace(AUTO_CAPTION_RE, (_m, model: string, how: string, n: string, style: string) =>
     `Auto-captioned (${aiOptionLabel('model', model.trim())}, ${how.trim()}): ${n} cues, ${captionStyleName(style)} style`)
   s = s.replace(/\blut\b/g, 'LUT')

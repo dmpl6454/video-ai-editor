@@ -17,6 +17,17 @@ export type NudgePlan =
   | { kind: 'refuse'; message: string }
   | { kind: 'none' }
 
+/** Seconds of a lane from 0 to its end that no span covers. */
+function laneHoles(spans: [number, number][]): number {
+  let holes = 0
+  let covered = 0
+  for (const [s, e] of [...spans].sort((x, y) => x[0] - y[0])) {
+    if (s > covered) holes += s - covered
+    covered = Math.max(covered, e)
+  }
+  return holes
+}
+
 function isLocked(t: Track): boolean {
   return !!(t as unknown as { locked?: boolean }).locked
 }
@@ -57,6 +68,21 @@ export function planNudge(edl: EDL | null | undefined, clipId: string | null | u
         message: main
           ? 'No room to nudge — main-track clips sit end to end. Drag to reorder, or trim a neighbour first.'
           : `No room to nudge — it would overlap the next clip on "${track.label ?? track.id}".`,
+      }
+    }
+    if (track.id === 'v1') {
+      // Final sweep 2 r2: the main lane keeps no gaps, so a nudge that would
+      // open one (the last clip moved right) is refused, as the backend's
+      // move_clip refuses it. Closing a gap an older project holds is fine.
+      const others = track.clips.filter((o) => o.id !== clip!.id && isMediaClip(o))
+        .map((o) => [o.start as number, (o.start as number) + clipDuration(o)] as [number, number])
+      const dur = clipDuration(clip)
+      if (laneHoles([...others, [newStart, newStart + dur]])
+          > laneHoles([...others, [start, start + dur]]) + 1e-4) {
+        return {
+          kind: 'refuse',
+          message: 'Main-track clips sit end to end — drag the clip to reorder it, or trim it to change its length.',
+        }
       }
     }
   }

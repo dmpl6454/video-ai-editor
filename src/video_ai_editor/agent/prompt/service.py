@@ -288,7 +288,9 @@ def question_text(q: Any) -> str:
     if q.kind == "confirm":
         return f"{text} Reply **yes** or **no**."
     if q.options:
-        labels = [f"**{o.value}**" for o in q.options]
+        # a file name ("teal_orange.cube") or an internal id ("color_look")
+        # is shown by its label — the reply matches a label as well
+        labels = [f"**{o.label if o.label and re.search(r'[._]', str(o.value)) else o.value}**" for o in q.options]
         if len(labels) > 1:
             return f"{text} Reply {', '.join(labels[:-1])} or {labels[-1]}."
         return f"{text} Reply {labels[0]}."
@@ -583,7 +585,8 @@ async def _iter_bus(bus: Any, start: int = 0) -> AsyncIterator[dict]:
 
 async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, history: list[dict],
                           pre_events: list[dict],
-                          consented_downloads: frozenset[str] = frozenset()) -> AsyncIterator[dict]:
+                          consented_downloads: frozenset[str] = frozenset(),
+                          contract_hint: dict[str, Any] | None = None) -> AsyncIterator[dict]:
     from . import executor
     from .brains.base import BRAIN_LABELS
     from .runlog import RunBus
@@ -593,7 +596,8 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
     for evt in pre_events:
         bus.publish(evt)
     handle = executor.start_run(_resolver_for(store), sid, plan, facts, prompt=prompt,
-                                history_writer=HISTORY, bus=bus, consented_downloads=consented_downloads)
+                                history_writer=HISTORY, bus=bus, consented_downloads=consented_downloads,
+                                contract_hint=contract_hint)
     label = BRAIN_LABELS.get(plan.brain, plan.brain)
     history.append({"role": "assistant", "content": [
         {"type": "text", "text": provisional_text(label, plan.title or plan.intent, handle.run_id)}]})
@@ -768,7 +772,7 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
         yield {"type": "done"}
         return
     async for evt in _run_and_stream(store, plan, facts, prompt=user_message, history=history,
-                                     pre_events=pre_events):
+                                     pre_events=pre_events, contract_hint={}):
         yield evt
 
 
@@ -824,6 +828,7 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         if own_history:
             HISTORY.save(sid, history)
         return
+    picked: str | None = None
     if (plan.intent in ("clarify", "ask") and not plan.steps and answers.get("intent")
             and any(q.key == "intent" for q in plan.needs_input)):
         # Final QA r2: a pick from "I did not catch that. Which of these did
@@ -837,7 +842,29 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
             yield {"type": "error", "message": f"Planning failed: {type(e).__name__}: {e}"}
             yield {"type": "done"}
             return
+        picked = str(answers["intent"])
         answers = {k: v for k, v in answers.items() if k != "intent"}
+        rolled = record.get("rollback") or {}
+        from .executor import step_signature
+        if rolled.get("steps") and step_signature(plan) == rolled["steps"]:
+            # Final sweep 2: the pick re-planned the very edit the net just
+            # undid ("make the title twice as big" → 'title' → the same new
+            # title, committed) — say so instead of running it again
+            pending.clear_pending(session_dir)
+            label = _pick_label(picked)
+            text = (via(BRAIN_LABELS.get(plan.brain, plan.brain)) +
+                    f"Reading that as {label} makes the same change I just undid, so I left the timeline as it "
+                    f"is. Say the change you want in one line, like 'make the title bigger' or 'add a title "
+                    f"saying Hello'.")
+            history.append({"role": "user", "content": user_message or picked})
+            history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+            yield {"type": "text_delta", "text": text}
+            yield {"type": "done"}
+            if own_history:
+                HISTORY.save(sid, history)
+            return
+    picked_intents = [picked] if picked else []
+    refused = list((record.get("rollback") or {}).get("reasons") or []) if picked else []
     # Consent (§1.4): a **download** answer names the tools whose artefacts
     # the executor may fetch on THIS run — the only place that set is built.
     consented: frozenset[str] = frozenset()
@@ -892,10 +919,20 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
             HISTORY.save(sid, history)
         return
     async for evt in _run_and_stream(store, plan, facts, prompt=prompt, history=history, pre_events=pre_events,
-                                     consented_downloads=consented):
+                                     consented_downloads=consented,
+                                     contract_hint={"picked": picked_intents,
+                                                    **({"refused": refused} if refused else {})}):
         yield evt
     if own_history:
         HISTORY.save(sid, history)
+
+
+def _pick_label(intent: str) -> str:
+    try:
+        from .planner import _TITLES
+        return f"'{_TITLES.get(intent, intent)}'"
+    except ImportError:
+        return f"'{intent}'"
 
 
 __all__ = ["LEGACY_EVENT_TYPES", "PROMPT_EVENT_TYPES", "EVENT_TYPES", "BRAIN_STATUSES",

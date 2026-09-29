@@ -383,7 +383,7 @@ def _check_whitelists(tool: str, args: dict[str, Any], facts: TimelineFacts, pla
             v = args.get(key)
             if v is not None and not (isinstance(v, str) and re.fullmatch(_LANG_CODE_RE, v)):
                 reasons.append(f"{tool}.{key}: {v!r} is not a language code")
-    if tool in ("add_text", "apply_brand_kit") and "font" in args:
+    if tool in ("add_text", "apply_brand_kit", "set_text_style", "set_caption_style") and args.get("font"):
         fonts = font_names()
         if fonts and args["font"] not in fonts:
             reasons.append(f"{tool}.font: {args['font']!r} is not a bundled font")

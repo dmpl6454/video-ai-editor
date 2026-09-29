@@ -378,7 +378,7 @@ TOOL_STAGE: dict[str, int] = {
     "set_caption_style": 7,
     # 8 — text (hook, title, brand, end card, voiceover)
     "apply_hook_stack": 8, "add_hook_overlay": 8, "generate_hook": 8,
-    "add_text": 8, "add_super_text": 8, "add_lower_third": 8, "set_text": 8,
+    "add_text": 8, "add_super_text": 8, "add_lower_third": 8, "set_text": 8, "set_text_style": 8,
     "apply_text_template": 8, "apply_brand_kit": 8, "tts_voiceover": 8,
     # 9 — music (add, duck, beats)
     "add_music": 9, "set_duck": 9, "auto_cut_to_beats": 9, "fit_music_to_video": 9,
@@ -497,6 +497,11 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     # The Transform flip the renderer reads; None = not checked.
     _spec("clip_flipped", "the clip is mirrored as asked", clip_id=None, flip_h=None, flip_v=None),
     _spec("export_preset_applied", "the export preset is set", name=None),
+    # K3: an existing text's look (set_text_style) — colour / size / font /
+    # bold / place, each checked only when asked. Its WORDS are the
+    # contract's business (it must not change them).
+    _spec("text_style_is", "the text has the requested look", clip_id=None, color=None, size=None, font=None,
+          bold=None, position=None),
     # Wave E (F2): the CapCut canvas background / blend mode the renderer
     # reads. `type` None = black bars (no background); color/blur checked
     # only when given.
@@ -520,6 +525,24 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     # the fallback: the step ran without raising
     _spec("tool_ok", "the step completed", tool=None),
 )}
+
+#: K3: the checks that BLOCK a commit. Each is measured on the EDL alone (no
+#: render, no transcript estimate), so a failure means the timeline does not
+#: hold what the plan set out to do — the executor rolls the run back to a
+#: question instead of reporting "done with issues" with the edit kept.
+#: Every other check is ADVISORY (captions cover 71% of speech, a long pause
+#: remains, the loudness of a render): the honest report stays, the edit stays.
+#: `duration_between` is advisory on purpose: it measures against the
+#: duration at the START of the run, so in a plan with two cuts (or a delete
+#: then a speed change) the second one's expectation is stale — the contract
+#: (contract._rule_structure) measures cuts by the source they removed.
+BLOCKING_CHECKS: frozenset[str] = frozenset({
+    "speed_equals", "freeze_held", "clip_reversed", "clip_zoomed", "clip_flipped", "clips_absent",
+    "effect_absent", "effect_present", "clip_duration", "transitions_count_geq", "transitions_absent",
+    "canvas_bg_set", "blend_is", "voice_effect_is", "animation_is", "volume_db", "track_muted",
+    "clips_muted", "video_fade_set", "audio_fade_set", "music_fade_set", "canvas_aspect", "caption_look",
+    "captions_style", "export_preset_applied", "loudness_target_set", "text_present", "text_style_is",
+})
 
 
 # --------------------------------------------------------------------------
@@ -618,6 +641,9 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
     "add_text": [_pc("text_present", "the text is on screen", contains=f"{ARG_REF}text"),
                  _pc("overlays_inside_safe_zone", "text stays clear of the platform UI")],
     "set_text": [_pc("text_present", "the text says the new words", contains=f"{ARG_REF}text")],
+    "set_text_style": [_pc("text_style_is", "the text has the requested look", clip_id=f"{ARG_REF}clip_id",
+                           color=f"{ARG_REF}color", size=f"{ARG_REF}size", font=f"{ARG_REF}font",
+                           bold=f"{ARG_REF}bold", position=f"{ARG_REF}position")],
     "add_super_text": [_pc("text_present", "the text is on screen"),
                        _pc("overlays_inside_safe_zone", "text stays clear of the platform UI")],
     "apply_text_template": [_pc("text_present", "the text is on screen"),
@@ -677,6 +703,6 @@ __all__ = [
     "Step", "NeedsInputOption", "NeedsInput", "Postcondition", "DownloadNeeded", "Plan",
     "IntentItem", "DraftQuestion", "IntentDraft",
     "STAGE_NAMES", "PLAN_DENY", "PENDING_DISPATCH_TOOLS", "TOOL_STAGE",
-    "CheckSpec", "CHECK_SPECS", "ARG_REF", "DEFAULT_POSTCONDITIONS",
+    "CheckSpec", "CHECK_SPECS", "BLOCKING_CHECKS", "ARG_REF", "DEFAULT_POSTCONDITIONS",
     "default_postconditions", "bind_postconditions",
 ]

@@ -30,8 +30,24 @@ describe('planNudge', () => {
     expect(planNudge(edl(RBF), 'blue', -1 / 30).kind).toBe('refuse')
   })
   it('moves exactly one PROJECT frame when there is room', () => {
-    const p = planNudge(edl([clip('a', 0, 2), clip('b', 5, 2)], 25), 'b', 1 / 30)
-    expect(p).toEqual({ kind: 'move', clipId: 'b', newStart: 5 + 1 / 25 })
+    const p = planNudge(edl([clip('a', 0, 2), clip('b', 5, 2)], 25), 'b', -1 / 30)
+    expect(p).toEqual({ kind: 'move', clipId: 'b', newStart: 5 - 1 / 25 })
+  })
+  it('refuses a right nudge of the last main-track clip: it would open a gap', () => {
+    const packed = [clip('a', 0, 2), clip('b', 2, 2)]
+    const p = planNudge(edl(packed), 'b', 1 / 30)
+    expect(p.kind).toBe('refuse')
+    expect(p.kind === 'refuse' && p.message).toMatch(/end to end/)
+    // …and a right nudge that would widen an older project's gap too.
+    expect(planNudge(edl([clip('a', 0, 2), clip('b', 5, 2)], 25), 'b', 1 / 30).kind).toBe('refuse')
+  })
+  it('still moves a clip right on a lane other than the main track', () => {
+    const e = {
+      ...edl([clip('a', 0, 2)]),
+      tracks: [{ id: 'v1', type: 'video', z: 0, clips: [clip('a', 0, 2)] },
+        { id: 'v2', type: 'video', z: 1, clips: [clip('p', 5, 2)] }],
+    } as unknown as EDL
+    expect(planNudge(e, 'p', 1 / 30)).toEqual({ kind: 'move', clipId: 'p', newStart: 5 + 1 / 30 })
   })
   it('refuses on a locked lane', () => {
     const p = planNudge(edl([clip('a', 0, 2), clip('b', 5, 2)], 30, true), 'b', 1 / 30)

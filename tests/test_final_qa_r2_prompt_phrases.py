@@ -65,6 +65,15 @@ def _cap_state(e):
     return (cap.config.style, cap.config.position, [(c.text, c.start) for c in cap.clips])
 
 
+def _restyled(**want):
+    """The user's own 'Summer Trip' title, same words and time, with the look asked."""
+    def chk(e, ids):
+        ts = texts(e)
+        _eq([(t.text, round(t.start, 2), round(t.end, 2)) for t in ts], [("Summer Trip", 0.0, 3.0)])
+        _eq({k: getattr(ts[0].style, k) for k in want}, want)
+    return chk
+
+
 def _summer_kept(e, ids) -> None:
     _eq([t.text for t in texts(e)], ["Summer Trip"])
 
@@ -92,10 +101,12 @@ CASES: list[Case] = [
     Case("slow down clip 2 by 20%", lambda e, ids: _eq(_speed_b(e), 0.8)),
     Case("clip 2 at 150% speed", lambda e, ids: _eq(_speed_b(e), 1.5)),
     # ---- restyling a title never replaces it ---------------------------------
-    Case("make the title red", NOOP, pre=_pre_summer, question="Inspector"),
-    Case("make the Summer Trip text bigger", NOOP, pre=_pre_summer, question="Inspector"),
-    Case("title font size 80", NOOP, pre=_pre_summer, question="Inspector"),
-    Case("make the text white with a black outline", NOOP, pre=_pre_summer, question="Inspector"),
+    # (K3: the Prompt bar restyles it now — set_text_style — instead of
+    # pointing at the Inspector; the words and timing stay the user's own)
+    Case("make the title red", _restyled(color="#FF3B30"), pre=_pre_summer),
+    Case("make the Summer Trip text bigger", _restyled(size=120.0), pre=_pre_summer),
+    Case("title font size 80", _restyled(size=80.0), pre=_pre_summer),
+    Case("make the text white with a black outline", _restyled(color="#FFFFFF", stroke_w=6.0), pre=_pre_summer),
     # ---- a speed curve by name is a speed curve --------------------------------
     Case("flash in speed curve on the second clip",
          lambda e, ids: (_eq(transitions(e), []), _eq(v1(e)[1].speed.get("name") if isinstance(v1(e)[1].speed, dict)

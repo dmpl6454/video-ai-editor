@@ -70,6 +70,10 @@ const TRACK_CHOICES = ['v1', 'v2']
 // draggable starting box beats four blank inputs the user can't picture.
 const BBOX_SEED = [0.4, 0.4, 0.2, 0.2]
 
+/** agent/prompt/heuristics.py MIN_SHOT_S — the shortest shot the beat_sync
+ *  recipe leaves (`min_shot_geq`); the AI panel's Cut to the beat default. */
+export const BEAT_MIN_SHOT_S = 0.8
+
 export const AI_CATALOG: readonly CatalogEntry[] = [
   // ---- Auto edit --------------------------------------------------------
   { tool: 'remove_silences', keywords: 'ripple', group: 'Auto edit', label: 'Remove silences',
@@ -85,7 +89,10 @@ export const AI_CATALOG: readonly CatalogEntry[] = [
               pad: { label: 'Silence to keep at each cut (s)' } } },
   { tool: 'auto_cut_to_beats', group: 'Auto edit', label: 'Cut to the beat',
     description: 'Cut the main video on every Nth beat of the music. Add music to the timeline first.',
-    gate: 'beats', runAsJob: true },
+    gate: 'beats', runAsJob: true,
+    // The Prompt-bar recipe's minimum shot: the tool's own default (0) left
+    // 2-frame flash shots at the old clip edges (final sweep 2).
+    fields: { min_shot: { default: BEAT_MIN_SHOT_S, label: 'Minimum shot (s)' } } },
   { tool: 'auto_reframe', group: 'Auto edit', label: 'Auto-reframe',
     description: 'Change the aspect ratio and reframe every clip to keep the subject in shot.',
     // The handler only imports ai.reframe when subject_track is on; the

@@ -10,7 +10,8 @@ import { describe, expect, it } from 'vitest'
 import { ICONS } from '../icons'
 import { VOICE_FX_PARITY } from '../preview/timeline/support'
 import {
-  GRAIN, PERIOD_MAX_OFFSET, PERIOD_WINDOW, SR, VOICE_PRESETS, VOICE_TABLE, processStereo, reverbIr, stagesAt, vibratoTable, voicePlan, voicePreset,
+  GRAIN, PERIOD_MAX_OFFSET, PERIOD_WINDOW, SR, VOICE_PRESETS, VOICE_TABLE, processStereo, reverbIr, stagesAt, vibratoTable, voicePeakBound,
+  voicePlan, voicePreset,
 } from './voiceFx'
 
 interface Win { start: number; L: number[]; R: number[] }
@@ -189,5 +190,53 @@ describe('blocks are the clip, sample for sample', () => {
   it('the pitch margins cover a grain', () => {
     expect(voicePlan('chipmunk', 1)!.ahead).toBe(
       GRAIN / 2 + Math.max(PERIOD_WINDOW / 2, Math.ceil((GRAIN / 2) * (Math.pow(2, 9 / 12) - 1)) + PERIOD_MAX_OFFSET) + 2)
+  })
+})
+
+// K2 (0.8.0 QA): the master limiter's APPROX ranges bounded a voice-effect
+// clip by nothing (Infinity), so every voice effect — an EXACT echo too — on
+// a project with a loudness target said "≈ Limiter on loud sound". The bound
+// must only ever be too high: every preset, at several intensities, driven by
+// hostile inputs, never tops it.
+describe('the peak bound of a voice effect (limiter ranges, gate RX)', () => {
+  const N = SR                                         // 1 s: the longest echo tap is 750 ms
+  let seed = 12345
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32) * 2 - 1
+  const inputs: Array<[string, Float32Array]> = [
+    ['noise', Float32Array.from({ length: N }, () => rnd())],
+    ['square 60 Hz', Float32Array.from({ length: N }, (_v, i) => (Math.sin((2 * Math.PI * 60 * i) / SR) >= 0 ? 1 : -1))],
+    ['square 1 kHz', Float32Array.from({ length: N }, (_v, i) => (Math.sin((2 * Math.PI * 1000 * i) / SR) >= 0 ? 1 : -1))],
+    ['sine 2 kHz', Float32Array.from({ length: N }, (_v, i) => Math.sin((2 * Math.PI * 2000 * i) / SR))],
+    ['clicks', Float32Array.from({ length: N }, (_v, i) => (i % 12000 === 0 ? 1 : i % 12000 === 1 ? -1 : 0))],
+    ['golden', Float32Array.from(IN_L.subarray(0, N), (v) => v / 0.93)],
+  ]
+  const peakOf = (x: ArrayLike<number>) => { let m = 0; for (let i = 0; i < x.length; i++) m = Math.max(m, Math.abs(x[i])); return m }
+
+  for (const pre of VOICE_PRESETS) {
+    it(`${pre.id}: never tops its bound`, () => {
+      for (const intensity of [1, 0.5, 0.2]) {
+        const plan = voicePlan(pre.id, intensity)!
+        for (const [name, x] of inputs) {
+          for (const scale of [1, 0.25]) {
+            const inp = x.map((v) => v * scale)
+            const [yL, yR] = processStereo(plan, inp, inp.map((v) => -v), 0)
+            const out = Math.max(peakOf(yL), peakOf(yR))
+            const bound = voicePeakBound({ ...plan, reverb: null }, peakOf(inp))
+            expect(out, `${pre.id} ${intensity} ${name} ×${scale}`).toBeLessThanOrEqual(bound)
+            expect(Number.isFinite(bound), `${pre.id}: bounded`).toBe(true)
+          }
+        }
+      }
+    }, 60000)
+  }
+
+  it('is the closed form where there is one', () => {
+    const echo = voicePlan('echo', 1)!
+    expect(voicePeakBound(echo, 0.1)).toBeCloseTo(0.1 * 0.85 * (1 + 0.5 + 0.25 + 0.125), 6)
+    expect(voicePeakBound(voicePlan('deep', 1)!, 0.1)).toBeCloseTo(0.1, 6)    // the grains' windows sum to 1
+    const rv = voicePlan('reverb', 1)!
+    const l1 = Math.max(...[0, 1].map((ch) => reverbIr(rv.reverb!, ch).reduce((a, v) => a + Math.abs(v), 0)))
+    expect(voicePeakBound(rv, 0.1) / (0.1 * l1)).toBeCloseTo(1, 5)            // the convolver is un-normalised
+    expect(voicePeakBound(echo, Number.NaN)).toBe(Infinity)
   })
 })

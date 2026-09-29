@@ -2,6 +2,7 @@
 // below are VERBATIM from a live backend's ops log (dispatch.py strings).
 import { describe, expect, it } from 'vitest'
 import { cleanSummary, editorSummary, opLabel, toolTitle } from './opLabels'
+import { _resetTransitionCatalogCache, loadTransitionCatalog } from './transitionCatalog'
 
 const ID = /\b[a-z]{1,3}_[0-9a-f]{6,}\b/
 
@@ -140,6 +141,38 @@ describe('History labels, final sweep', () => {
     // an alias the backend resolved: the look that renders
     expect(opLabel({ tool: 'add_transition', summary: 'Add wipe → wipeleft transition at 2.00s (0.40s)' }).detail)
       .toBe('Add Wipe Left transition at 2.00s (0.40s)')
+  })
+
+  // Final sweep 2: the render base ("custom", "slideleft") named the look the
+  // user never picked — History said "Custom" for Glitch, "Slide Left" for Whip.
+  it('names the look the user picked, never its render base', async () => {
+    _resetTransitionCatalogCache()
+    const glitch = 'Add glitch → custom transition at 5.00s (0.30s)'
+    const whip = 'Add whip → slideleft transition at 10.00s (0.27s)'
+    // before the catalog loads
+    expect(cleanSummary(glitch)).toBe('Add Glitch transition at 5.00s (0.30s)')
+    expect(cleanSummary(whip)).toBe('Add Whip Pan Left transition at 10.00s (0.27s)')
+    expect(cleanSummary('Add spiral → custom transition at 1.00s (0.60s)')).toBe('Add Spiral transition at 1.00s (0.60s)')
+    // with the real list_transitions entries (verbatim subset)
+    const entries = [
+      { name: 'glitch', display: 'Glitch', family: 'Glitch/Stylised', category: 'stylized', default_duration: 0.3, description: '', aliases: [], kind: 'custom' },
+      { name: 'whip', display: 'Whip Pan Left', family: 'Glitch/Stylised', category: 'stylized', default_duration: 0.25, description: '', aliases: ['whippan'], kind: 'post' },
+      { name: 'slideleft', display: 'Slide Left', family: 'Slide', category: 'slides', default_duration: 0.35, description: '', aliases: ['push', 'slide'], kind: 'native' },
+      { name: 'wipeleft', display: 'Wipe Left', family: 'Wipe', category: 'wipes', default_duration: 0.4, description: '', aliases: [], kind: 'native' },
+      { name: 'spiral', display: 'Spiral', family: 'Glitch/Stylised', category: 'stylized', default_duration: 0.6, description: '', aliases: ['spin', 'swirl'], kind: 'custom' },
+    ]
+    await loadTransitionCatalog('s', async () => ({ catalog: { entries } }))
+    try {
+      expect(cleanSummary(glitch)).toBe('Add Glitch transition at 5.00s (0.30s)')
+      expect(cleanSummary(whip)).toBe('Add Whip Pan Left transition at 10.00s (0.27s)')
+      expect(cleanSummary('Add whippan → slideleft transition at 1.00s (0.25s)')).toBe('Add Whip Pan Left transition at 1.00s (0.25s)')
+      expect(cleanSummary('Add swirl → custom transition at 1.00s (0.60s)')).toBe('Add Spiral transition at 1.00s (0.60s)')
+      // a true alias still names the look that renders
+      expect(cleanSummary('Add wipe → wipeleft transition at 2.00s (0.40s)')).toBe('Add Wipe Left transition at 2.00s (0.40s)')
+      expect(cleanSummary('Add push → slideleft transition at 2.00s (0.35s)')).toBe('Add Slide Left transition at 2.00s (0.35s)')
+    } finally {
+      _resetTransitionCatalogCache()
+    }
   })
 
   it('names caption styles and models as the Captions form does', () => {

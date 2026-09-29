@@ -355,8 +355,8 @@ def test_dispatch_stores_the_duration_the_renderer_will_use(tmp_path, fx):
     assert r["transition_duration"] == T.MAX_DURATION_S                  # capped, 2 s neighbours
     r = dispatch(store, "add_transition", {"at": 4.0, "type": "fade", "duration": 1.0})
     assert r["transition_duration"] == pytest.approx(0.3)                # the 0.3 s neighbour
-    r = dispatch(store, "add_transition", {"at": 9.0, "type": "fade", "duration": 5.0})
-    assert r["transition_duration"] == T.MAX_DURATION_S                  # no seam: cap only
+    with pytest.raises(ValueError, match="no cut"):                      # no seam: refused
+        dispatch(store, "add_transition", {"at": 9.0, "type": "fade", "duration": 5.0})
     dispatch(store, "remove_transition", {"all": True})
 
     dispatch(store, "add_transition", {"at": 2.0, "type": "fade", "duration": 0.05})

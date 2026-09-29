@@ -8,8 +8,9 @@
 //
 // Times: the playhead is RENDER time, a clip's `start`/`end` are LAYOUT time.
 // `splitTimeFor` is the decode ⌘B already uses per lane (v1 through its own
-// clip-slot inverse, every other lane through `layoutTime`), so a trim lands
-// on the frame the split would have cut.
+// clip-slot inverse, a sound clip through its own run's pull, every other
+// lane through `layoutTime`), so a trim lands on the frame the split would
+// have cut.
 import { clipDuration, clipEnd, clipSpeedFactor, isMediaClip, type AnyClip, type EDL, type Track } from '../types'
 import { splitTimeFor } from './splitTargets'
 import { sourceOffsetAt, type EdlClip } from './preview/timeline/framePlan'
@@ -39,7 +40,7 @@ function target(edl: EDL, selected: readonly string[], playhead: number): Locate
       for (const tk of edl.tracks) {
         const c = tk.clips.find((x) => x.id === id)
         if (!c) continue
-        const t = splitTimeFor(edl, tk.id, playhead)
+        const t = splitTimeFor(edl, tk.id, playhead, c)
         if (under(c, t)) return { track: tk, clip: c, t }
       }
     }

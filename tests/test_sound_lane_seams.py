@@ -111,7 +111,7 @@ def test_the_sound_window_starts_on_the_render_clock_and_keeps_its_length(fx):
     assert clock.sound_window(seams, 3.0, VO_LEN) == pytest.approx((2.5, 6.0))
     # a clip starting inside a consumed span is still heard, never dropped
     assert clock.sound_window(seams, 1.8, 0.2) == pytest.approx((1.8, 2.0))
-    placed = audio_mix._on_render_clock(edl.get_track("vo").clips, seams)
+    placed = audio_mix._on_render_clock(edl.get_track("vo").clips, seams, edl.video_extent())
     assert [w for _c, w in placed] == [pytest.approx((1.0, 4.5))]
 
 
@@ -131,12 +131,15 @@ def test_a_voiceover_across_two_transitions_exports_its_last_words(tmp_path, fx,
 
 def test_a_bed_that_outlives_the_picture_sets_the_timeline_length(fx):
     """Layout 8 s of v1 renders 7.1 s. `edl.duration` (the transport, and the
-    length the compositor pads the picture to) must reach the end of a sound
-    clip that now plays whole: an 8 s bed at layout 1.0 plays render 1.0-9.0,
-    where the old rule stopped the timeline at 9.0 - 0.9 = 8.1 and cut it."""
+    length the compositor pads the picture to) reaches the end of a sound
+    clip laid past v1's layout end — by exactly what was laid past it (final
+    QA, K1): an 8 s clip at layout 1.0 ends at layout 9.0, 1 s past v1's
+    end, so the programme is 7.1 + 1.0 = 8.1 s and the clip is cut there
+    (`render_time(9.0)`). Playing it whole to 9.0 (round 3) put 0.9 s of
+    black after the picture that nobody laid there — the transitions'."""
     assert _edl(fx, lane="music", start=1.0, length=VO_LEN).duration == pytest.approx(7.1)
     assert _edl(fx, lane="music", start=5.0, length=VO_LEN).duration == pytest.approx(4.1 + VO_LEN)
-    assert _edl(fx, lane="vo", start=1.0, length=8.0).duration == pytest.approx(9.0)
+    assert _edl(fx, lane="vo", start=1.0, length=8.0).duration == pytest.approx(8.1)
 
 
 # ------------------------------------------------ runs of abutting clips
@@ -155,7 +158,7 @@ def test_a_run_of_abutting_clips_moves_as_one_block(fx):
                 Clip(id="late", src=whole.src, in_=0, out=0.5, start=6.0)]
     seams = clock.seam_table(edl)
     assert sound_pulls(vo.clips, seams) == {"p1": 0.0, "p2": 0.0, "late": pytest.approx(0.9)}
-    wins = clock.sound_windows(vo.clips, seams)
+    wins = clock.sound_windows(vo.clips, seams, edl.video_extent())
     assert wins["p1"] == pytest.approx((1.0, 2.5)) and wins["p2"] == pytest.approx((2.5, 4.5))
     assert wins["late"] == pytest.approx((5.1, 5.6))
 
@@ -193,8 +196,133 @@ def test_a_default_bed_and_fit_to_video_end_with_the_picture(tmp_path, fx):
     assert store.edl.duration == pytest.approx(7.1, abs=0.01), "no tail past the picture"
     bed.out = 12.0
     store.edl.recompute_duration()
-    assert store.edl.duration == pytest.approx(12.0)
+    # laid to layout 12.0, 4 s past v1's layout end: the programme runs 4 s
+    # past the picture's render end (final QA, K1), not 0.9 s more
+    assert store.edl.duration == pytest.approx(7.1 + 4.0)
     dispatch(store, "fit_music_to_video", {})
     [bed] = store.edl.get_track("music").clips
     assert bed.effective_duration == pytest.approx(7.1, abs=0.01)
     assert store.edl.duration == pytest.approx(7.1, abs=0.01)
+
+
+# ------------------------------------------ final QA (K1): where a sound ends
+
+def _bed_edl(fx, bed: Path, *, lane: str = "music", start: float, length: float,
+             fade_out: float = 0.0) -> EDL:
+    from video_ai_editor.edl.schema import AudioProps
+    edl = _edl(fx, lane="a1", length=0.0)            # the four v1 clips, no sound
+    edl.get_track("a1").clips = []
+    edl.get_track(lane).clips = [Clip(id="bed", src=str(bed), in_=0, out=length, start=start,
+                                      audio=AudioProps(fade_out=fade_out))]
+    edl.recompute_duration()
+    return edl
+
+
+@pytest.fixture(scope="module")
+def bed(tmp_path_factory) -> Path:
+    p = tmp_path_factory.mktemp("slbed") / "bed.wav"
+    _run(["-f", "lavfi", "-i", f"aevalsrc=0.3*sin(2*PI*{TONE_HZ}*t):s=48000:d=12",
+          "-c:a", "pcm_s16le", str(p)])
+    return p
+
+
+def _windows(edl: EDL, lane: str) -> dict:
+    return clock.sound_windows(edl.get_track(lane).clips, clock.seam_table(edl), edl.video_extent())
+
+
+def test_every_sound_start_maps_through_the_seam_map(fx, bed):
+    """A sound clip starts where the picture under its start plays: after
+    the 2.0 dissolve (0.5) at layout 3.0 → render 2.5; after both (0.9) at
+    layout 5.0 → render 4.1 — the same map every picture lane uses."""
+    for start, rs in ((0.5, 0.5), (3.0, 2.5), (5.0, 4.1)):
+        edl = _bed_edl(fx, bed, lane="vo", start=start, length=1.0)
+        assert _windows(edl, "vo")["bed"][0] == pytest.approx(rs)
+        assert _windows(edl, "vo")["bed"][0] == pytest.approx(clock.render_time(edl, start))
+
+
+def test_a_bed_laid_to_the_end_of_the_video_ends_with_the_picture(fx, bed):
+    """A bed laid over the whole of v1 (layout [0, 8)) ends where the picture
+    ends in the file (7.1), not 0.9 s later over black."""
+    edl = _bed_edl(fx, bed, start=0.0, length=8.0)
+    assert _windows(edl, "music")["bed"] == pytest.approx((0.0, 7.1))
+    assert edl.duration == pytest.approx(7.1)
+
+
+def test_a_sound_placed_past_v1s_end_extends_the_programme_and_plays_whole(fx, bed):
+    edl = _bed_edl(fx, bed, lane="vo", start=9.0, length=1.5)
+    assert _windows(edl, "vo")["bed"] == pytest.approx((8.1, 9.6))
+    assert edl.duration == pytest.approx(9.6)
+
+
+@pytest.mark.parametrize("lane", ["vo", "music", "a1"])
+def test_a_sound_ending_inside_v1s_layout_plays_whole(fx, bed, lane):
+    """Final QA (run 2, round 2): layout [1.0, 7.5) ends INSIDE v1 (8.0), so
+    it plays whole from render 1.0 to 7.5 — 0.4 s past the picture's 7.1 —
+    and the programme gets that short tail. It was cut at the picture's end
+    (K1), which dropped the last words of a voiceover the user had placed
+    inside the video's span. Only a run laid to or past v1's layout end is
+    cut where that end maps (`test_a_bed_laid_to_the_end_...`)."""
+    edl = _bed_edl(fx, bed, lane=lane, start=1.0, length=6.5)
+    assert _windows(edl, lane)["bed"] == pytest.approx((1.0, 7.5))
+    assert edl.duration == pytest.approx(7.5)
+
+
+def test_a_voiceover_ending_inside_v1_exports_its_last_words(tmp_path, fx, bed):
+    """Decoded (the finder's t15, scaled down): the voiceover at layout 1.0
+    running to 7.5, inside v1's 8.0, is heard to 7.5 in the export — not cut
+    at the picture's 7.1 by the transitions it crosses."""
+    edl = _bed_edl(fx, bed, lane="vo", start=1.0, length=6.5)
+    heard = _tone_window(render_export(edl, tmp_path, height=H).path)
+    assert heard is not None and heard[1] == pytest.approx(7.5, abs=HOP + 0.01), heard
+
+
+def test_a_run_laid_to_the_end_is_cut_once_and_its_later_pieces_go(fx, bed):
+    """A bed split at 3.0 and at 7.95 (a run to layout 8.0): the run is cut
+    at the picture's end, so the last piece (render 7.05+) keeps only what
+    fits and nothing is doubled or left over black."""
+    edl = _bed_edl(fx, bed, start=0.0, length=8.0)
+    src = edl.get_track("music").clips[0].src
+    edl.get_track("music").clips = [
+        Clip(id="a", src=src, in_=0.0, out=3.0, start=0.0),
+        Clip(id="b", src=src, in_=3.0, out=7.95, start=3.0),
+        Clip(id="c", src=src, in_=7.95, out=8.0, start=7.95)]
+    edl.recompute_duration()
+    w = _windows(edl, "music")
+    assert w["a"] == pytest.approx((0.0, 3.0)) and w["b"] == pytest.approx((3.0, 7.1))
+    assert "c" not in w
+    assert edl.duration == pytest.approx(7.1)
+
+
+@pytest.mark.parametrize("case", ["to_end", "past_end"])
+def test_a_bed_cut_at_the_programme_end_is_heard_so_and_fades_there(tmp_path, fx, bed, case):
+    """Decoded: the bed laid to v1's end is heard to 7.1 (the file is 7.1 s),
+    one laid 1 s past it to 8.1; with a 0.5 s fade-out, the fade plays AT
+    the cut (the last 50 ms block is far below the level before the fade)."""
+    length, end = (8.0, 7.1) if case == "to_end" else (9.0, 8.1)
+    plain = _bed_edl(fx, bed, start=0.0, length=length)
+    assert plain.duration == pytest.approx(end)
+    heard = _tone_window(render_export(plain, tmp_path / "plain", height=H).path)
+    assert heard is not None and heard[1] == pytest.approx(end, abs=HOP + 0.01), heard
+    faded = _bed_edl(fx, bed, start=0.0, length=length, fade_out=0.5)
+    levels = _rms_blocks(render_export(faded, tmp_path / "faded", height=H).path)
+    before = [v for t, v in levels if end - 1.0 <= t < end - 0.6]
+    last = [v for t, v in levels if end - 0.1 <= t < end - HOP]
+    assert before and last and max(last) < min(before) - 12.0, (before, last)
+
+
+def _rms_blocks(path: Path) -> list[tuple[float, float]]:
+    n = int(round(48000 * HOP))
+    af = (f"aresample=48000,bandpass=f={TONE_HZ}:width_type=h:w=40,"
+          f"asetnsamples=n={n}:p=0,astats=metadata=1:reset=1,"
+          "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-")
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
+                           "-vn", "-af", af, "-f", "null", "-"], capture_output=True, text=True)
+    out, t = [], None
+    for line in proc.stdout.splitlines():
+        if "pts_time:" in line:
+            t = float(line.split("pts_time:")[1].split()[0])
+        elif "RMS_level=" in line and t is not None:
+            v = line.split("RMS_level=")[1].strip()
+            out.append((t, -200.0 if v == "-inf" else float(v)))
+            t = None
+    return out

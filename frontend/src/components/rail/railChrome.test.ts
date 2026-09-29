@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { contrastRatio, resolveToken, rootTokens, ruleDeclarations } from '../../lib/contrast'
 import { isFocusLost } from './focusRescue'
-import { tipPosition } from './railTip'
+import { pointInRect, tipPosition } from './railTip'
 
 describe('isFocusLost (LEFT_RAIL_SPEC §5.3)', () => {
   const body = { tag: 'body' }
@@ -77,5 +77,28 @@ describe('rail colours reach their contrast minimums (tokens only)', () => {
     const bg = tok(decl('.tool-panel').background)
     expect(contrastRatio(tok(decl('.tool-panel-head h2').color), bg)).toBeGreaterThanOrEqual(4.5)
     expect(contrastRatio(tok(decl('.tool-panel-kbd').color), bg)).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+describe('the tip never takes a click (final QA)', () => {
+  // It sits over the top row of the open tool panel (Upload PNG sticker…,
+  // Add music…); with pointer-events it swallowed the first click there.
+  const RAIL = readFileSync(new URL('./rail.css', import.meta.url), 'utf8')
+  const TIP = readFileSync(new URL('./RailTooltip.tsx', import.meta.url), 'utf8')
+  it('is pointer-events: none', () => {
+    expect(ruleDeclarations(RAIL, '.rail-tip')['pointer-events']).toBe('none')
+  })
+  it('stays hoverable by geometry, not by pointer events on the tip', () => {
+    expect(TIP).not.toMatch(/tip\.addEventListener\('pointer(enter|leave)'/)
+    expect(TIP).toMatch(/pointInRect\(e\.clientX, e\.clientY, tip\.getBoundingClientRect\(\)\)/)
+    expect(TIP).toMatch(/document\.addEventListener\('pointermove', onMove/)
+  })
+  it('pointInRect is half-open', () => {
+    const r = { left: 71, top: 115, right: 312, bottom: 142 }
+    expect(pointInRect(71, 115, r)).toBe(true)
+    expect(pointInRect(200, 130, r)).toBe(true)
+    expect(pointInRect(312, 130, r)).toBe(false)
+    expect(pointInRect(200, 142, r)).toBe(false)
+    expect(pointInRect(70, 130, r)).toBe(false)
   })
 })

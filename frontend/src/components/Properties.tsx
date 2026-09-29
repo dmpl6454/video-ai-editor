@@ -529,8 +529,8 @@ function PropertiesPanel() {
         // Showing the section on a v2 clip would just 400 with a toast.
         <Section label="Video fade" onReset={() => dispatch('set_video_fade', { clip_id: c.id, in_s: 0, out_s: 0 })}>
           {/* The visual fade the tester expected from the (audio-only) fade
-              fields below. Key-seeded so undo/chat edits re-seed the inputs.
-              The same-value guard compares against the SEEDED (2-dp) display
+              fields below. NumberField re-seeds on undo/chat edits; its
+              same-value guard compares against the SEEDED (2-dp) display
               value, not the raw EDL float: seeded from a chat-set 0.333 the
               field shows "0.33", so comparing to 0.333 would treat a
               focus-then-blur as an edit — committing an op, clearing redo,
@@ -539,23 +539,15 @@ function PropertiesPanel() {
           <div className="row two">
             <div className="field">
               <label>Video fade in (s)</label>
-              <input type="number" aria-label="Video fade in (s)" step="0.05" min={0} max={5}
-                key={`vfi${videoFadeIn.toFixed(2)}`} defaultValue={videoFadeIn.toFixed(2)}
-                onBlur={(e) => {
-                  const n = Number(e.target.value)
-                  if (Number.isFinite(n) && Math.max(0, n) !== Number(videoFadeIn.toFixed(2)))
-                    void dispatch('set_video_fade', { clip_id: c.id, in_s: Math.max(0, n) })
-                }} />
+              {/* NumberField (final QA): Enter commits, like the Audio fade
+                  fields — the bare blur-only inputs ignored Enter. */}
+              <NumberField ariaLabel="Video fade in (s)" value={videoFadeIn} step={0.05} min={0} max={5}
+                onCommit={(n) => void dispatch('set_video_fade', { clip_id: c.id, in_s: n })} />
             </div>
             <div className="field">
               <label>Video fade out (s)</label>
-              <input type="number" aria-label="Video fade out (s)" step="0.05" min={0} max={5}
-                key={`vfo${videoFadeOut.toFixed(2)}`} defaultValue={videoFadeOut.toFixed(2)}
-                onBlur={(e) => {
-                  const n = Number(e.target.value)
-                  if (Number.isFinite(n) && Math.max(0, n) !== Number(videoFadeOut.toFixed(2)))
-                    void dispatch('set_video_fade', { clip_id: c.id, out_s: Math.max(0, n) })
-                }} />
+              <NumberField ariaLabel="Video fade out (s)" value={videoFadeOut} step={0.05} min={0} max={5}
+                onCommit={(n) => void dispatch('set_video_fade', { clip_id: c.id, out_s: n })} />
             </div>
           </div>
           {/* Where the fade actually lands on the timeline. A fade is a

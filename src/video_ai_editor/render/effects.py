@@ -32,11 +32,20 @@ def mask_png_is_valid(p: Path) -> bool:
 
 
 def _hex_to_ffmpeg_color(hex_color: str) -> str:
-    """Normalize '#00FF00' / '00ff00' / 'green' → ffmpeg-friendly form."""
-    s = (hex_color or "").strip().lstrip("#")
-    if len(s) == 6 and all(ch in "0123456789abcdefABCDEF" for ch in s):
-        return f"0x{s.upper()}"
-    return hex_color  # let ffmpeg parse named colors like "green"
+    """Normalize '#00FF00' / '00ff00' / '0x00ff00' / 'green' → '0xRRGGBB'.
+
+    Final sweep 2 (CRITICAL): anything else used to be returned UNCHANGED and
+    spliced into `chromakey={color}:…`, so a colour holding ':' and ','
+    injected whole filters into the graph (a `metadata=…:file=` one truncated
+    a user file on preview). Only 6-digit hex and the key-colour names
+    (`schema.key_color`, ffmpeg's own values for them) ever reach the graph;
+    anything else keys the default green."""
+    from ..edl.schema import DEFAULT_KEY_COLOR, key_color
+    try:
+        norm = key_color(hex_color)
+    except ValueError:
+        norm = DEFAULT_KEY_COLOR
+    return "0x" + norm[1:]
 
 
 def build_chromakey_filter(ck: ChromaKey) -> str:
@@ -63,6 +72,84 @@ def build_chromakey_filter(ck: ChromaKey) -> str:
     return ",".join(parts)
 
 
+# ---- parameter bounds ----
+#
+# Final sweep 2: `add_effect` stored `params` unchecked and the builders
+# called int()/float() on them at render time, so {"strength": "abc"},
+# {"offset": 100000} or {"radius": "inf"} committed fine and then failed
+# EVERY preview and export. One table, read twice: `check_effect_params`
+# refuses such a value at the tool (a 400), and every builder clamps through
+# `_pnum`, so an EDL that already holds one still renders. The bounds are the
+# ffmpeg option ranges the builder feeds (eq, colorbalance, gblur, unsharp,
+# vignette, noise, blend); a value inside them renders exactly as before.
+
+_COLOR_BAL = 10.0 / 3.0    # colorbalance takes [-1, 1]; the builders scale by 0.3
+
+#: effect type -> {param: (lo, hi)}; "src" is the lut's path (checked by the tool).
+EFFECT_PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
+    "color": {"brightness": (-1.0, 1.0), "contrast": (-1000.0, 1000.0),
+              "saturation": (0.0, 3.0), "sat": (0.0, 3.0), "gamma": (0.1, 10.0),
+              "temp": (-_COLOR_BAL, _COLOR_BAL), "tint": (-_COLOR_BAL, _COLOR_BAL)},
+    "lut": {"intensity": (0.0, 1.0)},
+    "blur": {"radius": (0.0, 1024.0), "amount": (0.0, 1024.0)},
+    "sharpen": {"amount": (-2.0, 5.0)},
+    "vignette": {"angle": (0.0, math.pi / 2)},
+    "grain": {"strength": (0.0, 100.0)},
+    "glow": {"strength": (0.0, 1.0)},
+    "rgb_split": {"offset": (0.0, 200.0)},
+    "vintage": {}, "vhs": {}, "hflip": {}, "vflip": {},
+}
+EFFECT_PARAM_BOUNDS["color_grade"] = EFFECT_PARAM_BOUNDS["color"]
+
+
+def check_effect_params(etype: str, params) -> dict:
+    """`add_effect`'s params for `etype`, checked: known keys only, each a
+    finite number inside its range (the lut's `src` is a string the tool
+    resolves). Raises ValueError in the editor's words."""
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise ValueError(f"{etype} params must be an object of settings, got {params!r}")
+    bounds = EFFECT_PARAM_BOUNDS.get(etype, {})
+    allowed = set(bounds) | ({"src"} if etype == "lut" else set())
+    out: dict = {}
+    for key, value in params.items():
+        if key not in allowed:
+            names = ", ".join(sorted(allowed)) or "none"
+            raise ValueError(f"{etype} has no setting {key!r} (its settings: {names})")
+        if key == "src":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("lut src must be the path or name of a .cube file")
+            out[key] = value
+            continue
+        lo, hi = bounds[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{etype} {key} must be a number from {lo:g} to {hi:g}, got {value!r}")
+        f = float(value)
+        if not math.isfinite(f) or f < lo or f > hi:
+            raise ValueError(f"{etype} {key} must be a number from {lo:g} to {hi:g}, got {value!r}")
+        out[key] = value
+    return out
+
+
+def _pnum(p: dict, key: str, default: float, etype: str, *alts: str) -> float:
+    """`p[key]` (or the first alias present) as a finite float inside its
+    `EFFECT_PARAM_BOUNDS` range; the default when absent or unreadable."""
+    raw = default
+    for k in (key, *alts):
+        if k in p:
+            raw = p[k]
+            break
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        f = float(default)
+    if not math.isfinite(f):
+        f = float(default)
+    lo, hi = EFFECT_PARAM_BOUNDS[etype][key]
+    return min(hi, max(lo, f))
+
+
 # ---- color / look ----
 #
 # Every builder takes (params, uid). `uid` is a graph-unique suffix for
@@ -76,31 +163,31 @@ def _color(p: dict, uid: str = "") -> str:
     """Per-channel color grading via eq + colorbalance."""
     eq_parts: list[str] = []
     if "brightness" in p:
-        eq_parts.append(f"brightness={float(p['brightness']):.3f}")
+        eq_parts.append(f"brightness={_pnum(p, 'brightness', 0.0, 'color'):.3f}")
     if "contrast" in p:
-        eq_parts.append(f"contrast={float(p['contrast']):.3f}")
+        eq_parts.append(f"contrast={_pnum(p, 'contrast', 1.0, 'color'):.3f}")
     if "sat" in p or "saturation" in p:
-        eq_parts.append(f"saturation={float(p.get('sat', p.get('saturation'))):.3f}")
+        eq_parts.append(f"saturation={_pnum(p, 'sat', 1.0, 'color', 'saturation'):.3f}")
     if "gamma" in p:
-        eq_parts.append(f"gamma={float(p['gamma']):.3f}")
+        eq_parts.append(f"gamma={_pnum(p, 'gamma', 1.0, 'color'):.3f}")
     chain = []
     if eq_parts:
         chain.append("eq=" + ":".join(eq_parts))
     # color temperature: simple shift via colorbalance midtones
     if "temp" in p:
-        t = float(p["temp"])  # -1 cool, +1 warm
+        t = _pnum(p, "temp", 0.0, "color")  # -1 cool, +1 warm
         chain.append(f"colorbalance=rm={t * 0.3:.3f}:bm={-t * 0.3:.3f}")
     if "tint" in p:
-        t = float(p["tint"])  # -1 magenta, +1 green
+        t = _pnum(p, "tint", 0.0, "color")  # -1 magenta, +1 green
         chain.append(f"colorbalance=gm={t * 0.3:.3f}")
     return ",".join(chain) if chain else "null"
 
 
 def _lut(p: dict, uid: str = "") -> str:
     src = p.get("src")
-    if not src:
+    if not src or not isinstance(src, str):
         return "null"
-    intensity = max(0.0, min(1.0, float(p.get("intensity", 1.0))))
+    intensity = _pnum(p, "intensity", 1.0, "lut")
     # The LUT path is embedded in the lut3d= filter option, not passed as -i, so
     # it needs filtergraph escaping (raw Windows C:\ paths break the parser).
     src_arg = _pu.ffmpeg_filter_path(src)
@@ -123,22 +210,22 @@ def _lut(p: dict, uid: str = "") -> str:
 
 
 def _blur(p: dict, uid: str = "") -> str:
-    radius = float(p.get("radius", p.get("amount", 8)))
+    radius = _pnum(p, "radius", 8.0, "blur", "amount")
     return f"gblur=sigma={max(0.5, radius):.2f}"
 
 
 def _sharpen(p: dict, uid: str = "") -> str:
-    amount = float(p.get("amount", 1.0))
+    amount = _pnum(p, "amount", 1.0, "sharpen")
     return f"unsharp=lx=5:ly=5:la={amount:.2f}"
 
 
 def _vignette(p: dict, uid: str = "") -> str:
-    angle = float(p.get("angle", math.pi / 4))
+    angle = _pnum(p, "angle", math.pi / 4, "vignette")
     return f"vignette=angle={angle:.3f}"
 
 
 def _grain(p: dict, uid: str = "") -> str:
-    strength = int(p.get("strength", 20))
+    strength = int(_pnum(p, "strength", 20, "grain"))
     return f"noise=alls={max(1, strength)}:allf=t"
 
 
@@ -158,7 +245,7 @@ def _vhs(_: dict, uid: str = "") -> str:
 
 def _glow(p: dict, uid: str = "") -> str:
     """Soft-glow via blurred copy blended with original (uses split+blend)."""
-    s = float(p.get("strength", 0.4))
+    s = _pnum(p, "strength", 0.4, "glow")
     # Split → one branch blurred → blend with original
     a, b, g = f"[ga{uid}]", f"[gb{uid}]", f"[gg{uid}]"
     return f"split=2{a}{b};{b}gblur=sigma=12{g};{a}{g}blend=all_mode=screen:all_opacity={s:.2f}"
@@ -174,7 +261,7 @@ def _vflip(_: dict, uid: str = "") -> str:
 
 def _rgb_split(p: dict, uid: str = "") -> str:
     """Cheap chromatic aberration: split RGB and offset."""
-    off = int(p.get("offset", 6))
+    off = int(_pnum(p, "offset", 6, "rgb_split"))
     # split into R/G/B then merge offset versions; this is a pragmatic approximation
     r0, g0, b0 = f"[r0{uid}]", f"[g0{uid}]", f"[b0{uid}]"
     r1, g1, b1, rg = f"[r1{uid}]", f"[g1{uid}]", f"[b1{uid}]", f"[rg{uid}]"

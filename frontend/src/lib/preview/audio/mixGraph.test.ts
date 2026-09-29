@@ -10,9 +10,9 @@ import type { SourceInfo } from '../timeline/frameMap'
 import { buildProgramMap } from '../timeline/programMap'
 import type { PcmReader } from './audioChunks'
 import { clipGainAt, planFromProgram, type AudioPlan } from './audioPlan'
-import { asCtx, FakeContext, FakeGain, type FakeNode, FakeOfflineContext, FakeParam, FakeSource, type ParamEvent } from './fakeAudio'
+import { asCtx, type FakeCompressor, FakeContext, FakeGain, type FakeNode, FakeOfflineContext, FakeParam, FakeSource, type ParamEvent } from './fakeAudio'
 import {
-  BLOCK_SAMPLES, channelMatrix, curvePositions, duckValueAt, duckWindows, holdAndRamp, LIMITER_LATENCY, limiterMakeupUndo, MixGraph,
+  BLOCK_SAMPLES, channelMatrix, curvePositions, duckValueAt, duckWindows, holdAndRamp, LIMITER_LATENCY, limiterMakeupUndo, masterLatency, MixGraph,
   RAMP_S, sourceRange, trackedValue,
 } from './mixGraph'
 
@@ -335,5 +335,62 @@ describe('holdAndRamp', () => {
   it('exports the block grid', () => {
     expect(BLOCK_SAMPLES).toBe(SR)
     expect(FakeSource).toBeDefined()
+  })
+})
+
+// Final QA (engine): a mixed programme under a loudness gain plays the server
+// preview's order — the mix limiter (auto-level 1/0.97, 0 dBFS), THEN the
+// loudness gain and the −1 dBFS limiter. One limiter after the whole gain
+// left a loud mix under a negative gain unlimited: up to 4 dB louder than
+// the server render (tests/wk/test_wk_audio.py `mix_hot_loud`).
+describe('master with a loudness gain on a mixed programme', () => {
+  const loudPlan = (gainDb: number) => {
+    const e = edl({ v1: [{ id: 'a', start: 0, out: 1 }], music: [{ id: 'm', start: 0, out: 1 }] })
+    e.canvas = { fps: 30, loudness_lufs: -16 } as EdlLike['canvas']
+    return planFromProgram(e, buildProgramMap(e, () => SRC), () => SRC, { loudnessGainDb: gainDb })
+  }
+  /** destination ← … the single-input chain before it, in signal order. */
+  const chain = (ctx: FakeContext): string[] => {
+    const into = new Map<FakeNode, FakeNode[]>()
+    for (const n of ctx.nodes) for (const o of n.outputs) into.set(o.to, [...(into.get(o.to) ?? []), n])
+    const out: string[] = []
+    let n = ctx.destination
+    for (;;) {
+      const from = into.get(n) ?? []
+      if (from.length !== 1) break
+      n = from[0]
+      out.unshift(n.kind === 'compressor' ? `lim${(n as FakeCompressor).threshold.value}` : `g${(n as FakeGain).gain.value.toFixed(4)}`)
+    }
+    return out.slice(out.findIndex((s) => s.startsWith('lim')) - 1)
+  }
+  const undo1 = limiterMakeupUndo(-1).toFixed(4)
+
+  it('limits the mix first, then applies the loudness gain and the −1 dBFS limiter', () => {
+    const ctx = new FakeContext()
+    const g = new MixGraph(asCtx(ctx), loudPlan(-12), { reader: reader(), compensateLatency: true })
+    expect(chain(ctx)).toEqual(['g1.0309', 'lim0', 'g1.0000', 'g0.2512', 'lim-1', `g${undo1}`, 'g0.0000'])
+    expect(g.latency).toBe(2 * LIMITER_LATENCY)
+    g.anchor = { ctxTime: 2, sample: 0 }
+    expect(g.when(0) * SR).toBeCloseTo(2 * SR - 2 * LIMITER_LATENCY, 6)
+    expect(masterLatency(loudPlan(-12).master)).toBe(2 * LIMITER_LATENCY)
+    expect(masterLatency({ gain: 1, ceilingDb: null })).toBe(0)
+  })
+
+  it('a loudness gain edit ramps the post gain; gaining or losing the stage rebuilds', () => {
+    const ctx = new FakeContext()
+    ctx.state = 'running'
+    const g = new MixGraph(asCtx(ctx), loudPlan(-12), { reader: reader(), compensateLatency: false })
+    g.restart({ ctxTime: 1, sample: 0 }, SR)
+    const d = g.setPlan(loudPlan(-6), 1000, SR)
+    expect(d.master).toBe(true)
+    expect([...d.dirtyBuses]).toEqual([])                              // same stages: nothing restarts
+    const post = ctx.nodes.find((n) => n.kind === 'gain' && (n as FakeGain).gain.value.toFixed(4) === '0.2512') as FakeGain
+    expect(post.gain.events.at(-1)).toMatchObject({ type: 'ramp' })
+    expect((post.gain.events.at(-1) as { v: number }).v).toBeCloseTo(Math.pow(10, -6 / 20), 9)
+    const bare = planOf(edl({ v1: [{ id: 'a', start: 0, out: 1 }], music: [{ id: 'm', start: 0, out: 1 }] }))
+    const d2 = g.setPlan(bare, 2000, SR)                              // the target went: one stage again
+    expect(d2.dirtyBuses.size).toBeGreaterThan(0)
+    expect(chain(ctx).filter((s) => s.startsWith('lim'))).toEqual(['lim0'])
+    expect(g.latency).toBe(LIMITER_LATENCY)
   })
 })

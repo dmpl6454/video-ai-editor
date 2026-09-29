@@ -15,7 +15,8 @@
 //          RENDER clock, fades on the render clock, the music duck;
 //   master a mixed programme passes `alimiter=limit=0.97` with its auto-level
 //          (+0.26 dB, measured); a loudness target adds the last-known
-//          preview gain and a −1 dBFS limiter.
+//          preview gain and a −1 dBFS limiter — AFTER the mix limiter on a
+//          mixed programme (`MasterPlan.post`), as the server orders them.
 
 import {
   effectiveDuration, freezeOf, intermediateSpan, isMediaClip, planView, reversedViewRange, speedFactor, type EdlClip, type EdlLike,
@@ -112,11 +113,20 @@ export interface DuckPlan {
 }
 
 export interface MasterPlan {
-  /** Static gain before the limiter: the mix limiter's auto-level (1/0.97
-   *  when lanes are mixed) × the preview loudness gain. */
+  /** Static gain before the (first) limiter: the mix limiter's auto-level
+   *  (1/0.97 when lanes are mixed), or the preview loudness gain on a
+   *  programme with no lanes. */
   gain: number
   /** Limiter ceiling in dBFS, or null when the render has none. */
   ceilingDb: number | null
+  /** A MIXED programme with a loudness gain: the server preview runs
+   *  mix → alimiter 0.97 (auto-level) → volume g → alimiter −1 dBFS
+   *  (`audio_mix._preview_norm_chain`), so the loudness gain and its −1 dBFS
+   *  limiter are a second stage AFTER the mix limiter. Folding g into the
+   *  first gain (final QA, engine) left a loud mix under a negative g
+   *  unlimited: up to 4 dB louder than the server render and the export,
+   *  EXACT and with no chip. Absent: one stage. */
+  post?: { gain: number; ceilingDb: number }
 }
 
 export interface AudioPlan {
@@ -203,6 +213,12 @@ export function soundWindow(seams: Array<[number, number]>, start: number, lengt
   return [rs, rs + length]
 }
 
+/** `schema.sound_runs`: a detached sound (`linked_to`) follows its OWN
+ *  picture, so it always opens a run of its own (final QA, run 2: back to
+ *  back with another detached sound it played late by the transition at
+ *  their cut). */
+const opensSoundRun = (c: EdlClip): boolean => Boolean(c.linked_to)
+
 /** `schema.sound_pulls`: per clip of ONE sound lane, how much earlier than
  *  its start it plays — a run of abutting clips (a split voice-over, a looped
  *  bed) is pulled as one block by the overlap before its first clip, so the
@@ -214,7 +230,7 @@ export function soundPulls(clips: EdlClip[], seams: Array<[number, number]>): Ma
   for (const c of [...clips].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
     const s = c.start ?? 0
     const e = s + effectiveDuration(c)
-    if (runEnd === null || s > runEnd + 1e-3) {
+    if (runEnd === null || opensSoundRun(c) || s > runEnd + 1e-3) {
       runPull = s - renderTime(seams, s)
       runEnd = e
     } else {
@@ -223,6 +239,60 @@ export function soundPulls(clips: EdlClip[], seams: Array<[number, number]>): Ma
     out.set(c, runPull)
   }
   return out
+}
+
+/** `schema.SOUND_RUN_TOL_S`: a run ending this close to v1's layout end is
+ *  laid TO it (`soundWindows`). */
+const SOUND_RUN_TOL = 1e-3
+
+/** `schema.sound_render_windows` — THE sound-lane seam rule (final QA, K1),
+ *  mirrored step for step: per clip of ONE sound lane, its render window. A
+ *  run of abutting clips starts where its first clip's start plays (one pull,
+ *  `soundPulls`) and stays back to back; it plays WHOLE when it ends inside
+ *  v1's layout `videoEnd` — even past the picture's render end (final QA run
+ *  2, round 2: the cut dropped a voiceover's last words) — and is cut where
+ *  its layout end maps (`renderTime(end)`, its fade-out at the cut, never
+ *  before the picture's end) when laid to or past it. A clip wholly past its
+ *  run's cut is absent. */
+export function soundWindows(clips: EdlClip[], seams: Array<[number, number]>,
+                             videoEnd: number): Map<EdlClip, [number, number]> {
+  const out = new Map<EdlClip, [number, number]>()
+  const runs: EdlClip[][] = []
+  let runEnd: number | null = null
+  for (const c of [...clips].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))) {
+    const s = c.start ?? 0
+    const e = s + effectiveDuration(c)
+    if (runEnd === null || opensSoundRun(c) || s > runEnd + 1e-3) {
+      runs.push([c])
+      runEnd = e
+    } else {
+      runs[runs.length - 1].push(c)
+      runEnd = Math.max(runEnd, e)
+    }
+  }
+  const pictureEnd = renderTime(seams, videoEnd)
+  for (const run of runs) {
+    let pull = 0                                   // `_overlap_before(seams, start)`
+    for (const [seam, cost] of seams) if (seam <= (run[0].start ?? 0) + SEAM_EPS) pull += cost
+    const layEnd = Math.max(...run.map((c) => (c.start ?? 0) + effectiveDuration(c)))
+    // a run ending INSIDE v1's layout plays whole (final QA run 2, round 2)
+    const cut = layEnd >= videoEnd - SOUND_RUN_TOL
+      ? Math.max(renderTime(seams, layEnd), pictureEnd) : Infinity
+    for (const c of run) {
+      const rs = (c.start ?? 0) - pull
+      const re = Math.min(rs + effectiveDuration(c), cut)
+      if (re - rs > SEAM_EPS) out.set(c, [rs, re])
+    }
+  }
+  return out
+}
+
+/** `EDL.video_extent()`: where v1's LAYOUT ends (0 without v1 media). */
+export function videoExtent(tracks: readonly EdlTrack[]): number {
+  const v1 = tracks.find((t) => t.id === 'v1')
+  let end = 0
+  for (const c of v1?.clips ?? []) if (isMediaClip(c)) end = Math.max(end, (c.start ?? 0) + effectiveDuration(c))
+  return end
 }
 
 const speedOf = (c: EdlClip): number | null => {
@@ -401,14 +471,15 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
   for (const t of tracks) if (t.type === 'audio' && !t.muted) laneTracks.push(t)
   let placedMusic = 0
   let placedLanes = 0
+  const videoEnd = videoExtent(tracks)
   for (const t of laneTracks) {
     const kind: BusKind = t.id === 'music' ? 'music' : t.id === 'vo' ? 'vo' : 'audio'
     const bus = t.id
-    const pulls = soundPulls(t.clips.filter(isMediaClip), seams)
+    const wins = soundWindows(t.clips.filter(isMediaClip), seams, videoEnd)
     for (const c of t.clips) {
       if (!isMediaClip(c)) continue
       const eff = effectiveDuration(c)
-      const win = soundWindow(seams, c.start ?? 0, eff, pulls.get(c))
+      const win = wins.get(c)
       if (!win) continue
       if (!buses.some((b) => b.id === bus)) buses.push({ id: bus, kind, gain: trackGain(t, anySolo) })
       const lane = laneClip(c, bus, clips.length, win, eff)
@@ -434,17 +505,21 @@ export function buildAudioPlan(edl: EdlLike, placements: readonly AudioPlacement
   const mixed = placedLanes > 0
   let gain = mixed ? 1 / MIX_LIMIT : 1
   let ceilingDb: number | null = mixed ? 0 : null
+  let post: MasterPlan['post']
   const lufs = (edl.canvas as { loudness_lufs?: number | null } | undefined)?.loudness_lufs
   if (lufs !== null && lufs !== undefined && opts.loudnessGainDb !== null && opts.loudnessGainDb !== undefined) {
-    gain *= Math.pow(10, pyFixedValue(opts.loudnessGainDb, 2) / 20)
-    ceilingDb = LOUDNESS_CEILING_DB
+    const loud = Math.pow(10, pyFixedValue(opts.loudnessGainDb, 2) / 20)
+    // mixed: a second stage after the mix limiter (MasterPlan.post)
+    if (mixed) post = { gain: loud, ceilingDb: LOUDNESS_CEILING_DB }
+    else { gain *= loud; ceilingDb = LOUDNESS_CEILING_DB }
     approx.add('loudness')
   }
   if (clips.some((c) => c.voice)) approx.add('voice')
   const limiting = limitingRanges(clips, buses, gain, ceilingDb, total,
-    opts.peak ?? ((src) => (silent(src) ? 0 : null)))
+    opts.peak ?? ((src) => (silent(src) ? 0 : null)), post)
   if (limiting.length) approx.add('limiting')
-  return { total, clips: clips.map(withVoiceTiming), buses, duck, master: { gain, ceilingDb }, approx: [...approx], limiting }
+  const master: MasterPlan = post ? { gain, ceilingDb, post } : { gain, ceilingDb }
+  return { total, clips: clips.map(withVoiceTiming), buses, duck, master, approx: [...approx], limiting }
 }
 
 /** One music / voice-over / audio-lane clip (`_audio_clip_filter`). */
@@ -551,7 +626,8 @@ export function diffPlans(prev: AudioPlan | null, next: AudioPlan): PlanDiff {
   return {
     dirtyBuses, paramClips,
     busGains: gains(prev) !== gains(next),
-    master: prev.master.gain !== next.master.gain || prev.master.ceilingDb !== next.master.ceilingDb,
+    master: prev.master.gain !== next.master.gain || prev.master.ceilingDb !== next.master.ceilingDb
+      || prev.master.post?.gain !== next.master.post?.gain || prev.master.post?.ceilingDb !== next.master.post?.ceilingDb,
     duck: JSON.stringify(prev.duck) !== JSON.stringify(next.duck),
   }
 }

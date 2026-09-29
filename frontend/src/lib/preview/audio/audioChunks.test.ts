@@ -99,6 +99,45 @@ describe('AudioChunks', () => {
     expect(parseLayout({ audio: { chunk_peak: [0.5, 'x'] } }).chunkPeak).toBeNull()
     expect(parseLayout({ audio: { chunk_peak: [-1] } }).chunkPeak).toBeNull()
   })
+
+  // K2 (0.8.0 QA): a layout read while the sound was still being built (no
+  // samples, no recorded peaks) was kept for the page's life, so a fresh
+  // upload showed "≈ Limiter on loud sound" for good (an unknown peak is
+  // unbounded). It is re-read until the sound is built, and the change told.
+  it('re-reads a layout whose sound is still being built, and says when it lands', async () => {
+    let built = false
+    const hits: string[] = []
+    const fetch = async (url: string): Promise<Response> => {
+      hits.push(url)
+      return new Response(JSON.stringify({ audio: built
+        ? { chunk_samples: CS, samples: 2500, chunks: 3, chunk_peak: [0.1, 0.2, 0.1] }
+        : { chunk_samples: CS, samples: null, chunks: null } }))
+    }
+    const sleeps: number[] = []
+    const sleep = async (ms: number) => { sleeps.push(ms); if (sleeps.length === 2) built = true }
+    const chunks = new AudioChunks({ fetch, decode: async () => { throw new Error('no chunks here') }, sleep })
+    const told: string[] = []
+    chunks.onLayoutChange = (key) => told.push(key)
+    const first = await chunks.layout('k')
+    expect(first.chunkPeak).toBeNull()
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(chunks.layoutNow('k')!.chunkPeak).toEqual([0.1, 0.2, 0.1])
+    expect((await chunks.layout('k')).samples).toBe(2500)
+    expect(told).toEqual(['k'])
+    expect(hits.length).toBe(3)                                      // read, re-read (building), re-read (built)
+    expect(sleeps.every((ms) => ms > 0 && ms <= 1000)).toBe(true)     // promptly
+  })
+
+  it('does not re-read a built layout, or one of a source with no sound', async () => {
+    const s = fakeServer()
+    const chunks = new AudioChunks({ fetch: s.fetch, decode: s.decode, sleep: async () => {} })
+    await chunks.layout('k')
+    const silent = new AudioChunks({ fetch: async () => new Response(JSON.stringify({ audio: { silent: true, samples: null } })),
+      sleep: async () => { throw new Error('no re-read') } })
+    await silent.layout('q')
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(s.hits.filter((h) => h.endsWith('index.json'))).toHaveLength(1)
+  })
 })
 
 describe('chunkReader', () => {

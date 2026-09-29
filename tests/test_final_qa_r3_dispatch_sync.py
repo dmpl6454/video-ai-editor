@@ -76,8 +76,12 @@ def test_speed_up_keeps_every_cue_over_the_clip_at_half_its_offset(tmp_path, med
     assert len(got) == 6, got
     for i, (a, b) in enumerate(CUES):
         assert got[f"cue{i}"] == pytest.approx((a / 2, b / 2), abs=1e-3), (i, got)
-    # a cue over the NEXT clip moves left by the removed 7.05 s
-    assert got["cue9"] == pytest.approx((15.77 - 7.05, 17.91 - 7.05), abs=1e-3)
+    # a cue over the NEXT clip follows that picture (final QA, K1): the same
+    # 1.67 s into b, wherever b now starts (the removed 7.05 s, snapped to
+    # the frame grid by the magnetic repack)
+    b = st.edl.get_clip("b")[1]
+    assert b.start == pytest.approx(7.05, abs=1 / FPS)
+    assert got["cue9"] == pytest.approx((b.start + 1.67, b.start + 3.81), abs=1e-3)
 
 
 def test_a_sticker_and_a_pip_in_the_second_half_follow_the_speed_up(tmp_path, media):

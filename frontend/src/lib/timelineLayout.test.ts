@@ -367,6 +367,44 @@ describe('drawnSpan (sound lanes keep their length)', () => {
   })
 })
 
+describe('drawnSpan (final QA K1: where a sound clip ends)', () => {
+  // v1 a [0, 13.73) + b [13.73, 23.73), a 0.3 s seam: the picture ends at 23.43.
+  const edl = edlWith([{ at: 13.73, type: 'zoomin', duration: 0.3 }])
+  const layout = v1LayoutOf(edl)
+  const bed = (start: number, len: number, id = 'm') =>
+    ({ id, track: 'music', src: 'm.m4a', in: 0, out: len, start }) as unknown as AnyClipLike
+  const end = (c: AnyClipLike, lane?: AnyClipLike[]) => {
+    const s = drawnSpan('music', c, layout, 'music', lane)
+    return s.start + s.duration
+  }
+
+  it('ends a bed laid to the end of the video with the picture', () => {
+    expect(layout.end).toBeCloseTo(23.73, 9)
+    expect(end(bed(0, 23.73))).toBeCloseTo(23.43, 9)
+  })
+
+  it('cuts a bed laid past v1\'s end where its layout end maps', () => {
+    expect(end(bed(0, 25))).toBeCloseTo(24.7, 9)
+  })
+
+  it('plays a sound placed past v1\'s end whole, and one ending inside v1\'s layout whole', () => {
+    const late = drawnSpan('music', bed(24, 1), layout, 'music')
+    expect([late.start, late.duration]).toEqual([expect.closeTo(23.7, 9), expect.closeTo(1, 9)])
+    expect(end(bed(10, 7))).toBeCloseTo(17, 9)                  // ends inside: whole
+    // final QA (run 2, round 2): ends inside v1's layout (23.5 < 23.73), so
+    // whole even past the picture's 23.43 — the block shows its full length
+    expect(end(bed(10, 13.5))).toBeCloseTo(23.5, 9)
+  })
+
+  it('cuts a run once: its pieces stay back to back and a piece past the cut is dropped', () => {
+    const lane = [bed(0, 20, 'x'), { ...bed(20, 3.6, 'y'), in: 20, out: 23.6 } as AnyClipLike,
+      { ...bed(23.6, 0.13, 'z'), in: 23.6, out: 23.73 } as AnyClipLike]
+    expect(end(lane[0], lane)).toBeCloseTo(20, 9)
+    expect(end(lane[1], lane)).toBeCloseTo(23.43, 9)
+    expect(drawnSpan('music', lane[2], layout, 'music', lane).dropped).toBe(true)
+  })
+})
+
 describe('soundPull (a run of abutting sound clips moves as one block)', () => {
   it('pulls a split voiceover by its first piece, keeping the pieces back to back', () => {
     const edl = edlWith([{ at: 13.73, type: 'zoomin', duration: 0.3 }])
@@ -380,6 +418,39 @@ describe('soundPull (a run of abutting sound clips moves as one block)', () => {
     expect(s2.start).toBeCloseTo(s1.start + s1.duration, 9)        // no overlap at the seam
     expect(drawnSpan('vo', lane[2], layout, 'vo', lane).start).toBeCloseTo(19.7, 9)
     expect(soundPull(layout.seams, lane[1])).toBeCloseTo(0.3, 9)   // alone it would be pulled
+  })
+})
+
+describe('soundPull / drawnSpan (a detached sound follows its own picture)', () => {
+  // Final QA (run 2): v1 c0|c1|c2 (2 s each), fades of 0.5 at 2 and 4; the
+  // sounds of c1 and c2 detached onto a1, back to back. As one run the second
+  // sound took the first's pull (0.5) and was drawn — and exported — 0.5 s
+  // after its picture (render 3.0).
+  const edl = {
+    version: 3, duration: 5, canvas: { w: 320, h: 180, fps: 30 },
+    tracks: [
+      { id: 'v1', type: 'video', z: 0, clips: [0, 1, 2].map((i) => (
+        { id: `c${i}`, src: `c${i}.mp4`, in: 0, out: 2, start: 2 * i })),
+      transitions: [{ at: 2, type: 'fade', duration: 0.5 }, { at: 4, type: 'fade', duration: 0.5 }] },
+      { id: 'a1', type: 'audio', z: 0, clips: [
+        { id: 's1', src: 'c1.mp4', in: 0, out: 2, start: 2, linked_to: 'c1' },
+        { id: 's2', src: 'c2.mp4', in: 0, out: 2, start: 4, linked_to: 'c2' }] },
+    ],
+  } as unknown as EDL
+  const layout = v1LayoutOf(edl)
+  const lane = edl.tracks[1].clips
+
+  it('pulls each detached sound like its picture, not by the run before it', () => {
+    expect(soundPull(layout.seams, lane[0], lane)).toBeCloseTo(0.5, 9)
+    expect(soundPull(layout.seams, lane[1], lane)).toBeCloseTo(1.0, 9)
+    const s2 = drawnSpan('a1', lane[1], layout, 'audio', lane)
+    expect(s2.start).toBeCloseTo(renderTime(layout.seams, 4), 9)
+    expect(s2.duration).toBeCloseTo(2, 9)
+  })
+
+  it('keeps unlinked abutting pieces as one run', () => {
+    const plain = lane.map((c) => ({ ...c, linked_to: undefined })) as AnyClipLike[]
+    expect(soundPull(layout.seams, plain[1], plain)).toBeCloseTo(0.5, 9)
   })
 })
 

@@ -287,6 +287,13 @@ def test_tool_smoke(tool: str, session: EDLStore, tmp_path: Path):
         # Final QA: retext an overlay that exists.
         tid = dispatch(session, "add_text", {"text": "OLD", "start": 0.0, "end": 1.0})["id"]
         args = {"clip_id": tid, "text": "NEW"}
+    if tool == "add_transition":
+        # Final sweep 2: a transition needs a cut (it is refused elsewhere).
+        dispatch(session, "split_at", {"track": "v1", "time": 2.0})
+    if tool == "set_text_style":
+        # K3: restyle an overlay that exists.
+        tid = dispatch(session, "add_text", {"text": "OLD", "start": 0.0, "end": 1.0})["id"]
+        args = {"clip_id": tid, "color": "#FF3B30", "bold": True}
     if tool == "set_blend_mode":
         src = session.edl.tracks[0].clips[0].src
         cid = dispatch(session, "add_clip", {"track": "v2", "src": src, "in": 0.0, "out": 1.0,

@@ -101,19 +101,52 @@ class EDLStore:
         ops = ops[-n:] if n else []
         return [None] * (n - len(ops)) + ops
 
-    def _save_redo_stack(self) -> None:
-        if self._redo_stack:
-            payload = json.dumps([e.model_dump(by_alias=True, mode="json") for e in self._redo_stack])
-            self.redo_stack_path.write_text(payload, encoding="utf-8")
-            ops = getattr(self, "_redo_ops", [])
-            self.redo_ops_path.write_text(
-                json.dumps([o.model_dump(mode="json") if o else None for o in ops]),
-                encoding="utf-8")
-        else:
-            # Nothing to redo — remove the file rather than persist "[]" so a
-            # stale file left behind doesn't need special-casing on load.
+    def _redo_files(self, stack: list[EDL], ops: list[Op | None]) -> list[tuple[Path, str]]:
+        """The redo_stack.json / redo_ops.json payloads for `stack`, or [] for
+        an empty stack (whose files `_drop_empty_redo_files` removes)."""
+        if not stack:
+            return []
+        return [(self.redo_stack_path,
+                 json.dumps([e.model_dump(by_alias=True, mode="json") for e in stack])),
+                (self.redo_ops_path,
+                 json.dumps([o.model_dump(mode="json") if o else None for o in ops]))]
+
+    def _drop_empty_redo_files(self) -> None:
+        # Nothing to redo — remove the file rather than persist "[]" so a
+        # stale file left behind doesn't need special-casing on load.
+        if not self._redo_stack:
             self.redo_stack_path.unlink(missing_ok=True)
             self.redo_ops_path.unlink(missing_ok=True)
+
+    def _save_redo_stack(self) -> None:
+        files = self._redo_files(self._redo_stack, getattr(self, "_redo_ops", []))
+        if files:
+            self._publish(self._stage(files))
+        else:
+            self._drop_empty_redo_files()
+
+    @staticmethod
+    def _stage(files: list[tuple[Path, str]]) -> list[tuple[Path, Path]]:
+        """Write each `(dst, text)` to a temp beside `dst` — where ENOSPC
+        lands — and return the `(temp, dst)` pairs for `_publish`. A failed
+        write removes every temp written so far and re-raises: nothing of
+        the real files has changed."""
+        temps: list[tuple[Path, Path]] = []
+        try:
+            for dst, text in files:
+                tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+                temps.append((tmp, dst))
+                tmp.write_text(text, encoding="utf-8")
+        except OSError:
+            for tmp, _dst in temps:
+                tmp.unlink(missing_ok=True)
+            raise
+        return temps
+
+    @staticmethod
+    def _publish(temps: list[tuple[Path, Path]]) -> None:
+        for tmp, dst in temps:
+            os.replace(tmp, dst)
 
     @property
     def redo_available(self) -> bool:
@@ -267,21 +300,14 @@ class EDLStore:
         # it, and the next edit's single Undo removed both.
         snap = self.snapshots_dir / f"{len(self.ops.ops) + 1:05d}_{new_hash}.json"
         op = self.ops.append(tool, args, summary, prev_hash, new_hash, by=by)
-        temps: list[tuple[Path, Path]] = []
         try:
-            for dst, text in ((snap, payload), (self.edl_path, payload),
-                              (self.ops_path, self.ops.model_dump_json())):
-                tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
-                temps.append((tmp, dst))
-                tmp.write_text(text, encoding="utf-8")
+            temps = self._stage([(snap, payload), (self.edl_path, payload),
+                                 (self.ops_path, self.ops.model_dump_json())])
         except OSError:
-            for tmp, _dst in temps:
-                tmp.unlink(missing_ok=True)
             self.ops.pop()
             self._restore_last_good()
             raise
-        for tmp, dst in temps:
-            os.replace(tmp, dst)
+        self._publish(temps)
         self._prune_snapshots()
         self._redo_stack.clear()
         self._redo_ops.clear()
@@ -395,22 +421,52 @@ class EDLStore:
         for old in snaps[:len(snaps) - kept]:
             old.unlink(missing_ok=True)
 
+    #: What Undo says when the step it would restore cannot be read.
+    DAMAGED_HISTORY_MSG = ("Earlier undo history is damaged, so Undo stops here. "
+                           "The timeline is unchanged.")
+
+    def _end_history_at(self, snaps: list[Path], bad: Path, err: Exception) -> None:
+        """Drop the unreadable snapshot `bad` and every older one: undo
+        history now ends cleanly at the current step (`undo_depth` 0)."""
+        _log.warning("undo snapshot %s of %s is unreadable (%s: %s) — undo history "
+                     "ends here", bad.name, self.dir.name, type(err).__name__,
+                     str(err).splitlines()[0] if str(err) else "")
+        for old in snaps:
+            if old.name <= bad.name:
+                old.unlink(missing_ok=True)
+
     def undo(self) -> bool:
+        """Step back one snapshot. All-or-nothing (final sweep 2 r2, like
+        `commit`): the target is read and validated first, every file is
+        written to a temp, and memory changes only once all of them are in
+        place. It used to push the redo stack and save it before anything
+        could fail — on a full disk that left redo_stack.json empty and an
+        extra phantom Redo entry in memory per press; an unreadable snapshot
+        failed every press with a raw pydantic dump and grew Redo each time."""
         if not self.undo_available:
             return False
         snaps = self._snapshot_files()
-        # Push current onto redo stack, with the op it came from (Final QA:
-        # redo used to re-append a generic "Redo" and the name was lost).
-        self._redo_stack.append(self.edl.model_copy(deep=True))
-        self._redo_ops.append(self.ops.last())
-        self._save_redo_stack()
-        # Restore previous snapshot
         prev = snaps[-2]
-        self.edl = EDL.model_validate_json(prev.read_text(encoding="utf-8"))
-        self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
-        # Pop the last op (it's now undone; the redo stack keeps it)
-        if self.ops.pop():
-            self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
+        try:
+            prev_edl = EDL.model_validate_json(prev.read_text(encoding="utf-8"))
+        except ValueError as e:        # pydantic ValidationError, bad UTF-8
+            self._end_history_at(snaps[:-1], prev, e)
+            raise ValueError(self.DAMAGED_HISTORY_MSG) from None
+        # The current state goes onto the redo stack with the op it came from
+        # (Final QA: redo used to re-append a generic "Redo" and lose the name).
+        stack = [*self._redo_stack, self.edl.model_copy(deep=True)]
+        redo_ops = [*self._redo_ops, self.ops.last()]
+        undone = self.ops.pop()
+        try:
+            temps = self._stage([(self.edl_path, prev_edl.to_json()),
+                                 (self.ops_path, self.ops.model_dump_json()),
+                                 *self._redo_files(stack, redo_ops)])
+        except OSError:
+            if undone is not None:
+                self.ops.ops.append(undone)
+            raise
+        self._publish(temps)
+        self.edl, self._redo_stack, self._redo_ops = prev_edl, stack, redo_ops
         # Remove the snapshot we just left
         snaps[-1].unlink(missing_ok=True)
         return True
@@ -418,17 +474,18 @@ class EDLStore:
     def redo(self) -> bool:
         """Replay the most recently undone op without clearing the rest of
         the redo stack — naive `commit("redo")` would `clear()` the stack
-        and limit redo to a single step."""
+        and limit redo to a single step. All-or-nothing, as `undo`."""
         if not self._redo_stack:
             return False
-        self.edl = self._redo_stack.pop()
-        op = self._redo_ops.pop() if self._redo_ops else None
-        self._save_redo_stack()
-        self.edl.recompute_duration()
-        new_hash = self.edl.hash()
+        target = self._redo_stack[-1].model_copy(deep=True)
+        op = self._redo_ops[-1] if self._redo_ops else None
+        stack, redo_ops = self._redo_stack[:-1], self._redo_ops[:-1]
+        target.recompute_duration()
+        new_hash = target.hash()
         prev_hash = self._last_hash()
-        self._snapshot(new_hash)
-        self.edl_path.write_text(self.edl.to_json(), encoding="utf-8")
+        payload = target.to_json()
+        # Named by op seq + 1, as `_snapshot` names it.
+        snap = self.snapshots_dir / f"{len(self.ops.ops) + 1:05d}_{new_hash}.json"
         if op is not None:
             # The redone op itself, so History and the preview's changed-range
             # logic see what came back ("Animation — In Zoom In", not "Redo").
@@ -436,5 +493,15 @@ class EDLStore:
                             by=op.by, redo=True)
         else:
             self.ops.append("redo", {}, "Redo", prev_hash, new_hash, by="user", redo=True)
-        self.ops_path.write_text(self.ops.model_dump_json(), encoding="utf-8")
+        try:
+            temps = self._stage([(snap, payload), (self.edl_path, payload),
+                                 (self.ops_path, self.ops.model_dump_json()),
+                                 *self._redo_files(stack, redo_ops)])
+        except OSError:
+            self.ops.pop()
+            raise
+        self._publish(temps)
+        self.edl, self._redo_stack, self._redo_ops = target, stack, redo_ops
+        self._drop_empty_redo_files()
+        self._prune_snapshots()
         return True

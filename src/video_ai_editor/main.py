@@ -770,6 +770,11 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
+    # FIRST, before any directory or byte is written (final sweep 2): 400 for
+    # a path-shaped sid ('..' transcoded into WORKDIR's PARENT and wrote a
+    # media library there), 404 for one that is not a project (a well-formed
+    # unknown sid became a new project holding the take) — as audio_upload.
+    store = _store(sid)
     _require_media_tools()                       # QA-108: the take is transcoded by ffmpeg
     sd = session_dir(sid)
     vo_dir = sd / "uploads" / "vo"
@@ -814,7 +819,6 @@ async def vo_record(sid: str, request: Request, file: UploadFile = File(...),
     if display_name:
         _remember_display_name(sd, norm, display_name)
 
-    store = _store(sid)
     from .edl.schema import Track, Clip, AudioProps
 
     def _edit():
@@ -871,6 +875,10 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
     busy = _prompt_running_response(sid)
     if busy is not None:
         return busy
+    # Final sweep 2: the sid is checked BEFORE anything is written — '..'
+    # wrote the sticker into WORKDIR's parent and an unknown sid became a
+    # project (audio_upload's order).
+    store = _store(sid)
     sd = session_dir(sid)
     sticker_dir = sd / "uploads" / "stickers"
     sticker_dir.mkdir(parents=True, exist_ok=True)
@@ -886,8 +894,6 @@ async def sticker_upload(sid: str, request: Request, file: UploadFile = File(...
     info = {"src": str(dst), "filename": dst.name,
             "display_name": _display_name(file.filename, safe_name)}
     if add_at_playhead:
-        store = _store(sid)
-
         def _edit():
             canvas = store.edl.canvas
             res = dispatch(store, "add_sticker", {
@@ -2417,9 +2423,20 @@ def list_session_jobs(sid: str):
     return {"jobs": [j.to_dict() for j in JOB_MANAGER.list(session_id=sid)]}
 
 
+#: A render hash (`EDL.hash` / `EDL.render_hash`): 16 lowercase hex digits.
+_RENDER_HASH_RE = re.compile(r"[0-9a-f]{16}")
+
+
 @app.get("/api/sessions/{sid}/preview.mp4")
 async def stream_preview(sid: str, request: Request, h: str | None = None):
     from starlette.concurrency import run_in_threadpool
+    # Final sweep 2 r2: `h` names a render, and nothing else. It was joined
+    # raw onto the previews folder, so `../../../x` or an absolute path
+    # (pathlib drops the base) served any .mp4 on the Mac — other projects'
+    # exports included. Only the render-hash shape is accepted, and the
+    # resolved file must still sit inside this session's previews/.
+    if h and not _RENDER_HASH_RE.fullmatch(h):
+        raise HTTPException(404, "preview for that hash is no longer available")
     store = await run_in_threadpool(_store, sid)
     # The hash the preview of the CURRENT state is stored under — offline-
     # aware (QA-095), so a render made while the media was present is never
@@ -2431,7 +2448,10 @@ async def stream_preview(sid: str, request: Request, h: str | None = None):
         # The EDL's own hash (what /dispatch answers) names the current render.
         h = current_hash
     target_hash = h or current_hash
-    p = store.dir / "previews" / f"{target_hash}.mp4"
+    previews = store.dir / "previews"
+    p = previews / f"{target_hash}.mp4"
+    if not p.resolve().is_relative_to(previews.resolve()):
+        raise HTTPException(404, "preview for that hash is no longer available")
     # Treat a 0-byte leftover (from a killed render that predates atomic writes)
     # as missing — serving it would hand the client a torn file that mp4box
     # rejects with "invalid box". Re-render instead.
@@ -2616,6 +2636,11 @@ def _save_history(sid: str, history: list[dict]) -> None:
 
 @app.get("/api/sessions/{sid}/history")
 def get_history(sid: str):
+    # Final sweep 2: a GET never creates a project. `_history_path` →
+    # `session_dir` built the whole tree for any sid, so an <img> on another
+    # 127.0.0.1 page filled the project list, and '.' / '..' built one in
+    # WORKDIR or its parent.
+    _existing_session_or_error(sid)
     return {"history": _load_history(sid)}
 
 
@@ -3136,6 +3161,10 @@ def serve_session_file(sid: str, kind: str, name: str, as_name: str | None = Que
     if not is_valid_session_id(sid):
         raise HTTPException(400, {"code": "invalid_sid", "message": "invalid session id"})
     if kind not in {"uploads", "previews", "exports"}:
+        raise HTTPException(404, "not found")
+    # Final sweep 2: an unknown sid is a 404 with nothing created
+    # (`session_dir` below builds the tree).
+    if not session_exists(sid):
         raise HTTPException(404, "not found")
     base = (session_dir(sid) / kind).resolve()
     # `name` may include subdirs (e.g. "stickers/smile.png",

@@ -10,12 +10,17 @@
 // `limiting`; support.ts `audio:limiting`). The bound is the triangle
 // inequality — master gain × Σ bus gain × clip gain × envelope max × source
 // peak — so it can only flag too much, never too little. A clip whose peak is
-// not known yet (the layout has not loaded, or it has no `chunk_peak`) or
-// that runs a voice effect (its stages can add gain) is unbounded.
+// not known yet (the layout has not loaded, or it has no `chunk_peak`) is
+// unbounded. A voice effect's stages can add gain: its clip is bounded by
+// voicePeakBound (per stage — echo taps, filter L1 norms, the drive's
+// ceiling, the reverb's impulse response) of its source peak, its priming
+// included (K2, 0.8.0 QA: it was unbounded outright, and every voice effect
+// on a project with a loudness target said "≈ Limiter on loud sound").
 
 import type { BusPlan, ClipAudio } from './audioPlan'
 import type { CompiledEnv } from './curves'
 import { frameOf, type FpsLike } from '../timeline/timebase'
+import { voicePeakBound } from '../../voice/voiceFx'
 
 /** Samples either side of a stretch over the ceiling that the limiters'
  *  envelopes still touch: alimiter's 5 ms attack look-ahead and 50 ms
@@ -61,12 +66,65 @@ export function clipSourceSpan(c: ClipAudio): [number, number] {
  *  gain); Infinity when it cannot be bounded. */
 export function clipPeakBound(c: ClipAudio, busGain: number, peak: PeakLookup): number {
   if (c.mute || c.gain <= 0 || busGain <= 0) return 0
-  if (c.voice) return Infinity
-  const [s0, s1] = clipSourceSpan(c)
+  let [s0, s1] = clipSourceSpan(c)
+  // a primed effect also reads real sound before the head (mixGraph.primeOf:
+  // a forward run's `prime` samples)
+  if (c.voice && c.map.kind === 'runs') s0 = Math.max(0, s0 - c.voice.prime)
   if (s1 <= s0) return 0
   const p = peak(c.src, s0, s1)
   if (p === null || !Number.isFinite(p)) return Infinity
-  return busGain * c.gain * envMaxLinear(c.env) * p * (c.map.kind === 'runs' ? 1 : RESAMPLE_OVERSHOOT)
+  const input = p * (c.map.kind === 'runs' ? 1 : RESAMPLE_OVERSHOOT)
+  // the effect runs on the retimed samples, before the clip's gain
+  return busGain * c.gain * envMaxLinear(c.env) * (c.voice ? voicePeakBound(c.voice, input) : input)
+}
+
+/** Source grain a sample-exact clip is bounded at: 1 s, a divisor of the
+ *  proxy index's 5 s `chunk_samples`, so a piece never straddles a chunk
+ *  (any other chunk size only makes a piece's bound coarser, never low). */
+export const PEAK_GRAIN = 48000
+
+interface Piece { a: number; b: number; bound: number }
+
+/**
+ * A clip's contribution bound per stretch of OUTPUT samples (final sweep 2).
+ * Bounding a clip once by its whole source span flagged a 200 s talking head
+ * as "≈ Limiter on loud sound" end to end for one hot 5 s chunk. A
+ * sample-exact (`runs`) clip without a voice effect maps each output sample
+ * to one source sample, so it is cut where its source crosses a PEAK_GRAIN
+ * boundary and each piece is bounded by its own source samples. A resample
+ * (`rate`/`curve`) and a voice effect (echo/reverb tails carry a hot chunk
+ * past its own samples) keep the whole-clip bound.
+ */
+export function clipPieces(c: ClipAudio, busGain: number, peak: PeakLookup): Piece[] {
+  if (c.n <= 0) return []
+  const whole = (): Piece[] => {
+    const bound = clipPeakBound(c, busGain, peak)
+    return bound > 0 ? [{ a: c.out0, b: c.out0 + c.n, bound }] : []
+  }
+  const m = c.map
+  if (c.voice || m.kind !== 'runs' || m.runs.some(([, , , dir]) => dir !== 1 && dir !== -1 && dir !== 0)) return whole()
+  if (c.mute || c.gain <= 0 || busGain <= 0) return []
+  const k = busGain * c.gain * envMaxLinear(c.env)
+  const out: Piece[] = []
+  for (const [off, cnt, first, dir] of m.runs) {
+    for (let i = 0; i < cnt;) {
+      const src = first + dir * i
+      const blk = Math.floor(src / PEAK_GRAIN)
+      const j = dir === 0 ? cnt
+        : dir > 0 ? Math.min(cnt, (blk + 1) * PEAK_GRAIN - first)
+          : Math.min(cnt, first - blk * PEAK_GRAIN + 1)
+      const last = first + dir * (j - 1)
+      const lo = Math.max(0, Math.min(src, last)), hi = Math.max(src, last) + 1
+      const p = hi > lo ? peak(c.src, lo, hi) : 0
+      const bound = p === null || !Number.isFinite(p) ? Infinity : k * p
+      const a = c.out0 + off + i, b = c.out0 + off + j
+      const prev = out[out.length - 1]
+      if (prev && prev.b === a && prev.bound === bound) prev.b = b
+      else if (bound > 0) out.push({ a, b, bound })
+      i = Math.max(j, i + 1)
+    }
+  }
+  return out
 }
 
 /** `limiting` sample ranges as output FRAME ranges [k0, k1) for support.ts
@@ -76,24 +134,38 @@ export function limitingFrames(ranges: ReadonlyArray<readonly [number, number]>,
 }
 
 /** Output-sample ranges (merged, widened by LIMITING_SPREAD, inside
- *  [0, total)) where the bound on the pre-limiter peak tops the ceiling. */
+ *  [0, total)) where the bound on the pre-limiter peak tops the ceiling.
+ *  With `post` (a mixed programme's loudness stage, MasterPlan.post) a
+ *  stretch is also flagged where that stage's input — the first limiter's
+ *  output, at most its ceiling — times the post gain tops ITS ceiling; the
+ *  first stage is checked on its own, so a negative loudness gain can no
+ *  longer hide a mix the server's 0.97 limiter works on (final QA). */
 export function limitingRanges(clips: readonly ClipAudio[], buses: readonly BusPlan[], masterGain: number,
-                               ceilingDb: number | null, total: number, peak: PeakLookup): Array<[number, number]> {
+                               ceilingDb: number | null, total: number, peak: PeakLookup,
+                               post?: { gain: number; ceilingDb: number }): Array<[number, number]> {
   if (ceilingDb === null || total <= 0) return []
   const ceiling = Math.pow(10, ceilingDb / 20)
   const busGain = new Map(buses.map((b) => [b.id, b.gain]))
-  const live: Array<{ a: number; b: number; bound: number }> = []
-  for (const c of clips) {
-    const bound = clipPeakBound(c, busGain.get(c.bus) ?? 1, peak)
-    if (bound > 0 && c.n > 0) live.push({ a: c.out0, b: c.out0 + c.n, bound })
-  }
+  const live = clips.flatMap((c) => clipPieces(c, busGain.get(c.bus) ?? 1, peak))
   const cuts = [...new Set(live.flatMap((x) => [x.a, x.b]))].sort((x, y) => x - y)
+  // Σ of the bounds live over each stretch between cuts: a sweep (a long
+  // clip is many pieces now), an unbounded piece counted apart from the sum.
+  const at = new Map(cuts.map((t, i) => [t, i]))
+  const dSum = new Float64Array(cuts.length + 1)
+  const dInf = new Int32Array(cuts.length + 1)
+  for (const x of live) {
+    const i = at.get(x.a)!, j = at.get(x.b)!
+    if (x.bound === Infinity) { dInf[i]++; dInf[j]-- } else { dSum[i] += x.bound; dSum[j] -= x.bound }
+  }
   const over: Array<[number, number]> = []
+  let sum = 0, inf = 0
   for (let i = 0; i + 1 < cuts.length; i++) {
+    sum += dSum[i]; inf += dInf[i]
     const a = cuts[i], b = cuts[i + 1]
-    let sum = 0
-    for (const x of live) if (x.a <= a && b <= x.b) sum += x.bound
-    if (masterGain * sum > ceiling) over.push([a - LIMITING_SPREAD, b + LIMITING_SPREAD])
+    const level = masterGain * sum
+    const hot = inf > 0 || level > ceiling
+      || (post !== undefined && post.gain * Math.min(level, ceiling) > Math.pow(10, post.ceilingDb / 20))
+    if (hot) over.push([a - LIMITING_SPREAD, b + LIMITING_SPREAD])
   }
   const out: Array<[number, number]> = []
   for (const [a0, b0] of over) {

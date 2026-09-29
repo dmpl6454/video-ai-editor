@@ -108,6 +108,14 @@ def bind_clip(ref: Any, f: TimelineFacts) -> tuple[str | None, str | None]:
         return None, "There is no clip on the main track yet — add one first."
     if ref == "$playhead" and f.playhead is None:
         return None, "Which clip? The playhead position is not known — name it like 'the second clip'."
+    if ref == "$playhead":
+        # "the clip under the playhead": that ONE clip, by id — the verifier
+        # reads a sentinel as every clip, so the check failed on a right edit
+        t = float(f.playhead)
+        hit = next((cid for cid, a, b in (v1_spans(f) or []) if a - _TOL_S <= t < b), None)
+        if hit:
+            return hit, None
+        return None, f"Which clip? The playhead ({t:g}s) is not over a clip on the main track."
     return ref, None
 
 
@@ -182,13 +190,19 @@ def x_duplicate(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
     if ref == "$v1_all":
         return _ask("Duplicate every clip? Name one clip, like 'duplicate the second clip'.")
     span = _span_of(ref, f)
+    n = int(it.get("_copies") or 1)
     pcs = [pc("tool_ok", "the clip was duplicated", tool="duplicate_clip")]
     if span and not other_cuts(ctx, "duplicate"):
-        pcs.insert(0, pc("duration_between", "the copy sits right after the original",
-                         target=round((f.video_end or f.duration) + (span[1] - span[0]), 3), tol=0.1))
+        pcs.insert(0, pc("duration_between", "the copies sit right after the original" if n > 1 else
+                         "the copy sits right after the original",
+                         target=round((f.video_end or f.duration) + n * (span[1] - span[0]), 3), tol=0.1))
     what = _label(ref, f)
-    return Expansion(steps=(step("duplicate_clip", STAGE_CUTS, f"duplicate {what} right after itself", clip_id=ref),),
-                     postconditions=tuple(pcs), notes=(f"duplicated {what}",))
+    # a sentinel re-resolves per step ($v1_last would become the new copy);
+    # the id stays the original's, so every copy lands right after it
+    steps = tuple(step("duplicate_clip", STAGE_CUTS, f"duplicate {what} right after itself", clip_id=ref)
+                  for _ in range(n))
+    return Expansion(steps=steps, postconditions=tuple(pcs),
+                     notes=(f"duplicated {what}" + (f" {n} times" if n > 1 else ""),))
 
 
 def _concrete(ref: Any, f: TimelineFacts) -> tuple[str | None, str | None]:
@@ -280,10 +294,11 @@ def x_zoom(it: Intent, f: TimelineFacts, ctx: Context) -> Expansion:
         check_dir = ("in" if level > 1 else "out") if it.get("absolute") else direction
         steps = [step("set_clip_transform", STAGE_LOOK, f"zoom {_label(c, f)} to {level * 100:g}%",
                       clip_id=c, scale=level) for c in targets]
+        reset = bool(it.get("_reset")) and abs(level - 1.0) < 1e-6   # "reset the zoom": no direction to check
         return Expansion(steps=tuple(steps),
                          postconditions=(pc("tool_ok", "the zoom is set", tool="set_clip_transform"),
-                                         *(pc("clip_zoomed", f"the picture zooms {check_dir}", clip_id=c,
-                                              direction=check_dir) for c in targets)),
+                                         *(() if reset else (pc("clip_zoomed", f"the picture zooms {check_dir}",
+                                                                clip_id=c, direction=check_dir) for c in targets))),
                          notes=(f"{_label(targets[0], f) if len(targets) == 1 else 'every clip'} zoomed to {level * 100:g}%",))
     if ctx.has_cut_steps:
         return _ask("Zoom in its own prompt: the cuts in this one change every clip's length.")

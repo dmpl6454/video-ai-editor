@@ -52,6 +52,8 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
     ("add_text", "font"): "exempt",
     # Same rule: set_caption_style validates through check_font_arg.
     ("set_caption_style", "font"): "exempt",
+    # K3: set_text_style validates through check_font_arg too.
+    ("set_text_style", "font"): "exempt",
     # A dotted ATTRIBUTE path — "transform.x", "audio.gain_db" — not a
     # filesystem path. The genuinely dangerous half of this tool is its
     # `value` when the leaf is `src`, which the handler guards; see
@@ -88,7 +90,7 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
 }
 
 #: For the count pin in tests/test_path_guards.py and test_prompt_contracts.py.
-PATH_ARGS_COUNT = 24   # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt)
+PATH_ARGS_COUNT = 25   # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt); +1 K3 set_text_style.font (exempt)
 
 
 def guarded_args(kind: PathGuard) -> frozenset[tuple[str, str]]:

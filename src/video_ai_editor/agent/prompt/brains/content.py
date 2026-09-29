@@ -33,7 +33,7 @@ from .jsonfix import JsonRepairFailed, repair
 __all__ = ["HOOK_MAX_CHARS", "HOOK_MAX_WORDS", "HOOK_TOOL", "HOOK_RECIPE", "HookText", "RankResult",
            "hook_candidates_task", "rank_windows_task", "sanitize_hook_items", "sanitize_ranking",
            "needs_hook_text", "strip_model_hook_text", "ground_duck_off", "ground_to_prompt",
-           "ground_music_level", "music_level_direction",
+           "ground_music_level", "music_level_direction", "ground_semantics",
            "mentioned_intents", "parse_text_items", "text_task_prompts",
            "heuristic_hook_candidates", "hook_text", "rank_windows", "HEURISTIC_SOURCE"]
 
@@ -264,6 +264,7 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
             # (a lower third) — headline words are the title's text.
             slots["text"] = slots.pop("name")
         fixed.append(it if slots == it.slots else it.model_copy(update={"slots": slots}))
+    fixed = ground_semantics(fixed, prompt)
     # The model's own questions and its reply are dropped: every live answer
     # asked "which platform?" (options: the music file's name) for edits that
     # need no platform, and replied "I've stopped ducking the music" before
@@ -271,6 +272,54 @@ def ground_to_prompt(draft: IntentDraft, prompt: str) -> IntentDraft:
     # built from what the run did (summary.py).
     return draft.model_copy(update={"intents": fixed, "exclusions": exclusions,
                                     "needs_input": [], "reply": ""})
+
+
+def ground_semantics(intents: list, prompt: str) -> list:
+    """K3: an on-device draft read through the SAME semantics the grammar and
+    the executor's contract use (agent/prompt/semantics.py), so a model can
+    not invert what the words say:
+
+      * speed — the factor the words fix ("reduce the speed" → slower,
+        "3 times faster" → 3x, "back to normal" → 1x); a factor on the wrong
+        side of 1x is replaced; a clause that contradicts itself ("slow it
+        down to 2x") drops the speed intent (the recipes brain asks);
+      * volume — the direction ("turn the music DOWN") and a relative vs an
+        absolute amount ("by 6 dB" / "to -6 dB") come from the words;
+      * mute — "mute clip 2 but keep the music" never mutes the music.
+    Nothing the model added that the words do not decide is changed here."""
+    from .. import semantics as M
+    words = M.norm(prompt or "")
+    out = []
+    for it in intents:
+        slots = dict(it.slots)
+        if it.recipe == "speed" and not slots.get("preset"):
+            sa = M.speed_ask(words)
+            if sa.ambiguous:
+                continue
+            f = slots.get("factor")
+            try:
+                f = float(f) if f is not None else None
+            except (TypeError, ValueError):
+                f = None
+            if sa.factor is not None:
+                slots["factor"] = sa.factor
+            elif sa.direction in ("up", "down") and (f is None or (f > 1) != (sa.direction == "up") or f == 1):
+                slots["factor"] = M.default_speed(sa.direction)
+        if it.recipe == "volume":
+            la = M.level_ask(words)
+            if la.direction in ("up", "down") or la.db is not None:
+                # the grammar's own reader of "by N" vs "to N" (planner._volume_slots)
+                from ..planner import _volume_slots
+                level = _volume_slots(words, str(slots.get("target") or "music") == "music")
+                slots = {k: v for k, v in slots.items() if k not in ("db", "change", "_delta_db")}
+                slots.update({k: v for k, v in level.items() if k in ("db", "change", "_delta_db")})
+                if la.direction in ("up", "down") and slots.get("change") not in (None, la.direction):
+                    slots["change"] = la.direction
+        if it.recipe == "mute" and str(slots.get("target") or "") == "music" and re.search(
+                r"\b(?:keep|but|except|apart from|other than)\b.*\b(?:music|song|soundtrack)\b", words):
+            continue
+        out.append(it if slots == it.slots else it.model_copy(update={"slots": slots}))
+    return out
 
 
 #: Recipes that change the SOUND (Final QA r3: dropped when the prompt names

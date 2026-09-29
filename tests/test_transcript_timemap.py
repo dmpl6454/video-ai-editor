@@ -185,6 +185,10 @@ def fake_whisper(monkeypatch):
 
     def fake_transcribe(path, language=None, model_size=None, backend=None,
                         task="transcribe", on_progress=None, should_cancel=None):
+        # `silent`: files with no speech (auto_caption transcribes every
+        # audible source since final sweep 2, not only the first v1 file).
+        if Path(path).name in plan.get("silent", ()):
+            return _FakeTranscript({"language": "en", "duration": CLIP_DUR, "segments": []})
         return _FakeTranscript(plan["transcript"])
 
     monkeypatch.setattr(T, "transcribe", fake_transcribe)
@@ -602,6 +606,7 @@ def test_auto_caption_with_two_sources_maps_only_through_the_transcribed_clip(tm
     dispatch(store, "add_clip", {"track": "v1", "src": str(b), "in": 0, "out": CLIP_DUR,
                                  "start": CLIP_DUR})
     fake_whisper["transcript"] = _transcript([("hello", 2.0, 2.5), ("world", 2.6, 3.0)])
+    fake_whisper["silent"] = {Path(store.edl.get_track("v1").clips[1].src).name}   # b says nothing
     dispatch(store, "auto_caption", {"style": "word_emphasis", "chunk_size": 1})
     assert [(c.start, c.text) for c in _captions(store)] == [(2.0, "HELLO"), (2.6, "WORLD")]
 

@@ -16,6 +16,7 @@ import re
 from typing import Any, Callable
 
 from . import grammar as G
+from . import semantics as M
 from . import slots as S
 
 _T = r"(?:(\d{1,2}):(\d{2}(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?)?)"
@@ -137,10 +138,11 @@ def _move(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
 
 
 _PCT_RE = re.compile(r"\b(\d{2,3}(?:\.\d+)?)\s*(?:%|percent\b)")
+_TIMES_X_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*x\b")
 _ZOOM_OUT_RE = re.compile(r"\b(?:zoom|push|pull)(?:s|ed|ing)?[- ]?out\b|\bpull back\b")
 _SLOW_RE = re.compile(r"\bslow(?:ly)?\b|\bgradual(?:ly)?\b|\bken[- ]?burns\b|\bpan (?:and|&) zoom\b|\bover the (?:clip|shot)\b"
                       r"|\bsmooth(?:ly)?\b|\bgentle\b|\bsubtle\b|\bzoom (?:effect|animation)\b")
-_STATIC_RE = re.compile(r"\bpunch(?:es|ed|ing)?[- ]?in\b|\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)")
+_STATIC_RE = re.compile(r"\bpunch(?:es|ed|ing)?[- ]?in\b|\b\d{2,3}(?:\.\d+)?\s*(?:%|percent\b)|(?<![\w.])\d+(?:\.\d+)?\s*x\b")
 
 
 def _zoom_level(clause: str, m: re.Match, direction: str) -> float:
@@ -164,13 +166,23 @@ def _zoom_level(clause: str, m: re.Match, direction: str) -> float:
 
 def _zoom(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     clause = hit.clause
+    if re.search(r"\b(?:reset|undo|clear)\s+(?:the\s+|its\s+)?zoom\b|\bzoom\b.*\bback\s+to\s+(?:normal|100\s*%|1\s*x)\b"
+                 r"|\bun-?zoom\b|\bno\s+zoom\b", clause):
+        # "reset the zoom on clip 2" put transitions on every seam
+        return {"clip_ref": clip_ref(hit), "direction": "out", "scale": 1.0, "_reset": True, "style": "static"}
     out: dict[str, Any] = {"clip_ref": clip_ref(hit),
                            "direction": "out" if _ZOOM_OUT_RE.search(clause) else "in"}
     m = _PCT_RE.search(clause)
+    mx = _TIMES_X_RE.search(clause)
     if m:
         out["scale"] = _zoom_level(clause, m, out["direction"])
         # "to 80%": a level the user named, whichever way it goes
         out["absolute"] = re.search(r"\bto\s*$", clause[:m.start()]) is not None
+    elif mx and 0.1 <= float(mx.group(1)) <= 5.0:
+        # "zoom clip 1 to 2x" / "scale clip 3 to 1.5x": the size itself
+        out["scale"] = round(float(mx.group(1)), 3)
+        out["absolute"] = True
+        out["direction"] = "out" if float(mx.group(1)) < 1.0 else "in"
     if _STATIC_RE.search(clause) and not re.search(r"\bslow(?:ly)?\b|\bgradual", clause):
         out["style"] = "static"
     elif _SLOW_RE.search(clause) or "scale" not in out:
@@ -178,18 +190,12 @@ def _zoom(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     return out
 
 
-_DEG_RE = re.compile(r"(-?\d{1,3})\s*(?:°|degrees?|deg)\b")
-
-
 def _rotate(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     clause = hit.clause
-    deg: float | None = None
-    m = _DEG_RE.search(clause)
-    if m:
-        deg = float(m.group(1))
-    elif re.search(r"\bupside down\b", clause):
+    deg: float | None = M.rotation_degrees(clause)
+    if deg is None and re.search(r"\bupside down\b", clause):
         deg = 180.0
-    elif re.search(r"\bsideways\b|\bclockwise\b", clause):
+    elif deg is None and re.search(r"\bsideways\b|\bclockwise\b", clause):
         deg = 90.0
     if deg is not None and re.search(r"\b(?:counter[- ]?clockwise|anti[- ]?clockwise|to the left|left)\b", clause):
         deg = -abs(deg)
@@ -198,7 +204,7 @@ def _rotate(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
 
 _PROP_RE = (
     (re.compile(r"\bcontrast\w*|\bflatter\b|\bflat\b"), "contrast"),
-    (re.compile(r"\bsaturat\w*|\bcolou?rful\b|\bvibran\w*|\bdull\b|\bwashed out\b"), "saturation"),
+    (re.compile(r"\b(?:de)?saturat\w*|\bcolou?rful\b|\bvibran\w*|\bdull\b|\bwashed out\b"), "saturation"),
     (re.compile(r"\bbright\w*|\bdark\w*|\blight(?:er)?\b|\bdim\w*|\bexposure\b"), "brightness"),
 )
 _DOWN_RE = re.compile(r"\b(?:lower|reduce|decrease|drop|lessen|less|turn down|tone down|dial (?:down|back)|darker|darken|"
@@ -253,7 +259,8 @@ def _length(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
 _REMOVE_WHAT: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\b(?:captions?|subtitles?|subs)\b"), "captions"),
     (re.compile(r"\b(?:transitions?|cross[- ]?fades?|dissolves?)\b"), "transition"),
-    (re.compile(r"\b(?:filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading)\b"), "filter"),
+    (re.compile(r"\b(?:filters?|luts?|looks?|colou?r grade|colou?r grading|grades?|grading)\b"
+                r"|\b(?:black and white|b ?& ?w|b and w|mono(?:chrome)?|gr[ae]y ?scale|sepia)\s+(?:off|out)\b"), "filter"),
     (re.compile(r"\b(?:text|titles?|lower thirds?|hooks?|headlines?)\b"), "text"),
 )
 _PLURAL_REMOVE_RE = re.compile(r"\b(?:all|every|both|those|these)\b|\b(?:captions|subtitles|subs|transitions|crossfades|"
@@ -320,7 +327,7 @@ def _remove(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     if what == "filter":
         out["clip_ref"] = G.clip_ref_of(clause)
         out["_grade"] = bool(_GRADE_RE.search(clause))
-        out["_look"] = c.look                  # "the black and white filter" → mono.cube
+        out["_look"] = c.look or S.look_of(clause)   # "the black and white filter" → mono.cube
     elif what == "transition":
         from .planner import _at_seconds
         out["_seam"] = seam_index(clause)
@@ -392,8 +399,26 @@ def _anim_read(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     return read_animation(hit, c)
 
 
+_COPIES_RE = re.compile(r"\b(twice|thrice)\b|\b(\d{1,2}|two|three|four|five|six|seven|eight|nine|ten)\s+"
+                        r"(?:times|copies|more\s+times|more\s+copies|duplicates)\b")
+_COPY_WORDS = {"twice": 2, "thrice": 3, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+               "nine": 9, "ten": 10}
+
+
+def _duplicate(hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
+    """"duplicate clip 1 three times" made ONE copy: the count is how many
+    copies (never above 10)."""
+    out = _one(hit, c)
+    m = _COPIES_RE.search(hit.clause)
+    if m:
+        w = m.group(1) or m.group(2)
+        n = int(w) if w.isdigit() else _COPY_WORDS.get(w, 1)
+        out["_copies"] = max(1, min(10, n))
+    return out
+
+
 READERS: dict[str, Callable[[G.IntentHit, S.Slots], dict[str, Any]]] = {
-    "delete_clip": _one, "duplicate": _one, "move_clip": _move, "zoom": _zoom, "rotate": _rotate,
+    "delete_clip": _one, "duplicate": _duplicate, "move_clip": _move, "zoom": _zoom, "rotate": _rotate,
     "adjust": _adjust, "clip_length": _length, "remove_feature": _remove, "flip": _flip,
     # Wave E (F2): CapCut Canvas and blend modes (canvas_expanders.py)
     "canvas": _canvas_read, "blend": _blend_read,
@@ -462,6 +487,9 @@ def seam_index(clause: str) -> int | None:
     return after
 
 
+_HALF_RE = re.compile(r"\b(first|second|last|latter|front|back)\s+half\b(?!\s+of\s+(?:the\s+)?(?:clip|shot|\w+\s+clip))")
+
+
 def clip_extras(r: str, hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
     """Extra slots for the existing recipes: the clip an ordinal names, the
     range an edit covers, a title's time, a transition's seam, a freeze at
@@ -472,10 +500,14 @@ def clip_extras(r: str, hit: G.IntentHit, c: S.Slots) -> dict[str, Any]:
         out: dict[str, Any] = {"clip_ref": ref} if ref else {}
         if r == "color_look" and not c.look and re.search(r"\bpop\b|\bpoppy\b", clause):
             out["look"] = "punch.cube"           # "make the colours pop"
-        if r == "speed" and ref is None:
+        if r in ("speed", "color_look") and ref is None:
             rng = _range(c, clause)
             if rng is not None:
                 out["_range"] = rng
+            elif (h := _HALF_RE.search(clause)) and not re.search(r"\bsplit|\bcut\b", clause):
+                # final sweep 2 r2: "the second half of the video in slow
+                # motion" slowed every clip — half of the VIDEO, bound at plan time
+                out["_half"] = "first" if h.group(1) in ("first", "front") else "last"
         return out
     if r in ("mute", "volume"):
         if _MUSIC_RE.search(clause):

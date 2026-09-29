@@ -74,8 +74,11 @@ def audio_root(tmp_path_factory) -> dict:
         "toneB": fx.tone_source(src / "toneB.mp4", 7, 550, 330),
         "bed": fx.tone_source(src / "bed.m4a", 8, 220, 277, video=False, amp=0.3),
         "voice": fx.tone_source(src / "voice.m4a", 6, 880, 990, video=False, amp=0.25),
+        "sine440": fx.sine_source(src / "sine440.mp4", 7, 440, 0.8),
+        "sine330": fx.sine_source(src / "sine330.m4a", 7, 330, 0.8, video=False),
     }
-    twins = {n: str(fx.lossless_twin(S[n], src / f"{n}.twin.mov")) for n in ("toneA", "toneB", "bed", "voice")}
+    twins = {n: str(fx.lossless_twin(S[n], src / f"{n}.twin.mov"))
+             for n in ("toneA", "toneB", "bed", "voice", "sine440", "sine330")}
     hot = src / "hot.mov"                         # peaks over full scale: chunk headroom gain
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                     f"aevalsrc=exprs='1.7*sin(2*PI*100*t)|0.4*sin(2*PI*150*t)':s={SR}:d=6",
@@ -137,6 +140,8 @@ def cases(audio_root) -> dict:
     add("mix_curve", *fx.curve_edl(S["toneA"], S["toneB"], S["bed"]))
     add("pip_speed", *fx.pip_speed_edl(S["toneA"], S["toneB"]))
     add("mix_hot", *fx.hot_edl(S["counter30"], S["counter2997"]))
+    e, fps = fx.hot_loud_edl(S["sine440"], S["sine330"])
+    add("mix_hot_loud", e, fps, loud=-12.0)
     return out
 
 
@@ -405,7 +410,8 @@ def _lag(client: np.ndarray, server: np.ndarray, max_lag: int = 64) -> int:
     return arg
 
 
-@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed", "mix_hot"])
+@pytest.mark.parametrize("name", ["mix", "mix_solo", "mix_duck", "mix_loud", "mix_curve", "pip_speed", "mix_hot",
+                                  "mix_hot_loud"])
 def test_p1_a2_mix_parity_with_the_server_render(browser, cases, name):
     edl, fps, server, aac = cases[name]
     r = browser.run("render", case=name, timeout=120)

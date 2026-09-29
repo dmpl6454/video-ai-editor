@@ -19,3 +19,13 @@ export function tipPosition(
   y = Math.max(EDGE, Math.min(viewport.height - tip.height - EDGE, y))
   return { x: Math.round(x), y: Math.round(y) }
 }
+
+/** Is the pointer over the tip's box? The tip is `pointer-events: none` (a
+ *  click must reach the panel control under it — final QA: it covered the top
+ *  row of every tool panel and ate the first click), so WCAG 1.4.13
+ *  "hoverable" is kept by geometry instead of pointerenter/leave. */
+export function pointInRect(
+  x: number, y: number, r: { left: number; top: number; right: number; bottom: number },
+): boolean {
+  return x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}

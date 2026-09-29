@@ -16,6 +16,10 @@
   WebKit's colour-managed drawImage).
 * The preview shows an "≈" chip on an APPROX frame (Spin In, a voice effect)
   and none on an EXACT one.
+* A loudness gain the server has not measured yet is no "≈ Loudness" chip
+  (K2, 0.8.0 QA: every fresh project showed one): it is in the preview's
+  telemetry, the render that measures it is asked for at once, and a voice
+  effect's chip names only the voice effect meanwhile.
 
 Harness: VAE_A11Y_BASE_URL = a Vite dev server proxying /api to a backend
 (test_frontend_a11y's fixture). Screenshots go to VAE_RE_SHOTS.
@@ -23,6 +27,7 @@ Harness: VAE_A11Y_BASE_URL = a Vite dev server proxying /api to a backend
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -354,6 +359,89 @@ def test_an_approx_frame_shows_the_chip_and_an_exact_one_does_not(engine, base_u
         at(1.0)
         _wait(lambda: chip.count() == 0, "the chip goes with the APPROX effect")
     finally:
+        page.evaluate("""() => fetch('/api/settings/preview', {method: 'PUT',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify({engine: 'server'})})""")
+        page.context.close()
+
+
+# K2 (0.8.0 QA): a not-yet-measured loudness gain is not a chip.
+_RENDER_RE = re.compile(r".*/api/sessions/[^/]+/preview(\?.*)?$")
+_RENDER_TIMES = r"""
+(() => {
+  window.__renders = []
+  const orig = window.fetch
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : input.url
+    if (/\/api\/sessions\/[^/]+\/preview(\?|$)/.test(url) && (init?.method ?? 'GET') === 'POST') {
+      window.__renders.push(performance.now())
+    }
+    return orig.apply(this, arguments)
+  }
+})()
+"""
+_LOUDNESS = "() => window.__vaeTest.useStore.getState().clientView?.loudness ?? null"
+
+
+def test_a_loudness_gain_not_measured_yet_shows_no_chip_and_is_measured_at_once(engine, base_url, media):  # noqa: F811
+    name = engine.engine_name
+    sid, v1, _ = _project(base_url, media, f"re-loud-{name}", portrait=False)
+    page = _open(engine, base_url, sid, 1400, 900)
+    page.context.add_init_script(_RENDER_TIMES)
+    held = []
+    hold = {"on": True}
+    try:
+        if not _preview_mode(page, "client"):
+            pytest.skip(f"no client preview in Playwright {name}")
+        chip = page.locator("[data-fidelity='approx']")
+        # the server render that measures the gain is held: it stays unmeasured
+        page.route(_RENDER_RE, lambda route: held.append(route) if hold["on"] else route.continue_())
+
+        def edit(tool: str, args: dict) -> float:
+            """Dispatch through the app's store; the page clock at the edit."""
+            return page.evaluate("""async ([tool, args]) => {
+                const s = window.__vaeTest.useStore.getState(); const t = performance.now()
+                await s.dispatch(tool, args); return t }""", [tool, args])
+
+        def at(t: float):
+            page.evaluate("t => window.__vaeTest.useStore.getState().setPlayhead(t)", t)
+            page.wait_for_timeout(1200)
+
+        t_edit = edit("set_animation", {"clip_id": v1, "in": "slide_left"})       # EXACT; a new sound key
+        at(0.1)
+        page.wait_for_function(f"() => ({_LOUDNESS})() === 'pending'", timeout=10000)
+        assert chip.count() == 0, ("a loudness gain not measured yet shows no chip",
+                                   chip.first.get_attribute("aria-label"),
+                                   page.evaluate("() => window.__vaeTest.useStore.getState().clientView"))
+        # …and the render that measures it is asked for at once, not at the
+        # 1.5 s idle cadence
+        page.wait_for_function("t => window.__renders.some((r) => r >= t)", arg=t_edit, timeout=10000)
+        first = page.evaluate("t => Math.min(...window.__renders.filter((r) => r >= t))", t_edit)
+        assert first - t_edit < 1200, f"the render that measures the gain waited {first - t_edit:.0f} ms"
+
+        edit("set_voice_effect", {"clip_id": v1, "effect": "deep"})
+        at(1.0)
+        chip.wait_for(timeout=10000)
+        assert page.evaluate(_LOUDNESS) == "pending"
+        label = chip.get_attribute("aria-label") or ""
+        # each reason keeps its own words; none of them is the unmeasured gain
+        # (a voice effect's sound is unbounded for the limiter bound, gate RX,
+        # so "Limiter on loud sound" may stand beside it)
+        assert "Voice effect: Deep" in label and "Loudness" not in label, label
+
+        hold["on"] = False
+        while held:
+            held.pop(0).continue_()
+        page.wait_for_function(f"() => ({_LOUDNESS})() === 'measured'", timeout=60000)
+        at(1.0)
+        assert "Loudness" not in (chip.get_attribute("aria-label") or ""), "the measured gain plays: no loudness chip"
+        page.screenshot(path=str(SHOTS / f"re_loud_{name}.png"))
+    finally:
+        hold["on"] = False
+        for r in held:
+            try:
+                r.continue_()
+            except Exception:  # noqa: BLE001 — the page may be gone
+                pass
         page.evaluate("""() => fetch('/api/settings/preview', {method: 'PUT',
             headers: {'Content-Type': 'application/json'}, body: JSON.stringify({engine: 'server'})})""")
         page.context.close()

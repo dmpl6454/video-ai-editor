@@ -136,10 +136,12 @@ def test_pending_answer_and_run_lifecycle(app_env, monkeypatch):
                      F.step("translate_captions", target_lang=None, _optional=True),
                      needs_input=[_question()], title="translate")
     F.route_with(monkeypatch, F.FakeRouted(plan))
-    frames = _frames(client.post(f"/api/sessions/{SID}/prompt", json={"message": "translate"}).text)
+    # K3: the message names both edits the faked plan makes (a plan whose
+    # edits the prompt never asked for is rolled back by the contract)
+    frames = _frames(client.post(f"/api/sessions/{SID}/prompt", json={"message": "warm look, translate"}).text)
     clarify = next(f for f in frames if f["type"] == "clarify")
     body = client.get(f"/api/sessions/{SID}/prompt/pending").json()["pending"]
-    assert body["token"] == clarify["token"] and body["plan_id"] == plan.id and body["prompt"] == "translate"
+    assert body["token"] == clarify["token"] and body["plan_id"] == plan.id and body["prompt"] == "warm look, translate"
     assert body["questions"][0]["key"] == "target_lang" and 0 < body["expires_in_s"] <= service.CLARIFY_TTL_S
     assert body["brain"] == "recipes"
     # A stale token is refused with a frame, not a 500.

@@ -3,6 +3,7 @@ import { useStore } from '../store'
 import { formatTimecode, frameIndex, parseTimecode } from '../lib/timecode'
 import { TIMELINE_MAX_SECONDS } from '../lib/dispatchErrors'
 import { toast } from '../toast'
+import { afterCommit } from '../lib/fieldCommit'
 
 /** "Start must be within 6 hours" — the field's own label, the bound in words. */
 export function outOfRangeMessage(label: string | undefined, max: number): string {
@@ -29,8 +30,8 @@ export function TimecodeField({ value, fps: fpsProp, min, max = TIMELINE_MAX_SEC
   /** Upper bound (default: the 6 h every time argument allows, QA-041). A
    *  value past it is refused HERE, with the field restored — never sent. */
   max?: number
-  /** A falsy/null resolution (store.dispatch's "did not land") restores the
-   *  field to the current value instead of leaving the refused text in it. */
+  /** Once it settles the field shows the current value again, so a refused
+   *  (null) or no-op answer never leaves the typed text in it. */
   onCommit: (seconds: number) => unknown
   title?: string
   ariaLabel?: string
@@ -65,12 +66,10 @@ export function TimecodeField({ value, fps: fpsProp, min, max = TIMELINE_MAX_SEC
       setLocal(seeded)
       return
     }
-    const r = onCommit(v)
-    void Promise.resolve(r).then((res) => {
-      // Refused server-side: the value did not change, so no re-seed will
-      // come — restore the field ourselves.
-      if (r !== undefined && !res && document.activeElement !== ref.current) setLocal(seededRef.current)
-    })
+    // Refused, or accepted without a change: no re-seed will come — show the
+    // clip's real value again once settled (lib/fieldCommit).
+    void afterCommit(onCommit(v), () => document.activeElement === ref.current,
+      () => setLocal(seededRef.current))
   }
 
   return (

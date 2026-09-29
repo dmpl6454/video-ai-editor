@@ -164,13 +164,16 @@ def test_trim_clip_from_the_back_shifts_only_overlays_after_the_trimmed_tail():
     # new_duration=6 -> footprint becomes [5,11). The removed tail is
     # [11,15) (removed_start = old_start + new_duration = 11, shift = 4).
     # Sticker at [16,17) is genuinely AFTER the removed tail (not inside
-    # it) and must shift left by 4 -> [12,13).
+    # it). Final QA (K1): it sits past v1's end (15), over no picture — the
+    # user placed it there — so it keeps its time; it used to shift left by 4
+    # -> [12,13). (A sticker over a LATER picture follows that picture:
+    # tests/test_lane_magnetism.py.)
     store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=16.0, sticker_end=17.0,
                                           clip_start=5.0)
     dispatch(store, "trim_clip", {"clip_id": "c1", "out": 6.0})
     s = _sticker(store)
-    assert abs(s.start - 12.0) < 1e-6
-    assert abs(s.end - 13.0) < 1e-6
+    assert abs(s.start - 16.0) < 1e-6
+    assert abs(s.end - 17.0) < 1e-6
 
 
 def test_trim_clip_from_the_back_drops_overlay_inside_the_removed_tail():
@@ -187,12 +190,18 @@ def test_trim_clip_from_the_back_drops_overlay_inside_the_removed_tail():
 
 
 def test_trim_clip_from_the_back_leaves_overlays_before_the_trim_unchanged():
+    # The sticker sits 1 s into the clip, before the trimmed tail: its offset
+    # into the picture is unchanged. Final QA (K1): the magnetic lane also
+    # closes the 5 s hole before the clip (it now starts at 0), and the
+    # sticker follows its picture there -> [1,2) (it used to stay at [6,7),
+    # over a different frame).
     store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=6.0, sticker_end=7.0,
                                           clip_start=5.0)
     dispatch(store, "trim_clip", {"clip_id": "c1", "out": 6.0})
+    assert store.edl.get_track("v1").clips[0].start == 0.0
     s = _sticker(store)
-    assert abs(s.start - 6.0) < 1e-6
-    assert abs(s.end - 7.0) < 1e-6
+    assert abs(s.start - 1.0) < 1e-6
+    assert abs(s.end - 2.0) < 1e-6
 
 
 def test_trim_clip_from_the_front_shifts_overlays_after_the_trimmed_head():
@@ -200,13 +209,17 @@ def test_trim_clip_from_the_front_shifts_overlays_after_the_trimmed_head():
     # Trim IN to 4 -> new_duration=6, footprint conceptually [5,11) once
     # ripple repacks. The removed HEAD is [5,9) (removed_start=old_start=5,
     # removed_len = 10-6=4). A sticker at [10,11) sits after that removed
-    # head and must shift left by 4 -> [6,7).
+    # head and must shift left by 4 relative to its picture. Final QA (K1):
+    # the picture itself moves from 5 to 0 (the magnetic lane closes the hole
+    # before it) and the sticker follows it -> [1,2) (it used to be [6,7),
+    # 5 s behind the frame it was placed on).
     store = _store_with_clip_and_sticker(clip_duration=10.0, sticker_start=10.0, sticker_end=11.0,
                                           clip_start=5.0)
     dispatch(store, "trim_clip", {"clip_id": "c1", "in": 4.0})
+    assert store.edl.get_track("v1").clips[0].start == 0.0
     s = _sticker(store)
-    assert abs(s.start - 6.0) < 1e-6
-    assert abs(s.end - 7.0) < 1e-6
+    assert abs(s.start - 1.0) < 1e-6
+    assert abs(s.end - 2.0) < 1e-6
 
 
 def test_trim_clip_growing_out_does_not_ripple_overlays():
@@ -491,7 +504,7 @@ def test_cut_range_that_removes_the_entire_v1_clip_clears_captions():
 def test_overlay_parked_past_the_deleted_footage_survives_even_though_v1_is_now_empty():
     """The critical boundary case: an overlay deliberately moved PAST all v1
     content (e.g. to make room for a not-yet-added clip) is NOT orphaned by
-    deleting that content — it just shifts left like normal — and must
+    deleting that content — it keeps its time (final QA, K1) — and must
     survive intact even though v1 ends up with zero clips. The full-wipe
     version of this fix broke exactly this (a real shorten-then-replace edit
     sequence, pinned separately in test_overlay_move_span.py); the fix is
@@ -521,9 +534,10 @@ def test_overlay_parked_past_the_deleted_footage_survives_even_though_v1_is_now_
     assert store.edl.get_track("v1").clips == []
     caps = store.edl.get_track("captions").clips
     assert len(caps) == 1, "the parked caption must survive — it was never orphaned"
-    # Shifted left by the removed 6s, same as _ripple_overlays always did.
-    assert abs(caps[0].start - 54.0) < 1e-6
-    assert abs(caps[0].end - 55.0) < 1e-6
+    # Final QA (K1): parked past v1's end, over no picture, it keeps its time
+    # (it used to shift left by the removed 6 s, to 54).
+    assert abs(caps[0].start - 60.0) < 1e-6
+    assert abs(caps[0].end - 61.0) < 1e-6
 
 
 def test_v1_still_having_clips_does_not_clear_overlays():

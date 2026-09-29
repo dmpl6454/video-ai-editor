@@ -6,6 +6,7 @@ import { clipRequirement, gateFor, motionTrackSeed, type CatalogEntry } from '..
 import { featureCopy } from '../lib/featureCopy'
 import { useAiRuns, type RunState } from '../lib/aiRuns'
 import { buildArgs, fieldsFor, initialValues, reseedContextValues, type FormContext } from '../lib/schemaForm'
+import { layoutTimeArgs } from '../lib/aiFormTimes'
 import { AiToolForm } from './AiToolForm'
 import { AiResult } from './AiResult'
 import { Icon } from './Icon'
@@ -196,7 +197,10 @@ export function AiToolCard({ entry, schema, onRun }: Props) {
     const built = buildArgs(fields, values)
     setErrors(built.errors)
     if (Object.keys(built.errors).length) return
-    const args = clipReq.ok && clipReq.clipId ? { ...built.args, clip_id: clipReq.clipId } : built.args
+    // The form's times are ruler (render) times; the tools take layout times
+    // (lib/aiFormTimes — Cut range / Lower third after a transition, final QA).
+    const timed = layoutTimeArgs(fields, built.args, useStore.getState().edl)
+    const args = clipReq.ok && clipReq.clipId ? { ...timed, clip_id: clipReq.clipId } : timed
     if (!consented) {
       // Re-read what is on disk right before the run: a download may have
       // finished (or been deleted) since the panel loaded.

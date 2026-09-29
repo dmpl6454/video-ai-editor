@@ -387,7 +387,7 @@ export class ClientPreviewEngine extends EngineBase implements PreviewEngine {
   }
 
   private reclassify(emit = true): void {
-    const s = this.feed.classify(this.sink.limitingFrames?.(), this.sink.loudnessCurrent?.())
+    const s = this.feed.classify(this.sink.limitingFrames?.(), this.sink.loudnessOffDb?.())
     if (s) this.support = s
     if (emit) this.emitStatus()
   }

@@ -240,7 +240,9 @@ def test_validator_precedes_every_dispatch_on_a_resumed_run(session, monkeypatch
     order: list[str] = []
     _order_spies(monkeypatch, order)
     F.route_with(monkeypatch, F.FakeRouted(_questioned_plan()))
-    first = F.collect(service.prompt_turn(store, "translate the captions", []))
+    # K3: the prompt names BOTH edits the faked plan makes — the executor's
+    # contract rolls back a plan whose edits the prompt never asked for.
+    first = F.collect(service.prompt_turn(store, "translate the captions and give it a warm look", []))
     assert [e["type"] for e in first if e["type"] in ("clarify", "done")] == ["clarify", "done"]
     assert order == []                                     # paused: nothing validated or dispatched yet
     token = pending.load_pending(Path(store.dir))["token"]
@@ -256,7 +258,7 @@ def test_validator_precedes_dispatch_when_the_answer_is_the_next_chat_message(se
     order: list[str] = []
     _order_spies(monkeypatch, order)
     F.route_with(monkeypatch, F.FakeRouted(_questioned_plan()))
-    F.collect(service.prompt_turn(store, "translate the captions", []))
+    F.collect(service.prompt_turn(store, "translate the captions and give it a warm look", []))
     events = F.collect(service.prompt_turn(store, "English", []))
     assert order[0] == "validate" and any(o.startswith("dispatch:") for o in order)
     assert events[0]["type"] == "brain" and events[0]["status"] == "answered"     # a resume, not a new plan

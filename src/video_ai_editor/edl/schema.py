@@ -121,7 +121,17 @@ EDL_VERSION = 3
 #     v1 segment and PiP video element is BT.709 limited before assembly / overlay (the first clip's tag
 #     converted the others) and the export is tagged BT.709; a blended PiP's size animation plays (it froze
 #     at its first size) and a turning PiP has no black corners; biquad voice effects are primed.
-RENDER_BEHAVIOR_VERSION = 27
+# 28: (final QA, K1) a sound-lane run laid to or past v1's layout end is cut where its layout end maps
+#     (`schema.sound_render_windows`), its fade-out at the cut, and no run plays on past the picture unless
+#     it was laid past v1's end: a bed aligned to the end of the video ended 0.9 s after it over black.
+# 29: (final QA, run 2) a detached sound (`linked_to`) opens its own sound-lane run (`schema.sound_runs`):
+#     two detached sounds back to back across a transition played the second 0.5 s late and cut its tail;
+#     an export at another frame rate ends its v1 plan on the resampled project end
+#     (`compositor._rate_scope_end`): a half-frame length added a black, silent last frame at 25 fps.
+# 30: (final QA run 2, round 2) a sound-lane run ending INSIDE v1's layout plays whole
+#     (`schema.sound_render_windows`), even past the picture's render end: the K1 cut applied to every
+#     run and dropped the last 1.0 s of a voiceover laid at 2.0 over three 0.5 s fades, ending before v1.
+RENDER_BEHAVIOR_VERSION = 30
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]
@@ -375,11 +385,54 @@ class Framing(_EDLModel):
         return max(1.0, min(10.0, float(v)))
 
 
+#: The key colour a ChromaKey falls back to.
+DEFAULT_KEY_COLOR = "#00FF00"
+
+#: Key-colour NAMES a chroma key accepts, at ffmpeg's own values for them —
+#: a key saved as "green" before final sweep 2 went to ffmpeg as the name and
+#: keyed 0x008000, so it still keys exactly that.
+KEY_COLOR_NAMES: dict[str, str] = {
+    "green": "#008000", "lime": "#00FF00", "blue": "#0000FF", "red": "#FF0000",
+    "black": "#000000", "white": "#FFFFFF", "magenta": "#FF00FF", "cyan": "#00FFFF",
+    "yellow": "#FFFF00",
+}
+
+
+def key_color(value: Any) -> str:
+    """'#rrggbb' / 'rrggbb' / '0xrrggbb' / a `KEY_COLOR_NAMES` name →
+    '#RRGGBB'; ValueError for anything else."""
+    s = str(value if value is not None else "").strip()
+    low = s.lower()
+    if low in KEY_COLOR_NAMES:
+        return KEY_COLOR_NAMES[low]
+    for prefix in ("#", "0x"):
+        if low.startswith(prefix):
+            low = low[len(prefix):]
+            break
+    if len(low) == 6 and all(ch in "0123456789abcdef" for ch in low):
+        return "#" + low.upper()
+    raise ValueError(f"key colour must be #RRGGBB or one of {', '.join(KEY_COLOR_NAMES)}, "
+                     f"got {value!r}")
+
+
 class ChromaKey(_EDLModel):
-    color: str = "#00FF00"
+    color: str = DEFAULT_KEY_COLOR
     similarity: float = 0.4
     smoothness: float = 0.1
     spill_suppress: float = 0.5
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _norm_key_color(cls, v: Any) -> str:
+        """Final sweep 2 (CRITICAL): the colour was spliced RAW into the
+        filtergraph (`chromakey={color}:…`), so ':' and ',' in it injected
+        filters — from the tool, and from a crafted .vae's edl.json. Always
+        '#RRGGBB' here; a bad value in a saved EDL loads as the default key
+        (never an unloadable project); `dispatch.chroma_key` refuses it."""
+        try:
+            return key_color(v)
+        except ValueError:
+            return DEFAULT_KEY_COLOR
 
 
 def _log_unknown(what: str, value: Any, valid) -> None:
@@ -914,6 +967,30 @@ def _overlap_before(seams: list[tuple[float, float]], t: float) -> float:
     return sum(d for s, d in seams if s <= float(t) + 1e-6)
 
 
+def sound_runs(clips: list) -> list[list]:
+    """The RUNS of ONE sound lane, in start order: clips closer than
+    `SOUND_RUN_TOL_S` to the run before them join it (`sound_pulls`).
+
+    Final QA (run 2): a detached sound (`linked_to` set) follows its OWN
+    picture, so it always starts a new run. Detaching the sounds of two
+    adjacent v1 clips puts them back to back on one lane; as one run the
+    second took the first's pull and missed the transition at their cut —
+    it played late by the transition's length and lost its tail. Now the two
+    overlap during the crossfade, like a J/L cut. Unlinked pieces (a split
+    voiceover, a looped bed) keep the run rule. `timelineLayout.ts` and
+    `audioPlan.ts` mirror this."""
+    runs: list[list] = []
+    run_end: float | None = None
+    for c in sorted((c for c in clips if isinstance(c, Clip)), key=lambda c: c.start):
+        if run_end is None or c.linked_to or c.start > run_end + SOUND_RUN_TOL_S:
+            runs.append([c])
+            run_end = c.start + c.effective_duration
+        else:
+            runs[-1].append(c)
+            run_end = max(run_end, c.start + c.effective_duration)
+    return runs
+
+
 def sound_pulls(clips: list, seams: list[tuple[float, float]]) -> dict[str, float]:
     """Seconds each clip of ONE sound lane plays EARLIER than its layout
     `start` (`render start = start − pull`), by clip id.
@@ -924,18 +1001,56 @@ def sound_pulls(clips: list, seams: list[tuple[float, float]]) -> dict[str, floa
     by the overlap before the run's FIRST clip. Pulling each piece by its own
     start instead would overlap the pieces (the later one pulled left while
     the earlier one plays whole) and double the sound at every seam between
-    them. A lone clip is pulled by `overlap_before(start)`, as every lane."""
+    them. A lone clip is pulled by `overlap_before(start)`, as every lane.
+    A detached sound (`linked_to`) always starts a run of its own
+    (`sound_runs`), so it is pulled exactly like its picture."""
     pulls: dict[str, float] = {}
-    run_end: float | None = None
-    run_pull = 0.0
-    for c in sorted((c for c in clips if isinstance(c, Clip)), key=lambda c: c.start):
-        if run_end is None or c.start > run_end + SOUND_RUN_TOL_S:
-            run_pull = _overlap_before(seams, c.start)
-            run_end = c.start + c.effective_duration
-        else:
-            run_end = max(run_end, c.start + c.effective_duration)
-        pulls[c.id] = run_pull
+    for run in sound_runs(clips):
+        run_pull = _overlap_before(seams, run[0].start)
+        for c in run:
+            pulls[c.id] = run_pull
     return pulls
+
+
+def sound_render_windows(clips: list, seams: list[tuple[float, float]],
+                         video_end: float) -> dict[str, tuple[float, float]]:
+    """`(render start, render end)` of every audible clip of ONE sound lane,
+    by id — THE sound-lane seam rule (final QA, K1). `video_end` is v1's
+    LAYOUT end (`EDL.video_extent()`).
+
+    * A run's START maps through the v1 seam map like the picture under it
+      (`sound_pulls`: the run moves as one block), so what the user lines up
+      on the timeline stays lined up in the export.
+    * A run that ENDS INSIDE v1's layout (`lay_end < video_end`) plays
+      WHOLE from there (round 3: a voiceover never loses its last words to
+      the seams it crosses) — even when that runs past the picture's render
+      end: the programme gets the short tail the user laid out, as CapCut
+      does when audio outruns the video. Final QA (run 2, round 2): this
+      used to be cut at the picture's end too, which dropped the last second
+      of a voiceover laid at 2.0 over three transitions and ending 0.5 s
+      before v1's end.
+    * A run laid to or past v1's layout end is cut where its layout end maps
+      (`render_time(end)`; its own fade-out plays at the cut): a bed aligned
+      to the end of the video ends with the picture — no black tail because
+      transitions shortened it — and only the part the user deliberately
+      laid past v1's end extends the programme. Its cut is never earlier
+      than `render_time(video_end)` and never later than its whole length.
+    A clip wholly past its run's cut is not heard (absent from the map)."""
+    out: dict[str, tuple[float, float]] = {}
+    picture_end = float(video_end) - _overlap_before(seams, video_end)
+    for run in sound_runs(clips):
+        pull = _overlap_before(seams, run[0].start)
+        lay_end = max(c.start + c.effective_duration for c in run)
+        if lay_end >= float(video_end) - SOUND_RUN_TOL_S:
+            cut = max(lay_end - _overlap_before(seams, lay_end), picture_end)
+        else:
+            cut = math.inf                         # ends inside: plays whole
+        for c in run:
+            rs = float(c.start) - pull
+            re = min(rs + c.effective_duration, cut)
+            if re - rs > 1e-6:
+                out[c.id] = (rs, re)
+    return out
 
 
 def sound_pull_at(clips: list, seams: list[tuple[float, float]], start: float) -> float:
@@ -1210,7 +1325,8 @@ class EDL(_EDLModel):
         seams = self.v1_seam_table()
         total_overlap = sum(d for _s, d in seams)
         for t in self.tracks:
-            pulls = sound_pulls(t.clips, seams) if sound_lane(t) else {}
+            windows = (sound_render_windows(t.clips, seams, self.video_extent())
+                       if sound_lane(t) else {})
             if t.id == "v1":
                 # v1 is ASSEMBLED, not just laid out: `_v1_segments` walks the
                 # clips with `cursor = max(cursor, start) + effective_duration`,
@@ -1248,12 +1364,14 @@ class EDL(_EDLModel):
                 continue
             for c in t.clips:
                 if isinstance(c, Clip) and sound_lane(t):
-                    # A sound-lane clip plays whole from start − pull
-                    # (`sound_pulls`): its RENDER end, lifted back to the
-                    # layout clock the subtraction below undoes, so a bed
-                    # that now outlives the picture is not cut at the file end.
-                    rs = c.start - pulls.get(c.id, 0.0)
-                    end = max(end, rs + c.effective_duration + total_overlap)
+                    # A sound-lane clip ends where `sound_render_windows`
+                    # cuts it (whole inside the programme, at its mapped end
+                    # when laid to or past v1's end): its RENDER end, lifted
+                    # back to the layout clock the subtraction below undoes.
+                    # Only a run laid past v1's layout end reaches past the
+                    # picture (final QA, K1).
+                    if c.id in windows:
+                        end = max(end, windows[c.id][1] + total_overlap)
                 elif isinstance(c, Clip):
                     # Every other lane is placed at an absolute time (music via
                     # adelay, PIP via overlay+itsoffset), so its extent is the

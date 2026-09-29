@@ -43,7 +43,7 @@ from ..timemap import map_words_to_timeline, source_range_to_timeline
 from .facts import TimelineFacts
 from .langs import base_lang
 from .recipes import FILLERS_STRICT
-from .schema import CHECK_SPECS, CLIP_SENTINELS, Plan, Postcondition, bind_postconditions
+from .schema import BLOCKING_CHECKS, CHECK_SPECS, CLIP_SENTINELS, Plan, Postcondition, bind_postconditions
 from .service import VERIFY_RENDER_MAX_DURATION_S
 
 _D = importlib.import_module("video_ai_editor.agent.dispatch")
@@ -109,7 +109,7 @@ class CheckResult:
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"check": self.check, "human": self.human, "pass": self.passed,
                              "measured": self.measured, "expected": self.expected,
-                             "headline": self.headline}
+                             "headline": self.headline, "blocking": self.check in BLOCKING_CHECKS}
         if self.unit is not None:
             d["unit"] = self.unit
         if self.detail is not None:
@@ -998,13 +998,13 @@ def _measured_duck_db(ctx: VerifyCtx, probe: Path) -> tuple[float | None, str]:
 
 
 def _music_render_spans(edl: EDL) -> list[tuple[float, float]]:
-    """The music clips' `(start, end)` on the RENDER clock (final QA round 3:
-    a bed plays whole from where its run starts, `schema.sound_pulls`)."""
-    from ...edl.schema import sound_pulls
-    clips = music_clips(edl)
-    pulls = sound_pulls(clips, edl.v1_seam_table())
-    return [(c.start - pulls.get(c.id, 0.0), c.start - pulls.get(c.id, 0.0) + c.effective_duration)
-            for c in clips]
+    """The music clips' `(start, end)` on the RENDER clock, exactly as the
+    mix plays them (`schema.sound_render_windows`: a bed starts where its
+    run's start plays, plays whole inside the programme, and is cut where
+    its layout end maps when laid to or past v1's end — final QA, K1)."""
+    from ...edl.schema import sound_render_windows
+    wins = sound_render_windows(music_clips(edl), edl.v1_seam_table(), edl.video_extent())
+    return list(wins.values())
 
 
 def c_music_within_video_extent(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -1225,6 +1225,30 @@ def c_text_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         clips = [c for c in clips if c.start >= float(start_geq)]
     return _ok(pc, len(clips) >= 1, len(clips), "≥ 1", unit="text clips",
                detail=f"contains={contains!r} role={role!r} start≥{start_geq}" if not clips else None)
+
+
+def c_text_style_is(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
+    """K3: the text `clip_id` names carries the look asked (set_text_style)."""
+    cid = _arg(pc, "clip_id")
+    t = next((c for c in text_clips(ctx.edl) if c.id == cid), None)
+    if t is None:
+        return _ok(pc, False, None, "the text", detail=f"text {cid} is gone")
+    bad: list[str] = []
+    color, size, font, bold, place = (_arg(pc, k) for k in ("color", "size", "font", "bold", "position"))
+    if color and t.style.color.upper()[:7] != str(color).upper()[:7]:
+        bad.append(f"colour {t.style.color}")
+    if size is not None and abs(float(t.style.size) - float(size)) > 0.5:
+        bad.append(f"size {t.style.size:g}")
+    if font and (t.style.font or "") != str(font).rsplit(".", 1)[0] and (t.style.font or "") != str(font):
+        bad.append(f"font {t.style.font}")
+    if bold and not any(k in (t.style.font or "Inter-Bold") for k in ("Black", "Anton", "Bebas", "Bold")):
+        bad.append("not bold")
+    if place:
+        frac = float(t.transform.y) / float(ctx.edl.canvas.h) if not hasattr(t.transform.y, "keyframes") else 0.5
+        want = {"top": (0.0, 0.34), "middle": (0.34, 0.66), "center": (0.34, 0.66), "bottom": (0.66, 1.0)}[place]
+        if not want[0] <= frac <= want[1]:
+            bad.append(f"at y {frac:.2f}")
+    return _ok(pc, not bad, ", ".join(bad) or "as asked", "as asked")
 
 
 def c_brand_watermark_present(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
@@ -1703,5 +1727,32 @@ def verify_plan(store: EDLStore, plan: Plan, exec_result: Any, facts_before: Tim
     }
 
 
-__all__ = ["CheckResult", "VerifyCtx", "CHECKS", "run_check", "verify_plan", "overlay_positions",
+def blocking_failures(store: EDLStore, plan: Plan, exec_result: Any, facts_before: TimelineFacts, *,
+                      cancel_event: threading.Event | None = None) -> list[CheckResult]:
+    """K3: the BLOCKING postconditions (schema.BLOCKING_CHECKS — measured on
+    the EDL alone) that do NOT hold on the live tree. The executor calls this
+    inside its batch, before the commit, so a plan that did not do what it
+    set out to do is rolled back instead of kept "with issues". No render
+    runs here; a check that cannot measure (passed=None) never blocks."""
+    ctx = VerifyCtx(store=store, plan=plan, exec_result=exec_result, facts_before=facts_before,
+                    cancel_event=cancel_event, render_allowed=False)
+    # An OPTIONAL step that was skipped (it raised) owes nothing: its own
+    # natural postconditions are not held against the run that went on.
+    skipped = [s for s in getattr(exec_result, "steps", []) if getattr(s, "status", None) == "skipped"]
+    owed_by_skipped = {(pc.check, repr(sorted(pc.args.items())))
+                       for s in skipped if 0 <= s.index < len(plan.steps)
+                       for pc in bind_postconditions(plan.steps[s.index].tool, plan.steps[s.index].args)}
+    out: list[CheckResult] = []
+    for pc in _postconditions(plan):
+        if pc.check not in BLOCKING_CHECKS or pc.needs_render:
+            continue
+        if (pc.check, repr(sorted(pc.args.items()))) in owed_by_skipped:
+            continue
+        res = run_check(ctx, pc)
+        if res.passed is False:
+            out.append(res)
+    return out
+
+
+__all__ = ["CheckResult", "VerifyCtx", "CHECKS", "run_check", "verify_plan", "blocking_failures", "overlay_positions",
            "caption_clips", "text_clips", "music_clips", "v1_clips", "silence_runs"]

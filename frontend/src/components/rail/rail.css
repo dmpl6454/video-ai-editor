@@ -309,9 +309,13 @@
 
 /* ---- the tooltip ------------------------------------------------------ */
 
+/* pointer-events none: clicks go THROUGH the tip to the panel row under it
+   (final QA, it ate the first click on Upload PNG sticker… and Add music…).
+   It stays hoverable by geometry instead (RailTooltip, pointInRect). */
 .rail-tip {
   position: fixed;
   z-index: 2000;
+  pointer-events: none;
   top: 0;
   left: 0;
   max-width: 280px;

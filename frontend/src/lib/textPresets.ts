@@ -9,7 +9,9 @@
 //   - By default it REPLACES any same-role text clip on the same track whose
 //     [start, end) overlaps the new one (the "double subtitle" guard for
 //     chat/MCP callers). A UI insert must never silently delete content, so
-//     the default text passes allow_stack: true and the user manages overlaps.
+//     every insert here passes allow_stack: true — and a stacked text goes on
+//     the first text lane free for its window, a new "Text 2"… if none is
+//     (final sweep 2: two texts on one lane drew as one block).
 //
 // Templates go through `apply_text_template` (same handler file):
 // {name, start, end, fields:{text, hashtag, handle}}. A template that needs a
@@ -107,7 +109,9 @@ export const UPPER_THIRD = 0.3
  *  preset; the one typed value goes into all three so the UI stays one field. */
 export function templateArgs(name: string, fieldText: string, start: number, end: number): Record<string, unknown> {
   const v = fieldText.trim()
-  return { name, start, end, fields: { text: v, hashtag: v, handle: v } }
+  // allow_stack: never replace a text from the UI; over another text the
+  // server puts the new one on its own lane (`_free_text_lane`).
+  return { name, start, end, fields: { text: v, hashtag: v, handle: v }, allow_stack: true }
 }
 
 /** The editor state an insert reads, and how it dispatches. */

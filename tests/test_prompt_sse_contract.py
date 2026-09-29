@@ -104,7 +104,9 @@ def test_a_mutating_turn_honours_the_contract(session, monkeypatch):
     monkeypatch.setitem(__import__("importlib").import_module("video_ai_editor.agent.dispatch").DISPATCH,
                         "set_speed", lambda s, a: (_ for _ in ()).throw(RuntimeError("nope")))
     F.route_with(monkeypatch, F.FakeRouted(plan))
-    events = _turn(store, "edit it")
+    # K3: the prompt names every edit the faked plan makes (the contract rolls
+    # back a plan whose edits the prompt never asked for)
+    events = _turn(store, "cut 4 to 6 seconds, make it warm and speed up the first clip")
     _assert_contract(events)
     types = [e["type"] for e in events]
     assert types.index("verify") < types.index("op") < types.index("text_delta") < types.index("done")

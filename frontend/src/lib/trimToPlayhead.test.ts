@@ -79,6 +79,32 @@ describe('planTrimToPlayhead', () => {
     const plan = planTrimToPlayhead(e, ['b'], 12, 'start')
     expect(plan).toMatchObject({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'b', in: 23 } })
   })
+
+  it('a voiceover (sound lane, plays whole) trims at the playhead, not one second after it', () => {
+    // Three 5 s clips with two 0.5 s dissolves; the vo at 0–15 plays whole
+    // from render 0, so the playhead IS its layout time.
+    const e: EDL = {
+      version: 1, duration: 14, canvas: { w: 1920, h: 1080, fps: 30, bg: '#000' },
+      tracks: [
+        { id: 'v1', type: 'video', z: 0, clips: [
+          { id: 'a', src: SRC, in: 0, out: 5, start: 0 },
+          { id: 'b', src: SRC, in: 0, out: 5, start: 5 },
+          { id: 'c', src: SRC, in: 0, out: 5, start: 10 },
+        ] } as EDL['tracks'][number],
+        { id: 'vo', type: 'audio', z: 30, clips: [
+          { id: 'n', src: '/w/s_1/uploads/n.wav', in: 0, out: 15, start: 0 },
+        ] },
+      ],
+    }
+    ;(e.tracks[0] as unknown as { transitions: unknown[] }).transitions = [
+      { at: 5, type: 'fade', duration: 0.5 }, { at: 10, type: 'fade', duration: 0.5 }]
+    expect(planTrimToPlayhead(e, ['n'], 10, 'end'))
+      .toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'n', out: 10 } })
+    expect(planTrimToPlayhead(e, ['n'], 13.5, 'end'))
+      .toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'n', out: 13.5 } })
+    expect(planTrimToPlayhead(e, ['n'], 4, 'start'))
+      .toEqual({ kind: 'dispatch', tool: 'trim_clip', args: { clip_id: 'n', in: 4, move_start: true } })
+  })
 })
 
 describe('planLift', () => {

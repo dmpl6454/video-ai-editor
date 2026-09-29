@@ -78,12 +78,16 @@ describe('the inserts send what the old Text tool sent', () => {
   })
 
   it('a template: apply_text_template with the typed value in all three slots', async () => {
+    // allow_stack: a UI insert never replaces a text; over another it gets
+    // its own lane (dispatch._free_text_lane, final sweep 2).
     const { d, sent } = deps(v1(10), 5)
     await insertTextTemplate(d, 'hashtag_chunky', ' fyp ')
     expect(sent).toEqual([{ tool: 'apply_text_template', args: {
-      name: 'hashtag_chunky', start: 5, end: 8, fields: { text: 'fyp', hashtag: 'fyp', handle: 'fyp' } } }])
+      name: 'hashtag_chunky', start: 5, end: 8, fields: { text: 'fyp', hashtag: 'fyp', handle: 'fyp' },
+      allow_stack: true } }])
     expect(templateArgs('countdown_3_2_1', '', 0, 3)).toEqual({
-      name: 'countdown_3_2_1', start: 0, end: 3, fields: { text: '', hashtag: '', handle: '' } })
+      name: 'countdown_3_2_1', start: 0, end: 3, fields: { text: '', hashtag: '', handle: '' },
+      allow_stack: true })
   })
 
   it('selects nothing when the dispatch failed (its toast already fired)', async () => {

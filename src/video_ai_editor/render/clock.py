@@ -121,19 +121,18 @@ def sound_window(src: EDL | SeamTable, start: float, length: float
     return rs, rs + float(length)
 
 
-def sound_windows(clips, seams: SeamTable) -> dict[str, tuple[float, float]]:
-    """`sound_window`s of every clip of ONE sound lane, by id — a run of
-    abutting clips (a split voiceover, a looped bed) placed as one block,
-    pulled by the overlap before its first clip (`schema.sound_pulls`), so
-    the pieces stay back to back instead of overlapping at every seam."""
-    from ..edl.schema import Clip, sound_pulls
-    pulls = sound_pulls(list(clips), list(seams))
-    out: dict[str, tuple[float, float]] = {}
-    for c in clips:
-        if isinstance(c, Clip) and c.effective_duration > SEAM_EPS:
-            rs = float(c.start) - pulls.get(c.id, 0.0)
-            out[c.id] = (rs, rs + float(c.effective_duration))
-    return out
+def sound_windows(clips, seams: SeamTable, video_end: float
+                  ) -> dict[str, tuple[float, float]]:
+    """The render windows of every audible clip of ONE sound lane, by id —
+    `schema.sound_render_windows`, the one copy of the sound-lane seam rule:
+    a run of abutting clips (a split voiceover, a looped bed) starts where
+    its first clip's start plays (`schema.sound_pulls`) and stays back to
+    back; it plays whole when it ends inside the programme, and is cut where
+    its layout end maps when it was laid to or past v1's layout end
+    (`video_end`, `EDL.video_extent()`), so a bed aligned to the end of the
+    video ends with the picture (final QA, K1)."""
+    from ..edl.schema import sound_render_windows
+    return sound_render_windows(list(clips), list(seams), float(video_end))
 
 
 __all__ = ["SeamTable", "SEAM_EPS", "seam_table", "overlap_before",

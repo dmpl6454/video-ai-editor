@@ -207,7 +207,9 @@ def test_add_sticker_accepts_a_named_anchor(store: EDLStore, tmp_path: Path):
     from PIL import Image
     Image.new("RGBA", (16, 16), (0, 255, 0, 255)).save(png)
     res = dispatch(store, "add_sticker", {"src": str(png), "position": "center"})
-    sk = next(c for c in store.edl.get_track("stickers").clips if c.id == res["sticker_id"])
+    # s1 already covers 0-2 s on "stickers", so the new one gets its own
+    # lane (final sweep 2 r2) — find it by id.
+    sk = store.edl.get_clip(res["sticker_id"])[1]
     assert sk.transform.x == pytest.approx(540.0)
     assert sk.transform.y == pytest.approx(960.0)
 
@@ -328,7 +330,9 @@ def test_advertised_effect_enum_matches_the_registry():
 def test_every_advertised_effect_type_is_accepted(store: EDLStore):
     from video_ai_editor.render.effects import EFFECT_BUILDERS
     for name in sorted(EFFECT_BUILDERS):
-        dispatch(store, "add_effect", {"clip_id": "c1", "type": name})
+        # A lut needs its .cube (final sweep 2: a src-less lut did nothing).
+        params = {"params": {"src": "warm"}} if name == "lut" else {}
+        dispatch(store, "add_effect", {"clip_id": "c1", "type": name, **params})
     assert len(store.edl.get_clip("c1")[1].effects) == len(EFFECT_BUILDERS)
 
 

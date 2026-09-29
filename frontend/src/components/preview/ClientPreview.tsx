@@ -140,19 +140,26 @@ export function ClientPreview() {
     if (step.seek) ctl.seekTime(playhead)
   }, [playhead, isPlaying, setPlayhead])
 
-  // The background render (bakes). Text and sticker edits never need one.
+  // The background render (bakes, and the loudness gain it measures). Text
+  // and sticker edits never need one. Urgent (BAKED ranges, or a loudness
+  // gain not measured yet — K2, 0.8.0 QA) after BAKE_RENDER_DELAY_MS, asked
+  // THEN so the loudness answer of the new hash is in; else at the idle
+  // cadence.
   const fingerprint = useMemo(() => videoFingerprintOf(edl), [edl])
   useEffect(() => {
     if (!sid || !edl?.duration) return
-    const baked = previewController()?.needsBake() ?? false
-    const t = window.setTimeout(() => {
+    const fire = () => {
       setError(null)
       renderPreview({ priority: 'low' }).catch((e) => {
         // Only worth a word where the picture depends on it (BAKED ranges).
         if (previewController()?.needsBake()) setError(errorMessage(e))
         else console.warn('[preview] background render failed:', errorMessage(e))
       })
-    }, baked ? BAKE_RENDER_DELAY_MS : IDLE_RENDER_DELAY_MS)
+    }
+    let t = window.setTimeout(() => {
+      if (previewController()?.renderUrgent()) fire()
+      else t = window.setTimeout(fire, IDLE_RENDER_DELAY_MS - BAKE_RENDER_DELAY_MS)
+    }, BAKE_RENDER_DELAY_MS)
     return () => window.clearTimeout(t)
   }, [sid, fingerprint, edl?.duration, renderPreview])
 

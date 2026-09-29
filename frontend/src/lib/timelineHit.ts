@@ -75,7 +75,11 @@ export function hitTest(x: number, y: number, g: HitGeometry,
   }
   if (cut) return { kind: 'transition', cut }
   if (Math.abs(x - g.playheadX) <= PLAYHEAD_GRAB_PX) return { kind: 'playhead' }
-  if (under.length) return { kind: 'move', box: under[0] }
+  // The body grab takes the clip drawn on TOP — the last box, since the hit
+  // list is built in draw order. `under[0]` picked the one underneath, so on
+  // a lane with two texts over one window the text whose label shows could
+  // never be selected from the timeline (final sweep 2).
+  if (under.length) return { kind: 'move', box: under[under.length - 1] }
   return { kind: 'empty' }
 }
 

@@ -27,10 +27,17 @@
 .canvas-swatch[aria-checked="true"] { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 .canvas-swatch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .canvas-custom { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
-.canvas-custom input[type="color"] {
-  width: 32px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px;
+/* The well keeps its 32 px inside the Inspector: `.props input:not(…)`
+   (0,3,1) set width:100% over the plain rule, the well took 181 px and
+   `.props { overflow-wrap: anywhere }` broke "Cust/om" and "#000/000"
+   (final sweep 2). The `.props … .canvas-well` form (0,4,1) outranks it. */
+.canvas-custom input[type="color"],
+.props .canvas-custom input.canvas-well[type="color"] {
+  flex: 0 0 32px; width: 32px; min-width: 32px; height: 22px; padding: 0;
+  border: 1px solid var(--line); border-radius: 4px;
   background: var(--bg-1); cursor: pointer;
 }
+.canvas-custom > span { white-space: nowrap; }
 .canvas-custom input[type="color"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .canvas-hex { font-variant-numeric: tabular-nums; color: var(--text); }
 

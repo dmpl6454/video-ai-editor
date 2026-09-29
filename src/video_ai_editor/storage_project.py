@@ -476,6 +476,58 @@ def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> Non
         out = sd / name
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
+    _trim_unreadable_history(sd)
+
+
+def _trim_unreadable_history(sd: Path) -> None:
+    """Final sweep 2 r2: the undo/redo history of an opened project ends
+    cleanly at its last readable step.
+
+    A snapshot that is not a readable EDL was written through as it came,
+    and every Undo onto it then failed with a raw pydantic dump (and grew
+    Redo by one phantom step per press). Such a snapshot is dropped with
+    every OLDER one — undo walks back one snapshot at a time, so nothing
+    before it is reachable. A redo-stack entry that does not read is dropped
+    with everything under it (redo pops the top first); `redo_ops.json`
+    aligns to the stack's top on load (`EDLStore._load_redo_ops`)."""
+    snaps = sorted(p for p in (sd / "snapshots").glob("*.json")
+                   if _SNAPSHOT_NAME.match(p.name)) if (sd / "snapshots").is_dir() else []
+    for i in range(len(snaps) - 1, -1, -1):
+        try:
+            EDL.model_validate_json(snaps[i].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            _log.warning("load_project: undo snapshot %s is unreadable (%s) — dropping it "
+                         "and %d older step(s)", snaps[i].name, type(e).__name__, i)
+            for old in snaps[:i + 1]:
+                old.unlink(missing_ok=True)
+            break
+    rs = sd / "redo_stack.json"
+    if not rs.is_file():
+        return
+    try:
+        stack = json.loads(rs.read_text(encoding="utf-8"))
+        if not isinstance(stack, list):
+            raise ValueError("redo_stack.json is not a list")
+    except (OSError, ValueError):
+        rs.unlink(missing_ok=True)
+        (sd / "redo_ops.json").unlink(missing_ok=True)
+        return
+    keep = len(stack)
+    for i in range(len(stack) - 1, -1, -1):
+        try:
+            EDL.model_validate(stack[i])
+        except ValueError:
+            keep = len(stack) - 1 - i
+            break
+    if keep == len(stack):
+        return
+    _log.warning("load_project: redo step %d of %d is unreadable — keeping the %d above it",
+                 len(stack) - keep, len(stack), keep)
+    if keep:
+        rs.write_text(json.dumps(stack[len(stack) - keep:]), encoding="utf-8")
+    else:
+        rs.unlink(missing_ok=True)
+        (sd / "redo_ops.json").unlink(missing_ok=True)
 
 
 #: Top-level JSON type of each state file this app writes. One of another

@@ -383,6 +383,101 @@ export function processStereo(plan: VoicePlan, L: Float64Array | Float32Array, R
   return [l, r]
 }
 
+// ---------------------------------------------------------------- peak bound
+
+/** Samples of a biquad's impulse response summed for its L1 norm; the
+ *  filter's state after them must have died away (else: unbounded). */
+const L1_SAMPLES = 1 << 17
+const L1_RESIDUE = 1e-12
+/** Relative slack on a computed bound (float rounding in the stages). */
+const BOUND_SLACK = 1 + 1e-6
+const l1Cache = new Map<string, number>()
+
+/** Σ|h[n]| of one biquad pass (the unblended filter), or Infinity when its
+ *  response has not decayed within L1_SAMPLES. */
+function biquadL1(p: Stage['p']): number {
+  const key = JSON.stringify(['bq', p.type, p.f, p.q, p.gain_db ?? null])
+  const hit = l1Cache.get(key)
+  if (hit !== undefined) return hit
+  const [b0, b1, b2, a1, a2] = biquadCoefs(p)
+  let i1 = 0, i2 = 0, o1 = 0, o2 = 0
+  let sum = 0
+  for (let n = 0; n < L1_SAMPLES; n++) {
+    const v = n === 0 ? 1 : 0
+    const o = v * b0 + i1 * b1 + i2 * b2 + o1 * a1 + o2 * a2
+    i2 = i1; i1 = v; o2 = o1; o1 = o
+    sum += Math.abs(o)
+  }
+  const out = Number.isFinite(sum) && Math.abs(o1) + Math.abs(o2) < L1_RESIDUE ? sum : Infinity
+  l1Cache.set(key, out)
+  return out
+}
+
+/** max over channels of Σ|ir[n]| of the Hall's impulse response (the
+ *  ConvolverNode runs it un-normalised). */
+function reverbL1(r: ReverbParams): number {
+  const key = JSON.stringify(['rv', r])
+  const hit = l1Cache.get(key)
+  if (hit !== undefined) return hit
+  let best = 0
+  for (const ch of [0, 1]) {
+    let s = 0
+    for (const v of reverbIr(r, ch)) s += Math.abs(v)
+    best = Math.max(best, s)
+  }
+  l1Cache.set(key, best)
+  return best
+}
+
+/** The largest |output| one stage can give from input samples of |x| ≤ `b`. */
+function stagePeak(s: Stage, b: number): number {
+  const p = s.p
+  switch (s.kind) {
+    case 'biquad': {
+      // y = wet·(h ∗ x) + dry·x per pass (the filter state is the unblended output)
+      const wet = p.mix as number
+      const f = Math.abs(wet) * biquadL1(p) + Math.abs(1 - wet)
+      return b * Math.pow(f, Number(p.passes ?? 1))
+    }
+    case 'echo':
+      return b * Math.abs(p.out_gain as number)
+        * (Math.abs(p.in_gain as number) + (p.decays as number[]).reduce((a, d) => a + Math.abs(d), 0))
+    case 'drive': {
+      const k = p.k as number
+      return Math.min(1, Math.abs(k) * b) / Math.abs(Math.tanh(k))   // |tanh(k·x)| ≤ min(1, |k·x|)
+    }
+    case 'ring': {
+      const d = p.depth as number
+      return b * (Math.abs(1 - d) + Math.abs(d))
+    }
+    case 'gain': return b * Math.pow(10, (p.db as number) / 20)
+    // a linear interpolation between two input samples
+    case 'vibrato': return b
+    // Hann grains every GRAIN/2: the two windows over any sample sum to 1,
+    // each reading a linear interpolation of the input
+    case 'pitch': return b
+    default: return Infinity
+  }
+}
+
+/**
+ * An upper bound on the |output| of `plan` (its offline stages, then the
+ * reverb) for input samples of |x| ≤ `inputPeak` — what the master limiter's
+ * APPROX ranges bound a voice-effect clip by (audio/limiting.ts, gate RX).
+ * It can only be too high, never too low (voiceFx.test.ts drives every
+ * preset with hostile inputs against it); Infinity when a stage cannot be
+ * bounded. K2 (0.8.0 QA): a voice effect used to be unbounded outright, so
+ * any voice effect on a project with a loudness target showed "≈ Limiter on
+ * loud sound", an EXACT one included.
+ */
+export function voicePeakBound(plan: VoicePlan, inputPeak: number): number {
+  if (!(inputPeak >= 0)) return Infinity
+  let b = inputPeak
+  for (const s of plan.offline) b = stagePeak(s, b)
+  if (plan.reverb) b *= reverbL1(plan.reverb)
+  return b * BOUND_SLACK
+}
+
 // ---------------------------------------------------------------- the reverb IR
 
 /** `voice_effects.reverb_constants`. */

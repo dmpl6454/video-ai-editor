@@ -26,6 +26,11 @@ export type Mode = typeof MODE_EXACT | typeof MODE_APPROX | typeof MODE_BAKED | 
 
 export const MODE_NAMES = ['EXACT', 'APPROX', 'BAKED', 'PENDING'] as const
 
+/** A loudness-gain difference (dB) a listener would notice: the "≈ Loudness"
+ *  chip needs MORE than this (K2, 0.8.0 QA; render/preview_loudness's
+ *  TOLERANCE_LU is the same 1 LU on the server side). */
+export const LOUDNESS_AUDIBLE_DB = 1
+
 export type Phase = 1 | 2 | 3 | 4 | 5
 
 /** What the client can draw/hear, per phase (§12). */
@@ -270,8 +275,13 @@ export interface SupportOptions {
   demote?: ReadonlyArray<readonly [number, number]>
   /** The duck gain curve for the current render hash has landed (P2). */
   duckCurveReady?: boolean
-  /** The preview-loudness gain matches the current render hash. */
-  loudnessCurrent?: boolean
+  /** How far (dB) the master loudness gain the sound plays is from the gain
+   *  the server MEASURED for this render's sound; undefined: not measured yet
+   *  (or no target). Over LOUDNESS_AUDIBLE_DB every frame is APPROX
+   *  'audio:loudness'; a gain not measured yet is no verdict (K2, 0.8.0 QA:
+   *  it put "≈ Loudness" on every fresh project for the few seconds the
+   *  server needs; the controller measures it promptly instead). */
+  loudnessOffDb?: number
   /** Output frame ranges where the master limiter may work: the browser's
    *  limiter is not the export's alimiter there (gate RX; audio/limiting.ts). */
   limiting?: ReadonlyArray<readonly [number, number]>
@@ -458,7 +468,7 @@ export function classify(pm: ProgramMap, edl: EdlLike, opts: SupportOptions): Su
       }
     }
   }
-  if (opts.loudnessCurrent === false) bump(0, n, MODE_APPROX, 'audio:loudness')
+  if ((opts.loudnessOffDb ?? 0) > LOUDNESS_AUDIBLE_DB) bump(0, n, MODE_APPROX, 'audio:loudness')
   for (const [a, b] of opts.limiting ?? []) bump(Math.max(0, a), Math.min(n, b), MODE_APPROX, 'audio:limiting')
   for (const [a, b] of opts.demote ?? []) bump(a, b, MODE_BAKED, 'structure:mismatch')
 

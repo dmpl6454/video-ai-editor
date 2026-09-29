@@ -289,14 +289,15 @@ export class ProgramFeed {
   }
 
   /** Fidelity classes of the program (§7), Phase 1 capabilities.
-   *  `loudnessCurrent` false: the sound plays a last-known (or no) loudness
-   *  gain — every frame APPROX 'audio:loudness' (AudioSink.loudnessCurrent). */
-  classify(limiting?: ReadonlyArray<readonly [number, number]>, loudnessCurrent?: boolean): Support | null {
+   *  `loudnessOffDb`: how far the loudness gain the sound plays is from the
+   *  measured one (AudioSink.loudnessOffDb) — over 1 dB every frame is
+   *  APPROX 'audio:loudness'; undefined (not measured yet) is no verdict. */
+  classify(limiting?: ReadonlyArray<readonly [number, number]>, loudnessOffDb?: number): Support | null {
     if (!this.pm || !this.edl) return null
     try {
       return classify(this.pm, this.edl, {
         phase: 1, proxyState: (src) => this.proxyState(src), demote: this.demote,
-        canvasImagePending: this.canvasImagePending ?? undefined, limiting, loudnessCurrent,
+        canvasImagePending: this.canvasImagePending ?? undefined, limiting, loudnessOffDb,
       })
     } catch (e) {
       console.error('[preview engine] classify failed', e)

@@ -214,7 +214,7 @@ def test_check_specs_cover_the_verifier_table():
 def test_path_args_table_matches_the_guard_test():
     guards = importlib.import_module("test_path_guards")
     assert path_args.PATH_ARGS == guards.EXPECTED_GUARDS
-    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 24
+    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 25   # K3: + set_text_style.font (exempt)
     assert path_args.path_args_for("apply_lut") == {"src": "read", "lut_path": "read"}
     assert path_args.path_args_for("add_text") == {}
     assert path_args.guarded_args("write") == {("export_ass", "path"), ("export_srt", "path"), ("export_vtt", "path")}

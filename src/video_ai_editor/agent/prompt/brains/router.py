@@ -31,6 +31,8 @@ stand-ins and the router degrades honestly when they are not on the tree.
 """
 from __future__ import annotations
 
+import re
+
 import logging
 import os
 import platform
@@ -283,6 +285,16 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
             record(Attempt(bid, "failed", reason=f"rejected:ungrounded {', '.join(ungrounded)}",
                            latency_ms=result.latency_ms, model=result.model))
             continue
+        off = off_topic(validated, req.prompt) if bid in ON_DEVICE else None
+        if off:
+            # Final sweep 2: "set clip 3 to 0 db" came back from Apple
+            # Intelligence as a voice-over with a 60 MB download offer, "tilt
+            # clip one by 10 degrees" as "already 16:9" — an on-device answer
+            # about an edit the prompt never names ends the turn wrongly; the
+            # ladder falls through to the recipes' reading or "did you mean".
+            record(Attempt(bid, "failed", reason=f"rejected:{off}", latency_ms=result.latency_ms,
+                           model=result.model))
+            continue
         if _recipes_read_more(recipes_result, validated):
             # QA-032: the grammar understood every edit the model planned and
             # more (the Chat example: brand + hook + captions vs the model's
@@ -336,6 +348,52 @@ def plan(req: BrainRequest, *, order: Iterable[str] | None = None,
     else:
         clarify = _clarify_from(None)
     return RoutedPlan(None, None, tuple(attempts), clarify=clarify, note="clarify_intent")
+
+
+#: Words that ask for a NEW voice-over (grammar's voiceover row, the verbs).
+_VO_CREATE_RE = re.compile(
+    r"\b(?:add|record|generate|make|create|put|give|insert|want|need)\s+(?:me\s+)?(?:a\s+|an\s+|some\s+|new\s+|another\s+)*"
+    r"(?:ai\s+|spoken\s+)?(?:voice[- ]?overs?|narration|vo|voice)\b"
+    r"|\b(?:voice[- ]?over|narration)\s+(?:saying|that says|reading|of)\b|\bread\s+(?:it|this|that|the\s+\w+)\s+(?:out|aloud)\b"
+    r"|\btts\b|\btext[- ]to[- ]speech\b|\bnarrate\b")
+
+
+def off_topic(plan: Plan, prompt: str) -> str | None:
+    """Why an on-device plan does not answer `prompt` (None when it may):
+    its edit is of a kind the prompt's words never name, or it is a
+    read-only "already …" reply to a prompt that asks for an edit."""
+    from ..contract import INTENT_FAMILIES, families_of
+    from .. import semantics as M
+    said: set[str] = set()
+    for c in M.clauses(prompt) or [prompt]:
+        # final sweep 2 r2: a lane named only as the REFERENCE ("… so my
+        # voiceover is clear") is not asked for — Apple Intelligence's new
+        # voice-over (and its 60 MB download) passed as on-topic
+        head, tail = M.reference_split(c)
+        said |= families_of(head if tail else c)
+    edits = said - {"composite", "history", "text"}
+    if not edits or "composite" in said:
+        return None
+    parts = [p for p in (plan.intent or "").split("+") if p and p not in ("clarify", "ask", "noop")]
+    fams: set[str] = set()
+    for p in parts:
+        fams |= INTENT_FAMILIES.get(p, {p})
+    if fams and not fams & said:
+        return f"off-topic {'+'.join(parts)[:40]}"
+    if "voiceover" in parts and said - {"vo", "text"} and not _VO_CREATE_RE.search(M.norm(prompt)):
+        # a NEW voice-over needs words that make one; an edit of the one there
+        # ("make the voiceover louder") is not a request for another
+        return "off-topic voiceover"
+    if plan.downloads_needed and not fams & said:
+        return "an unasked download"
+    reply = (plan.reply or "").strip()
+    if not plan.steps and not plan.needs_input and reply and not reply.endswith("?") \
+            and plan.intent not in ("clarify", "ask"):
+        # "music is already on the timeline", "the Prompt bar can change the
+        # colour and position" — for a prompt that ASKS for an edit, an
+        # answer that edits nothing is not an answer
+        return "read-only reply to an edit"
+    return None
 
 
 #: Steps that restructure the footage, and the grammar intents whose words

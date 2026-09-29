@@ -63,3 +63,15 @@ describe('every support.ts reason code has words', () => {
       'Approximate preview: Canvas behind a moved or resized clip. The export is exact.')
   })
 })
+
+// K2 (0.8.0 QA): with "Loudness" on every frame the chip read as if that
+// were all; each approximation keeps its own words next to the others.
+describe('the chip names every reason of the frame', () => {
+  it('keeps "Voice effect: Deep" beside "Loudness"', () => {
+    const s = approxSummary(['audio:loudness', 'audio:voice:deep'])
+    expect(s).toContain('Voice effect: Deep')
+    expect(s).toContain('Loudness')
+    expect(approxSummary(['audio:voice:deep', 'anim:in:spin'])).toBe(
+      'Approximate preview: Voice effect: Deep, Spin In animation. The export is exact.')
+  })
+})

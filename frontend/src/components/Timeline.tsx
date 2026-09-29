@@ -13,7 +13,7 @@ import {
   type LayoutClip, type V1Layout,
 } from '../lib/timelineLayout'
 import { TransitionPopover, type TransitionInfo } from './TransitionPopover'
-import { splitTimeFor } from '../lib/splitTargets'
+import { soundClipUnder, splitTimeFor } from '../lib/splitTargets'
 import { freezeAtPlayhead, planFreeze } from '../lib/freezeFrame'
 import { useSpeedCatalog } from '../lib/speed/speedCatalog'
 import { BADGE_ICON, layoutSpeedBadge, speedBadgeText, type BadgeKind, type BadgeLayout } from '../lib/speedBadge'
@@ -2632,8 +2632,10 @@ export function Timeline() {
               title: `Cut the clip under the playhead in two (${chordLabel('Mod+KeyB')}). Move the playhead to where you want the cut first.`,
               // Decoded per lane (lib/splitTargets): `split_at` takes layout
               // time and the playhead is render time — same path as ⌘B.
+              // A sound clip decodes through its own pull (it plays whole).
               action: () => useStore.getState().splitTrackAt(
-                contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead)) },
+                contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead,
+                  soundClipUnder(edl, contextMenu.trackId, playhead))) },
             // v1 and overlay (PIP) video lanes (wave D3, E2: an overlay freeze
             // opens only its own lane — lib/freezeFrame).
             ...(edl?.tracks.find((t) => t.id === contextMenu.trackId)?.type === 'video' && menuClip && isMediaClip(menuClip)

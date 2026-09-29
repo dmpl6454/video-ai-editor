@@ -77,6 +77,9 @@ export interface V1Layout {
   /** clip id -> seconds it is pulled LEFT of its `start`. */
   shift: Map<string, number>
   seams: SeamLayout[]
+  /** v1's LAYOUT end (`EDL.video_extent()`); where a sound run laid to it is
+   *  cut (`soundSpan`). Absent without v1 clips. */
+  end?: number
 }
 
 // The gap tolerance (compositor._GAP_EPS) and the 0.05 s boundary match
@@ -125,13 +128,14 @@ export function v1Layout(
   const sorted = [...clips].sort((a, b) => a.start - b.start)
   if (sorted.length === 0) return { shift, seams: [] }
   const seams = seamTable(sorted, transitions, fps)
+  const end = Math.max(...sorted.map((c) => c.start + c.duration))
   shift.set(sorted[0].id, 0)
   // The clip AFTER seam i is pulled by everything consumed through seam i.
   // Per-clip rather than `renderTime(start)` on purpose: a legacy pair whose
   // `start` sits a hair BEFORE its boundary is still packed to that boundary
   // by the renderer, and the per-segment charge is what it actually does.
   for (let i = 0; i < seams.length; i++) shift.set(sorted[i + 1].id, seams[i].cum)
-  return { shift, seams }
+  return { shift, seams, end }
 }
 
 /** Convenience: a clip's start in OUTPUT time. */
@@ -272,6 +276,12 @@ export function isSoundLane(trackId: string, trackType?: string): boolean {
 /** schema.SOUND_RUN_TOL_S: two sound clips this close are one run. */
 const SOUND_RUN_TOL = 1e-3
 
+/** `schema.sound_runs`: a detached sound (`linked_to`) follows its OWN
+ *  picture, so it never joins the run of the clip before it — back to back
+ *  with another detached sound it was pulled by that one's seam only and
+ *  drawn/exported late by the transition at their cut (final QA, run 2). */
+const opensSoundRun = (c: AnyClip): boolean => Boolean((c as { linked_to?: string | null }).linked_to)
+
 /**
  * How much earlier than its layout `start` a SOUND clip plays
  * (`schema.sound_pulls`): a run of abutting clips on its lane (a split
@@ -283,6 +293,8 @@ const SOUND_RUN_TOL = 1e-3
 export function soundPull(
   seams: SeamLayout[], clip: AnyClip, laneClips?: readonly AnyClip[],
 ): number {
+  // (final QA, run 2) a detached sound (`linked_to`) always opens its own
+  // run — `schema.sound_runs` — so it is pulled exactly like its picture
   const own = clip.start - renderTime(seams, clip.start)
   if (!laneClips?.length) return own
   // `clip` stands in for the lane's copy of itself (a what-if position:
@@ -292,7 +304,7 @@ export function soundPull(
   let runEnd: number | null = null
   let runPull = 0
   for (const c of lane.filter(isMediaClip).sort((a, b) => a.start - b.start)) {
-    if (runEnd === null || c.start > runEnd + SOUND_RUN_TOL) {
+    if (runEnd === null || opensSoundRun(c) || c.start > runEnd + SOUND_RUN_TOL) {
       runPull = c.start - renderTime(seams, c.start)
       runEnd = c.start + clipDuration(c)
     } else {
@@ -301,6 +313,44 @@ export function soundPull(
     if (c.id === clip.id) return runPull
   }
   return own
+}
+
+/**
+ * Where a SOUND clip plays, in render time (`schema.sound_render_windows`,
+ * final QA K1): its run (the abutting clips around it) starts where the
+ * run's first start plays (`soundPull`) and plays whole — unless the run was
+ * laid to or past v1's layout end `videoEnd`, which cuts it where that end
+ * maps (`renderTime(end)`). A run ending inside v1's layout plays whole even
+ * past the picture's render end (final QA run 2, round 2), so its block
+ * shows the full length the export plays. `end <= start` for a piece wholly
+ * past its run's cut.
+ */
+export function soundSpan(
+  seams: SeamLayout[], videoEnd: number | undefined, clip: AnyClip, laneClips?: readonly AnyClip[],
+): { start: number; end: number } {
+  const pull = soundPull(seams, clip, laneClips)
+  const start = clip.start - pull
+  const whole = start + clipDuration(clip)
+  if (!seams.length || videoEnd === undefined) return { start, end: whole }
+  // the run's layout end (`clip` stands in for the lane's copy of itself)
+  const lane = (laneClips ?? []).filter((c) => c.id !== clip.id && isMediaClip(c))
+  const sorted = [...lane, clip].sort((a, b) => a.start - b.start)
+  let runEnd = -Infinity
+  let hit = -Infinity
+  for (const c of sorted) {
+    const e = c.start + clipDuration(c)
+    if (runEnd === -Infinity || opensSoundRun(c) || c.start > runEnd + SOUND_RUN_TOL) {
+      if (hit !== -Infinity) break                // the run holding `clip` has ended
+      runEnd = e
+    } else {
+      runEnd = Math.max(runEnd, e)
+    }
+    if (c.id === clip.id) hit = runEnd
+  }
+  // a run ending INSIDE v1's layout plays whole (final QA run 2, round 2)
+  if (runEnd < videoEnd - SOUND_RUN_TOL) return { start, end: whole }
+  const cut = Math.max(renderTime(seams, runEnd), renderTime(seams, videoEnd))
+  return { start, end: Math.min(whole, cut) }
 }
 
 export interface DrawnSpan {
@@ -335,10 +385,10 @@ export function drawnSpan(
     // a transition overlaps main-track pictures only. The picture window
     // below shrank a voiceover's block by every seam it crossed, and the
     // export cut its last words by the same amount (final QA, round 3).
-    return {
-      start: clip.start - soundPull(layout.seams, clip, laneClips),
-      duration: clipDuration(clip), dropped: false,
-    }
+    // Final QA (K1): a run laid to or past v1's layout end is cut where
+    // that end maps, so a bed aligned to the video ends with its picture.
+    const sp = soundSpan(layout.seams, layout.end, clip, laneClips)
+    return { start: sp.start, duration: Math.max(0, sp.end - sp.start), dropped: sp.end - sp.start <= SEAM_EPS }
   }
   const w = renderWindow(layout.seams, clip.start, clipEnd(clip))
   return { start: w.start, duration: Math.max(0, w.end - w.start), dropped: w.dropped }

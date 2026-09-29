@@ -678,16 +678,18 @@ def _lane_prime(c: Clip) -> float:
     return min(float(c.in_), latency_prime_s(c))
 
 
-def _on_render_clock(clips: list[Clip], seams: clock.SeamTable
+def _on_render_clock(clips: list[Clip], seams: clock.SeamTable, video_end: float
                      ) -> list[tuple[Clip, tuple[float, float]]]:
     """`(clip, window)` on the render clock for every audible clip of ONE
     sound lane, in the order given: `clock.sound_windows` — it starts where
-    its run's start plays and lasts its whole `effective_duration` (an
-    audio-lane clip is retimed by its speed like v1, QA-086). Final QA
-    (round 3): it was `render_window(start, start + eff)`, the PICTURE rule,
-    which shrank a voiceover by every seam it crossed and cut its last words
-    off in the export."""
-    wins = clock.sound_windows(clips, seams)
+    its run's start plays; it lasts its whole `effective_duration` (an
+    audio-lane clip is retimed by its speed like v1, QA-086) unless its run
+    was laid to or past v1's layout end (`video_end`), which cuts it where
+    that end maps, its fade-out at the cut (final QA, K1). Final QA (round
+    3): it was `render_window(start, start + eff)`, the PICTURE rule, which
+    shrank a voiceover by every seam it crossed and cut its last words off
+    in the export."""
+    wins = clock.sound_windows(clips, seams, video_end)
     return [(c, wins[c.id]) for c in clips if c.id in wins]
 
 
@@ -720,8 +722,9 @@ def build_audio_mix(
     # Every lane below is positioned on the RENDER clock, each lane on its
     # own (`_on_render_clock`: a run of abutting clips moves as one block).
     seams = clock.seam_table(edl)
-    music_placed = _on_render_clock(music_clips, seams)
-    vo_placed = _on_render_clock(vo_clips, seams)
+    video_end = edl.video_extent()
+    music_placed = _on_render_clock(music_clips, seams, video_end)
+    vo_placed = _on_render_clock(vo_clips, seams, video_end)
     # Plain audio lanes (the stock `a1` "Main audio" track, plus any other
     # type=="audio" track) were read by NO render path: clips dropped there were
     # silent, yet still extended `edl.duration`. The UI shows the lane and
@@ -729,7 +732,7 @@ def build_audio_mix(
     # Folded in with the voiceover group — same per-clip filter, same mix stage.
     for t in edl.tracks:
         if t.type == "audio" and not t.muted:
-            vo_placed += _on_render_clock([c for c in t.clips if isinstance(c, Clip)], seams)
+            vo_placed += _on_render_clock([c for c in t.clips if isinstance(c, Clip)], seams, video_end)
 
     if not music_placed and not vo_placed:
         # Still master the speech-only path when a target is set AND we're in

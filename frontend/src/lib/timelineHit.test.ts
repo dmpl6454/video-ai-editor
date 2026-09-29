@@ -47,6 +47,15 @@ describe('hitTest elsewhere', () => {
     expect(cursorFor(h)).toBe('not-allowed')
   })
 
+  it('two clips drawn on the same spot: the body grab takes the one drawn on TOP (last)', () => {
+    // A legacy lane with two texts over one window: the one whose label shows
+    // (drawn last) must be the one a click selects, not the one under it.
+    const under: HitBox = { ...A, clipId: 'arrow' }
+    const top: HitBox = { ...A, clipId: 'yourtext' }
+    const h = hitTest(400, 42, G, [under, top], [])
+    expect(h).toMatchObject({ kind: 'move', box: { clipId: 'yourtext' } })
+  })
+
   it('a 6 px sliver keeps a body to grab', () => {
     const s: HitBox = { ...A, w: 6 }
     expect(hitTest(83, 42, { ...G, playheadX: 600 }, [s], []).kind).toBe('move')

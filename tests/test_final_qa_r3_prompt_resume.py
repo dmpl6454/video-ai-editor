@@ -75,9 +75,13 @@ def test_a_typo_in_the_first_prompt_is_fixed_when_the_answer_replans(tmp_path, m
     ids = [c.id for c in store.edl.get_track("v1").clips]
     events = F.collect(service.prompt_turn(store, "delet clip 3", [], ui_state={"playhead": 1.0}))
     clarify = [e for e in events if e["type"] == "clarify"]
-    assert clarify, _said(events)
-    events = F.collect(service.resume(store, clarify[0]["token"], {service.MODEL_QUESTION_KEY: "the last clip"},
-                                      history=[], user_message="the last clip"))
+    if clarify:
+        events = F.collect(service.resume(store, clarify[0]["token"], {service.MODEL_QUESTION_KEY: "the last clip"},
+                                          history=[], user_message="the last clip"))
+    else:
+        # K3: the recipes brain now reads the slip on the FIRST turn (the
+        # shared typo table) — the right clip, with no question
+        assert "?" not in _said(events).split("—", 1)[-1], _said(events)
     assert [c.id for c in store.edl.get_track("v1").clips] == ids[:2], _said(events)
     assert pending.load_pending(Path(store.dir)) is None
 

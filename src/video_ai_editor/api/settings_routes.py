@@ -28,7 +28,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .. import config, keychain
-from .auth import _is_loopback
+from .auth import _is_loopback, same_origin
 
 router = APIRouter(tags=["settings"])
 
@@ -39,41 +39,10 @@ _NO_STORE = {"Cache-Control": "no-store"}
 _TEST_TIMEOUT_S = 15.0
 
 
-#: `Sec-Fetch-Site` values a request from the app's own window can carry:
-#: its own page (`same-origin`) or a user-typed/top-level load (`none`).
-_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
-
-
-def _same_origin(request: Request) -> bool:
-    """True unless the request came from a page on ANOTHER origin.
-
-    The loopback-peer check cannot see this: a page at http://localhost:5173
-    (Vite's default port, i.e. any other dev project on this Mac) runs in a
-    local browser, so its fetch arrives from 127.0.0.1 too
-    (REVIEW-C3-KEY-CORS-5173).
-
-      * Fetch metadata decides whenever the browser sends it (every engine
-        the app runs in does): a different port on the same host is
-        `same-site`, another host `cross-site`; only `same-origin` (the app's
-        own page) and `none` (typed / top-level) pass. Page script cannot set
-        a `Sec-` header, so it cannot claim `same-origin`.
-      * Without fetch metadata, a named Origin must be the host:port this
-        request was addressed to.
-
-    The Vite dev proxy rewrites Host to the backend's (its string shorthand
-    is `changeOrigin: true`) but forwards the browser's `same-origin`, so the
-    dev app still passes and a foreign page never does.
-    """
-    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
-    if site:
-        return site in _OWN_FETCH_SITES
-    origin = (request.headers.get("origin") or "").strip()
-    if origin:
-        host = (request.headers.get("host") or "").strip().lower()
-        _, _, origin_host = origin.lower().partition("://")
-        if not host or origin_host.rstrip("/") != host:
-            return False
-    return True
+#: One rule, shared with the middleware that applies it to every write
+#: (api/auth.same_origin, SEC-SAME-ORIGIN). The settings routes also apply
+#: it to their GET, because that answer describes the key.
+_same_origin = same_origin
 
 
 def _guard(request: Request, *, write: bool) -> None:
