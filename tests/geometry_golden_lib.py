@@ -490,3 +490,18 @@ def document(records: list[dict]) -> dict:
 
 def load() -> dict:
     return json.loads(GOLDEN.read_text())
+
+
+# ------------------------------------------------- golden vs another machine
+
+def deviation(measured: list[dict], gold_frames: list[dict]):
+    """A `golden_env.Deviation` of a render against the golden's frames."""
+    from golden_env import Deviation
+    d = Deviation()
+    for got, want in zip(measured, gold_frames, strict=True):
+        if "gain" in want:
+            d.gain(got["gain"], want["gain"], GREY)
+            continue
+        for m, at in want["markers"].items():
+            d.marker((got["k"], m), got["markers"][m], at)
+    return d

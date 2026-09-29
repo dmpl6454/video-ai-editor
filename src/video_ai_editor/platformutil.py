@@ -261,6 +261,268 @@ def list_processes() -> list[tuple[int, str]]:
     return procs
 
 
+def process_table() -> list[tuple[int, int, str]]:
+    """`(pid, parent pid, command line)` of every process this user can see,
+    on every OS — for saying WHAT was still alive when a cancelled encode did
+    not stop (the tests' failure messages). POSIX through `ps`; Windows
+    through PowerShell's CIM (`wmic` is gone from Windows 11 24H2), which
+    takes about a second to start, so this is a diagnostic, never a hot path.
+    An empty list when the tool is missing or fails."""
+    if IS_WINDOWS:  # pragma: no cover - exercised on the Windows CI runner
+        argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object "
+                "{ \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }"]
+    else:
+        argv = ["ps", "-axo", "pid=,ppid=,command="]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", stdin=subprocess.DEVNULL,
+                             timeout=30, **SUBPROCESS_FLAGS).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_process_table(out, "|" if IS_WINDOWS else None)
+
+
+def parse_process_table(text: str, sep: str | None) -> list[tuple[int, int, str]]:
+    """Rows of `pid<sep>ppid<sep>command line` (`sep` None: whitespace)."""
+    rows: list[tuple[int, int, str]] = []
+    for line in (text or "").splitlines():
+        parts = line.strip().split(sep, 2)
+        if len(parts) >= 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            cmd = parts[2].strip() if len(parts) == 3 else ""
+            rows.append((int(parts[0]), int(parts[1]), cmd))
+    return rows
+
+
+# ---- killing a process TREE ---------------------------------------------------
+#
+# CI round 3 (Windows runner, ffmpeg from `choco install ffmpeg-full`): the
+# `ffmpeg.exe` on PATH is a Chocolatey SHIM ("ShimGen has successfully created
+# a shim for ffmpeg.exe") — a small launcher that starts the real ffmpeg as
+# its CHILD and waits for it. Scoop installs the same kind of launcher.
+# `Popen.kill()` is TerminateProcess on the launcher alone: the real ffmpeg
+# ran on as an orphan, holding the inherited stdout/stderr pipes (so
+# `communicate()` after the kill waited for the whole encode) and the `.part`
+# file (which Windows then refuses to delete). Measured on that run: a
+# superseded preview answered 49.69 s after the newer request, a 1 s deadline
+# after 8.4 s, a cancelled proxy build wrote 15/15 spans.
+#
+# So on Windows every cancellable ffmpeg is started SUSPENDED, put in a Job
+# Object and only then resumed (`popen_in_tree`), and cancelling it
+# terminates the JOB — the launcher and whatever it started. A process is in
+# its parent's job only if the parent was in it when it was created, so the
+# launcher must not run before the assignment. POSIX is untouched: `nice`
+# execs the tool, ffmpeg has no children, and `kill_process_tree` there IS
+# `proc.kill()`.
+
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9      # JOBOBJECTINFOCLASS
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+#: What a killed tree exits with — the code `Popen.kill()` itself passes to
+#: TerminateProcess, so "exit 1" in logs and messages reads as before.
+_TREE_KILL_EXIT_CODE = 1
+_TREE_JOB_ATTR = "_vai_tree_job"
+_CREATE_SUSPENDED = 0x00000004                  # process creation flag
+#: One job handle is read by a kill and closed by a release, from two threads
+#: (the proxy watcher kills while the encode's `finally` releases). Windows
+#: reuses handle values, so a TerminateJobObject after the CloseHandle could
+#: name ANOTHER encode's job. Held only around those two system calls.
+_TREE_JOB_LOCK = threading.Lock()
+
+
+def _job_limits_kill_on_close():
+    """A JOBOBJECT_EXTENDED_LIMIT_INFORMATION asking for KILL_ON_JOB_CLOSE
+    (144 bytes on 64-bit Windows; the test pins the size, because
+    SetInformationJobObject rejects any other)."""
+    import ctypes
+
+    class _Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", ctypes.c_uint32),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", ctypes.c_uint32),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", ctypes.c_uint32),
+                    ("SchedulingClass", ctypes.c_uint32)]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class _Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", _Basic),
+                    ("IoInfo", _IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    info = _Extended()
+    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    return info
+
+
+def _kernel32():  # pragma: no cover - Windows only; the tests substitute a fake
+    """kernel32 with pointer-sized HANDLEs declared (the ctypes default is a
+    C int, which truncates a 64-bit handle)."""
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle, dword, void_p = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p
+    k32.CreateJobObjectW.restype = handle
+    k32.CreateJobObjectW.argtypes = [void_p, ctypes.c_wchar_p]
+    k32.SetInformationJobObject.argtypes = [handle, ctypes.c_int, void_p, dword]
+    k32.AssignProcessToJobObject.argtypes = [handle, handle]
+    k32.TerminateJobObject.argtypes = [handle, ctypes.c_uint]
+    k32.CloseHandle.argtypes = [handle]
+    return k32
+
+
+def _create_kill_job(process_handle: int) -> int | None:
+    """A Job Object holding the process behind `process_handle`, or None."""
+    import ctypes
+    k32 = _kernel32()
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = _job_limits_kill_on_close()
+    if (k32.SetInformationJobObject(job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                                    ctypes.byref(info), ctypes.sizeof(info))
+            and k32.AssignProcessToJobObject(job, process_handle)):
+        return int(job)
+    k32.CloseHandle(job)
+    return None
+
+
+def track_process_tree(proc: subprocess.Popen) -> bool:
+    """Windows puts `proc` in a Job Object, so the children it starts FROM
+    NOW ON die with it in `kill_process_tree`; a child it already has is not
+    in the job and is not reached, which is why `popen_in_tree` calls this
+    before the process has run at all. True when the job holds it. Nothing
+    at all on POSIX. Pair every call with `release_process_tree`."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        job = _create_kill_job(int(getattr(proc, "_handle")))
+    except Exception:  # noqa: BLE001 — no job is a slower kill, never a failed render
+        job = None
+    setattr(proc, _TREE_JOB_ATTR, job)
+    return job is not None
+
+
+def _ntdll():  # pragma: no cover - Windows only; the tests substitute a fake
+    import ctypes
+    nt = ctypes.WinDLL("ntdll")
+    nt.NtResumeProcess.restype = ctypes.c_long          # NTSTATUS
+    nt.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    return nt
+
+
+def _resume_process(proc: subprocess.Popen) -> bool:
+    """Let a process started with CREATE_SUSPENDED run. Popen closes the
+    main thread's handle, so it is resumed through the process handle
+    (NtResumeProcess; Popen's handle has PROCESS_ALL_ACCESS). True on
+    STATUS_SUCCESS."""
+    try:
+        return int(_ntdll().NtResumeProcess(int(getattr(proc, "_handle")))) == 0
+    except Exception:  # noqa: BLE001 — the caller starts the tool the old way
+        return False
+
+
+def popen_in_tree(argv, **kwargs) -> subprocess.Popen:
+    """`subprocess.Popen(argv, **kwargs)` for a process that may have to be
+    killed with everything it starts. POSIX: exactly that. Windows: started
+    suspended, put in its Job Object (`track_process_tree`), then resumed, so
+    a launcher cannot start the real tool before the job holds it. Pair with
+    `release_process_tree` once it has been waited for.
+
+    A process that cannot be resumed would never end: it is killed and the
+    tool started running, then tracked, as before (the child can then get
+    out first on a contended machine; `taskkill /T` is tried only when no
+    job exists)."""
+    if not IS_WINDOWS:
+        return subprocess.Popen(argv, **{**SUBPROCESS_FLAGS, **kwargs})
+    running = {**SUBPROCESS_FLAGS, **kwargs}
+    kwargs = dict(running)
+    flags = int(kwargs.pop("creationflags", 0) or 0)
+    proc = subprocess.Popen(argv, creationflags=flags | _CREATE_SUSPENDED, **kwargs)
+    track_process_tree(proc)
+    if _resume_process(proc):
+        return proc
+    try:
+        kill_process_tree(proc)
+        proc.wait(timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    release_process_tree(proc)
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+    proc = subprocess.Popen(argv, **{**SUBPROCESS_FLAGS, **running})   # as it was started before
+    track_process_tree(proc)
+    return proc
+
+
+def _taskkill_tree(pid: int) -> bool:
+    """`taskkill /T /F`: the fallback when no Job Object holds the tree (an
+    outer job that forbids nesting). It walks parent pids, so it must run
+    while the root is still alive — before `proc.kill()`. True when
+    taskkill reported the tree terminated."""
+    try:
+        done = subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10, **SUBPROCESS_FLAGS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return getattr(done, "returncode", 1) == 0
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill `proc` AND every process it started. POSIX: exactly
+    `proc.kill()`. Windows: terminate its Job Object (`track_process_tree`),
+    else `taskkill /T /F`, then the process itself."""
+    if not IS_WINDOWS:
+        proc.kill()
+        return
+    killed = False
+    with _TREE_JOB_LOCK:                # not while `release_process_tree` closes it
+        job = getattr(proc, _TREE_JOB_ATTR, None)
+        if job:
+            try:
+                killed = bool(_kernel32().TerminateJobObject(job, _TREE_KILL_EXIT_CODE))
+            except Exception:  # noqa: BLE001 — fall through to taskkill
+                killed = False
+    if not killed and proc.poll() is None:
+        killed = bool(_taskkill_tree(proc.pid))
+    try:
+        proc.kill()
+    except OSError:
+        # TerminateProcess on a process the tree kill is already taking down
+        # answers "access denied" while its exit code still reads as running
+        # (Popen.kill re-raises that). It is dying; a cancel must not turn
+        # into a PermissionError. Without a tree kill, raise as before.
+        if not killed:
+            raise
+
+
+def release_process_tree(proc: subprocess.Popen) -> None:
+    """Close the Job Object of a process that has been waited for. The job
+    is KILL_ON_JOB_CLOSE, so this also ends anything the process left
+    behind. Idempotent; nothing on POSIX."""
+    if not IS_WINDOWS:
+        return
+    with _TREE_JOB_LOCK:
+        job = getattr(proc, _TREE_JOB_ATTR, None)
+        if not job:
+            return
+        setattr(proc, _TREE_JOB_ATTR, None)
+        try:
+            _kernel32().CloseHandle(job)
+        except Exception:  # noqa: BLE001 — a leaked handle is not worth failing a render
+            pass
+
+
 def replace_with_retry(src: Path | str, dst: Path | str,
                        attempts: int = 10, delay: float = 0.05) -> None:
     """os.replace with retry. On Windows, replacing a file another process has

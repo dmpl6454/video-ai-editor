@@ -8,6 +8,7 @@ fails on a corrupt clip → 422, not 500.
 from __future__ import annotations
 import importlib
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,23 @@ def client(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(_main, "WORKDIR", tmp_path)
     _main._STORES.clear()
     return TestClient(_main.app)
+
+
+def _mp4_without_a_moov(size: int = 2000) -> bytes:
+    """An MP4 that every ffmpeg identifies as MP4 and none can open: a valid
+    `ftyp` box and an `mdat` of zeros, no `moov`. The `ftyp` tag gives the mov
+    demuxer the top probe score, so no other demuxer is tried, and the header
+    read ends in "moov atom not found" (ffprobe exit 1, ffmpeg 8.1.1).
+
+    Random bytes are NOT that fixture: the container guess then depends on the
+    dice and on the ffmpeg version. Measured on ffmpeg 8.1.1, 400 files of
+    os.urandom(2000): 397 unreadable, 3 identified as an `lrc` lyrics file
+    (one subtitle stream) - which add_clip rightly refuses on a video lane, so
+    the clip this test needs on v1 was never added (the ubuntu CI failure,
+    ffmpeg 6.1.1: "add_clip returned 400: 'broken.mp4' has no video stream")."""
+    ftyp = struct.pack(">I4s4sI4s4s", 24, b"ftyp", b"isom", 0x200, b"isom", b"mp41")
+    payload = bytes(size - len(ftyp) - 8)
+    return ftyp + struct.pack(">I4s", len(payload) + 8, b"mdat") + payload
 
 
 def test_garbage_file_import_returns_422_not_500(client, tmp_path: Path):
@@ -60,7 +78,7 @@ def test_preview_of_unrenderable_clip_returns_422(client, tmp_path: Path):
     # round-5 verification run could not be diagnosed from the log for exactly
     # that reason — the message now carries what is needed.
     bad = tmp_path / "broken.mp4"
-    bad.write_bytes(os.urandom(2000))
+    bad.write_bytes(_mp4_without_a_moov())
     sid = client.post("/api/sessions").json()["id"]
     add = client.post(f"/api/sessions/{sid}/dispatch", json={
         "tool": "add_clip",

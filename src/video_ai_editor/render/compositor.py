@@ -2240,11 +2240,15 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
     # at that count ffmpeg closes the file before the AAC encoder flushes its
     # last packet, so the sound ended ~10 ms before the picture at NTSC rates
     # (gate RX finding 1; tests/test_render_audio_tail.py). The sound is
-    # already bounded by `apad`+`atrim=end_sample`.
+    # already bounded by `apad`+`atrim=end_sample` per segment.
     from .frame_map import planned_frames as _planned_frames
     plan_frames = _planned_frames(edl, fps)
     fc = f"{fc};{v_label}trim=end_frame={plan_frames}[vcap]"
     v_label = "[vcap]"
+    # ... and the sound reaches it (`_sound_covers_plan`).
+    a_cap, final_audio_label = _sound_covers_plan(final_audio_label, plan_frames, fps)
+    if a_cap:
+        fc = f"{fc};{a_cap}"
     args = [_pu.FFMPEG, "-y", *inputs, *extra_inputs,
             "-filter_complex", fc,
             "-map", v_label, "-map", final_audio_label,
@@ -2273,6 +2277,30 @@ def _render_locked(edl: EDL, dst: Path, *, height: int, fps: int, preview: bool,
         raise RuntimeError(f"ffmpeg render failed (rc={rc}):\n{(err or '')[-2000:]}")
     _pu.replace_with_retry(tmp, dst)  # atomic swap; retries on Windows if a reader holds dst
     return dst
+
+
+def _sound_covers_plan(a_label: str, frames: int, fps) -> tuple[str, str]:
+    """`(filter, label)`: the delivered sound padded with digital silence to
+    `samples_for_frames(frames)`, so it never ends before the picture's last
+    frame does. `("", a_label)` when there is no plan to cover.
+
+    The v1 sound is every segment's OWN frames in samples, each rounded
+    (`frame_map.audio_total_samples`), so at an NTSC rate the sum can fall
+    short of the whole plan's: ten clips of 17/13/11/9/10/12/8/14/10/19 frames
+    at 29.97 sum to 196996 samples where 123 frames are 196996.8 -> 196997.
+    ffmpeg <= 8 hid it (its AAC decode returns whole 1024-sample frames:
+    197632 here); ffmpeg 9 returns exactly what the encoder was fed, and
+    macOS 9.0.1 / Windows 9.0.2 decoded 196996 (CI run 36599751632). Stated in
+    SAMPLES (`apad=whole_len`), so no version rounds a duration; pad only,
+    never a cut: a sound lane laid past the picture still plays whole, and no
+    placed sample moves. On 8.1.1 the AAC packets are byte-identical (the
+    encoder already zero-filled its last frame); only the audio track's
+    length in the container grows by the padded samples.
+    """
+    n = _tb.samples_for_frames(frames, fps)
+    if n <= 0:
+        return "", a_label
+    return f"{a_label}apad=whole_len={n}[acap]", "[acap]"
 
 
 def _probe_duration(p: Path) -> float | None:
@@ -2368,8 +2396,10 @@ def _assemble_chunks_streamcopy(edl: EDL, chunk_paths: list[Path],
             apply_loudnorm=False,
         )
         args += audio_inputs
-        fc_all = ";".join(x for x in (";".join(a_parts), audio_chain) if x)
         final_lbl = final_audio_label if audio_chain else main_label
+        # The picture is exactly the chunks' frames; the sound reaches its end.
+        a_cap, final_lbl = _sound_covers_plan(final_lbl, sum(frames), fps)
+        fc_all = ";".join(x for x in (";".join(a_parts), audio_chain, a_cap) if x)
         args += ["-filter_complex", fc_all,
                  "-map", "0:v", "-map", final_lbl,
                  # The one encode this path pays for — the fastest AAC
@@ -2781,6 +2811,13 @@ def _remux_with_new_audio(edl: EDL, video_only: Path, dst: Path,
     # idx 0 = the video-only file. Preview-only, so loudnorm stays off.
     a_inputs, fc, final_audio_label = _audio_only_graph(
         edl, fps=fps, first_input=1, apply_loudnorm=False)
+    # The cached picture is the plan's frames; the sound reaches its end, as
+    # in the full render this path stands in for.
+    from .frame_map import planned_frames as _planned_frames
+    a_cap, final_audio_label = _sound_covers_plan(
+        final_audio_label, _planned_frames(edl, fps), fps)
+    if a_cap:
+        fc = f"{fc};{a_cap}"
     args = [_pu.FFMPEG, "-y", "-i", str(video_only), *a_inputs,
             "-filter_complex", fc,
             "-map", "0:v", "-map", final_audio_label,
@@ -3067,20 +3104,19 @@ def _render_export_to(edl: EDL, dst: Path, h: str, *, height: int, fps, crf: int
     from .audio_mix import export_gain_scope
     gain = _export_mastering_gain(edl, fps=f_out, cache_dir=session_dir / "cache",
                                   cancel_event=cancel_event)
-    with export_gain_scope(gain):
+
+    def encode(average: int | None, peak_cap: bool, progress) -> None:
         _render(edl, dst, height=h_out, fps=f_out, preview=False,
-                cache_dir=session_dir / "cache",
-                on_progress=report if on_progress is not None else None,
+                cache_dir=session_dir / "cache", on_progress=progress,
                 cancel_event=cancel_event, crf=crf,
-                bitrate_kbps=target, bitrate_peak_cap=not vt_target, chunked=chunked)
-        if vt_target and (_video_kbps(dst) or 0) > target * _BITRATE_TOLERANCE:
-            # The first pass already reported ~100%; hold the bar there through
-            # the capped pass instead of running it backwards.
-            hold = (lambda _p: on_progress(max(0.99, seen[0]))) if on_progress is not None else None
-            _render(edl, dst, height=h_out, fps=f_out, preview=False,
-                    cache_dir=session_dir / "cache",
-                    on_progress=hold, cancel_event=cancel_event, crf=crf,
-                    bitrate_kbps=target, bitrate_peak_cap=True, chunked=chunked)
+                bitrate_kbps=average, bitrate_peak_cap=peak_cap, chunked=chunked)
+    # The first pass already reported ~100%; a later pass holds the bar there
+    # instead of running it backwards.
+    hold = (lambda _p: on_progress(max(0.99, seen[0]))) if on_progress is not None else None
+    with export_gain_scope(gain):
+        encode(target, not vt_target, report if on_progress is not None else None)
+        if vt_target:
+            _hold_bitrate_target(dst, target, lambda average, cap: encode(average, cap, hold))
     _hold_delivery_true_peak(dst, cancel_event=cancel_event)
     return RenderResult(path=dst, cached=False, edl_hash=h)
 
@@ -3246,6 +3282,60 @@ def _render_audio_export(edl: EDL, dst: Path, *, fps, cache_dir: Path,
 #: How far over a platform bitrate target an uncapped VideoToolbox export may
 #: land before it is re-encoded with the peak cap.
 _BITRATE_TOLERANCE = 1.15
+#: How far UNDER the target the delivered file may land before one corrective
+#: pass. A platform target is an average the file should measure, and both
+#: passes can miss it low: the capped pass on easy footage (testsrc2 1080p,
+#: 12000 kb/s: 10263, -14.5 %, on a real Mac and 10274 on GitHub's macOS
+#: guest) and the uncapped pass on a loaded machine (10492 to 11752 over 12
+#: runs of the same clip).
+_BITRATE_STARVED = 0.90
+#: The corrective pass never asks for more than the peak a platform target
+#: allows (`_target_bitrate_args`: 1.5x). Footage that would need more (a
+#: slate, a still) cannot spend the target and is not encoded again.
+_BITRATE_CORRECTION_MAX = 1.5
+
+
+def _hold_bitrate_target(dst: Path, target: int, encode) -> None:
+    """The VideoToolbox ladder after the uncapped first pass is in `dst`;
+    `encode(average_kbps, peak_cap)` writes another pass to `dst`.
+
+    Over target x 1.15: the capped pass, as before (noise: +58 % uncapped, on
+    target capped; testsrc2 with noise 2 to 35: 12584 to 15125 uncapped,
+    11973 to 12016 capped). A delivery still more than 10 % UNDER the target
+    gets ONE corrective pass: uncapped, its average scaled by what the first
+    uncapped pass measured (the uncapped encoder follows its average: 10000k
+    -> 9933, 13000k -> 12628, 14000k -> 13324; the capped one does not:
+    13000k to 16000k under the same cap all measure 10242). The file that
+    measured closest to the target is the one delivered.
+    """
+    first = _video_kbps(dst)
+    if first is None:
+        return
+    got = first
+    if first > target * _BITRATE_TOLERANCE:
+        encode(target, True)
+        got = _video_kbps(dst)
+    if got is None or got >= target * _BITRATE_STARVED:
+        return
+    average = int(round(target * target / first))
+    if average > target * _BITRATE_CORRECTION_MAX:
+        return
+    kept = dst.with_name(f".{dst.stem}.{os.getpid()}.{threading.get_ident()}.kept.part{dst.suffix}")
+    try:
+        os.link(dst, kept)              # `dst` stays a whole file throughout
+    except OSError:                     # a filesystem without hard links
+        _pu.replace_with_retry(dst, kept)
+    try:
+        encode(average, False)
+        again = _video_kbps(dst)
+        if again is not None and abs(again - target) < abs(got - target):
+            _pu.unlink_with_retry(kept)
+    finally:
+        if kept.exists():               # the earlier pass is the delivery
+            if dst.exists() and os.path.samefile(kept, dst):
+                _pu.unlink_with_retry(kept)     # the pass never swapped its file in
+            else:
+                _pu.replace_with_retry(kept, dst)
 
 
 def _video_kbps(path: Path) -> float | None:

@@ -285,11 +285,26 @@ def live_server(tmp_path):
 
 
 def _upload_while_polling_version(live_server, src: Path) -> tuple[dict, list[float]]:
-    """Upload `src` synchronously while polling /api/version every 0.2 s."""
+    """Upload `src` synchronously while polling /api/version every 0.2 s.
+
+    /api/version is asked once BEFORE the upload starts: its first answer in
+    a fresh server is not the answer the top bar polls. `config.build_id()`
+    is lazy, and in a checkout without a BUILD_ID file (the file is
+    git-ignored, so every CI runner) the first call runs `git rev-parse` and
+    `git status --porcelain` over the whole tree, then caches. On the Windows
+    runner that one call was the only slow sample — 2.707 s, followed by
+    0.044, 0.024, 0.020, 0.025, 0.028 ... through a 13.06 s import — and it
+    says nothing about the import freezing the backend. `result["warm_s"]`
+    and `result["samples"]` (seconds since the upload began, latency) are
+    for the failure message."""
     import httpx
     sid = httpx.post(live_server + "/api/sessions").json()["id"]
     done = threading.Event()
     result: dict = {}
+    t_warm = time.monotonic()
+    assert httpx.get(live_server + "/api/version", timeout=300).status_code == 200
+    warm_s = time.monotonic() - t_warm
+    t_upload = time.monotonic()
 
     def _do_upload():
         t0 = time.monotonic()
@@ -305,13 +320,17 @@ def _upload_while_polling_version(live_server, src: Path) -> tuple[dict, list[fl
     th = threading.Thread(target=_do_upload)
     th.start()
     latencies = []
+    samples = []
     time.sleep(0.5)
     while not done.is_set():
         t0 = time.monotonic()
         assert httpx.get(live_server + "/api/version", timeout=300).status_code == 200
         latencies.append(time.monotonic() - t0)
+        samples.append((round(t0 - t_upload, 2), round(latencies[-1], 3)))
         time.sleep(0.2)
     th.join()
+    result["warm_s"] = round(warm_s, 3)
+    result["samples"] = samples
     return result, latencies
 
 
@@ -333,7 +352,11 @@ def test_version_stays_fast_while_a_long_import_normalises(live_server, tmp_path
             break
     assert result["seconds"] > 2.0, "fixture too small to prove anything"
     assert len(latencies) >= 5, (latencies, result)
-    assert max(latencies) < 1.0, (max(latencies), result["seconds"])
+    slowest = sorted(result["samples"], key=lambda s: -s[1])[:5]
+    assert max(latencies) < 1.0, (
+        max(latencies), result["seconds"],
+        f"first /api/version (before the upload) took {result['warm_s']} s; slowest "
+        f"samples as (seconds into the upload, latency)={slowest} of {len(latencies)}")
 
 
 def test_wait0_upload_is_a_job_with_progress(api, tmp_path):

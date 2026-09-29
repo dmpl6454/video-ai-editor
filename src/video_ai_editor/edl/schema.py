@@ -137,7 +137,13 @@ EDL_VERSION = 3
 #     overlap). A laid gap now shrinks at most to zero; a detached sound keeps its J/L overlap. Same bump:
 #     with Loudness Off a PIP's sound folded into v1 counts as a mix and gets the true-peak limiter
 #     (`audio_mix.build_audio_mix(main_is_mix=)`): a WAV of v1 + a loud PIP hard-clipped.
-RENDER_BEHAVIOR_VERSION = 31
+# 32: (CI round 3) the delivered sound is padded with silence to the PLAN's samples
+#     (`compositor._sound_covers_plan`, `apad=whole_len`): the v1 sound is each segment's frames in
+#     samples, rounded per segment, and at an NTSC rate the sum can end under the picture (ten clips,
+#     123 frames at 29.97: 196996 for 196997). ffmpeg 9 decodes exactly what was encoded, so the
+#     file ended one sample early there. On ffmpeg 8.1.1 the decoded PCM and the AAC packets are
+#     unchanged; the audio track's last packet is one sample longer in the container (388 -> 389).
+RENDER_BEHAVIOR_VERSION = 32
 
 # A keyframed value is either a scalar or a list of [time, value] pairs with an interp.
 KeyframeList = list[tuple[float, float]]

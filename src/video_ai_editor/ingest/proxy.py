@@ -824,12 +824,17 @@ def encode_args(info: SourceInfo, f0: int, f1: int) -> list[str]:
 
 
 def _spawn(argv: list[str], low_priority: bool) -> subprocess.Popen:
+    # Windows: a launcher's child (the real ffmpeg behind a Chocolatey shim)
+    # must die with it, or a cancelled build goes on writing spans (CI round
+    # 3: 15/15 spans after the cancel), so the process is in its kill job
+    # before it runs. On POSIX this is `subprocess.Popen`. Every caller ends
+    # with `_pu.release_process_tree`.
     if low_priority:
-        return subprocess.Popen(_pu.low_priority_argv(argv), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                **_pu.LOW_PRIORITY_SUBPROCESS_FLAGS)
-    return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, **_pu.SUBPROCESS_FLAGS)
+        return _pu.popen_in_tree(_pu.low_priority_argv(argv), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 **_pu.LOW_PRIORITY_SUBPROCESS_FLAGS)
+    return _pu.popen_in_tree(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, **_pu.SUBPROCESS_FLAGS)
 
 
 class _EventLike:  # pragma: no cover - typing aid only
@@ -845,7 +850,7 @@ def _watch(proc: subprocess.Popen, cancel: "threading.Event | _EventLike | None"
     while not stop.wait(0.05):
         if cancel is not None and cancel.is_set():
             try:
-                proc.kill()
+                _pu.kill_process_tree(proc)
             except OSError:
                 pass
             return
@@ -889,7 +894,7 @@ def run_encode(info: SourceInfo, f0: int, f1: int, *,
                     on_init(reader.init)
             if f0 + count >= f1:
                 overflow = True
-                proc.kill()          # it is blocked writing the extra frames
+                _pu.kill_process_tree(proc)   # it is blocked writing the extra frames
                 break
             buf.append(sample)
             count += 1
@@ -903,8 +908,10 @@ def run_encode(info: SourceInfo, f0: int, f1: int, *,
     finally:
         stop.set()
         if proc.poll() is None:
-            proc.kill()
+            _pu.kill_process_tree(proc)
             proc.wait()
+        watcher.join(timeout=1)         # its kill is over before the job handle closes
+        _pu.release_process_tree(proc)
         drainer.join(timeout=2)
     if cancel is not None and cancel.is_set():
         raise Cancelled()
@@ -1093,8 +1100,10 @@ def build_audio(info: SourceInfo, *, cancel: "threading.Event | _EventLike | Non
     finally:
         stop.set()
         if proc.poll() is None:
-            proc.kill()
+            _pu.kill_process_tree(proc)
             proc.wait()
+        watcher.join(timeout=1)         # its kill is over before the job handle closes
+        _pu.release_process_tree(proc)
         drainer.join(timeout=2)
     if cancel is not None and cancel.is_set():
         raise Cancelled()

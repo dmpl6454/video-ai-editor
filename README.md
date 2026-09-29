@@ -150,6 +150,8 @@ cd frontend && npm install && cd ..
 cp .env.example .env                   # ANTHROPIC_API_KEY is optional (it adds the Claude rung)
 ```
 
+ffmpeg 8 or 9 is supported. Older versions are not tested.
+
 Optional binaries (downloaded on first use of each feature; ~270 MB total):
 
 ```bash

@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from video_ai_editor.api.hardening import RATE
 from video_ai_editor.main import app
+from runner_env import ffmpeg_alive
 
 
 @pytest.fixture
@@ -69,6 +70,10 @@ class _PopenSpy:
     def alive(self) -> list[subprocess.Popen]:
         return [p for p in self.procs if p.poll() is None]
 
+    def describe(self) -> list[tuple[int, object]]:
+        """(pid, exit code or None while running) of every ffmpeg started."""
+        return [(p.pid, p.poll()) for p in self.procs]
+
 
 def _session(c: TestClient, src: Path) -> str:
     sid = c.post("/api/sessions", json={"name": "bounds"}).json()["id"]
@@ -106,12 +111,17 @@ def test_unsuperseded_preview_hits_its_wall_clock_deadline(workdir, slow_src, mo
 
     assert r.status_code == 504, (r.status_code, r.text[:300], f"{took:.1f}s")
     assert r.json()["error"]["details"]["error"] == "preview_timed_out"
-    assert took < 6.0, f"deadline of 1 s answered after {took:.1f}s"
+    assert took < 6.0, (
+        f"deadline of 1 s answered after {took:.1f}s; ffmpeg started as (pid, exit "
+        f"code)={spy.describe()}; still running under {sid} as (pid, ppid, command "
+        f"tail)={ffmpeg_alive(sid)}")
     assert spy.procs, "the render never started an ffmpeg"
-    assert not spy.alive(), "a timed-out render left ffmpeg running"
+    assert not spy.alive(), (
+        f"a timed-out render left ffmpeg running: {spy.describe()}, {ffmpeg_alive(sid)}")
     sd = workdir / sid
     assert not (sd / "previews" / f"{h}.mp4").exists()
-    assert not _leftovers(sd), _leftovers(sd)
+    assert not _leftovers(sd), (
+        _leftovers(sd), f"answered after {took:.1f}s", spy.describe(), ffmpeg_alive(sid))
 
 
 def test_deadline_scales_with_the_timeline():
@@ -179,13 +189,18 @@ def test_preview_whose_client_disconnects_is_abandoned(workdir, slow_src, live_s
     t_close = time.monotonic()
     while spy.alive() and time.monotonic() - t_close < 5:
         time.sleep(0.05)
+    t_dead = time.monotonic() - t_close
     assert not spy.alive(), (
-        f"ffmpeg still running {time.monotonic() - t_close:.1f}s after the client left")
+        f"ffmpeg still running {time.monotonic() - t_close:.1f}s after the client left: "
+        f"{spy.describe()}, {ffmpeg_alive(sid)}")
     # Let the worker unwind, then nothing may have been published.
     time.sleep(0.5)
     sd = workdir / sid
     assert not (sd / "previews" / f"{h}.mp4").exists()
-    assert not _leftovers(sd), _leftovers(sd)
+    assert not _leftovers(sd), (
+        _leftovers(sd), f"the started ffmpeg was gone {t_dead:.2f}s after the client "
+        f"left, checked {time.monotonic() - t_close:.2f}s after", spy.describe(),
+        f"still running under {sid}: {ffmpeg_alive(sid)}")
 
 
 def test_disconnect_does_not_cancel_a_render_another_client_shares(workdir):

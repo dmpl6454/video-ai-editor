@@ -6,14 +6,21 @@ fades); ``frontend/src/lib/preview/render/geometry.test.ts`` holds the client
 compositor to it. This side re-renders a representative subset through the
 REAL compositor and requires the same measurements, so a compositor change
 that moves a picture fails here until the goldens (and geometry.ts) follow.
+
+The golden's sub-pixel numbers are those of the machine it was recorded on
+(tests/golden_env.py: the export's H.264 encoder decides them). Every live
+case is therefore two tests: the integer geometry, which holds everywhere,
+and the golden's own sub-pixel lines, which run where it was recorded.
 """
 from __future__ import annotations
 
 import shutil
+import warnings
 
 import pytest
 
 import geometry_golden_lib as lib
+import golden_env
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not on PATH")
 
@@ -55,24 +62,191 @@ def sources(tmp_path_factory):
     return lib.ensure_sources(tmp_path_factory.mktemp("geo-src"))
 
 
-@pytest.mark.parametrize("name", LIVE)
-def test_live_render_matches_golden(name, sources, tmp_path):
-    paths, infos = sources
-    case = next(c for c in lib.cases() if c.name == name)
-    measured = lib.render_case(case, paths, tmp_path)
-    gold = GOLD[name]
+#: What holds on EVERY machine beside the integer geometry, and what is
+#: scoped: one copy, with the measurements (tests/golden_env.py).
+PIXEL_GUARD, LEVEL_GUARD, SCOPED = golden_env.PIXEL_GUARD, golden_env.LEVEL_GUARD, golden_env.SCOPED
+PORTABLE = "frame indices, sources and integer bounding boxes are checked by test_live_render_integer_geometry"
+
+
+@pytest.fixture(scope="module")
+def rendered(sources, tmp_path_factory):
+    """name -> (measurements, the encoder they went through); one render per
+    case for the two tests below."""
+    paths, _infos = sources
+    work = tmp_path_factory.mktemp("geo-live")
+    done: dict[str, tuple[list[dict], str]] = {}
+
+    def get(name: str) -> tuple[list[dict], str]:
+        if name not in done:
+            case = next(c for c in lib.cases() if c.name == name)
+            encoder = golden_env.probe_encoder()
+            done[name] = (lib.render_case(case, paths, work), encoder)
+        return done[name]
+    return get
+
+
+def check_integer_geometry(name: str, measured: list[dict], gold: dict, infos: dict) -> None:
+    """Every assertion that does not depend on the encoder's or the scaler's
+    arithmetic: it runs on every machine."""
     assert gold["sources"] == {k: infos[k].to_json() for k in gold["sources"]}
     for got, want in zip(measured, gold["frames"], strict=True):
         assert got["k"] == want["k"]
         if "gain" in want:
-            assert got["gain"] == pytest.approx(want["gain"], abs=0.005), (name, got["k"])
+            assert abs(got["gain"] - want["gain"]) * lib.GREY <= LEVEL_GUARD, (name, got["k"], got["gain"], want["gain"])
             continue
         assert got["bbox"] == want["bbox"], (name, got["k"])
+        assert set(got["markers"]) == set(want["markers"]), (name, got["k"])
+        for m, at in want["markers"].items():
+            if at is not None and got["markers"][m] is not None:
+                assert got["markers"][m] == pytest.approx(at, abs=PIXEL_GUARD), (name, got["k"], m)
+
+
+def check_sub_pixel(name: str, measured: list[dict], gold: dict) -> None:
+    """The golden's own lines (unchanged): the numbers of the recording
+    environment's encoder, scaler and decoder."""
+    for got, want in zip(measured, gold["frames"], strict=True):
+        if "gain" in want:
+            assert got["gain"] == pytest.approx(want["gain"], abs=0.005), (name, got["k"])
+            continue
         for m, at in want["markers"].items():
             if at is None:
                 assert got["markers"][m] is None, (name, got["k"], m)
             else:
                 assert got["markers"][m] == pytest.approx(at, abs=0.25), (name, got["k"], m)
+
+
+def scope_to_the_recording_environment(name: str, measured: list[dict], gold: dict, encoder: str) -> None:
+    """Skip (with both environments and what THIS one measured) anywhere but
+    where the golden was recorded. The warning puts the numbers in a `-q` log."""
+    why = golden_env.foreign_reason(golden_env.GEOMETRY, SCOPED, portable=PORTABLE,
+                                    env=golden_env.current(encoder=encoder))
+    if why is None:
+        return
+    why = f"{name}: {why}; {lib.deviation(measured, gold['frames']).describe()}"
+    warnings.warn(why, stacklevel=2)
+    pytest.skip(why)
+
+
+@pytest.mark.parametrize("name", LIVE)
+def test_live_render_integer_geometry(name, sources, rendered):
+    measured, _encoder = rendered(name)
+    check_integer_geometry(name, measured, GOLD[name], sources[1])
+
+
+@pytest.mark.parametrize("name", LIVE)
+def test_live_render_matches_golden(name, sources, rendered):
+    measured, encoder = rendered(name)
+    check_integer_geometry(name, measured, GOLD[name], sources[1])
+    scope_to_the_recording_environment(name, measured, GOLD[name], encoder)
+    check_sub_pixel(name, measured, GOLD[name])
+
+
+# Both directions, on any machine. A libx264 render on the recording Mac IS a
+# foreign environment for this golden (tests/golden_env.py), and on a runner
+# it is the runner's own: the three cases are the three scoped kinds (the
+# largest centroid difference, a gain, a marker at the visibility threshold).
+REHEARSED = ("contain_portrait", "fades_speed2", "kf_freeze")
+
+
+@pytest.mark.parametrize("name", REHEARSED)
+def test_on_another_encoder_the_integer_geometry_holds_and_the_rest_skips(name, sources, tmp_path, monkeypatch):
+    from video_ai_editor.render import compositor
+    monkeypatch.setattr(compositor, "_usable_encoder", lambda _name: False)
+    assert golden_env.probe_encoder() == "libx264"
+    case = next(c for c in lib.cases() if c.name == name)
+    measured = lib.render_case(case, sources[0], tmp_path)
+    check_integer_geometry(name, measured, GOLD[name], sources[1])
+    with pytest.warns(UserWarning, match="recorded on ffmpeg 8 arm64"), pytest.raises(pytest.skip.Exception) as skipped:
+        scope_to_the_recording_environment(name, measured, GOLD[name], "libx264")
+    why = str(skipped.value)
+    assert "geometry_cases.json recorded on ffmpeg 8 arm64 (h264_videotoolbox); this is " in why
+    assert "(libx264): sub-pixel centroids" in why and "integer bounding boxes are checked" in why
+    assert "measured here: at most " in why
+
+
+@pytest.mark.parametrize("major,machine,encoder,foreign", [
+    (8, "arm64", "h264_videotoolbox", False),          # the recording environment
+    (9, "arm64", "h264_videotoolbox", True),           # CI macOS (Homebrew 9.0.1)
+    (9, "x86_64", "libx264", True),                    # CI Windows (9.0.2)
+    (8, "x86_64", "libx264", True),                    # CI ubuntu, pinned to ffmpeg 8
+    (8, "arm64", "libx264", True),                     # the recording Mac without its hardware encoder
+    (None, "arm64", "h264_videotoolbox", True),        # a git snapshot names no release
+])
+def test_the_sub_pixel_lines_run_only_where_the_golden_was_recorded(major, machine, encoder, foreign, monkeypatch):
+    monkeypatch.setattr(golden_env, "probe_ffmpeg_major", lambda: major)
+    monkeypatch.setattr(golden_env, "probe_machine", lambda: machine)
+    monkeypatch.setattr(golden_env, "probe_encoder", lambda: encoder)
+    gold = GOLD["contain_portrait"]
+    if not foreign:
+        # nothing skips, and the golden's own numbers pass its own lines
+        scope_to_the_recording_environment("contain_portrait", gold["frames"], gold, golden_env.probe_encoder())
+        check_sub_pixel("contain_portrait", gold["frames"], gold)
+        return
+    with pytest.warns(UserWarning), pytest.raises(pytest.skip.Exception) as skipped:
+        scope_to_the_recording_environment("contain_portrait", gold["frames"], gold, golden_env.probe_encoder())
+    here = golden_env.GoldenEnv(major, machine, encoder).describe()
+    assert f"recorded on ffmpeg 8 arm64 (h264_videotoolbox); this is {here}: " in str(skipped.value)
+
+
+def test_the_golden_is_held_somewhere():
+    """A FAILURE, not a skip, on the recording machine once its ffmpeg is
+    another major: no CI runner is the recording environment, so the day the
+    owner's Mac moves to ffmpeg 9 (what brew installs today) the 0.25 px /
+    0.005 lines would run nowhere, silently."""
+    why = golden_env.stale_reason(golden_env.GEOMETRY)
+    assert why is None, why
+
+
+@pytest.mark.parametrize("golden", [golden_env.GEOMETRY, golden_env.KEYFRAME_MATRIX], ids=lambda g: g.name)
+@pytest.mark.parametrize("major,machine,same_encoder,virtual,stale", [
+    (8, "arm64", True, False, False),          # the recording environment
+    (9, "arm64", True, False, True),           # the recording Mac after `brew upgrade`
+    (9, "arm64", True, True, False),           # CI macOS: a guest, never the recording machine
+    (9, "arm64", False, False, False),         # another encoder: foreign, not stale
+    (9, "x86_64", True, False, False),         # CI Windows
+    (8, "x86_64", True, False, False),         # CI ubuntu, pinned to ffmpeg 8
+    (None, "arm64", True, False, True),        # a git build on the recording Mac
+])
+def test_a_golden_nothing_holds_is_a_failure_on_the_machine_that_recorded_it(
+        golden, major, machine, same_encoder, virtual, stale):
+    encoder = golden.recorded.encoder if same_encoder else "h264_nvenc"
+    env = golden_env.GoldenEnv(major, machine, encoder)
+    why = golden_env.stale_reason(golden, env=env, virtual=virtual)
+    assert (why is not None) is stale, why
+    if stale:
+        assert golden.name in why and "re-record" in why and "NOWHERE" in why
+        # and it is exactly a case the sub-pixel lines skip
+        assert golden_env.foreign_reason(golden, "s", portable="p", env=env) is not None
+
+
+def test_the_voice_golden_does_not_depend_on_the_ffmpeg_major():
+    """arm64 + ffmpeg 9.0.1 reproduced every float of the 8.1.1 golden: its
+    exact lines still run on the recording Mac after an upgrade."""
+    env = golden_env.GoldenEnv(9, "arm64")
+    golden = golden_env.voice_fx({"ffmpeg": "8.1.1"})
+    assert golden_env.stale_reason(golden, env=env, virtual=False) is None
+    assert golden_env.foreign_reason(golden, "s", portable="p", env=env) is None
+
+
+def test_the_guards_still_fail_a_picture_that_moved():
+    """The portable test is not a formality: a bounding box one pixel off, a
+    centroid a whole pixel off and a gain 4 levels off each fail it."""
+    import copy
+    infos = {k: type("I", (), {"to_json": lambda self, v=v: v})() for k, v in GOLD["kf_scale"]["sources"].items()}
+    check_integer_geometry("kf_scale", GOLD["kf_scale"]["frames"], GOLD["kf_scale"], infos)
+    moved = copy.deepcopy(GOLD["kf_scale"]["frames"])
+    moved[0]["bbox"][0] += 1
+    with pytest.raises(AssertionError):
+        check_integer_geometry("kf_scale", moved, GOLD["kf_scale"], infos)
+    moved = copy.deepcopy(GOLD["kf_scale"]["frames"])
+    moved[0]["markers"]["white"][0] += 1.01
+    with pytest.raises(AssertionError):
+        check_integer_geometry("kf_scale", moved, GOLD["kf_scale"], infos)
+    infos = {k: type("I", (), {"to_json": lambda self, v=v: v})() for k, v in GOLD["fades_speed2"]["sources"].items()}
+    faded = copy.deepcopy(GOLD["fades_speed2"]["frames"])
+    faded[3]["gain"] += 4 / lib.GREY
+    with pytest.raises(AssertionError):
+        check_integer_geometry("fades_speed2", faded, GOLD["fades_speed2"], infos)
 
 
 def test_keyframes_are_evaluated_at_clip_local_timeline_time():

@@ -61,6 +61,8 @@ from pathlib import Path
 
 import pytest
 
+from runner_env import is_virtual_mac
+
 from .harness import PageServer, WKHarness, process_footprint, wk_unavailable_reason
 from .live_backend import GO_PAGE, LiveBackend
 from .playback import load_per_core, machine_is_quiet
@@ -312,7 +314,22 @@ def test_footprint_sampler_measures_the_webviews_own_webcontent_process(bare_wk)
     # the executables, read by the sampler while the helpers were alive
     paths = run.helper_pids[0]["paths"]
     assert "com.apple.WebKit.WebContent" in (paths["web"] or ""), paths
-    assert "com.apple.WebKit.GPU" in (paths["gpu"] or ""), paths
+    if not is_virtual_mac():
+        # real hardware: WebKit has a GPU process from the first report
+        assert "com.apple.WebKit.GPU" in (paths["gpu"] or ""), paths
+    else:
+        # The macOS CI guest (kern.hv_vmm_present = 1, run 36599751632)
+        # reported none (path None beside a WebContent and a Networking
+        # path). There, present or absent: a pid the view names is never
+        # another executable and an absent one is never sampled.
+        for report in run.helper_pids:
+            gpu_path = report["paths"]["gpu"]
+            if report["gpu"]:
+                assert "com.apple.WebKit.GPU" in (gpu_path or ""), report
+            else:
+                assert gpu_path is None, report
+        if not any(report["gpu"] for report in run.helper_pids):
+            assert all(r["gpu"] is None for r in run.footprints), run.footprints
     assert f"helpers web={next(iter(pids))}" in run.stdout
     base = min(r["web"] for r in rows[:5])
     top = max(r["web"] for r in rows)

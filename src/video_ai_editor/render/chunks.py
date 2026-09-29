@@ -285,9 +285,18 @@ def render_clip_to_chunk(
         # subprocess.run unless a superseded-preview scope is active, in which
         # case the chunk's ffmpeg is terminated early (render.cancel, QA-004).
         from .cancel import run as _cancellable_run
-        proc = _cancellable_run(args, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace",
-                                **_pu.SUBPROCESS_FLAGS)
+        # A graph too long for the command line is read from a file beside the
+        # staged chunk (Windows' CreateProcess refuses more than 32,767
+        # characters, WinError 206, before ffmpeg starts: a clip with a long
+        # speed curve or effect stack is a chunk of its own). The compositor's
+        # one helper decides; under its limit the argv is this one, unchanged,
+        # so every chunk rendered before is rendered the same. The file is
+        # gone when the block ends: success, failure, cancel or exception.
+        from .compositor import _graph_in_file_if_long
+        with _graph_in_file_if_long(args, tmp) as run_args:
+            proc = _cancellable_run(run_args, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace",
+                                    **_pu.SUBPROCESS_FLAGS)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"chunk render failed (rc={proc.returncode}):\n{proc.stderr[-1500:]}")

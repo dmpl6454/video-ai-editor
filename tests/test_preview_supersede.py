@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from video_ai_editor.main import app
 from video_ai_editor.api.hardening import RATE
+from runner_env import ffmpeg_alive
 
 
 @pytest.fixture
@@ -110,9 +111,16 @@ def test_newer_preview_cancels_the_render_it_supersedes(client, slow_src, transi
     new_hash = _edit(c, sid, 6.0)
     assert new_hash != old_hash
     t_new = time.perf_counter()
+    # Diagnostics only: what is rendering for this session at the moment the
+    # superseded request is due to have answered (the 1.5 s bound below).
+    seen: dict = {}
+    snap = threading.Timer(1.5, lambda: seen.update(
+        old_answered=th.is_alive() is False, ffmpeg=ffmpeg_alive(sid)))
+    snap.start()
     r = c.post(f"/api/sessions/{sid}/preview")
     t_new_done = time.perf_counter()
     th.join(timeout=300)
+    snap.join(timeout=60)
 
     # The newer request renders the CURRENT EDL.
     assert r.status_code == 200, r.text
@@ -123,7 +131,11 @@ def test_newer_preview_cancels_the_render_it_supersedes(client, slow_src, transi
     assert out["body"]["error"]["details"]["error"] == "preview_superseded", out["body"]
     assert out["end"] - t_new < 1.5, (
         f"superseded render ran on for {out['end'] - t_new:.2f}s after the newer "
-        f"request (newer render itself took {t_new_done - t_new:.2f}s)")
+        f"request (newer render itself took {t_new_done - t_new:.2f}s); the old "
+        f"request took {out['took']:.2f}s in all; 1.5 s after the newer request: "
+        f"old request answered={seen.get('old_answered')}, ffmpeg processes of "
+        f"{sid} (old hash {old_hash}, new {new_hash}) as (pid, ppid, command "
+        f"tail)={seen.get('ffmpeg')}")
     from video_ai_editor import main as _main
     pdir = _main._store(sid).dir / "previews"
     assert not (pdir / f"{old_hash}.mp4").exists(), "cancelled render was published"

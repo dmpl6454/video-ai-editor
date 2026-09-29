@@ -50,7 +50,10 @@ def _trace_origins(monkeypatch) -> dict[int, str | None]:
             mod = None
             for f in reversed(traceback.extract_stack()[:-1]):
                 name = f.filename.replace(os.sep, "/")
-                if "/video_ai_editor/" in name and not name.endswith("render/cancel.py"):
+                # cancel.py and platformutil.py are the spawn helpers a render
+                # module calls (cancel.run -> platformutil.popen_in_tree, since
+                # the Windows kill-tree change): the origin is their caller.
+                if "/video_ai_editor/" in name and not name.endswith(("render/cancel.py", "/platformutil.py")):
                     mod = name.split("/video_ai_editor/", 1)[1]
                     break
             origins[self.pid] = mod

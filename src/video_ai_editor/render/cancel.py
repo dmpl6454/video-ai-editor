@@ -279,6 +279,26 @@ def run_prioritised(args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(argv, **{**_pu.SUBPROCESS_FLAGS, **kw})
 
 
+def _communicate_until_stopped(proc: subprocess.Popen, ev: threading.Event) -> tuple:
+    """`proc.communicate()`, killing the process (and what it started) as
+    soon as `ev` is set or the scope's deadline has passed."""
+    while True:
+        try:
+            return proc.communicate(timeout=_POLL_S)
+        except subprocess.TimeoutExpired:
+            timed_out = _expired()
+            if ev.is_set() or timed_out:
+                # SIGKILL, not SIGTERM: a terminated ffmpeg first flushes its
+                # encoder and writes a trailer (measured: up to ~2 s under
+                # load), for an output that is about to be deleted anyway —
+                # every caller renders to a `.part` file it unlinks on error.
+                _pu.kill_process_tree(proc)
+                proc.communicate()
+                if timed_out and not ev.is_set():
+                    raise RenderTimedOut() from None
+                raise RenderCancelled() from None
+
+
 def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
         ) -> subprocess.CompletedProcess:
     """``subprocess.run`` that honours the active cancellation scope."""
@@ -291,23 +311,17 @@ def run(args, *, check: bool = False, capture_output: bool = False, **kwargs
     if capture_output:
         kw["stdout"] = subprocess.PIPE
         kw["stderr"] = subprocess.PIPE
-    proc = subprocess.Popen(argv, **{**_pu.SUBPROCESS_FLAGS, **kw})
-    while True:
-        try:
-            out, err = proc.communicate(timeout=_POLL_S)
-            break
-        except subprocess.TimeoutExpired:
-            timed_out = _expired()
-            if ev.is_set() or timed_out:
-                # SIGKILL, not SIGTERM: a terminated ffmpeg first flushes its
-                # encoder and writes a trailer (measured: up to ~2 s under
-                # load), for an output that is about to be deleted anyway —
-                # every caller renders to a `.part` file it unlinks on error.
-                proc.kill()
-                proc.communicate()
-                if timed_out and not ev.is_set():
-                    raise RenderTimedOut() from None
-                raise RenderCancelled() from None
+    # Windows: `ffmpeg.exe` may be a package manager's launcher whose CHILD
+    # is the real ffmpeg (Chocolatey/Scoop shims). Killing the launcher alone
+    # left the encoder running with our pipes and the `.part` file open, so
+    # the `communicate()` below waited out the whole render (CI round 3: a
+    # superseded preview answered after 49.69 s). So the process is in its
+    # kill job before it runs. On POSIX this is `subprocess.Popen`.
+    proc = _pu.popen_in_tree(argv, **{**_pu.SUBPROCESS_FLAGS, **kw})
+    try:
+        out, err = _communicate_until_stopped(proc, ev)
+    finally:
+        _pu.release_process_tree(proc)
     cp = subprocess.CompletedProcess(args, proc.returncode, out, err)
     if check:
         cp.check_returncode()

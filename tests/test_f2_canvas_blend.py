@@ -41,8 +41,23 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 ASPECTS = {"9x16": (360, 640), "16x9": (640, 360)}
 #: The fitted picture next to a new background vs next to black bars: the
-#: same pixels through a lossy (q18) encode.
+#: same pixels through two lossy encodes.
 PICTURE_MIN_PSNR = 42.0
+#: The quality the letterbox test's exports are made at (the keyframe matrix
+#: measures at the same crf). This is NOT the quality an export ships at by
+#: default (crf 18): at 12 the lines below measure what the COMPOSITOR put in
+#: the frame (which pixels are bars, which colour, the picture unmoved), not
+#: what the default encode does to it. At the default the encoder's rate
+#: control, which looks at the whole frame, bars included, is what the 42 dB
+#: line measured: on the recording Mac VideoToolbox gives 59.1 to 69.1 dB
+#: between the two encodes, libx264 (every runner without a hardware
+#: encoder) 38.9 to 40.1 dB on the 9:16 canvas and 42.2 to 42.3 dB on 16:9.
+#: At crf 12 libx264 gives 44.7 to 44.8 dB (9:16) and 47.4 to 47.6 dB
+#: (16:9), VideoToolbox identical pictures. The bars, measured here on the
+#: 9:16 canvas with libx264 and the 8 px band: crf 18 black within 2 and the
+#: colour within 3 (the runners read 3 and 5), crf 12 black exact and the
+#: colour within 2. No line and no pixel of the mask changed.
+PICTURE_CRF = 12
 
 
 # --------------------------------------------------------------------------- media
@@ -104,9 +119,9 @@ def _store(sd: Path, e: EDL) -> EDLStore:
     return EDLStore(sd)
 
 
-def _export(sd: Path, e: EDL) -> Path:
+def _export(sd: Path, e: EDL, *, crf: int | None = None) -> Path:
     s = _store(sd, e)
-    return render_export(s.edl, s.dir).path
+    return render_export(s.edl, s.dir, **({} if crf is None else {"crf": crf})).path
 
 
 # --------------------------------------------------------------------------- schema
@@ -228,12 +243,12 @@ def test_canvas_colour_blur_and_image_fill_the_letterbox(media, tmp_path, aspect
     # 8 px in from the picture's edge: the export is lossy H.264, and a
     # macroblock straddling the edge codes differently next to a new colour
     inner = (slice(y0 + 8, y1 - 8), slice(x0 + 8, x1 - 8))
-    base = decode(_export(tmp_path / "none", _canvas_edl(src, wh, None)), 1.0, *wh)
+    base = decode(_export(tmp_path / "none", _canvas_edl(src, wh, None), crf=PICTURE_CRF), 1.0, *wh)
     assert base[bars].max() <= 2, "no background renders black bars"
 
     # colour: the bars ARE the colour (BT.709, ±3 levels)
-    col = decode(_export(tmp_path / "col", _canvas_edl(src, wh, CanvasBackground(type="color", color="#E53935"))),
-                 1.0, *wh)
+    col = decode(_export(tmp_path / "col", _canvas_edl(src, wh, CanvasBackground(type="color", color="#E53935")),
+                         crf=PICTURE_CRF), 1.0, *wh)
     assert np.abs(col[bars] - np.array([229, 57, 53])).max() <= 3, col[bars].mean(axis=0)
     assert psnr(col[inner], base[inner]) >= PICTURE_MIN_PSNR, "the picture itself is untouched"
 
@@ -241,7 +256,8 @@ def test_canvas_colour_blur_and_image_fill_the_letterbox(media, tmp_path, aspect
     # same 1/4 size (an independent implementation) within 30 dB, and smooth
     for level in (1, 4):
         out = decode(_export(tmp_path / f"blur{level}",
-                             _canvas_edl(src, wh, CanvasBackground(type="blur", blur=level))), 1.0, *wh)
+                             _canvas_edl(src, wh, CanvasBackground(type="blur", blur=level)),
+                             crf=PICTURE_CRF), 1.0, *wh)
         assert psnr(out[inner], base[inner]) >= PICTURE_MIN_PSNR
         ref = _blur_reference(_source_frame(src, 1.0, *src_wh), wh, level)
         p = psnr(out[bars], ref[bars])
@@ -252,8 +268,8 @@ def test_canvas_colour_blur_and_image_fill_the_letterbox(media, tmp_path, aspect
 
     # image: the picture cover-fitted to the canvas (the route's own file)
     img = decode(_export(tmp_path / "img", _canvas_edl(src, wh, CanvasBackground(type="image",
-                                                                                image=str(media["pic"])))),
-                 1.0, *wh)
+                                                                                image=str(media["pic"]))),
+                         crf=PICTURE_CRF), 1.0, *wh)
     ref = np.asarray(Image.open(CBG.image_file(media["pic"], *wh)).convert("RGB"), dtype=np.float64)
     assert psnr(img[bars], ref[bars]) >= 36.0, psnr(img[bars], ref[bars])
     assert psnr(img[inner], base[inner]) >= PICTURE_MIN_PSNR

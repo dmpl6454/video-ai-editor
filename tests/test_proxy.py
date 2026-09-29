@@ -23,6 +23,7 @@ import soundfile as sf
 from video_ai_editor import platformutil as _pu
 from video_ai_editor.ingest import proxy as P
 from video_ai_editor.ingest.proxy_queue import ProxyManager
+from runner_env import ffmpeg_alive
 
 from proxy_fixtures import (decode_audio_f32, decode_gray, decode_yuv420, decoded_frame_count,
                             make_barcode_master, make_flat_master, read_barcode, sample_nals,
@@ -317,7 +318,11 @@ def _wait_for(pred, timeout=30.0):
     return False
 
 
-def _ffmpeg_children() -> int:
+def _ffmpeg_children(src) -> int:
+    if _pu.IS_WINDOWS:
+        # no pgrep there (the test stopped at FileNotFoundError before it
+        # could say anything); every ffmpeg on this test's own source instead
+        return len(ffmpeg_alive(src))
     out = subprocess.run(["pgrep", "-P", str(os.getpid()), "-f", "ffmpeg"],
                          capture_output=True, text=True).stdout
     return len(out.split())
@@ -339,8 +344,9 @@ def test_cancel_stops_the_encode_and_a_later_ensure_resumes(workdir, manager, tm
     # cancel, a fast-runner race; a large one means the kill did not land)
     assert 0 < len(done) < info.spans, (
         f"cancel did not stop the build: {len(done)}/{info.spans} spans, "
-        f"{t_idle - t_seen:.2f} s from span 0 to idle, stats={manager.stats}")
-    assert _wait_for(lambda: _ffmpeg_children() == 0, 5)
+        f"{t_idle - t_seen:.2f} s from span 0 to idle, stats={manager.stats}, "
+        f"ffmpeg still on this source as (pid, ppid, command tail)={ffmpeg_alive(src)}")
+    assert _wait_for(lambda: _ffmpeg_children(src) == 0, 5), ffmpeg_alive(src)
     assert not list(P.proxy_dir(key).rglob(".*.part"))
     # Resume: only the missing spans are encoded, and the result is complete.
     manager.ensure(src)
@@ -385,7 +391,10 @@ def test_eager_builds_pause_during_an_export(workdir, manager, tmp_path, monkeyp
         info = P.load_source(key)
         count = sum(P.span_path(key, n).is_file() for n in range(info.spans))
         time.sleep(1.0)                          # ... and nothing is written meanwhile
-        assert sum(P.span_path(key, n).is_file() for n in range(info.spans)) == count
+        assert sum(P.span_path(key, n).is_file() for n in range(info.spans)) == count, (
+            f"spans were written during the export pause (of {info.spans}; {count} "
+            f"before the 1.0 s wait), stats={manager.stats}, ffmpeg still on this "
+            f"source as (pid, ppid, command tail)={ffmpeg_alive(src)}")
         assert count < info.spans
         # An on-demand span still runs during an export.
         missing = next(n for n in range(info.spans) if not P.span_path(key, n).is_file())

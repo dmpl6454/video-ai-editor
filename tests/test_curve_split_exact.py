@@ -35,6 +35,7 @@ from video_ai_editor.edl import timebase as tb  # noqa: E402
 from video_ai_editor.edl.schema import Canvas, Clip  # noqa: E402
 from video_ai_editor.render import compositor  # noqa: E402
 from video_ai_editor.render.frame_map import SourceInfo, build_program_map  # noqa: E402
+from ffmpeg_caps import binary_reads
 
 SRC = "bars.mp4"
 
@@ -314,20 +315,6 @@ def _graph_opts(args) -> list[str]:
     return [a for a in args if a in ("-filter_complex", "-/filter_complex", "-filter_complex_script")]
 
 
-def _binary_reads(opt: str) -> bool:
-    """Whether the ffmpeg on PATH has `opt`. CI run 36601831900 measured both
-    ends: 9.0.1 says "Unrecognized option 'filter_complex_script'" (removed
-    after 8, where it was deprecated), 6.1.1 says the same of
-    '/filter_complex' (new in 7.0). An unreadable version is a recent build."""
-    major = _REAL_FFMPEG_MAJOR()
-    if opt == "-filter_complex_script":
-        return major is not None and major <= 8
-    return major is None or major >= 7
-
-
-_REAL_FFMPEG_MAJOR = compositor._ffmpeg_major          # the cached reader, before any test patches it
-
-
 def _record_argv(monkeypatch, graphs: list[str] | None = None):
     seen: list[list[str]] = []
     graphs = [] if graphs is None else graphs          # the text of each graph file, read while it exists
@@ -380,7 +367,7 @@ def test_a_graph_over_the_argv_limit_is_passed_as_a_file_and_renders_the_same_fr
         monkeypatch.setattr(compositor, "_ffmpeg_major", lambda m=major: m)
         opt = "-/filter_complex" if major >= 7 else "-filter_complex_script"
         assert compositor._graph_file_option() == opt
-        if not _binary_reads(opt):
+        if not binary_reads(opt):
             # This binary does not have the option a version-`major` ffmpeg
             # would be given, so only the argv is checked, not a render.
             with compositor._graph_in_file_if_long(list(as_inline), tmp_path / f"argv{major}.part") as argv:

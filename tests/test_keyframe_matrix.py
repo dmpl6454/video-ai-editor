@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import golden_env
 import keyframe_matrix_lib as lib
 from video_ai_editor.edl.keyframes import sample
 from video_ai_editor.edl.schema import EDL, Canvas, Clip, Keyframe, empty_edl
@@ -100,21 +102,99 @@ def test_step_keys_switch_on_their_own_frame(measured):
     assert sample(c.transform.x, t_key) == 60
 
 
-def test_golden_is_current(measured):
+#: What holds on EVERY machine against the golden, and what is scoped: one
+#: copy, with the measurements (tests/golden_env.py).
+PIXEL_GUARD, LEVEL_GUARD, SCOPED = golden_env.PIXEL_GUARD, golden_env.LEVEL_GUARD, golden_env.SCOPED
+PORTABLE = ("the renders, their EDLs, frame indices and clips are checked by test_golden_structure_is_current, "
+            "every frame against the UI's value by test_export_animates_at_the_ui_clock")
+
+
+def _golden_rows(measured):
+    gold = {r["name"]: r for r in lib.load()["renders"]}
+    for name, (_edl, rows) in measured.items():
+        for got, want in zip(rows, gold[name]["rows"], strict=True):
+            yield name, got, want
+
+
+def test_golden_structure_is_current(measured):
     """tests/goldens/keyframe_matrix.json (the frontend's fixture) still
-    describes the compositor."""
+    describes the compositor: the part that is the same on every machine."""
     gold = {r["name"]: r for r in lib.load()["renders"]}
     assert set(gold) == set(RENDERS)
-    for name, (edl, rows) in measured.items():
+    for name, (edl, _rows) in measured.items():
         assert gold[name]["edl"] == lib.edl_json(edl), name
-        for got, want in zip(rows, gold[name]["rows"], strict=True):
-            assert (got["k"], got["clip"]) == (want["k"], want["clip"])
-            for n in ("white", "red", "green"):
-                if want[n] is None or got[n] is None:
-                    assert want[n] is None and got[n] is None, (name, got["k"], n)
-                else:
-                    assert got[n] == pytest.approx(want[n], abs=0.3), (name, got["k"], n)
-            assert got["gain"] == pytest.approx(want["gain"], abs=0.01), (name, got["k"])
+    for name, got, want in _golden_rows(measured):
+        assert (got["k"], got["clip"]) == (want["k"], want["clip"])
+        for n in ("white", "red", "green"):
+            if want[n] is not None and got[n] is not None:
+                assert got[n] == pytest.approx(want[n], abs=PIXEL_GUARD), (name, got["k"], n)
+        assert abs(got["gain"] - want["gain"]) * lib.GREY <= LEVEL_GUARD, (name, got["k"], got["gain"], want["gain"])
+
+
+def _deviation(measured) -> str:
+    d = golden_env.Deviation()
+    for name, got, want in _golden_rows(measured):
+        d.gain(got["gain"], want["gain"], lib.GREY)
+        for n in ("white", "red", "green"):
+            d.marker((name, got["k"], n), got[n], want[n])
+    return d.describe()
+
+
+def scope_to_the_recording_environment(measured) -> None:
+    """Skip (naming both environments and what THIS one measured) anywhere
+    but where the golden was recorded; `measured` is rendered under
+    `lib.software_encoder()`, so the encoder is libx264 on every machine."""
+    why = golden_env.foreign_reason(golden_env.KEYFRAME_MATRIX, SCOPED, portable=PORTABLE,
+                                    env=golden_env.current(encoder="libx264"))
+    if why is None:
+        return
+    why = f"{why}; {_deviation(measured)}"
+    warnings.warn(why, stacklevel=2)
+    pytest.skip(why)
+
+
+def test_golden_is_current(measured):
+    """The golden's own sub-pixel lines (unchanged), where it was recorded
+    (tests/golden_env.py)."""
+    scope_to_the_recording_environment(measured)
+    for name, got, want in _golden_rows(measured):
+        for n in ("white", "red", "green"):
+            if want[n] is None or got[n] is None:
+                assert want[n] is None and got[n] is None, (name, got["k"], n)
+            else:
+                assert got[n] == pytest.approx(want[n], abs=0.3), (name, got["k"], n)
+        assert got["gain"] == pytest.approx(want["gain"], abs=0.01), (name, got["k"])
+
+
+def test_the_golden_is_held_somewhere():
+    """A FAILURE, not a skip, on the recording machine once its ffmpeg is
+    another major (tests/golden_env.py `stale_reason`): the 0.3 px / 0.01
+    lines would otherwise run nowhere."""
+    why = golden_env.stale_reason(golden_env.KEYFRAME_MATRIX, env=golden_env.current(encoder="libx264"))
+    assert why is None, why
+
+
+@pytest.mark.parametrize("major,machine,foreign", [
+    (8, "arm64", False),              # the recording environment
+    (9, "arm64", True),               # CI macOS (Homebrew 9.0.1)
+    (9, "x86_64", True),              # CI Windows (9.0.2)
+    (8, "x86_64", True),              # CI ubuntu, pinned to ffmpeg 8
+])
+def test_the_sub_pixel_lines_run_only_where_the_golden_was_recorded(major, machine, foreign, monkeypatch):
+    """Both directions on any machine, with the golden's own rows as the
+    measurement (no render)."""
+    monkeypatch.setattr(golden_env, "probe_ffmpeg_major", lambda: major)
+    monkeypatch.setattr(golden_env, "probe_machine", lambda: machine)
+    own = {r["name"]: (None, r["rows"]) for r in lib.load()["renders"]}
+    if not foreign:
+        scope_to_the_recording_environment(own)          # nothing skips
+        return
+    with pytest.warns(UserWarning), pytest.raises(pytest.skip.Exception) as skipped:
+        scope_to_the_recording_environment(own)
+    why = str(skipped.value)
+    assert f"keyframe_matrix.json recorded on ffmpeg 8 arm64 (libx264); this is ffmpeg {major} {machine} (libx264): " in why
+    assert "sub-pixel centroids" in why and "test_golden_structure_is_current" in why
+    assert "at most 0.000 px and 0.00 grey levels" in why
 
 
 @pytest.mark.parametrize("name", ["pan_0.5x", "zoom_curve", "pan_reverse_2x"])
