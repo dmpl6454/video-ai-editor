@@ -302,7 +302,7 @@ def test_project_menu_items_line_up_and_speak_plainly(browser, base_url, session
     page.locator("button.topbar-session").click()
     page.wait_for_timeout(400)
     menu = page.locator("[role=menu][aria-label=Projects]")
-    items = [menu.get_by_role("menuitem", name=n) for n in ("New project", "Open project file…", "Rename this project…")]
+    items = [menu.get_by_role("menuitem", name=n) for n in ("New project", "Import media…", "Open project file…", "Rename this project…")]
     xs = []
     for it in items:
         assert it.count() == 1

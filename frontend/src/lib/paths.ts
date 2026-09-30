@@ -25,3 +25,12 @@ export const AUDIO_EXTS = /\.(mp3|wav|m4a|aac|flac|ogg|oga|opus|aif|aiff)$/i
 // (dispatch._reject_videoless_on_video_lane) and is the actual enforcement for
 // chat/MCP callers and for audio-only files wearing a video extension.
 export const isAudioPath = (p: string): boolean => AUDIO_EXTS.test(baseName(p))
+
+// What a file picker offers when it is asking for media: one list for the
+// Media panel's dropzone and the top bar's "Import media…" / "Open", so the
+// two cannot drift (iPhone HEIC/HEVC/.mov sources and camera .MTS included).
+export const MEDIA_PICKER_ACCEPT =
+  'video/*,audio/*,image/*,.mov,.MOV,.mp4,.MP4,.m4v,.mkv,.webm,.avi,.MTS,.mp3,.wav,.m4a,.aac,.flac,.png,.jpg,.jpeg,.heic,.HEIC,.heif,.webp'
+
+// A saved project file, as the Save button writes it.
+export const PROJECT_PICKER_ACCEPT = '.vae,.zip'

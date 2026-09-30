@@ -4,6 +4,7 @@ import { api } from '../api'
 import { toast } from '../toast'
 import type { MediaItem } from '../types'
 import { dropzoneHandlers, importFiles } from '../lib/fileDrop'
+import { MEDIA_PICKER_ACCEPT } from '../lib/paths'
 import { binMeta, binRows, type BinRow } from '../lib/mediaLibrary'
 import { nameBreaks, useMediaNames } from '../lib/mediaNames'
 import { batchLabel, etaLabel, uploadEtaSeconds, uploadStageLabel, type UploadItem } from '../lib/uploadQueue'
@@ -110,7 +111,7 @@ export function MediaBin() {
       <input
         ref={fileRef}
         type="file"
-        accept="video/*,audio/*,image/*,.mov,.MOV,.mp4,.MP4,.m4v,.mkv,.webm,.avi,.MTS,.mp3,.wav,.m4a,.aac,.flac,.png,.jpg,.jpeg,.heic,.HEIC,.heif,.webp"
+        accept={MEDIA_PICKER_ACCEPT}
         multiple
         hidden
         onChange={(e) => {

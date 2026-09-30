@@ -7,6 +7,9 @@ import { ActivityChip } from './topbar/ActivityChip'
 import { densityClass, useTopBarFit } from './topbar/useTopBarFit'
 import { RatioMenu } from './RatioMenu'
 import { claimClickForNativeSave } from '../lib/nativeSave'
+import { importFiles } from '../lib/fileDrop'
+import { classifyOpenedFile, mediaInsteadOfProject } from '../lib/openPick'
+import { MEDIA_PICKER_ACCEPT, PROJECT_PICKER_ACCEPT } from '../lib/paths'
 import { isSavedProjectStale, savedProject, visibleSavedProject, type SavedProject } from '../lib/savedProject'
 import { exportKind, exportLinkView } from '../lib/exportLink'
 import { useActivityStore } from '../lib/activityStore'
@@ -62,6 +65,7 @@ export function TopBar() {
   const exportView = exportLinkView(exportLinks, sid, edlHash)
   const savedStale = !!savedHere && isSavedProjectStale(savedHere, opsLen)
   const importRef = useRef<HTMLInputElement>(null)
+  const mediaRef = useRef<HTMLInputElement>(null)
   const barRef = useRef<HTMLElement>(null)
   const leftRef = useRef<HTMLDivElement>(null)
   // The activity chip's width inputs (lib/activityStore), for the fit key.
@@ -146,7 +150,22 @@ export function TopBar() {
     })
   }
 
+  // Media handed to the importer exactly like a drop on the window: same
+  // routing (audio to the Music track, the rest to the video ingress), same
+  // queue, same progress. The store's own upload errors report themselves.
+  const importPicked = async (files: File[]) => {
+    const { upload, uploadAudio } = useStore.getState()
+    await importFiles(files, { upload, uploadAudio })
+  }
+
   const onLoadProject = async (file: File) => {
+    // "Open" is the first place anyone looks for a video: import a media file
+    // instead of refusing it as "not a project" (lib/openPick.ts).
+    if (classifyOpenedFile(file) === 'media') {
+      toast.info(mediaInsteadOfProject(file))
+      await importPicked([file])
+      return
+    }
     try {
       const r = await api.loadProject(file)
       // Switch to the new session (loaded first, then swapped in atomically)
@@ -314,6 +333,11 @@ export function TopBar() {
             {/* Every item carries its icon, so the labels line up (wave C
                 review); the file extension is for the tooltip, not the label. */}
             <button type="button" role="menuitem" className="menu-item"
+              title="Add videos, audio or photos to this project"
+              onClick={() => { pickerA11y.close(false); mediaRef.current?.click() }}>
+              <Icon name="upload" /> Import media…
+            </button>
+            <button type="button" role="menuitem" className="menu-item"
               title="Open a Video AI Editor project file (.vae)"
               onClick={() => { pickerA11y.close(false); importRef.current?.click() }}>
               <Icon name="open" /> Open project file…
@@ -415,11 +439,23 @@ export function TopBar() {
           {/* At density 3 the words give way; the icon, name and tooltip stay. */}
           {saving ? 'Saving…' : <><Icon name="save" /><span className="topbar-btn-label">Save</span></>}
         </button>
-        <button className="tb-labelled" onClick={() => importRef.current?.click()} data-tip="Open a saved .vae project" aria-label="Open">
+        <button className="tb-labelled" onClick={() => importRef.current?.click()} data-tip="Open a saved .vae project — or pick a video to add it to this project" aria-label="Open">
           <Icon name="open" /><span className="topbar-btn-label">Open</span>
         </button>
-        <input ref={importRef} type="file" accept=".vae,.zip" hidden
-          onChange={(e) => { const f = e.target.files?.[0]; if (f) void onLoadProject(f) }} />
+        <input ref={importRef} type="file" accept={`${PROJECT_PICKER_ACCEPT},${MEDIA_PICKER_ACCEPT}`} hidden
+          data-testid="open-file"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            e.target.value = ''              // picking the same file again still opens it
+            if (f) void onLoadProject(f)
+          }} />
+        <input ref={mediaRef} type="file" accept={MEDIA_PICKER_ACCEPT} multiple hidden
+          data-testid="import-media-file"
+          onChange={(e) => {
+            const picked = Array.from(e.target.files ?? [])
+            e.target.value = ''
+            void importPicked(picked)
+          }} />
         {savedHere && (
           // "(outdated)" is in the NAME at every density; from density 2 the
           // visible words become a warn dot.
