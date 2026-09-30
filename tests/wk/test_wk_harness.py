@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from runner_env import is_virtual_mac
+
 from .conftest import PAGES
 from .harness import (WINDOW_PX, PageServer, WKHarness, WKPageError, window_origin,
                       wk_unavailable_reason)
@@ -152,7 +154,16 @@ def test_wk_concurrent_runs_are_not_throttled(bare_wk):
     assert all(r is not None for r in results)
     assert window_origin(results[0].pid) != window_origin(results[1].pid)
     for r in results:
-        assert r.result["visibility"] == "visible"
+        assert r.result["visibility"] == "visible"      # not hidden or occluded: true on any machine
+    if is_virtual_mac():
+        # The frame RATE is a property of the machine's compositor: GitHub's
+        # macOS guest has no GPU and drew 2 frames in 500 ms in one window
+        # (CI run 36656960624) against the 30+ of a real Mac. Visibility, and
+        # that the two windows do not cover each other, are asserted above;
+        # "full-rate" is only measurable on hardware.
+        pytest.skip("frame rate is not measurable on a virtual Mac (kern.hv_vmm_present=1); "
+                    "visibility and window separation were asserted")
+    for r in results:
         assert r.result["rafsIn500ms"] >= 15, r.result
         assert r.result["timerMs"] < 1500, r.result
 
