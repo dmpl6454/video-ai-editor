@@ -388,3 +388,31 @@ def test_tools_that_download_on_first_use_are_denied(session, dispatch_spy, tool
     store, facts = session
     assert "denied to plans" in _refused(tool, facts, clip_id="$v1_first", query="x")
     assert dispatch_spy == []
+
+
+# ---- EB1 fix SC-05: the nested paths of the brain tools, at the last line ----------------
+
+@pytest.mark.parametrize("tool,args", [
+    ("cut_source_ranges", {"track": "v1", "ranges": [{"src": "/etc/passwd", "start": 0.0, "end": 1.0}]}),
+    ("apply_camera_plan", {"switches": [{"src": "SRC", "at_src": 1.0, "until_src": 2.0, "angle_src": "/etc/passwd"}]}),
+    ("apply_camera_plan", {"switches": [{"src": "/etc/passwd", "at_src": 1.0, "until_src": 2.0, "angle_src": "SRC"}]}),
+    ("sync_dialogue_lane", {"src": "SRC", "lane": "a1", "offsets": {"/etc/passwd": 0.0}}),
+])
+def test_guard_refuses_nested_brain_paths_it_was_never_shown_by_the_validator(session, dispatch_spy, tool, args):
+    """A `$brain:` step is resolved AFTER validation, from files on disk: what it resolves to is checked
+    again by the guard, so a tampered decisions or graph file cannot point a tool at a file that was not offered."""
+    store, facts = session
+    src = str(next(iter(sorted(facts.allowed_paths))))
+    args = json_swap(args, "SRC", src)
+    with pytest.raises(executor.StepRefused, match="not offered"):
+        executor.guard_step(tool, args, facts)
+
+
+def json_swap(node, old: str, new: str):
+    if isinstance(node, str):
+        return new if node == old else node
+    if isinstance(node, list):
+        return [json_swap(x, old, new) for x in node]
+    if isinstance(node, dict):
+        return {(new if k == old else k): json_swap(v, old, new) for k, v in node.items()}
+    return node

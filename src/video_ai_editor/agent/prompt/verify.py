@@ -420,11 +420,18 @@ def c_captions_nonempty(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
 
 def c_captions_cover(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     min_ratio = float(_arg(pc, "min_ratio") or 0.9)
+    cues = _merge_spans([(c.start, c.end) for c in caption_clips(ctx.edl)], gap=0.0)
+    from ...brain.caption_lane import speaker_cover      # Editor Brain: EVERY speaker's speech, the worst one decides
+    each = speaker_cover(ctx, cues)
+    if each is not None:
+        worst, ratios = each
+        shown = ", ".join(f"{n} {r:.0%}" for n, r in sorted(ratios.items()))
+        return _ok(pc, worst >= min_ratio, round(worst, 3), f"≥ {min_ratio:.0%}", unit="ratio",
+                   detail=f"worst speaker of {len(ratios)}: {shown}")
     speech = ctx.speech_spans(ctx.edl)
     speech_s = _span_total(speech)
     if speech_s <= 0.0:
         return _ok(pc, None, None, f"≥ {min_ratio:.0%}", detail="no speech on the timeline to cover")
-    cues = _merge_spans([(c.start, c.end) for c in caption_clips(ctx.edl)], gap=0.0)
     ratio = _intersection(cues, speech) / speech_s
     return _ok(pc, ratio >= min_ratio, round(ratio, 3), f"≥ {min_ratio:.0%}", unit="ratio")
 
@@ -684,6 +691,22 @@ def _fit_trim_source_end(ctx: VerifyCtx, src: str | None) -> float | None:
     return float(clips[-1].out)
 
 
+def _brain_named_removals(ctx: VerifyCtx, src: str | None) -> list[tuple[float, float]] | None:
+    """The source-second ranges of the transcript's file that a brain plan's own decisions remove, or None."""
+    from ...brain.checks import named_removals
+    from ..timemap import _same_source
+    rows = named_removals(ctx.store, ctx.plan, ctx.edl_before)
+    if rows is None:
+        return None
+    return [(a, b) for f, a, b in rows if src is None or _same_source(f, src)]
+
+
+def _mostly_inside(w: dict, ranges: list[tuple[float, float]]) -> bool:
+    s, e = float(w["start"]), float(w["end"])
+    span = max(1e-6, e - s)
+    return sum(max(0.0, min(e, b) - max(s, a)) for a, b in ranges) >= 0.5 * span
+
+
 def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     """Every non-filler word that was on the timeline BEFORE the run is still
     on it AFTER. Decided on SOURCE ranges through both edls (keyed by source
@@ -722,6 +745,11 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
     trimmed = [w for w in gone if (tail_src is not None and float(w["start"]) >= tail_src - 0.05)
                or (head_src is not None and float(w["end"]) <= head_src + 0.05)]
     gone = [w for w in gone if not any(w is t for t in trimmed)]
+    # A BRAIN plan removes what its own decisions name (a reel keeps a few windows and drops the rest): those words
+    # are the edit, not lost speech. Only a word gone from OUTSIDE every named removal is a loss.
+    named = _brain_named_removals(ctx, src) if gone else None
+    by_plan = [w for w in gone if named is not None and _mostly_inside(w, named)]
+    gone = [w for w in gone if not any(w is t for t in by_plan)]
     # Energy is ground truth, timestamps are estimates: a vanished word whose
     # source span sits inside a silent run of the SOURCE (measured with the
     # plan's own silencedetect settings) was never voiced there — the
@@ -736,6 +764,8 @@ def c_speech_preserved(ctx: VerifyCtx, pc: Postcondition) -> CheckResult:
         parts.append("lost: " + ", ".join(str(w.get("word")) for w in lost[:6]))
     if trimmed:
         parts.append(f"{len(trimmed)} words outside the kept target length were trimmed as asked — not counted")
+    if by_plan:
+        parts.append(f"{len(by_plan)} words are the ones the plan removes on purpose — not counted")
     if misaligned:
         parts.append(f"{len(misaligned)} transcript words sat inside measured silence (misaligned timestamps)"
                      " — not counted: " + ", ".join(str(w.get("word")) for w in misaligned[:6]))
@@ -1777,6 +1807,14 @@ def blocking_failures(store: EDLStore, plan: Plan, exec_result: Any, facts_befor
         if res.passed is False:
             out.append(res)
     return out
+
+
+# Editor Brain (EB1): its two checks register into CHECKS as soon as THIS module
+# is imported, not only when the executor is (so the K3 net, `verify_plan` and
+# the "every CheckSpec has an implementation" test see them in every process).
+# Last statement on purpose: brain/checks.py imports names defined above.
+# brain/checks.py installs itself at its own tail, so either import order works.
+from ...brain import checks as _brain_checks  # noqa: E402,F401
 
 
 __all__ = ["CheckResult", "VerifyCtx", "CHECKS", "run_check", "verify_plan", "blocking_failures", "overlay_positions",

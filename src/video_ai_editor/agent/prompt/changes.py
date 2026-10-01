@@ -68,6 +68,10 @@ class Change:
     group: str
     text: str
     keys: frozenset[str] = frozenset()
+    #: Editor Brain (EB1): the decision's reason this line comes from, set
+    #: by brain_card for a brain run behind `brain.enabled`; None otherwise.
+    #: Presentation only — the line and its keys are the change.
+    why: str | None = None
 
 
 @dataclass

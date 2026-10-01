@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Iterator, Literal
@@ -20,6 +21,20 @@ LoadState = Literal["new", "clean", "recovered", "corrupt"]
 # structured log next to the request that triggered it. Fetched by name rather
 # than importing api.hardening — edl/ must not depend on the web layer.
 _log = logging.getLogger("video_ai_editor")
+
+
+_HASH_RE = re.compile(r"[0-9a-f]{1,64}")
+
+
+def version_row_ok(row: object) -> bool:
+    """Is this row of `brain/versions.json` one the app could have written: an object whose `op_seq` is an
+    integer and whose `edl_hash` is a hex digest? A hand-made or imported file may hold anything else, and a
+    row that is not fit to name a snapshot file must be skipped, never raise inside Undo (closer review)."""
+    if not isinstance(row, dict):
+        return False
+    seq, h = row.get("op_seq"), row.get("edl_hash")
+    return isinstance(seq, int) and not isinstance(seq, bool) and seq >= -1 and isinstance(h, str) \
+        and _HASH_RE.fullmatch(h) is not None
 
 
 class EDLStore:
@@ -419,7 +434,34 @@ class EDLStore:
             total += size
             kept += 1
         for old in snaps[:len(snaps) - kept]:
-            old.unlink(missing_ok=True)
+            self._retire_snapshot(old)
+
+    def _pinned_snapshots(self) -> set[str]:
+        """Snapshot names a PINNED brain version keeps (`brain/versions.py`,
+        `<session>/brain/versions.json`: `{op_seq + 1:05d}_{edl_hash}.json`).
+        Read here without importing brain/ — the EDL layer stays a leaf."""
+        p = self.dir / "brain" / "versions.json"
+        try:
+            rows = json.loads(p.read_text(encoding="utf-8")).get("versions") or []
+        except (OSError, ValueError, AttributeError):
+            return set()
+        return {f"{r['op_seq'] + 1:05d}_{r['edl_hash']}.json" for r in rows if version_row_ok(r) and r.get("pinned")}
+
+    def _retire_snapshot(self, snap: Path) -> None:
+        """Drop a snapshot leaving the undo sequence — unless a brain version
+        pins it, in which case it is PARKED under `snapshots/pinned/` (still
+        restorable, no longer an undo step: an old pin left in the sequence
+        would become `snaps[-2]` one day and Undo would jump back to it)."""
+        if snap.name not in self._pinned_snapshots():
+            snap.unlink(missing_ok=True)
+            return
+        dst = self.snapshots_dir / "pinned" / snap.name
+        try:
+            dst.parent.mkdir(exist_ok=True)
+            os.replace(snap, dst)
+        except OSError as e:
+            _log.warning("could not park pinned snapshot %s of %s (%s); left in place",
+                         snap.name, self.dir.name, e)
 
     #: What Undo says when the step it would restore cannot be read.
     DAMAGED_HISTORY_MSG = ("Earlier undo history is damaged, so Undo stops here. "
@@ -467,8 +509,8 @@ class EDLStore:
             raise
         self._publish(temps)
         self.edl, self._redo_stack, self._redo_ops = prev_edl, stack, redo_ops
-        # Remove the snapshot we just left
-        snaps[-1].unlink(missing_ok=True)
+        # Remove the snapshot we just left (a pinned version's is parked)
+        self._retire_snapshot(snaps[-1])
         return True
 
     def redo(self) -> bool:

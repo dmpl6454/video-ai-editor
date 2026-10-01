@@ -46,7 +46,7 @@ from uuid import uuid4
 from .facts import TimelineFacts
 from .recipes import ASK, consumes_answer, dropped_note, is_blank_answer, reask, reask_note, was_reasked
 from .schema import NeedsInput, Plan
-from .service import CLARIFY_TTL_S, PENDING_FILE
+from .service import ANALYSIS_GATE_KEY, CLARIFY_TTL_S, PENDING_FILE
 
 _ORDINALS: dict[str, int] = {
     "first": 0, "1st": 0, "one": 0, "second": 1, "2nd": 1, "two": 1, "third": 2, "3rd": 2,
@@ -84,16 +84,32 @@ def normalise_answer(message: str) -> str:
     return text
 
 
-def facts_hash(facts: TimelineFacts) -> str:
+def facts_hash(facts: TimelineFacts, *, progress: bool = True) -> str:
     """What a pending plan was planned against: the parts of the facts that
     another route's `op` would change. Selection/playhead are deliberately
-    excluded — moving the playhead must not drop a question."""
+    excluded — moving the playhead must not drop a question.
+
+    `progress=False` also leaves out the analysis-progress bits: whether the upload's transcript exists
+    yet. The analysis gate ("wait for it, then edit?") is asked precisely BECAUSE that is still false, and it
+    turns true exactly when the wait ends — a person who paused at the gate was told "the timeline changed"
+    (review, race3.py). No `op` is behind that change, so it must not invalidate the question."""
     payload = {
         "duration": round(facts.duration, 3), "canvas": [facts.canvas_w, facts.canvas_h],
         "clips": list(facts.clip_ids), "tracks": list(facts.track_ids),
-        "captions": facts.has_captions, "music": facts.has_music, "transcript": facts.has_transcript,
+        "captions": facts.has_captions, "music": facts.has_music,
     }
+    if progress:
+        payload["transcript"] = facts.has_transcript
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _is_gate(plan: Plan | dict[str, Any] | None) -> bool:
+    """A plan whose only job is the analysis gate's question."""
+    try:
+        p = plan if isinstance(plan, Plan) else Plan.model_validate(plan)
+    except (TypeError, ValueError):
+        return False
+    return any(q.key == ANALYSIS_GATE_KEY for q in p.needs_input)
 
 
 def pending_path(session_dir: Path) -> Path:
@@ -111,7 +127,7 @@ def save_pending(session_dir: Path, *, plan: Plan, prompt: str, facts: TimelineF
     now = time.time()
     record = {
         "token": f"q_{uuid4().hex[:10]}", "plan": plan.model_dump(), "prompt": prompt,
-        "facts_hash": facts_hash(facts), "created": now, "expires": now + CLARIFY_TTL_S,
+        "facts_hash": facts_hash(facts, progress=not _is_gate(plan)), "created": now, "expires": now + CLARIFY_TTL_S,
         "brain": plan.brain, "ui_state": ui_state or {},
     }
     if rollback:
@@ -143,7 +159,7 @@ def pending_is_valid(record: dict[str, Any], facts: TimelineFacts | None, *,
     now = time.time() if now is None else now
     if float(record.get("expires", 0)) < now:
         return False, "the question expired"
-    if facts is not None and record.get("facts_hash") != facts_hash(facts):
+    if facts is not None and record.get("facts_hash") != facts_hash(facts, progress=not _is_gate(record.get("plan"))):
         return False, "the timeline changed since the question was asked"
     return True, None
 

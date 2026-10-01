@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rank_moments",
+  "description": "The model's answer to a rank_moments call: the window indices of the payload, best first, each at most once. Carried by the fm-planner helper's `rank_windows` text task this wave.",
+  "type": "object",
+  "required": ["order"],
+  "additionalProperties": true,
+  "properties": {
+    "order": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0},
+      "maxItems": 64
+    },
+    "model": {"type": ["string", "null"]},
+    "latency_ms": {"type": ["integer", "null"]}
+  }
+}

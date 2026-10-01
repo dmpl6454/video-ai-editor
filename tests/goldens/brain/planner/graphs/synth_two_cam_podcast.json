@@ -1,0 +1,8717 @@
+{
+ "angles": {
+  "dialogue": "src_e20000000000000000000001",
+  "members": [
+   {
+    "angle": "A",
+    "by": "own_mic",
+    "confidence": 0.9,
+    "path": "/fixtures/brain/two_cam_podcast/cam_a_host.mp4",
+    "sees": [
+     "S1"
+    ],
+    "src_key": "src_e20000000000000000000002",
+    "sync_offset_s": 0.35
+   },
+   {
+    "angle": "B",
+    "by": "own_mic",
+    "confidence": 0.9,
+    "path": "/fixtures/brain/two_cam_podcast/cam_b_guest.mp4",
+    "sees": [
+     "S2"
+    ],
+    "src_key": "src_e20000000000000000000003",
+    "sync_offset_s": -0.2
+   }
+  ],
+  "reference": "src_e20000000000000000000001"
+ },
+ "graph": {
+  "analysis_version": 1,
+  "clock": "reference",
+  "content_type": {
+   "confidence": 0.88,
+   "evidence": [
+    "2 speakers",
+    "shares 0.42/0.58"
+   ],
+   "guess": "podcast"
+  },
+  "digests": {
+   "audio": "sha256:9bb38c008b5ad1e4b7303da5ced4f5cb7cfb98740683cd58bc44d9cb351f29e6",
+   "semantic": "sha256:92406f4e22de79234f6efc1c42e2cb73941307b67f7d92701534699f59f4d48d",
+   "speakers": "sha256:8c0861131a9ac0d4545d6e3ffd04ed3c1dc2b2c41231248a9249541f87440961",
+   "speech": "sha256:35c9f8db2edfc26eb1506fe058ce7e42b07d053268bcee1e59ecbfb9b3fb82ca"
+  },
+  "id": "g_66bbd4184437",
+  "layers": {
+   "audio": "audio/hand-truth-v1.json",
+   "semantic": "semantic/hand-truth-v1.json",
+   "speakers": "speakers/hand-truth-v1.json",
+   "speech": "speech/hand-truth-v1.json"
+  },
+  "music_hint": {
+   "energy": 0.5,
+   "evidence": [
+    "podcast"
+   ],
+   "mood": "chill"
+  },
+  "project": {
+   "canvas": [
+    1920,
+    1080
+   ],
+   "controls_seen": [],
+   "fps": 30,
+   "session_language": "en"
+  },
+  "reference": "src_e20000000000000000000001",
+  "scenes": "scenes.json",
+  "sources": [
+   {
+    "dialogue": true,
+    "duration": 169.635,
+    "has_audio": true,
+    "has_video": false,
+    "key": "src_e20000000000000000000001",
+    "layers": {
+     "audio": "ok",
+     "semantic": "ok",
+     "speakers": "ok",
+     "speech": "ok"
+    },
+    "leaf": "recorder.wav",
+    "path": "/fixtures/brain/two_cam_podcast/recorder.wav",
+    "role": "reference_audio",
+    "sync_offset_s": 0.0
+   },
+   {
+    "angle": "A",
+    "angle_guess": {
+     "by": "own_mic",
+     "confidence": 0.9,
+     "kind": "close",
+     "sees": [
+      "S1"
+     ]
+    },
+    "duration": 170.635,
+    "fps": "30/1",
+    "has_audio": true,
+    "has_video": true,
+    "key": "src_e20000000000000000000002",
+    "layers": {
+     "audio": "ok",
+     "visual": "lazy"
+    },
+    "leaf": "cam_a_host.mp4",
+    "path": "/fixtures/brain/two_cam_podcast/cam_a_host.mp4",
+    "role": "angle",
+    "sync_offset_s": 0.35
+   },
+   {
+    "angle": "B",
+    "angle_guess": {
+     "by": "own_mic",
+     "confidence": 0.9,
+     "kind": "close",
+     "sees": [
+      "S2"
+     ]
+    },
+    "duration": 170.635,
+    "fps": "30/1",
+    "has_audio": true,
+    "has_video": true,
+    "key": "src_e20000000000000000000003",
+    "layers": {
+     "audio": "ok",
+     "visual": "lazy"
+    },
+    "leaf": "cam_b_guest.mp4",
+    "path": "/fixtures/brain/two_cam_podcast/cam_b_guest.mp4",
+    "role": "angle",
+    "sync_offset_s": -0.2
+   }
+  ],
+  "speakers": [
+   {
+    "angle_hint": "A",
+    "id": "S1",
+    "label": "SPEAKER_00",
+    "name": null,
+    "questions": 11,
+    "role_guess": "host",
+    "share": 0.42
+   },
+   {
+    "angle_hint": "B",
+    "id": "S2",
+    "label": "SPEAKER_01",
+    "name": null,
+    "questions": 0,
+    "role_guess": "guest",
+    "share": 0.58
+   }
+  ],
+  "timings_s": {},
+  "topics": [
+   {
+    "by": "rules",
+    "id": "t_001",
+    "sents": [
+     "s_00001",
+     "s_00002",
+     "s_00003",
+     "s_00004",
+     "s_00005",
+     "s_00006",
+     "s_00007",
+     "s_00008",
+     "s_00009",
+     "s_00010",
+     "s_00011",
+     "s_00012",
+     "s_00013",
+     "s_00014",
+     "s_00015",
+     "s_00016",
+     "s_00017",
+     "s_00018",
+     "s_00019",
+     "s_00020",
+     "s_00021",
+     "s_00022",
+     "s_00023",
+     "s_00024",
+     "s_00025",
+     "s_00026",
+     "s_00027",
+     "s_00028",
+     "s_00029",
+     "s_00030",
+     "s_00031",
+     "s_00032",
+     "s_00033",
+     "s_00034",
+     "s_00035",
+     "s_00036",
+     "s_00037",
+     "s_00038",
+     "s_00039",
+     "s_00040",
+     "s_00041",
+     "s_00042",
+     "s_00043"
+    ],
+    "t0": 0.0,
+    "t1": 169.635,
+    "title": "raising money for hardware"
+   }
+  ],
+  "version": 1
+ },
+ "layers": {
+  "audio": {
+   "clipping": [],
+   "env_10ms": "xsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbG6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19bU1tfY6Ojp6erq6+vs7Ozr6+rq6eno2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2trZ2dnY2NjX19fW1tbV1dXU1NXV1dbW1tfX19jY2NnZ2dro6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NbU1tjo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Ojp6enp6erq6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urq6unp6enp6Oja2NfV1dfY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjW1NbY6Ojo6enp6enq6urq6urr6+vr6+zs7Ozs6+vr6+vq6urq6urp6enp6ejo2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6enq6uvr7Ozr6+rq6ena2NbU1tjo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo2tjX1tTW19jo6Ojp6enp6erq6urq6+vr6+vs7Ozs7Ozr6+vr6+rq6urq6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojo6enp6erq6urq6+vr6+zs7Ozs6+vr6+rq6urq6enp6ejo2tjX1tTW19jo6Onp6urr6+vs7Ovr6+rq6eno2trZ2dnY2NjX19fW1tbV1dXU1NXV1dbW1tfX19jY2NnZ2dro6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrY19bU1tfY6Onp6urr6+zr6+rq6ena2NfV1dfY6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfW1NbX2Ojo6Onp6enp6erq6urq6uvr6+vr6+zs7Ozs6+vr6+vr6urq6urq6enp6enp6Oja2NbU1tjo6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjX1dXX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1tTW19jo6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ozs6+vr6+vr6urq6urq6enp6enp6Ojo2trZ2dnY2NjX19fW1tbV1dXU1NTV1dXW1tbX19fY2NjZ2dna6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozr6+vr6+vq6urq6urp6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6enq6urq6urr6+vr6+zs7Ozs6+vr6+vq6urq6urp6enp6ejo2tjW1NbY6Ojo6enp6enq6urq6+vr6+vs7Ozs7Ovr6+vr6urq6unp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr7Ozs7Ovr6+rq6unp6eno2tjX1tTW19jo6Ojp6enp6urq6urr6+vr7Ozs7Ozr6+vr6urq6urp6enp6Oja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1tTW19jo6Onp6urr6+vs7Ovr6+rq6eno2trZ2dnY2NjX19fW1tbV1dXU1NXV1dbW1tfX19jY2NnZ2dro6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Ojp6enp6erq6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urq6unp6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6enq6uvr6+zs6+vr6urp6eja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6Onp6enp6erq6urq6uvr6+vr6+zs7Ozs6+vr6+vr6urq6urq6enp6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6uvr6+zs6+vr6urp6eja2tnZ2NjY19fW1tbV1dTU1NXV1tbW19fY2NjZ2dro6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1tTW19jo6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojp6erq6+vs7Ovr6urp6drY1tTW2Ojo6Onp6enp6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urp6enp6ejo2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enp6urq6urr6+vr6+zs7Ozs7Ovr6+vr6urq6urp6enp6ejo2tjX1tTW19jo6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrY19bU1tfY6Ojo6enp6erq6urq6+vr6+zs7Ozs6+vr6+rq6urq6enp6ejo2tjX1tTW19jo6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo6Nra2dnZ2NjY19fX1tbW1dXV1NTU1dXV1tbW19fX2NjY2dnZ2ujo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrY19XV19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tjX1dXX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Ojp6enq6urq6uvr6+zs7Ozs6+vr6urq6urp6eno6NrY19XV19jo6Ojp6enp6erq6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urq6unp6enp6Oja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrY19bU1tfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NbU1tjo6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enq6urq6uvr6+vr7Ozs7Ovr6+vr6urq6urp6enp6Oja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6Nra2dnZ2NjY19fX1tbW1dXV1NTV1dXW1tbX19fY2NjZ2dna6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozr6+vr6+vq6urq6urp6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfW1NbX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NbU1tjo6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6Onp6enp6urq6urq6+vr6+vs7Ozs7Ovr6+vr6urq6urq6enp6eno6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY1tTW2Ojo6Onp6enp6urq6urq6+vr6+vs7Ozs7Ovr6+vr6urq6urq6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6Nra2dnY2NjX19bW1tXV1NTU1dXW1tbX19jY2NnZ2ujo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojo6enp6enq6urq6urr6+vr6+zs7Ozs6+vr6+vq6urq6urp6enp6ejo2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrY1tTW2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojp6erq6+vs6+vq6unp2tjX1tTW19jo6Ojp6enp6erq6urq6+vr6+vs7Ozs7Ozr6+vr6+rq6urq6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NbU1tjo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NfV1dfY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2djY2NfX19bW1tXV1dTU1NXV1dbW1tfX19jY2NnZ2dro6Onp6urr6+zs7Ovr6urp6eja2tnZ2djY2NfX19bW1tXV1dTU1NXV1dbW1tfX19jY2NnZ2dro6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojp6erq6+vs6+vq6unp2tjX1tTW19jo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6Nra2dnY2NjX19bW1tXV1NTU1dXW1tbX19jY2NnZ2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfW1NbX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NbU1tjo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjW1NbY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6erq6uvr7Ozs6+vq6urp6eja2tnZ2djY2NfX1tbW1dXV1NTU1dXV1tbW19fY2NjZ2dna6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1tTW19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2trZ2dnY2NjX19bW1tXV1dTU1NXV1dbW1tfX2NjY2dnZ2ujo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY1tTW2Ojo6Onp6enp6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urp6enp6ejo2tjX1dXX2Ojo6enp6erq6uvr6+zs7Ozr6+vq6urp6enp6NrY19bU1tfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6Nra2dnZ2NjY19fX1tbW1dXV1NTV1dXW1tbX19fY2NjZ2dna6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjW1NbY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19bU1tfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Ojp6enq6urq6uvr6+zs7Ozs6+vr6urq6urp6eno6NrY19bU1tfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tjW1NbY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfW1NbX2Ojp6erq6+vs6+vq6unp2tjX1dXX2Ojo6Ojp6enp6enp6urq6urq6uvr6+vr6+vs7Ozs7Ozr6+vr6+vr6urq6urq6unp6enp6eno6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Ojp6enq6urq6uvr6+zs7Ozs6+vr6urq6urp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6Ojp6enp6enq6urq6urr6+vr6+vr7Ozs7Ozs6+vr6+vr6+rq6urq6unp6enp6ejo6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ozs6+vr6+vr6urq6urq6enp6enp6Ojo2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfW1NbX2Ojo6Onp6enp6urq6urr6+vr6+zs7Ozs7Ovr6+vr6urq6urp6enp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Ojo6enp6enp6erq6urq6urr6+vr6+vr7Ozs7Ozs6+vr6+vr6+rq6urq6urp6enp6enp6Ojo2trZ2dnY2NjX19fW1tbV1dXU1NXV1dbW1tfX19jY2NnZ2dro6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2NjY19fW1tbV1dTU1NXV1tbW19fY2NjZ2dro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfW1NbX2Ojo6Onp6enq6urq6uvr6+vs7Ozs7Ovr6+vq6urq6unp6eno6NrY19bU1tfY6Ojp6erq6+vs7Ozr6+rq6eno2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6uro6Onp6erq6uvr6+zo6Ojp6enq6urq6uvr6+zs7Ozo6Onp6urr6+vs7Ovr6+rq6eno2tbW6Ojp6ejo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6Onp6enp6urq6urr6+vr6+zs7Ozs7Ovr6+vr6urq6urp6enp6ejo2tjX1tTW19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjW1NbY6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozr6+vr6+vq6urq6urp6enp6eno6NrY19bU1tfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NbU1tjo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6Nra2dnZ2NjY19fX1tbW1dXV1NTV1dXW1tbX19fY2NjZ2dna6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjW1NbY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19bU1tfY6Ojp6erq6+vs7Ozr6+rq6eno2tjX1tTW19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enp6urq6urr6+vr6+zs7Ozs7Ovr6+vr6urq6urp6enp6ejo2tjX1tTW19jo6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozs7Ovr6+vr6+rq6urq6unp6enp6ejo6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfW1NbX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1tTW19jo6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NbU1tjo6Ojp6enp6erq6urr6+vr6+zs7Ozs6+vr6+vq6urq6enp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Ojp6enp6erq6urr6+vr6+zs7Ozs6+vr6+vq6urq6enp6eno6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2djY2NfX19bW1tXV1dTU1NXV1dbW1tfX19jY2NnZ2dro6Onp6urr6+zs7Ovr6urp6eja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjW1NbY6Ojp6erq6uvr7Ozs6+vq6urp6eja2NbU1tjo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6enq6uvr7Ovr6urp6drY19bU1tfY6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfV1dfY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6enq6uvr7Ozr6+rq6ena2NfV1dfY6Ojo6enp6enq6urq6urr6+vr6+zs7Ozs6+vr6+vq6urq6urp6enp6ejo2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1tTW19jo6Onp6urr6+zs7Ovr6urp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojo6enp6enq6urq6+vr6+vs7Ozs7Ovr6+vr6urq6unp6enp6Oja2NbU1tjo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja2NfV1dfY6Ojo6enp6enp6urq6urq6+vr6+vr7Ozs7Ozr6+vr6+vq6urq6urp6enp6eno6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6Onp6enq6urq6uvr6+vr7Ozs7Ovr6+vr6urq6urp6enp6Oja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY1tTW2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfW1NbX2Ojo6enq6uvr7Ozs6+vq6unp6NrY19bU1tfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojp6erq6+vs7Ozr6+rq6eno2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2trZ2dnY2NjX19fW1tbV1dXU1NXV1dbW1tfX19jY2NnZ2dro6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NbU1tjo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6Onp6enq6urq6uvr6+vr7Ozs7Ovr6+vr6urq6urp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6enq6uvr7Ozr6+rq6ena2NbU1tjo6Ojo6enp6enp6erq6urq6urr6+vr6+vr7Ozs7Ozs7Ovr6+vr6+vq6urq6urq6enp6enp6ejo6NrY1tTW2Ojo6Ojp6enp6enq6urq6urr6+vr6+vr7Ozs7Ozs6+vr6+vr6+rq6urq6unp6enp6ejo6NrY19XV19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NbU1tjo6Ojp6enp6erq6urr6+vr6+zs7Ozs6+vr6+vq6urq6enp6eno6NrY1tTW2Ojo6enq6urr6+zs7Ovr6urq6eno2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfW1NbX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrY1tTW2Ojo6enp6urq6+vr7Ozs6+vr6urq6enp6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6erq6+vr7Ozr6+vq6unp6Nra2dnZ2NjY19fX1tbW1dXV1NTV1dXW1tbX19fY2NjZ2dna6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojo6enp6urq6urr6+vs7Ozs7Ovr6+rq6urq6enp6Oja2NfW1NbX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfW1NbX2Ojo6Onp6enp6erq6urq6uvr6+vr6+zs7Ozs6+vr6+vr6urq6urq6enp6enp6Oja2NbU1tjo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6enq6urr6+vr7Ozs6+vr6+rq6unp6eno2tjX1dXX2Ojo6Ojp6enp6enq6urq6urr6+vr6+vs7Ozs7Ozs6+vr6+vr6urq6urq6enp6enp6Ojo2tjX1tTW19jo6Ojp6enp6urq6urr6+vr7Ozs7Ozr6+vr6urq6urp6enp6Oja2NfV1dfY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6Nra2dnZ2NjY19fW1tbV1dXU1NTV1dXW1tbX19jY2NnZ2dro6Ojp6enp6erq6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urq6unp6enp6Oja2NfV1dfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjX1dXX2Ojo6Onp6enp6urq6urr6+vr6+zs7Ozs7Ovr6+vr6urq6urp6enp6ejo2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Ojp6enq6urq6uvr6+zs7Ozs6+vr6urq6urp6eno6Nra2dnZ2NjY19fX1tbW1dXV1NTU1dXV1tbW19fX2NjY2dnZ2ujo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1tTW19jo6Ojp6enq6urq6uvr6+zs7Ozs6+vr6urq6urp6eno6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojo6enp6erq6urq6+vr6+vs7Ozs6+vr6+vq6urq6unp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojp6enp6urq6+vr7Ozs7Ovr6+rq6unp6eno2tjX1tTW19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tfT0M3JxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbJzdDT19ro6Ojp6enp6erq6urq6uvr6+vr7Ozs7Ozr6+vr6+rq6urq6unp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6Nra2dnZ2NjY19fX1tbW1dXV1NTV1dXW1tbX19fY2NjZ2dna6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjW1NbY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6urq6+vs7Ozr6+rq6unp6NrY1tTW2Ojo6Onp6enq6urq6+vr6+zs7Ozr6+vr6urq6unp6eno6NrX09DNycbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGyc3Q09fa6Ojo6enp6erq6urr6+vr7Ozs7Ovr6+vq6urq6enp6ejo2tjW1NbY6Ojp6enq6urr6+vs7Ozr6+vq6urp6eno2tjX1dXX2Ojo6Onp6enq6urq6uvr6+vr7Ozs7Ovr6+vr6urq6urp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Onp6erq6uvr6+zs7Ovr6+rq6unp6eja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6enq6uvr7Ozs6+vq6unp6NrY19bU1tfY6Ojp6enq6urr6+vs7Ovr6+rq6unp6eja2NfV1dfY6Ojo6enp6enq6urq6urr6+vr6+zs7Ozs6+vr6+vq6urq6urp6enp6ejo2trZ2dnY2NjX19bW1tXV1dTU1NXV1dbW1tfX2NjY2dnZ2ujo6enp6urq6+vr7Ozs6+vr6urq6enp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojo6enp6enq6urq6uvr6+vr7Ozs7Ozs6+vr6+vq6urq6unp6enp6Oja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6urr6+vs7Ovr6+rq6eno2tjX1dXX2Ojo6Onp6enq6urq6uvr6+vr7Ozs7Ovr6+vr6urq6urp6enp6Oja2NfV1dfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6NrY19XV19jo6Ojp6enp6urq6uvr6+vs7Ozs6+vr6+rq6urp6enp6Oja19PQzcnGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsnN0NPX2ujo6Onp6erq6urq6+vr7Ozs7Ozr6+vq6urq6unp6ejo2tjX1dXX2Ojo6enp6urq6+vr7Ozr6+vq6urp6eno2tjX1tTW19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19XV19jo6Ojp6enp6urq6urr6+vr6+zs7Ozr6+vr6+rq6urq6enp6ejo2tjX1dXX2Ojo6enq6uvr6+zs6+vr6urp6eja2tnZ2djY2NfX19bW1tXV1dTU1dXV1tbW19fX2NjY2dnZ2ujo6enp6erq6uvr6+vs7Ozr6+vr6urq6enp6eja2NfV1dfY6Ojp6erq6+vr7Ozr6+vq6unp6NrY19XV19jo6Onp6erq6uvr6+zs6+vr6urq6enp6NrY19bU1tfY6Ojp6enp6urq6+vr6+zs7Ovr6+vq6urp6enp6MbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbG",
+   "events": [],
+   "hz": 100,
+   "loudness_i": -19.0,
+   "noise_floor_db": -58.0,
+   "own_mic_energy": {},
+   "silences": [
+    {
+     "id": "sil_0001",
+     "t0": 7.27,
+     "t1": 7.65
+    },
+    {
+     "id": "sil_0002",
+     "t0": 11.785,
+     "t1": 12.165
+    },
+    {
+     "id": "sil_0003",
+     "t0": 15.52,
+     "t1": 15.9
+    },
+    {
+     "id": "sil_0004",
+     "t0": 22.31,
+     "t1": 22.69
+    },
+    {
+     "id": "sil_0005",
+     "t0": 28.66,
+     "t1": 29.04
+    },
+    {
+     "id": "sil_0006",
+     "t0": 32.0,
+     "t1": 32.38
+    },
+    {
+     "id": "sil_0007",
+     "t0": 38.425,
+     "t1": 38.805
+    },
+    {
+     "id": "sil_0008",
+     "t0": 41.02,
+     "t1": 41.9
+    },
+    {
+     "id": "sil_0009",
+     "t0": 45.1,
+     "t1": 45.48
+    },
+    {
+     "id": "sil_0010",
+     "t0": 48.91,
+     "t1": 50.59
+    },
+    {
+     "id": "sil_0011",
+     "t0": 54.965,
+     "t1": 55.345
+    },
+    {
+     "id": "sil_0012",
+     "t0": 59.185,
+     "t1": 59.565
+    },
+    {
+     "id": "sil_0013",
+     "t0": 63.525,
+     "t1": 63.905
+    },
+    {
+     "id": "sil_0014",
+     "t0": 66.415,
+     "t1": 66.795
+    },
+    {
+     "id": "sil_0015",
+     "t0": 68.13,
+     "t1": 68.51
+    },
+    {
+     "id": "sil_0016",
+     "t0": 71.315,
+     "t1": 71.695
+    },
+    {
+     "id": "sil_0017",
+     "t0": 76.385,
+     "t1": 76.765
+    },
+    {
+     "id": "sil_0018",
+     "t0": 78.08,
+     "t1": 78.38
+    },
+    {
+     "id": "sil_0019",
+     "t0": 80.745,
+     "t1": 81.125
+    },
+    {
+     "id": "sil_0020",
+     "t0": 84.945,
+     "t1": 87.575
+    },
+    {
+     "id": "sil_0021",
+     "t0": 89.825,
+     "t1": 90.205
+    },
+    {
+     "id": "sil_0022",
+     "t0": 93.865,
+     "t1": 94.245
+    },
+    {
+     "id": "sil_0023",
+     "t0": 102.47,
+     "t1": 102.85
+    },
+    {
+     "id": "sil_0024",
+     "t0": 108.125,
+     "t1": 108.505
+    },
+    {
+     "id": "sil_0025",
+     "t0": 109.955,
+     "t1": 110.335
+    },
+    {
+     "id": "sil_0026",
+     "t0": 112.225,
+     "t1": 113.005
+    },
+    {
+     "id": "sil_0027",
+     "t0": 119.455,
+     "t1": 119.835
+    },
+    {
+     "id": "sil_0028",
+     "t0": 121.105,
+     "t1": 121.485
+    },
+    {
+     "id": "sil_0029",
+     "t0": 126.76,
+     "t1": 127.14
+    },
+    {
+     "id": "sil_0030",
+     "t0": 128.76,
+     "t1": 129.14
+    },
+    {
+     "id": "sil_0031",
+     "t0": 132.1,
+     "t1": 133.78
+    },
+    {
+     "id": "sil_0032",
+     "t0": 136.29,
+     "t1": 136.67
+    },
+    {
+     "id": "sil_0033",
+     "t0": 140.56,
+     "t1": 140.94
+    },
+    {
+     "id": "sil_0034",
+     "t0": 145.67,
+     "t1": 146.05
+    },
+    {
+     "id": "sil_0035",
+     "t0": 153.545,
+     "t1": 153.925
+    },
+    {
+     "id": "sil_0036",
+     "t0": 155.465,
+     "t1": 155.845
+    },
+    {
+     "id": "sil_0037",
+     "t0": 158.23,
+     "t1": 158.61
+    },
+    {
+     "id": "sil_0038",
+     "t0": 160.455,
+     "t1": 160.835
+    },
+    {
+     "id": "sil_0039",
+     "t0": 165.015,
+     "t1": 165.395
+    }
+   ],
+   "vad": [
+    [
+     0.6,
+     1.015
+    ],
+    [
+     1.085,
+     1.365
+    ],
+    [
+     1.435,
+     1.625
+    ],
+    [
+     1.695,
+     1.93
+    ],
+    [
+     2.0,
+     2.28
+    ],
+    [
+     2.63,
+     2.955
+    ],
+    [
+     3.025,
+     3.35
+    ],
+    [
+     3.42,
+     3.61
+    ],
+    [
+     3.68,
+     3.915
+    ],
+    [
+     3.985,
+     4.4
+    ],
+    [
+     4.47,
+     4.795
+    ],
+    [
+     4.865,
+     5.28
+    ],
+    [
+     5.35,
+     5.675
+    ],
+    [
+     5.745,
+     5.98
+    ],
+    [
+     6.05,
+     6.195
+    ],
+    [
+     6.265,
+     6.725
+    ],
+    [
+     6.795,
+     7.21
+    ],
+    [
+     7.71,
+     8.08
+    ],
+    [
+     8.15,
+     8.385
+    ],
+    [
+     8.455,
+     8.825
+    ],
+    [
+     8.895,
+     9.085
+    ],
+    [
+     9.435,
+     9.625
+    ],
+    [
+     9.695,
+     9.885
+    ],
+    [
+     9.955,
+     10.1
+    ],
+    [
+     10.17,
+     10.585
+    ],
+    [
+     10.655,
+     11.115
+    ],
+    [
+     11.185,
+     11.375
+    ],
+    [
+     11.445,
+     11.725
+    ],
+    [
+     12.225,
+     12.415
+    ],
+    [
+     12.485,
+     12.81
+    ],
+    [
+     12.88,
+     13.205
+    ],
+    [
+     13.275,
+     13.465
+    ],
+    [
+     13.535,
+     13.77
+    ],
+    [
+     13.84,
+     14.345
+    ],
+    [
+     14.695,
+     14.93
+    ],
+    [
+     15.0,
+     15.46
+    ],
+    [
+     15.96,
+     16.375
+    ],
+    [
+     16.445,
+     16.815
+    ],
+    [
+     16.885,
+     17.165
+    ],
+    [
+     17.235,
+     17.605
+    ],
+    [
+     17.675,
+     17.865
+    ],
+    [
+     17.935,
+     18.125
+    ],
+    [
+     18.195,
+     18.385
+    ],
+    [
+     18.735,
+     18.97
+    ],
+    [
+     19.04,
+     19.275
+    ],
+    [
+     19.345,
+     19.76
+    ],
+    [
+     19.83,
+     20.02
+    ],
+    [
+     20.09,
+     20.55
+    ],
+    [
+     20.62,
+     20.9
+    ],
+    [
+     21.25,
+     21.44
+    ],
+    [
+     21.79,
+     22.25
+    ],
+    [
+     22.75,
+     22.94
+    ],
+    [
+     23.24,
+     23.43
+    ],
+    [
+     23.5,
+     23.69
+    ],
+    [
+     23.76,
+     24.085
+    ],
+    [
+     24.155,
+     24.39
+    ],
+    [
+     24.46,
+     24.785
+    ],
+    [
+     24.855,
+     25.36
+    ],
+    [
+     25.43,
+     25.62
+    ],
+    [
+     25.69,
+     25.835
+    ],
+    [
+     25.905,
+     26.275
+    ],
+    [
+     26.345,
+     26.58
+    ],
+    [
+     26.65,
+     27.065
+    ],
+    [
+     27.135,
+     27.325
+    ],
+    [
+     27.395,
+     27.585
+    ],
+    [
+     27.655,
+     28.025
+    ],
+    [
+     28.095,
+     28.6
+    ],
+    [
+     29.1,
+     29.47
+    ],
+    [
+     29.54,
+     30.045
+    ],
+    [
+     30.395,
+     30.63
+    ],
+    [
+     30.7,
+     30.935
+    ],
+    [
+     31.005,
+     31.24
+    ],
+    [
+     31.31,
+     31.59
+    ],
+    [
+     31.66,
+     31.94
+    ],
+    [
+     32.44,
+     32.675
+    ],
+    [
+     32.745,
+     33.07
+    ],
+    [
+     33.14,
+     33.51
+    ],
+    [
+     33.58,
+     33.905
+    ],
+    [
+     33.975,
+     34.21
+    ],
+    [
+     34.28,
+     34.605
+    ],
+    [
+     34.675,
+     35.09
+    ],
+    [
+     35.16,
+     35.485
+    ],
+    [
+     35.555,
+     35.745
+    ],
+    [
+     35.815,
+     36.095
+    ],
+    [
+     36.165,
+     36.4
+    ],
+    [
+     36.47,
+     36.795
+    ],
+    [
+     36.865,
+     37.055
+    ],
+    [
+     37.125,
+     37.315
+    ],
+    [
+     37.385,
+     37.62
+    ],
+    [
+     37.69,
+     38.06
+    ],
+    [
+     38.13,
+     38.365
+    ],
+    [
+     38.865,
+     39.055
+    ],
+    [
+     39.125,
+     39.495
+    ],
+    [
+     39.565,
+     39.89
+    ],
+    [
+     39.96,
+     40.15
+    ],
+    [
+     40.5,
+     40.96
+    ],
+    [
+     41.96,
+     42.195
+    ],
+    [
+     42.265,
+     42.455
+    ],
+    [
+     42.525,
+     42.805
+    ],
+    [
+     42.875,
+     43.155
+    ],
+    [
+     43.225,
+     43.415
+    ],
+    [
+     43.485,
+     43.9
+    ],
+    [
+     43.97,
+     44.25
+    ],
+    [
+     44.32,
+     44.555
+    ],
+    [
+     44.625,
+     45.04
+    ],
+    [
+     45.54,
+     45.82
+    ],
+    [
+     46.12,
+     46.31
+    ],
+    [
+     46.38,
+     46.795
+    ],
+    [
+     46.865,
+     47.1
+    ],
+    [
+     47.17,
+     47.495
+    ],
+    [
+     47.565,
+     47.89
+    ],
+    [
+     47.96,
+     48.15
+    ],
+    [
+     48.22,
+     48.365
+    ],
+    [
+     48.435,
+     48.85
+    ],
+    [
+     50.65,
+     50.84
+    ],
+    [
+     50.91,
+     51.19
+    ],
+    [
+     51.26,
+     51.495
+    ],
+    [
+     51.565,
+     51.8
+    ],
+    [
+     51.87,
+     52.24
+    ],
+    [
+     52.31,
+     52.635
+    ],
+    [
+     52.705,
+     52.94
+    ],
+    [
+     53.01,
+     53.29
+    ],
+    [
+     53.36,
+     53.595
+    ],
+    [
+     53.665,
+     53.99
+    ],
+    [
+     54.06,
+     54.295
+    ],
+    [
+     54.365,
+     54.6
+    ],
+    [
+     54.67,
+     54.905
+    ],
+    [
+     55.405,
+     55.595
+    ],
+    [
+     55.665,
+     55.945
+    ],
+    [
+     56.295,
+     56.485
+    ],
+    [
+     56.835,
+     57.025
+    ],
+    [
+     57.095,
+     57.33
+    ],
+    [
+     57.4,
+     57.545
+    ],
+    [
+     57.615,
+     58.075
+    ],
+    [
+     58.145,
+     58.38
+    ],
+    [
+     58.45,
+     58.73
+    ],
+    [
+     58.8,
+     59.125
+    ],
+    [
+     59.625,
+     59.95
+    ],
+    [
+     60.25,
+     60.53
+    ],
+    [
+     60.6,
+     60.97
+    ],
+    [
+     61.04,
+     61.41
+    ],
+    [
+     61.48,
+     61.715
+    ],
+    [
+     61.785,
+     62.065
+    ],
+    [
+     62.135,
+     62.415
+    ],
+    [
+     62.485,
+     62.72
+    ],
+    [
+     62.79,
+     63.115
+    ],
+    [
+     63.185,
+     63.465
+    ],
+    [
+     63.965,
+     64.155
+    ],
+    [
+     64.505,
+     64.74
+    ],
+    [
+     64.81,
+     65.0
+    ],
+    [
+     65.07,
+     65.305
+    ],
+    [
+     65.375,
+     65.7
+    ],
+    [
+     65.77,
+     66.005
+    ],
+    [
+     66.075,
+     66.355
+    ],
+    [
+     66.855,
+     67.135
+    ],
+    [
+     67.485,
+     67.675
+    ],
+    [
+     67.745,
+     68.07
+    ],
+    [
+     68.57,
+     68.805
+    ],
+    [
+     68.875,
+     69.155
+    ],
+    [
+     69.225,
+     69.595
+    ],
+    [
+     69.665,
+     69.945
+    ],
+    [
+     70.015,
+     70.25
+    ],
+    [
+     70.32,
+     70.51
+    ],
+    [
+     70.58,
+     70.86
+    ],
+    [
+     70.93,
+     71.255
+    ],
+    [
+     71.755,
+     72.08
+    ],
+    [
+     72.15,
+     72.34
+    ],
+    [
+     72.41,
+     72.6
+    ],
+    [
+     72.67,
+     72.86
+    ],
+    [
+     72.93,
+     73.21
+    ],
+    [
+     73.56,
+     73.795
+    ],
+    [
+     73.865,
+     74.145
+    ],
+    [
+     74.215,
+     74.54
+    ],
+    [
+     74.61,
+     74.8
+    ],
+    [
+     74.87,
+     75.105
+    ],
+    [
+     75.175,
+     75.41
+    ],
+    [
+     75.48,
+     75.67
+    ],
+    [
+     75.74,
+     75.975
+    ],
+    [
+     76.045,
+     76.325
+    ],
+    [
+     76.825,
+     77.06
+    ],
+    [
+     77.13,
+     77.41
+    ],
+    [
+     77.48,
+     77.715
+    ],
+    [
+     77.785,
+     78.02
+    ],
+    [
+     78.44,
+     78.72
+    ],
+    [
+     78.79,
+     79.025
+    ],
+    [
+     79.095,
+     79.33
+    ],
+    [
+     79.4,
+     79.725
+    ],
+    [
+     79.795,
+     80.075
+    ],
+    [
+     80.145,
+     80.425
+    ],
+    [
+     80.495,
+     80.685
+    ],
+    [
+     81.185,
+     81.51
+    ],
+    [
+     81.58,
+     81.815
+    ],
+    [
+     81.885,
+     82.255
+    ],
+    [
+     82.325,
+     82.65
+    ],
+    [
+     82.72,
+     82.91
+    ],
+    [
+     82.98,
+     83.305
+    ],
+    [
+     83.375,
+     83.52
+    ],
+    [
+     83.59,
+     84.14
+    ],
+    [
+     84.21,
+     84.49
+    ],
+    [
+     84.56,
+     84.885
+    ],
+    [
+     87.635,
+     87.96
+    ],
+    [
+     88.03,
+     88.535
+    ],
+    [
+     88.605,
+     88.885
+    ],
+    [
+     88.955,
+     89.19
+    ],
+    [
+     89.26,
+     89.765
+    ],
+    [
+     90.265,
+     90.5
+    ],
+    [
+     90.57,
+     90.805
+    ],
+    [
+     90.875,
+     91.29
+    ],
+    [
+     91.36,
+     91.595
+    ],
+    [
+     91.665,
+     91.9
+    ],
+    [
+     91.97,
+     92.52
+    ],
+    [
+     92.87,
+     93.105
+    ],
+    [
+     93.175,
+     93.41
+    ],
+    [
+     93.48,
+     93.805
+    ],
+    [
+     94.305,
+     94.585
+    ],
+    [
+     94.885,
+     95.12
+    ],
+    [
+     95.19,
+     95.47
+    ],
+    [
+     95.54,
+     96.0
+    ],
+    [
+     96.07,
+     96.26
+    ],
+    [
+     96.33,
+     96.565
+    ],
+    [
+     96.635,
+     97.005
+    ],
+    [
+     97.075,
+     97.265
+    ],
+    [
+     97.335,
+     97.57
+    ],
+    [
+     97.64,
+     97.965
+    ],
+    [
+     98.035,
+     98.315
+    ],
+    [
+     97.515,
+     97.75
+    ],
+    [
+     97.82,
+     98.01
+    ],
+    [
+     98.08,
+     98.36
+    ],
+    [
+     98.43,
+     98.71
+    ],
+    [
+     98.78,
+     98.97
+    ],
+    [
+     99.04,
+     99.32
+    ],
+    [
+     99.67,
+     100.085
+    ],
+    [
+     100.155,
+     100.435
+    ],
+    [
+     100.505,
+     100.965
+    ],
+    [
+     101.035,
+     101.27
+    ],
+    [
+     101.34,
+     101.62
+    ],
+    [
+     101.69,
+     102.015
+    ],
+    [
+     102.085,
+     102.41
+    ],
+    [
+     102.91,
+     103.19
+    ],
+    [
+     103.26,
+     103.45
+    ],
+    [
+     103.8,
+     104.035
+    ],
+    [
+     104.105,
+     104.385
+    ],
+    [
+     104.455,
+     104.645
+    ],
+    [
+     104.715,
+     104.995
+    ],
+    [
+     105.065,
+     105.3
+    ],
+    [
+     105.37,
+     105.785
+    ],
+    [
+     105.855,
+     106.36
+    ],
+    [
+     106.43,
+     106.71
+    ],
+    [
+     106.78,
+     107.06
+    ],
+    [
+     107.13,
+     107.365
+    ],
+    [
+     107.435,
+     107.76
+    ],
+    [
+     107.83,
+     108.065
+    ],
+    [
+     108.565,
+     108.845
+    ],
+    [
+     108.915,
+     109.105
+    ],
+    [
+     109.175,
+     109.455
+    ],
+    [
+     109.525,
+     109.895
+    ],
+    [
+     110.395,
+     110.675
+    ],
+    [
+     110.745,
+     110.98
+    ],
+    [
+     111.05,
+     111.285
+    ],
+    [
+     111.355,
+     111.77
+    ],
+    [
+     111.84,
+     112.165
+    ],
+    [
+     113.065,
+     113.39
+    ],
+    [
+     113.46,
+     113.65
+    ],
+    [
+     113.72,
+     113.955
+    ],
+    [
+     114.025,
+     114.395
+    ],
+    [
+     114.465,
+     114.745
+    ],
+    [
+     115.095,
+     115.285
+    ],
+    [
+     115.355,
+     115.59
+    ],
+    [
+     115.66,
+     115.94
+    ],
+    [
+     116.01,
+     116.335
+    ],
+    [
+     116.405,
+     116.595
+    ],
+    [
+     116.665,
+     116.945
+    ],
+    [
+     117.015,
+     117.25
+    ],
+    [
+     117.32,
+     117.465
+    ],
+    [
+     117.535,
+     117.95
+    ],
+    [
+     118.02,
+     118.39
+    ],
+    [
+     118.46,
+     118.695
+    ],
+    [
+     118.765,
+     118.91
+    ],
+    [
+     118.98,
+     119.395
+    ],
+    [
+     119.895,
+     120.175
+    ],
+    [
+     120.245,
+     120.48
+    ],
+    [
+     120.55,
+     120.785
+    ],
+    [
+     120.855,
+     121.045
+    ],
+    [
+     121.545,
+     121.735
+    ],
+    [
+     121.805,
+     122.175
+    ],
+    [
+     122.245,
+     122.57
+    ],
+    [
+     122.64,
+     123.1
+    ],
+    [
+     123.17,
+     123.405
+    ],
+    [
+     123.475,
+     123.8
+    ],
+    [
+     123.87,
+     124.15
+    ],
+    [
+     124.22,
+     124.41
+    ],
+    [
+     124.48,
+     124.85
+    ],
+    [
+     125.2,
+     125.435
+    ],
+    [
+     125.505,
+     125.785
+    ],
+    [
+     125.855,
+     126.045
+    ],
+    [
+     126.115,
+     126.395
+    ],
+    [
+     126.465,
+     126.7
+    ],
+    [
+     127.2,
+     127.48
+    ],
+    [
+     127.55,
+     127.785
+    ],
+    [
+     127.855,
+     128.045
+    ],
+    [
+     128.115,
+     128.35
+    ],
+    [
+     128.42,
+     128.7
+    ],
+    [
+     129.2,
+     129.57
+    ],
+    [
+     129.92,
+     130.155
+    ],
+    [
+     130.225,
+     130.505
+    ],
+    [
+     130.575,
+     130.945
+    ],
+    [
+     131.015,
+     131.295
+    ],
+    [
+     131.365,
+     131.6
+    ],
+    [
+     131.67,
+     132.04
+    ],
+    [
+     133.84,
+     134.12
+    ],
+    [
+     134.19,
+     134.38
+    ],
+    [
+     134.45,
+     134.595
+    ],
+    [
+     134.665,
+     135.215
+    ],
+    [
+     135.285,
+     135.79
+    ],
+    [
+     135.86,
+     136.23
+    ],
+    [
+     136.73,
+     136.92
+    ],
+    [
+     136.99,
+     137.18
+    ],
+    [
+     137.25,
+     137.485
+    ],
+    [
+     137.555,
+     137.835
+    ],
+    [
+     137.905,
+     138.275
+    ],
+    [
+     138.345,
+     138.535
+    ],
+    [
+     138.605,
+     138.84
+    ],
+    [
+     138.91,
+     139.1
+    ],
+    [
+     139.17,
+     139.405
+    ],
+    [
+     139.475,
+     139.8
+    ],
+    [
+     139.87,
+     140.195
+    ],
+    [
+     140.265,
+     140.5
+    ],
+    [
+     141.0,
+     141.19
+    ],
+    [
+     141.54,
+     141.91
+    ],
+    [
+     141.98,
+     142.17
+    ],
+    [
+     142.24,
+     142.52
+    ],
+    [
+     142.87,
+     143.15
+    ],
+    [
+     143.22,
+     143.545
+    ],
+    [
+     143.615,
+     143.85
+    ],
+    [
+     143.92,
+     144.2
+    ],
+    [
+     144.27,
+     144.685
+    ],
+    [
+     144.755,
+     145.215
+    ],
+    [
+     145.285,
+     145.61
+    ],
+    [
+     146.11,
+     146.39
+    ],
+    [
+     146.46,
+     146.65
+    ],
+    [
+     146.72,
+     147.0
+    ],
+    [
+     147.07,
+     147.575
+    ],
+    [
+     147.645,
+     148.015
+    ],
+    [
+     148.085,
+     148.32
+    ],
+    [
+     148.39,
+     148.715
+    ],
+    [
+     149.065,
+     149.48
+    ],
+    [
+     149.55,
+     149.785
+    ],
+    [
+     149.855,
+     150.18
+    ],
+    [
+     150.25,
+     150.665
+    ],
+    [
+     150.735,
+     150.97
+    ],
+    [
+     151.04,
+     151.365
+    ],
+    [
+     151.715,
+     152.04
+    ],
+    [
+     152.11,
+     152.345
+    ],
+    [
+     152.415,
+     152.74
+    ],
+    [
+     152.81,
+     153.045
+    ],
+    [
+     153.115,
+     153.485
+    ],
+    [
+     153.985,
+     154.265
+    ],
+    [
+     154.335,
+     154.705
+    ],
+    [
+     154.775,
+     155.01
+    ],
+    [
+     155.08,
+     155.405
+    ],
+    [
+     155.905,
+     156.32
+    ],
+    [
+     156.39,
+     156.67
+    ],
+    [
+     157.02,
+     157.255
+    ],
+    [
+     157.325,
+     157.515
+    ],
+    [
+     157.585,
+     157.775
+    ],
+    [
+     157.845,
+     158.17
+    ],
+    [
+     158.67,
+     158.995
+    ],
+    [
+     159.065,
+     159.3
+    ],
+    [
+     159.37,
+     159.74
+    ],
+    [
+     159.81,
+     160.09
+    ],
+    [
+     160.16,
+     160.395
+    ],
+    [
+     160.895,
+     161.085
+    ],
+    [
+     161.155,
+     161.39
+    ],
+    [
+     161.46,
+     161.875
+    ],
+    [
+     162.225,
+     162.46
+    ],
+    [
+     162.53,
+     162.765
+    ],
+    [
+     162.835,
+     163.25
+    ],
+    [
+     163.32,
+     163.51
+    ],
+    [
+     163.58,
+     163.77
+    ],
+    [
+     163.84,
+     164.21
+    ],
+    [
+     164.28,
+     164.56
+    ],
+    [
+     164.63,
+     164.955
+    ],
+    [
+     165.455,
+     165.78
+    ],
+    [
+     165.85,
+     166.085
+    ],
+    [
+     166.155,
+     166.39
+    ],
+    [
+     166.46,
+     166.83
+    ],
+    [
+     166.9,
+     167.09
+    ],
+    [
+     167.44,
+     167.72
+    ],
+    [
+     167.79,
+     167.98
+    ],
+    [
+     168.05,
+     168.285
+    ],
+    [
+     168.355,
+     168.635
+    ]
+   ]
+  },
+  "semantic": {
+   "annotations": [],
+   "budget": {
+    "calls": 0,
+    "partial_from": null,
+    "spent_s": 0.0
+   },
+   "scores": {
+    "s_00001": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00002": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.151,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.181
+    },
+    "s_00003": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.003,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.5,
+     "virality": 0.094
+    },
+    "s_00004": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "contrast_words"
+      ],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.223,
+     "quotable": 0.4,
+     "standalone": 0.5,
+     "virality": 0.105
+    },
+    "s_00005": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00006": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim",
+       "strong_number"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.073,
+     "importance": 0.3,
+     "quotable": 1.0,
+     "standalone": 0.5,
+     "virality": 0.25
+    },
+    "s_00007": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00008": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim",
+       "contrast_words"
+      ],
+      "importance": [
+       "claim",
+       "topic_peak"
+      ]
+     },
+     "hook": 0.404,
+     "importance": 0.592,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.472
+    },
+    "s_00009": {
+     "emotion": 0.8,
+     "evidence": {
+      "hook": [
+       "delivery"
+      ],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.12
+    },
+    "s_00010": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.5,
+     "virality": 0.093
+    },
+    "s_00011": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00012": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00013": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.003,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.5,
+     "virality": 0.094
+    },
+    "s_00014": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.119,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.073
+    },
+    "s_00015": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00016": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.0,
+     "importance": 0.22,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.015
+    },
+    "s_00017": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.136
+    },
+    "s_00018": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00019": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00020": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.171,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.186
+    },
+    "s_00021": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.167
+    },
+    "s_00022": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.3,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.218
+    },
+    "s_00023": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "contrast_words"
+      ],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.5,
+     "virality": 0.049
+    },
+    "s_00024": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00025": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.0,
+     "importance": 0.32,
+     "quotable": 1.0,
+     "standalone": 0.5,
+     "virality": 0.223
+    },
+    "s_00026": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "contrast_words"
+      ],
+      "importance": []
+     },
+     "hook": 0.205,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.204
+    },
+    "s_00027": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "contrast_words"
+      ],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.0
+    },
+    "s_00028": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.043
+    },
+    "s_00029": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.7,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00030": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.237,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.202
+    },
+    "s_00031": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00032": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.193,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.191
+    },
+    "s_00033": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00034": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "strong_number"
+      ],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.187,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.25
+    },
+    "s_00035": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.043
+    },
+    "s_00036": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.0,
+     "importance": 0.22,
+     "quotable": 0.4,
+     "standalone": 0.0,
+     "virality": 0.015
+    },
+    "s_00037": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.213
+    },
+    "s_00038": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "claim",
+       "contrast_words"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.404,
+     "importance": 0.497,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.448
+    },
+    "s_00039": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00040": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    },
+    "s_00041": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [
+       "question"
+      ],
+      "importance": []
+     },
+     "hook": 0.248,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.217
+    },
+    "s_00042": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.152,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.181
+    },
+    "s_00043": {
+     "emotion": 0.03,
+     "evidence": {
+      "hook": [],
+      "importance": []
+     },
+     "hook": 0.0,
+     "importance": 0.0,
+     "quotable": 0.4,
+     "standalone": 1.0,
+     "virality": 0.143
+    }
+   },
+   "topics": []
+  },
+  "speakers": {
+   "engine": "hand",
+   "flip_risk": [],
+   "k": 2,
+   "k_method": "truth",
+   "overlaps": [],
+   "silhouette": 0.4,
+   "speakers": [
+    {
+     "id": "S1",
+     "label": "SPEAKER_00",
+     "name": null,
+     "questions": 11,
+     "role_guess": "host",
+     "share": 0.42
+    },
+    {
+     "id": "S2",
+     "label": "SPEAKER_01",
+     "name": null,
+     "questions": 0,
+     "role_guess": "guest",
+     "share": 0.58
+    }
+   ],
+   "turns": [
+    {
+     "id": "u_0001",
+     "sents": [
+      "s_00001"
+     ],
+     "spk": "S1",
+     "t0": 0.6,
+     "t1": 7.21
+    },
+    {
+     "id": "u_0002",
+     "sents": [
+      "s_00002"
+     ],
+     "spk": "S2",
+     "t0": 7.71,
+     "t1": 11.725
+    },
+    {
+     "id": "u_0003",
+     "sents": [
+      "s_00003"
+     ],
+     "spk": "S1",
+     "t0": 12.225,
+     "t1": 15.46
+    },
+    {
+     "id": "u_0004",
+     "sents": [
+      "s_00004"
+     ],
+     "spk": "S2",
+     "t0": 15.96,
+     "t1": 22.25
+    },
+    {
+     "id": "u_0005",
+     "sents": [
+      "s_00005"
+     ],
+     "spk": "S1",
+     "t0": 22.75,
+     "t1": 22.94
+    },
+    {
+     "id": "u_0006",
+     "sents": [
+      "s_00006"
+     ],
+     "spk": "S2",
+     "t0": 23.24,
+     "t1": 28.6
+    },
+    {
+     "id": "u_0007",
+     "sents": [
+      "s_00007"
+     ],
+     "spk": "S1",
+     "t0": 29.1,
+     "t1": 31.94
+    },
+    {
+     "id": "u_0008",
+     "sents": [
+      "s_00008",
+      "s_00009",
+      "s_00010"
+     ],
+     "spk": "S2",
+     "t0": 32.44,
+     "t1": 45.04
+    },
+    {
+     "id": "u_0009",
+     "sents": [
+      "s_00011"
+     ],
+     "spk": "S1",
+     "t0": 45.54,
+     "t1": 45.82
+    },
+    {
+     "id": "u_0010",
+     "sents": [
+      "s_00012"
+     ],
+     "spk": "S2",
+     "t0": 46.12,
+     "t1": 48.85
+    },
+    {
+     "id": "u_0011",
+     "sents": [
+      "s_00013"
+     ],
+     "spk": "S1",
+     "t0": 50.65,
+     "t1": 54.905
+    },
+    {
+     "id": "u_0012",
+     "sents": [
+      "s_00014"
+     ],
+     "spk": "S2",
+     "t0": 55.405,
+     "t1": 59.125
+    },
+    {
+     "id": "u_0013",
+     "sents": [
+      "s_00015"
+     ],
+     "spk": "S1",
+     "t0": 59.625,
+     "t1": 59.95
+    },
+    {
+     "id": "u_0014",
+     "sents": [
+      "s_00016"
+     ],
+     "spk": "S2",
+     "t0": 60.25,
+     "t1": 63.465
+    },
+    {
+     "id": "u_0015",
+     "sents": [
+      "s_00017"
+     ],
+     "spk": "S1",
+     "t0": 63.965,
+     "t1": 66.355
+    },
+    {
+     "id": "u_0016",
+     "sents": [
+      "s_00018"
+     ],
+     "spk": "S2",
+     "t0": 66.855,
+     "t1": 68.07
+    },
+    {
+     "id": "u_0017",
+     "sents": [
+      "s_00019"
+     ],
+     "spk": "S1",
+     "t0": 68.57,
+     "t1": 71.255
+    },
+    {
+     "id": "u_0018",
+     "sents": [
+      "s_00020"
+     ],
+     "spk": "S2",
+     "t0": 71.755,
+     "t1": 76.325
+    },
+    {
+     "id": "u_0019",
+     "sents": [
+      "s_00021"
+     ],
+     "spk": "S1",
+     "t0": 78.44,
+     "t1": 80.685
+    },
+    {
+     "id": "u_0020",
+     "sents": [
+      "s_00022",
+      "s_00023"
+     ],
+     "spk": "S2",
+     "t0": 81.185,
+     "t1": 93.805
+    },
+    {
+     "id": "u_0021",
+     "sents": [
+      "s_00024"
+     ],
+     "spk": "S1",
+     "t0": 94.305,
+     "t1": 94.585
+    },
+    {
+     "id": "u_0022",
+     "sents": [
+      "s_00025"
+     ],
+     "spk": "S2",
+     "t0": 94.885,
+     "t1": 98.315
+    },
+    {
+     "id": "u_0023",
+     "sents": [
+      "s_00026"
+     ],
+     "spk": "S1",
+     "t0": 97.515,
+     "t1": 102.41
+    },
+    {
+     "id": "u_0024",
+     "sents": [
+      "s_00027"
+     ],
+     "spk": "S2",
+     "t0": 102.91,
+     "t1": 108.065
+    },
+    {
+     "id": "u_0025",
+     "sents": [
+      "s_00028",
+      "s_00029"
+     ],
+     "spk": "S1",
+     "t0": 108.565,
+     "t1": 112.165
+    },
+    {
+     "id": "u_0026",
+     "sents": [
+      "s_00030"
+     ],
+     "spk": "S2",
+     "t0": 113.065,
+     "t1": 119.395
+    },
+    {
+     "id": "u_0027",
+     "sents": [
+      "s_00031"
+     ],
+     "spk": "S1",
+     "t0": 119.895,
+     "t1": 121.045
+    },
+    {
+     "id": "u_0028",
+     "sents": [
+      "s_00032"
+     ],
+     "spk": "S2",
+     "t0": 121.545,
+     "t1": 126.7
+    },
+    {
+     "id": "u_0029",
+     "sents": [
+      "s_00033"
+     ],
+     "spk": "S1",
+     "t0": 127.2,
+     "t1": 128.7
+    },
+    {
+     "id": "u_0030",
+     "sents": [
+      "s_00034"
+     ],
+     "spk": "S2",
+     "t0": 129.2,
+     "t1": 132.04
+    },
+    {
+     "id": "u_0031",
+     "sents": [
+      "s_00035"
+     ],
+     "spk": "S1",
+     "t0": 133.84,
+     "t1": 136.23
+    },
+    {
+     "id": "u_0032",
+     "sents": [
+      "s_00036"
+     ],
+     "spk": "S2",
+     "t0": 136.73,
+     "t1": 140.5
+    },
+    {
+     "id": "u_0033",
+     "sents": [
+      "s_00037"
+     ],
+     "spk": "S1",
+     "t0": 141.0,
+     "t1": 145.61
+    },
+    {
+     "id": "u_0034",
+     "sents": [
+      "s_00038"
+     ],
+     "spk": "S2",
+     "t0": 146.11,
+     "t1": 153.485
+    },
+    {
+     "id": "u_0035",
+     "sents": [
+      "s_00039"
+     ],
+     "spk": "S1",
+     "t0": 153.985,
+     "t1": 155.405
+    },
+    {
+     "id": "u_0036",
+     "sents": [
+      "s_00040"
+     ],
+     "spk": "S2",
+     "t0": 155.905,
+     "t1": 158.17
+    },
+    {
+     "id": "u_0037",
+     "sents": [
+      "s_00041"
+     ],
+     "spk": "S1",
+     "t0": 158.67,
+     "t1": 160.395
+    },
+    {
+     "id": "u_0038",
+     "sents": [
+      "s_00042"
+     ],
+     "spk": "S2",
+     "t0": 160.895,
+     "t1": 164.955
+    },
+    {
+     "id": "u_0039",
+     "sents": [
+      "s_00043"
+     ],
+     "spk": "S1",
+     "t0": 165.455,
+     "t1": 168.635
+    }
+   ],
+   "utterances": [
+    {
+     "spk": "S1",
+     "t0": 0.6,
+     "t1": 7.21
+    },
+    {
+     "spk": "S2",
+     "t0": 7.71,
+     "t1": 11.725
+    },
+    {
+     "spk": "S1",
+     "t0": 12.225,
+     "t1": 15.46
+    },
+    {
+     "spk": "S2",
+     "t0": 15.96,
+     "t1": 22.25
+    },
+    {
+     "spk": "S1",
+     "t0": 22.75,
+     "t1": 22.94
+    },
+    {
+     "spk": "S2",
+     "t0": 23.24,
+     "t1": 28.6
+    },
+    {
+     "spk": "S1",
+     "t0": 29.1,
+     "t1": 31.94
+    },
+    {
+     "spk": "S2",
+     "t0": 32.44,
+     "t1": 45.04
+    },
+    {
+     "spk": "S1",
+     "t0": 45.54,
+     "t1": 45.82
+    },
+    {
+     "spk": "S2",
+     "t0": 46.12,
+     "t1": 48.85
+    },
+    {
+     "spk": "S1",
+     "t0": 50.65,
+     "t1": 54.905
+    },
+    {
+     "spk": "S2",
+     "t0": 55.405,
+     "t1": 59.125
+    },
+    {
+     "spk": "S1",
+     "t0": 59.625,
+     "t1": 59.95
+    },
+    {
+     "spk": "S2",
+     "t0": 60.25,
+     "t1": 63.465
+    },
+    {
+     "spk": "S1",
+     "t0": 63.965,
+     "t1": 66.355
+    },
+    {
+     "spk": "S2",
+     "t0": 66.855,
+     "t1": 68.07
+    },
+    {
+     "spk": "S1",
+     "t0": 68.57,
+     "t1": 71.255
+    },
+    {
+     "spk": "S2",
+     "t0": 71.755,
+     "t1": 76.325
+    },
+    {
+     "spk": "S1",
+     "t0": 78.44,
+     "t1": 80.685
+    },
+    {
+     "spk": "S2",
+     "t0": 81.185,
+     "t1": 93.805
+    },
+    {
+     "spk": "S1",
+     "t0": 94.305,
+     "t1": 94.585
+    },
+    {
+     "spk": "S2",
+     "t0": 94.885,
+     "t1": 98.315
+    },
+    {
+     "spk": "S1",
+     "t0": 97.515,
+     "t1": 102.41
+    },
+    {
+     "spk": "S2",
+     "t0": 102.91,
+     "t1": 108.065
+    },
+    {
+     "spk": "S1",
+     "t0": 108.565,
+     "t1": 112.165
+    },
+    {
+     "spk": "S2",
+     "t0": 113.065,
+     "t1": 119.395
+    },
+    {
+     "spk": "S1",
+     "t0": 119.895,
+     "t1": 121.045
+    },
+    {
+     "spk": "S2",
+     "t0": 121.545,
+     "t1": 126.7
+    },
+    {
+     "spk": "S1",
+     "t0": 127.2,
+     "t1": 128.7
+    },
+    {
+     "spk": "S2",
+     "t0": 129.2,
+     "t1": 132.04
+    },
+    {
+     "spk": "S1",
+     "t0": 133.84,
+     "t1": 136.23
+    },
+    {
+     "spk": "S2",
+     "t0": 136.73,
+     "t1": 140.5
+    },
+    {
+     "spk": "S1",
+     "t0": 141.0,
+     "t1": 145.61
+    },
+    {
+     "spk": "S2",
+     "t0": 146.11,
+     "t1": 153.485
+    },
+    {
+     "spk": "S1",
+     "t0": 153.985,
+     "t1": 155.405
+    },
+    {
+     "spk": "S2",
+     "t0": 155.905,
+     "t1": 158.17
+    },
+    {
+     "spk": "S1",
+     "t0": 158.67,
+     "t1": 160.395
+    },
+    {
+     "spk": "S2",
+     "t0": 160.895,
+     "t1": 164.955
+    },
+    {
+     "spk": "S1",
+     "t0": 165.455,
+     "t1": 168.635
+    }
+   ]
+  },
+  "speech": {
+   "acoustic_fillers": [],
+   "flags": {
+    "dead_air": [
+     {
+      "id": "d_0001",
+      "t0": 85.235,
+      "t1": 87.635
+     }
+    ],
+    "false_starts": [
+     {
+      "id": "f_0001",
+      "kept": "s_00021",
+      "t0": 76.825,
+      "t1": 78.09,
+      "text": "And when did the—"
+     }
+    ],
+    "repeats": [],
+    "technical": [],
+    "weak_questions": []
+   },
+   "params": {
+    "analysis_version": 1,
+    "backend": "hand",
+    "language": "en",
+    "model": "truth",
+    "prompt": "none"
+   },
+   "sentences": [
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 17,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 154
+     },
+     "id": "s_00001",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 0.6,
+     "t1": 7.21,
+     "text": "Welcome back to the show, where today we are talking about raising money for a hardware company.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00001",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 164
+     },
+     "id": "s_00002",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 7.71,
+     "t1": 11.725,
+     "text": "Thanks for having me, it is a strange business to fund.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 8,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 148
+     },
+     "id": "s_00003",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 12.225,
+     "t1": 15.46,
+     "text": "So let's start at the beginning, why hardware?",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": "s_00003",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 15,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 143
+     },
+     "id": "s_00004",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 15.96,
+     "t1": 22.25,
+     "text": "Because nobody else wanted to do it, and the margins in hardware were, um, terrible.",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": false,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 1,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 316
+     },
+     "id": "s_00005",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 22.75,
+     "t1": 22.94,
+     "text": "mm-hm",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": true,
+      "len_words": 15,
+      "story_marker": false,
+      "strong_number": true,
+      "weak_number": false,
+      "wpm": 168
+     },
+     "id": "s_00006",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 23.24,
+     "t1": 28.6,
+     "text": "So we built the first prototype in a garage and shipped it to twelve customers.",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 7,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 148
+     },
+     "id": "s_00007",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 29.1,
+     "t1": 31.94,
+     "text": "Twelve customers, how did you find them?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00007",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 17,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 172
+     },
+     "id": "s_00008",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 32.44,
+     "t1": 38.365,
+     "text": "The thing nobody tells you about raising money is that the first no is the useful one.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 5,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 143
+     },
+     "id": "s_00009",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 38.865,
+     "t1": 40.96,
+     "text": "It nearly broke us, honestly.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 175
+     },
+     "id": "s_00010",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 41.96,
+     "t1": 45.04,
+     "text": "But it also told us exactly what was missing.",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": false,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 1,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 214
+     },
+     "id": "s_00011",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 45.54,
+     "t1": 45.82,
+     "text": "yeah",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 8,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 176
+     },
+     "id": "s_00012",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 46.12,
+     "t1": 48.85,
+     "text": "We rewrote the whole pitch in a weekend.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 13,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 183
+     },
+     "id": "s_00013",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 50.65,
+     "t1": 54.905,
+     "text": "So what did the second pitch say that the first one did not?",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": "s_00013",
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 10,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 161
+     },
+     "id": "s_00014",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 55.405,
+     "t1": 59.125,
+     "text": "It said, uh, we had a customer who paid twice.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 1,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 185
+     },
+     "id": "s_00015",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 59.625,
+     "t1": 59.95,
+     "text": "Right.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 168
+     },
+     "id": "s_00016",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 60.25,
+     "t1": 63.465,
+     "text": "That single number did more than the whole deck.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 7,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 176
+     },
+     "id": "s_00017",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 63.965,
+     "t1": 66.355,
+     "text": "Um, let me ask about the team.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 3,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 148
+     },
+     "id": "s_00018",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 66.855,
+     "t1": 68.07,
+     "text": "Sure, go ahead.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 8,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 179
+     },
+     "id": "s_00019",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 68.57,
+     "t1": 71.255,
+     "text": "How many people were you at that point?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00019",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": true,
+      "len_words": 14,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": true,
+      "wpm": 184
+     },
+     "id": "s_00020",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 71.755,
+     "t1": 76.325,
+     "text": "Three of us in 2019, and then eight by the end of the year.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 7,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 187
+     },
+     "id": "s_00021",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 78.44,
+     "t1": 80.685,
+     "text": "When did the first hire come in?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00021",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 15,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 105
+     },
+     "id": "s_00022",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 81.185,
+     "t1": 89.765,
+     "text": "About six months later we hired a manufacturing lead first, which everybody said was backwards.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 153
+     },
+     "id": "s_00023",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 90.265,
+     "t1": 93.805,
+     "text": "But the product was the bottleneck, not the sales.",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": false,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 1,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 214
+     },
+     "id": "s_00024",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 94.305,
+     "t1": 94.585,
+     "text": "okay",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": true,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 10,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 175
+     },
+     "id": "s_00025",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 94.885,
+     "t1": 98.315,
+     "text": "And that decision is the reason we are still here.",
+     "topic": "t_001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 13,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 159
+     },
+     "id": "s_00026",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 97.515,
+     "t1": 102.41,
+     "text": "Let me push back on that, because most founders say hire sales first.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 14,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 163
+     },
+     "id": "s_00027",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 102.91,
+     "t1": 108.065,
+     "text": "They do, and most of them are selling something that does not exist yet.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 4,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 180
+     },
+     "id": "s_00028",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 108.565,
+     "t1": 109.895,
+     "text": "That is fair enough.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 5,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 169
+     },
+     "id": "s_00029",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 110.395,
+     "t1": 112.165,
+     "text": "What was the hardest month?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00029",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 18,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 171
+     },
+     "id": "s_00030",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 113.065,
+     "t1": 119.395,
+     "text": "March of the second year, we had four weeks of cash and a factory asking for a deposit.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 4,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 209
+     },
+     "id": "s_00031",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 119.895,
+     "t1": 121.045,
+     "text": "What did you do?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00031",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 14,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 163
+     },
+     "id": "s_00032",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 121.545,
+     "t1": 126.7,
+     "text": "We called every customer and asked them to prepay, and nine of them did.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 5,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 200
+     },
+     "id": "s_00033",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 127.2,
+     "t1": 128.7,
+     "text": "Nine out of how many?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00033",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": true,
+      "len_words": 7,
+      "story_marker": false,
+      "strong_number": true,
+      "weak_number": false,
+      "wpm": 148
+     },
+     "id": "s_00034",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 129.2,
+     "t1": 132.04,
+     "text": "Twelve, the same twelve from the garage.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 6,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 151
+     },
+     "id": "s_00035",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 133.84,
+     "t1": 136.23,
+     "text": "That is a remarkable retention number.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 12,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 191
+     },
+     "id": "s_00036",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 136.73,
+     "t1": 140.5,
+     "text": "It is the only number we put on the first slide now.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 143
+     },
+     "id": "s_00037",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 141.0,
+     "t1": 145.61,
+     "text": "Um, before we wrap, what would you tell someone starting today?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00037",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 18,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 146
+     },
+     "id": "s_00038",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 146.11,
+     "t1": 153.485,
+     "text": "Ship to real customers before you raise, because the money follows the proof, never the other way around.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 4,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 169
+     },
+     "id": "s_00039",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 153.985,
+     "t1": 155.405,
+     "text": "Ship before you raise.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 6,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 159
+     },
+     "id": "s_00040",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 155.905,
+     "t1": 158.17,
+     "text": "Exactly that, and do it early.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 5,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 174
+     },
+     "id": "s_00041",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 158.67,
+     "t1": 160.395,
+     "text": "Where can people find you?",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": "s_00041",
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 163
+     },
+     "id": "s_00042",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S2",
+     "t0": 160.895,
+     "t1": 164.955,
+     "text": "On the website, and the product is in stores next month.",
+     "topic": "t_001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 170
+     },
+     "id": "s_00043",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 165.455,
+     "t1": 168.635,
+     "text": "Thank you for coming on, that is the show.",
+     "topic": "t_001",
+     "weak_start": false
+    }
+   ],
+   "turns": [
+    {
+     "id": "u_0001",
+     "sents": [
+      "s_00001"
+     ],
+     "spk": "S1",
+     "t0": 0.6,
+     "t1": 7.21
+    },
+    {
+     "id": "u_0002",
+     "sents": [
+      "s_00002"
+     ],
+     "spk": "S2",
+     "t0": 7.71,
+     "t1": 11.725
+    },
+    {
+     "id": "u_0003",
+     "sents": [
+      "s_00003"
+     ],
+     "spk": "S1",
+     "t0": 12.225,
+     "t1": 15.46
+    },
+    {
+     "id": "u_0004",
+     "sents": [
+      "s_00004"
+     ],
+     "spk": "S2",
+     "t0": 15.96,
+     "t1": 22.25
+    },
+    {
+     "id": "u_0005",
+     "sents": [
+      "s_00005"
+     ],
+     "spk": "S1",
+     "t0": 22.75,
+     "t1": 22.94
+    },
+    {
+     "id": "u_0006",
+     "sents": [
+      "s_00006"
+     ],
+     "spk": "S2",
+     "t0": 23.24,
+     "t1": 28.6
+    },
+    {
+     "id": "u_0007",
+     "sents": [
+      "s_00007"
+     ],
+     "spk": "S1",
+     "t0": 29.1,
+     "t1": 31.94
+    },
+    {
+     "id": "u_0008",
+     "sents": [
+      "s_00008",
+      "s_00009",
+      "s_00010"
+     ],
+     "spk": "S2",
+     "t0": 32.44,
+     "t1": 45.04
+    },
+    {
+     "id": "u_0009",
+     "sents": [
+      "s_00011"
+     ],
+     "spk": "S1",
+     "t0": 45.54,
+     "t1": 45.82
+    },
+    {
+     "id": "u_0010",
+     "sents": [
+      "s_00012"
+     ],
+     "spk": "S2",
+     "t0": 46.12,
+     "t1": 48.85
+    },
+    {
+     "id": "u_0011",
+     "sents": [
+      "s_00013"
+     ],
+     "spk": "S1",
+     "t0": 50.65,
+     "t1": 54.905
+    },
+    {
+     "id": "u_0012",
+     "sents": [
+      "s_00014"
+     ],
+     "spk": "S2",
+     "t0": 55.405,
+     "t1": 59.125
+    },
+    {
+     "id": "u_0013",
+     "sents": [
+      "s_00015"
+     ],
+     "spk": "S1",
+     "t0": 59.625,
+     "t1": 59.95
+    },
+    {
+     "id": "u_0014",
+     "sents": [
+      "s_00016"
+     ],
+     "spk": "S2",
+     "t0": 60.25,
+     "t1": 63.465
+    },
+    {
+     "id": "u_0015",
+     "sents": [
+      "s_00017"
+     ],
+     "spk": "S1",
+     "t0": 63.965,
+     "t1": 66.355
+    },
+    {
+     "id": "u_0016",
+     "sents": [
+      "s_00018"
+     ],
+     "spk": "S2",
+     "t0": 66.855,
+     "t1": 68.07
+    },
+    {
+     "id": "u_0017",
+     "sents": [
+      "s_00019"
+     ],
+     "spk": "S1",
+     "t0": 68.57,
+     "t1": 71.255
+    },
+    {
+     "id": "u_0018",
+     "sents": [
+      "s_00020"
+     ],
+     "spk": "S2",
+     "t0": 71.755,
+     "t1": 76.325
+    },
+    {
+     "id": "u_0019",
+     "sents": [
+      "s_00021"
+     ],
+     "spk": "S1",
+     "t0": 78.44,
+     "t1": 80.685
+    },
+    {
+     "id": "u_0020",
+     "sents": [
+      "s_00022",
+      "s_00023"
+     ],
+     "spk": "S2",
+     "t0": 81.185,
+     "t1": 93.805
+    },
+    {
+     "id": "u_0021",
+     "sents": [
+      "s_00024"
+     ],
+     "spk": "S1",
+     "t0": 94.305,
+     "t1": 94.585
+    },
+    {
+     "id": "u_0022",
+     "sents": [
+      "s_00025"
+     ],
+     "spk": "S2",
+     "t0": 94.885,
+     "t1": 98.315
+    },
+    {
+     "id": "u_0023",
+     "sents": [
+      "s_00026"
+     ],
+     "spk": "S1",
+     "t0": 97.515,
+     "t1": 102.41
+    },
+    {
+     "id": "u_0024",
+     "sents": [
+      "s_00027"
+     ],
+     "spk": "S2",
+     "t0": 102.91,
+     "t1": 108.065
+    },
+    {
+     "id": "u_0025",
+     "sents": [
+      "s_00028",
+      "s_00029"
+     ],
+     "spk": "S1",
+     "t0": 108.565,
+     "t1": 112.165
+    },
+    {
+     "id": "u_0026",
+     "sents": [
+      "s_00030"
+     ],
+     "spk": "S2",
+     "t0": 113.065,
+     "t1": 119.395
+    },
+    {
+     "id": "u_0027",
+     "sents": [
+      "s_00031"
+     ],
+     "spk": "S1",
+     "t0": 119.895,
+     "t1": 121.045
+    },
+    {
+     "id": "u_0028",
+     "sents": [
+      "s_00032"
+     ],
+     "spk": "S2",
+     "t0": 121.545,
+     "t1": 126.7
+    },
+    {
+     "id": "u_0029",
+     "sents": [
+      "s_00033"
+     ],
+     "spk": "S1",
+     "t0": 127.2,
+     "t1": 128.7
+    },
+    {
+     "id": "u_0030",
+     "sents": [
+      "s_00034"
+     ],
+     "spk": "S2",
+     "t0": 129.2,
+     "t1": 132.04
+    },
+    {
+     "id": "u_0031",
+     "sents": [
+      "s_00035"
+     ],
+     "spk": "S1",
+     "t0": 133.84,
+     "t1": 136.23
+    },
+    {
+     "id": "u_0032",
+     "sents": [
+      "s_00036"
+     ],
+     "spk": "S2",
+     "t0": 136.73,
+     "t1": 140.5
+    },
+    {
+     "id": "u_0033",
+     "sents": [
+      "s_00037"
+     ],
+     "spk": "S1",
+     "t0": 141.0,
+     "t1": 145.61
+    },
+    {
+     "id": "u_0034",
+     "sents": [
+      "s_00038"
+     ],
+     "spk": "S2",
+     "t0": 146.11,
+     "t1": 153.485
+    },
+    {
+     "id": "u_0035",
+     "sents": [
+      "s_00039"
+     ],
+     "spk": "S1",
+     "t0": 153.985,
+     "t1": 155.405
+    },
+    {
+     "id": "u_0036",
+     "sents": [
+      "s_00040"
+     ],
+     "spk": "S2",
+     "t0": 155.905,
+     "t1": 158.17
+    },
+    {
+     "id": "u_0037",
+     "sents": [
+      "s_00041"
+     ],
+     "spk": "S1",
+     "t0": 158.67,
+     "t1": 160.395
+    },
+    {
+     "id": "u_0038",
+     "sents": [
+      "s_00042"
+     ],
+     "spk": "S2",
+     "t0": 160.895,
+     "t1": 164.955
+    },
+    {
+     "id": "u_0039",
+     "sents": [
+      "s_00043"
+     ],
+     "spk": "S1",
+     "t0": 165.455,
+     "t1": 168.635
+    }
+   ],
+   "words": [
+    {
+     "id": "w_000001",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 0.6,
+     "t1": 1.015,
+     "text": "Welcome"
+    },
+    {
+     "id": "w_000002",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 1.085,
+     "t1": 1.365,
+     "text": "back"
+    },
+    {
+     "id": "w_000003",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 1.435,
+     "t1": 1.625,
+     "text": "to"
+    },
+    {
+     "id": "w_000004",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 1.695,
+     "t1": 1.93,
+     "text": "the"
+    },
+    {
+     "id": "w_000005",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 2.0,
+     "t1": 2.28,
+     "text": "show,"
+    },
+    {
+     "id": "w_000006",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 2.63,
+     "t1": 2.955,
+     "text": "where"
+    },
+    {
+     "id": "w_000007",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 3.025,
+     "t1": 3.35,
+     "text": "today"
+    },
+    {
+     "id": "w_000008",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 3.42,
+     "t1": 3.61,
+     "text": "we"
+    },
+    {
+     "id": "w_000009",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 3.68,
+     "t1": 3.915,
+     "text": "are"
+    },
+    {
+     "id": "w_000010",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 3.985,
+     "t1": 4.4,
+     "text": "talking"
+    },
+    {
+     "id": "w_000011",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 4.47,
+     "t1": 4.795,
+     "text": "about"
+    },
+    {
+     "id": "w_000012",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 4.865,
+     "t1": 5.28,
+     "text": "raising"
+    },
+    {
+     "id": "w_000013",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 5.35,
+     "t1": 5.675,
+     "text": "money"
+    },
+    {
+     "id": "w_000014",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 5.745,
+     "t1": 5.98,
+     "text": "for"
+    },
+    {
+     "id": "w_000015",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 6.05,
+     "t1": 6.195,
+     "text": "a"
+    },
+    {
+     "id": "w_000016",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 6.265,
+     "t1": 6.725,
+     "text": "hardware"
+    },
+    {
+     "id": "w_000017",
+     "prob": 1.0,
+     "sent": "s_00001",
+     "spk": "S1",
+     "t0": 6.795,
+     "t1": 7.21,
+     "text": "company."
+    },
+    {
+     "id": "w_000018",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 7.71,
+     "t1": 8.08,
+     "text": "Thanks"
+    },
+    {
+     "id": "w_000019",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 8.15,
+     "t1": 8.385,
+     "text": "for"
+    },
+    {
+     "id": "w_000020",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 8.455,
+     "t1": 8.825,
+     "text": "having"
+    },
+    {
+     "id": "w_000021",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 8.895,
+     "t1": 9.085,
+     "text": "me,"
+    },
+    {
+     "id": "w_000022",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 9.435,
+     "t1": 9.625,
+     "text": "it"
+    },
+    {
+     "id": "w_000023",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 9.695,
+     "t1": 9.885,
+     "text": "is"
+    },
+    {
+     "id": "w_000024",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 9.955,
+     "t1": 10.1,
+     "text": "a"
+    },
+    {
+     "id": "w_000025",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 10.17,
+     "t1": 10.585,
+     "text": "strange"
+    },
+    {
+     "id": "w_000026",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 10.655,
+     "t1": 11.115,
+     "text": "business"
+    },
+    {
+     "id": "w_000027",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 11.185,
+     "t1": 11.375,
+     "text": "to"
+    },
+    {
+     "id": "w_000028",
+     "prob": 1.0,
+     "sent": "s_00002",
+     "spk": "S2",
+     "t0": 11.445,
+     "t1": 11.725,
+     "text": "fund."
+    },
+    {
+     "id": "w_000029",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 12.225,
+     "t1": 12.415,
+     "text": "So"
+    },
+    {
+     "id": "w_000030",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 12.485,
+     "t1": 12.81,
+     "text": "let's"
+    },
+    {
+     "id": "w_000031",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 12.88,
+     "t1": 13.205,
+     "text": "start"
+    },
+    {
+     "id": "w_000032",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 13.275,
+     "t1": 13.465,
+     "text": "at"
+    },
+    {
+     "id": "w_000033",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 13.535,
+     "t1": 13.77,
+     "text": "the"
+    },
+    {
+     "id": "w_000034",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 13.84,
+     "t1": 14.345,
+     "text": "beginning,"
+    },
+    {
+     "id": "w_000035",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 14.695,
+     "t1": 14.93,
+     "text": "why"
+    },
+    {
+     "id": "w_000036",
+     "prob": 1.0,
+     "sent": "s_00003",
+     "spk": "S1",
+     "t0": 15.0,
+     "t1": 15.46,
+     "text": "hardware?"
+    },
+    {
+     "id": "w_000037",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 15.96,
+     "t1": 16.375,
+     "text": "Because"
+    },
+    {
+     "id": "w_000038",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 16.445,
+     "t1": 16.815,
+     "text": "nobody"
+    },
+    {
+     "id": "w_000039",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 16.885,
+     "t1": 17.165,
+     "text": "else"
+    },
+    {
+     "id": "w_000040",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 17.235,
+     "t1": 17.605,
+     "text": "wanted"
+    },
+    {
+     "id": "w_000041",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 17.675,
+     "t1": 17.865,
+     "text": "to"
+    },
+    {
+     "id": "w_000042",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 17.935,
+     "t1": 18.125,
+     "text": "do"
+    },
+    {
+     "id": "w_000043",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 18.195,
+     "t1": 18.385,
+     "text": "it,"
+    },
+    {
+     "id": "w_000044",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 18.735,
+     "t1": 18.97,
+     "text": "and"
+    },
+    {
+     "id": "w_000045",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 19.04,
+     "t1": 19.275,
+     "text": "the"
+    },
+    {
+     "id": "w_000046",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 19.345,
+     "t1": 19.76,
+     "text": "margins"
+    },
+    {
+     "id": "w_000047",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 19.83,
+     "t1": 20.02,
+     "text": "in"
+    },
+    {
+     "id": "w_000048",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 20.09,
+     "t1": 20.55,
+     "text": "hardware"
+    },
+    {
+     "id": "w_000049",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 20.62,
+     "t1": 20.9,
+     "text": "were,"
+    },
+    {
+     "filler": true,
+     "id": "w_000050",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 21.25,
+     "t1": 21.44,
+     "text": "um,"
+    },
+    {
+     "id": "w_000051",
+     "prob": 1.0,
+     "sent": "s_00004",
+     "spk": "S2",
+     "t0": 21.79,
+     "t1": 22.25,
+     "text": "terrible."
+    },
+    {
+     "id": "w_000052",
+     "prob": 1.0,
+     "sent": "s_00005",
+     "spk": "S1",
+     "t0": 22.75,
+     "t1": 22.94,
+     "text": "mm-hm"
+    },
+    {
+     "id": "w_000053",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 23.24,
+     "t1": 23.43,
+     "text": "So"
+    },
+    {
+     "id": "w_000054",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 23.5,
+     "t1": 23.69,
+     "text": "we"
+    },
+    {
+     "id": "w_000055",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 23.76,
+     "t1": 24.085,
+     "text": "built"
+    },
+    {
+     "id": "w_000056",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 24.155,
+     "t1": 24.39,
+     "text": "the"
+    },
+    {
+     "id": "w_000057",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 24.46,
+     "t1": 24.785,
+     "text": "first"
+    },
+    {
+     "id": "w_000058",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 24.855,
+     "t1": 25.36,
+     "text": "prototype"
+    },
+    {
+     "id": "w_000059",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 25.43,
+     "t1": 25.62,
+     "text": "in"
+    },
+    {
+     "id": "w_000060",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 25.69,
+     "t1": 25.835,
+     "text": "a"
+    },
+    {
+     "id": "w_000061",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 25.905,
+     "t1": 26.275,
+     "text": "garage"
+    },
+    {
+     "id": "w_000062",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 26.345,
+     "t1": 26.58,
+     "text": "and"
+    },
+    {
+     "id": "w_000063",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 26.65,
+     "t1": 27.065,
+     "text": "shipped"
+    },
+    {
+     "id": "w_000064",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 27.135,
+     "t1": 27.325,
+     "text": "it"
+    },
+    {
+     "id": "w_000065",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 27.395,
+     "t1": 27.585,
+     "text": "to"
+    },
+    {
+     "id": "w_000066",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 27.655,
+     "t1": 28.025,
+     "text": "twelve"
+    },
+    {
+     "id": "w_000067",
+     "prob": 1.0,
+     "sent": "s_00006",
+     "spk": "S2",
+     "t0": 28.095,
+     "t1": 28.6,
+     "text": "customers."
+    },
+    {
+     "id": "w_000068",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 29.1,
+     "t1": 29.47,
+     "text": "Twelve"
+    },
+    {
+     "id": "w_000069",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 29.54,
+     "t1": 30.045,
+     "text": "customers,"
+    },
+    {
+     "id": "w_000070",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 30.395,
+     "t1": 30.63,
+     "text": "how"
+    },
+    {
+     "id": "w_000071",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 30.7,
+     "t1": 30.935,
+     "text": "did"
+    },
+    {
+     "id": "w_000072",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 31.005,
+     "t1": 31.24,
+     "text": "you"
+    },
+    {
+     "id": "w_000073",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 31.31,
+     "t1": 31.59,
+     "text": "find"
+    },
+    {
+     "id": "w_000074",
+     "prob": 1.0,
+     "sent": "s_00007",
+     "spk": "S1",
+     "t0": 31.66,
+     "t1": 31.94,
+     "text": "them?"
+    },
+    {
+     "id": "w_000075",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 32.44,
+     "t1": 32.675,
+     "text": "The"
+    },
+    {
+     "id": "w_000076",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 32.745,
+     "t1": 33.07,
+     "text": "thing"
+    },
+    {
+     "id": "w_000077",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 33.14,
+     "t1": 33.51,
+     "text": "nobody"
+    },
+    {
+     "id": "w_000078",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 33.58,
+     "t1": 33.905,
+     "text": "tells"
+    },
+    {
+     "id": "w_000079",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 33.975,
+     "t1": 34.21,
+     "text": "you"
+    },
+    {
+     "id": "w_000080",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 34.28,
+     "t1": 34.605,
+     "text": "about"
+    },
+    {
+     "id": "w_000081",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 34.675,
+     "t1": 35.09,
+     "text": "raising"
+    },
+    {
+     "id": "w_000082",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 35.16,
+     "t1": 35.485,
+     "text": "money"
+    },
+    {
+     "id": "w_000083",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 35.555,
+     "t1": 35.745,
+     "text": "is"
+    },
+    {
+     "id": "w_000084",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 35.815,
+     "t1": 36.095,
+     "text": "that"
+    },
+    {
+     "id": "w_000085",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 36.165,
+     "t1": 36.4,
+     "text": "the"
+    },
+    {
+     "id": "w_000086",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 36.47,
+     "t1": 36.795,
+     "text": "first"
+    },
+    {
+     "id": "w_000087",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 36.865,
+     "t1": 37.055,
+     "text": "no"
+    },
+    {
+     "id": "w_000088",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 37.125,
+     "t1": 37.315,
+     "text": "is"
+    },
+    {
+     "id": "w_000089",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 37.385,
+     "t1": 37.62,
+     "text": "the"
+    },
+    {
+     "id": "w_000090",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 37.69,
+     "t1": 38.06,
+     "text": "useful"
+    },
+    {
+     "id": "w_000091",
+     "prob": 1.0,
+     "sent": "s_00008",
+     "spk": "S2",
+     "t0": 38.13,
+     "t1": 38.365,
+     "text": "one."
+    },
+    {
+     "id": "w_000092",
+     "prob": 1.0,
+     "sent": "s_00009",
+     "spk": "S2",
+     "t0": 38.865,
+     "t1": 39.055,
+     "text": "It"
+    },
+    {
+     "id": "w_000093",
+     "prob": 1.0,
+     "sent": "s_00009",
+     "spk": "S2",
+     "t0": 39.125,
+     "t1": 39.495,
+     "text": "nearly"
+    },
+    {
+     "id": "w_000094",
+     "prob": 1.0,
+     "sent": "s_00009",
+     "spk": "S2",
+     "t0": 39.565,
+     "t1": 39.89,
+     "text": "broke"
+    },
+    {
+     "id": "w_000095",
+     "prob": 1.0,
+     "sent": "s_00009",
+     "spk": "S2",
+     "t0": 39.96,
+     "t1": 40.15,
+     "text": "us,"
+    },
+    {
+     "id": "w_000096",
+     "prob": 1.0,
+     "sent": "s_00009",
+     "spk": "S2",
+     "t0": 40.5,
+     "t1": 40.96,
+     "text": "honestly."
+    },
+    {
+     "id": "w_000097",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 41.96,
+     "t1": 42.195,
+     "text": "But"
+    },
+    {
+     "id": "w_000098",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 42.265,
+     "t1": 42.455,
+     "text": "it"
+    },
+    {
+     "id": "w_000099",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 42.525,
+     "t1": 42.805,
+     "text": "also"
+    },
+    {
+     "id": "w_000100",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 42.875,
+     "t1": 43.155,
+     "text": "told"
+    },
+    {
+     "id": "w_000101",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 43.225,
+     "t1": 43.415,
+     "text": "us"
+    },
+    {
+     "id": "w_000102",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 43.485,
+     "t1": 43.9,
+     "text": "exactly"
+    },
+    {
+     "id": "w_000103",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 43.97,
+     "t1": 44.25,
+     "text": "what"
+    },
+    {
+     "id": "w_000104",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 44.32,
+     "t1": 44.555,
+     "text": "was"
+    },
+    {
+     "id": "w_000105",
+     "prob": 1.0,
+     "sent": "s_00010",
+     "spk": "S2",
+     "t0": 44.625,
+     "t1": 45.04,
+     "text": "missing."
+    },
+    {
+     "id": "w_000106",
+     "prob": 1.0,
+     "sent": "s_00011",
+     "spk": "S1",
+     "t0": 45.54,
+     "t1": 45.82,
+     "text": "yeah"
+    },
+    {
+     "id": "w_000107",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 46.12,
+     "t1": 46.31,
+     "text": "We"
+    },
+    {
+     "id": "w_000108",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 46.38,
+     "t1": 46.795,
+     "text": "rewrote"
+    },
+    {
+     "id": "w_000109",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 46.865,
+     "t1": 47.1,
+     "text": "the"
+    },
+    {
+     "id": "w_000110",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 47.17,
+     "t1": 47.495,
+     "text": "whole"
+    },
+    {
+     "id": "w_000111",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 47.565,
+     "t1": 47.89,
+     "text": "pitch"
+    },
+    {
+     "id": "w_000112",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 47.96,
+     "t1": 48.15,
+     "text": "in"
+    },
+    {
+     "id": "w_000113",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 48.22,
+     "t1": 48.365,
+     "text": "a"
+    },
+    {
+     "id": "w_000114",
+     "prob": 1.0,
+     "sent": "s_00012",
+     "spk": "S2",
+     "t0": 48.435,
+     "t1": 48.85,
+     "text": "weekend."
+    },
+    {
+     "id": "w_000115",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 50.65,
+     "t1": 50.84,
+     "text": "So"
+    },
+    {
+     "id": "w_000116",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 50.91,
+     "t1": 51.19,
+     "text": "what"
+    },
+    {
+     "id": "w_000117",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 51.26,
+     "t1": 51.495,
+     "text": "did"
+    },
+    {
+     "id": "w_000118",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 51.565,
+     "t1": 51.8,
+     "text": "the"
+    },
+    {
+     "id": "w_000119",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 51.87,
+     "t1": 52.24,
+     "text": "second"
+    },
+    {
+     "id": "w_000120",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 52.31,
+     "t1": 52.635,
+     "text": "pitch"
+    },
+    {
+     "id": "w_000121",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 52.705,
+     "t1": 52.94,
+     "text": "say"
+    },
+    {
+     "id": "w_000122",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 53.01,
+     "t1": 53.29,
+     "text": "that"
+    },
+    {
+     "id": "w_000123",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 53.36,
+     "t1": 53.595,
+     "text": "the"
+    },
+    {
+     "id": "w_000124",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 53.665,
+     "t1": 53.99,
+     "text": "first"
+    },
+    {
+     "id": "w_000125",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 54.06,
+     "t1": 54.295,
+     "text": "one"
+    },
+    {
+     "id": "w_000126",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 54.365,
+     "t1": 54.6,
+     "text": "did"
+    },
+    {
+     "id": "w_000127",
+     "prob": 1.0,
+     "sent": "s_00013",
+     "spk": "S1",
+     "t0": 54.67,
+     "t1": 54.905,
+     "text": "not?"
+    },
+    {
+     "id": "w_000128",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 55.405,
+     "t1": 55.595,
+     "text": "It"
+    },
+    {
+     "id": "w_000129",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 55.665,
+     "t1": 55.945,
+     "text": "said,"
+    },
+    {
+     "filler": true,
+     "id": "w_000130",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 56.295,
+     "t1": 56.485,
+     "text": "uh,"
+    },
+    {
+     "id": "w_000131",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 56.835,
+     "t1": 57.025,
+     "text": "we"
+    },
+    {
+     "id": "w_000132",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 57.095,
+     "t1": 57.33,
+     "text": "had"
+    },
+    {
+     "id": "w_000133",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 57.4,
+     "t1": 57.545,
+     "text": "a"
+    },
+    {
+     "id": "w_000134",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 57.615,
+     "t1": 58.075,
+     "text": "customer"
+    },
+    {
+     "id": "w_000135",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 58.145,
+     "t1": 58.38,
+     "text": "who"
+    },
+    {
+     "id": "w_000136",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 58.45,
+     "t1": 58.73,
+     "text": "paid"
+    },
+    {
+     "id": "w_000137",
+     "prob": 1.0,
+     "sent": "s_00014",
+     "spk": "S2",
+     "t0": 58.8,
+     "t1": 59.125,
+     "text": "twice."
+    },
+    {
+     "id": "w_000138",
+     "prob": 1.0,
+     "sent": "s_00015",
+     "spk": "S1",
+     "t0": 59.625,
+     "t1": 59.95,
+     "text": "Right."
+    },
+    {
+     "id": "w_000139",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 60.25,
+     "t1": 60.53,
+     "text": "That"
+    },
+    {
+     "id": "w_000140",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 60.6,
+     "t1": 60.97,
+     "text": "single"
+    },
+    {
+     "id": "w_000141",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 61.04,
+     "t1": 61.41,
+     "text": "number"
+    },
+    {
+     "id": "w_000142",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 61.48,
+     "t1": 61.715,
+     "text": "did"
+    },
+    {
+     "id": "w_000143",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 61.785,
+     "t1": 62.065,
+     "text": "more"
+    },
+    {
+     "id": "w_000144",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 62.135,
+     "t1": 62.415,
+     "text": "than"
+    },
+    {
+     "id": "w_000145",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 62.485,
+     "t1": 62.72,
+     "text": "the"
+    },
+    {
+     "id": "w_000146",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 62.79,
+     "t1": 63.115,
+     "text": "whole"
+    },
+    {
+     "id": "w_000147",
+     "prob": 1.0,
+     "sent": "s_00016",
+     "spk": "S2",
+     "t0": 63.185,
+     "t1": 63.465,
+     "text": "deck."
+    },
+    {
+     "filler": true,
+     "id": "w_000148",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 63.965,
+     "t1": 64.155,
+     "text": "Um,"
+    },
+    {
+     "id": "w_000149",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 64.505,
+     "t1": 64.74,
+     "text": "let"
+    },
+    {
+     "id": "w_000150",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 64.81,
+     "t1": 65.0,
+     "text": "me"
+    },
+    {
+     "id": "w_000151",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 65.07,
+     "t1": 65.305,
+     "text": "ask"
+    },
+    {
+     "id": "w_000152",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 65.375,
+     "t1": 65.7,
+     "text": "about"
+    },
+    {
+     "id": "w_000153",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 65.77,
+     "t1": 66.005,
+     "text": "the"
+    },
+    {
+     "id": "w_000154",
+     "prob": 1.0,
+     "sent": "s_00017",
+     "spk": "S1",
+     "t0": 66.075,
+     "t1": 66.355,
+     "text": "team."
+    },
+    {
+     "id": "w_000155",
+     "prob": 1.0,
+     "sent": "s_00018",
+     "spk": "S2",
+     "t0": 66.855,
+     "t1": 67.135,
+     "text": "Sure,"
+    },
+    {
+     "id": "w_000156",
+     "prob": 1.0,
+     "sent": "s_00018",
+     "spk": "S2",
+     "t0": 67.485,
+     "t1": 67.675,
+     "text": "go"
+    },
+    {
+     "id": "w_000157",
+     "prob": 1.0,
+     "sent": "s_00018",
+     "spk": "S2",
+     "t0": 67.745,
+     "t1": 68.07,
+     "text": "ahead."
+    },
+    {
+     "id": "w_000158",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 68.57,
+     "t1": 68.805,
+     "text": "How"
+    },
+    {
+     "id": "w_000159",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 68.875,
+     "t1": 69.155,
+     "text": "many"
+    },
+    {
+     "id": "w_000160",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 69.225,
+     "t1": 69.595,
+     "text": "people"
+    },
+    {
+     "id": "w_000161",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 69.665,
+     "t1": 69.945,
+     "text": "were"
+    },
+    {
+     "id": "w_000162",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 70.015,
+     "t1": 70.25,
+     "text": "you"
+    },
+    {
+     "id": "w_000163",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 70.32,
+     "t1": 70.51,
+     "text": "at"
+    },
+    {
+     "id": "w_000164",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 70.58,
+     "t1": 70.86,
+     "text": "that"
+    },
+    {
+     "id": "w_000165",
+     "prob": 1.0,
+     "sent": "s_00019",
+     "spk": "S1",
+     "t0": 70.93,
+     "t1": 71.255,
+     "text": "point?"
+    },
+    {
+     "id": "w_000166",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 71.755,
+     "t1": 72.08,
+     "text": "Three"
+    },
+    {
+     "id": "w_000167",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 72.15,
+     "t1": 72.34,
+     "text": "of"
+    },
+    {
+     "id": "w_000168",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 72.41,
+     "t1": 72.6,
+     "text": "us"
+    },
+    {
+     "id": "w_000169",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 72.67,
+     "t1": 72.86,
+     "text": "in"
+    },
+    {
+     "id": "w_000170",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 72.93,
+     "t1": 73.21,
+     "text": "2019,"
+    },
+    {
+     "id": "w_000171",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 73.56,
+     "t1": 73.795,
+     "text": "and"
+    },
+    {
+     "id": "w_000172",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 73.865,
+     "t1": 74.145,
+     "text": "then"
+    },
+    {
+     "id": "w_000173",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 74.215,
+     "t1": 74.54,
+     "text": "eight"
+    },
+    {
+     "id": "w_000174",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 74.61,
+     "t1": 74.8,
+     "text": "by"
+    },
+    {
+     "id": "w_000175",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 74.87,
+     "t1": 75.105,
+     "text": "the"
+    },
+    {
+     "id": "w_000176",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 75.175,
+     "t1": 75.41,
+     "text": "end"
+    },
+    {
+     "id": "w_000177",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 75.48,
+     "t1": 75.67,
+     "text": "of"
+    },
+    {
+     "id": "w_000178",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 75.74,
+     "t1": 75.975,
+     "text": "the"
+    },
+    {
+     "id": "w_000179",
+     "prob": 1.0,
+     "sent": "s_00020",
+     "spk": "S2",
+     "t0": 76.045,
+     "t1": 76.325,
+     "text": "year."
+    },
+    {
+     "id": "w_000180",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 76.825,
+     "t1": 77.06,
+     "text": "And"
+    },
+    {
+     "id": "w_000181",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 77.13,
+     "t1": 77.41,
+     "text": "when"
+    },
+    {
+     "id": "w_000182",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 77.48,
+     "t1": 77.715,
+     "text": "did"
+    },
+    {
+     "id": "w_000183",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 77.785,
+     "t1": 78.02,
+     "text": "the—"
+    },
+    {
+     "id": "w_000184",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 78.44,
+     "t1": 78.72,
+     "text": "When"
+    },
+    {
+     "id": "w_000185",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 78.79,
+     "t1": 79.025,
+     "text": "did"
+    },
+    {
+     "id": "w_000186",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 79.095,
+     "t1": 79.33,
+     "text": "the"
+    },
+    {
+     "id": "w_000187",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 79.4,
+     "t1": 79.725,
+     "text": "first"
+    },
+    {
+     "id": "w_000188",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 79.795,
+     "t1": 80.075,
+     "text": "hire"
+    },
+    {
+     "id": "w_000189",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 80.145,
+     "t1": 80.425,
+     "text": "come"
+    },
+    {
+     "id": "w_000190",
+     "prob": 1.0,
+     "sent": "s_00021",
+     "spk": "S1",
+     "t0": 80.495,
+     "t1": 80.685,
+     "text": "in?"
+    },
+    {
+     "id": "w_000191",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 81.185,
+     "t1": 81.51,
+     "text": "About"
+    },
+    {
+     "id": "w_000192",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 81.58,
+     "t1": 81.815,
+     "text": "six"
+    },
+    {
+     "id": "w_000193",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 81.885,
+     "t1": 82.255,
+     "text": "months"
+    },
+    {
+     "id": "w_000194",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 82.325,
+     "t1": 82.65,
+     "text": "later"
+    },
+    {
+     "id": "w_000195",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 82.72,
+     "t1": 82.91,
+     "text": "we"
+    },
+    {
+     "id": "w_000196",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 82.98,
+     "t1": 83.305,
+     "text": "hired"
+    },
+    {
+     "id": "w_000197",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 83.375,
+     "t1": 83.52,
+     "text": "a"
+    },
+    {
+     "id": "w_000198",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 83.59,
+     "t1": 84.14,
+     "text": "manufacturing"
+    },
+    {
+     "id": "w_000199",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 84.21,
+     "t1": 84.49,
+     "text": "lead"
+    },
+    {
+     "id": "w_000200",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 84.56,
+     "t1": 84.885,
+     "text": "first,"
+    },
+    {
+     "id": "w_000201",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 87.635,
+     "t1": 87.96,
+     "text": "which"
+    },
+    {
+     "id": "w_000202",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 88.03,
+     "t1": 88.535,
+     "text": "everybody"
+    },
+    {
+     "id": "w_000203",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 88.605,
+     "t1": 88.885,
+     "text": "said"
+    },
+    {
+     "id": "w_000204",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 88.955,
+     "t1": 89.19,
+     "text": "was"
+    },
+    {
+     "id": "w_000205",
+     "prob": 1.0,
+     "sent": "s_00022",
+     "spk": "S2",
+     "t0": 89.26,
+     "t1": 89.765,
+     "text": "backwards."
+    },
+    {
+     "id": "w_000206",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 90.265,
+     "t1": 90.5,
+     "text": "But"
+    },
+    {
+     "id": "w_000207",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 90.57,
+     "t1": 90.805,
+     "text": "the"
+    },
+    {
+     "id": "w_000208",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 90.875,
+     "t1": 91.29,
+     "text": "product"
+    },
+    {
+     "id": "w_000209",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 91.36,
+     "t1": 91.595,
+     "text": "was"
+    },
+    {
+     "id": "w_000210",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 91.665,
+     "t1": 91.9,
+     "text": "the"
+    },
+    {
+     "id": "w_000211",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 91.97,
+     "t1": 92.52,
+     "text": "bottleneck,"
+    },
+    {
+     "id": "w_000212",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 92.87,
+     "t1": 93.105,
+     "text": "not"
+    },
+    {
+     "id": "w_000213",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 93.175,
+     "t1": 93.41,
+     "text": "the"
+    },
+    {
+     "id": "w_000214",
+     "prob": 1.0,
+     "sent": "s_00023",
+     "spk": "S2",
+     "t0": 93.48,
+     "t1": 93.805,
+     "text": "sales."
+    },
+    {
+     "id": "w_000215",
+     "prob": 1.0,
+     "sent": "s_00024",
+     "spk": "S1",
+     "t0": 94.305,
+     "t1": 94.585,
+     "text": "okay"
+    },
+    {
+     "id": "w_000216",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 94.885,
+     "t1": 95.12,
+     "text": "And"
+    },
+    {
+     "id": "w_000217",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 95.19,
+     "t1": 95.47,
+     "text": "that"
+    },
+    {
+     "id": "w_000218",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 95.54,
+     "t1": 96.0,
+     "text": "decision"
+    },
+    {
+     "id": "w_000219",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 96.07,
+     "t1": 96.26,
+     "text": "is"
+    },
+    {
+     "id": "w_000220",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 96.33,
+     "t1": 96.565,
+     "text": "the"
+    },
+    {
+     "id": "w_000221",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 96.635,
+     "t1": 97.005,
+     "text": "reason"
+    },
+    {
+     "id": "w_000222",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 97.075,
+     "t1": 97.265,
+     "text": "we"
+    },
+    {
+     "id": "w_000223",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 97.335,
+     "t1": 97.57,
+     "text": "are"
+    },
+    {
+     "id": "w_000224",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 97.64,
+     "t1": 97.965,
+     "text": "still"
+    },
+    {
+     "id": "w_000225",
+     "prob": 1.0,
+     "sent": "s_00025",
+     "spk": "S2",
+     "t0": 98.035,
+     "t1": 98.315,
+     "text": "here."
+    },
+    {
+     "id": "w_000226",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 97.515,
+     "t1": 97.75,
+     "text": "Let"
+    },
+    {
+     "id": "w_000227",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 97.82,
+     "t1": 98.01,
+     "text": "me"
+    },
+    {
+     "id": "w_000228",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 98.08,
+     "t1": 98.36,
+     "text": "push"
+    },
+    {
+     "id": "w_000229",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 98.43,
+     "t1": 98.71,
+     "text": "back"
+    },
+    {
+     "id": "w_000230",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 98.78,
+     "t1": 98.97,
+     "text": "on"
+    },
+    {
+     "id": "w_000231",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 99.04,
+     "t1": 99.32,
+     "text": "that,"
+    },
+    {
+     "id": "w_000232",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 99.67,
+     "t1": 100.085,
+     "text": "because"
+    },
+    {
+     "id": "w_000233",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 100.155,
+     "t1": 100.435,
+     "text": "most"
+    },
+    {
+     "id": "w_000234",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 100.505,
+     "t1": 100.965,
+     "text": "founders"
+    },
+    {
+     "id": "w_000235",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 101.035,
+     "t1": 101.27,
+     "text": "say"
+    },
+    {
+     "id": "w_000236",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 101.34,
+     "t1": 101.62,
+     "text": "hire"
+    },
+    {
+     "id": "w_000237",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 101.69,
+     "t1": 102.015,
+     "text": "sales"
+    },
+    {
+     "id": "w_000238",
+     "prob": 1.0,
+     "sent": "s_00026",
+     "spk": "S1",
+     "t0": 102.085,
+     "t1": 102.41,
+     "text": "first."
+    },
+    {
+     "id": "w_000239",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 102.91,
+     "t1": 103.19,
+     "text": "They"
+    },
+    {
+     "id": "w_000240",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 103.26,
+     "t1": 103.45,
+     "text": "do,"
+    },
+    {
+     "id": "w_000241",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 103.8,
+     "t1": 104.035,
+     "text": "and"
+    },
+    {
+     "id": "w_000242",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 104.105,
+     "t1": 104.385,
+     "text": "most"
+    },
+    {
+     "id": "w_000243",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 104.455,
+     "t1": 104.645,
+     "text": "of"
+    },
+    {
+     "id": "w_000244",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 104.715,
+     "t1": 104.995,
+     "text": "them"
+    },
+    {
+     "id": "w_000245",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 105.065,
+     "t1": 105.3,
+     "text": "are"
+    },
+    {
+     "id": "w_000246",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 105.37,
+     "t1": 105.785,
+     "text": "selling"
+    },
+    {
+     "id": "w_000247",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 105.855,
+     "t1": 106.36,
+     "text": "something"
+    },
+    {
+     "id": "w_000248",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 106.43,
+     "t1": 106.71,
+     "text": "that"
+    },
+    {
+     "id": "w_000249",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 106.78,
+     "t1": 107.06,
+     "text": "does"
+    },
+    {
+     "id": "w_000250",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 107.13,
+     "t1": 107.365,
+     "text": "not"
+    },
+    {
+     "id": "w_000251",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 107.435,
+     "t1": 107.76,
+     "text": "exist"
+    },
+    {
+     "id": "w_000252",
+     "prob": 1.0,
+     "sent": "s_00027",
+     "spk": "S2",
+     "t0": 107.83,
+     "t1": 108.065,
+     "text": "yet."
+    },
+    {
+     "id": "w_000253",
+     "prob": 1.0,
+     "sent": "s_00028",
+     "spk": "S1",
+     "t0": 108.565,
+     "t1": 108.845,
+     "text": "That"
+    },
+    {
+     "id": "w_000254",
+     "prob": 1.0,
+     "sent": "s_00028",
+     "spk": "S1",
+     "t0": 108.915,
+     "t1": 109.105,
+     "text": "is"
+    },
+    {
+     "id": "w_000255",
+     "prob": 1.0,
+     "sent": "s_00028",
+     "spk": "S1",
+     "t0": 109.175,
+     "t1": 109.455,
+     "text": "fair"
+    },
+    {
+     "id": "w_000256",
+     "prob": 1.0,
+     "sent": "s_00028",
+     "spk": "S1",
+     "t0": 109.525,
+     "t1": 109.895,
+     "text": "enough."
+    },
+    {
+     "id": "w_000257",
+     "prob": 1.0,
+     "sent": "s_00029",
+     "spk": "S1",
+     "t0": 110.395,
+     "t1": 110.675,
+     "text": "What"
+    },
+    {
+     "id": "w_000258",
+     "prob": 1.0,
+     "sent": "s_00029",
+     "spk": "S1",
+     "t0": 110.745,
+     "t1": 110.98,
+     "text": "was"
+    },
+    {
+     "id": "w_000259",
+     "prob": 1.0,
+     "sent": "s_00029",
+     "spk": "S1",
+     "t0": 111.05,
+     "t1": 111.285,
+     "text": "the"
+    },
+    {
+     "id": "w_000260",
+     "prob": 1.0,
+     "sent": "s_00029",
+     "spk": "S1",
+     "t0": 111.355,
+     "t1": 111.77,
+     "text": "hardest"
+    },
+    {
+     "id": "w_000261",
+     "prob": 1.0,
+     "sent": "s_00029",
+     "spk": "S1",
+     "t0": 111.84,
+     "t1": 112.165,
+     "text": "month?"
+    },
+    {
+     "id": "w_000262",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 113.065,
+     "t1": 113.39,
+     "text": "March"
+    },
+    {
+     "id": "w_000263",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 113.46,
+     "t1": 113.65,
+     "text": "of"
+    },
+    {
+     "id": "w_000264",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 113.72,
+     "t1": 113.955,
+     "text": "the"
+    },
+    {
+     "id": "w_000265",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 114.025,
+     "t1": 114.395,
+     "text": "second"
+    },
+    {
+     "id": "w_000266",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 114.465,
+     "t1": 114.745,
+     "text": "year,"
+    },
+    {
+     "id": "w_000267",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 115.095,
+     "t1": 115.285,
+     "text": "we"
+    },
+    {
+     "id": "w_000268",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 115.355,
+     "t1": 115.59,
+     "text": "had"
+    },
+    {
+     "id": "w_000269",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 115.66,
+     "t1": 115.94,
+     "text": "four"
+    },
+    {
+     "id": "w_000270",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 116.01,
+     "t1": 116.335,
+     "text": "weeks"
+    },
+    {
+     "id": "w_000271",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 116.405,
+     "t1": 116.595,
+     "text": "of"
+    },
+    {
+     "id": "w_000272",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 116.665,
+     "t1": 116.945,
+     "text": "cash"
+    },
+    {
+     "id": "w_000273",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 117.015,
+     "t1": 117.25,
+     "text": "and"
+    },
+    {
+     "id": "w_000274",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 117.32,
+     "t1": 117.465,
+     "text": "a"
+    },
+    {
+     "id": "w_000275",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 117.535,
+     "t1": 117.95,
+     "text": "factory"
+    },
+    {
+     "id": "w_000276",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 118.02,
+     "t1": 118.39,
+     "text": "asking"
+    },
+    {
+     "id": "w_000277",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 118.46,
+     "t1": 118.695,
+     "text": "for"
+    },
+    {
+     "id": "w_000278",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 118.765,
+     "t1": 118.91,
+     "text": "a"
+    },
+    {
+     "id": "w_000279",
+     "prob": 1.0,
+     "sent": "s_00030",
+     "spk": "S2",
+     "t0": 118.98,
+     "t1": 119.395,
+     "text": "deposit."
+    },
+    {
+     "id": "w_000280",
+     "prob": 1.0,
+     "sent": "s_00031",
+     "spk": "S1",
+     "t0": 119.895,
+     "t1": 120.175,
+     "text": "What"
+    },
+    {
+     "id": "w_000281",
+     "prob": 1.0,
+     "sent": "s_00031",
+     "spk": "S1",
+     "t0": 120.245,
+     "t1": 120.48,
+     "text": "did"
+    },
+    {
+     "id": "w_000282",
+     "prob": 1.0,
+     "sent": "s_00031",
+     "spk": "S1",
+     "t0": 120.55,
+     "t1": 120.785,
+     "text": "you"
+    },
+    {
+     "id": "w_000283",
+     "prob": 1.0,
+     "sent": "s_00031",
+     "spk": "S1",
+     "t0": 120.855,
+     "t1": 121.045,
+     "text": "do?"
+    },
+    {
+     "id": "w_000284",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 121.545,
+     "t1": 121.735,
+     "text": "We"
+    },
+    {
+     "id": "w_000285",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 121.805,
+     "t1": 122.175,
+     "text": "called"
+    },
+    {
+     "id": "w_000286",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 122.245,
+     "t1": 122.57,
+     "text": "every"
+    },
+    {
+     "id": "w_000287",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 122.64,
+     "t1": 123.1,
+     "text": "customer"
+    },
+    {
+     "id": "w_000288",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 123.17,
+     "t1": 123.405,
+     "text": "and"
+    },
+    {
+     "id": "w_000289",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 123.475,
+     "t1": 123.8,
+     "text": "asked"
+    },
+    {
+     "id": "w_000290",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 123.87,
+     "t1": 124.15,
+     "text": "them"
+    },
+    {
+     "id": "w_000291",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 124.22,
+     "t1": 124.41,
+     "text": "to"
+    },
+    {
+     "id": "w_000292",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 124.48,
+     "t1": 124.85,
+     "text": "prepay,"
+    },
+    {
+     "id": "w_000293",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 125.2,
+     "t1": 125.435,
+     "text": "and"
+    },
+    {
+     "id": "w_000294",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 125.505,
+     "t1": 125.785,
+     "text": "nine"
+    },
+    {
+     "id": "w_000295",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 125.855,
+     "t1": 126.045,
+     "text": "of"
+    },
+    {
+     "id": "w_000296",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 126.115,
+     "t1": 126.395,
+     "text": "them"
+    },
+    {
+     "id": "w_000297",
+     "prob": 1.0,
+     "sent": "s_00032",
+     "spk": "S2",
+     "t0": 126.465,
+     "t1": 126.7,
+     "text": "did."
+    },
+    {
+     "id": "w_000298",
+     "prob": 1.0,
+     "sent": "s_00033",
+     "spk": "S1",
+     "t0": 127.2,
+     "t1": 127.48,
+     "text": "Nine"
+    },
+    {
+     "id": "w_000299",
+     "prob": 1.0,
+     "sent": "s_00033",
+     "spk": "S1",
+     "t0": 127.55,
+     "t1": 127.785,
+     "text": "out"
+    },
+    {
+     "id": "w_000300",
+     "prob": 1.0,
+     "sent": "s_00033",
+     "spk": "S1",
+     "t0": 127.855,
+     "t1": 128.045,
+     "text": "of"
+    },
+    {
+     "id": "w_000301",
+     "prob": 1.0,
+     "sent": "s_00033",
+     "spk": "S1",
+     "t0": 128.115,
+     "t1": 128.35,
+     "text": "how"
+    },
+    {
+     "id": "w_000302",
+     "prob": 1.0,
+     "sent": "s_00033",
+     "spk": "S1",
+     "t0": 128.42,
+     "t1": 128.7,
+     "text": "many?"
+    },
+    {
+     "id": "w_000303",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 129.2,
+     "t1": 129.57,
+     "text": "Twelve,"
+    },
+    {
+     "id": "w_000304",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 129.92,
+     "t1": 130.155,
+     "text": "the"
+    },
+    {
+     "id": "w_000305",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 130.225,
+     "t1": 130.505,
+     "text": "same"
+    },
+    {
+     "id": "w_000306",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 130.575,
+     "t1": 130.945,
+     "text": "twelve"
+    },
+    {
+     "id": "w_000307",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 131.015,
+     "t1": 131.295,
+     "text": "from"
+    },
+    {
+     "id": "w_000308",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 131.365,
+     "t1": 131.6,
+     "text": "the"
+    },
+    {
+     "id": "w_000309",
+     "prob": 1.0,
+     "sent": "s_00034",
+     "spk": "S2",
+     "t0": 131.67,
+     "t1": 132.04,
+     "text": "garage."
+    },
+    {
+     "id": "w_000310",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 133.84,
+     "t1": 134.12,
+     "text": "That"
+    },
+    {
+     "id": "w_000311",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 134.19,
+     "t1": 134.38,
+     "text": "is"
+    },
+    {
+     "id": "w_000312",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 134.45,
+     "t1": 134.595,
+     "text": "a"
+    },
+    {
+     "id": "w_000313",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 134.665,
+     "t1": 135.215,
+     "text": "remarkable"
+    },
+    {
+     "id": "w_000314",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 135.285,
+     "t1": 135.79,
+     "text": "retention"
+    },
+    {
+     "id": "w_000315",
+     "prob": 1.0,
+     "sent": "s_00035",
+     "spk": "S1",
+     "t0": 135.86,
+     "t1": 136.23,
+     "text": "number."
+    },
+    {
+     "id": "w_000316",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 136.73,
+     "t1": 136.92,
+     "text": "It"
+    },
+    {
+     "id": "w_000317",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 136.99,
+     "t1": 137.18,
+     "text": "is"
+    },
+    {
+     "id": "w_000318",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 137.25,
+     "t1": 137.485,
+     "text": "the"
+    },
+    {
+     "id": "w_000319",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 137.555,
+     "t1": 137.835,
+     "text": "only"
+    },
+    {
+     "id": "w_000320",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 137.905,
+     "t1": 138.275,
+     "text": "number"
+    },
+    {
+     "id": "w_000321",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 138.345,
+     "t1": 138.535,
+     "text": "we"
+    },
+    {
+     "id": "w_000322",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 138.605,
+     "t1": 138.84,
+     "text": "put"
+    },
+    {
+     "id": "w_000323",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 138.91,
+     "t1": 139.1,
+     "text": "on"
+    },
+    {
+     "id": "w_000324",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 139.17,
+     "t1": 139.405,
+     "text": "the"
+    },
+    {
+     "id": "w_000325",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 139.475,
+     "t1": 139.8,
+     "text": "first"
+    },
+    {
+     "id": "w_000326",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 139.87,
+     "t1": 140.195,
+     "text": "slide"
+    },
+    {
+     "id": "w_000327",
+     "prob": 1.0,
+     "sent": "s_00036",
+     "spk": "S2",
+     "t0": 140.265,
+     "t1": 140.5,
+     "text": "now."
+    },
+    {
+     "filler": true,
+     "id": "w_000328",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 141.0,
+     "t1": 141.19,
+     "text": "Um,"
+    },
+    {
+     "id": "w_000329",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 141.54,
+     "t1": 141.91,
+     "text": "before"
+    },
+    {
+     "id": "w_000330",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 141.98,
+     "t1": 142.17,
+     "text": "we"
+    },
+    {
+     "id": "w_000331",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 142.24,
+     "t1": 142.52,
+     "text": "wrap,"
+    },
+    {
+     "id": "w_000332",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 142.87,
+     "t1": 143.15,
+     "text": "what"
+    },
+    {
+     "id": "w_000333",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 143.22,
+     "t1": 143.545,
+     "text": "would"
+    },
+    {
+     "id": "w_000334",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 143.615,
+     "t1": 143.85,
+     "text": "you"
+    },
+    {
+     "id": "w_000335",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 143.92,
+     "t1": 144.2,
+     "text": "tell"
+    },
+    {
+     "id": "w_000336",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 144.27,
+     "t1": 144.685,
+     "text": "someone"
+    },
+    {
+     "id": "w_000337",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 144.755,
+     "t1": 145.215,
+     "text": "starting"
+    },
+    {
+     "id": "w_000338",
+     "prob": 1.0,
+     "sent": "s_00037",
+     "spk": "S1",
+     "t0": 145.285,
+     "t1": 145.61,
+     "text": "today?"
+    },
+    {
+     "id": "w_000339",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 146.11,
+     "t1": 146.39,
+     "text": "Ship"
+    },
+    {
+     "id": "w_000340",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 146.46,
+     "t1": 146.65,
+     "text": "to"
+    },
+    {
+     "id": "w_000341",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 146.72,
+     "t1": 147.0,
+     "text": "real"
+    },
+    {
+     "id": "w_000342",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 147.07,
+     "t1": 147.575,
+     "text": "customers"
+    },
+    {
+     "id": "w_000343",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 147.645,
+     "t1": 148.015,
+     "text": "before"
+    },
+    {
+     "id": "w_000344",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 148.085,
+     "t1": 148.32,
+     "text": "you"
+    },
+    {
+     "id": "w_000345",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 148.39,
+     "t1": 148.715,
+     "text": "raise,"
+    },
+    {
+     "id": "w_000346",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 149.065,
+     "t1": 149.48,
+     "text": "because"
+    },
+    {
+     "id": "w_000347",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 149.55,
+     "t1": 149.785,
+     "text": "the"
+    },
+    {
+     "id": "w_000348",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 149.855,
+     "t1": 150.18,
+     "text": "money"
+    },
+    {
+     "id": "w_000349",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 150.25,
+     "t1": 150.665,
+     "text": "follows"
+    },
+    {
+     "id": "w_000350",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 150.735,
+     "t1": 150.97,
+     "text": "the"
+    },
+    {
+     "id": "w_000351",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 151.04,
+     "t1": 151.365,
+     "text": "proof,"
+    },
+    {
+     "id": "w_000352",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 151.715,
+     "t1": 152.04,
+     "text": "never"
+    },
+    {
+     "id": "w_000353",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 152.11,
+     "t1": 152.345,
+     "text": "the"
+    },
+    {
+     "id": "w_000354",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 152.415,
+     "t1": 152.74,
+     "text": "other"
+    },
+    {
+     "id": "w_000355",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 152.81,
+     "t1": 153.045,
+     "text": "way"
+    },
+    {
+     "id": "w_000356",
+     "prob": 1.0,
+     "sent": "s_00038",
+     "spk": "S2",
+     "t0": 153.115,
+     "t1": 153.485,
+     "text": "around."
+    },
+    {
+     "id": "w_000357",
+     "prob": 1.0,
+     "sent": "s_00039",
+     "spk": "S1",
+     "t0": 153.985,
+     "t1": 154.265,
+     "text": "Ship"
+    },
+    {
+     "id": "w_000358",
+     "prob": 1.0,
+     "sent": "s_00039",
+     "spk": "S1",
+     "t0": 154.335,
+     "t1": 154.705,
+     "text": "before"
+    },
+    {
+     "id": "w_000359",
+     "prob": 1.0,
+     "sent": "s_00039",
+     "spk": "S1",
+     "t0": 154.775,
+     "t1": 155.01,
+     "text": "you"
+    },
+    {
+     "id": "w_000360",
+     "prob": 1.0,
+     "sent": "s_00039",
+     "spk": "S1",
+     "t0": 155.08,
+     "t1": 155.405,
+     "text": "raise."
+    },
+    {
+     "id": "w_000361",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 155.905,
+     "t1": 156.32,
+     "text": "Exactly"
+    },
+    {
+     "id": "w_000362",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 156.39,
+     "t1": 156.67,
+     "text": "that,"
+    },
+    {
+     "id": "w_000363",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 157.02,
+     "t1": 157.255,
+     "text": "and"
+    },
+    {
+     "id": "w_000364",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 157.325,
+     "t1": 157.515,
+     "text": "do"
+    },
+    {
+     "id": "w_000365",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 157.585,
+     "t1": 157.775,
+     "text": "it"
+    },
+    {
+     "id": "w_000366",
+     "prob": 1.0,
+     "sent": "s_00040",
+     "spk": "S2",
+     "t0": 157.845,
+     "t1": 158.17,
+     "text": "early."
+    },
+    {
+     "id": "w_000367",
+     "prob": 1.0,
+     "sent": "s_00041",
+     "spk": "S1",
+     "t0": 158.67,
+     "t1": 158.995,
+     "text": "Where"
+    },
+    {
+     "id": "w_000368",
+     "prob": 1.0,
+     "sent": "s_00041",
+     "spk": "S1",
+     "t0": 159.065,
+     "t1": 159.3,
+     "text": "can"
+    },
+    {
+     "id": "w_000369",
+     "prob": 1.0,
+     "sent": "s_00041",
+     "spk": "S1",
+     "t0": 159.37,
+     "t1": 159.74,
+     "text": "people"
+    },
+    {
+     "id": "w_000370",
+     "prob": 1.0,
+     "sent": "s_00041",
+     "spk": "S1",
+     "t0": 159.81,
+     "t1": 160.09,
+     "text": "find"
+    },
+    {
+     "id": "w_000371",
+     "prob": 1.0,
+     "sent": "s_00041",
+     "spk": "S1",
+     "t0": 160.16,
+     "t1": 160.395,
+     "text": "you?"
+    },
+    {
+     "id": "w_000372",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 160.895,
+     "t1": 161.085,
+     "text": "On"
+    },
+    {
+     "id": "w_000373",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 161.155,
+     "t1": 161.39,
+     "text": "the"
+    },
+    {
+     "id": "w_000374",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 161.46,
+     "t1": 161.875,
+     "text": "website,"
+    },
+    {
+     "id": "w_000375",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 162.225,
+     "t1": 162.46,
+     "text": "and"
+    },
+    {
+     "id": "w_000376",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 162.53,
+     "t1": 162.765,
+     "text": "the"
+    },
+    {
+     "id": "w_000377",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 162.835,
+     "t1": 163.25,
+     "text": "product"
+    },
+    {
+     "id": "w_000378",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 163.32,
+     "t1": 163.51,
+     "text": "is"
+    },
+    {
+     "id": "w_000379",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 163.58,
+     "t1": 163.77,
+     "text": "in"
+    },
+    {
+     "id": "w_000380",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 163.84,
+     "t1": 164.21,
+     "text": "stores"
+    },
+    {
+     "id": "w_000381",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 164.28,
+     "t1": 164.56,
+     "text": "next"
+    },
+    {
+     "id": "w_000382",
+     "prob": 1.0,
+     "sent": "s_00042",
+     "spk": "S2",
+     "t0": 164.63,
+     "t1": 164.955,
+     "text": "month."
+    },
+    {
+     "id": "w_000383",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 165.455,
+     "t1": 165.78,
+     "text": "Thank"
+    },
+    {
+     "id": "w_000384",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 165.85,
+     "t1": 166.085,
+     "text": "you"
+    },
+    {
+     "id": "w_000385",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 166.155,
+     "t1": 166.39,
+     "text": "for"
+    },
+    {
+     "id": "w_000386",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 166.46,
+     "t1": 166.83,
+     "text": "coming"
+    },
+    {
+     "id": "w_000387",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 166.9,
+     "t1": 167.09,
+     "text": "on,"
+    },
+    {
+     "id": "w_000388",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 167.44,
+     "t1": 167.72,
+     "text": "that"
+    },
+    {
+     "id": "w_000389",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 167.79,
+     "t1": 167.98,
+     "text": "is"
+    },
+    {
+     "id": "w_000390",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 168.05,
+     "t1": 168.285,
+     "text": "the"
+    },
+    {
+     "id": "w_000391",
+     "prob": 1.0,
+     "sent": "s_00043",
+     "spk": "S1",
+     "t0": 168.355,
+     "t1": 168.635,
+     "text": "show."
+    }
+   ],
+   "words_to_check": []
+  }
+ },
+ "scenes": [
+  {
+   "id": "sc_0001",
+   "kind": "speech",
+   "sents": [
+    "s_00001"
+   ],
+   "spk": "S1",
+   "t0": 0.6,
+   "t1": 7.21,
+   "text": "Welcome back to the show, where today we are talking about raising money for a hardware company.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0002",
+   "kind": "speech",
+   "sents": [
+    "s_00002"
+   ],
+   "spk": "S2",
+   "t0": 7.71,
+   "t1": 11.725,
+   "text": "Thanks for having me, it is a strange business to fund.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0003",
+   "kind": "speech",
+   "sents": [
+    "s_00003"
+   ],
+   "spk": "S1",
+   "t0": 12.225,
+   "t1": 15.46,
+   "text": "So let's start at the beginning, why hardware?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0004",
+   "kind": "speech",
+   "sents": [
+    "s_00004"
+   ],
+   "spk": "S2",
+   "t0": 15.96,
+   "t1": 22.25,
+   "text": "Because nobody else wanted to do it, and the margins in hardware were, um, terrible.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0005",
+   "kind": "speech",
+   "sents": [
+    "s_00005"
+   ],
+   "spk": "S1",
+   "t0": 22.75,
+   "t1": 22.94,
+   "text": "mm-hm",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0006",
+   "kind": "speech",
+   "sents": [
+    "s_00006"
+   ],
+   "spk": "S2",
+   "t0": 23.24,
+   "t1": 28.6,
+   "text": "So we built the first prototype in a garage and shipped it to twelve customers.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0007",
+   "kind": "speech",
+   "sents": [
+    "s_00007"
+   ],
+   "spk": "S1",
+   "t0": 29.1,
+   "t1": 31.94,
+   "text": "Twelve customers, how did you find them?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0008",
+   "kind": "speech",
+   "sents": [
+    "s_00008",
+    "s_00009"
+   ],
+   "spk": "S2",
+   "t0": 32.44,
+   "t1": 40.96,
+   "text": "The thing nobody tells you about raising money is that the first no is the useful one. It nearly broke us, honestly.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0009",
+   "kind": "speech",
+   "sents": [
+    "s_00010"
+   ],
+   "spk": "S2",
+   "t0": 41.96,
+   "t1": 45.04,
+   "text": "But it also told us exactly what was missing.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0010",
+   "kind": "speech",
+   "sents": [
+    "s_00011"
+   ],
+   "spk": "S1",
+   "t0": 45.54,
+   "t1": 45.82,
+   "text": "yeah",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0011",
+   "kind": "speech",
+   "sents": [
+    "s_00012"
+   ],
+   "spk": "S2",
+   "t0": 46.12,
+   "t1": 48.85,
+   "text": "We rewrote the whole pitch in a weekend.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0012",
+   "kind": "pause",
+   "sents": [],
+   "spk": null,
+   "t0": 48.85,
+   "t1": 50.65,
+   "text": "",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0013",
+   "kind": "speech",
+   "sents": [
+    "s_00013"
+   ],
+   "spk": "S1",
+   "t0": 50.65,
+   "t1": 54.905,
+   "text": "So what did the second pitch say that the first one did not?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0014",
+   "kind": "speech",
+   "sents": [
+    "s_00014"
+   ],
+   "spk": "S2",
+   "t0": 55.405,
+   "t1": 59.125,
+   "text": "It said, uh, we had a customer who paid twice.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0015",
+   "kind": "speech",
+   "sents": [
+    "s_00015"
+   ],
+   "spk": "S1",
+   "t0": 59.625,
+   "t1": 59.95,
+   "text": "Right.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0016",
+   "kind": "speech",
+   "sents": [
+    "s_00016"
+   ],
+   "spk": "S2",
+   "t0": 60.25,
+   "t1": 63.465,
+   "text": "That single number did more than the whole deck.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0017",
+   "kind": "speech",
+   "sents": [
+    "s_00017"
+   ],
+   "spk": "S1",
+   "t0": 63.965,
+   "t1": 66.355,
+   "text": "Um, let me ask about the team.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0018",
+   "kind": "speech",
+   "sents": [
+    "s_00018"
+   ],
+   "spk": "S2",
+   "t0": 66.855,
+   "t1": 68.07,
+   "text": "Sure, go ahead.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0019",
+   "kind": "speech",
+   "sents": [
+    "s_00019"
+   ],
+   "spk": "S1",
+   "t0": 68.57,
+   "t1": 71.255,
+   "text": "How many people were you at that point?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0020",
+   "kind": "speech",
+   "sents": [
+    "s_00020"
+   ],
+   "spk": "S2",
+   "t0": 71.755,
+   "t1": 76.325,
+   "text": "Three of us in 2019, and then eight by the end of the year.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0021",
+   "kind": "pause",
+   "sents": [],
+   "spk": null,
+   "t0": 76.325,
+   "t1": 78.44,
+   "text": "",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0022",
+   "kind": "speech",
+   "sents": [
+    "s_00021"
+   ],
+   "spk": "S1",
+   "t0": 78.44,
+   "t1": 80.685,
+   "text": "When did the first hire come in?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0023",
+   "kind": "speech",
+   "sents": [
+    "s_00022"
+   ],
+   "spk": "S2",
+   "t0": 81.185,
+   "t1": 89.765,
+   "text": "About six months later we hired a manufacturing lead first, which everybody said was backwards.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0024",
+   "kind": "speech",
+   "sents": [
+    "s_00023"
+   ],
+   "spk": "S2",
+   "t0": 90.265,
+   "t1": 93.805,
+   "text": "But the product was the bottleneck, not the sales.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0025",
+   "kind": "speech",
+   "sents": [
+    "s_00024"
+   ],
+   "spk": "S1",
+   "t0": 94.305,
+   "t1": 94.585,
+   "text": "okay",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0026",
+   "kind": "speech",
+   "sents": [
+    "s_00025"
+   ],
+   "spk": "S2",
+   "t0": 94.885,
+   "t1": 98.315,
+   "text": "And that decision is the reason we are still here.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0027",
+   "kind": "speech",
+   "sents": [
+    "s_00026"
+   ],
+   "spk": "S1",
+   "t0": 97.515,
+   "t1": 102.41,
+   "text": "Let me push back on that, because most founders say hire sales first.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0028",
+   "kind": "speech",
+   "sents": [
+    "s_00027"
+   ],
+   "spk": "S2",
+   "t0": 102.91,
+   "t1": 108.065,
+   "text": "They do, and most of them are selling something that does not exist yet.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0029",
+   "kind": "speech",
+   "sents": [
+    "s_00028",
+    "s_00029"
+   ],
+   "spk": "S1",
+   "t0": 108.565,
+   "t1": 112.165,
+   "text": "That is fair enough. What was the hardest month?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0030",
+   "kind": "speech",
+   "sents": [
+    "s_00030"
+   ],
+   "spk": "S2",
+   "t0": 113.065,
+   "t1": 119.395,
+   "text": "March of the second year, we had four weeks of cash and a factory asking for a deposit.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0031",
+   "kind": "speech",
+   "sents": [
+    "s_00031"
+   ],
+   "spk": "S1",
+   "t0": 119.895,
+   "t1": 121.045,
+   "text": "What did you do?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0032",
+   "kind": "speech",
+   "sents": [
+    "s_00032"
+   ],
+   "spk": "S2",
+   "t0": 121.545,
+   "t1": 126.7,
+   "text": "We called every customer and asked them to prepay, and nine of them did.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0033",
+   "kind": "speech",
+   "sents": [
+    "s_00033"
+   ],
+   "spk": "S1",
+   "t0": 127.2,
+   "t1": 128.7,
+   "text": "Nine out of how many?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0034",
+   "kind": "speech",
+   "sents": [
+    "s_00034"
+   ],
+   "spk": "S2",
+   "t0": 129.2,
+   "t1": 132.04,
+   "text": "Twelve, the same twelve from the garage.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0035",
+   "kind": "pause",
+   "sents": [],
+   "spk": null,
+   "t0": 132.04,
+   "t1": 133.84,
+   "text": "",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0036",
+   "kind": "speech",
+   "sents": [
+    "s_00035"
+   ],
+   "spk": "S1",
+   "t0": 133.84,
+   "t1": 136.23,
+   "text": "That is a remarkable retention number.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0037",
+   "kind": "speech",
+   "sents": [
+    "s_00036"
+   ],
+   "spk": "S2",
+   "t0": 136.73,
+   "t1": 140.5,
+   "text": "It is the only number we put on the first slide now.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0038",
+   "kind": "speech",
+   "sents": [
+    "s_00037"
+   ],
+   "spk": "S1",
+   "t0": 141.0,
+   "t1": 145.61,
+   "text": "Um, before we wrap, what would you tell someone starting today?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0039",
+   "kind": "speech",
+   "sents": [
+    "s_00038"
+   ],
+   "spk": "S2",
+   "t0": 146.11,
+   "t1": 153.485,
+   "text": "Ship to real customers before you raise, because the money follows the proof, never the other way around.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0040",
+   "kind": "speech",
+   "sents": [
+    "s_00039"
+   ],
+   "spk": "S1",
+   "t0": 153.985,
+   "t1": 155.405,
+   "text": "Ship before you raise.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0041",
+   "kind": "speech",
+   "sents": [
+    "s_00040"
+   ],
+   "spk": "S2",
+   "t0": 155.905,
+   "t1": 158.17,
+   "text": "Exactly that, and do it early.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0042",
+   "kind": "speech",
+   "sents": [
+    "s_00041"
+   ],
+   "spk": "S1",
+   "t0": 158.67,
+   "t1": 160.395,
+   "text": "Where can people find you?",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0043",
+   "kind": "speech",
+   "sents": [
+    "s_00042"
+   ],
+   "spk": "S2",
+   "t0": 160.895,
+   "t1": 164.955,
+   "text": "On the website, and the product is in stores next month.",
+   "topic": "t_001"
+  },
+  {
+   "id": "sc_0044",
+   "kind": "speech",
+   "sents": [
+    "s_00043"
+   ],
+   "spk": "S1",
+   "t0": 165.455,
+   "t1": 168.635,
+   "text": "Thank you for coming on, that is the show.",
+   "topic": "t_001"
+  }
+ ]
+}

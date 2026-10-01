@@ -126,6 +126,9 @@ describe('the rendered run log', () => {
     const { PromptRunLog } = await import('./PromptRunLog')
     const html = renderToStaticMarkup(createElement(PromptRunLog))
     expect(html.match(/advisory · the edit was kept/g)).toHaveLength(1)
+    // closer N-17: its screen-reader / text label says "noted" for the advisory row, "failed" only for a real miss
+    expect(html).toMatch(/captions cover the speech[\s\S]*?<span class="prompt-sr-only"> noted<\/span>/)
+    expect(html).not.toMatch(/captions cover the speech[\s\S]{0,200}? failed/)
   })
 
   it('names the safety net step in editor language (K3)', async () => {

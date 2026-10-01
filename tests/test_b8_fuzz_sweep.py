@@ -149,7 +149,7 @@ def _fill(path: str, sid: str) -> str:
             .replace("{clip_id}", "nope").replace("{kind}", "uploads").replace("{name:path}", "..%2f..%2fetc")
             .replace("{name}", "nope").replace("{seq}", "zz")
             .replace("{key}", "0123456789abcdef01234567").replace("{n}", "zz")
-            .replace("{h}", "nope"))
+            .replace("{h}", "nope").replace("{did}", "nope").replace("{vid}", "nope"))
 
 
 def test_every_route_answers_fuzzed_requests_without_a_500(seeded):

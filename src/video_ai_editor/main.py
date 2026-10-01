@@ -1297,6 +1297,21 @@ def _ingest_failure(safe_name: str, e: Exception,
     })
 
 
+def _mark_transcript(ingest_json: Path, status: str) -> None:
+    """Write `transcript_status: <status>` ("failed": the whisper pass raised; "skipped": the upload
+    asked for no transcript) into an upload's ingest.json, so nothing waits for a transcript that is not
+    coming (best effort: a missing or unreadable file is left alone, there is nothing to mark)."""
+    try:
+        if not ingest_json.exists():
+            return
+        data = json.loads(ingest_json.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and not data.get("transcript"):
+            data["transcript_status"] = status
+            ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        return
+
+
 def _background_transcriber(normalized_path: Path, out_dir: Path, whisper_model: str):
     """The whisper pass that runs after the upload has answered. Writes the
     transcript into the upload's own ingest.json so get_transcript /
@@ -1315,7 +1330,9 @@ def _background_transcriber(normalized_path: Path, out_dir: Path, whisper_model:
                 data["transcript"] = tx.model_dump()
                 ingest_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
-            pass
+            # Say so: the Editor Brain waits for a transcript that is on its
+            # way, and this marker is what tells it that none is coming.
+            _mark_transcript(out_dir / "ingest.json", "failed")
     return _bg_transcribe
 
 
@@ -1447,6 +1464,9 @@ async def upload(sid: str, request: Request, background_tasks: BackgroundTasks,
         if res.probe.streams and res.probe.video is None:
             return _handoff_audio_only(sid, dst, upload_dir, safe_name, display_name,
                                        res.probe.duration, add_to_timeline)
+
+        if not transcribe:          # no whisper pass is coming: say so, so the Editor Brain does not wait for one
+            _mark_transcript(upload_dir / "ingest.json", "skipped")
 
         # Wave D: the instant-preview proxy of the new master, built in the
         # background (niced) — only when the preview engine is on.
@@ -2678,6 +2698,13 @@ from .api import prompt_routes as _prompt_routes
 _prompt_routes.configure(resolve_store=_store)
 app.include_router(_prompt_routes.router)
 _prompt_running_response = _prompt_routes.prompt_running_response
+
+# Editor Brain routes (EB1, spec §8.7 subset): the analysis job, the graph
+# and EDP reads, versions + restore, and the `brain.enabled` setting. Behind
+# the same middleware; every session route answers 404 while the flag is off.
+from .api import brain_routes as _brain_routes
+_brain_routes.configure(resolve_store=_store)
+app.include_router(_brain_routes.router)
 
 # Instant-preview routes (wave D, INSTANT_PREVIEW_SPEC §5.2): proxy index,
 # spans, FLAC chunks, the preview.engine setting, the reference frame map and

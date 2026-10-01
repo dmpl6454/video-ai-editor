@@ -42,6 +42,14 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
     ("import_srt", "path"): "read",
     ("match_style", "reference"): "read",
     ("multicam", "srcs"): "read",
+    # Editor Brain (EB1-B): the dialogue source `sync_dialogue_lane` lays on
+    # lane a1 (a recorder wav or the reference camera); the handler runs it
+    # through `_safe_src` before anything else. The nested `src` fields of
+    # `cut_source_ranges.ranges[]`, `apply_camera_plan.switches[]` and the
+    # `offsets` keys are guarded the same way inside the handlers and by the
+    # plan validator's nested path rule (spec §5.4); they are containers, not
+    # top-level path arguments, so they carry no row here.
+    ("sync_dialogue_lane", "src"): "read",
     ("export_ass", "path"): "write",
     ("export_srt", "path"): "write",
     ("export_vtt", "path"): "write",
@@ -90,7 +98,7 @@ PATH_ARGS: dict[tuple[str, str], PathGuard] = {
 }
 
 #: For the count pin in tests/test_path_guards.py and test_prompt_contracts.py.
-PATH_ARGS_COUNT = 25   # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt); +1 K3 set_text_style.font (exempt)
+PATH_ARGS_COUNT = 26   # +1 EB1-B: sync_dialogue_lane.src (read); +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt); +1 K3 set_text_style.font (exempt)
 
 
 def guarded_args(kind: PathGuard) -> frozenset[tuple[str, str]]:

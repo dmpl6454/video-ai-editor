@@ -66,6 +66,8 @@ def facts_to_prompt_block(facts: TimelineFacts) -> str:
         parts.append("transcript pending")
     else:
         parts.append("no transcript")
+    if getattr(facts, "brain_graph_id", None):
+        parts.append("footage read: " + (", ".join(sorted(facts.brain_layers)) or "yes"))   # Editor Brain (EB1)
     parts.append(("captions " + (facts.caption_style or "on")) if facts.has_captions else "no captions")
     parts.append(("music" + (" ducked" if facts.music_ducked else "")) if facts.has_music else "no music")
     if facts.brand_handle:

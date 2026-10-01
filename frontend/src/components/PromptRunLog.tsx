@@ -286,7 +286,9 @@ function CreatedProjects({ items }: { items: readonly ChildRun[] }) {
 function CheckRow({ c }: { c: VerifyCheck }) {
   const state = c.pass === true ? 'pass' : c.pass === false ? 'fail' : 'skip'
   const g: IconName = c.pass === true ? 'check' : c.pass === false ? 'close' : 'minus'
-  const label = c.pass === true ? 'passed' : c.pass === false ? 'failed' : 'not measured'
+  // an advisory check that did not hold is a note beside the verdict, not a failed step (the edit was kept)
+  const advisory = c.pass === false && c.blocking === false
+  const label = c.pass === true ? 'passed' : advisory ? 'noted' : c.pass === false ? 'failed' : 'not measured'
   // Prose, never JSON (lib/checkProse): one wrapping line under the label.
   const values = checkValues(c)
   return (
@@ -295,7 +297,7 @@ function CheckRow({ c }: { c: VerifyCheck }) {
       <span className="human" title={c.check}>
         {c.human || c.check.replace(/_/g, ' ')}
         {c.headline === false && <small>info</small>}
-        {c.pass === false && c.blocking === false && <small>advisory · the edit was kept</small>}
+        {advisory && <small>advisory · the edit was kept</small>}
         <span className="prompt-sr-only"> {label}</span>
       </span>
       {values && <span className="vals">{values}</span>}

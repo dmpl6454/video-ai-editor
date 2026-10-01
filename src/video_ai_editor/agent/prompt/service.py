@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -44,7 +45,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Iterable
 
+from . import brain_card
+from .reply_text import joined_reply
 from .schema import Plan
+
+_log = logging.getLogger(__name__)
 
 #: The six shapes `agent/loop.py` already streams; unchanged.
 LEGACY_EVENT_TYPES: tuple[str, ...] = ("text_delta", "tool_use", "tool_result", "op", "done", "error")
@@ -53,6 +58,14 @@ LEGACY_EVENT_TYPES: tuple[str, ...] = ("text_delta", "tool_use", "tool_result", 
 PROMPT_EVENT_TYPES: tuple[str, ...] = ("brain", "plan", "step", "verify", "clarify")
 
 EVENT_TYPES: tuple[str, ...] = LEGACY_EVENT_TYPES + PROMPT_EVENT_TYPES
+
+#: Editor Brain (EB1): the analysis job's progress frame
+#: `analysis{layer, pct, eta_s}` (spec §8.7). It is NOT a prompt-turn event
+#: — the frozen prompt contract (`EVENT_TYPES`, 11 types, pinned by
+#: tests/test_prompt_contracts.py) is unchanged; `KNOWN_EVENT_TYPES` is the
+#: union every reader accepts. `api/brain_routes.py` writes these frames.
+BRAIN_EVENT_TYPES: tuple[str, ...] = ("analysis",)
+KNOWN_EVENT_TYPES: tuple[str, ...] = EVENT_TYPES + BRAIN_EVENT_TYPES
 
 BRAIN_STATUSES: tuple[str, ...] = ("trying", "answered", "failed")
 STEP_STATUSES: tuple[str, ...] = ("running", "ok", "failed", "skipped")
@@ -112,13 +125,13 @@ def via(label: str) -> str:
 
 
 def is_known_event(event: dict[str, Any]) -> bool:
-    return event.get("type") in EVENT_TYPES
+    return event.get("type") in KNOWN_EVENT_TYPES
 
 
 def unknown_event_types(events: Iterable[dict[str, Any]]) -> set[str]:
     """For the SSE-contract test: every `type` a stream used that is not in
-    `EVENT_TYPES`."""
-    return {str(e.get("type")) for e in events} - set(EVENT_TYPES)
+    `EVENT_TYPES` (or the brain's `analysis` frame)."""
+    return {str(e.get("type")) for e in events} - set(KNOWN_EVENT_TYPES)
 
 
 # --------------------------------------------------------------------------
@@ -668,6 +681,10 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
     bus = RunBus()
     for evt in pre_events:
         bus.publish(evt)
+    # Editor Brain (EB1): the reply names the EDP's rung, deferred list and
+    # version label; the registry is how compose_reply finds them.
+    brain_card.register_plan(plan, Path(store.dir))
+    _refresh_version_label(plan, Path(store.dir))
     handle = executor.start_run(_resolver_for(store), sid, plan, facts, prompt=prompt,
                                 history_writer=HISTORY, bus=bus, consented_downloads=consented_downloads,
                                 contract_hint=contract_hint, mode=mode, preview=preview, ui_state=ui_state)
@@ -675,11 +692,7 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
     history.append({"role": "assistant", "content": [
         {"type": "text", "text": provisional_text(label, plan.title or plan.intent, handle.run_id)}]})
     try:
-        async for evt in _iter_bus(bus, start=len(pre_events)):
-            if evt.get("type") == "done" and handle.final_text:
-                _replace_in_place(history, handle.run_id, handle.final_text)
-            if evt.get("type") == "done" and handle.stale:
-                break
+        async for evt in _pump(bus, handle, store, plan, history, start=len(pre_events)):
             yield evt
     finally:
         # A client that went away mid-run: the route's `finally` will save
@@ -692,6 +705,55 @@ async def _run_and_stream(store: Any, plan: Plan, facts: Any, *, prompt: str, hi
         async for evt in prompt_turn(store, prompt, history, ui_state=ui_state, confirm=True,
                                      replan_note=executor.STALE_PREVIEW_TEXT + " Here is a fresh preview."):
             yield evt
+
+
+async def _pump(bus: Any, handle: Any, store: Any, plan: Plan, history: list[dict], *,
+                start: int) -> AsyncIterator[dict]:
+    """The run's bus to the client; `done` first settles the history line
+    and (for an applied brain plan) the version row, so a Versions strip
+    that refreshes on `done` already lists it. A stale Apply ends without
+    its `done` — the caller re-plans instead."""
+    async for evt in _iter_bus(bus, start=start):
+        if evt.get("type") == "done":
+            if handle.final_text:
+                _replace_in_place(history, handle.run_id, handle.final_text)
+            if handle.stale:
+                break
+            await asyncio.to_thread(record_brain_version, store, plan, handle)
+        yield evt
+
+
+def _refresh_version_label(plan: Plan, session_dir: Path) -> None:
+    """The card and the reply name the version THIS run will record ("V2 Reel"), not the one a run of the
+    same plan (same content-hash id) recorded before — `register_plan` keeps the first label it computed."""
+    did = brain_card.decisions_id_of(plan)
+    if did:
+        brain_card.remember_version(did, brain_card.prospective_label(did, session_dir))
+
+
+def record_brain_version(store: Any, plan: Plan, handle: Any) -> dict[str, Any] | None:
+    """Editor Brain (EB1, spec §7.1): after an APPLIED brain plan — one that
+    carries an EDP (`plan_ref`) and committed — record "V<n> <target>" in
+    `<session>/versions.json` through the versions seam (C's helper, or the
+    stand-in until it lands). Never for an ordinary plan, a dry run, a
+    rolled-back or uncommitted run; never raises (a version is a courtesy,
+    the edit already happened)."""
+    did = brain_card.decisions_id_of(plan)
+    result = getattr(handle, "result", None)
+    if not did or result is None or not getattr(result, "committed", False):
+        return None
+    try:
+        from . import brain_seams
+        live = _resolver_for(store)(Path(store.dir).name)
+        # The label is computed NOW from the versions file, never remembered per decisions id: the EDP id is a
+        # content hash, so "make the reel, ⌘Z, make it again" names the same `did` twice and must get V2, not V1.
+        label = brain_card.prospective_label(did, Path(live.dir))
+        row = brain_seams.versions().record(live, label=label, decisions_id=did, kind="brain")
+        brain_card.remember_version(did, str(row.get("label") or label))       # only for the reply's wording
+        return row
+    except Exception as e:  # noqa: BLE001
+        _log.warning("brain version for %s not recorded: %s", did, e)
+        return None
 
 
 async def _pause(store: Any, plan: Plan, facts: Any, *, prompt: str, history: list[dict],
@@ -864,7 +926,7 @@ async def prompt_turn(store: Any, user_message: str, history: list[dict], *,
     if asked is not None:
         plan = asked
     if notes:
-        plan = plan.with_(reply=" ".join(notes + ([plan.reply] if plan.reply else [])))
+        plan = plan.with_(reply=joined_reply(notes, plan.reply))
     plan_evt = {"type": "plan", "plan": plan.model_dump()}
     pre_events.append(plan_evt)
     yield plan_evt
@@ -959,6 +1021,14 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         return
 
     plan = pending.pending_plan(record)
+    if _is_analysis_gate(plan):
+        pending.clear_pending(session_dir)
+        async for evt in _resume_gate(store, record, answers, history=history,
+                                      ui_state=ui_state or record.get("ui_state") or None, user_message=user_message):
+            yield evt
+        if own_history:
+            HISTORY.save(sid, history)
+        return
     if is_model_question(plan):
         # Item 23: the answer to a model's own question re-plans the whole
         # request with it — "turn clip two upside down — 180 degrees" — through
@@ -1084,6 +1154,113 @@ async def resume(store: Any, token: str, answers: dict[str, Any], ui_state: dict
         HISTORY.save(sid, history)
 
 
+ANALYSIS_GATE_KEY = "gate_analysis"
+_GATE_YES = ("read", "yes", "y", "true", "1")
+_GATE_POLL_S = 0.2
+
+
+def _is_analysis_gate(plan: Plan) -> bool:
+    return any(q.key == ANALYSIS_GATE_KEY for q in plan.needs_input)
+
+
+_GATE_BEAT_S = 5.0
+
+
+async def _analysis_frames(job: Any) -> AsyncIterator[dict]:
+    """`analysis` frames while the job runs — one per change of progress or of the layer being read, a
+    heartbeat every few seconds while it waits (the upload's transcript can take minutes) — the last at 100
+    when it completed. Each names the layer (`audio`, `speakers`, `speech`, `semantic`, `transcript`…)."""
+    from . import brain_seams
+    said: tuple[float, str] | None = None
+    started, beat = time.time(), time.monotonic()
+    while job.status in ("queued", "running"):
+        seen = brain_seams.analysis_progress(job.id) or {}
+        pct, layer = round(100.0 * float(job.progress or 0.0), 1), str(seen.get("layer") or "")
+        due = time.monotonic() - beat >= _GATE_BEAT_S
+        if ((pct, layer) != said or due) and pct < 100.0:
+            said, beat = (pct, layer), time.monotonic()
+            waiting = seen.get("waiting")
+            eta = None if waiting else seen.get("eta_s")
+            if eta is None and pct > 0 and not waiting:
+                eta = (time.time() - started) * (100.0 - pct) / pct
+            yield brain_seams.analysis_event(layer, pct, eta, waiting=waiting)
+        await asyncio.sleep(_GATE_POLL_S)
+    if job.status == "completed":
+        yield brain_seams.analysis_event("done", 100.0, 0.0)
+
+
+def _gate_reply(history: list[dict], user_message: str | None, text: str) -> dict:
+    history.append({"role": "user", "content": user_message or "Read the footage first"})
+    history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    return {"type": "text_delta", "text": text}
+
+
+async def _resume_gate(store: Any, record: dict[str, Any], answers: dict[str, Any], *, history: list[dict],
+                       ui_state: dict | None, user_message: str | None) -> AsyncIterator[dict]:
+    """The analysis gate, answered (Editor Brain, EB1): **read** starts the
+    footage analysis — the same job the analyse route starts — and, when the
+    graph lands, plans the ORIGINAL sentence on it; anything else stops with
+    nothing changed. Cancelling the run (`POST …/prompt/cancel`) while the
+    footage is being read stops the job and the re-plan."""
+    from . import brain_seams
+    from .brains.base import BRAIN_LABELS
+    lead = via(BRAIN_LABELS["recipes"])
+    answer = str(answers.get(ANALYSIS_GATE_KEY, "")).strip().lower()
+    if answer not in _GATE_YES:
+        history.append({"role": "user", "content": user_message or answer or "stop"})
+        text = lead + "Stopped. Nothing was changed; the footage has not been read."
+        history.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+        yield {"type": "text_delta", "text": text}
+        yield {"type": "done"}
+        return
+    sid = Path(store.dir).name
+    brain_seams.resume_cancel_event(sid)
+    try:
+        async for evt in _gate_read_and_plan(store, str(record.get("prompt") or ""), lead, history=history,
+                                             ui_state=ui_state, user_message=user_message):
+            yield evt
+    finally:
+        brain_seams.end_resume(sid)
+
+
+async def _gate_read_and_plan(store: Any, prompt: str, lead: str, *, history: list[dict], ui_state: dict | None,
+                              user_message: str | None) -> AsyncIterator[dict]:
+    from . import brain_seams
+    sid = Path(store.dir).name
+    cancelled = brain_seams.resume_cancel_event(sid)
+    try:
+        live = _resolver_for(store)(sid)
+        job = await asyncio.to_thread(brain_seams.start_analysis, live)
+    except brain_seams.AnalysisBusy as e:      # the last read is still stopping: one sentence, no exception name
+        yield _gate_reply(history, user_message, lead + f"{e} Nothing was changed.")
+        yield {"type": "done"}
+        return
+    except Exception as e:  # noqa: BLE001 — said, never raised into the stream
+        job, failed = None, f"{type(e).__name__}: {brain_seams.scrub_error(e)}"
+    else:
+        async for frame in _analysis_frames(job):
+            yield frame
+        failed = None if job.status == "completed" else brain_seams.scrub_error(job.error or job.status)
+    if brain_seams.was_cancelled(job) or cancelled.is_set():
+        yield _gate_reply(history, user_message, lead + "Cancelled. Nothing was changed.")
+        yield {"type": "done"}
+        return
+    if failed is not None:
+        text = lead + f"The footage could not be read ({failed}). Nothing was changed."
+        _gate_reply(history, user_message, text)
+        yield {"type": "error", "message": text}
+        yield {"type": "done"}
+        return
+    if (job.result or {}).get("waiting_for") == "transcript":
+        yield _gate_reply(history, user_message, lead + "The footage is still being read — its speech is still "
+                          "being transcribed. Nothing was changed; ask again in a minute.")
+        yield {"type": "done"}
+        return
+    async for evt in prompt_turn(store, prompt, history, ui_state=ui_state,
+                                 history_text=user_message or "Read the footage first"):
+        yield evt
+
+
 async def _resume_preview(store: Any, record: dict[str, Any], answers: dict[str, Any], *,
                           history: list[dict], user_message: str | None) -> AsyncIterator[dict]:
     """Apply or drop a previewed plan (preview.py). Apply re-runs the SAME
@@ -1145,7 +1322,8 @@ def _pick_label(intent: str) -> str:
         return f"'{intent}'"
 
 
-__all__ = ["LEGACY_EVENT_TYPES", "PROMPT_EVENT_TYPES", "EVENT_TYPES", "BRAIN_STATUSES",
+__all__ = ["LEGACY_EVENT_TYPES", "PROMPT_EVENT_TYPES", "EVENT_TYPES", "BRAIN_EVENT_TYPES", "KNOWN_EVENT_TYPES",
+           "record_brain_version", "BRAIN_STATUSES",
            "STEP_STATUSES", "VIA_PREFIX", "CLARIFY_TTL_S", "PLANNING_BUDGET_S",
            "TRANSCRIPT_WAIT_S", "VERIFY_RENDER_MAX_DURATION_S", "ROUTES", "LOOPBACK_ONLY_ROUTES",
            "PROMPT_RUNNING_CODE", "PENDING_FILE", "RUNLOG_FILE", "SNAPSHOT_DIR",

@@ -1,0 +1,303 @@
+{
+ "dropped": [],
+ "plan_ref": "d_792dc2dc",
+ "steps": {
+  "cuts": [
+   {
+    "clip_ids": [
+     "c_e210aa4d"
+    ],
+    "code": "silence",
+    "decision": "k_0003",
+    "kind": "cut_range",
+    "src_range": [
+     14.3667,
+     15.0
+    ],
+    "text": "silence of 1.5 s at 00:00:14:11",
+    "timeline": [
+     [
+      4.8667,
+      5.5
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "filler",
+    "decision": "k_0004",
+    "kind": "cut_range",
+    "src_range": [
+     30.4667,
+     32.1334
+    ],
+    "text": "filler \u201cUm\u201d at 00:00:31:20",
+    "timeline": [
+     [
+      15.5,
+      17.1667
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "silence",
+    "decision": "k_0005",
+    "kind": "cut_range",
+    "src_range": [
+     37.8334,
+     38.5
+    ],
+    "text": "silence of 1.4 s at 00:00:37:25",
+    "timeline": [
+     [
+      22.8667,
+      23.5333
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "filler",
+    "decision": "k_0006",
+    "kind": "cut_range",
+    "src_range": [
+     44.3667,
+     44.8334
+    ],
+    "text": "filler \u201cUm\u201d at 00:00:44:12",
+    "timeline": [
+     [
+      29.4,
+      29.8667
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "filler_acoustic",
+    "decision": "k_0007",
+    "kind": "cut_range",
+    "src_range": [
+     49.6667,
+     50.0666
+    ],
+    "text": "an \u201cuh\u201d the transcript missed, at 00:00:49:21 (0.99)",
+    "timeline": [
+     [
+      34.7,
+      35.0999
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "silence",
+    "decision": "k_0008",
+    "kind": "cut_range",
+    "src_range": [
+     53.4334,
+     54.1
+    ],
+    "text": "silence of 1.4 s at 00:00:53:13",
+    "timeline": [
+     [
+      38.4667,
+      39.1333
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "filler",
+    "decision": "k_0009",
+    "kind": "cut_range",
+    "src_range": [
+     57.9,
+     58.3334
+    ],
+    "text": "filler \u201cUm\u201d at 00:00:57:28",
+    "timeline": [
+     [
+      42.9333,
+      43.3667
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a",
+     "c_e210aa4d"
+    ],
+    "code": "filler_acoustic",
+    "decision": "k_0010",
+    "kind": "cut_range",
+    "src_range": [
+     61.4,
+     61.8333
+    ],
+    "text": "an \u201cuh\u201d the transcript missed, at 00:01:01:14 (0.99)",
+    "timeline": [
+     [
+      46.4333,
+      46.8666
+     ]
+    ]
+   }
+  ],
+  "keep": [
+   {
+    "clip_ids": [
+     "c_e210aa4d"
+    ],
+    "code": "best_window",
+    "decision": "k_0001",
+    "kept": [
+     9.5,
+     19.7334
+    ],
+    "kind": "keep_window",
+    "text": "9.5 s of whole sentences after the hook; topic \u201cthe footage\u201d"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d"
+    ],
+    "code": "best_window",
+    "decision": "k_0002",
+    "kept": [
+     25.2,
+     65.1667
+    ],
+    "kind": "keep_window",
+    "text": "35 s of whole sentences after the hook; topic \u201cthe footage\u201d"
+   }
+  ],
+  "punch_ins": [
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_520162"
+    ],
+    "code": "emphasis_peak",
+    "decision": "k_0013",
+    "keyframe_times": [
+     1.7633,
+     2.1633
+    ],
+    "kind": "punch_in",
+    "text": "speaker delivers a key point (2.2\u03c3 louder, 1.36\u00d7 slower)"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_7ea836"
+    ],
+    "code": "hook_emphasis",
+    "decision": "k_0014",
+    "keyframe_times": [
+     0.23,
+     0.63
+    ],
+    "kind": "punch_in",
+    "text": "punch in on the hook statement"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_400395"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0015",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:00:15:00 to hide the jump"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_e1c2e1"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0016",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:00:44:25 to hide the jump"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_79fdf1"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0017",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:00:54:03 to hide the jump"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_b1c9e8"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0018",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:00:58:10 to hide the jump"
+   },
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_c53a56"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0019",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:01:01:25 to hide the jump"
+   }
+  ],
+  "story_order": [
+   {
+    "clip_ids": [
+     "c_e210aa4d_ada34a_7ea836"
+    ],
+    "code": "hook_strongest_opening",
+    "decision": "k_0012",
+    "kind": "open_on",
+    "text": "strongest opening: curiosity + surprise + authority + emotion (0.66)"
+   }
+  ],
+  "story_splits": [
+   {
+    "code": "hook_strongest_opening",
+    "decision": "k_0012",
+    "kind": "open_on",
+    "text": "strongest opening: curiosity + surprise + authority + emotion (0.66)",
+    "times": []
+   }
+  ]
+ }
+}

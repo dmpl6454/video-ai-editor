@@ -46,6 +46,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .facts_brain import BrainEditFact, DialogueLaneFact, brain_facts, brain_on
+
 Aspect = Literal["9:16", "16:9", "1:1", "4:5", "other"]
 TranscriptBackend = Literal["faster_whisper", "whisper_cli", None]
 
@@ -234,6 +236,24 @@ class TimelineFacts(BaseModel):
     #: Final QA r3: the stickers that are mirrored, id → "h" / "v" / "hv"
     #: ("flip the sticker" toggles from what is there).
     sticker_flips: dict[str, str] = Field(default_factory=dict)
+    #: Editor Brain (EB1): the session's CURRENT Content Graph id when the
+    #: brain is enabled and every source the graph names is still the file
+    #: it was analysed as — None hides every brain path (the `edit` recipe
+    #: asks the analysis gate; `auto_edit` runs its checklist unchanged).
+    brain_graph_id: str | None = None
+    #: layer → status ("ok" | "partial" | "lazy" | "failed:…") of the graph's reference source.
+    brain_layers: dict[str, str] = Field(default_factory=dict)
+    #: The dialogue lane `a1` when the brain (or a hand) laid one.
+    dialogue_lane: DialogueLaneFact | None = None
+    #: The timeline already carries an earlier brain edit (facts_brain.brain_edit): the
+    #: `edit` recipe refuses to plan over it (review EX-02 / UX-04).
+    brain_edit: BrainEditFact | None = None
+    #: The files ALREADY on the timeline (resolved). The Editor Brain's three
+    #: tools re-use only these — a range of the main lane's file, its other
+    #: angle, its recorder — so a clip added from ~/Movies by path (never
+    #: under the session's uploads, hence not in `allowed_paths`) can still
+    #: be edited by the brain. Nothing else reads this set.
+    timeline_paths: set[str] = Field(default_factory=set)
 
     def clip(self, cid: str | None) -> ClipFact | None:
         """The media clip `cid` names, or None."""
@@ -545,7 +565,10 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         try:
             data = json.loads(ingest_json.read_text(encoding="utf-8"))
             fresh = (time.time() - ingest_json.stat().st_mtime) < TRANSCRIPT_PENDING_MAX_AGE_S
-            transcript_pending = not data.get("transcript") and fresh
+            # the "no transcript is coming" marker is the Editor Brain's; with it off the Prompt bar reads this
+            # file as it did in 0.8.0 (a transcript-less upload is pending for TRANSCRIPT_PENDING_MAX_AGE_S)
+            nothing_coming = brain_on() and data.get("transcript_status") in ("failed", "skipped")
+            transcript_pending = not data.get("transcript") and fresh and not nothing_coming
         except (OSError, ValueError):
             transcript_pending = False
 
@@ -628,6 +651,7 @@ def build_facts(store: Any, ui_state: dict | None, *, feature_report: dict | Non
         clips=clip_facts, caption_clip_ids=[c.id for c in caption_clips],
         texts=text_facts, transitions=transition_facts,
         **_anim_facts(edl),
+        **brain_facts(store, edl, sdir, resolve=_resolved),
     )
 
 

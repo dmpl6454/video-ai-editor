@@ -4,6 +4,9 @@ A `.vae` file is a zip containing:
   - edl.json + ops.json + chat.json + meta.json (the session state)
   - snapshots/*.json + redo_stack.json — the undo/redo history
   - transcript.json — an imported/hand-corrected transcript (import_srt)
+  - brain/ + snapshots/pinned/ — the Editor Brain's versions, decisions and
+    graph header, when the session has them (storage_brain.py says what
+    travels and what the manifest records as left out)
   - manifest.json — list of media srcs and their relative bundled paths
   - media/  — original uploaded files referenced by the timeline OR by any
     undo/redo state, each with its upload's `ingest.json` (whisper transcript)
@@ -28,6 +31,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
+from . import storage_brain as _sb
 from .config import WORKDIR
 from .edl import EDL, EDLStore
 from .edl.schema import Clip, Sticker
@@ -88,7 +92,7 @@ def _history_edls(sd: Path) -> list[EDL]:
     """Every EDL undo/redo can bring back: the snapshots and the redo stack.
     Unreadable entries are skipped — they could not be restored anyway."""
     out: list[EDL] = []
-    for snap in sorted((sd / "snapshots").glob("*.json")):
+    for snap in [*sorted((sd / "snapshots").glob("*.json")), *sorted((sd / "snapshots" / "pinned").glob("*.json"))]:
         try:
             out.append(EDL.model_validate_json(snap.read_text(encoding="utf-8")))
         except Exception:
@@ -200,6 +204,11 @@ def _write_archive(dst: Path, sd: Path, edl: EDL,
         for snap in sorted((sd / "snapshots").glob("*.json")):
             if _SNAPSHOT_NAME.match(snap.name):
                 zf.write(snap, arcname=f"snapshots/{snap.name}")
+        brain_files, brain_report = _sb.brain_entries(sd)
+        for path, arc in brain_files:
+            zf.write(path, arcname=arc)
+        if brain_files or brain_report["left_out"]:
+            manifest["brain"] = brain_report
 
         # Media: bundle by basename to keep arcnames simple. If duplicate
         # basenames, suffix with index.
@@ -494,13 +503,7 @@ def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> Non
         sp = _inside(unpack, name)
         if sp is None or not sp.is_file():
             continue
-        text = sp.read_text(encoding="utf-8")
-        for old, new in src_remap.items():
-            # Both escapings: json.dumps writes \uXXXX for non-ASCII while
-            # pydantic's model_dump_json (edl.json, snapshots) writes UTF-8.
-            for ascii_only in (True, False):
-                text = text.replace(json.dumps(old, ensure_ascii=ascii_only)[1:-1],
-                                    json.dumps(new, ensure_ascii=ascii_only)[1:-1])
+        text = _sb.remap_text(sp.read_text(encoding="utf-8"), src_remap)
         text = _vetted_state_text(name, text, sd)
         if text is None:
             _log.warning("load_project: dropping %s — not the shape this app writes", name)
@@ -509,6 +512,14 @@ def _write_state_files(sd: Path, unpack: Path, src_remap: dict[str, str]) -> Non
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
     _trim_unreadable_history(sd)
+    _restore_brain_state(sd, unpack, src_remap)
+
+
+def _restore_brain_state(sd: Path, unpack: Path, src_remap: dict[str, str]) -> None:
+    """EX-03: the brain's versions, decisions, graph header and pinned
+    snapshots, confined like media and re-hashed for the new paths."""
+    _sb.restore_all(unpack, sd, src_remap, app_asset=_app_asset, vet=lambda n, t: _vetted_state_text(n, t, sd),
+                    edl_of=EDL.model_validate_json)
 
 
 def _trim_unreadable_history(sd: Path) -> None:
@@ -738,6 +749,7 @@ def load_project(src: Path, *, max_unpacked_bytes: int | None = None) -> str:
             # Final QA (zip bomb): budget first, then a counted extraction —
             # `extractall` had no limit, so a 1 MB file wrote 1 GiB of zeros.
             infos = zf.infolist()
+            _sb.refuse_unsafe_entries(infos)
             budget = _unpack_budget(src, infos, max_unpacked_bytes)
             _extract_within(zf, infos, unpack, budget)
         manifest = _read_manifest(unpack)

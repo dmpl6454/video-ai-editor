@@ -237,23 +237,26 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
     if not utts:
         return []
 
-    # 3) MFCC features per utterance
+    # 3) MFCC features per utterance — librosa where it exists (the historical
+    #    path, byte-identical), else the numpy port below (the packaged .app).
+    import numpy as np
     try:
         import librosa  # type: ignore
-        import numpy as np
     except ImportError:
-        # Without librosa we can't get features — return everything as one speaker.
-        return [{"speaker": "SPEAKER_00", "start": s, "end": e} for s, e in utts]
-
-    y, sr = librosa.load(str(audio_wav), sr=16000, mono=True)
+        librosa = None
+    if librosa is not None:
+        y, sr = librosa.load(str(audio_wav), sr=16000, mono=True)
+        mfcc_of = lambda seg: librosa.feature.mfcc(y=seg, sr=sr, n_mfcc=13)  # noqa: E731
+    else:
+        y, sr = _read_wav16k(audio_wav)
+        mfcc_of = lambda seg: mfcc13_numpy(seg.astype(np.float64), sr, librosa_compatible=True)  # noqa: E731
     feats = []
     for s, e in utts:
         i0, i1 = int(s * sr), int(min(len(y), e * sr))
         if i1 - i0 < 800:
             feats.append(np.zeros(13, dtype=np.float32))
             continue
-        mfcc = librosa.feature.mfcc(y=y[i0:i1], sr=sr, n_mfcc=13)
-        feats.append(mfcc.mean(axis=1))
+        feats.append(mfcc_of(y[i0:i1]).mean(axis=1))
     X = np.stack(feats)
 
     # 4) KMeans (numpy, k-means++ init, 25 iterations)
@@ -263,6 +266,96 @@ def _heuristic_diarize(src: Path, cache_dir: Path, *,
          "start": utts[i][0], "end": utts[i][1]}
         for i in range(len(utts))
     ]
+
+
+def _read_wav16k(path: Path):
+    """(float32 mono samples, rate) of the 16 kHz wav `_audio_extract` wrote."""
+    import wave
+    import numpy as np
+    with wave.open(str(path), "rb") as wf:
+        sr = wf.getframerate()
+        data = np.frombuffer(wf.readframes(wf.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+        if wf.getnchannels() > 1:
+            data = data.reshape(-1, wf.getnchannels()).mean(axis=1)
+    return data, sr
+
+
+# --- numpy MFCC (no librosa) -------------------------------------------------
+
+def _hz_to_mel(f):
+    """Slaney's scale (librosa's default, `htk=False`)."""
+    import numpy as np
+    f = np.asarray(f, dtype=np.float64)
+    mel = f / (200.0 / 3)
+    min_log_hz, min_log_mel, logstep = 1000.0, 15.0, np.log(6.4) / 27.0
+    return np.where(f >= min_log_hz, min_log_mel + np.log(np.maximum(f, 1e-12) / min_log_hz) / logstep, mel)
+
+
+def _mel_to_hz(m):
+    import numpy as np
+    m = np.asarray(m, dtype=np.float64)
+    f = 200.0 / 3 * m
+    min_log_hz, min_log_mel, logstep = 1000.0, 15.0, np.log(6.4) / 27.0
+    return np.where(m >= min_log_mel, min_log_hz * np.exp(logstep * (m - min_log_mel)), f)
+
+
+def mel_filterbank(sr: int, n_fft: int, n_mels: int, fmin: float = 0.0, fmax: float | None = None):
+    """librosa.filters.mel(…, htk=False, norm="slaney") in numpy."""
+    import numpy as np
+    fmax = float(sr) / 2 if fmax is None else fmax
+    fftfreqs = np.linspace(0, float(sr) / 2, 1 + n_fft // 2)
+    mel_f = _mel_to_hz(np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax), n_mels + 2))
+    fdiff = np.diff(mel_f)
+    ramps = np.subtract.outer(mel_f, fftfreqs)
+    weights = np.zeros((n_mels, len(fftfreqs)))
+    for i in range(n_mels):
+        lower = -ramps[i] / fdiff[i]
+        upper = ramps[i + 2] / fdiff[i + 1]
+        weights[i] = np.maximum(0, np.minimum(lower, upper))
+    enorm = 2.0 / (mel_f[2: n_mels + 2] - mel_f[:n_mels])
+    return weights * enorm[:, None]
+
+
+def _dct2_ortho(x):
+    """DCT-II with orthonormal scaling along axis 0 (scipy.fftpack.dct type 2, norm="ortho")."""
+    import numpy as np
+    n = x.shape[0]
+    k = np.arange(n)[:, None]
+    m = np.arange(n)[None, :]
+    basis = np.cos(np.pi * k * (2 * m + 1) / (2 * n))
+    scale = np.full((n, 1), np.sqrt(2.0 / n))
+    scale[0, 0] = np.sqrt(1.0 / n)
+    return scale * (basis @ x)
+
+
+def mfcc13_numpy(y, sr: int, *, n_mfcc: int = 13, n_fft: int = 2048, hop: int = 512, n_mels: int = 128,
+                 preemph: float = 0.0, top_db: float | None = 80.0, librosa_compatible: bool = False):
+    """13 MFCC (n_mfcc × frames) in numpy: optional pre-emphasis, a centred
+    periodic-Hann STFT (zero padding, as librosa ≥ 0.10), a power mel
+    spectrogram on Slaney's filterbank, `power_to_db(ref=1, amin=1e-10,
+    top_db)`, DCT-II ortho. `librosa_compatible=True` pins librosa's defaults
+    (n_fft 2048, hop 512, 128 mels, no pre-emphasis), which
+    tests/test_brain_speakers.py holds within 1e-3 of `librosa.feature.mfcc`;
+    the brain's speaker features use 25 ms / 10 ms / 26 mel / 0.97."""
+    import numpy as np
+    y = np.asarray(y, dtype=np.float64)
+    if librosa_compatible:
+        n_fft, hop, n_mels, preemph = 2048, 512, 128, 0.0
+    if preemph:
+        y = np.append(y[0], y[1:] - preemph * y[:-1])
+    pad = n_fft // 2
+    y = np.pad(y, (pad, pad), mode="constant")
+    if len(y) < n_fft:
+        y = np.pad(y, (0, n_fft - len(y)))
+    n_frames = 1 + (len(y) - n_fft) // hop
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
+    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n_fft) / n_fft)
+    spec = np.abs(np.fft.rfft(y[idx] * window, axis=1)) ** 2          # (frames, bins)
+    mel = mel_filterbank(sr, n_fft, n_mels) @ spec.T                    # (mels, frames)
+    log_spec = 10.0 * np.log10(np.maximum(1e-10, mel))
+    if top_db is not None:
+        log_spec = np.maximum(log_spec, log_spec.max() - top_db)
+    return _dct2_ortho(log_spec)[:n_mfcc]
 
 
 def _kmeans_numpy(X, k: int, iters: int = 25, seed: int = 0):

@@ -120,8 +120,8 @@ def test_every_advertised_path_arg_has_a_table_entry():
 
 def test_the_guard_count_is_pinned():
     """A bare count, so a rename cannot quietly shrink the table."""
-    assert len(EXPECTED_GUARDS) == 25  # +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt: bundled font name, render/fonts.py); +1 K3 set_text_style.font (exempt, same rule)
-    assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 11
+    assert len(EXPECTED_GUARDS) == 26  # +1 EB1-B: sync_dialogue_lane.src (read); +1 wave E F2: set_canvas_background.image; +1 on 2026-09-08: apply_lut.lut_path (alias of src) is now advertised; +1 set_caption_style.font (exempt: bundled font name, render/fonts.py); +1 K3 set_text_style.font (exempt, same rule)
+    assert sum(1 for v in EXPECTED_GUARDS.values() if v == "read") == 12   # EB1-B: sync_dialogue_lane.src
     assert sum(1 for v in EXPECTED_GUARDS.values() if v == "write") == 3
 
 

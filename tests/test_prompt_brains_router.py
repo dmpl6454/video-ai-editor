@@ -276,7 +276,7 @@ def test_brains_report_is_honest_per_rung_and_refresh_reprobes():
     rep = router.brains_report(brains=brains, env={"VAI_BRAIN": "auto", "VAI_PROMPT_CLOUD": "0"})
     assert rep["ladder"] == list(BRAIN_IDS) and rep["pinned"] is None and rep["cloud_allowed"] is False
     rows = {r["id"]: r for r in rep["brains"]}
-    assert rows["recipes"]["available"] and rows["recipes"]["detail"].startswith(f"grammar + {len(recipes.RECIPE_NAMES)} recipes")
+    assert rows["recipes"]["available"] and rows["recipes"]["detail"].startswith(f"grammar + {len(recipes.cards(exclude=frozenset()))} recipes")
     assert "tools" in rows["recipes"]["detail"] and rows["recipes"]["fix"] is None
     for bid in ("apple_intelligence", "local_model", "claude"):
         assert rows[bid]["available"] is False and rows[bid]["fix"], bid

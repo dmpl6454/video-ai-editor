@@ -3,6 +3,7 @@ import { useLayoutStore } from '../lib/layoutStore'
 import type { RightTab } from '../lib/rightTab'
 import { Properties } from './Properties'
 import { OpsLog } from './OpsLog'
+import { VersionsStrip } from './brain/VersionsStrip'
 import { ChatOverlay } from './ChatOverlay'
 import { Icon } from './Icon'
 import { useFocusRescue } from './rail/focusRescue'
@@ -106,6 +107,9 @@ export function RightPanel() {
       <div role="tabpanel" id="right-panel-inspect" aria-labelledby={TAB_ID.inspect} className="right-body"
            hidden={!rightOpen || rightTab !== 'inspect'}>
         <Properties />
+        {/* Editor Brain (EB1): named versions above History; renders nothing
+            unless brain.enabled is on AND the project has versions. */}
+        <VersionsStrip />
         <OpsLog />
       </div>
       <div ref={chatRef} role="tabpanel" id="right-panel-chat" aria-labelledby={TAB_ID.chat} className="right-chat"

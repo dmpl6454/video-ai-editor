@@ -203,9 +203,37 @@ def lines_for(before: EDL, after: EDL, results: list[dict[str, Any]], session_di
         c.text for c in C.summarize(before, after, session_dir=session_dir)]
 
 
-def summary_line(plan: Plan, total: int) -> str:
+def brain_lines(plan: Plan, live: EDLStore, log: Any, before: EDL, after: EDL,
+                lines: list[str]) -> tuple[list[str], dict[str, Any] | None]:
+    """Editor Brain (EB1, behind `brain.enabled`): for a brain run, the
+    lines the card SHOWS — the cuts grouped with their reason tally, every
+    line with a why — and the card's `brain` payload; `(lines, None)` for
+    an ordinary prompt or with the flag off, so the 0.8.0 card is
+    byte-for-byte what it was. The footprint the resolver wrote during the
+    dry run is read from the run's scratch copy (still present: the
+    executor discards it after this returns)."""
+    from . import brain_card
+    if brain_card.decisions_id_of(plan) is None:
+        return lines, None
+    from ...brain_setting import is_enabled
+    if not is_enabled():
+        return lines, None
+    run_id = getattr(getattr(log, "record", None), "run_id", None)
+    scratch = (scratch_root(live) / str(run_id) / Path(live.dir).name) if run_id else None
+    changes = C.summarize(before, after, session_dir=Path(live.dir))
+    display, payload = brain_card.card_payload(plan, live, scratch, before, after, changes)
+    if payload is None:
+        return lines, None
+    head = lines[: len(lines) - len(changes)]       # the shorts lines, if any, stay in front
+    return head + [c.text for c in display], payload
+
+
+def summary_line(plan: Plan, total: int, length_s: float | None = None) -> str:
+    """"Edit: 12 changes"; a brain run's card also says how long the result
+    is ("· 44.7 s when applied") — the length was never on the card (UX-12)."""
     title = (plan.title or plan.intent or "This edit").strip()
-    return f"{title}: {total} change{'s' if total != 1 else ''}"
+    line = f"{title}: {total} change{'s' if total != 1 else ''}"
+    return f"{line} · {length_s:.1f} s when applied" if length_s else line
 
 
 def reply_text(label: str, summary: str, shown: list[str], more: int, note: str | None) -> str:
@@ -248,14 +276,19 @@ def pause_for_confirm(live: EDLStore, *, plan: Plan, prompt: str, facts: Any, be
         log.emit({"type": "text_delta", "text": text, "outcome": NOTHING_TO_APPLY})
         log.set_status("done")
         return text
-    cl = C.change_list([C.Change(group="", text=t) for t in lines])
-    summary = summary_line(plan, cl.total)
+    shown, brain = brain_lines(plan, live, log, before, after, lines)
+    cl = C.change_list([C.Change(group="", text=t) for t in shown])
+    summary = summary_line(plan, cl.total, ((brain or {}).get("summary") or {}).get("result_s"))
     q = apply_question()
     paused = plan.with_(needs_input=[q])
     # `hidden`: the lines past the cap, so the card's "and N more changes"
     # opens to show them — every change is seen before Apply (final sweep 3).
     public = {"summary": summary, "lines": cl.lines, "more": cl.more, "total": cl.total,
               "hidden": cl.all_lines[len(cl.lines):], "note": note, "nothing_changed": NOTHING_CHANGED_YET}
+    if brain is not None:
+        public["brain"] = brain
+    # `all_lines` stays the RAW diff (what `apply_check` compares against);
+    # a brain run's grouped lines and whys are presentation (brain_card).
     record = pending.save_pending(
         Path(live.dir), plan=paused, prompt=prompt, facts=facts, ui_state=ui_state,
         preview={**public, "all_lines": lines, "base_hash": base_hash, "fingerprint": fingerprint,
@@ -296,6 +329,12 @@ def public_view(record: dict[str, Any]) -> dict[str, Any] | None:
     view = {k: p.get(k) for k in ("summary", "lines", "more", "total", "note", "nothing_changed")}
     lines = list(p.get("lines") or [])
     view["hidden"] = list(p.get("hidden") or list(p.get("all_lines") or [])[len(lines):])
+    if isinstance(p.get("brain"), dict):
+        # a brain run's payload, only while the flag is on (it can be turned
+        # off with a card open; the card then reads as an ordinary one)
+        from ...brain_setting import is_enabled
+        if is_enabled():
+            view["brain"] = p["brain"]
     return view
 
 
@@ -316,5 +355,6 @@ def preview_plan(record: dict[str, Any]) -> Plan:
 
 __all__ = ["PREVIEW_DIR", "ARTEFACT_DIR", "DRY_RUN_SKIP", "APPLY_KEY", "APPLY_QUESTION", "NOTHING_CHANGED_YET",
            "apply_question", "wants_preview", "is_apply_yes", "scratch_store", "discard_scratch",
-           "path_map", "shorts_lines", "lines_for", "summary_line", "reply_text", "pause_for_confirm",
+           "path_map", "shorts_lines", "lines_for", "brain_lines", "summary_line", "reply_text",
+           "pause_for_confirm",
            "apply_check", "public_view", "preview_plan"]

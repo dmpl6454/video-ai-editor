@@ -68,6 +68,9 @@ class P:
     touch: str = "v"
     pre: Callable[[EDLStore, dict[str, str]], None] | None = None
     ui: dict = field(default_factory=lambda: dict(UI))
+    #: EB1 (FX-D, review SC-04): the plan intent 0.8.0 chose for this phrase, recorded from the frozen
+    #: 0.8.0 grammar; with `brain.enabled` off the Prompt bar must still choose it (`edit` block only).
+    head: str | None = None
 
 
 # --------------------------------------------------------------------------- setups
@@ -981,12 +984,83 @@ HOLDOUT2: list[P] = [
     P("fix the audio", ASK, touch="vm"),
 ]
 
-ALL = [(p, "corpus") for p in CORPUS] + [(p, "holdout") for p in HOLDOUT] + [(p, "holdout2") for p in HOLDOUT2]
+#: EB1 (Editor Brain, lane E): the `edit` family — "make a N-second reel",
+#: "tighten this podcast", "premium podcast", "edit this like …". With
+#: `brain.enabled` OFF (the default, and this harness) every phrasing must
+#: behave exactly as before the brain existed: a reel request is the Auto
+#: edit for that platform, a tighten request is the tighten recipe, a
+#: "premium podcast" is the Auto edit with no platform. With the flag ON and
+#: no Content Graph in the session, `edit` asks the analysis-gate question
+#: and NOTHING changes — `test_edit_block_is_safe_with_brain_on` below runs
+#: the same block with `VAI_BRAIN_ENABLED=1`.
+_REEL = both(speech_kept, canvas_is(1080, 1920))
+_TIGHT = both(speech_kept, cut_only)
+_COMPOSITE = both(speech_kept, canvas_is(1920, 1080))
+EDIT_BLOCK: list[P] = [
+    P("make a 45-second reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make a 45 second reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make me a 30-second reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make this into an engaging 45-second instagram reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("turn this into a 30s reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("cut a 20 second reel out of this", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make a 45-second reel for instagram", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("tighten this podcast", _TIGHT, touch="vmtc", head="tighten"),
+    P("tighten the podcast", _TIGHT, touch="vmtc", head="tighten"),
+    P("tighten this episode", _TIGHT, touch="vmtc", head="tighten"),
+    P("tighten this interview", _TIGHT, touch="vmtc", head="tighten"),
+    P("tighten this podcast like a premium podcast", _TIGHT, touch="vmtc", head="tighten"),
+    P("tighten up this conversation", _TIGHT, touch="vmtc", head="tighten"),
+    P("edit this like a premium podcast", _COMPOSITE, touch="vkmtcx", head="auto_edit"),
+    P("edit this podcast like a premium business podcast", _COMPOSITE, touch="vkmtcx", head="auto_edit"),
+    P("premium podcast", ASK, touch="vkmtcx", head="ask"),
+    P("edit this like a premium business podcast, remove the boring parts", ASK, touch="vkmtcx", head="ask"),
+    P("edit it like a pro podcast editor would", _COMPOSITE, touch="vkmtcx", head="auto_edit"),
+    P("edit this interview like a premium podcast", _COMPOSITE, touch="vkmtcx", head="auto_edit"),
+    P("edit this footage like a talking head reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("cut this like an interview", ASK, touch="vkmtcx", head="ask"),
+    P("edit this episode like a premium podcast with captions", _COMPOSITE, touch="vkmtcx", head="captions"),
+    P("make a 45-second reel and keep the music", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make a 45-second reel, no captions", both(speech_kept, canvas_is(1080, 1920)), touch="vkmtx", head="auto_edit"),
+    # UX-12 (FX-D): the phrasings the re-testers found answered with a wrong or unclear question. With the
+    # flag ON they are the `edit` recipe (or ONE clear question); OFF they are what 0.8.0 made of them.
+    P("cut this down to a 60s vertical for tiktok", ASK, touch="vkmtcx", head="trim"),
+    P("clean this up", ASK, touch="vkmtcx", head="ask"),
+    P("edit this", ASK, touch="vkmtcx", head="auto_edit"),
+    P("make it punchier", ASK, touch="vkmtcx", head="tighten"),
+    P("make a 2 minute reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("podcast ko tight karo, premium feel", ASK, touch="vkmtcx", head="ask"),
+    P("cut the silences and switch to whoever is speaking", _TIGHT, touch="vmtc", head="remove_silences"),
+    P("edit this like a podcast, switch cameras when they talk", ASK, touch="vkmtcx", head="ask"),
+    P("give me a 45 sec short for youtube shorts", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make a 60 second short for tiktok", _REEL, touch="vkmtcx", head="auto_edit"),
+    # the two re-tester phrasings the block did not carry yet (UX-12, review R-editor)
+    P("make a 30 second reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("edit this like a talking head", _REEL, touch="vkmtcx", head="auto_edit"),
+]
+
+#: UX-12: sentences the Auto edit already answered; with the flag ON and no Content Graph they STAY the
+#: 0.8.0 Auto edit (the brain takes `auto_edit` over only when the footage was read).
+EDIT_PASSTHROUGH: list[P] = [
+    P("make this a reel for instagram with captions", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("isko 45 second ki reel bana do", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("make a reel", _REEL, touch="vkmtcx", head="auto_edit"),
+    P("turn this into a youtube video", _COMPOSITE, touch="vkmtcx", head="auto_edit"),
+    P("make a 30-second clip of the best moment for linkedin", both(speech_kept, canvas_is(1080, 1350)),   # linkedin is 4:5
+      touch="vkmtcx", head="auto_edit"),
+    # the re-testers' filler / silence phrasings: 0.8.0 answers them, and must keep doing so with the brain on
+    P("remove the ums and the dead air", _TIGHT, touch="vmtc", head="remove_silences+remove_fillers"),
+    P("remove the fillers but keep the pauses", _TIGHT, touch="vmtc", head="remove_fillers"),
+]
+
+ALL = ([(p, "corpus") for p in CORPUS] + [(p, "holdout") for p in HOLDOUT] + [(p, "holdout2") for p in HOLDOUT2]
+       + [(p, "edit") for p in EDIT_BLOCK + EDIT_PASSTHROUGH])
 
 
 @pytest.mark.usefixtures("no_downloads")
 @pytest.mark.parametrize("entry,part", ALL, ids=[f"{i:03d}-{part[0]}-{p.phrase}" for i, (p, part) in enumerate(ALL)])
-def test_corpus_phrase_never_commits_a_wrong_edit(media, entry, part, request):  # noqa: F811
+def test_corpus_phrase_never_commits_a_wrong_edit(media, entry, part, request, monkeypatch):  # noqa: F811
+    if part == "edit":
+        monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")        # the `edit` block pins the flag-OFF behaviour here
     st, ids = _session(media, f"k3_{request.node.callspec.id[:3]}")
     ui = {k: (ids[v] if k == "selection" else v) for k, v in entry.ui.items()}
     if entry.pre:
@@ -1004,6 +1078,29 @@ def test_corpus_phrase_never_commits_a_wrong_edit(media, entry, part, request): 
                    "rolled_back": any(x["type"] == "clarify" for x in events)
                    and any(x["type"] == "step" for x in events)})
     assert outcome != "wrong", f"WRONG EDIT for {entry.phrase!r}: {why}\nreply: {_question_text(events)[:300]}"
+    if entry.head is not None:
+        # SC-04: flag off, the plan is the one 0.8.0 chose (recorded from the frozen 0.8.0 grammar) — never `edit`
+        assert plan is not None and plan.get("intent") == entry.head, (entry.phrase, plan and plan.get("intent"), entry.head)
+
+
+SWEEP_ON = [(p, part) for p, part in ALL if part != "edit"]
+
+
+@pytest.mark.usefixtures("no_downloads")
+@pytest.mark.parametrize("entry,part", SWEEP_ON, ids=[f"on{i:03d}-{part[0]}-{p.phrase}" for i, (p, part) in enumerate(SWEEP_ON)])
+def test_corpus_phrase_never_commits_a_wrong_edit_with_the_brain_on(media, entry, part, request, monkeypatch):  # noqa: F811
+    """SC-04 / UX-12: wrong-commit rate 0 with `brain.enabled` ON as well as OFF — the `edit` rows and the
+    contract's brain-on reading of the edit asks take no neighbour's phrase (the K3 session has no Content Graph)."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    st, ids = _session(media, f"k3s_{request.node.callspec.id[2:5]}")
+    ui = {k: (ids[v] if k == "selection" else v) for k, v in entry.ui.items()}
+    if entry.pre:
+        entry.pre(st, ids)
+    before_hash, before_aspects = st.edl.hash(), aspects(st.edl)
+    events = _turn(st, entry.phrase, ui)
+    e = st.edl
+    outcome, why = _outcome(entry, e, ids, before_hash, e.hash(), before_aspects, aspects(e))
+    assert outcome != "wrong", f"WRONG EDIT (brain on) for {entry.phrase!r}: {why}\nreply: {_question_text(events)[:300]}"
 
 
 def _rates(rows: list[dict]) -> dict:
@@ -1028,7 +1125,8 @@ def test_corpus_rates(tmp_path_factory):
         pytest.skip("rates need the whole corpus in this run")
     summary = {"all": _rates(RECORD), "corpus": _rates([r for r in RECORD if r["part"] == "corpus"]),
                "holdout": _rates([r for r in RECORD if r["part"] == "holdout"]),
-               "holdout2": _rates([r for r in RECORD if r["part"] == "holdout2"])}
+               "holdout2": _rates([r for r in RECORD if r["part"] == "holdout2"]),
+               "edit": _rates([r for r in RECORD if r["part"] == "edit"])}
     body = json.dumps({"summary": summary, "phrases": RECORD}, indent=1, default=str)
     (tmp_path_factory.getbasetemp() / "k3_corpus.json").write_text(body, encoding="utf-8")
     out = os.environ.get("VAE_K3_CORPUS_OUT")
@@ -1038,3 +1136,42 @@ def test_corpus_rates(tmp_path_factory):
     assert summary["all"]["wrong"] == 0, [r["phrase"] for r in RECORD if r["outcome"] == "wrong"]
     assert summary["corpus"]["correct_edit_rate"] >= 0.8, summary
     assert summary["holdout"]["correct_edit_rate"] >= 0.6, summary
+    assert len(EDIT_BLOCK) >= 20 and summary["edit"]["wrong"] == 0, summary["edit"]
+
+
+@pytest.mark.usefixtures("no_downloads")
+@pytest.mark.parametrize("entry", EDIT_BLOCK, ids=[f"on-{p.phrase}" for p in EDIT_BLOCK])
+def test_edit_block_is_safe_with_brain_on(media, entry, request, monkeypatch):  # noqa: F811
+    """`brain.enabled` on, no Content Graph in the session: every `edit`
+    phrasing asks the analysis gate (or, for a plain reel/tighten wording
+    that still reads as its old recipe, does that edit) and never commits
+    anything else. Wrong-commit rate 0 with the flag ON as well as OFF."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    st, ids = _session(media, f"k3on_{EDIT_BLOCK.index(entry):02d}")
+    ui = {k: (ids[v] if k == "selection" else v) for k, v in entry.ui.items()}
+    before_hash, before_aspects = st.edl.hash(), aspects(st.edl)
+    events = _turn(st, entry.phrase, ui)
+    e = st.edl
+    outcome, why = _outcome(entry, e, ids, before_hash, e.hash(), before_aspects, aspects(e))
+    plan = next((x["plan"] for x in events if x["type"] == "plan"), None)
+    assert outcome != "wrong", f"WRONG EDIT (brain on) for {entry.phrase!r}: {why}"
+    assert plan is not None and "edit" in str(plan.get("intent", "")).split("+"), (plan or {}).get("intent")
+    keys = {q["key"] for x in events if x["type"] == "clarify" for q in x.get("questions", [])}
+    assert "gate_analysis" in keys, (plan.get("intent"), keys, _question_text(events)[:200])
+    assert outcome == "safe", (outcome, why)
+
+
+@pytest.mark.usefixtures("no_downloads")
+@pytest.mark.parametrize("entry", EDIT_PASSTHROUGH, ids=[f"on-{p.phrase}" for p in EDIT_PASSTHROUGH])
+def test_edit_passthrough_stays_the_auto_edit_with_brain_on_and_no_graph(media, entry, request, monkeypatch):  # noqa: F811
+    """UX-12: a sentence the Auto edit already answered is not turned into a question by the brain being on."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    st, ids = _session(media, f"k3pt_{EDIT_PASSTHROUGH.index(entry):02d}")
+    ui = {k: (ids[v] if k == "selection" else v) for k, v in entry.ui.items()}
+    before_hash, before_aspects = st.edl.hash(), aspects(st.edl)
+    events = _turn(st, entry.phrase, ui)
+    e = st.edl
+    outcome, why = _outcome(entry, e, ids, before_hash, e.hash(), before_aspects, aspects(e))
+    plan = next((x["plan"] for x in events if x["type"] == "plan"), None)
+    assert outcome != "wrong", f"WRONG EDIT (brain on) for {entry.phrase!r}: {why}"
+    assert plan is not None and plan.get("intent") == entry.head, (entry.phrase, plan and plan.get("intent"))

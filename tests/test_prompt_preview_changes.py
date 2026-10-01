@@ -51,7 +51,9 @@ def media(tmp_path_factory):
     src = F.speech_clip(root)
     F.write_ingest(src)
     bed = F.music_bed(root, dur=12.0)
-    yield {"root": root, "src": src, "bed": bed, "ingest": (src.parent / "ingest.json").read_bytes()}
+    angle = F.speech_clip(root, "angle")          # a second camera for apply_camera_plan
+    yield {"root": root, "src": src, "bed": bed, "angle": angle,
+           "ingest": (src.parent / "ingest.json").read_bytes()}
     mp.undo()
     config.enable_path_restriction(before)
 
@@ -181,6 +183,26 @@ OPS: dict[str, tuple] = {
     "bulk_duplicate": (_d("bulk_duplicate", clip_ids=["$A"]), ["Duplicated Clip 1 'talk.mp4'"]),
     "duplicate_clip": (_d("duplicate_clip", clip_id="$B"), ["Duplicated Clip 2 'talk.mp4'"]),
     "detach_audio": (_d("detach_audio", clip_id="$A"), ["Clip 1 'talk.mp4': muted"]),
+    # Editor Brain (EB1-B): source-range cuts read as deletions; an angle swap
+    # is a camera line, never a deletion; the dialogue lane is one line plus
+    # the muted camera sound (the fixture's bed stands in for the recorder,
+    # and its music-lane copy is taken as the upload handoff's placement).
+    "cut_source_ranges": (lambda st, ids, m: dispatch(st, "cut_source_ranges", {
+                              "track": "v1", "ranges": [{"src": str(m["src"]), "start": 1.0, "end": 2.0},
+                                                        {"src": str(m["src"]), "start": 9.0, "end": 9.5}]}),
+                          ["Deleted 00:00:01:00-00:00:02:00 of the video (part of Clip 1 'talk.mp4')",
+                           "Deleted 00:00:09:00-00:00:09:15 of the video (part of Clip 3 'talk.mp4')"]),
+    "apply_camera_plan": (lambda st, ids, m: dispatch(st, "apply_camera_plan", {
+                              "switches": [{"src": str(m["src"]), "at_src": 5.0, "until_src": 7.0,
+                                            "angle_src": str(m["angle"])}],
+                              "offsets": {str(m["src"]): 0.0, str(m["angle"]): 0.5}}),
+                          ["Split Clip 2 'talk.mp4' at 00:00:05:00 and 00:00:07:00",
+                           "Camera: 00:00:05:00-00:00:07:00 shows 'angle.mp4' instead of 'talk.mp4'"]),
+    "sync_dialogue_lane": (lambda st, ids, m: dispatch(st, "sync_dialogue_lane", {
+                               "src": str(m["bed"]), "lane": "a1", "offsets": {str(m["src"]): 0.0}}),
+                           ["Dialogue from 'bed.wav' on the Main audio track: 3 pieces in step with the video",
+                            "the recorder was on the Music lane, it is now the dialogue",
+                            "Camera sound muted on 3 video clips: the dialogue plays from the Main audio track"]),
     # stage 3
     "make_shorts": (_d("make_shorts", target_count=2, max_dur=6.0, min_dur=3.0), []),
     # stage 4 — look
@@ -683,3 +705,44 @@ def test_an_all_caps_title_is_named_as_it_renders(media):
     t.style.upper = True
     text = [c.text for c in C.summarize(before, st.edl)]
     assert any(x.startswith("Added title 'WELCOME'") for x in text), text
+
+
+def _reframe_the_main_lane(st: EDLStore, media: dict, *, record: bool) -> None:
+    """auto_reframe's EDL effect on a SPLIT main lane: every piece plays the
+    reframe render of the same upload (dispatch records `<render>.origin`)."""
+    from video_ai_editor.agent import media_origin
+    out = Path(st.dir) / "cache" / f"reframe_{'ab12cd34' if record else 'ee55ff66'}.mp4"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(b"\0")
+    if record:
+        media_origin.record_origin(out, media["src"])
+    for c in st.edl.get_track("v1").clips:
+        c.src = str(out)
+
+
+def test_a_reframe_of_a_split_lane_is_never_a_camera_change(media):
+    """UX-14: with brain.enabled off the legacy 45-second reel's card said
+    "Camera: 8 spans (…) show 'th_16x9.mp4 (reframed)' instead of
+    'th_16x9.mp4'": eight pieces of one clip now play the reframe render, and
+    the angle rule took a derivative of the SAME upload for another camera."""
+    st, ids = _session(media)
+    before = st.edl.model_copy(deep=True)
+    for t in (2.0, 6.0, 10.0):                                    # the reel's cuts split the clips first
+        dispatch(st, "split_at", {"track": "v1", "time": t})
+    _reframe_the_main_lane(st, media, record=True)
+    lines = [c.text for c in C.summarize(before, st.edl)]
+    assert not any(t.startswith("Camera:") for t in lines), lines
+    assert not any("instead of" in t for t in lines), lines
+    assert any("media" in t for t in lines), lines               # said as the media change it is
+
+
+def test_a_second_upload_is_still_a_camera(media):
+    """The other side of UX-14: a piece that plays ANOTHER upload (no
+    `.origin` tying it to the clip's own file) is the brain's angle swap."""
+    st, ids = _session(media)
+    before = st.edl.model_copy(deep=True)
+    dispatch(st, "apply_camera_plan", {
+        "switches": [{"src": str(media["src"]), "at_src": 5.0, "until_src": 7.0, "angle_src": str(media["angle"])}],
+        "offsets": {str(media["src"]): 0.0, str(media["angle"]): 0.5}})
+    lines = [c.text for c in C.summarize(before, st.edl)]
+    assert any(t.startswith("Camera: ") and "'angle.mp4' instead of 'talk.mp4'" in t for t in lines), lines

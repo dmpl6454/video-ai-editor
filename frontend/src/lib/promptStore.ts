@@ -30,7 +30,7 @@ import { answersPayload, type Answers } from './clarifyDefaults'
 import { promptTooLongError } from './promptLimit'
 import {
   EMPTY_RUN, PROMPT_RUNNING_MESSAGE, normalizeBrainsReport, normalizePreview, onPromptRunning, onSessionSwitch,
-  promptRunningFromError,
+  promptRunningFromError, ranBrainTools, withAdvisoryNotes,
   readSseStream, reduce, startRun, type BrainsReport, type PromptEvent, type PromptRunState,
   type ClarifyState, type PromptStatus, type StepRow, type VerifyEvent,
 } from './promptEvents'
@@ -485,8 +485,10 @@ export const usePromptStore = create<PromptStoreState>((set, get) => {
         if (i === -1) steps.push(row); else steps[i] = row
       }
       steps.sort((a, b) => a.index - b.index)
-      const verify = record.verify && typeof record.verify === 'object' && Array.isArray((record.verify as VerifyEvent).checks)
+      const rawVerify = record.verify && typeof record.verify === 'object' && Array.isArray((record.verify as VerifyEvent).checks)
         ? ({ type: 'verify', ...(record.verify as object) } as VerifyEvent) : null
+      // a stored brain run reads like the live one: its advisory audit is a note, not a miss
+      const verify = rawVerify && ranBrainTools(steps.map((s) => s.tool)) ? withAdvisoryNotes(rawVerify) : rawVerify
       const status = String(record.status ?? '')
       const busyStatus = status === 'running' || status === 'planning' || status === 'verifying'
       const mapped: PromptStatus =

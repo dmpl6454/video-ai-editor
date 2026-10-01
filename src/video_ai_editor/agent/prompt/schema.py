@@ -142,6 +142,17 @@ FIT_SENTINEL_PREFIX = "$fit_to:"
 #: (QA-069, wave C) — as a tail cut plus a head cut in one step.
 FIT_BEST_PREFIX = "$fit_best:"
 
+#: Editor Brain (wave EB1): `"$brain:<kind>"` in ONE arg of a step names a
+#: decision kind of the frozen Edit Decision Plan that `plan_ref`
+#: (`d_[0-9a-f]{8}`, a file under `<session>/brain/decisions/`) points at.
+#: `brain/resolve.py` declares the (tool, arg) pairs (`BRAIN_SENTINELS`) and
+#: resolves each step against the LIVE store right before its dispatch —
+#: the `$fit_best` contract: one arg dict or a fan-out list. Kept here so
+#: the plan contract reads without importing brain/.
+BRAIN_SENTINEL_PREFIX = "$brain:"
+PLAN_REF_ARG = "plan_ref"
+PLAN_REF_PATTERN = r"^d_[0-9a-f]{8}$"
+
 #: Duration gate (§1.1): above this the planner appends the `go` confirm.
 LONG_RUN_SECONDS = 90.0
 
@@ -337,10 +348,11 @@ PLAN_DENY: frozenset[str] = frozenset({
     "vocal_isolate", "instrumental_isolate", "diarize", "assign_caption_speakers", "search_media",
 })
 
-#: §4.9 tools X adds to DISPATCH after BASE. They need a stage today because
-#: P's `transcribe` recipe emits them; the contracts test lets TOOL_STAGE lead
-#: DISPATCH by exactly this set. Delete entries as they land — `transcribe`
-#: landed with `dispatch.transcribe_tool`, so the set is empty.
+#: Tools TOOL_STAGE may name before DISPATCH has them (the contracts test
+#: lets TOOL_STAGE lead DISPATCH by exactly this set; delete entries as they
+#: land). Wave EB1 staged `cut_source_ranges`, `apply_camera_plan` and
+#: `sync_dialogue_lane` here while lane B built them; they landed in the
+#: same wave, so the set is empty again.
 PENDING_DISPATCH_TOOLS: frozenset[str] = frozenset()
 
 TOOL_STAGE: dict[str, int] = {
@@ -357,6 +369,10 @@ TOOL_STAGE: dict[str, int] = {
     "trim_clip": 2, "split_at": 2, "set_clip_timing": 2, "move_clip": 2,
     "reorder_clips": 2, "bulk_delete": 2, "bulk_duplicate": 2, "duplicate_clip": 2,
     "detach_audio": 2,
+    # Editor Brain (EB1): three narrow tools at stage 2 — source-range cuts,
+    # the camera plan, and the dialogue lane, which the compiler emits LAST
+    # in the stage (brain/resolve.STAGE2_ORDER) so it sees the final v1 layout
+    "cut_source_ranges": 2, "apply_camera_plan": 2, "sync_dialogue_lane": 2,
     # 3 — structure (terminal for the parent plan)
     "make_shorts": 3,
     # 4 — look (per-clip picture; templates are composites applied first)
@@ -522,6 +538,16 @@ CHECK_SPECS: dict[str, CheckSpec] = {s.name: s for s in (
     _spec("shorts_created", "the shorts were created", count=None, max_dur=None, min_dur=None),
     _spec("shorts_finished", "each short has captions, a hook and a 9:16 canvas"),
     _spec("audit_ok", "the aesthetic audit passes"),
+    # Editor Brain (EB1, spec §6.1) — both BLOCKING, neither needs a render.
+    # `no_cut_mid_word`: every AUDIO cut seam (a1's when the dialogue lane
+    # exists, v1's otherwise) lies outside [w.t0 + tol, w.t1 − tol] of every
+    # kept word, measured in the source clock from the transcript the
+    # side-effect snapshot keeps readable in-batch. `dialogue_in_sync`: the
+    # a1 clip under every v1 angle piece plays the same reference second
+    # within `tol` (None = half a frame), no a1 clip over a v1 gap, angle
+    # mics muted, no v1 transition — EDL only (brain/checks.py).
+    _spec("no_cut_mid_word", "no cut lands inside a word", tol=0.02),
+    _spec("dialogue_in_sync", "the dialogue lane is in sync with the picture", tol=None),
     # the fallback: the step ran without raising
     _spec("tool_ok", "the step completed", tool=None),
 )}
@@ -542,6 +568,9 @@ BLOCKING_CHECKS: frozenset[str] = frozenset({
     "canvas_bg_set", "blend_is", "voice_effect_is", "animation_is", "volume_db", "track_muted",
     "clips_muted", "video_fade_set", "audio_fade_set", "music_fade_set", "canvas_aspect", "caption_look",
     "captions_style", "export_preset_applied", "loudness_target_set", "text_present", "text_style_is",
+    # Editor Brain (EB1): the dialogue lane is DERIVED, last, and blocking —
+    # an out-of-step a1 or a cut inside a word never reaches a commit.
+    "no_cut_mid_word", "dialogue_in_sync",
 })
 
 
@@ -582,6 +611,11 @@ DEFAULT_POSTCONDITIONS: dict[str, list[Postcondition]] = {
                        _pc("speech_preserved", "no kept word was cut")],
     "cut_range": [_pc("duration_between", "the cut range is gone",
                       start=f"{ARG_REF}start", end=f"{ARG_REF}end", tol=0.1)],
+    # Editor Brain (EB1): source-range cuts must not land inside a kept word;
+    # the dialogue lane must play the picture's reference seconds.
+    "cut_source_ranges": [_pc("no_cut_mid_word", "no cut lands inside a word", tol=0.02),
+                          _pc("speech_preserved", "no kept word was cut")],
+    "sync_dialogue_lane": [_pc("dialogue_in_sync", "the dialogue lane is in sync with the picture")],
     "set_speed": [_pc("speed_equals", "the speed matches",
                       clip_id=f"{ARG_REF}clip_id", factor=f"{ARG_REF}factor",
                       preset=f"{ARG_REF}preset")],
@@ -700,6 +734,7 @@ def bind_postconditions(tool: str, args: dict[str, Any]) -> list[Postcondition]:
 
 __all__ = [
     "PLAN_JSON_SCHEMA", "CLOUD_PLAN_STRIPPED_FIELDS", "cloud_plan_input_schema", "CLIP_SENTINELS", "SEAM_SENTINEL", "HOOK_SENTINEL", "FIT_SENTINEL_PREFIX", "FIT_BEST_PREFIX", "LONG_RUN_SECONDS",
+    "BRAIN_SENTINEL_PREFIX", "PLAN_REF_ARG", "PLAN_REF_PATTERN",
     "BrainId", "NeedsInputKind", "SlotValue",
     "Step", "NeedsInputOption", "NeedsInput", "Postcondition", "DownloadNeeded", "Plan",
     "IntentItem", "DraftQuestion", "IntentDraft",

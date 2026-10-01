@@ -1,0 +1,260 @@
+{
+ "brand_kit": null,
+ "canvas": {
+  "bg": "#000000",
+  "bitrate_kbps": null,
+  "fps": 20,
+  "h": 1080,
+  "loudness_lufs": -16.0,
+  "w": 1920
+ },
+ "duration": 337.25,
+ "markers": [],
+ "show_template": null,
+ "tracks": [
+  {
+   "clips": [
+    {
+     "audio": {
+      "channels": "stereo",
+      "fade_in": 0.0,
+      "fade_out": 0.0,
+      "gain_db": 0.0,
+      "gain_env": null,
+      "keep_pitch": true,
+      "mute": false
+     },
+     "chromakey": null,
+     "effects": [],
+     "fit": "contain",
+     "framing": null,
+     "id": "c_308c70dd",
+     "in": 0.0,
+     "mask": null,
+     "matte_src": null,
+     "out": 168.9,
+     "reverse": false,
+     "speed": null,
+     "src": "/media/p2_cam_a_ea24ff10/p2_cam_a.normalized.mp4",
+     "start": 0.0,
+     "track_to": null,
+     "transform": {
+      "opacity": 1.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "x": 0.0,
+      "y": 0.0
+     },
+     "video_fade_in": 0.0,
+     "video_fade_out": 0.0
+    },
+    {
+     "audio": {
+      "channels": "stereo",
+      "fade_in": 0.0,
+      "fade_out": 0.0,
+      "gain_db": 0.0,
+      "gain_env": null,
+      "keep_pitch": true,
+      "mute": false
+     },
+     "chromakey": null,
+     "effects": [],
+     "fit": "contain",
+     "framing": null,
+     "id": "c_98667370",
+     "in": 0.0,
+     "mask": null,
+     "matte_src": null,
+     "out": 168.35,
+     "reverse": false,
+     "speed": null,
+     "src": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+     "start": 168.9,
+     "track_to": null,
+     "transform": {
+      "opacity": 1.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "x": 0.0,
+      "y": 0.0
+     },
+     "video_fade_in": 0.0,
+     "video_fade_out": 0.0
+    }
+   ],
+   "config": null,
+   "duck": null,
+   "id": "v1",
+   "label": "Main video",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "video",
+   "z": 0
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "v2",
+   "label": "PIP / overlay video",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "video",
+   "z": 1
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "a1",
+   "label": "Main audio",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "audio",
+   "z": 0
+  },
+  {
+   "clips": [
+    {
+     "audio": {
+      "channels": "stereo",
+      "fade_in": 0.5,
+      "fade_out": 1.0,
+      "gain_db": -12.0,
+      "gain_env": null,
+      "keep_pitch": true,
+      "mute": false
+     },
+     "chromakey": null,
+     "effects": [],
+     "fit": "contain",
+     "framing": null,
+     "id": "c_00e9b970",
+     "in": 0.0,
+     "mask": null,
+     "matte_src": null,
+     "out": 168.55,
+     "reverse": false,
+     "speed": null,
+     "src": "/media/audio/p2_recorder_541ba464.wav",
+     "start": 0.0,
+     "track_to": null,
+     "transform": {
+      "opacity": 1.0,
+      "rotation": 0.0,
+      "scale": 1.0,
+      "x": 0.0,
+      "y": 0.0
+     },
+     "video_fade_in": 0.0,
+     "video_fade_out": 0.0
+    }
+   ],
+   "config": null,
+   "duck": {
+    "to_db": -18.0,
+    "track_ref": "a1"
+   },
+   "id": "music",
+   "label": "Music",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "music",
+   "z": 0
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "vo",
+   "label": "Voiceover",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "vo",
+   "z": 0
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "tx_hook",
+   "label": "Hook",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "text",
+   "z": 10
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "tx_super",
+   "label": "Super text",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "text",
+   "z": 11
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "tx_lt",
+   "label": "Lower thirds",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "text",
+   "z": 12
+  },
+  {
+   "clips": [],
+   "config": null,
+   "duck": null,
+   "id": "stickers",
+   "label": "Stickers",
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "sticker",
+   "z": 12
+  },
+  {
+   "clips": [],
+   "config": {
+    "enabled": false,
+    "lang": null,
+    "look": null,
+    "position": "bottom",
+    "style": "default"
+   },
+   "duck": null,
+   "id": "captions",
+   "label": null,
+   "locked": false,
+   "muted": false,
+   "solo": false,
+   "transitions": [],
+   "type": "captions",
+   "z": 13
+  }
+ ],
+ "version": 3
+}

@@ -21,6 +21,7 @@ import { ToastHost } from './components/Toast'
 import { Splitter } from './components/Splitter'
 import { Icon } from './components/Icon'
 import { useLayoutStore } from './lib/layoutStore'
+import { useBrainFlag } from './lib/brainFlag'
 import { useKeymap } from './keymap/engine'
 
 // The 3-pane editor holds a 900px floor (see .app in styles.css) and scrolls
@@ -34,6 +35,10 @@ export default function App() {
   // QA-105/109: notice edits made in another window (focus, visibility, a
   // light poll) and whether the engine is still there.
   useEffect(() => startSessionWatch(window), [])
+  // Editor Brain (EB1): whether its surfaces show (`brain.enabled`, off by
+  // default); read once, the components render nothing brain-shaped until then.
+  const loadBrainFlag = useBrainFlag((s) => s.load)
+  useEffect(() => { void loadBrainFlag() }, [loadBrainFlag])
 
   // The shell's layout (lib/layoutStore, LEFT_RAIL_SPEC §6.1): which tool
   // panel shows, whether each side is open, and any DRAGGED side width. A

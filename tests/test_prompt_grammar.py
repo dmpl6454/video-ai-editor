@@ -9,7 +9,14 @@ carries the same strings; if the two drift the benchmark run says so).
 """
 from __future__ import annotations
 
+import json
+import sys
+import types
+from pathlib import Path
+
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 from video_ai_editor.agent.prompt import grammar as G
 
@@ -163,7 +170,9 @@ def test_transition_requests_without_the_word_transition():
 
 
 def test_every_intent_has_a_phrase_row_and_the_tie_breaks_are_real_intents():
-    assert set(G.PHRASES) == set(G.INTENTS)
+    from video_ai_editor.agent.prompt import edit_grammar as EG
+    # the `edit` rows live in edit_grammar (read only with brain.enabled on; review SC-04)
+    assert set(G.PHRASES) | set(EG.EDIT_PHRASES) == set(G.INTENTS) and not set(G.PHRASES) & set(EG.EDIT_PHRASES)
     for winner, loser in G._TIE_BREAKS:
         assert winner in G.INTENTS and loser in G.INTENTS
 
@@ -181,3 +190,160 @@ def test_clause_slots_keep_the_proper_noun_name_from_the_whole_prompt():
     assert det.intents == ["brand", "title"]
     assert det.hits[0].slots.name is None and det.hits[0].slots.handle == "@acme"
     assert det.hits[1].slots.name == "Priya Sharma" and det.hits[1].slots.handle is None
+
+
+# --------------------------------------------------------------------------
+# Editor Brain (EB1, FX-D, review SC-04): brain.enabled OFF is 0.8.0.
+#
+# The differential runs against a FROZEN copy of the 0.8.0 grammar
+# (tests/goldens/prompt_flag_off/grammar_0_8_0.py.txt = `git show f407287:…/grammar.py`),
+# phrase by phrase over the whole K3 corpus, the `edit` block and the UX-12 phrasings:
+# the reading (intents, scores, clauses, slots, exclusions, unmatched) and the PLAN
+# (intent, title, steps, questions, reply) must be equal with the flag off.
+# --------------------------------------------------------------------------
+
+_FROZEN_0_8_0 = Path(__file__).parent / "goldens" / "prompt_flag_off" / "grammar_0_8_0.py.txt"
+
+
+def frozen_grammar() -> types.ModuleType:
+    """The 0.8.0 grammar module, loaded under the prompt package so its relative imports resolve."""
+    name = "video_ai_editor.agent.prompt.grammar_0_8_0"
+    if name in sys.modules:
+        return sys.modules[name]
+    mod = types.ModuleType(name)
+    mod.__package__ = "video_ai_editor.agent.prompt"
+    mod.__file__ = str(_FROZEN_0_8_0)
+    sys.modules[name] = mod                       # dataclasses look their module up here
+    exec(compile(_FROZEN_0_8_0.read_text(encoding="utf-8"), str(_FROZEN_0_8_0), "exec"), mod.__dict__)
+    return mod
+
+
+def _corpus_phrases() -> tuple[list[str], list[str]]:
+    """(the K3 phrasings that are not `edit` phrasings, the `edit` block + passthrough)."""
+    import test_k3_prompt_corpus as K
+    edit = [p.phrase for p in K.EDIT_BLOCK + K.EDIT_PASSTHROUGH]
+    return [p.phrase for p in K.CORPUS + K.HOLDOUT + K.HOLDOUT2], edit
+
+
+def _reading(det) -> tuple:
+    return (det.clauses, [(h.intent, h.score, h.clause, h.slots, h.template) for h in det.hits],
+            det.exclusions, det.unmatched, det.slots)
+
+
+def test_flag_off_every_phrase_reads_as_it_did_in_0_8_0(monkeypatch):
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    head = frozen_grammar()
+    rest, edit = _corpus_phrases()
+    phrases = rest + edit
+    assert len(phrases) >= 500 and len(edit) >= 34
+    bad = [p for p in phrases if _reading(G.detect(p)) != _reading(head.detect(p))]
+    assert not bad, f"{len(bad)} phrases read differently from 0.8.0 with the brain off: {bad[:8]}"
+    assert not any(h.intent == "edit" for p in phrases for h in G.detect(p).hits)
+    # the tables everyone else reads are the 0.8.0 ones
+    assert G.PHRASES == head.PHRASES and G.CUT_PRECEDENCE == head.CUT_PRECEDENCE
+
+
+def test_flag_on_no_neighbour_moves(monkeypatch):
+    """The `edit` rows take only the `edit` phrasings: with the brain ON every other corpus phrase still reads as 0.8.0."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    head = frozen_grammar()
+    rest, edit = _corpus_phrases()
+    bad = [p for p in rest if _reading(G.detect(p)) != _reading(head.detect(p))]
+    assert not bad, f"an `edit` row took over {bad[:8]}"
+    # …and every phrase of the edit block reads as ONE edit or (the passthrough) as the auto edit, never a question
+    import test_k3_prompt_corpus as K
+    for p in K.EDIT_BLOCK:
+        det = G.detect(p.phrase)
+        assert "edit" in det.intents and det.confidence >= G.RUN_THRESHOLD, (p.phrase, det.intents, det.confidence)
+    for p in K.EDIT_PASSTHROUGH:                 # the sentences 0.8.0 already answered read as 0.8.0 read them
+        assert G.detect(p.phrase).intents == head.detect(p.phrase).intents, p.phrase
+
+
+def _plan_digest(plan) -> dict:
+    return {"intent": plan.intent, "title": plan.title, "reply": plan.reply,
+            "steps": [(s.tool, json.dumps(s.args, sort_keys=True, default=str), s.stage) for s in plan.steps],
+            "questions": [(q.key, q.question, [(o.value, o.label) for o in (q.options or [])]) for q in plan.needs_input]}
+
+
+def plan_digests(phrases: list[str], facts, grammar_module=None) -> dict[str, dict]:
+    """`planner.plan` for every phrase, optionally with another grammar module swapped in for the run."""
+    from video_ai_editor.agent.prompt import planner
+    saved = planner.G
+    if grammar_module is not None:
+        planner.G = grammar_module
+    try:
+        return {p: _plan_digest(planner.plan(p, facts)) for p in phrases}
+    finally:
+        planner.G = saved
+
+
+@pytest.fixture(scope="module")
+def k3_facts(tmp_path_factory):
+    """Facts of the K3 sweep session (three 4 s clips, music bed, clip B selected) — built with the flag off."""
+    import prompt_fixtures as F
+    from video_ai_editor import config, storage
+    from video_ai_editor.agent.dispatch import dispatch
+    from video_ai_editor.agent.prompt.facts import build_facts
+    from video_ai_editor.edl.snapshot import EDLStore
+    root = tmp_path_factory.mktemp("flag_off")
+    mp = pytest.MonkeyPatch()
+    mp.setenv("VAI_BRAIN_ENABLED", "0")
+    before = config._FORCED_RESTRICT
+    config.enable_path_restriction(False)
+    mp.setattr(storage, "WORKDIR", root)
+    mp.setattr(config, "WORKDIR", root)
+    src = F.speech_clip(root)
+    F.write_ingest(src)
+    bed = F.music_bed(root, dur=12.0)
+    st = EDLStore(root / "sess")
+    dispatch(st, "add_clip", {"track": "v1", "src": str(src), "in": 0, "out": F.CLIP_DUR, "start": 0})
+    dispatch(st, "set_canvas", {"w": 1920, "h": 1080})
+    dispatch(st, "split_at", {"track": "v1", "time": 4.0})
+    dispatch(st, "split_at", {"track": "v1", "time": 8.0})
+    dispatch(st, "add_music", {"src": str(bed), "start": 0.0, "volume_db": -14.0, "duck": False})
+    ids = [c.id for c in st.edl.get_track("v1").clips]
+    facts = build_facts(st, {"selection": ids[1], "playhead": 5.5}, feature_report={"unavailable": []})
+    yield facts
+    mp.undo()
+    config.enable_path_restriction(before)
+
+
+def test_flag_off_every_phrase_plans_as_it_did_in_0_8_0(k3_facts, monkeypatch):
+    """The plan/route chosen — intent, title, steps, the question (with its options) and the reply — equals
+    what 0.8.0's grammar chooses, phrase by phrase: no replies naming the hidden feature, no new rows."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    rest, edit = _corpus_phrases()
+    phrases = rest + edit
+    now = plan_digests(phrases, k3_facts)
+    then = plan_digests(phrases, k3_facts, frozen_grammar())
+    bad = [p for p in phrases if now[p] != then[p]]
+    assert not bad, f"{len(bad)} plans differ from 0.8.0 with the brain off, first: {bad[0]!r}: {now[bad[0]]} != {then[bad[0]]}"
+    assert not any("Editor Brain" in (d["reply"] or "") for d in now.values())
+    assert not any(d["intent"] == "edit" or "edit" in d["intent"].split("+") for d in now.values())
+
+
+def test_flag_off_an_unread_phrase_never_offers_the_hidden_recipe(k3_facts, monkeypatch):
+    """The 'which did you mean?' options come from the 0.8.0 tables, with the brain off and on alike."""
+    for flag in ("0", "1"):
+        monkeypatch.setenv("VAI_BRAIN_ENABLED", flag)
+        for phrase in ("do something with the sound", "make it better", "fix this"):
+            digest = plan_digests([phrase], k3_facts)[phrase]
+            offered = {v for _k, _q, opts in digest["questions"] for v, _l in opts}
+            assert "edit" not in offered, (flag, phrase, digest)
+
+
+def test_the_ux12_phrasings_are_one_edit_with_the_brain_on(monkeypatch):
+    """Review UX-12: each phrasing the re-testers found answered with a wrong or unclear question is ONE `edit` clause."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    for phrase in ("cut this down to a 60s vertical for tiktok", "clean this up", "edit this", "make it punchier",
+                   "make a 2 minute reel", "podcast ko tight karo, premium feel",
+                   "cut the silences and switch to whoever is speaking",
+                   "edit this like a podcast, switch cameras when they talk", "give me a 45 sec short for youtube shorts",
+                   "filler words hata do aur tight kar do", "sync the dialogue"):
+        det = G.detect(phrase)
+        assert det.intents == ["edit"] and det.confidence == 1.0 and not det.unmatched, (phrase, det.intents, det.confidence)
+    # neighbours stay: a platform export, "clean this up FOR tiktok", a title look, the beat sync
+    assert G.detect("export for tiktok").intents == ["export_preset"]
+    assert G.detect("clean this up for tiktok").intents == ["auto_edit"]
+    assert G.detect("make the title look premium").intents == ["color_look"]
+    assert G.detect("sync to the beat").intents == ["beat_sync"]

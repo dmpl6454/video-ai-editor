@@ -67,8 +67,9 @@ from .langs import needs_translation
 from .presets import font_names, lut_names, music_beds, show_template_names
 from .recipes import (ASK, FILLERS_STRICT, RECIPE_BY_NAME, Intent, ask, estimate_seconds,
                       normalize_slots, placeholder)
-from .schema import (ARG_REF, CLIP_SENTINELS, PLAN_DENY, SEAM_SENTINEL, STAGE_AUDIT, STAGE_CUTS, STAGE_REFRAME,
-                     TOOL_STAGE, NeedsInput, Plan, Postcondition, Step, bind_postconditions)
+from .schema import (ARG_REF, BRAIN_SENTINEL_PREFIX, CLIP_SENTINELS, PLAN_DENY, PLAN_REF_ARG, SEAM_SENTINEL,
+                     STAGE_AUDIT, STAGE_CUTS, STAGE_REFRAME, TOOL_STAGE, NeedsInput, Plan, Postcondition, Step,
+                     bind_postconditions)
 
 _D = importlib.import_module("video_ai_editor.agent.dispatch")
 
@@ -98,16 +99,39 @@ EXTRA_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "audio": {"type": "string", "enum": ["fade_boost", "none"]}}, "required": ["text"]},
 }
 
+#: Editor Brain (EB1): the frozen arg shapes of the three tools lane B adds
+#: to `agent/tools.py` (EB1 brief "Frozen contracts"). `plan_schema_for`
+#: prefers the advertised schema the moment it exists; these keep the plan
+#: contract checkable — and `tests/test_brain_resolve.py` green — before
+#: it lands, and pin the shape afterwards. `_check_brain_tool_args` holds
+#: the nested path / bound rules no JSON schema can express here.
+BRAIN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "cut_source_ranges": {"type": "object", "properties": {
+        "track": {"type": "string"}, "ranges": {"type": "array", "items": {"type": "object"}},
+        "why": {"type": "string"}}, "required": ["ranges"]},
+    "apply_camera_plan": {"type": "object", "properties": {
+        "switches": {"type": "array", "items": {"type": "object"}}, "offsets": {"type": "object"}},
+        "required": ["switches", "offsets"]},
+    "sync_dialogue_lane": {"type": "object", "properties": {
+        "src": {"type": "string"}, "lane": {"type": "string"}, "offsets": {"type": "object"},
+        "seam_fade_s": {"type": "number"}, "mute_camera_mics": {"type": "boolean"}}, "required": ["src"]},
+}
+_PLAN_REF_PROP: dict[str, dict[str, Any]] = {PLAN_REF_ARG: {"type": "string"}}
+
 #: Args beyond a tool's advertised schema that plans may carry (§1.3 / §4.9).
 EXTRA_ARGS: dict[str, dict[str, dict[str, Any]]] = {
     "auto_reframe": {"subject_track": {"type": "boolean"}},
     "apply_template": {"with_hook_stack": {"type": "boolean"}},
-    "add_caption_track": {"chunk_size": {"type": "integer"}},
+    "add_caption_track": {"chunk_size": {"type": "integer"}, **_PLAN_REF_PROP},
     "add_music": {"loop": {"type": "boolean"}},
+    # Editor Brain (EB1): `plan_ref` rides on the five sentinel-carrying
+    # tools (brain/resolve.BRAIN_SENTINELS) and is stripped before dispatch.
+    "split_at": _PLAN_REF_PROP, "reorder_clips": _PLAN_REF_PROP, "add_keyframe": _PLAN_REF_PROP,
+    "cut_source_ranges": _PLAN_REF_PROP, "apply_camera_plan": _PLAN_REF_PROP,
 }
 
 PLAN_TOOLS: frozenset[str] = frozenset(
-    ({t["name"] for t in _tools.list_tools()} | set(EXTRA_TOOL_SCHEMAS)) - PLAN_DENY)
+    ({t["name"] for t in _tools.list_tools()} | set(EXTRA_TOOL_SCHEMAS) | set(BRAIN_TOOL_SCHEMAS)) - PLAN_DENY)
 
 #: Track ids the EDL creates itself (defaults + the ones handlers add on
 #: demand). A step may name one of these before an earlier step in the same
@@ -162,6 +186,7 @@ ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("add_fade", "in_s"): (0.0, 30.0), ("add_fade", "out_s"): (0.0, 30.0),
     ("set_video_fade", "in_s"): (0.0, 30.0), ("set_video_fade", "out_s"): (0.0, 30.0),
     ("fit_music_to_video", "fade_in"): (0.0, 30.0), ("fit_music_to_video", "fade_out"): (0.0, 30.0),
+    ("sync_dialogue_lane", "seam_fade_s"): (0.0, 0.05),           # Editor Brain (EB1)
 }
 
 #: (tool, arg) → max characters for free text that lands on screen or in a
@@ -190,7 +215,7 @@ MAX_POSTCONDITIONS = 20
 def plan_schema_for(tool: str) -> dict[str, Any] | None:
     """The schema a PLAN step is checked against: the advertised
     `input_schema` (or `EXTRA_TOOL_SCHEMAS`) with `EXTRA_ARGS` merged in."""
-    base = _tools.input_schema_for(tool) or EXTRA_TOOL_SCHEMAS.get(tool)
+    base = _tools.input_schema_for(tool) or EXTRA_TOOL_SCHEMAS.get(tool) or BRAIN_TOOL_SCHEMAS.get(tool)
     if base is None:
         return None
     props = {**(base.get("properties") or {}), **EXTRA_ARGS.get(tool, {})}
@@ -217,9 +242,60 @@ def _blank(v: Any) -> bool:
     return not isinstance(v, str) or not v.strip()
 
 
+# --- Editor Brain (EB1): the `$brain:<kind>` rule ---------------------------
+# The shape-level rule lives here (a sentinel is accepted only on its
+# declared (tool, arg) pair; the resolver fills the args it declares); the
+# plan_ref / current-graph check and the nested path + bound rules of the
+# three brain tools are `brain/plan_rules.py`, called per step below.
+
+def _brain_kind(v: Any) -> str | None:
+    if isinstance(v, str) and v.startswith(BRAIN_SENTINEL_PREFIX):
+        return v[len(BRAIN_SENTINEL_PREFIX):] or None
+    return None
+
+
+def _brain_rules():
+    from ...brain import plan_rules as _rules
+    return _rules
+
+
+def _is_brain_sentinel(tool: str, key: str, v: Any) -> bool:
+    """`$brain:<kind>` exactly on the (tool, arg) pair brain/resolve.py
+    declares for that kind — nowhere else, never as a free string."""
+    kind = _brain_kind(v)
+    return kind is not None and _brain_rules().BRAIN_SENTINELS.get(kind) == (tool, key)
+
+
+def _brain_fills(tool: str, args: dict[str, Any]) -> frozenset[str]:
+    """Args the resolver supplies for this step's sentinel (`add_keyframe`
+    declares prop/time/value required; the fan-out fills them per key)."""
+    out: set[str] = set()
+    for key, value in args.items():
+        if _is_brain_sentinel(tool, key, value):
+            out |= set(_brain_rules().SENTINEL_FILLS.get(_brain_kind(value) or "", ()))
+    return frozenset(out)
+
+
+def _check_brain_step(tool: str, args: dict[str, Any], facts: TimelineFacts, reasons: list[str]) -> None:
+    _brain_rules().check_brain_step(tool, args, facts, reasons)
+
+
+def _check_brain_tool_args(tool: str, args: dict[str, Any], facts: TimelineFacts, reasons: list[str]) -> None:
+    _brain_rules().check_brain_tool_args(tool, args, facts, reasons, resolve_path=_resolve,
+                                         known_tracks=set(facts.track_ids) | KNOWN_TRACK_IDS,
+                                         is_placeholder=_is_placeholder)
+
+
 # --------------------------------------------------------------------------
 # 3. Per-step checks
 # --------------------------------------------------------------------------
+
+def _check_required(tool: str, schema: dict[str, Any], out: dict[str, Any], reasons: list[str]) -> None:
+    fills = _brain_fills(tool, out)          # EB1: the resolver supplies these per dispatch
+    for req in schema["required"]:
+        if req not in out and req not in fills:
+            reasons.append(f"{tool}: missing required arg {req!r}")
+
 
 def _check_shape(tool: str, args: dict[str, Any], schema: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
     """Rule 5: unknown / required / type / enum, on a copy. Returns the
@@ -231,11 +307,14 @@ def _check_shape(tool: str, args: dict[str, Any], schema: dict[str, Any], reason
     unknown = sorted(k for k in out if k not in props)
     if unknown:
         reasons.append(f"{tool}: unknown args {unknown}")
-    for req in schema["required"]:
-        if req not in out:
-            reasons.append(f"{tool}: missing required arg {req!r}")
+    _check_required(tool, schema, out, reasons)
     for key, value in list(out.items()):
         spec = props.get(key)
+        if _brain_kind(value) is not None:
+            if not _is_brain_sentinel(tool, key, value):
+                reasons.append(f"{tool}.{key}: {value!r} — $brain:<kind> is accepted only on its declared "
+                               f"(tool, arg) pair (brain/resolve.BRAIN_SENTINELS)")
+            continue
         if not isinstance(spec, dict) or _is_placeholder(value) or _is_seam_sentinel(tool, key, value):
             continue
         declared = spec.get("type")
@@ -469,6 +548,13 @@ def _question_key(tool: str, arg: str) -> str:
     return f"{arg}_{tool}"[:32]
 
 
+def _on_timeline(tool: str, resolved: str, facts: TimelineFacts) -> bool:
+    """Editor Brain (EB1): the three brain tools re-use files that are
+    ALREADY on the timeline (`facts.timeline_paths`) — and only they do."""
+    from ...brain import plan_rules as _rules      # lazy, as below: brain/ imports this package
+    return tool in _rules.BRAIN_TOOLS and resolved in (getattr(facts, "timeline_paths", None) or set())
+
+
 def _check_paths(tool: str, args: dict[str, Any], facts: TimelineFacts, schema: dict[str, Any],
                  reasons: list[str], notes: list[str], questions: list[NeedsInput]) -> dict[str, Any]:
     """Rule 6. Returns args with read paths resolved (or replaced by a
@@ -499,7 +585,7 @@ def _check_paths(tool: str, args: dict[str, Any], facts: TimelineFacts, schema: 
                 reasons.append(f"{tool}.{arg}: path must be a non-empty string")
                 continue
             resolved = _resolve(v)
-            if resolved is not None and resolved in facts.allowed_paths:
+            if resolved is not None and (resolved in facts.allowed_paths or _on_timeline(tool, resolved, facts)):
                 resolved_list.append(resolved)
                 continue
             base = Path(v).name
@@ -555,7 +641,7 @@ def _check_refs(tool: str, args: dict[str, Any], facts: TimelineFacts, has_cuts:
             continue
         refs = args[key] if isinstance(args[key], (list, tuple)) else [args[key]]
         for ref in refs:
-            if ref in CLIP_SENTINELS or ref in known_clips:
+            if ref in CLIP_SENTINELS or ref in known_clips or _is_brain_sentinel(tool, key, ref):
                 continue
             reasons.append(f"{tool}.{key}: {ref!r} is not a clip on this timeline (use a sentinel like $v1_all)")
     if "track" in args and not _is_placeholder(args["track"]):
@@ -818,6 +904,8 @@ def validate_plan(plan: Plan | dict[str, Any], facts: TimelineFacts) -> Plan:
         args = _check_hook_text(s.tool, args, step_reasons, notes)
         args = _check_paths(s.tool, args, facts, schema, step_reasons, notes, questions)
         _check_refs(s.tool, args, facts, has_cuts, step_reasons)
+        _check_brain_step(s.tool, args, facts, step_reasons)
+        _check_brain_tool_args(s.tool, args, facts, step_reasons)
         _check_bounds(s.tool, args, step_reasons)
         _check_speed(s.tool, args, step_reasons)
         _check_whitelists(s.tool, args, facts, p, step_reasons)
@@ -837,5 +925,5 @@ def validate_plan(plan: Plan | dict[str, Any], facts: TimelineFacts) -> Plan:
                    postconditions=postconditions, estimated_seconds=estimate_seconds(steps, facts), reply=reply)
 
 
-__all__ = ["PlanRejected", "EXTRA_TOOL_SCHEMAS", "EXTRA_ARGS", "PLAN_TOOLS", "KNOWN_TRACK_IDS",
+__all__ = ["PlanRejected", "EXTRA_TOOL_SCHEMAS", "BRAIN_TOOL_SCHEMAS", "EXTRA_ARGS", "PLAN_TOOLS", "KNOWN_TRACK_IDS",
            "ARG_BOUNDS", "TEXT_LIMITS", "plan_schema_for", "validate_plan"]

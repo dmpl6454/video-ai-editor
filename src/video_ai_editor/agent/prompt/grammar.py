@@ -34,6 +34,7 @@ from . import slots as S
 from . import canvas_vocab as _CV
 from . import voice_vocab as _VV
 from . import anim_vocab as _AV
+from . import edit_grammar as _EG
 
 INTENTS: tuple[str, ...] = (
     "auto_edit", "captions", "translate_captions", "remove_silences", "remove_fillers", "tighten",
@@ -78,6 +79,12 @@ INTENTS: tuple[str, ...] = (
     # Wave E (F1): CapCut clip animations (In / Out / Combo) on a clip or a
     # sticker (agent/prompt/anim_expanders.py).
     "animation",
+    # Editor Brain (EB1): "make a 45-second reel", "tighten this podcast",
+    # "edit this like a premium podcast" → the `edit` recipe
+    # (agent/prompt/brain_expanders.py). Its phrase rows live in
+    # agent/prompt/edit_grammar.py and are read ONLY with `brain.enabled` on:
+    # off, no sentence reads as `edit` (0.8.0 byte-for-byte, review SC-04).
+    "edit",
 )
 
 EXACT, SYNONYM, WEAK = 1.0, 0.85, 0.5
@@ -982,10 +989,25 @@ _NOUN_ONLY_FALLBACK: frozenset[str] = frozenset({"captions", "music", "hook", "c
 _COMPILED: dict[str, tuple[tuple[re.Pattern, float], ...]] = {
     intent: tuple((re.compile(p), s) for p, s in rows) for intent, rows in PHRASES.items()}
 _CUT_COMPILED = tuple((re.compile(p), i, s) for p, i, s in CUT_PRECEDENCE)
+#: Editor Brain (EB1): the `edit` recipe's rows (agent/prompt/edit_grammar.py).
+#: Consulted ONLY with `brain.enabled` on — with it off every sentence reads as
+#: 0.8.0 did and PHRASES / CUT_PRECEDENCE above are the tables everyone else
+#: (planner guesses, brains/content.py) reads, unchanged (review SC-04).
+_EDIT_COMPILED = tuple((re.compile(p), sc) for p, sc in _EG.EDIT_PHRASES["edit"])
+
+
+def _brain_on() -> bool:
+    """`brain.enabled` — anything unreadable is OFF (the 0.8.0 reading)."""
+    from .facts_brain import brain_on
+    return brain_on()
 
 #: When two intents both match at EXACT in one clause, the more specific one
 #: wins. Rows are (winner, loser).
 _TIE_BREAKS: tuple[tuple[str, str], ...] = (
+    # Editor Brain (EB1): the `edit` family reads whole edits; its rows are the most specific
+    ("edit", "auto_edit"), ("edit", "tighten"), ("edit", "captions"), ("edit", "music"), ("edit", "reframe"),
+    ("edit", "export_preset"), ("edit", "shorts"), ("edit", "trim"), ("edit", "remove_silences"), ("edit", "remove_fillers"),
+    ("edit", "hook"), ("edit", "color_look"), ("edit", "clean_audio"), ("edit", "loudness"), ("edit", "transitions"),
     ("title", "trim"), ("title", "tighten"),
     ("translate_captions", "captions"), ("tighten", "remove_silences"), ("tighten", "remove_fillers"),
     ("tighten", "trim"), ("beat_sync", "music"), ("beat_sync", "trim"), ("beat_sync", "speed"),
@@ -1066,17 +1088,21 @@ _TEXT_RETIME_FIRST_RE = re.compile(
     r"|(?:(?:to\s+)?(?:start|begin|end|appear|disappear)s?\s+)?(?:at|from)\s+\d)")
 
 
-def _resolve_clause(clause: str) -> tuple[str, float] | None:
-    """The single best intent for one clause."""
+def _resolve_clause(clause: str, edit_on: bool = False) -> tuple[str, float] | None:
+    """The single best intent for one clause. `edit_on`: the Editor Brain is
+    on, so its `edit` rows take part (`detect` reads the flag once)."""
     if _SPEED_CURVE_FIRST_RE.search(clause):
         return "speed", EXACT
     if _TEXT_RETIME_FIRST_RE.search(clause):
         return "title", EXACT
+    if edit_on and _EG.EDIT_FIRST_RE.search(clause):
+        return "edit", EXACT
     for rx, intent, score in _CUT_COMPILED:
         if rx.search(clause):
             return intent, score
     best: dict[str, float] = {}
-    for intent, rows in _COMPILED.items():
+    tables = (("edit", _EDIT_COMPILED), *_COMPILED.items()) if edit_on else tuple(_COMPILED.items())
+    for intent, rows in tables:
         for rx, score in rows:
             if rx.search(clause):
                 best[intent] = max(best.get(intent, 0.0), score)
@@ -1095,7 +1121,7 @@ def _resolve_clause(clause: str) -> tuple[str, float] | None:
     # Specific-over-general at equal score, via the explicit table; a pair the
     # table does not order keeps phrase-table order (declared first wins).
     losers = {loser for winner, loser in _TIE_BREAKS if winner in tied and loser in tied}
-    for intent in PHRASES:
+    for intent in (("edit", *PHRASES) if edit_on else PHRASES):
         if intent in tied and intent not in losers:
             return intent, top
     return tied[0], top
@@ -1167,16 +1193,52 @@ def _whole_prompt_retext(prompt: str, hits: list[IntentHit], whole: S.Slots) -> 
     return keep + [IntentHit(intent="retext", score=EXACT, clause=span, slots=_clause_slots(span, whole))]
 
 
+def _merge_edit_hits(clauses: tuple[str, ...], hits: list[IntentHit], whole: S.Slots
+                     ) -> tuple[tuple[str, ...], list[IntentHit]]:
+    """Editor Brain: every clause the `edit` recipe answers to — and the
+    tighten / silence / filler / auto-edit clauses beside it, which it does
+    itself — is ONE edit ("cut the silences and switch to whoever is
+    speaking"; "podcast ko tight karo, premium feel"). The clauses and hits
+    are merged so the plan runs the recipe once and the confidence counts
+    the merged clause as understood."""
+    absorbed = [h for h in hits if h.intent == "edit" or (h.intent in _EG.SUBSUMED_INTENTS)]
+    if not any(h.intent == "edit" for h in absorbed) or len(absorbed) < 2:
+        return clauses, hits
+    ordered = sorted(absorbed, key=lambda h: clauses.index(h.clause) if h.clause in clauses else len(clauses))
+    joined = " and ".join(dict.fromkeys(h.clause for h in ordered))
+    merged = IntentHit(intent="edit", score=EXACT, clause=joined, slots=_clause_slots(joined, whole))
+    gone = {h.clause for h in absorbed}
+    out_hits: list[IntentHit] = []
+    for h in hits:
+        if h in absorbed:
+            if merged is not None:
+                out_hits.append(merged)
+                merged = None
+            continue
+        out_hits.append(h)
+    out_clauses: list[str] = []
+    placed = False
+    for c in clauses:
+        if c in gone:
+            if not placed:
+                out_clauses.append(joined)
+                placed = True
+            continue
+        out_clauses.append(c)
+    return tuple(out_clauses), out_hits
+
+
 def detect(prompt: str) -> Detection:
     clauses = tuple(split_clauses(prompt))
     whole = S.extract(prompt)
+    edit_on = _brain_on()
     hits: list[IntentHit] = []
     exclusions: list[str] = []
     unmatched: list[str] = []
     for clause in clauses:
         clause_ex = exclusions_in(clause)
         positive = strip_negations(clause) if clause_ex else clause
-        resolved = _resolve_clause(mask_quotes(positive)) if positive.strip() else None
+        resolved = _resolve_clause(mask_quotes(positive), edit_on) if positive.strip() else None
         if "duck" in clause_ex and (resolved is None or (resolved[0] == "music" and resolved[1] < EXACT)):
             # QA-031: "don't duck the music" / "no ducking on the music" is a
             # request to turn ducking OFF, not a pure negation to ignore (and
@@ -1190,7 +1252,7 @@ def detect(prompt: str) -> Detection:
         if not positive.strip():
             continue                       # pure negation clause: counted as understood
         template = _template_hit(positive)
-        if template and (resolved is None or resolved[0] != "shorts"):
+        if template and (resolved is None or resolved[0] not in ("shorts", "edit")):
             resolved = ("auto_edit", EXACT)
         if resolved is None and hits and hits[-1].intent in ("title", "captions") and _IT_LOOK_RE.match(positive):
             continue                       # "add a title 'Intro' and make it red": the title's own look
@@ -1206,6 +1268,8 @@ def detect(prompt: str) -> Detection:
     # sequence the executor cannot honour in one op, so undo alone wins.
     if hits and hits[0].intent in ("undo", "redo") and _UNDO_ONLY.match(S.normalize(prompt)):
         hits = [hits[0]]
+    if edit_on:
+        clauses, hits = _merge_edit_hits(clauses, hits, whole)
     return Detection(prompt=prompt, clauses=clauses, hits=tuple(hits), exclusions=tuple(exclusions),
                      slots=whole, unmatched=tuple(unmatched))
 

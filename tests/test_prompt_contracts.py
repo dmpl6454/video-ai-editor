@@ -214,7 +214,7 @@ def test_check_specs_cover_the_verifier_table():
 def test_path_args_table_matches_the_guard_test():
     guards = importlib.import_module("test_path_guards")
     assert path_args.PATH_ARGS == guards.EXPECTED_GUARDS
-    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 25   # K3: + set_text_style.font (exempt)
+    assert len(path_args.PATH_ARGS) == path_args.PATH_ARGS_COUNT == 26   # EB1-B: + sync_dialogue_lane.src (read); K3: + set_text_style.font (exempt)
     assert path_args.path_args_for("apply_lut") == {"src": "read", "lut_path": "read"}
     assert path_args.path_args_for("add_text") == {}
     assert path_args.guarded_args("write") == {("export_ass", "path"), ("export_srt", "path"), ("export_vtt", "path")}
@@ -291,7 +291,9 @@ def test_recipe_table_matches_the_grammar_intents():
                     # wave E (F1): CapCut clip animations (In / Out / Combo)
                     "animation",
                     # Final QA: an existing text's new wording
-                    "retext"}
+                    "retext",
+                    # wave EB1 (lane E): the Editor Brain's `edit` card
+                    "edit"}
     assert spec_intents | {"transcribe"} == set(recipes.RECIPE_NAMES)   # undo/redo are intents, not recipes
     offered = {c.name for c in recipes.cards()}
     assert "transcribe" not in offered and "ask" not in offered and "auto_edit" in offered
@@ -324,3 +326,67 @@ def test_brain_protocol_is_satisfiable_and_results_are_vetted():
     err = brains_base.BrainUnavailable("appleIntelligenceNotEnabled", "Turn on Apple Intelligence in System Settings")
     assert err.fix and str(err) == "appleIntelligenceNotEnabled"
     assert brains_base.BrainAnswer is brains_base.BrainResult
+
+
+# --- 7. Editor Brain (wave EB1, lane C) — additions only --------------------------
+
+def test_brain_tools_are_staged_at_two_and_the_two_checks_block():
+    """The three narrow tools sit at stage 2 (never in PLAN_DENY, which is
+    frozen — tests/test_brain_checks.py pins the set); the two new checks
+    exist, block, need no render; `vai://plan/1` is untouched by all of it."""
+    for tool in ("cut_source_ranges", "apply_camera_plan", "sync_dialogue_lane"):
+        assert schema.TOOL_STAGE[tool] == schema.STAGE_CUTS
+        assert tool not in schema.PLAN_DENY
+    for check in ("no_cut_mid_word", "dialogue_in_sync"):
+        assert check in schema.CHECK_SPECS and check in schema.BLOCKING_CHECKS
+        assert schema.CHECK_SPECS[check].needs_render is False
+    assert schema.CHECK_SPECS["no_cut_mid_word"].args["tol"] == 0.02
+    assert schema.Plan.model_fields["steps"].metadata[0].max_length == 24
+    assert schema.PLAN_JSON_SCHEMA["$id"] == "vai://plan/1"
+    assert schema.BRAIN_SENTINEL_PREFIX == "$brain:" and schema.PLAN_REF_ARG == "plan_ref"
+
+
+def test_brain_sentinel_pairs_are_declared_once_and_stage2_order_is_pinned():
+    from video_ai_editor.brain import resolve as R
+    assert set(R.BRAIN_SENTINELS) == {"cuts", "keep", "story_splits", "story_order", "camera", "punch_ins", "captions"}
+    for kind, (tool, arg) in R.BRAIN_SENTINELS.items():
+        assert tool in schema.TOOL_STAGE and tool not in schema.PLAN_DENY, kind
+        assert re.fullmatch(r"[a-z_]{2,32}", arg), (kind, arg)
+    assert R.STAGE2_ORDER == ("keep", "cuts", "story_splits", "story_order", "camera", "sync_dialogue_lane")
+    assert R.STAGE2_ORDER[-1] == "sync_dialogue_lane" and schema.TOOL_STAGE["sync_dialogue_lane"] == 2
+
+
+# --------------------------------------------------------------------------
+# closer review (SC-04): with brain.enabled off the recipe table a model reads is the 0.8.0 one
+# --------------------------------------------------------------------------
+
+#: `recipes.cards()` and `prompt_text.recipe_cards_block(cards())` of the 0.8.0 tree (git HEAD before the wave).
+HEAD_RECIPE_NAMES = ["captions", "translate_captions", "remove_silences", "remove_fillers", "tighten", "shorts", "reframe",
+                     "music", "duck", "beat_sync", "hook", "color_look", "clean_audio", "loudness", "speed", "freeze", "split",
+                     "delete_clip", "duplicate", "move_clip", "zoom", "rotate", "adjust", "remove_feature", "retext",
+                     "clip_length", "flip", "canvas", "blend", "voice_effect", "animation", "reverse", "trim", "title", "brand",
+                     "end_card", "transitions", "export_preset", "voiceover", "stabilize", "upscale", "fade", "volume", "mute",
+                     "fit_music", "remove_music", "auto_edit"]
+HEAD_RECIPE_BLOCK_SHA = "fc9f237571522977e7940b1de23c3ddcb04f3283b2b3365e7ce5416319fc1716"
+
+
+def test_with_the_brain_off_the_model_sees_the_080_recipe_table(monkeypatch):
+    import hashlib
+    from video_ai_editor.agent.prompt.brains.prompt_text import recipe_cards_block
+    from video_ai_editor.agent.prompt.recipes import cards
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    assert [c.name for c in cards()] == HEAD_RECIPE_NAMES
+    assert hashlib.sha256(recipe_cards_block(cards()).encode()).hexdigest() == HEAD_RECIPE_BLOCK_SHA
+    assert "edit" not in {c.name for c in cards(exclude=frozenset())}
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    assert "edit" in [c.name for c in cards()]
+
+
+def test_the_prompt_a_model_reads_is_the_080_one_with_the_brain_off(monkeypatch):
+    from video_ai_editor.agent.prompt.brains.prompt_text import recipe_cards_block
+    from video_ai_editor.agent.prompt.recipes import cards
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    off = recipe_cards_block(cards())
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    on = recipe_cards_block(cards())
+    assert len(on) > len(off) and "edit" in on and len(off) == 7437

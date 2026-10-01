@@ -48,9 +48,24 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _prefix(plan: Plan) -> str:
+def _brain_bits(plan: Plan) -> dict[str, Any] | None:
+    """Editor Brain (EB1): the rung that ranked the moments, the deferred
+    line and the version label — None for an ordinary plan or with the
+    flag off (brain_card.reply_bits)."""
+    from .brain_card import reply_bits
+    try:
+        return reply_bits(plan)
+    except Exception:  # noqa: BLE001 — the reply must still be written
+        return None
+
+
+def _prefix(plan: Plan, bits: dict[str, Any] | None = None) -> str:
     label = BRAIN_LABELS.get(plan.brain, plan.brain)
-    if plan.content_brain and plan.content_brain != plan.brain:
+    if bits is not None:
+        # a brain run: the content rung ranked MOMENTS, it wrote no text
+        if bits.get("moments_by"):
+            label = f"{label} · moments by {BRAIN_LABELS.get(bits['moments_by'], bits['moments_by'])}"
+    elif plan.content_brain and plan.content_brain != plan.brain:
         label = f"{label} · text by {BRAIN_LABELS.get(plan.content_brain, plan.content_brain)}"
     return via(label)
 
@@ -80,6 +95,26 @@ def _unmeasured_lines(verify_result: dict[str, Any] | None) -> list[str]:
             for c in verify_result.get("checks", []) if c.get("pass") is None]
 
 
+def _step_lines(steps: list[Any]) -> list[str]:
+    """What a step did differently from the literal plan, known only at run
+    time (a replaced title, skipped sliver seams, a sentence-boundary cut);
+    the steps that had nothing to do; the ones skipped."""
+    lines: list[str] = []
+    for s in steps:
+        if s.status == "ok" and s.effect != "none":
+            notices = getattr(s, "notices", None) or []
+            if notices:
+                lines.append(f"· {s.tool}: {'; '.join(notices)}")
+    for s in steps:
+        if s.status == "ok" and s.effect == "none":
+            summary = ""
+            if s.results and isinstance(s.results[0], dict):
+                summary = str(s.results[0].get("summary") or "")
+            lines.append(f"· {s.tool}: {summary or 'nothing to do'}")
+    lines.extend(f"· {s.tool}: skipped ({s.error})" for s in steps if s.status == "skipped")
+    return lines
+
+
 def _project_name(sid: str, child_runs: list[dict[str, Any]] | None = None) -> str:
     """A created project's NAME for the reply (QA-068) — never its `s_…` id.
     The finishing pass records it; otherwise it is read from the project."""
@@ -103,18 +138,38 @@ def created_projects_line(sessions: list[str], child_runs: list[dict[str, Any]] 
     return f"{n} short{'' if n == 1 else 's'} ready: {' · '.join(names)}."
 
 
+def _brain_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | None, bits: dict[str, Any],
+                 ran: list[Any]) -> str:
+    """An Editor Brain run's reply as prose (agent/prompt/brain_reply): the
+    advisory audit is a note, each thing is said once, the opening quote is
+    whole, the resulting length is stated."""
+    from . import brain_reply as BR
+    steps = list(exec_result.steps)
+    gate = BR.without_advisory(verify_result)
+    parts = BR.compose(verify_result, plan.title or plan.intent, len(ran), _failed_lines(gate),
+                       _unmeasured_lines(gate), _step_lines(BR.worth_saying(steps)), plan, bits, _fmt)
+    if exec_result.new_sessions:
+        parts.append(created_projects_line(list(exec_result.new_sessions), exec_result.child_runs))
+    if exec_result.committed:
+        parts.append("Undo with ⌘Z" + (" (the new shorts are kept)." if exec_result.new_sessions else "."))
+    return " ".join(parts)
+
+
 def compose_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | None) -> str:
     """The end-of-run text. `exec_result` is an `executor.ExecResult`;
     `verify_result` the `verify` event payload (or None when nothing ran)."""
-    head = _prefix(plan)
+    bits = _brain_bits(plan)
+    head = _prefix(plan, bits)
     if exec_result.error:
         return head + exec_result.error
 
     steps = list(exec_result.steps)
     ran = [s for s in steps if s.status == "ok" and s.effect != "none"]
-    none = [s for s in steps if s.status == "ok" and s.effect == "none"]
-    skipped = [s for s in steps if s.status == "skipped"]
     title = plan.title or plan.intent
+    if bits is not None and steps:
+        return head + _brain_reply(plan, exec_result, verify_result, bits, ran)
+    if bits and bits.get("version") and exec_result.committed:
+        title = f"{bits['version']} — {title}"       # "V1 Premium Podcast — Podcast → tightened: …"
 
     parts: list[str] = []
     if not steps:
@@ -130,21 +185,11 @@ def compose_reply(plan: Plan, exec_result: Any, verify_result: dict[str, Any] | 
 
     parts.extend(_failed_lines(verify_result))
     parts.extend(_unmeasured_lines(verify_result))
-    # What a step did differently from the literal plan, known only at run
-    # time (a replaced title, skipped sliver seams, a sentence-boundary cut).
-    for s in ran:
-        notices = getattr(s, "notices", None) or []
-        if notices:
-            parts.append(f"· {s.tool}: {'; '.join(notices)}")
-    for s in none:
-        summary = ""
-        if s.results and isinstance(s.results[0], dict):
-            summary = str(s.results[0].get("summary") or "")
-        parts.append(f"· {s.tool}: {summary or 'nothing to do'}")
-    for s in skipped:
-        parts.append(f"· {s.tool}: skipped ({s.error})")
+    parts.extend(_step_lines(steps))
     if plan.reply:
         parts.append(plan.reply)
+    if bits and bits.get("deferred"):
+        parts.append(bits["deferred"])              # honesty: what this wave did not do, and why
     if exec_result.new_sessions:
         parts.append(created_projects_line(list(exec_result.new_sessions), exec_result.child_runs))
         finished = [c for c in exec_result.child_runs if c.get("status") == "ok"]

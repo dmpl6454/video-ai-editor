@@ -187,6 +187,21 @@ export interface PromptPending {
 // (prompt_setting.py). `source: "env"` means VAI_PROMPT_CONFIRM wins.
 export interface PromptSettingsWire { confirm_before_apply: boolean; source: string; default: boolean }
 
+// --- Editor Brain (api/brain_routes.py, EB1) ---------------------------------
+// `GET/PUT /api/settings/brain` — `brain.enabled` (brain_setting.py); off by
+// default this wave, `source: "env"` means VAI_BRAIN_ENABLED wins.
+export interface BrainSettingsWire { enabled: boolean; source: string; default: boolean }
+// `GET …/brain/versions` — named versions on the store's snapshots
+// (brain/versions.py rows + `current` = the live tree is this version, and
+// `restorable` = its snapshot still exists).
+export interface BrainVersionRow {
+  id: string; label: string; op_seq: number; edl_hash: string; decisions_id: string | null
+  kind: string; created: number; pinned: boolean; undone?: boolean
+  current: boolean; restorable: boolean
+}
+export interface BrainVersionsWire { versions: BrainVersionRow[]; live_hash: string }
+export interface BrainAnalyseWire { job_id: string; status: string; status_url: string }
+
 export interface PromptModelRow {
   id: string; installed: boolean; snapshot_path?: string | null
   bytes_on_disk?: number; expected_bytes?: number; free_bytes?: number
@@ -665,6 +680,22 @@ export const api = {
   promptSettings: () => http<PromptSettingsWire>('GET', '/settings/prompt'),
   setPromptSettings: (confirmBeforeApply: boolean) =>
     http<PromptSettingsWire>('PUT', '/settings/prompt', { confirm_before_apply: confirmBeforeApply }),
+
+  // --- Editor Brain (api/brain_routes.py, EB1) -----------------------------
+  brainSettings: () => http<BrainSettingsWire>('GET', '/settings/brain'),
+  setBrainSettings: (enabled: boolean) => http<BrainSettingsWire>('PUT', '/settings/brain', { enabled }),
+  // POST …/brain/analyse → 202 {job_id}; poll /api/jobs/{id} as for a render.
+  brainAnalyse: (sid: string, body: { layers?: string[]; force?: boolean } = {}) =>
+    http<BrainAnalyseWire>('POST', `/sessions/${sid}/brain/analyse`, body),
+  brainGraph: (sid: string) => http<Record<string, unknown>>('GET', `/sessions/${sid}/brain/graph`),
+  brainDecisions: (sid: string, did: string) =>
+    http<Record<string, unknown>>('GET', `/sessions/${sid}/brain/decisions/${encodeURIComponent(did)}`),
+  brainVersions: (sid: string) => http<BrainVersionsWire>('GET', `/sessions/${sid}/brain/versions`),
+  // One `restore_version` op (a History row, one ⌘Z); `op` is null when the
+  // live tree already is that version.
+  brainRestore: (sid: string, id: string) =>
+    http<{ op: Op | null; version: BrainVersionRow; edl_hash: string }>(
+      'POST', `/sessions/${sid}/brain/versions/${encodeURIComponent(id)}/restore`, {}),
 
   promptPending: (sid: string) => http<{ pending: PromptPending | null }>('GET', `/sessions/${sid}/prompt/pending`),
 

@@ -37,6 +37,7 @@ from . import name_expanders as NX
 from . import canvas_expanders as KX
 from . import voice_expanders as VX
 from . import anim_expanders as AX
+from . import brain_expanders as BX
 from ...edl.speed_presets import PRESET_BY_ID as _SPEED_PRESET_BY_ID, PRESETS as _SPEED_PRESETS
 from .costs import DEFAULT_STEP_COST, RECIPE_COST, estimate_seconds, step_cost   # noqa: F401 — re-exported
 from .heuristics import (_CANNED_HOOK, MAX_BEAT_SPLITS, MIN_SHOT_S, PULSE_RISE_S, PULSE_SCALE,  # noqa: F401
@@ -2284,12 +2285,16 @@ EXPANDERS: dict[str, Callable[[Intent, TimelineFacts, Context], Expansion]] = {
     "voice_effect": VX.x_voice,
     # Wave E (F1): CapCut clip animations (agent/prompt/anim_expanders.py)
     "animation": AX.x_animation,
+    # Editor Brain (EB1): the `edit` recipe (agent/prompt/brain_expanders.py)
+    "edit": BX.x_edit,
 }
 
 
 def expand_auto_edit(it: Intent, f: TimelineFacts, exclusions: frozenset[str]) -> list[Intent]:
     """§2.4 `auto_edit`: the ordered sub-recipes, gated on facts and
     exclusions. A template name in `_template` supplies its own list."""
+    if (edit := BX.edit_for_auto_edit(it, f, exclusions)) is not None:     # Editor Brain (EB1): the graph is read
+        return edit
     tpl_name = it.get("_template")
     if tpl_name:
         tpl = edit_templates().get(tpl_name)

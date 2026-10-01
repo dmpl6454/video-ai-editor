@@ -50,6 +50,41 @@ export const TOOL_TITLES: Record<string, string> = {
   set_animation: 'Animation',
   // K3: restyle a title; the executor's net that rolls a wrong run back
   set_text_style: 'Text style', safety_net: 'Safety check',
+  // Editor Brain (EB1): the three narrow tools of lane B, and a restored version
+  cut_source_ranges: 'Cut ranges', apply_camera_plan: 'Camera plan', sync_dialogue_lane: 'Dialogue lane',
+  restore_version: 'Restore version',
+}
+
+/** How many of `key` a brain tool's op names: the args list when the op
+ *  carries it, else the first count in the summary ("14 cuts", "6 switches"). */
+function brainCount(op: { summary?: string | null; args?: Record<string, unknown> | null }, key: string,
+                    word: RegExp): number {
+  const v = op.args?.[key]
+  if (Array.isArray(v)) return v.length
+  const m = word.exec(op.summary ?? '')
+  return m ? Number(m[1]) : 0
+}
+
+/** History rows for the Editor Brain's tools (EB1-B's labels): "Cut {n}
+ *  ranges", "Camera plan: {n} switches", "Dialogue lane synced". */
+export function brainOpLabel(op: { tool: string; summary?: string | null; args?: Record<string, unknown> | null },
+                             ctx?: LabelContext): OpLabel | null {
+  const raw = `${op.tool} — ${op.summary ?? ''}`
+  const said = ctx ? editorSummary(op.summary ?? '', ctx) : cleanSummary(op.summary ?? '')
+  if (op.tool === 'cut_source_ranges') {
+    const n = brainCount(op, 'ranges', /(\d+)\s+(?:cuts?|ranges?)\b/i)
+    return { title: `Cut ${n} range${n === 1 ? '' : 's'}`, detail: said.replace(/^Cut \d+ ranges?\s+/i, ''), raw }
+  }
+  if (op.tool === 'apply_camera_plan') {
+    const n = brainCount(op, 'switches', /(\d+)\s+switch(?:es)?\b/i)
+    // "Camera plan: 6 switches (13 pieces; derived_from camA.mp4)" → "13 pieces; from camA.mp4"
+    const detail = said.replace(/^Camera plan: \d+ switch(?:es)?\s*\((.*)\)$/i, '$1').replace(/\bderived_from\b/g, 'from')
+    return { title: `Camera plan: ${n} switch${n === 1 ? '' : 'es'}`, detail, raw }
+  }
+  if (op.tool === 'sync_dialogue_lane') {
+    return { title: 'Dialogue lane synced', detail: said.replace(/^Dialogue lane synced:\s*/i, ''), raw }
+  }
+  return null
 }
 
 /** A title for a tool id: the table, else the id made readable. */
@@ -300,6 +335,8 @@ export function opLabel(op: { tool: string; summary?: string | null; args?: Reco
       return { title: pl.group, detail, raw: `${op.tool} — ${op.summary ?? ''}` }
     }
   }
+  const brain = brainOpLabel(op, ctx)
+  if (brain) return brain
   const title = toolTitle(op.tool)
   let detail = ctx ? editorSummary(op.summary ?? '', ctx) : cleanSummary(op.summary ?? '')
   // Don't say it twice: "Split — Split at 5.00s" → "Split — at 5.00s", and

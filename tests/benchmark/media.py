@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -201,6 +202,179 @@ def render_scene_video(narration_wav: Path, dst: Path, *, size: tuple[int, int],
           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
           "-shortest", "-movflags", "+faststart", str(dst)], f"scene video {dst.name}")
+    return dst
+
+
+# --------------------------------------------------------------------------
+# bar-coded angles with click tracks (EB1-A; the brain fixtures)
+# --------------------------------------------------------------------------
+
+#: The bar-code layout is `tests/frame_map_golden_lib.py`'s read geometry:
+#: 16 bands of 20 px on a 320×180 base, code bits read from columns
+#: [b·20+5, b·20+15) of rows 24-84 (top) and 100-172 (bottom). Only those
+#: cells carry the code here; everything else stays dark (Y 16) so a
+#: one-frame FLASH (everything outside the cells → Y 235) reads as a bright
+#: frame to `timing_fixtures.flash_times` (whole-frame mean > 128 at 32×18)
+#: while the code stays readable on that frame, and no non-flash frame can
+#: cross 128 (≤ 13 set bits × 10/20 columns × 140/180 rows → mean ≤ 101).
+BAR_W, BAR_H = 320, 180
+BAR_BANDS, BAR_BAND_W = 16, 20
+BAR_TOP_ROWS, BAR_BOT_ROWS = (22, 86), (98, 174)
+BAR_STRIP_ROWS = (88, 96)
+BAR_FRAME_BITS = 12
+#: The click: 4 ms of 1 kHz at 0.95 full scale (`timing_fixtures.make_clap`'s
+#: shape, louder). Speech in these fixtures peaks ≤ 0.5, so
+#: `click_times(thresh=0.7)` sees only clicks.
+CLICK_AMP, CLICK_S, CLICK_HZ = 0.95, 0.004, 1000.0
+ECHO_DB = -6.0
+
+
+def click_pcm(sr: int) -> np.ndarray:
+    t = np.arange(int(round(CLICK_S * sr))) / sr
+    return (CLICK_AMP * np.sin(2 * np.pi * CLICK_HZ * t)).astype(np.float32)
+
+
+def add_clicks(pcm: np.ndarray, sr: int, times) -> np.ndarray:
+    """A copy of `pcm` with a click starting at every time (seconds); a click
+    past the end is dropped, one that straddles the end is truncated."""
+    out = np.array(pcm, dtype=np.float32, copy=True)
+    burst = click_pcm(sr)
+    for t in times:
+        i = int(round(t * sr))
+        if 0 <= i < len(out):
+            n = min(len(burst), len(out) - i)
+            out[i:i + n] += burst[:n]
+    return out
+
+
+def room_mic(pcm: np.ndarray, sr: int, *, gain_db: float, delay_ms: float, echo_db: float = ECHO_DB,
+             noise_dbfs: float | None = None, seed: int = 0) -> np.ndarray:
+    """A camera microphone hearing `pcm`: the direct path at `gain_db` plus a
+    reflection `delay_ms` later at `echo_db` relative, plus white room noise
+    at `noise_dbfs` RMS (deterministic by `seed`). The direct path keeps the
+    file's offset unambiguous — the reflection is a second, quieter copy, so
+    a cross-correlation peaks at the true offset and `click_times` (on the
+    undelayed clicks added afterwards) agrees with it."""
+    x = np.asarray(pcm, dtype=np.float32)
+    out = x * float(10 ** (gain_db / 20.0))
+    d = int(round(delay_ms * sr / 1000.0))
+    if d > 0:
+        out[d:] += out[:-d] * float(10 ** (echo_db / 20.0))
+    if noise_dbfs is not None:
+        rng = np.random.default_rng(seed)
+        out = out + rng.standard_normal(len(out)).astype(np.float32) * float(10 ** (noise_dbfs / 20.0))
+    return out.astype(np.float32)
+
+
+def _yuv_frame(base: np.ndarray, code: int, strip_color: tuple[int, int, int] | None, flash: bool) -> bytes:
+    y = base.copy()
+    if flash:
+        y[:, :] = 235
+    for b in range(BAR_BANDS):
+        v = 235 if (code >> b) & 1 else 16
+        x0, x1 = b * BAR_BAND_W + 5, b * BAR_BAND_W + 15
+        y[BAR_TOP_ROWS[0]:BAR_TOP_ROWS[1], x0:x1] = v
+        y[BAR_BOT_ROWS[0]:BAR_BOT_ROWS[1], x0:x1] = v
+    u = np.full((BAR_H // 2, BAR_W // 2), 128, np.uint8)
+    vv = np.full((BAR_H // 2, BAR_W // 2), 128, np.uint8)
+    if strip_color is not None and not flash:
+        r0, r1 = BAR_STRIP_ROWS
+        y[r0:r1, :] = strip_color[0]
+        u[r0 // 2:r1 // 2, :] = strip_color[1]
+        vv[r0 // 2:r1 // 2, :] = strip_color[2]
+    return y.tobytes() + u.tobytes() + vv.tobytes()
+
+
+def _strip_at(strip: list[tuple[float, float, tuple[int, int, int]]], t: float):
+    for t0, t1, color in strip:
+        if t0 <= t < t1:
+            return color
+    return None
+
+
+def _write_mono_wav(path: Path, pcm: np.ndarray, sr: int) -> None:
+    import wave
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes((np.clip(pcm, -1.0, 1.0) * 32767.0).astype("<i2").tobytes())
+
+
+def _angle_audio(narration_wav: Path, *, offset_s: float, mic_gain_db: float, mic_delay_ms: float,
+                 noise_dbfs: float | None, seed: int, clicks: list[float], click: bool) -> tuple[np.ndarray, int]:
+    """The file's audio on its OWN clock: `file_t = ref_t + offset_s`."""
+    from .narration import _read_wav
+    x, sr = _read_wav(narration_wav)
+    lead = int(round(offset_s * sr))
+    if lead >= 0:
+        x = np.concatenate([np.zeros(lead, np.float32), x])
+    else:
+        x = x[-lead:]
+    if mic_gain_db or mic_delay_ms or noise_dbfs is not None:
+        x = room_mic(x, sr, gain_db=mic_gain_db, delay_ms=mic_delay_ms, noise_dbfs=noise_dbfs, seed=seed)
+    if click:
+        x = add_clicks(x, sr, [t + offset_s for t in clicks])
+    return x, sr
+
+
+def _angle_cmd(tmp_wav: Path, dst: Path, size: tuple[int, int], fps: int) -> list[str]:
+    w, h = size
+    vf = "format=yuv420p" if (w, h) == (BAR_W, BAR_H) else f"scale={w}:{h}:flags=neighbor,format=yuv420p"
+    return [_pu.FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{BAR_W}x{BAR_H}", "-r", str(fps), "-i", "-",
+            "-i", str(tmp_wav), "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", str(2 * fps), "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "48000", "-ac", "2", "-b:a", "128k",
+            "-fflags", "+bitexact", "-flags", "+bitexact", "-map_metadata", "-1",
+            "-shortest", "-movflags", "+faststart", str(dst)]
+
+
+def render_barcode_angle(narration_wav: Path, dst: Path, *, sid: int, size: tuple[int, int], offset_s: float,
+                         mic_gain_db: float = 0.0, mic_delay_ms: float = 0.0, click: bool = True,
+                         fps: int = FPS, click_times: tuple[float, ...] | list[float] = (),
+                         strip: list[tuple[float, float, tuple[int, int, int]]] | None = None,
+                         noise_dbfs: float | None = None, seed: int = 0) -> Path:
+    """One camera angle of a bar-coded fixture (EB1-A).
+
+    Picture: frame n carries `frame_map_golden_lib.code_of(sid, n)` in the
+    read cells (`BAR_*` above), a coloured strip (rows 88-96 of the base)
+    whose colour follows `strip` = [(ref_t0, ref_t1, (Y, U, V)), …] (a pulse
+    while a speaker talks, or a scene colour), and a one-frame flash at every
+    `click_times` entry. Sound: `narration_wav` on the reference clock, passed
+    through `room_mic` when a mic gain/delay/noise is given, then the clicks
+    (undelayed, un-attenuated) at the same instants. Both are shifted by
+    `offset_s` (`file_t = ref_t + offset_s`: a positive offset prepends lead,
+    a negative one drops the head), so the flash and the click of one event
+    sit at the same file time — the raw angle measures `av_offsets_ms ≈ 0`
+    and the click tracks of two angles differ by exactly their offsets.
+    Every event time must sit on the `fps` grid (the caller's job); the
+    picture is generated at 320×180 and scaled by nearest neighbour."""
+    clicks = [float(t) for t in click_times]
+    pcm, sr = _angle_audio(narration_wav, offset_s=offset_s, mic_gain_db=mic_gain_db,
+                           mic_delay_ms=mic_delay_ms, noise_dbfs=noise_dbfs, seed=seed,
+                           clicks=clicks, click=click)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp_wav = dst.with_suffix(".angle_audio.wav")
+    _write_mono_wav(tmp_wav, pcm, sr)
+    n_frames = int(math.ceil(len(pcm) / sr * fps - 1e-9))
+    flash_frames = {int(round((t + offset_s) * fps)) for t in clicks}
+    strip_file = [(t0 + offset_s, t1 + offset_s, c) for t0, t1, c in (strip or [])]
+    base = np.full((BAR_H, BAR_W), 16, np.uint8)
+    proc = subprocess.Popen(_angle_cmd(tmp_wav, dst, size, fps), stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                            **_pu.SUBPROCESS_FLAGS)
+    try:
+        assert proc.stdin is not None
+        for n in range(n_frames):
+            code = (sid << BAR_FRAME_BITS) | (n & ((1 << BAR_FRAME_BITS) - 1))
+            proc.stdin.write(_yuv_frame(base, code, _strip_at(strip_file, n / fps), n in flash_frames))
+        proc.stdin.close()
+    finally:
+        _err = proc.stderr.read() if proc.stderr else b""
+        rc = proc.wait()
+        tmp_wav.unlink(missing_ok=True)
+    if rc != 0:
+        raise MediaBuildError(f"bar-code angle {dst.name}: ffmpeg exit {rc}: {_err[-600:].decode('utf-8', 'replace')}")
     return dst
 
 
@@ -402,5 +576,7 @@ __all__ = ["MEDIA_VERSION", "CACHE_ROOT", "FPS", "SCENE_CUT_FRACTIONS", "BED_SR"
            "BED_LUFS", "BED_GRID_OFFSET", "BENCH_BED_BPM", "PRESET_BEDS", "LOOP_FIXTURE_SECONDS",
            "LONG_FIXTURE_SECONDS", "BROLL_SECONDS", "MediaBuildError", "HindiVoiceUnavailable",
            "Bed", "MediaSet", "scene_cuts_for", "render_scene_video", "render_broll",
+           "BAR_W", "BAR_H", "BAR_FRAME_BITS", "CLICK_AMP", "click_pcm", "add_clicks", "room_mic",
+           "render_barcode_angle",
            "render_looped_video", "synth_bed_pcm", "synth_bed", "integrated_lufs", "bed_sidecar",
            "ensure_preset_beds", "media_key", "build_media_set"]

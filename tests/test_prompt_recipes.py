@@ -87,7 +87,9 @@ def test_plans_use_allow_listed_tools_with_monotonic_stages_and_validate(prompt,
 
 def test_the_cards_are_the_frozen_contract():
     names = [c.name for c in R.cards()]
-    assert "transcribe" not in names and "ask" not in names and len(names) == len(R.RECIPE_NAMES) - 2
+    # `transcribe` and `ask` are never offered; the Editor Brain's `edit` only while brain.enabled is on
+    assert "transcribe" not in names and "ask" not in names and "edit" not in names
+    assert len(names) == len(R.RECIPE_NAMES) - 2 - len(R.BRAIN_ONLY_RECIPES)
     for c in R.RECIPE_CARDS:
         for slot, kind in c.slots.items():
             assert kind in ("enum", "number", "text")

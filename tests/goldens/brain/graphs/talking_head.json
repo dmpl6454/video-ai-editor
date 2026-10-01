@@ -1,0 +1,3649 @@
+{
+ "angles": {
+  "dialogue": "src_e03728d3130b96983c09cf74",
+  "members": [
+   {
+    "angle": "A",
+    "by": "truth",
+    "confidence": 1.0,
+    "path": "th_16x9.mp4",
+    "sees": [
+     "S1"
+    ],
+    "src_key": "src_e03728d3130b96983c09cf74",
+    "sync_offset_s": 0.0
+   }
+  ],
+  "reference": "src_e03728d3130b96983c09cf74"
+ },
+ "fixture": {
+  "files": {
+   "reference": "th_16x9.mp4",
+   "vertical": "th_9x16.mp4"
+  },
+  "name": "talking_head",
+  "notes": [
+   "scores by the §3.4 formulas over truth features; rms_z and stretch measured; see gen_brain_fixture_graphs.py",
+   "scene provenance is `truth` for every score (no annotations); the frozen Scene model has no `by`",
+   "the 9:16 render is the same programme with bar-code sid 2"
+  ],
+  "scene_measured": {
+   "sc_0001": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.2583,
+    "stretch": 1.0067
+   },
+   "sc_0002": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.3038,
+    "stretch": 1.1406
+   },
+   "sc_0003": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": "s_0004",
+    "rms_z": -0.2914,
+    "stretch": 0.9197
+   },
+   "sc_0004": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.32,
+    "stretch": 1.3307
+   },
+   "sc_0005": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": 3.6039,
+    "stretch": 1.3848
+   },
+   "sc_0006": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.221,
+    "stretch": 1.0554
+   },
+   "sc_0007": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": true,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.2122,
+    "stretch": 1.0808
+   },
+   "sc_0008": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.2525,
+    "stretch": 1.6133
+   },
+   "sc_0009": {
+    "answer_of": null,
+    "dead_air_s": 0.0,
+    "false_start": false,
+    "is_question": false,
+    "laughter": false,
+    "overlap_s": 0.0,
+    "pitch_range_st": 0.0,
+    "repeat_of": null,
+    "rms_z": -0.2923,
+    "stretch": 0.9934
+   }
+  }
+ },
+ "graph": {
+  "analysis_version": 1,
+  "clock": "reference",
+  "content_type": {
+   "confidence": 1.0,
+   "evidence": [
+    "1 speaker"
+   ],
+   "guess": "talking_head"
+  },
+  "digests": {
+   "audio": "sha256:3f5f92b47aeaf81742e1a6d1bf8e7cf594fd4c487d2b43dc2522fb6fb2070d8b",
+   "semantic": "sha256:a5cf082002de5be0ca9e293db22e3f9792715022bc9d4e7001e8d280f688ed09",
+   "speakers": "sha256:5ddc089c93611f7be862d99c5344566e67ffbfc904c11e48efa722bb037aab06",
+   "speech": "sha256:a0a0ee4a83c93de39d46c4b07a7a5636841874dbc2e2bf4b03d480f0ea9c5670"
+  },
+  "id": "g_3fbfa2e05692",
+  "layers": {
+   "audio": "audio/truth-v1.json",
+   "semantic": "semantic/truth-v1.json",
+   "speakers": "speakers/truth-v1.json",
+   "speech": "speech/truth-v1.json"
+  },
+  "music_hint": {
+   "energy": 0.6,
+   "evidence": [
+    "talking_head",
+    "reel"
+   ],
+   "mood": "upbeat"
+  },
+  "project": {
+   "canvas": [
+    1920,
+    1080
+   ],
+   "controls_seen": [],
+   "fps": 30,
+   "session_language": "en"
+  },
+  "reference": "src_e03728d3130b96983c09cf74",
+  "scenes": "scenes.json",
+  "sources": [
+   {
+    "angle": "A",
+    "angle_guess": {
+     "by": "truth",
+     "confidence": 1.0,
+     "kind": "close",
+     "sees": [
+      "S1"
+     ]
+    },
+    "dialogue": true,
+    "duration": 69.932,
+    "fps": "30",
+    "has_audio": true,
+    "has_video": true,
+    "key": "src_e03728d3130b96983c09cf74",
+    "layers": {
+     "audio": "ok",
+     "semantic": "ok",
+     "speakers": "ok",
+     "speech": "ok"
+    },
+    "leaf": "th_16x9.mp4",
+    "role": "angle",
+    "sync_offset_s": 0.0
+   }
+  ],
+  "speakers": [
+   {
+    "angle_hint": "A",
+    "id": "S1",
+    "label": "SPEAKER_00",
+    "name": "Host",
+    "questions": 1,
+    "role_guess": "host",
+    "share": 1.0
+   }
+  ],
+  "timings_s": {
+   "audio": 0.0,
+   "semantic": 0.0,
+   "speakers": 0.0,
+   "transcript": 0.0,
+   "visual": 0.0
+  },
+  "topics": [
+   {
+    "by": "truth",
+    "id": "t_0001",
+    "sents": [
+     "s_0001",
+     "s_0002",
+     "s_0003",
+     "s_0004",
+     "s_0005",
+     "s_0006",
+     "s_0007",
+     "s_0008",
+     "s_0009",
+     "s_0010",
+     "s_0011",
+     "s_0012",
+     "s_0013",
+     "s_0014"
+    ],
+    "t0": 0.0896,
+    "t1": 69.883,
+    "title": "the index card habit"
+   }
+  ],
+  "version": 1
+ },
+ "layers": {
+  "audio": {
+   "clipping": [],
+   "env_10ms": "p7nGx8vP0dTV2dnj5+jo6enp6erq6unm5ODi397az+Xh5ujo6evq6OTd2tbS0dff4+bn5ufn5+bm5OPg3t7e3uHj5Obn5+bl5eXl5OPk49/h4N/f3t3d29na2NXRy8W9ubKzs7Oyr6yoo6alpqWnqaahpqKin9zi4tzf5+bi3NnW08re4efn5+jo6enq6ejn5+fn5OLf3ePj4ubj5eXl5eTl5ubl5OPh393c29zf4uPk5ebm5ubm5eTk5OLf3tzWycDAu7e63t3Y2eDa0cXBvrzg4dvS09bX2Nbk5ujo6Ojm5+bl5OHf3NXPxMK+vLna2czYzNHa09ri5OXf2NbSxcDG3Onq6ejn6Ono6Ofn5dnOysjBwsC/19rj5ePf3dzY1tnc3+Hl5+fm5+fm5uTj4uLi4ODe39zb2Nrb3uHk5ufo6Onp5NnWz8nG0Nzm5uXh183ExMK/v7y2sLOsqKiz2dbo6enp5uHfzcrExL7BvLy41+Lm5N7a1+Xm5uXl5eXl5eXj4+Pj4uLh39zY2d/j5ePi29XZ4OTd1tTW2NnY2uLm5efn5+fm5OXl5eXk4OTf4tnk4+bm5ubl5uXl5OTk5OXl4+De3NjY2dvg4+bl4+Tk4ePg4+Dh3d7b2tHQycrLvLizr6qrnKSmpNvOy83OycjGwoiIiIiIiIiIiIiIrrS2yc/a5+fn5+fm5ufm5ubn5uXj4eHh4eDg39/f397d3dzb2NbSzsnJx8fFw8C9iIiIiIiIiIiIiIiTkZes097p6+3s6tzY0Njb3+Lh5Ojq6urn5OHg3t/e3+Df1cPD3uXl5ebm5ubm5eTl5ebl5N7jzMXDw9HO3tvk4+Hi4uHg3eDc3dPGzNHg4t/l5uXl5eXl5eXk4+Tj4OLh4Nve3cfEwr+7ure0s6/Wx8vJyMfGxL69uLGppqelpKTa5Obm5ufn4+bl5ePh3OLm5+fn5+bm3tfMytvc4eTk5OXl5eTh397e3t/e3tfExNnm5eXm5ubm5ubm5ubm5ufn5+fm19rl6efl49/X0dPQ0M7Ozc3N3efp6ufm5eXl5eXl5eXk4eLi4N3Yz83V3Nvd3uDh3dfl5uXm5ufn5uXm5uXl5OPi5Obn5uXl5eXl5eTl5eDh1tjHxcTCvLazwrOyrq7T4OLh4uPi3+De2tXKxcLAube1s7aw2tDPzc/MysjHx8G8iIiIiIiIiIiIiIiqtLK+ztTm5+jn5ubn5+bn5ubm5eXh4eHh4ODg39/e3t7d3NzY19TQysrHxsXEwb6IiIiIiIiIiIiIiIial53T1Orr6+zt7ezr6OPe3NnV0tTT09PQ4ebp6erq6unp5+jm5ubl4+Tk5OPk4+Pj4uTk5OTl5eXl5eTk4+Pj4+Df3t/f3+Lg4eDe397d3tvb3Nvd29nY2NfT0MjBv725s7StqJ+gp6Ohn9Tj6Orp6Ojo6Obj4NzZ19vh5ejm5uXk5ubm5eTl5ubj4uHg3NrGxcDAwLmzs62ppqTS2d3m5+bb2NXKxcTV4ODk5efp6Ojn5+bn5+Xj5OTk5OLh39vb3Nvd3N7f08C4trKyq67Y09TU0dDPz9Dk5+fm5ubm5ubl5ubm5OXl5OPk5OHg4eHg39/e3tbe08zaz9be4uLj5OXl5ebl4uLj4uHk5OPi4d7a2Nve3t7e397e39/e3tzV4efm5uXl5OPk5OTj4+Lf2s/d0uLk5eTl5ePj4uHf2uLW28zFx93h5OTl5eTl5ubm5eXk4dzW3ePk5eTf0snKxcTZ1dXa29zc29zd3dC7trK93dbV1tPW1tPb5OXl5eXl5OPh4+Pg4uHf4eDe39zRz8XD2NbPy8rJxsT48IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIj5iIiIiJqw29zXz9nj6erp4dXPycbE197a3Njb3Nzc5Ojp6urq6eno6Ojo5+jn5d7Y0crZ2NPV19jW2drZ4ebo6Ojo6OXh39zd4OTf2tbU0dDS1Nfa3eDi5Obm5+fn5ubm5ufn5+bm5uXm5ubl4uPk4+Pi4uLe2c7Iy9DR0dHQz+bo6Ojo6Ojo6Ofn5OPh3drZ2Nrc4OTl5ufo5+fn5+fn5ubl4uLj4+He2NfXzszNzM7Nzcbi5ufn5ubl5OPi4t/h39/W2uHW5eHl5N/Zzs7P0dLS0c/OysjFxcjI0s3j5+jp6Ofm5uTl5ePg4eLh4eHh4OHg39/e3NrY1tDU2Nvc3N3c2tjW0s3YysK6tbCxq9jk5ubn5uXl5eXl5OLd09nd5+jo6Ojl5d7LysbGz9HMwtvf4uPk6Orr6uno5uXk5OTk4+Pl5OXk4+Lj4uDf3tzMycPDw7+72szIxMTB1+Lk5ubl4+Hh4N/c1MrDvsXP1ebp6N/WyMnEv7/Wzc/PzsvMydPi4+Xl5OXl5OLj4eLi4OHh4OHd3dvX19LKxr67uNrY2NTOzMzKxsTDvYiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiJqw29zXz9nj6erp4dXPycbE197a3Njb3Nzc5Ojp6urq6eno6Ojo5+jn5d7Y0crZ2NPV19jW2drZ4ebo6Ojo6OXh39zd4OTf2tbU0dDS1Nfa3eDi5Obm5+fn5ubm5ufn5+bm5uXm5ubl4uPk4+Pi4uLe2c7Iy9DR0dHQ0Obo6Ojo6Ojo6Ofn5OPh3drZ2Nrc4OTl5ufo5+fn5+fn5ubl4uLj4+He2NfXzszNzM7Nzcbi5ufn5ubl5OPi4t/g39/W2uHW5eHl5N/Zzs7P0dLS0dDOysjFxcjI0s3j5+jp6Ofm5eTl5ePg4eLh4OHh4OHg397e3NrY1tDU2Nvc3N3c2tjW0s3YysK6tbCxq9jk5ubn5uXl5eXl5OLd09nd5+jo6Ojl5d7LysbGz9HLwtvf4uPk6Orr6uno5uXk5OTk4+Pl4+Xk4+Lj4uDf3tzMycPDw7+72szIxMTB1+Lk5ubl4+Hh4N/c1MrDvsXP1ebp6N/WyMnEv7/Wzc/PzsvMydTi4+Xl5OXl5OLj4eHi4OHh4OHd3dvX19LKxr67uNrY2NTOzMzKxsTDvYiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiLvR3N/f3+Dg4eDf3+Dg4eDf3+Dg4ODf3+De2s2iiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiJGbmJ7U2Onq6ejo6Ofn5+bl5OLd297f39/f3uDg4eDf0MDR4+Hp7Ovq6enp6Ojo6Ojo5+bd2dfg5+jp6Ofj3NnY2NjW083HxcPBv9bX3+bn5+bk5OPe3NjX2N3d3Nzb3tzd3dzVyby6wN7h5OPj5OTl5OTi4dvLzcbg5eTk3dnY3OXl5eXl5N3UycrM083i6eno6Ofn5+fn5+fn6Ojo6Obk4d3c3d7f2uHk5OLl5ebm5ebl5OTl5OTj4+Tl5eXl5ebl5eXk5eXl5eXl5OPk5OTj3tbIycff5ebj3tnW0dHi4+Tk5OTj5OXk5OTk4eDg4eDf3t7d3dzb2tna3ODi4uLf08vP0dHQzczMy9PT19nZ2NjUzdvj5OXm5ubm5uXl5OPj5OLYysfJycW9u9bb29rY1tPW5+bk5eXl5d/RxcfIx8TWzuTn6eno5+fm5eTi4+Ph39zdz8rL1tjf4ePi4+Tk5Obm5uXi4t7e4+Li4uLi4uPj4+Xj393V5Ofp6unm5+bm5ubm5ubm5uXl5ODY1sva4eDj0NDRyeLg4eXl5OLk5ePj4t7c29bRz9LR0M7Pzc7MyNLj4uPh4ODe3NvZ2tjV0dPX2Njb2tra2tra2trY2djZ2NnY19bOx7+4s8f5iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiPjwrbS2wM7W5+fn5+fm5ufn5ubm5+Xk4eLh4OHg39/f397e3dzb2dbSz8nJx8fFxMC9iIiIiIiIiIiIiIibq66/2eXo7PDw8PDw7+/r6+vr6urq6eno5+bj397k6u7u6+jcz8nIxsfG39vZ3dzY2t7b3OXq6+zs6uvr6+ro6urp5+np6enp6ujh29bQ2eHe0N7W4+Hk5evs7Onl4ePj4+Pj4+Ti4uDb2NXT0dHP0tPT0s/j7e3u7u7u7u7u7e3s6erp6Ojl5+fm5OHh397a1c/LyMW8iIiIiIiIiIiIiIivwb/A2eDk7O/v7u3t7ezs6+rp5+Hl6ubp6Onp7Ort6+zv7+/v7+7t6uDSyc/cz9PV1tjX1djS4e7u7e3s7Onm5ebf3M/Pzd/o6enq6+zs7e3t7Ozs6ubd08XJyMO8vrm0sdzj4Ojq6+vq6OXk5ufm5eXk5OLj4+Le2uvr6+vq5+bn5+rn6Ofh4Onr6ujq6ejp5eno5+jn5ufn5uXm5OTk49/d2d3i4+Hj4eDcycbFwcDe7Ovq7Ovr6+ns7Onm6OLn1tjY6uzr6+7u7ezt7Ozr6uvr6urq6uro6Ofm5eXm5ufp6uzt7O3t7ezt7evi3uXs7+/u7ezr7Ovs6+rk2tfY1tXU1NPT0tPS1dXV7e7v7+/u7evn6urq6unp6urp6urp6Ojn5OPg4Nzc4+bm5ufm5ubn5+fn5+jn6Ofn5+Xaxbi1tbSu3uDc2dPR0M7MyYiI+PCIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI+Z6XntfZ6+vr6unp6eno6Ofn5+Xl5OTk4+Pj4+bn5+fn5+fn5+fl5+fm5uXj4d7Y0NLS0c/Ozs/O0dLS3+jo6ejn5eTk5OXn5+fm5uXk4uDe3+Pk5OLi4uLi4eDe3NnU0dDNy8zOzs/N2ubn5+jn5ubl5d7Z3+Xo6Ofl5eTj5OTWysnDxLy+09bP0eTl5eTj4d7j5OXl4+Pg4NrS6Onp6Ofn5eLi39/bz8vKyM/Z297g4OHh4uPj5OTl5eXm5uXm5eTh4tTh3djg5OTj4NvTz9DP0M7J2Nzb3eHk5ejr6uno6efl4tzOyMnF1s/Jz83V3tzl5ubm5ePk5OPi39LOxsLCwNTRz9DPzczKzOLk5Obm5ePk5OPi4+Pi4+Lh4uLh4uLh4eLg4eDe3dza19XMycbEu7i1s7KwrK6sqamkpZ2hnZqfoKWgpqCXntfZ5unm39vX1cvGxMLC2Onq6+rr6+vq6Obk4tvb3d/f3t/e39/e3dPQ2d7i4uHg4N/e397g4OHh5OPd19Pe4d3Z5ufo6enp6enq6ejo5d3Kx8TQ1Nrf4uTk39nV4+Tk3tfRzMrKx8bC2eXk5eTl5uXl5eXj5OTk5OTk4d7d29ra3uHl5+jn5uTj4tzWzsjHxLy9uNrU0tLk4uLi4uHi4uHh4ODf393d3d3c29zf4OHi5ebm5Obl4+Tj4+Lg4d7g393e29nX1tbQzMzQ0NDPzs7Nzc3NzMzMzM7NyMbFvoiIiIiIiIiIiIiIrrS2yM/X5+fn5+fm5ufm5ubm5uXk4eHh4eHg39/f3t7e3dzb2NbSz8nJx8fFw8G9iIiIiIiIiIiIiIjF0tnZ29vc3d3d3t3f3Njq6+zt6+rq6efm6Ojo6Ofn5+fn5uXi2s3H1+Lj6enn6Onp6Ofm5ubj5eXk5eTj4uLi4eLi4t/b2trd29za2tPg3eHX4d3k5OPk5OPj4+Ph4N7Y2dvc3N3d3t7h39vKsqzd4OHn6Ojo6efm5uXi39vS0dLQ0M7Pz9DQ0NTo6urq6enp6Ojo6Ojn5+fn5OXn5uTd2dPCxcXFwtba6Ojn6Ofm5eLf29fX1dbX2t3h4+Tk5OXk5OPj4+Pi4eLh3+Hh3+Hh4eDi4uDe3t7e3t7d3NrQytzPy8/Qxr25tLCpp6zS4OPk5eXj5OTj4+He2dng5+jk1MvLyMTD29nV1dLX2NPW4OTl5ubm5uXl4+Tk5eXl493X1tXUz8PAv7y0sbCor62npNfh4t3k6ern5ufn5+bk4+He2tvd39/h4+Pk2rjT3tnMyMG6zeDk5+jo5+fn5+Xj4+Pj4+LX0cvIxsTM0dfZ297g3t3WzcrIy8zO0M7c5eXi2c/Gw8LE4t3Uz9/i3uDh4uLi4uPj5OTk4+Tk5OTk5OLj4+Lg4uLi4eLi4eLh4OLg4eHe393a2djY1NDJwr64iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIq83Y3uDg39/g4OHg39/g4OHg39/g4ODg397b08KIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIt8jP09fZ29zc3Nzd3d3e3d7a4Ojq6uvr6+vq6enp6Ofm5uXk4+Lh4N/d2tjV1M7Iwby4tbzS2t/l5+jo6ejo5+Xl5eTj4NfX1MrDv97e4+Xo5+bn5+fm5OPf3d3e3t7e3t/d397c2tXl6Ojo6Ofk4+Tj4+Pi39rSxcrIytPR4eTk5OTi4eHh4eHh4ODg4eDg4ODd2dTJ087Z4+Xk4t/c293e3tzc3d3d3d3b3d/e3eDUycHByOTi4+Lj5eXl5eXm5ubn5+fo6Ofn5+fm5ePj4+Lg3t3c2tre4uTm5ubl5OTi4+Li3+Dd1dbHx8TAv7qyraqjqKTa0svMzsvLysjHwb+2x/mIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI+PCTnZ2k2uXp6uro49fOy8jF4Nza2NjY2eHo6urr6+vp5+bk4N/d3t3e3Nrj5ubm5ePf0sjHv9HRzMzLzM7O0NLQ5ufo6erq6efl5eTh4N3d4ePi4uHg4d/e2tvk4+Pj4eDf3d7g4N/b3eTk49/WzcjGxNXZ3ePm5OXl4+Le19Da5ubm5+jm6Ofm5ubl5uXj4Nza19nc3dzc3dzc3t/e3t7Vu7SysK+x1c/j5ubm5uXi3tnb2NfT0tHR0NDS0Nnn6erq6Ono6Ojo5dzZ0NHa4efo6OPc1tLKxMDd4OHk5+jn5+fn5+fn5+bl5ebl5OXi5OPk5OTj4+bm5eTm5ubk5+Xe1s7LwsHA3dTb3t/d3dzd29XUx8DH3eLg3M/LxMPX1szLysfHyszP0NDS4uTl5eTl5OLh4eHf3t7e3t7g4uHh4uPj4uTj4eLh3t/d29nX1M/Iw7+2iIiIiIiIiIiIiIistLO/ztTm6Ofn5ufn5ubn5ubm5uTh4eHh4ODf39/f3t7d3NzY1tTPysrHx8TEwb2IiIiIiIiIiIiIiIifp7LY4OHj5OXl5ujq6urr6urq6+rl3dbPysjC1+Dp6Ojo5+fn5+fm5ubf19Pc4ePj4+Pj4+Tj4uPi4uLi4uLj4+Tl5eXl5eXk5OTk5OXk5ODc2tbTysTO0tnc3tza3uLl4ePj5OPk5OTk5OPj4+To6Ojo6Ojn3dbPy9fm5+bm5OTk5OPi3NLIxMXFxL+918zU1NfU4eXm5+jo6Ojo6Obn39fc4+Tj497QzcfCwrm3s6ql1N7e4+Xm5uXg3NfT0NHW3uPl4NbV1+Hj4eDh4eHg4OHg3drb3t7c3Nvc3NrW0uTj4+Le29nc3t7e3d7e3t/d09bd4djL3+Lh4eDd3d7g4ODf39za09PRz87LxsPBvoiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiJXM19zf4ODg39/g4ODf39/g4eDf39/g4ODf29XGiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiMbW3uHf3tzZ19bT1d3l5ufn6Ojo6Ojn5+fn5+bm5ePk3eHg4+Lk5ePg3dHKwc7NyMnJyszOz8/P1ufp6ejo6Onp6enp6ejo6Ofn5uPg3dXX2Nnb4OTn5+fm5uXl5eXk5OTj4+Pi4NvY083Dwb+6u7rU3tjW08/R09TO0N/d3OLj4+Pk5OTj4t7VysnG4ODc1NrZ3d7g4uXn5+jn5+fn5ubm5uXk5OTk5OTj4+Pm5ubn5ebm5ubl5OLi3tnU0M7U3+Tm5+jo5uTj08vH19TX19vb2tzb2eDl5ufn5ubm5ubl49jLx8TBw8HV1+Pk4uTj4eLg3eDe397d3tze3Nvc2tnY2NXT19jY2tjZ2dnZ2NnX1tTPysbAvLeIx/mIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI+PC0tsrP4efn5+jm5ufn5ubm5ubl5OHh4eHg4N/f39/e3t3c29jV0s7IycbHxcPAvIiIiIiIiIiIiIiIiJOcstLS0dfk6+zr6+rq6unn5OLe0cjGxMLf1M/J1NXh2+Pm5eTi39/f397f3Nzj5eLg5eXo5+jo5+fn5+fn6Ofm5OTh3tfR09TS0c/OzM7Nz87QzOPm5+bk5OHYzs3Ev8Xe5eXi39na5eXk29nW2+Ln6Ojl5Obm5OXl5OLk5OTj5eXl4+Lh4N7c29jSzsnKyMS+uLCqqbDV4ubm5+fm5+fn5ubm5N/Vz83O0dHUztzo5+fn5uXm5ubl5ePi4d/b0MjJ2N3V2tzd3dzc3dzd3t7a19HPzczMzM3Pzs/J5Ofo6Ofm5uTj4d7c293f4eTk5ebn5+fm5ebm5uTk4NvMycfDwdXX3OHk5OXi29jQ5OXk5OTi4uLg3t/f3t/e3dva2NfU0dLMysjF",
+   "events": [],
+   "hz": 100,
+   "loudness_i": -27.7,
+   "noise_floor_db": -120.0,
+   "own_mic_energy": {},
+   "silences": [
+    {
+     "id": "sil_0001",
+     "t0": 13.6916,
+     "t1": 15.3057
+    },
+    {
+     "id": "sil_0002",
+     "t0": 19.415,
+     "t1": 20.3456
+    },
+    {
+     "id": "sil_0003",
+     "t0": 25.0523,
+     "t1": 25.4636
+    },
+    {
+     "id": "sil_0004",
+     "t0": 30.1351,
+     "t1": 31.7396
+    },
+    {
+     "id": "sil_0005",
+     "t0": 37.1792,
+     "t1": 38.7744
+    },
+    {
+     "id": "sil_0006",
+     "t0": 44.0209,
+     "t1": 44.4292
+    },
+    {
+     "id": "sil_0007",
+     "t0": 49.9455,
+     "t1": 50.3548
+    },
+    {
+     "id": "sil_0008",
+     "t0": 52.7693,
+     "t1": 54.4221
+    },
+    {
+     "id": "sil_0009",
+     "t0": 64.8068,
+     "t1": 66.4281
+    }
+   ],
+   "vad": [
+    [
+     0.0896,
+     4.9086
+    ],
+    [
+     5.1586,
+     5.4658
+    ],
+    [
+     5.7362,
+     8.8262
+    ],
+    [
+     9.1114,
+     9.4185
+    ],
+    [
+     9.6875,
+     13.6916
+    ],
+    [
+     15.3057,
+     19.415
+    ],
+    [
+     20.3456,
+     24.4549
+    ],
+    [
+     24.811,
+     25.0523
+    ],
+    [
+     25.4636,
+     30.1351
+    ],
+    [
+     31.7396,
+     32.0467
+    ],
+    [
+     32.3178,
+     33.7148
+    ],
+    [
+     33.9317,
+     37.1792
+    ],
+    [
+     38.7744,
+     44.0209
+    ],
+    [
+     44.4292,
+     44.7363
+    ],
+    [
+     44.978,
+     49.3564
+    ],
+    [
+     49.7042,
+     49.9455
+    ],
+    [
+     50.3548,
+     52.7693
+    ],
+    [
+     54.4221,
+     57.7088
+    ],
+    [
+     57.9505,
+     58.2576
+    ],
+    [
+     58.5287,
+     61.1029
+    ],
+    [
+     61.4761,
+     61.7174
+    ],
+    [
+     62.0982,
+     64.8068
+    ],
+    [
+     66.4281,
+     66.7352
+    ],
+    [
+     67.0297,
+     69.883
+    ]
+   ]
+  },
+  "semantic": {
+   "annotations": [],
+   "budget": {
+    "calls": 0,
+    "partial_from": null,
+    "spent_s": 0.0
+   },
+   "scores": {
+    "s_0001": {
+     "emotion": 0.0927,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 1.0,
+     "virality": 0.1393
+    },
+    "s_0002": {
+     "emotion": 0.09,
+     "evidence": {
+      "importance": [
+       "fillers"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.15,
+     "standalone": 0.0,
+     "virality": 0.024
+    },
+    "s_0003": {
+     "emotion": 0.1462,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ],
+      "importance": [
+       "fillers"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 1.0,
+     "virality": 0.1446
+    },
+    "s_0004": {
+     "emotion": 0.09,
+     "evidence": {
+      "hook": [
+       "claim",
+       "delivery",
+       "standalone",
+       "flat_delivery"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.2194,
+     "humour": 0.0,
+     "importance": 0.22,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.3298
+    },
+    "s_0005": {
+     "emotion": 0.09,
+     "evidence": {
+      "hook": [
+       "claim",
+       "delivery",
+       "standalone",
+       "flat_delivery"
+      ],
+      "importance": [
+       "claim",
+       "repeat"
+      ]
+     },
+     "hook": 0.2194,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.2748
+    },
+    "s_0006": {
+     "emotion": 0.2223,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 1.0,
+     "virality": 0.1522
+    },
+    "s_0007": {
+     "emotion": 0.7439,
+     "evidence": {
+      "emotion": [
+       "rms_z",
+       "stretch"
+      ],
+      "hook": [
+       "claim",
+       "delivery",
+       "standalone"
+      ],
+      "importance": [
+       "claim",
+       "topic_peak",
+       "rms_z",
+       "fillers"
+      ]
+     },
+     "hook": 0.45,
+     "humour": 0.0,
+     "importance": 0.5018,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.5348
+    },
+    "s_0008": {
+     "emotion": 0.09,
+     "evidence": {
+      "hook": [
+       "claim",
+       "strong_number",
+       "delivery",
+       "contrast_words",
+       "standalone"
+      ],
+      "importance": [
+       "claim",
+       "strong_number"
+      ]
+     },
+     "hook": 0.5635,
+     "humour": 0.0,
+     "importance": 0.3,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.453
+    },
+    "s_0009": {
+     "emotion": 0.1122,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ],
+      "importance": [
+       "fillers"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 1.0,
+     "virality": 0.1412
+    },
+    "s_0010": {
+     "emotion": 0.1223,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ],
+      "hook": [
+       "is_question",
+       "delivery",
+       "standalone",
+       "flat_delivery"
+      ]
+     },
+     "hook": 0.2228,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 0.5,
+     "virality": 0.1591
+    },
+    "s_0011": {
+     "emotion": 0.09,
+     "evidence": {
+      "hook": [
+       "claim",
+       "delivery",
+       "standalone",
+       "flat_delivery"
+      ],
+      "importance": [
+       "claim"
+      ]
+     },
+     "hook": 0.1845,
+     "humour": 0.0,
+     "importance": 0.22,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 0.5,
+     "virality": 0.2693
+    },
+    "s_0012": {
+     "emotion": 0.29,
+     "evidence": {
+      "emotion": [
+       "stretch"
+      ],
+      "hook": [
+       "claim",
+       "delivery",
+       "contrast_words",
+       "standalone"
+      ],
+      "importance": [
+       "claim",
+       "fillers"
+      ]
+     },
+     "hook": 0.4435,
+     "humour": 0.0,
+     "importance": 0.18,
+     "quality": 0.5,
+     "quotable": 1.0,
+     "standalone": 1.0,
+     "virality": 0.4071
+    },
+    "s_0013": {
+     "emotion": 0.09,
+     "evidence": {
+      "hook": [
+       "delivery",
+       "standalone",
+       "flat_delivery"
+      ]
+     },
+     "hook": 0.0794,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.3,
+     "standalone": 1.0,
+     "virality": 0.1628
+    },
+    "s_0014": {
+     "emotion": 0.09,
+     "evidence": {
+      "importance": [
+       "fillers"
+      ]
+     },
+     "hook": 0.0,
+     "humour": 0.0,
+     "importance": 0.0,
+     "quality": 0.5,
+     "quotable": 0.15,
+     "standalone": 0.0,
+     "virality": 0.024
+    }
+   },
+   "topics": [
+    {
+     "by": "truth",
+     "id": "t_0001",
+     "sents": [
+      "s_0001",
+      "s_0002",
+      "s_0003",
+      "s_0004",
+      "s_0005",
+      "s_0006",
+      "s_0007",
+      "s_0008",
+      "s_0009",
+      "s_0010",
+      "s_0011",
+      "s_0012",
+      "s_0013",
+      "s_0014"
+     ],
+     "t0": 0.0896,
+     "t1": 69.883,
+     "title": "the index card habit"
+    }
+   ]
+  },
+  "speakers": {
+   "engine": "truth",
+   "flip_risk": [],
+   "k": 1,
+   "k_method": "truth",
+   "overlaps": [],
+   "silhouette": null,
+   "speakers": [
+    {
+     "id": "S1",
+     "label": "SPEAKER_00",
+     "questions": 1,
+     "role_guess": "host",
+     "share": 1.0
+    }
+   ],
+   "turns": [
+    {
+     "id": "u_0001",
+     "sents": [
+      "s_0001",
+      "s_0002",
+      "s_0003"
+     ],
+     "spk": "S1",
+     "t0": 0.0896,
+     "t1": 13.6916
+    },
+    {
+     "id": "u_0002",
+     "sents": [
+      "s_0004"
+     ],
+     "spk": "S1",
+     "t0": 15.3057,
+     "t1": 19.415
+    },
+    {
+     "id": "u_0003",
+     "sents": [
+      "s_0005",
+      "s_0006"
+     ],
+     "spk": "S1",
+     "t0": 20.3456,
+     "t1": 30.1351
+    },
+    {
+     "id": "u_0004",
+     "sents": [
+      "s_0007"
+     ],
+     "spk": "S1",
+     "t0": 31.7396,
+     "t1": 37.1792
+    },
+    {
+     "id": "u_0005",
+     "sents": [
+      "s_0008",
+      "s_0009",
+      "s_0010"
+     ],
+     "spk": "S1",
+     "t0": 38.7744,
+     "t1": 52.7693
+    },
+    {
+     "id": "u_0006",
+     "sents": [
+      "s_0011",
+      "s_0012",
+      "s_0013"
+     ],
+     "spk": "S1",
+     "t0": 54.4221,
+     "t1": 64.8068
+    },
+    {
+     "id": "u_0007",
+     "sents": [
+      "s_0014"
+     ],
+     "spk": "S1",
+     "t0": 66.4281,
+     "t1": 69.883
+    }
+   ],
+   "utterances": [
+    {
+     "spk": "S1",
+     "t0": 0.0896,
+     "t1": 4.9086
+    },
+    {
+     "spk": "S1",
+     "t0": 5.1586,
+     "t1": 5.4658
+    },
+    {
+     "spk": "S1",
+     "t0": 5.7362,
+     "t1": 8.8262
+    },
+    {
+     "spk": "S1",
+     "t0": 9.1114,
+     "t1": 9.4185
+    },
+    {
+     "spk": "S1",
+     "t0": 9.6875,
+     "t1": 13.6916
+    },
+    {
+     "spk": "S1",
+     "t0": 15.3057,
+     "t1": 19.415
+    },
+    {
+     "spk": "S1",
+     "t0": 20.3456,
+     "t1": 24.4549
+    },
+    {
+     "spk": "S1",
+     "t0": 24.811,
+     "t1": 25.0523
+    },
+    {
+     "spk": "S1",
+     "t0": 25.4636,
+     "t1": 30.1351
+    },
+    {
+     "spk": "S1",
+     "t0": 31.7396,
+     "t1": 32.0467
+    },
+    {
+     "spk": "S1",
+     "t0": 32.3178,
+     "t1": 33.7148
+    },
+    {
+     "spk": "S1",
+     "t0": 33.9317,
+     "t1": 37.1792
+    },
+    {
+     "spk": "S1",
+     "t0": 38.7744,
+     "t1": 44.0209
+    },
+    {
+     "spk": "S1",
+     "t0": 44.4292,
+     "t1": 44.7363
+    },
+    {
+     "spk": "S1",
+     "t0": 44.978,
+     "t1": 49.3564
+    },
+    {
+     "spk": "S1",
+     "t0": 49.7042,
+     "t1": 49.9455
+    },
+    {
+     "spk": "S1",
+     "t0": 50.3548,
+     "t1": 52.7693
+    },
+    {
+     "spk": "S1",
+     "t0": 54.4221,
+     "t1": 57.7088
+    },
+    {
+     "spk": "S1",
+     "t0": 57.9505,
+     "t1": 58.2576
+    },
+    {
+     "spk": "S1",
+     "t0": 58.5287,
+     "t1": 61.1029
+    },
+    {
+     "spk": "S1",
+     "t0": 61.4761,
+     "t1": 61.7174
+    },
+    {
+     "spk": "S1",
+     "t0": 62.0982,
+     "t1": 64.8068
+    },
+    {
+     "spk": "S1",
+     "t0": 66.4281,
+     "t1": 66.7352
+    },
+    {
+     "spk": "S1",
+     "t0": 67.0297,
+     "t1": 69.883
+    }
+   ]
+  },
+  "speech": {
+   "acoustic_fillers": [
+    {
+     "confidence": 0.9,
+     "evidence": {
+      "flux": 0.05,
+      "pitch_range_st": 0.2,
+      "word_overlap": 0.0
+     },
+     "id": "af_0001",
+     "t0": 24.811,
+     "t1": 25.0523
+    },
+    {
+     "confidence": 0.9,
+     "evidence": {
+      "flux": 0.05,
+      "pitch_range_st": 0.2,
+      "word_overlap": 0.0
+     },
+     "id": "af_0002",
+     "t0": 49.7042,
+     "t1": 49.9455
+    },
+    {
+     "confidence": 0.9,
+     "evidence": {
+      "flux": 0.05,
+      "pitch_range_st": 0.2,
+      "word_overlap": 0.0
+     },
+     "id": "af_0003",
+     "t0": 61.4761,
+     "t1": 61.7174
+    }
+   ],
+   "flags": {
+    "dead_air": [
+     {
+      "id": "d_0001",
+      "t0": 19.5036,
+      "t1": 20.3036
+     }
+    ],
+    "false_starts": [],
+    "repeats": [
+     {
+      "dup": "s_0005",
+      "id": "r_0001",
+      "of": "s_0004",
+      "similarity": 1.0
+     }
+    ],
+    "technical": [],
+    "weak_questions": []
+   },
+   "params": {
+    "analysis_version": 1,
+    "backend": "truth",
+    "language": "en",
+    "model": "fixture",
+    "prompt": "none"
+   },
+   "sentences": [
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 15,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 187
+     },
+     "id": "s_0001",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 0.0896,
+     "t1": 4.9086,
+     "text": "Hey everyone, today I want to talk about the one habit that changed how I work.",
+     "topic": "t_0001",
+     "weak_start": true
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 214
+     },
+     "id": "s_0002",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 5.7362,
+     "t1": 8.8262,
+     "text": "It is not an app, and it is not a fancy notebook.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 165
+     },
+     "id": "s_0003",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 9.6875,
+     "t1": 13.6916,
+     "text": "Every morning, I write the day's plan on a single index card.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 14,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 204
+     },
+     "id": "s_0004",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 15.3057,
+     "t1": 19.415,
+     "text": "The card has room for a handful of things, and that limit is the point.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 14,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 204
+     },
+     "id": "s_0005",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 20.3456,
+     "t1": 24.4549,
+     "text": "The card has room for a handful of things, and that limit is the point.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": true,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": true,
+      "wpm": 141
+     },
+     "id": "s_0006",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 25.4636,
+     "t1": 30.1351,
+     "text": "I started this in 2019 with three people in a shared office.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 136
+     },
+     "id": "s_0007",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 32.3178,
+     "t1": 37.1792,
+     "text": "When the card is full, the important decisions are already finished.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 0,
+      "has_number": true,
+      "len_words": 17,
+      "story_marker": false,
+      "strong_number": true,
+      "weak_number": false,
+      "wpm": 194
+     },
+     "id": "s_0008",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 38.7744,
+     "t1": 44.0209,
+     "text": "I now finish forty percent more of what I plan, the best stretch of my working life.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 13,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 178
+     },
+     "id": "s_0009",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 44.978,
+     "t1": 49.3564,
+     "text": "Some days I still fall behind, and the card just waits for tomorrow.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 7,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 174
+     },
+     "id": "s_0010",
+     "is_question": true,
+     "kind": "question",
+     "spk": "S1",
+     "t0": 50.3548,
+     "t1": 52.7693,
+     "text": "So why does something this small work?",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 11,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 201
+     },
+     "id": "s_0011",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 54.4221,
+     "t1": 57.7088,
+     "text": "Because it forces a choice before the day makes it for you.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": true,
+      "conclusion_marker": false,
+      "contrast_words": 1,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 5,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 117
+     },
+     "id": "s_0012",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 58.5287,
+     "t1": 61.1029,
+     "text": "Nobody needs another productivity system.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": false,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 0,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 199
+     },
+     "id": "s_0013",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 62.0982,
+     "t1": 64.8068,
+     "text": "Try it for a week and tell me what happens.",
+     "topic": "t_0001",
+     "weak_start": false
+    },
+    {
+     "answer_of": null,
+     "complete": true,
+     "features": {
+      "anaphora_start": true,
+      "claim": false,
+      "conclusion_marker": false,
+      "contrast_words": 0,
+      "fillers": 1,
+      "has_number": false,
+      "len_words": 9,
+      "story_marker": false,
+      "strong_number": false,
+      "weak_number": false,
+      "wpm": 189
+     },
+     "id": "s_0014",
+     "is_question": false,
+     "kind": "statement",
+     "spk": "S1",
+     "t0": 67.0297,
+     "t1": 69.883,
+     "text": "That is all for today, and thanks for watching.",
+     "topic": "t_0001",
+     "weak_start": false
+    }
+   ],
+   "turns": [
+    {
+     "id": "u_0001",
+     "sents": [
+      "s_0001",
+      "s_0002",
+      "s_0003"
+     ],
+     "spk": "S1",
+     "t0": 0.0896,
+     "t1": 13.6916
+    },
+    {
+     "id": "u_0002",
+     "sents": [
+      "s_0004"
+     ],
+     "spk": "S1",
+     "t0": 15.3057,
+     "t1": 19.415
+    },
+    {
+     "id": "u_0003",
+     "sents": [
+      "s_0005",
+      "s_0006"
+     ],
+     "spk": "S1",
+     "t0": 20.3456,
+     "t1": 30.1351
+    },
+    {
+     "id": "u_0004",
+     "sents": [
+      "s_0007"
+     ],
+     "spk": "S1",
+     "t0": 31.7396,
+     "t1": 37.1792
+    },
+    {
+     "id": "u_0005",
+     "sents": [
+      "s_0008",
+      "s_0009",
+      "s_0010"
+     ],
+     "spk": "S1",
+     "t0": 38.7744,
+     "t1": 52.7693
+    },
+    {
+     "id": "u_0006",
+     "sents": [
+      "s_0011",
+      "s_0012",
+      "s_0013"
+     ],
+     "spk": "S1",
+     "t0": 54.4221,
+     "t1": 64.8068
+    },
+    {
+     "id": "u_0007",
+     "sents": [
+      "s_0014"
+     ],
+     "spk": "S1",
+     "t0": 66.4281,
+     "t1": 69.883
+    }
+   ],
+   "words": [
+    {
+     "id": "w_0001_00",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 0.0896,
+     "t1": 0.3367,
+     "text": "Hey"
+    },
+    {
+     "id": "w_0001_01",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 0.3367,
+     "t1": 0.8928,
+     "text": "everyone,"
+    },
+    {
+     "id": "w_0001_02",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 0.8928,
+     "t1": 1.2635,
+     "text": "today"
+    },
+    {
+     "id": "w_0001_03",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 1.2635,
+     "t1": 1.387,
+     "text": "I"
+    },
+    {
+     "id": "w_0001_04",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 1.387,
+     "t1": 1.6959,
+     "text": "want"
+    },
+    {
+     "id": "w_0001_05",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 1.6959,
+     "t1": 1.8813,
+     "text": "to"
+    },
+    {
+     "id": "w_0001_06",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 1.8813,
+     "t1": 2.1902,
+     "text": "talk"
+    },
+    {
+     "id": "w_0001_07",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 2.1902,
+     "t1": 2.5609,
+     "text": "about"
+    },
+    {
+     "id": "w_0001_08",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 2.5609,
+     "t1": 2.808,
+     "text": "the"
+    },
+    {
+     "id": "w_0001_09",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 2.808,
+     "t1": 3.0551,
+     "text": "one"
+    },
+    {
+     "id": "w_0001_10",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 3.0551,
+     "t1": 3.4258,
+     "text": "habit"
+    },
+    {
+     "id": "w_0001_11",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 3.4258,
+     "t1": 3.7347,
+     "text": "that"
+    },
+    {
+     "id": "w_0001_12",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 3.7347,
+     "t1": 4.229,
+     "text": "changed"
+    },
+    {
+     "id": "w_0001_13",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 4.229,
+     "t1": 4.4761,
+     "text": "how"
+    },
+    {
+     "id": "w_0001_14",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 4.4761,
+     "t1": 4.5997,
+     "text": "I"
+    },
+    {
+     "id": "w_0001_15",
+     "prob": 1.0,
+     "sent": "s_0001",
+     "spk": "S1",
+     "t0": 4.5997,
+     "t1": 4.9086,
+     "text": "work."
+    },
+    {
+     "filler": true,
+     "id": "w_0002_f",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 5.1586,
+     "t1": 5.4658,
+     "text": "um"
+    },
+    {
+     "id": "w_0002_00",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 5.7362,
+     "t1": 5.9293,
+     "text": "It"
+    },
+    {
+     "id": "w_0002_01",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 5.9293,
+     "t1": 6.1224,
+     "text": "is"
+    },
+    {
+     "id": "w_0002_02",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 6.1224,
+     "t1": 6.3799,
+     "text": "not"
+    },
+    {
+     "id": "w_0002_03",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 6.3799,
+     "t1": 6.5731,
+     "text": "an"
+    },
+    {
+     "id": "w_0002_04",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 6.5731,
+     "t1": 6.8306,
+     "text": "app,"
+    },
+    {
+     "id": "w_0002_05",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 6.8306,
+     "t1": 7.0881,
+     "text": "and"
+    },
+    {
+     "id": "w_0002_06",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 7.0881,
+     "t1": 7.2812,
+     "text": "it"
+    },
+    {
+     "id": "w_0002_07",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 7.2812,
+     "t1": 7.4743,
+     "text": "is"
+    },
+    {
+     "id": "w_0002_08",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 7.4743,
+     "t1": 7.7318,
+     "text": "not"
+    },
+    {
+     "id": "w_0002_09",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 7.7318,
+     "t1": 7.8606,
+     "text": "a"
+    },
+    {
+     "id": "w_0002_10",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 7.8606,
+     "t1": 8.2468,
+     "text": "fancy"
+    },
+    {
+     "id": "w_0002_11",
+     "prob": 1.0,
+     "sent": "s_0002",
+     "spk": "S1",
+     "t0": 8.2468,
+     "t1": 8.8262,
+     "text": "notebook."
+    },
+    {
+     "filler": true,
+     "id": "w_0006_f",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 9.1114,
+     "t1": 9.4185,
+     "text": "um"
+    },
+    {
+     "id": "w_0003_00",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 9.6875,
+     "t1": 10.0879,
+     "text": "Every"
+    },
+    {
+     "id": "w_0003_01",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 10.0879,
+     "t1": 10.6218,
+     "text": "morning,"
+    },
+    {
+     "id": "w_0003_02",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 10.6218,
+     "t1": 10.7552,
+     "text": "I"
+    },
+    {
+     "id": "w_0003_03",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 10.7552,
+     "t1": 11.1556,
+     "text": "write"
+    },
+    {
+     "id": "w_0003_04",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 11.1556,
+     "t1": 11.4226,
+     "text": "the"
+    },
+    {
+     "id": "w_0003_05",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 11.4226,
+     "t1": 11.823,
+     "text": "day's"
+    },
+    {
+     "id": "w_0003_06",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 11.823,
+     "t1": 12.1567,
+     "text": "plan"
+    },
+    {
+     "id": "w_0003_07",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 12.1567,
+     "t1": 12.3569,
+     "text": "on"
+    },
+    {
+     "id": "w_0003_08",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 12.3569,
+     "t1": 12.4903,
+     "text": "a"
+    },
+    {
+     "id": "w_0003_09",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 12.4903,
+     "t1": 12.9575,
+     "text": "single"
+    },
+    {
+     "id": "w_0003_10",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 12.9575,
+     "t1": 13.3579,
+     "text": "index"
+    },
+    {
+     "id": "w_0003_11",
+     "prob": 1.0,
+     "sent": "s_0003",
+     "spk": "S1",
+     "t0": 13.3579,
+     "t1": 13.6916,
+     "text": "card."
+    },
+    {
+     "id": "w_0004_00",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 15.3057,
+     "t1": 15.5405,
+     "text": "The"
+    },
+    {
+     "id": "w_0004_01",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 15.5405,
+     "t1": 15.834,
+     "text": "card"
+    },
+    {
+     "id": "w_0004_02",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 15.834,
+     "t1": 16.0688,
+     "text": "has"
+    },
+    {
+     "id": "w_0004_03",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 16.0688,
+     "t1": 16.3623,
+     "text": "room"
+    },
+    {
+     "id": "w_0004_04",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 16.3623,
+     "t1": 16.5972,
+     "text": "for"
+    },
+    {
+     "id": "w_0004_05",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 16.5972,
+     "t1": 16.7146,
+     "text": "a"
+    },
+    {
+     "id": "w_0004_06",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 16.7146,
+     "t1": 17.1842,
+     "text": "handful"
+    },
+    {
+     "id": "w_0004_07",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 17.1842,
+     "t1": 17.3603,
+     "text": "of"
+    },
+    {
+     "id": "w_0004_08",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 17.3603,
+     "t1": 17.7712,
+     "text": "things,"
+    },
+    {
+     "id": "w_0004_09",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 17.7712,
+     "t1": 18.0061,
+     "text": "and"
+    },
+    {
+     "id": "w_0004_10",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 18.0061,
+     "t1": 18.2996,
+     "text": "that"
+    },
+    {
+     "id": "w_0004_11",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 18.2996,
+     "t1": 18.6518,
+     "text": "limit"
+    },
+    {
+     "id": "w_0004_12",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 18.6518,
+     "t1": 18.8279,
+     "text": "is"
+    },
+    {
+     "id": "w_0004_13",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 18.8279,
+     "t1": 19.0627,
+     "text": "the"
+    },
+    {
+     "id": "w_0004_14",
+     "prob": 1.0,
+     "sent": "s_0004",
+     "spk": "S1",
+     "t0": 19.0627,
+     "t1": 19.415,
+     "text": "point."
+    },
+    {
+     "id": "w_0005_00",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 20.3456,
+     "t1": 20.5804,
+     "text": "The"
+    },
+    {
+     "id": "w_0005_01",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 20.5804,
+     "t1": 20.874,
+     "text": "card"
+    },
+    {
+     "id": "w_0005_02",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 20.874,
+     "t1": 21.1088,
+     "text": "has"
+    },
+    {
+     "id": "w_0005_03",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 21.1088,
+     "t1": 21.4023,
+     "text": "room"
+    },
+    {
+     "id": "w_0005_04",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 21.4023,
+     "t1": 21.6371,
+     "text": "for"
+    },
+    {
+     "id": "w_0005_05",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 21.6371,
+     "t1": 21.7545,
+     "text": "a"
+    },
+    {
+     "id": "w_0005_06",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 21.7545,
+     "t1": 22.2242,
+     "text": "handful"
+    },
+    {
+     "id": "w_0005_07",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 22.2242,
+     "t1": 22.4003,
+     "text": "of"
+    },
+    {
+     "id": "w_0005_08",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 22.4003,
+     "t1": 22.8112,
+     "text": "things,"
+    },
+    {
+     "id": "w_0005_09",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 22.8112,
+     "t1": 23.046,
+     "text": "and"
+    },
+    {
+     "id": "w_0005_10",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 23.046,
+     "t1": 23.3395,
+     "text": "that"
+    },
+    {
+     "id": "w_0005_11",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 23.3395,
+     "t1": 23.6918,
+     "text": "limit"
+    },
+    {
+     "id": "w_0005_12",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 23.6918,
+     "t1": 23.8679,
+     "text": "is"
+    },
+    {
+     "id": "w_0005_13",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 23.8679,
+     "t1": 24.1027,
+     "text": "the"
+    },
+    {
+     "id": "w_0005_14",
+     "prob": 1.0,
+     "sent": "s_0005",
+     "spk": "S1",
+     "t0": 24.1027,
+     "t1": 24.4549,
+     "text": "point."
+    },
+    {
+     "id": "w_0006_00",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 25.4636,
+     "t1": 25.6193,
+     "text": "I"
+    },
+    {
+     "id": "w_0006_01",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 25.6193,
+     "t1": 26.2422,
+     "text": "started"
+    },
+    {
+     "id": "w_0006_02",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 26.2422,
+     "t1": 26.6315,
+     "text": "this"
+    },
+    {
+     "id": "w_0006_03",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 26.6315,
+     "t1": 26.865,
+     "text": "in"
+    },
+    {
+     "id": "w_0006_04",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 26.865,
+     "t1": 27.2543,
+     "text": "2019"
+    },
+    {
+     "id": "w_0006_05",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 27.2543,
+     "t1": 27.6436,
+     "text": "with"
+    },
+    {
+     "id": "w_0006_06",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 27.6436,
+     "t1": 28.1108,
+     "text": "three"
+    },
+    {
+     "id": "w_0006_07",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 28.1108,
+     "t1": 28.6558,
+     "text": "people"
+    },
+    {
+     "id": "w_0006_08",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 28.6558,
+     "t1": 28.8894,
+     "text": "in"
+    },
+    {
+     "id": "w_0006_09",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 28.8894,
+     "t1": 29.0451,
+     "text": "a"
+    },
+    {
+     "id": "w_0006_10",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 29.0451,
+     "t1": 29.5901,
+     "text": "shared"
+    },
+    {
+     "id": "w_0006_11",
+     "prob": 1.0,
+     "sent": "s_0006",
+     "spk": "S1",
+     "t0": 29.5901,
+     "t1": 30.1351,
+     "text": "office."
+    },
+    {
+     "filler": true,
+     "id": "w_0018_f",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 31.7396,
+     "t1": 32.0467,
+     "text": "umm"
+    },
+    {
+     "id": "w_0007_00",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 32.3178,
+     "t1": 32.6806,
+     "text": "When"
+    },
+    {
+     "id": "w_0007_01",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 32.6806,
+     "t1": 32.9708,
+     "text": "the"
+    },
+    {
+     "id": "w_0007_02",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 32.9708,
+     "t1": 33.3336,
+     "text": "card"
+    },
+    {
+     "id": "w_0007_03",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 33.3336,
+     "t1": 33.5513,
+     "text": "is"
+    },
+    {
+     "id": "w_0007_04",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 33.5513,
+     "t1": 33.9141,
+     "text": "full,"
+    },
+    {
+     "id": "w_0007_05",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 33.9141,
+     "t1": 34.2043,
+     "text": "the"
+    },
+    {
+     "id": "w_0007_06",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 34.2043,
+     "t1": 34.9299,
+     "text": "important"
+    },
+    {
+     "id": "w_0007_07",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 34.9299,
+     "t1": 35.6555,
+     "text": "decisions"
+    },
+    {
+     "id": "w_0007_08",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 35.6555,
+     "t1": 35.9457,
+     "text": "are"
+    },
+    {
+     "id": "w_0007_09",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 35.9457,
+     "t1": 36.5262,
+     "text": "already"
+    },
+    {
+     "id": "w_0007_10",
+     "prob": 1.0,
+     "sent": "s_0007",
+     "spk": "S1",
+     "t0": 36.5262,
+     "t1": 37.1792,
+     "text": "finished."
+    },
+    {
+     "id": "w_0008_00",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 38.7744,
+     "t1": 38.9008,
+     "text": "I"
+    },
+    {
+     "id": "w_0008_01",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 38.9008,
+     "t1": 39.1537,
+     "text": "now"
+    },
+    {
+     "id": "w_0008_02",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 39.1537,
+     "t1": 39.5962,
+     "text": "finish"
+    },
+    {
+     "id": "w_0008_03",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 39.5962,
+     "t1": 39.9754,
+     "text": "forty"
+    },
+    {
+     "id": "w_0008_04",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 39.9754,
+     "t1": 40.4811,
+     "text": "percent"
+    },
+    {
+     "id": "w_0008_05",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 40.4811,
+     "t1": 40.7972,
+     "text": "more"
+    },
+    {
+     "id": "w_0008_06",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 40.7972,
+     "t1": 40.9868,
+     "text": "of"
+    },
+    {
+     "id": "w_0008_07",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 40.9868,
+     "t1": 41.3028,
+     "text": "what"
+    },
+    {
+     "id": "w_0008_08",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 41.3028,
+     "t1": 41.4293,
+     "text": "I"
+    },
+    {
+     "id": "w_0008_09",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 41.4293,
+     "t1": 41.7453,
+     "text": "plan,"
+    },
+    {
+     "id": "w_0008_10",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 41.7453,
+     "t1": 41.9982,
+     "text": "the"
+    },
+    {
+     "id": "w_0008_11",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 41.9982,
+     "t1": 42.3142,
+     "text": "best"
+    },
+    {
+     "id": "w_0008_12",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 42.3142,
+     "t1": 42.8199,
+     "text": "stretch"
+    },
+    {
+     "id": "w_0008_13",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 42.8199,
+     "t1": 43.0095,
+     "text": "of"
+    },
+    {
+     "id": "w_0008_14",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 43.0095,
+     "t1": 43.1992,
+     "text": "my"
+    },
+    {
+     "id": "w_0008_15",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 43.1992,
+     "t1": 43.7049,
+     "text": "working"
+    },
+    {
+     "id": "w_0008_16",
+     "prob": 1.0,
+     "sent": "s_0008",
+     "spk": "S1",
+     "t0": 43.7049,
+     "t1": 44.0209,
+     "text": "life."
+    },
+    {
+     "filler": true,
+     "id": "w_0026_f",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 44.4292,
+     "t1": 44.7363,
+     "text": "um"
+    },
+    {
+     "id": "w_0009_00",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 44.978,
+     "t1": 45.3048,
+     "text": "Some"
+    },
+    {
+     "id": "w_0009_01",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 45.3048,
+     "t1": 45.6315,
+     "text": "days"
+    },
+    {
+     "id": "w_0009_02",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 45.6315,
+     "t1": 45.7622,
+     "text": "I"
+    },
+    {
+     "id": "w_0009_03",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 45.7622,
+     "t1": 46.1543,
+     "text": "still"
+    },
+    {
+     "id": "w_0009_04",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 46.1543,
+     "t1": 46.481,
+     "text": "fall"
+    },
+    {
+     "id": "w_0009_05",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 46.481,
+     "t1": 46.9385,
+     "text": "behind,"
+    },
+    {
+     "id": "w_0009_06",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 46.9385,
+     "t1": 47.1999,
+     "text": "and"
+    },
+    {
+     "id": "w_0009_07",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 47.1999,
+     "t1": 47.4613,
+     "text": "the"
+    },
+    {
+     "id": "w_0009_08",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 47.4613,
+     "t1": 47.788,
+     "text": "card"
+    },
+    {
+     "id": "w_0009_09",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 47.788,
+     "t1": 48.1148,
+     "text": "just"
+    },
+    {
+     "id": "w_0009_10",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 48.1148,
+     "t1": 48.5069,
+     "text": "waits"
+    },
+    {
+     "id": "w_0009_11",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 48.5069,
+     "t1": 48.7683,
+     "text": "for"
+    },
+    {
+     "id": "w_0009_12",
+     "prob": 1.0,
+     "sent": "s_0009",
+     "spk": "S1",
+     "t0": 48.7683,
+     "t1": 49.3564,
+     "text": "tomorrow."
+    },
+    {
+     "id": "w_0010_00",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 50.3548,
+     "t1": 50.5454,
+     "text": "So"
+    },
+    {
+     "id": "w_0010_01",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 50.5454,
+     "t1": 50.7996,
+     "text": "why"
+    },
+    {
+     "id": "w_0010_02",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 50.7996,
+     "t1": 51.1173,
+     "text": "does"
+    },
+    {
+     "id": "w_0010_03",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 51.1173,
+     "t1": 51.7527,
+     "text": "something"
+    },
+    {
+     "id": "w_0010_04",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 51.7527,
+     "t1": 52.0704,
+     "text": "this"
+    },
+    {
+     "id": "w_0010_05",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 52.0704,
+     "t1": 52.4516,
+     "text": "small"
+    },
+    {
+     "id": "w_0010_06",
+     "prob": 1.0,
+     "sent": "s_0010",
+     "spk": "S1",
+     "t0": 52.4516,
+     "t1": 52.7693,
+     "text": "work?"
+    },
+    {
+     "id": "w_0011_00",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 54.4221,
+     "t1": 54.8678,
+     "text": "Because"
+    },
+    {
+     "id": "w_0011_01",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 54.8678,
+     "t1": 55.0349,
+     "text": "it"
+    },
+    {
+     "id": "w_0011_02",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 55.0349,
+     "t1": 55.4248,
+     "text": "forces"
+    },
+    {
+     "id": "w_0011_03",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 55.4248,
+     "t1": 55.5363,
+     "text": "a"
+    },
+    {
+     "id": "w_0011_04",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 55.5363,
+     "t1": 55.9262,
+     "text": "choice"
+    },
+    {
+     "id": "w_0011_05",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 55.9262,
+     "t1": 56.3161,
+     "text": "before"
+    },
+    {
+     "id": "w_0011_06",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 56.3161,
+     "t1": 56.539,
+     "text": "the"
+    },
+    {
+     "id": "w_0011_07",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 56.539,
+     "t1": 56.7618,
+     "text": "day"
+    },
+    {
+     "id": "w_0011_08",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 56.7618,
+     "t1": 57.096,
+     "text": "makes"
+    },
+    {
+     "id": "w_0011_09",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 57.096,
+     "t1": 57.2631,
+     "text": "it"
+    },
+    {
+     "id": "w_0011_10",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 57.2631,
+     "t1": 57.486,
+     "text": "for"
+    },
+    {
+     "id": "w_0011_11",
+     "prob": 1.0,
+     "sent": "s_0011",
+     "spk": "S1",
+     "t0": 57.486,
+     "t1": 57.7088,
+     "text": "you."
+    },
+    {
+     "filler": true,
+     "id": "w_0036_f",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 57.9505,
+     "t1": 58.2576,
+     "text": "um"
+    },
+    {
+     "id": "w_0012_00",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 58.5287,
+     "t1": 58.9682,
+     "text": "Nobody"
+    },
+    {
+     "id": "w_0012_01",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 58.9682,
+     "t1": 59.3449,
+     "text": "needs"
+    },
+    {
+     "id": "w_0012_02",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 59.3449,
+     "t1": 59.8472,
+     "text": "another"
+    },
+    {
+     "id": "w_0012_03",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 59.8472,
+     "t1": 60.6634,
+     "text": "productivity"
+    },
+    {
+     "id": "w_0012_04",
+     "prob": 1.0,
+     "sent": "s_0012",
+     "spk": "S1",
+     "t0": 60.6634,
+     "t1": 61.1029,
+     "text": "system."
+    },
+    {
+     "id": "w_0013_00",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 62.0982,
+     "t1": 62.3502,
+     "text": "Try"
+    },
+    {
+     "id": "w_0013_01",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 62.3502,
+     "t1": 62.5391,
+     "text": "it"
+    },
+    {
+     "id": "w_0013_02",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 62.5391,
+     "t1": 62.7911,
+     "text": "for"
+    },
+    {
+     "id": "w_0013_03",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 62.7911,
+     "t1": 62.9171,
+     "text": "a"
+    },
+    {
+     "id": "w_0013_04",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 62.9171,
+     "t1": 63.232,
+     "text": "week"
+    },
+    {
+     "id": "w_0013_05",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 63.232,
+     "t1": 63.484,
+     "text": "and"
+    },
+    {
+     "id": "w_0013_06",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 63.484,
+     "t1": 63.799,
+     "text": "tell"
+    },
+    {
+     "id": "w_0013_07",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 63.799,
+     "t1": 63.988,
+     "text": "me"
+    },
+    {
+     "id": "w_0013_08",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 63.988,
+     "t1": 64.3029,
+     "text": "what"
+    },
+    {
+     "id": "w_0013_09",
+     "prob": 1.0,
+     "sent": "s_0013",
+     "spk": "S1",
+     "t0": 64.3029,
+     "t1": 64.8068,
+     "text": "happens."
+    },
+    {
+     "filler": true,
+     "id": "w_0044_f",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 66.4281,
+     "t1": 66.7352,
+     "text": "umm"
+    },
+    {
+     "id": "w_0014_00",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 67.0297,
+     "t1": 67.3398,
+     "text": "That"
+    },
+    {
+     "id": "w_0014_01",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 67.3398,
+     "t1": 67.5259,
+     "text": "is"
+    },
+    {
+     "id": "w_0014_02",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 67.5259,
+     "t1": 67.774,
+     "text": "all"
+    },
+    {
+     "id": "w_0014_03",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 67.774,
+     "t1": 68.0222,
+     "text": "for"
+    },
+    {
+     "id": "w_0014_04",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 68.0222,
+     "t1": 68.3943,
+     "text": "today,"
+    },
+    {
+     "id": "w_0014_05",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 68.3943,
+     "t1": 68.6424,
+     "text": "and"
+    },
+    {
+     "id": "w_0014_06",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 68.6424,
+     "t1": 69.0766,
+     "text": "thanks"
+    },
+    {
+     "id": "w_0014_07",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 69.0766,
+     "t1": 69.3247,
+     "text": "for"
+    },
+    {
+     "id": "w_0014_08",
+     "prob": 1.0,
+     "sent": "s_0014",
+     "spk": "S1",
+     "t0": 69.3247,
+     "t1": 69.883,
+     "text": "watching."
+    }
+   ],
+   "words_to_check": [
+    {
+     "why": "digit",
+     "word": "w_0006_04"
+    }
+   ]
+  }
+ },
+ "scenes": [
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ],
+    "importance": [
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": false,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 1,
+    "has_number": false,
+    "len_words": 26,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 200
+   },
+   "id": "sc_0001",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.0927,
+    "hook": 0.0,
+    "humour": 0.0,
+    "importance": 0.0,
+    "quality": 0.5,
+    "quotable": 0.3,
+    "standalone": 1.0,
+    "virality": 0.1393
+   },
+   "sents": [
+    "s_0001",
+    "s_0002"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 0.0896,
+   "t1": 8.8262,
+   "text": "Hey everyone, today I want to talk about the one habit that changed how I work. It is not an app, and it is not a fancy notebook.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ],
+    "importance": [
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": false,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 1,
+    "has_number": false,
+    "len_words": 11,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 165
+   },
+   "id": "sc_0002",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.1462,
+    "hook": 0.0,
+    "humour": 0.0,
+    "importance": 0.0,
+    "quality": 0.5,
+    "quotable": 0.3,
+    "standalone": 1.0,
+    "virality": 0.1446
+   },
+   "sents": [
+    "s_0003"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 9.6875,
+   "t1": 13.6916,
+   "text": "Every morning, I write the day's plan on a single index card.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {},
+   "features": {},
+   "id": "sc_0010",
+   "kind": "pause",
+   "labels": {},
+   "quality": {},
+   "scores": {},
+   "sents": [],
+   "shot": {},
+   "spk": null,
+   "t0": 13.6916,
+   "t1": 15.3057,
+   "text": "",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "hook": [
+     "claim",
+     "delivery",
+     "standalone",
+     "flat_delivery"
+    ],
+    "importance": [
+     "claim",
+     "repeat"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": true,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 0,
+    "has_number": false,
+    "len_words": 28,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 204
+   },
+   "id": "sc_0003",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.09,
+    "hook": 0.2194,
+    "humour": 0.0,
+    "importance": 0.22,
+    "quality": 0.5,
+    "quotable": 1.0,
+    "standalone": 1.0,
+    "virality": 0.3298
+   },
+   "sents": [
+    "s_0004",
+    "s_0005"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 15.3057,
+   "t1": 24.4549,
+   "text": "The card has room for a handful of things, and that limit is the point. The card has room for a handful of things, and that limit is the point.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": false,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 0,
+    "has_number": true,
+    "len_words": 11,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": true,
+    "wpm": 141
+   },
+   "id": "sc_0004",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.2223,
+    "hook": 0.0,
+    "humour": 0.0,
+    "importance": 0.0,
+    "quality": 0.5,
+    "quotable": 0.3,
+    "standalone": 1.0,
+    "virality": 0.1522
+   },
+   "sents": [
+    "s_0006"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 25.4636,
+   "t1": 30.1351,
+   "text": "I started this in 2019 with three people in a shared office.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {},
+   "features": {},
+   "id": "sc_0011",
+   "kind": "pause",
+   "labels": {},
+   "quality": {},
+   "scores": {},
+   "sents": [],
+   "shot": {},
+   "spk": null,
+   "t0": 30.1351,
+   "t1": 32.3178,
+   "text": "",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "rms_z",
+     "stretch"
+    ],
+    "hook": [
+     "claim",
+     "delivery",
+     "standalone"
+    ],
+    "importance": [
+     "claim",
+     "topic_peak",
+     "rms_z",
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": true,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 1,
+    "has_number": false,
+    "len_words": 11,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 136
+   },
+   "id": "sc_0005",
+   "kind": "speech",
+   "labels": {
+    "emotion": "emphatic",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.7439,
+    "hook": 0.45,
+    "humour": 0.0,
+    "importance": 0.5018,
+    "quality": 0.5,
+    "quotable": 1.0,
+    "standalone": 1.0,
+    "virality": 0.5348
+   },
+   "sents": [
+    "s_0007"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 32.3178,
+   "t1": 37.1792,
+   "text": "When the card is full, the important decisions are already finished.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {},
+   "features": {},
+   "id": "sc_0012",
+   "kind": "pause",
+   "labels": {},
+   "quality": {},
+   "scores": {},
+   "sents": [],
+   "shot": {},
+   "spk": null,
+   "t0": 37.1792,
+   "t1": 38.7744,
+   "text": "",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ],
+    "hook": [
+     "claim",
+     "strong_number",
+     "delivery",
+     "contrast_words",
+     "standalone"
+    ],
+    "importance": [
+     "claim",
+     "strong_number",
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": true,
+    "conclusion_marker": false,
+    "contrast_words": 1,
+    "fillers": 1,
+    "has_number": true,
+    "len_words": 30,
+    "story_marker": false,
+    "strong_number": true,
+    "weak_number": false,
+    "wpm": 186
+   },
+   "id": "sc_0006",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.1122,
+    "hook": 0.5635,
+    "humour": 0.0,
+    "importance": 0.3,
+    "quality": 0.5,
+    "quotable": 1.0,
+    "standalone": 1.0,
+    "virality": 0.453
+   },
+   "sents": [
+    "s_0008",
+    "s_0009"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 38.7744,
+   "t1": 49.3564,
+   "text": "I now finish forty percent more of what I plan, the best stretch of my working life. Some days I still fall behind, and the card just waits for tomorrow.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ],
+    "hook": [
+     "is_question",
+     "delivery",
+     "standalone",
+     "flat_delivery"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": false,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 0,
+    "has_number": false,
+    "len_words": 7,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 174
+   },
+   "id": "sc_0007",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "question"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.1223,
+    "hook": 0.2228,
+    "humour": 0.0,
+    "importance": 0.0,
+    "quality": 0.5,
+    "quotable": 0.3,
+    "standalone": 0.5,
+    "virality": 0.1591
+   },
+   "sents": [
+    "s_0010"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 50.3548,
+   "t1": 52.7693,
+   "text": "So why does something this small work?",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {},
+   "features": {},
+   "id": "sc_0013",
+   "kind": "pause",
+   "labels": {},
+   "quality": {},
+   "scores": {},
+   "sents": [],
+   "shot": {},
+   "spk": null,
+   "t0": 52.7693,
+   "t1": 54.4221,
+   "text": "",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "emotion": [
+     "stretch"
+    ],
+    "hook": [
+     "claim",
+     "delivery",
+     "standalone",
+     "flat_delivery",
+     "contrast_words"
+    ],
+    "importance": [
+     "claim",
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": false,
+    "claim": true,
+    "conclusion_marker": false,
+    "contrast_words": 1,
+    "fillers": 1,
+    "has_number": false,
+    "len_words": 25,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 172
+   },
+   "id": "sc_0008",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.29,
+    "hook": 0.4435,
+    "humour": 0.0,
+    "importance": 0.22,
+    "quality": 0.5,
+    "quotable": 1.0,
+    "standalone": 0.5,
+    "virality": 0.4071
+   },
+   "sents": [
+    "s_0011",
+    "s_0012",
+    "s_0013"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 54.4221,
+   "t1": 64.8068,
+   "text": "Because it forces a choice before the day makes it for you. Nobody needs another productivity system. Try it for a week and tell me what happens.",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {},
+   "features": {},
+   "id": "sc_0014",
+   "kind": "pause",
+   "labels": {},
+   "quality": {},
+   "scores": {},
+   "sents": [],
+   "shot": {},
+   "spk": null,
+   "t0": 64.8068,
+   "t1": 67.0297,
+   "text": "",
+   "topic": "t_0001"
+  },
+  {
+   "evidence": {
+    "importance": [
+     "fillers"
+    ]
+   },
+   "features": {
+    "anaphora_start": true,
+    "claim": false,
+    "conclusion_marker": false,
+    "contrast_words": 0,
+    "fillers": 1,
+    "has_number": false,
+    "len_words": 9,
+    "story_marker": false,
+    "strong_number": false,
+    "weak_number": false,
+    "wpm": 189
+   },
+   "id": "sc_0009",
+   "kind": "speech",
+   "labels": {
+    "emotion": "calm",
+    "function": "statement"
+   },
+   "quality": {
+    "clipping": 0.0,
+    "exposure": 0.5,
+    "noise_db": -120.0,
+    "shake": 0.0,
+    "sharpness": 0.5
+   },
+   "scores": {
+    "emotion": 0.09,
+    "hook": 0.0,
+    "humour": 0.0,
+    "importance": 0.0,
+    "quality": 0.5,
+    "quotable": 0.15,
+    "standalone": 0.0,
+    "virality": 0.024
+   },
+   "sents": [
+    "s_0014"
+   ],
+   "shot": {
+    "active_angle": "src_e03728d3130b96983c09cf74",
+    "angles": {},
+    "face_lost_frac": 0.0,
+    "motion": 0.0
+   },
+   "spk": "S1",
+   "t0": 67.0297,
+   "t1": 69.883,
+   "text": "That is all for today, and thanks for watching.",
+   "topic": "t_0001"
+  }
+ ]
+}

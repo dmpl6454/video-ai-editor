@@ -219,6 +219,13 @@ RECIPE_CARDS: tuple[RecipeCard, ...] = (
     _card("remove_music", "Take the music bed off the timeline."),
     _card("auto_edit", "Do the whole edit for a platform.",
           platform=_PLATFORMS, language=_LANGS, mood=_MOODS, look=_LOOKS),
+    # Editor Brain (EB1): the one recipe whose expander plans over the
+    # session's Content Graph (agent/prompt/brain_expanders.py). Behind
+    # `brain.enabled`; off, it is the Auto edit / tighten it always was.
+    _card("edit", "Edit the footage like an editor: tighten, story, camera, punch-ins, captions, music "
+          "(reads the footage first).",
+          platform=_PLATFORMS, duration_s="number", content_type=("talking_head", "podcast", "interview"),
+          energy="number", captions=("auto", "off"), music=("subtle", "off")),
     _card("ask", "Answer a question about the timeline without editing."),
 )
 
@@ -246,12 +253,22 @@ SHORTS_FINISH_DRAFT = IntentDraft(
     confidence=1.0, reply="finish each short")
 
 
+#: Recipes that exist only with the Editor Brain on (never offered to a model, never a grammar target, without it).
+BRAIN_ONLY_RECIPES: frozenset[str] = frozenset({"edit"})
+
+
 def cards(*, exclude: frozenset[str] = frozenset({"transcribe", "ask"})) -> list[RecipeCard]:
     """Recipe cards for the on-device brains (§3.1). `transcribe` is a
     prerequisite the expander inserts itself and `ask` is routed by the
     grammar, so neither is offered to a model by default; the FM `context`
-    retry (§3.2) passes a smaller table by trimming this list."""
-    return [c for c in RECIPE_CARDS if c.name not in exclude]
+    retry (§3.2) passes a smaller table by trimming this list.
+
+    The Editor Brain's `edit` recipe is offered to a model only while `brain.enabled` is on: with it off the
+    table a model reads is byte-for-byte the 0.8.0 one, and a model cannot answer a recipe the app hides
+    (closer review, SC-04: +327 characters in every on-device and cloud prompt)."""
+    from .facts_brain import brain_on
+    hidden = frozenset() if brain_on() else BRAIN_ONLY_RECIPES
+    return [c for c in RECIPE_CARDS if c.name not in exclude and c.name not in hidden]
 
 
 # --------------------------------------------------------------------------

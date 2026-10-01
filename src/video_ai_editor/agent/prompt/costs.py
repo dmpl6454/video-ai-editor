@@ -43,6 +43,12 @@ RECIPE_COST: dict[str, Callable[[TimelineFacts], float]] = {
     "audit_aesthetic": lambda f: 0.5,
     "apply_hook_stack": lambda f: 0.5,
     "apply_brand_kit": lambda f: 0.5,
+    # Editor Brain (EB1): the three stage-2 tools — the source-range loop
+    # re-maps through the live EDL per cut (O(n²), spec §15.1-3), the camera
+    # plan splits and swaps per switch, the dialogue lane is one pass.
+    "cut_source_ranges": lambda f: 0.03 * f.duration + 2,
+    "apply_camera_plan": lambda f: 0.02 * f.duration + 1,
+    "sync_dialogue_lane": lambda f: 1.0,
 }
 DEFAULT_STEP_COST = 0.3
 

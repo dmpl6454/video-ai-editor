@@ -90,7 +90,7 @@ _TITLES: dict[str, str] = {
     "rotate": "Rotate", "adjust": "Adjust", "sticker": "Sticker", "remove_feature": "Remove", "flip": "Flip",
     "clip_length": "Clip length", "retext": "Edit text", "transform": "Transform",
     "canvas": "Canvas", "blend": "Blend", "voice_effect": "Voice effect", "animation": "Animation",
-    "_audit": "Audit", "preview": "Preview",
+    "_audit": "Audit", "preview": "Preview", "edit": "Edit",
 }
 
 
@@ -1598,6 +1598,20 @@ def _human_minutes(seconds: float) -> str:
     return f"{max(1, int(round(seconds / 60)))} minutes"
 
 
+#: Review EX-06: a hand edit of the picture leaves the derived dialogue lane `a1`
+#: where it was; the Prompt bar says so in one line (and "sync the dialogue" fixes it).
+STALE_LANE_NOTE = "The dialogue lane no longer follows the picture — ask me to re-sync it"
+
+
+def _stale_lane_note(steps: list[Step], facts: TimelineFacts) -> list[str]:
+    """The one-line notice (as a list of notes) for any plan that is not itself a re-sync, made on a
+    timeline whose dialogue lane `facts` measured out of step (brain on only)."""
+    lane = getattr(facts, "dialogue_lane", None)
+    if lane is None or lane.in_sync is not False or not steps:
+        return []
+    return [] if any(s.tool == "sync_dialogue_lane" for s in steps) else [STALE_LANE_NOTE]
+
+
 def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozenset[str] = frozenset(),
             confidence: float = 1.0, reply_prefix: str | None = None,
             hook_text: tuple[str, str] | None = None, allow_downloads: bool = True,
@@ -1637,7 +1651,7 @@ def compose(intents: list[Intent], facts: TimelineFacts, *, exclusions: frozense
     steps.sort(key=lambda s: (s.stage if s.stage is not None else 12,))   # stable → original order within a stage
     steps, gate_questions, gate_notes = _gate_steps(steps, facts)
     steps, trim_notes = _trim_steps(steps)
-    notes.extend(gate_notes + trim_notes)
+    notes.extend(gate_notes + trim_notes + _stale_lane_note(steps, facts))
     questions.extend(gate_questions)
 
     est = estimate_seconds(steps, facts)

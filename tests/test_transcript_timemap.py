@@ -831,3 +831,77 @@ def test_export_srt_is_deliberately_source_timed(tmp_path: Path):
     r = dispatch(store, "export_srt", {"path": str(tmp_path / "out.srt")})
     body = Path(r["path"]).read_text(encoding="utf-8")
     assert "00:00:00,200 --> 00:00:11,600" in body
+
+
+# ------------------------------------------ the dialogue lane `a1` (EB1-B)
+#
+# spec §2.4: captions, `no_cut_mid_word` and the speech facts map the
+# REFERENCE transcript through lane `a1` when it exists
+# (`timemap(track_id="a1", src=<dialogue>)`, offset 0 — one clock) and through
+# v1 otherwise. `sync_dialogue_lane` lays a1 so that a reference second plays
+# exactly where the picture that shows it plays; these cases pin that the
+# generic mapper needs nothing new for it.
+
+def _dialogue_session(tmp_path: Path, off_a: float):
+    """v1 = camera A (its clock `off_a` ahead of the recorder), a1 = the
+    recorder laid by `sync_dialogue_lane`."""
+    import brain_tool_fixtures as BT
+    rec = BT.make_recorder(tmp_path / "recorder.wav", seconds=CLIP_DUR)
+    cam = BT.make_click_camera(tmp_path / "camA.mp4", offset_s=off_a, seconds=CLIP_DUR)
+    store = BT.session(tmp_path)
+    dispatch(store, "add_clip", {"track": "v1", "src": str(cam), "in": 0, "out": CLIP_DUR, "start": 0})
+    a = store.edl.get_track("v1").clips[0].src
+    offsets = {a: off_a, str(rec): 0.0}
+    dispatch(store, "sync_dialogue_lane", {"src": str(rec), "lane": "a1", "offsets": offsets})
+    return store, a, str(rec), offsets
+
+
+def test_a1_maps_reference_words_where_the_picture_plays_them(tmp_path: Path):
+    """A reference-clock word stream mapped through a1 (offset 0) lands where
+    the same words, shifted onto camera A's clock, map through v1 — before
+    and after a cut and a reorder — and words in removed footage vanish."""
+    import brain_tool_fixtures as BT
+    off_a = 0.5
+    with BT.restriction_off():
+        store, a, rec, offsets = _dialogue_session(tmp_path, off_a)
+        ref_words = [{"word": w, "start": s, "end": e} for w, s, e in WORDS]          # recorder seconds
+        cam_words = [{**w, "start": w["start"] + off_a, "end": w["end"] + off_a} for w in ref_words]
+
+        def both():
+            via_a1 = map_words_to_timeline(store.edl, "a1", ref_words, src=rec)
+            via_v1 = map_words_to_timeline(store.edl, "v1", cam_words, src=a)
+            return via_a1, via_v1
+
+        via_a1, via_v1 = both()
+        assert [w["word"] for w in via_a1] == [w for w, _, _ in WORDS]
+        assert [(w["start"], w["end"]) for w in via_a1] == pytest.approx([(w["start"], w["end"]) for w in via_v1])
+        dispatch(store, "cut_source_ranges", {"track": "v1", "ranges": [{"src": a, "start": 5.9, "end": 6.9}]})
+        dispatch(store, "split_at", {"track": "v1", "time": 2.0})
+        ids = [c.id for c in sorted(store.edl.get_track("v1").clips, key=lambda c: c.start)]
+        dispatch(store, "reorder_clips", {"track": "v1", "order": ids[::-1]})
+        dispatch(store, "sync_dialogue_lane", {"src": rec, "lane": "a1", "offsets": offsets})
+        via_a1, via_v1 = both()
+        assert "uh" not in [w["word"] for w in via_a1]                 # recorder 5.5-5.8 = camera 6.0-6.3, cut
+        assert [w["word"] for w in via_a1] == [w["word"] for w in via_v1]
+        assert [(w["start"], w["end"]) for w in via_a1] == pytest.approx([(w["start"], w["end"]) for w in via_v1])
+        assert [w["start"] for w in via_a1] == sorted(w["start"] for w in via_a1)
+
+
+def test_a1_point_queries_are_the_reference_clock(tmp_path: Path):
+    """`source_to_timeline(edl, "a1", t, src=recorder)` answers with the
+    instant the picture showing reference second t plays; a reference second
+    the pictures do not show (before the camera started) is None."""
+    import brain_tool_fixtures as BT
+    off_a = 0.5
+    with BT.restriction_off():
+        store, a, rec, _ = _dialogue_session(tmp_path, off_a)
+        # camera second p shows reference p - 0.5: reference 3.0 plays at 3.5
+        assert source_to_timeline(store.edl, "a1", 3.0, src=rec) == pytest.approx(3.5)
+        assert source_to_timeline(store.edl, "v1", 3.5, src=a) == pytest.approx(3.5)
+        # the a1 clip starts where reference 0 plays (0.5) — the first half
+        # second of the picture predates the recorder
+        hit = timeline_to_source(store.edl, "a1", 0.25)
+        assert hit is None
+        clip, t = timeline_to_source(store.edl, "a1", 4.0)
+        assert clip.src == rec and t == pytest.approx(3.5)
+        assert source_range_to_timeline(store.edl, "a1", 1.0, 2.0, src=rec) == [pytest.approx((1.5, 2.5))]

@@ -11,6 +11,10 @@ from typing import Callable
 
 ToolSchema = dict
 
+#: `add_caption_track.cues`: the most ready-made cues one call lays. ONE number: the schema's `maxItems`, the
+#: handler's refusal (`dispatch._lay_given_cues`) and the resolver's cap (`brain/caption_lane.MAX_CUES`) all read it.
+CAPTION_CUES_MAX = 4000
+
 
 def _transition_names() -> list[str]:
     """The transition `type` enum, generated from the render catalog so the
@@ -551,6 +555,16 @@ TEXT_TOOLS = [
                                       "cues were edited by hand. Without it, a style "
                                       "change on hand-edited captions restyles them in "
                                       "place and keeps the edits."},
+           # Editor Brain (EB1 fix, UX-03): the brain lays its own cues, from the
+           # analysed speech of EVERY speaker, in timeline seconds.
+           "cues": {"type": "array", "maxItems": CAPTION_CUES_MAX,
+                    "items": {"type": "object",
+                              "properties": {"text": {"type": "string"}, "start": {"type": "number"},
+                                             "end": {"type": "number"}},
+                              "required": ["text", "start", "end"]},
+                    "description": "Ready-made cues {text, start, end} in TIMELINE seconds, "
+                                   "laid instead of building them from the transcript "
+                                   "(the Editor Brain's own words, every speaker's)."},
        }),
     _t("set_caption_style",
        "Change how the captions LOOK and where they sit, for every cue at once, in one "
@@ -1354,10 +1368,88 @@ VISION_TOOLS = [
 ]
 
 
+# --- Editor Brain tools (EB1) -------------------------------------------------
+#
+# Three narrow, guarded stage-2 tools the brain's compiled plans use instead of
+# the denied `multicam` / `add_clip` (EDITOR_BRAIN_SPEC §5.4). The list caps
+# below are enforced by the handlers (`dispatch._validate_tool_args` checks
+# numeric bounds and item types, not list lengths) and advertised here as
+# `maxItems` / `maxProperties` so a schema-reading client sees the same limit.
+# Wording rule: the container arguments' descriptions never say "path" or
+# "file" — `tests/test_path_guards.py` derives its guard table from those
+# words, and the nested `src` fields are guarded by the handlers
+# (`_safe_src`) and by the plan validator's own nested path rule.
+
+#: `cut_source_ranges.ranges` — one step of a compiled plan (§4.6.4 splits longer lists).
+CUT_RANGES_MAX = 2000
+#: The longest single source range a cut step may name, seconds.
+CUT_RANGE_MAX_S = 600.0
+#: `apply_camera_plan.switches`.
+CAMERA_SWITCHES_MAX = 600
+#: Entries in an `offsets` map (one per angle member, plus the dialogue source).
+OFFSETS_MAX = 16
+#: `sync_dialogue_lane.seam_fade_s` upper bound, seconds (5 ms is the default).
+SEAM_FADE_MAX_S = 0.05
+#: v1 media pieces `sync_dialogue_lane` will lay a lane for.
+DIALOGUE_PIECES_MAX = 4000
+
+_SRC_RANGE = {"type": "object",
+              "properties": {"src": {"type": "string"}, "start": {"type": "number"},
+                             "end": {"type": "number"}},
+              "required": ["src", "start", "end"]}
+_SWITCH = {"type": "object",
+           "properties": {"src": {"type": "string"}, "at_src": {"type": "number"},
+                          "until_src": {"type": "number"}, "angle_src": {"type": "string"}},
+           "required": ["src", "at_src", "until_src", "angle_src"]}
+_OFFSETS = {"type": "object", "additionalProperties": {"type": "number"}, "maxProperties": OFFSETS_MAX,
+            "description": "Per-source clock offsets in seconds, keyed by the media each "
+                           "angle plays: an event at reference second r is at second "
+                           "r + offset of that source (positive = it lags the reference)."}
+
+EDITOR_BRAIN_TOOLS = [
+    _t("cut_source_ranges",
+       "Remove SOURCE ranges — seconds of the media a clip plays, not timeline seconds — "
+       "from a video lane and ripple. Ranges are merged per source, cut last-first and "
+       "re-mapped through the live timeline before every cut, so a range is removed "
+       "wherever that footage still plays and ignored where it was already cut. One op.",
+       "edit",
+       {"track": {"type": "string", "default": "v1"},
+        "ranges": {"type": "array", "items": _SRC_RANGE, "maxItems": CUT_RANGES_MAX,
+                   "description": f"Up to {CUT_RANGES_MAX} {{src, start, end}} in source seconds; "
+                                  f"each at most {CUT_RANGE_MAX_S:g} s long"},
+        "why": {"type": "string", "description": "Optional note recorded with the op"}},
+       ["ranges"]),
+    _t("apply_camera_plan",
+       "Show another camera angle over spans of the main lane: per switch, split the v1 "
+       "piece(s) playing source [at_src, until_src) of `src` and swap them to `angle_src`, "
+       "shifting in/out by offsets[angle_src] − offsets[src]. Keeps transform, effects, "
+       "audio, keyframes and fades; never clears v1; clamps to the angle's extent and "
+       "leaves the remainder on the original angle. One op.",
+       "edit",
+       {"switches": {"type": "array", "items": _SWITCH, "maxItems": CAMERA_SWITCHES_MAX,
+                     "description": f"Up to {CAMERA_SWITCHES_MAX} {{src, at_src, until_src, angle_src}}"},
+        "offsets": _OFFSETS},
+       ["switches"]),
+    _t("sync_dialogue_lane",
+       "Rebuild the dialogue lane from the main lane: drop the lane's own clips of `src`, "
+       "take the music-lane copy an audio-only upload left (once), lay one abutting clip of "
+       "`src` per v1 piece (start = the piece's start, in/out mapped by the offsets), fade "
+       "seam_fade_s at internal seams and 0 at the ends, and mute the camera-microphone "
+       "audio of every v1 angle piece (gain kept). Idempotent. One op.",
+       "audio",
+       {"src": {"type": "string", "description": "The dialogue source (a recorder wav or the reference camera)"},
+        "lane": {"type": "string", "default": "a1", "description": "An audio lane id (a1, a2, …)"},
+        "offsets": _OFFSETS,
+        "seam_fade_s": {"type": "number", "default": 0.005},
+        "mute_camera_mics": {"type": "boolean", "default": True}},
+       ["src"]),
+]
+
+
 ALL_TOOLS: list[ToolSchema] = (
     INSPECTION_TOOLS + EDIT_TOOLS + PROJECT_TOOLS + TEXT_TOOLS
     + AUDIO_TOOLS + SHOW_TOOLS + EFFECT_TOOLS + VISION_TOOLS + TTS_TOOLS
-    + HEAVY_AI_TOOLS
+    + HEAVY_AI_TOOLS + EDITOR_BRAIN_TOOLS
 )
 
 
@@ -1457,6 +1549,9 @@ _ARG_BOUNDS: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("motion_track", "sample_every"): (1, 1000),
     ("smooth_slow_motion", "factor"): (2, 16),
     ("upscale", "factor"): (1, 4),
+    # Editor Brain (EB1): a dialogue seam fade is 5 ms; anything longer than
+    # 50 ms audibly dips the voice at every cut.
+    ("sync_dialogue_lane", "seam_fade_s"): (0.0, SEAM_FADE_MAX_S),
 }
 
 

@@ -200,6 +200,13 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "set_track_locked": {"track": "v1", "locked": True},
         "remove_silences": {"clip_id": "c1", "min_silence_s": 0.5, "noise_db": -35},
         "remove_fillers": {"clip_id": "c1"},
+        # Editor Brain tools (EB1-B): source ranges of the fixture's own file, a
+        # switch to the same file (a degenerate angle), the file as its own
+        # dialogue source.
+        "cut_source_ranges": {"track": "v1", "ranges": [{"src": src, "start": 1.0, "end": 1.5}]},
+        "apply_camera_plan": {"switches": [{"src": src, "at_src": 1.0, "until_src": 2.0,
+                                            "angle_src": src}], "offsets": {src: 0.0}},
+        "sync_dialogue_lane": {"src": src, "lane": "a1", "offsets": {src: 0.0}},
         "record_voiceover": {"src": music, "start": 0.0},  # reuses music as fake mic capture
         # Text & captions
         "add_super_text": {"text": "TEST", "start": 0.0, "end": 1.0},

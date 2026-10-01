@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ...edl.schema import EDL, Clip, Sticker, TextClip
+from . import change_rules_brain as _brain
 from .change_words import (MISSING, Names, _CAPTION_WORDS, _deg, _effects_words, _fmt_value, _num, _pct,
                            _ratio, _short, _trans_name, _v1, colour, fmt_num, secs, speed_word, split_parent)
 from .changes import EPS, GROUP_ORDER, Change, diff_keys, flat_state
@@ -34,6 +35,7 @@ class Summary:
         self.changes: list[Change] = []
         self.v1_moved = False            # a main-lane change that re-times what follows
         self._pieces: dict[str, list[Clip]] = {}
+        self._wins: dict[str, dict[str, tuple[float, float]]] = {}
 
     # -- bookkeeping ------------------------------------------------------
     def add(self, group: str, text: str, keys: Iterable[str]) -> None:
@@ -70,13 +72,16 @@ class Summary:
             parent = split_parent(c.id, bid)
             (pieces[parent].append(c) if parent else new.append(c))
         deleted: list[tuple[float, float, str]] = []      # before-timeline spans, owner id
+        # Parent-source window per piece: an angle piece (apply_camera_plan)
+        # plays another file, so its own in/out are not the parent's clock.
+        self._wins = {b.id: _brain.angle_windows(b, pieces[b.id]) for b in before}
         for b in before:
             ps = sorted(pieces[b.id], key=lambda p: p.in_)
             if b.freeze is not None:
                 if not ps:
                     deleted.append((b.start, b.start + b.effective_duration, b.id))
                 continue
-            lost = _subtract((b.in_, b.out), [(p.in_, p.out) for p in ps])
+            lost = _subtract((b.in_, b.out), [self._wins[b.id][p.id] for p in ps])
             for s0, s1 in lost:
                 t0 = b.start + b.timeline_offset_at(s0 - b.in_)
                 t1 = b.start + b.timeline_offset_at(s1 - b.in_)
@@ -87,6 +92,7 @@ class Summary:
         self._trims(before, pieces)
         self._new_on_v1(new, bid)
         self._order(before, after, pieces)
+        _brain.camera_lines(self, before, pieces)
 
     def _deletions(self, deleted: list[tuple[float, float, str]], bid: dict[str, Clip],
                    pieces: dict[str, list[Clip]]) -> None:
@@ -172,11 +178,12 @@ class Summary:
 
     def _splits(self, before: list[Clip], pieces: dict[str, list[Clip]]) -> None:
         for b in before:
-            ps = sorted(pieces[b.id], key=lambda p: p.in_)
+            win = self._wins[b.id]
+            ps = sorted(pieces[b.id], key=lambda p: win[p.id][0])
             if len(ps) < 2:
                 continue
-            points = [b.start + b.timeline_offset_at(p.in_ - b.in_)
-                      for prev, p in zip(ps, ps[1:]) if abs(p.in_ - prev.out) <= EPS]
+            points = [b.start + b.timeline_offset_at(win[p.id][0] - b.in_)
+                      for prev, p in zip(ps, ps[1:]) if abs(win[p.id][0] - win[prev.id][1]) <= EPS]
             if not points:
                 continue           # pieces with a hole between: the deletion line said it
             self.v1_moved = True
@@ -194,6 +201,8 @@ class Summary:
             if len(pieces[b.id]) != 1 or pieces[b.id][0].id != b.id:
                 continue
             p = pieces[b.id][0]
+            if _brain.is_angle_piece(b, pieces[b.id], p):
+                continue           # a whole clip swapped to another angle: the camera line says it
             ks = {f"clip:{b.id}.in", f"clip:{b.id}.out"} & self.pending
             if not ks:
                 continue
@@ -386,6 +395,39 @@ class Summary:
     def overlays_and_audio(self) -> None:
         b_ids = {c.id: (t, c) for t in self.before.tracks for c in t.clips}
         a_ids = {c.id: (t, c) for t in self.after.tracks for c in t.clips}
+        self._caption_lines(b_ids, a_ids)
+        for cid, (t, c) in a_ids.items():
+            if cid in b_ids or t.id == "v1" or t.type == "captions":
+                continue
+            if split_parent(cid, b_ids):
+                continue
+            keys = self.keys_of(cid)
+            if not keys and self._by_clip.get(cid):
+                continue                    # an earlier line already says it (the dialogue lane's pieces)
+            if isinstance(c, TextClip):
+                shown = c.text.upper() if getattr(c.style, "upper", None) else c.text   # as it renders
+                look = title_look(c, self.after.canvas.w, self.after.canvas.h)
+                self.add("Text", f"Added title '{_short(shown)}' ({self.names.span(c.start, c.end)})"
+                                 + (f": {look}" if look else ""), keys)
+            elif isinstance(c, Sticker):
+                self.add("Stickers", f"Added sticker '{c.label or Path(c.src).stem}' "
+                                     f"({self.names.span(c.start, c.end)})", keys)
+            else:
+                vol = f", volume {fmt_num(c.audio.gain_db, 'dB')}" if c.audio.gain_db else ""
+                self.add("Audio" if t.type in ("music", "vo", "audio") else "Video",
+                         f"Added {self.names.clip(cid).split(' ', 1)[0].lower()} '{self.names.media(c.src)}' "
+                         f"at {self.names.tc(c.start)} ({secs(c.effective_duration)}{vol})", keys)
+        for cid, (t, c) in b_ids.items():
+            if cid in a_ids or t.id == "v1" or t.type == "captions":
+                continue
+            keys = self.keys_of(cid)
+            if not keys and self._by_clip.get(cid):
+                continue                    # … or that it went (the recorder's copy on the Music lane)
+            self.add("Text" if isinstance(c, TextClip) else "Stickers" if isinstance(c, Sticker) else "Audio",
+                     f"Removed {self.names.clip(cid)}", keys)
+        self._text_edits(b_ids, a_ids)
+
+    def _caption_lines(self, b_ids: dict, a_ids: dict) -> None:
         captions_added = [c for cid, (t, c) in a_ids.items() if cid not in b_ids and t.type == "captions"]
         captions_gone = [c for cid, (t, c) in b_ids.items() if cid not in a_ids and t.type == "captions"]
         if captions_added:
@@ -405,32 +447,6 @@ class Summary:
             keys = set().union(*(self.keys_of(c.id) for c in captions_gone))
             self.add("Captions", f"Removed {len(captions_gone)} caption line{'s' if len(captions_gone) != 1 else ''}",
                      keys)
-        for cid, (t, c) in a_ids.items():
-            if cid in b_ids or t.id == "v1" or t.type == "captions":
-                continue
-            if split_parent(cid, b_ids):
-                continue
-            keys = self.keys_of(cid)
-            if isinstance(c, TextClip):
-                shown = c.text.upper() if getattr(c.style, "upper", None) else c.text   # as it renders
-                look = title_look(c, self.after.canvas.w, self.after.canvas.h)
-                self.add("Text", f"Added title '{_short(shown)}' ({self.names.span(c.start, c.end)})"
-                                 + (f": {look}" if look else ""), keys)
-            elif isinstance(c, Sticker):
-                self.add("Stickers", f"Added sticker '{c.label or Path(c.src).stem}' "
-                                     f"({self.names.span(c.start, c.end)})", keys)
-            else:
-                vol = f", volume {fmt_num(c.audio.gain_db, 'dB')}" if c.audio.gain_db else ""
-                self.add("Audio" if t.type in ("music", "vo", "audio") else "Video",
-                         f"Added {self.names.clip(cid).split(' ', 1)[0].lower()} '{self.names.media(c.src)}' "
-                         f"at {self.names.tc(c.start)} ({secs(c.effective_duration)}{vol})", keys)
-        for cid, (t, c) in b_ids.items():
-            if cid in a_ids or t.id == "v1" or t.type == "captions":
-                continue
-            keys = self.keys_of(cid)
-            self.add("Text" if isinstance(c, TextClip) else "Stickers" if isinstance(c, Sticker) else "Audio",
-                     f"Removed {self.names.clip(cid)}", keys)
-        self._text_edits(b_ids, a_ids)
 
     def _text_edits(self, b_ids: dict, a_ids: dict) -> None:
         caption_words = [cid for cid, (t, c) in a_ids.items()
@@ -753,6 +769,7 @@ class Summary:
     def run(self) -> list[Change]:
         self.canvas()
         self.main_lane()
+        _brain.dialogue_lane_lines(self)
         self.overlays_and_audio()
         self.attributes()
         self.transitions()

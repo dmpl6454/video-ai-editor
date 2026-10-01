@@ -217,7 +217,23 @@ def families_of(clause: str) -> set[str]:
         fams.discard("fade")
     if re.search(r"\bcut\b", t) and ("split" in fams):
         pass
+    if "composite" not in fams and _brain_edit_ask(clause):
+        fams.add("composite")
     return fams
+
+
+def _brain_edit_ask(clause: str) -> bool:
+    """Editor Brain (EB1, review UX-12): with `brain.enabled` on, "edit this", "make it punchier",
+    "clean this up", "switch to whoever is speaking" are whole-edit asks like "make it a reel" — the brain's
+    `edit` recipe answers them, so they license every kind of change (its own checks stay the plan's
+    postconditions). Off, this is False and the contract judges every sentence as in 0.8.0."""
+    try:
+        from . import edit_grammar as _EG
+        from . import slots as _S
+        from .facts_brain import brain_on
+        return brain_on() and _EG.reads_as_edit(_S.normalize(clause))
+    except Exception:  # noqa: BLE001 — a broken import must not break the judge
+        return False
 
 
 def _negated(clause: str, noun: str) -> bool:

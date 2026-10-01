@@ -59,3 +59,51 @@ def test_music_clip_ids_are_reported(tmp_path: Path):
     built = FA.build_facts(store, None, feature_report={"unavailable": []})
     music = store.edl.get_track("music")
     assert built.has_music and built.music_clip_ids == [c.id for c in music.clips]
+
+
+def test_the_brain_block_lives_in_facts_brain_and_both_files_stay_within_the_limit():
+    """SC-09: facts.py went from 714 to 815 lines with the brain block; it is split out, both are <= 800."""
+    from video_ai_editor.agent.prompt import facts_brain
+    for mod in (FA, facts_brain):
+        assert len(Path(mod.__file__).read_text(encoding="utf-8").splitlines()) <= 800, mod.__name__
+    assert FA.DialogueLaneFact is facts_brain.DialogueLaneFact and FA.BrainEditFact is facts_brain.BrainEditFact
+    assert not hasattr(FA, "_brain_facts")
+
+
+def test_brain_off_facts_carry_no_brain_field(tmp_path: Path, monkeypatch):
+    """SC-12 / SC-04: with brain.enabled off the brain reads nothing (the lane used to be built before the flag was looked at)."""
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    store = F.make_store(tmp_path)
+    from video_ai_editor.agent.dispatch import dispatch
+    dispatch(store, "sync_dialogue_lane", {"src": next(iter(store.edl.get_track("v1").clips)).src, "lane": "a1",
+                                           "offsets": {}})
+    assert FA.build_facts(store, None, feature_report={"unavailable": []}).dialogue_lane is None
+    from video_ai_editor.agent.prompt import facts_brain
+    assert facts_brain.brain_facts(store, store.edl, Path(store.dir), resolve=str) == {}
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    lane = FA.build_facts(store, None, feature_report={"unavailable": []}).dialogue_lane
+    assert lane is not None and lane.in_sync is None and lane.offsets == {}        # no brain run laid it: nothing to measure against
+
+
+def test_a_transcript_that_is_not_coming_is_not_pending_with_the_brain_on(tmp_path: Path, monkeypatch):
+    """Finalize: an upload made with `transcribe=false` (`transcript_status: skipped`) or whose whisper pass
+    raised (`failed`) has no transcript and never will; only an upload still awaiting its pass is pending."""
+    import json
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "1")
+    store = F.make_store(tmp_path, with_transcript=False)
+    assert FA.build_facts(store, None, feature_report=MAC_REPORT).transcript_pending is True     # awaiting whisper
+    ing = next((tmp_path / "uploads").rglob("ingest.json"))
+    for status in ("skipped", "failed"):
+        ing.write_text(json.dumps({"src": "x", "transcript_status": status}), encoding="utf-8")
+        assert FA.build_facts(store, None, feature_report=MAC_REPORT).transcript_pending is False, status
+
+
+def test_the_marker_is_ignored_with_the_brain_off_as_in_0_8_0(tmp_path: Path, monkeypatch):
+    """Closer N-24 (2): the flag-off Prompt bar reads ingest.json as 0.8.0 did: no transcript and a fresh file is pending."""
+    import json
+    monkeypatch.setenv("VAI_BRAIN_ENABLED", "0")
+    store = F.make_store(tmp_path, with_transcript=False)
+    ing = next((tmp_path / "uploads").rglob("ingest.json"))
+    for status in ("skipped", "failed"):
+        ing.write_text(json.dumps({"src": "x", "transcript_status": status}), encoding="utf-8")
+        assert FA.build_facts(store, None, feature_report=MAC_REPORT).transcript_pending is True, status

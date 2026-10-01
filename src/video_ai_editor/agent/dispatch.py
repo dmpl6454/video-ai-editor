@@ -2263,6 +2263,7 @@ def reorder_clips(store: EDLStore, args: dict) -> dict:
     by_id = {c.id: c for c in track.clips}
     if set(order) != set(by_id.keys()):
         raise ValueError("order must contain exactly the current clip ids")
+    before_order = [c.id for c in track.clips]
     origin = min((c.start for c in by_id.values() if isinstance(c, Clip)), default=0.0)
     seams = _v1_seam_owners(track)     # Final QA: transitions follow their cut
     track.clips = [by_id[i] for i in order]
@@ -2281,9 +2282,40 @@ def reorder_clips(store: EDLStore, args: dict) -> dict:
     _reseat_v1_transitions(track, seams)
     if track.id != MAIN_LANE_ID:
         _pack_lane_from(track, origin)   # QA-013: never from t=0 off the main lane
-    summary = f"Reorder {track.id}: {', '.join(order)}"
+    summary = _reorder_summary(track.id, before_order, order)
     store.commit("reorder_clips", args, summary)
     return {"summary": summary}
+
+
+def _moved_count(before: list[str], after: list[str]) -> int:
+    """The fewest clips that moved: the ones outside the longest run of
+    clips that kept their relative order."""
+    import bisect
+    at = {cid: i for i, cid in enumerate(before)}
+    tails: list[int] = []
+    for cid in after:
+        k = bisect.bisect_left(tails, at[cid])
+        if k == len(tails):
+            tails.append(at[cid])
+        else:
+            tails[k] = at[cid]
+    return len(after) - len(tails)
+
+
+def _reorder_summary(lane: str, before: list[str], after: list[str]) -> str:
+    """UX-13: what moved, never the ids (an id list read 'Reorder V1:,,,,,,,,,'
+    once the details view dropped the ids). With the Editor Brain off the op text is the 0.8.0 one, byte for byte
+    (the History of a person who never turned the brain on does not change)."""
+    from .prompt.facts_brain import brain_on
+    if not brain_on():
+        return f"Reorder {lane}: {', '.join(after)}"
+    moved = _moved_count(before, after)
+    if moved == 0:
+        return f"Reorder {lane}: the order did not change"
+    text = f"Reordered {moved} clip{'' if moved == 1 else 's'} on {lane}"
+    if after[0] != before[0]:
+        text += f": what was clip {before.index(after[0]) + 1} now plays first"
+    return text
 
 
 def ripple_delete(store: EDLStore, args: dict) -> dict:
@@ -2958,6 +2990,34 @@ def set_caption_style(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "cues": n, "position": cap.config.position}
 
 
+def _lay_given_cues(store: EDLStore, cap: Track, style: str, position: str, args: dict) -> dict:
+    """`add_caption_track(cues=[{text, start, end}, …])`: the cues are the
+    caller's own, in TIMELINE seconds (the Editor Brain lays them from the
+    analysed words of every speaker, mapped through the live v1 layout), so
+    no transcript is read and no angle is left out. Clamped to the video's
+    extent like every other build; the op records the COUNT, not the list."""
+    if len(args["cues"]) > CAPTION_CUES_MAX:
+        raise ValueError(f"add_caption_track: {len(args['cues'])} cues; the limit is {CAPTION_CUES_MAX} per call")
+    canvas = store.edl.canvas
+    extent = store.edl.video_extent()
+    y_pos = overlay_default_y(canvas, "caption", position)
+    cap.clips = []
+    for c in args["cues"]:
+        text = str(c.get("text") or "").strip()
+        span = clamp_to_extent(float(c["start"]), float(c["end"]), extent)
+        if not text or span is None:
+            continue
+        hook = style == "word_emphasis"
+        cap.clips.append(TextClip(
+            text=text.upper() if hook else text, start=span[0], end=span[1], role="hook" if hook else "caption",  # type: ignore[arg-type]
+            transform=Transform(x=canvas.w / 2, y=canvas.h * 0.5 if hook else y_pos)))
+    n = len(cap.clips)
+    summary = f"Add caption track ({style}, {position}) — {n} caption(s) from the analysed speech"
+    _apply_caption_look(cap)
+    store.commit("add_caption_track", {**{k: v for k, v in args.items() if k != "cues"}, "cues": len(args["cues"])}, summary)
+    return {"summary": summary, "lines": n}
+
+
 def add_caption_track(store: EDLStore, args: dict) -> dict:
     # These two land on the EDL by ASSIGNMENT (`cap.config.style = …`) rather
     # than by constructing a CaptionsConfig, which is exactly why an unknown
@@ -2981,6 +3041,9 @@ def add_caption_track(store: EDLStore, args: dict) -> dict:
         # transcript on every call, so choosing another style silently threw
         # away the user's text and timing fixes.
         return _restyle_captions_in_place(store, cap, style, position, edited)
+
+    if isinstance(args.get("cues"), list) and args["cues"]:
+        return _lay_given_cues(store, cap, style, position, args)
 
     # Resolve through _load_transcript, which knows BOTH transcript writers:
     # `<session>/transcript.json` (import_srt) wins over the whisper
@@ -6343,6 +6406,22 @@ _EXPORT_PRESETS = {
 _PLATFORM_FPS_MIN, _PLATFORM_FPS_MAX = 24000 / 1001, 60.0
 
 
+def conformed_fps(project_fps: float, preset: str) -> float:
+    """The frame rate the project has AFTER `apply_export_preset(preset)`.
+
+    The project frame rate is kept when a platform can deliver it (QA-009):
+    every platform here accepts 23.976-60 fps, and forcing 30 onto a
+    25/23.976 project re-introduces the pulldown judder ingest now avoids. A
+    rate NO platform takes (a 120/240 fps phone slow-mo project, a 15 fps
+    screen recording) is conformed to the preset's rate (QA-027: the preset
+    "sets canvas, fps, bitrate and loudness"). Public so the Editor Brain plans on the frame grid the export will
+    have (closer review: a reel cut on a 20 fps grid, then conformed to 30, left pieces at half frames)."""
+    p = _EXPORT_PRESETS.get(str(preset).lower())
+    if p is None or _PLATFORM_FPS_MIN - 1e-3 <= float(project_fps) <= _PLATFORM_FPS_MAX + 1e-3:
+        return project_fps
+    return p["fps"]
+
+
 def apply_export_preset(store: EDLStore, args: dict) -> dict:
     """Set canvas + bitrate + loudness target from a named platform preset.
 
@@ -6364,14 +6443,8 @@ def apply_export_preset(store: EDLStore, args: dict) -> dict:
         raise ValueError(f"unknown export preset: {name}. options: {list(_EXPORT_PRESETS)}")
     canvas = store.edl.canvas
     old_w, old_h = canvas.w, canvas.h
-    # The project frame rate is kept when a platform can deliver it (QA-009):
-    # every platform here accepts 23.976-60 fps, and forcing 30 onto a
-    # 25/23.976 project re-introduces the pulldown judder ingest now avoids. A
-    # rate NO platform takes (a 120/240 fps phone slow-mo project, a 15 fps
-    # screen recording) is conformed to the preset's rate (QA-027: the preset
-    # "sets canvas, fps, bitrate and loudness").
-    if not (_PLATFORM_FPS_MIN - 1e-3 <= float(canvas.fps) <= _PLATFORM_FPS_MAX + 1e-3):
-        canvas.fps = p["fps"]
+    if (rate := conformed_fps(canvas.fps, name)) != canvas.fps:
+        canvas.fps = rate
     canvas.w, canvas.h = p["w"], p["h"]
     # Same overlay re-placement `set_canvas` does: the top-bar platform buttons
     # now dispatch this tool instead of set_canvas (QA-027), and a sticker near
@@ -9510,3 +9583,400 @@ def dispatch(store: EDLStore, tool: str, args: dict, *,
 
 def list_tools(categories: list[str] | None = None):
     return _list_tools(categories)
+
+
+# --- Editor Brain tools (EB1) ---
+#
+# Three narrow, guarded stage-2 tools the Editor Brain's compiled plans use
+# instead of the denied `multicam` / `add_clip` (EDITOR_BRAIN_SPEC §5.4; the
+# EB1 brief, lane B). They are ordinary handlers: `fn(store, args) -> dict`,
+# registered in `DISPATCH` below, validated by the tools.py schema, one
+# `commit()` each (folded into the enclosing `batch()` when a plan runs them,
+# exactly as `remove_silences` composes `cut_range`).
+#
+# Nothing above this header changed for them; the follow/lane sets they join
+# are rebound here, not edited in place.
+import hashlib as _hashlib
+
+from ..edl.schema import AudioProps as _AudioProps, SOUND_RUN_TOL_S as _SOUND_RUN_TOL_S
+from .timemap import _same_source as _same_file
+from .tools import (CAMERA_SWITCHES_MAX, CAPTION_CUES_MAX, CUT_RANGE_MAX_S, CUT_RANGES_MAX, DIALOGUE_PIECES_MAX,
+                    OFFSETS_MAX, SEAM_FADE_MAX_S)
+
+#: Audio lane ids `sync_dialogue_lane` may CREATE (`_free_audio_lane`'s naming).
+_DIALOGUE_LANE_RE = re.compile(r"^a\d{1,3}$")
+_BRAIN_EPS = 1e-6
+
+
+def _brain_num(row: dict, key: str, what: str) -> float:
+    """A finite number out of a nested arg row, or a 400."""
+    raw = row.get(key)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what}.{key} must be a number, got {raw!r}")
+    if v != v or v in (float("inf"), float("-inf")):
+        raise ValueError(f"{what}.{key} must be finite, got {raw!r}")
+    return v
+
+
+def _brain_rows(args: dict, key: str, cap: int, fields: tuple[str, ...], tool: str) -> list[dict]:
+    """The list arg `key`: at most `cap` objects, each carrying `fields`."""
+    rows = args[key]
+    if not isinstance(rows, list):
+        raise ValueError(f"{tool}.{key} must be a list")
+    if len(rows) > cap:
+        raise ValueError(f"{tool}: at most {cap} {key} per call, got {len(rows)}")
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            raise ValueError(f"{tool}.{key}[{i}] must be an object")
+        for f in fields:
+            if f not in r:
+                raise ValueError(f"{tool}.{key}[{i}] needs '{f}'")
+    return rows
+
+
+def _brain_offsets(tool: str, args: dict) -> dict[str, float]:
+    """`offsets` = {source: seconds}: every key through the read allowlist,
+    every value finite, at most `OFFSETS_MAX` of them."""
+    raw = args.get("offsets") or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{tool}.offsets must be an object of {{source: seconds}}")
+    if len(raw) > OFFSETS_MAX:
+        raise ValueError(f"{tool}: at most {OFFSETS_MAX} offsets, got {len(raw)}")
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        path = _safe_src(str(k))
+        out[path] = _brain_num({"s": v}, "s", f"{tool}.offsets[{Path(str(k)).name}]")
+    return out
+
+
+def _offset_of(offsets: dict[str, float], src: str) -> float | None:
+    """The offset recorded for `src` (path equality through `.origin`), or None."""
+    for k, v in offsets.items():
+        if _same_file(k, src):
+            return v
+    return None
+
+
+def _lane_extent(edl: EDL, track: Track) -> float:
+    if track.id == MAIN_LANE_ID:
+        return edl.video_extent()
+    return max((c.start + c.effective_duration for c in track.clips if isinstance(c, Clip)), default=0.0)
+
+
+def _parse_cut_ranges(store: EDLStore, track_id: str, rows: list[dict]
+                      ) -> tuple[list[tuple[str, float, float]], list[dict]]:
+    """Validated, per-source merged (src, start, end) plus the rows that map
+    to nothing on the lane (already cut, off the source, another file)."""
+    per_src: dict[str, list[tuple[float, float]]] = {}
+    skipped: list[dict] = []
+    for i, r in enumerate(rows):
+        what = f"cut_source_ranges.ranges[{i}]"
+        if not isinstance(r.get("src"), str) or not r["src"]:
+            raise ValueError(f"{what}.src must be a source path")
+        src = _safe_src(r["src"])
+        s, e = _brain_num(r, "start", what), _brain_num(r, "end", what)
+        if e <= s:
+            raise ValueError(f"{what}: end must be > start")
+        if e - s > CUT_RANGE_MAX_S:
+            raise ValueError(f"{what}: a range is at most {CUT_RANGE_MAX_S:g} s long")
+        s = max(0.0, s)
+        if not source_range_to_timeline(store.edl, track_id, s, e, src=src):
+            skipped.append({"index": i, "src": Path(src).name, "start": s, "end": e,
+                            "reason": "not on the timeline"})
+            continue
+        per_src.setdefault(src, []).append((s, e))
+    return [(src, a, b) for src, rs in per_src.items() for a, b in _merge_ranges(rs)], skipped
+
+
+def cut_source_ranges(store: EDLStore, args: dict) -> dict:
+    """Remove SOURCE ranges of named files from a video lane — the brain's cut
+    tool (spec §5.4 row 1), a public wrapper over `_cut_source_ranges`.
+
+    Ranges are merged per source, mapped through the LIVE timeline before
+    every cut (so a range already removed maps to nothing and one that plays
+    twice is removed twice) and cut last-first; the whole pass is ONE op.
+    `skipped` lists the ranges that had nothing left to remove."""
+    track_id = str(args.get("track") or MAIN_LANE_ID)
+    track = _v_track(store.edl, track_id)
+    rows = _brain_rows(args, "ranges", CUT_RANGES_MAX, ("src", "start", "end"), "cut_source_ranges")
+    ranges, skipped = _parse_cut_ranges(store, track_id, rows)
+    before = _lane_extent(store.edl, track)
+    n = 0
+    if ranges:
+        with store.batch():
+            n = _cut_source_ranges(store, track_id, ranges)
+    removed = round(max(0.0, before - _lane_extent(store.edl, _v_track(store.edl, track_id))), 4)
+    why = str(args.get("why") or "").strip()
+    summary = (f"Cut {n} range{'' if n == 1 else 's'} on {track_id} ({removed:.2f} s removed"
+               + (f"; {len(skipped)} skipped" if skipped else "") + ")"
+               + (f" — {why}" if why else ""))
+    store.commit("cut_source_ranges", args, summary)
+    return {"summary": summary, "cuts": n, "removed_s": removed, "skipped": skipped,
+            "ranges": len(rows)}
+
+
+class _Switch:
+    """One parsed `apply_camera_plan` switch."""
+    __slots__ = ("src", "at", "until", "angle", "delta")
+
+    def __init__(self, row: dict, i: int, offsets: dict[str, float]) -> None:
+        what = f"apply_camera_plan.switches[{i}]"
+        for f in ("src", "angle_src"):
+            if not isinstance(row.get(f), str) or not row[f]:
+                raise ValueError(f"{what}.{f} must be a source path")
+        self.src = _safe_src(row["src"])
+        self.angle = _safe_src(row["angle_src"])
+        self.at = _brain_num(row, "at_src", what)
+        self.until = _brain_num(row, "until_src", what)
+        if self.until <= self.at:
+            raise ValueError(f"{what}: until_src must be > at_src")
+        self.delta = (_offset_of(offsets, self.angle) or 0.0) - (_offset_of(offsets, self.src) or 0.0)
+
+
+def _angle_extent(angle: str, fps, cache: dict[str, float]) -> float:
+    if angle not in cache:
+        ext = _source_video_extent(angle, fps)
+        if ext is None:
+            raise ValueError(f"apply_camera_plan: {Path(angle).name} has no picture — "
+                             f"it cannot be a camera angle")
+        cache[angle] = ext
+    return cache[angle]
+
+
+def _set_clip_angle(edl: EDL, c: Clip, angle_src: str, delta: float) -> None:
+    """Swap one v1 piece to another angle: `src` → the angle, `in`/`out`
+    shifted by the angles' clock difference (the in-point snapped to the
+    frame grid, the length kept to the sample so v1 never ripples). The
+    transform, effects, audio (incl. a mute), keyframes and fades stay."""
+    new_in = max(0.0, _q(edl, c.in_ + delta))
+    length = c.out - c.in_
+    c.src = angle_src
+    c.in_ = new_in
+    c.out = new_in + length
+
+
+def _apply_camera_switch(store: EDLStore, sw: _Switch, extents: dict[str, float]) -> tuple[int, int]:
+    """Split v1 at the live edges of the span the angle can cover and swap
+    every piece of `sw.src` between them. Returns (pieces swapped, clamped)."""
+    edl = store.edl
+    fps = edl.canvas.fps
+    ext = _angle_extent(sw.angle, fps, extents)
+    lo, hi = max(sw.at, -sw.delta), min(sw.until, ext - sw.delta)
+    clamped = int(lo > sw.at + _BRAIN_EPS or hi < sw.until - _BRAIN_EPS)
+    if hi - lo <= _tb.frame_duration(fps) + _BRAIN_EPS:
+        return 0, clamped
+    hits = source_range_to_timeline(edl, MAIN_LANE_ID, lo, hi, src=sw.src)
+    if not hits:
+        return 0, clamped
+    for t0, t1 in hits:
+        for t in (t0, t1):
+            split_at(store, {"track": MAIN_LANE_ID, "time": t})
+    pieces = 0
+    v1 = _v_track(edl, MAIN_LANE_ID)
+    for t0, t1 in hits:
+        q0, q1 = _q(edl, t0), _q(edl, t1)
+        for c in v1.clips:
+            if (isinstance(c, Clip) and c.freeze is None and _same_file(c.src, sw.src)
+                    and c.start >= q0 - _BRAIN_EPS
+                    and c.start + c.effective_duration <= q1 + _BRAIN_EPS):
+                _set_clip_angle(edl, c, sw.angle, sw.delta)
+                pieces += 1
+    return pieces, clamped
+
+
+def apply_camera_plan(store: EDLStore, args: dict) -> dict:
+    """Show other camera angles over spans of v1 — the brain's multicam tool
+    (spec §5.4 row 2). Never clears v1; one op; the summary records which
+    reference angles the pieces were derived from."""
+    rows = _brain_rows(args, "switches", CAMERA_SWITCHES_MAX,
+                       ("src", "at_src", "until_src", "angle_src"), "apply_camera_plan")
+    offsets = _brain_offsets("apply_camera_plan", args)
+    switches = [_Switch(r, i, offsets) for i, r in enumerate(rows)]
+    v1 = _v_track(store.edl, MAIN_LANE_ID)
+    n_before = sum(isinstance(c, Clip) for c in v1.clips)
+    applied = skipped = clamped = pieces = 0
+    derived: set[str] = set()
+    extents: dict[str, float] = {}
+    with store.batch():
+        for sw in switches:
+            got, clamp = _apply_camera_switch(store, sw, extents)
+            pieces += got
+            clamped += clamp
+            if got:
+                applied += 1
+                derived.add(Path(sw.src).name)
+            else:
+                skipped += 1
+        if sum(isinstance(c, Clip) for c in _v_track(store.edl, MAIN_LANE_ID).clips) < n_before:
+            raise RuntimeError("apply_camera_plan must never remove a v1 piece")
+    summary = (f"Camera plan: {applied} switch{'' if applied == 1 else 'es'} ({pieces} piece{'' if pieces == 1 else 's'}"
+               + (f", {skipped} skipped" if skipped else "")
+               + (f", {clamped} clamped to the angle's length" if clamped else "")
+               + (f"; derived_from {', '.join(sorted(derived))}" if derived else "") + ")")
+    store.commit("apply_camera_plan", args, summary)
+    return {"summary": summary, "switches": applied, "pieces": pieces, "skipped": skipped,
+            "clamped": clamped, "derived_from": sorted(derived)}
+
+
+def _has_audio_stream(src: str) -> bool:
+    try:
+        from ..ingest.probe import probe as _probe
+        return Path(src).is_file() and _probe(Path(src)).audio is not None
+    except Exception:
+        return False
+
+
+def _dialogue_lane(edl: EDL, lane_id: str) -> Track:
+    """The audio lane `lane_id`; created by `_free_audio_lane`'s rule (label
+    "Dialogue") when absent; a non-audio or locked lane is refused."""
+    t = edl.get_track(lane_id)
+    if t is None:
+        if not _DIALOGUE_LANE_RE.match(lane_id):
+            raise ValueError(f"sync_dialogue_lane: lane must be an audio lane id such as 'a1', "
+                             f"got {lane_id!r}")
+        t = Track(id=lane_id, type="audio", z=0, label="Dialogue")
+        at = max((i for i, x in enumerate(edl.tracks) if x.type == "audio"), default=len(edl.tracks) - 1)
+        edl.tracks.insert(at + 1, t)
+        return t
+    if t.type != "audio":
+        raise ValueError(f"sync_dialogue_lane: '{lane_id}' is a {t.type} lane, not an audio lane")
+    if t.locked:
+        raise _locked_refusal(t, "sync_dialogue_lane")
+    return t
+
+
+def _drop_music_copy(edl: EDL, src: str) -> int:
+    """Remove ONE music-lane clip of `src` (the audio-only upload handoff's
+    placement, `main._handoff_audio_only`); a second copy is the person's."""
+    music = edl.get_track("music")
+    if music is None:
+        return 0
+    for c in music.clips:
+        if isinstance(c, Clip) and _same_file(c.src, src):
+            music.clips.remove(c)
+            return 1
+    return 0
+
+
+def _dialogue_id(edl: EDL, lane_id: str, piece: Clip, i: int, taken: set[str]) -> str:
+    """A deterministic id per v1 piece, so two syncs of one layout hash equal."""
+    cid = "c_dl" + _hashlib.sha1(f"{lane_id}|{piece.id}|{i}".encode()).hexdigest()[:8]
+    return cid if cid not in taken else _new_clip_id(edl)
+
+
+def _dialogue_piece(edl: EDL, p: Clip, src: str, delta: float, extent: float | None,
+                    cid: str) -> Clip | None:
+    """The a1 clip under v1 piece `p`: `src` at the piece's reference seconds
+    (`in_ = p.in_ + delta`), starting where the piece starts, clamped to the
+    dialogue file's extent by advancing the start (never by stretching), the
+    start kept on the frame grid. None when the file has none of it."""
+    if p.freeze is not None:
+        return None
+    in_, out = p.in_ + delta, p.out + delta
+    lo = max(0.0, in_)
+    hi = min(out, extent) if extent else out
+    if hi - lo <= _BRAIN_EPS:
+        return None
+    start = p.start
+    if lo > in_ and not p.reverse:
+        start = _tb.ceil_to_frame(p.start + (lo - in_) / p.speed_factor, edl.canvas.fps)
+        lo = in_ + (start - p.start) * p.speed_factor
+        if hi - lo <= _BRAIN_EPS:
+            return None
+    return Clip(id=cid, src=src, in_=lo, out=hi, start=start, speed=p.speed, reverse=p.reverse,
+                audio=_AudioProps(gain_db=0.0), linked_to=None)
+
+
+def _fade_seams(laid: list[Clip], fade: float) -> None:
+    """`fade` on every side that abuts another dialogue piece, 0 at the ends
+    (the programme's head and tail, and either side of a gap)."""
+    for i, c in enumerate(laid):
+        prev_abuts = i > 0 and abs(laid[i - 1].start + laid[i - 1].effective_duration - c.start) <= _SOUND_RUN_TOL_S
+        next_abuts = (i + 1 < len(laid)
+                      and abs(c.start + c.effective_duration - laid[i + 1].start) <= _SOUND_RUN_TOL_S)
+        c.audio.fade_in = fade if prev_abuts else 0.0
+        c.audio.fade_out = fade if next_abuts else 0.0
+
+
+def _lay_dialogue(edl: EDL, lane_id: str, pieces: list[Clip], src: str, offsets: dict[str, float],
+                  fade: float, mute: bool, extent: float | None) -> tuple[list[Clip], list[list[float]], int]:
+    """One dialogue clip per v1 angle piece, in timeline order; the pieces of
+    other footage (B-roll, a title card) leave a gap. Returns (clips, gaps,
+    muted angle pieces)."""
+    off_src = _offset_of(offsets, src) or 0.0
+    taken = {c.id for t in edl.tracks for c in t.clips}
+    laid: list[Clip] = []
+    gaps: list[list[float]] = []
+    muted = 0
+    for i, p in enumerate(pieces):
+        off = _offset_of(offsets, p.src)
+        if off is None and not _same_file(p.src, src):
+            gaps.append([round(p.start, 4), round(p.start + p.effective_duration, 4)])
+            continue
+        if mute:
+            p.audio.mute = True
+        muted += int(p.audio.mute)
+        c = _dialogue_piece(edl, p, src, off_src - (off or 0.0), extent, _dialogue_id(edl, lane_id, p, i, taken))
+        if c is None:
+            gaps.append([round(p.start, 4), round(p.start + p.effective_duration, 4)])
+            continue
+        taken.add(c.id)
+        laid.append(c)
+    _fade_seams(laid, fade)
+    merged: list[list[float]] = []
+    for g in gaps:
+        if merged and abs(merged[-1][1] - g[0]) <= _SOUND_RUN_TOL_S:
+            merged[-1][1] = g[1]
+        else:
+            merged.append(g)
+    return laid, merged, muted
+
+
+def sync_dialogue_lane(store: EDLStore, args: dict) -> dict:
+    """Rebuild the dialogue lane from the main lane — the brain's last stage-2
+    step (spec §4.6.1, §5.4 row 4). Idempotent: the lane's own clips of `src`
+    are dropped and re-laid from the current v1 layout; clips of other files
+    on the lane are left and counted as `foreign`. One op."""
+    src = _safe_src(str(args["src"]))
+    if not _has_audio_stream(src):
+        raise ValueError(f"sync_dialogue_lane: {Path(str(src)).name} is not a media file with audio")
+    lane_id = str(args.get("lane") or "a1")
+    offsets = _brain_offsets("sync_dialogue_lane", args)
+    fade = float(_num(args, "seam_fade_s", 0.005, min=0.0, max=SEAM_FADE_MAX_S) or 0.0)
+    mute = bool(args.get("mute_camera_mics", True))
+    pieces = sorted((c for c in _v_track(store.edl, MAIN_LANE_ID).clips if isinstance(c, Clip)),
+                    key=lambda c: c.start)
+    if len(pieces) > DIALOGUE_PIECES_MAX:
+        raise ValueError(f"sync_dialogue_lane: at most {DIALOGUE_PIECES_MAX} v1 pieces, got {len(pieces)}")
+    extent = _source_duration(src)
+    with store.batch():
+        # SC-15: a missing lane is created INSIDE the batch — any refusal or failure after this point
+        # restores the tree, so no half-made track outlives a refused call.
+        lane = _dialogue_lane(store.edl, lane_id)
+        foreign = [c for c in lane.clips if not (isinstance(c, Clip) and _same_file(c.src, src))]
+        lane.clips = foreign
+        removed_music = _drop_music_copy(store.edl, src)
+        laid, gaps, muted = _lay_dialogue(store.edl, lane_id, pieces, src, offsets, fade, mute, extent)
+        lane.clips = sorted([*foreign, *laid], key=lambda c: c.start)
+        store.edl.recompute_duration()
+    name = Path(src).name
+    summary = (f"Dialogue lane synced: {len(laid)} piece{'' if len(laid) == 1 else 's'} of {name} on {lane_id}"
+               + (f", {muted} camera clip{'' if muted == 1 else 's'} muted" if muted else "")
+               + (f", {len(gaps)} gap{'s' if len(gaps) != 1 else ''}" if gaps else "")
+               + ("; the recorder was on the Music lane; it is now the dialogue" if removed_music else ""))
+    store.commit("sync_dialogue_lane", args, summary)
+    return {"summary": summary, "lane": lane_id, "clips": len(laid), "muted": muted,
+            "removed_from_music": removed_music, "gaps": gaps, "foreign": len(foreign)}
+
+
+DISPATCH.update({
+    "cut_source_ranges": cut_source_ranges,
+    "apply_camera_plan": apply_camera_plan,
+    "sync_dialogue_lane": sync_dialogue_lane,
+})
+# Both operate on v1 by default (the lock pre-check names it) and can move a
+# picture a detached sound follows (`_call_following`); rebound, not edited.
+_V1_DEFAULT_TOOLS = _V1_DEFAULT_TOOLS | {"cut_source_ranges", "apply_camera_plan"}
+_FOLLOW_TOOLS = _FOLLOW_TOOLS | {"cut_source_ranges", "apply_camera_plan"}

@@ -68,7 +68,10 @@ import numpy as np
 from video_ai_editor import platformutil as _pu
 from video_ai_editor.ai import tts as _tts
 
-Kind = Literal["speech", "filler", "pause", "gap"]
+#: `silence` (EB1-A) is a planted silence of an explicit length: the script
+#: item's text is the seconds, e.g. ``("silence", "0.8")``. The bench scripts
+#: never use it, so their narrations are unchanged.
+Kind = Literal["speech", "filler", "pause", "gap", "silence"]
 
 PAUSE_S = 2.0
 #: Silence between consecutive spoken utterances. Piper adds ~0.1–0.2 s of its
@@ -86,7 +89,11 @@ HI_SAY_VOICE = "Lekha"
 
 #: What Piper is asked to say for each filler token — a full stop gives it
 #: sentence prosody instead of an aborted fragment.
-FILLER_SPOKEN: dict[str, str] = {"um": "Um.", "umm": "Umm."}
+FILLER_SPOKEN: dict[str, str] = {"um": "Um.", "umm": "Umm.",
+                                 # EB1-A: the token whisper-small DROPS for Piper amy
+                                 # (module docstring) — the brain fixtures plant it as
+                                 # acoustic truth by concat offset; the bench never does.
+                                 "uh": "Uh."}
 CONTENT_LIKE_SENTENCE = "I like this part."
 
 # (kind, text). A talking-head camera review: twelve sentences, nine fillers
@@ -317,11 +324,6 @@ def _synth_piper(voice, text: str, dst: Path) -> tuple[np.ndarray, int]:
     return _read_wav(dst)
 
 
-def piper_voice_available(name: str = EN_VOICE) -> bool:
-    """The Piper voice is cached locally (never triggers `ensure_voice`)."""
-    return _tts.voice_paths(name)[0].exists()
-
-
 def say_available(voice: str = HI_SAY_VOICE) -> bool:
     """macOS `say` has the named system voice (Lekha is the hi_IN voice)."""
     say = shutil.which("say")
@@ -353,54 +355,152 @@ def hindi_backend() -> str | None:
     return None
 
 
-def synthesize_narration(out_dir: Path, *, lang: str = "en") -> Narration:
-    """Synthesize the script for `lang` into `out_dir/narration_<lang>.wav`
-    and return the ground truth. Deterministic for a given voice, so the
-    caller may cache the result by content key."""
-    script = SCRIPT_EN if lang == "en" else SCRIPT_HI
-    parts_dir = out_dir / f"parts_{lang}"
-    if lang == "en":
-        voice = _piper_voice(EN_VOICE)
-        voice_name = EN_VOICE
-        synth = lambda text, dst: _synth_piper(voice, text, dst)  # noqa: E731
-        sr = int(voice.config.sample_rate)
-    else:
-        backend = hindi_backend()
-        if backend == "piper":
-            voice = _piper_voice(HI_VOICE)
-            voice_name = HI_VOICE
-            synth = lambda text, dst: _synth_piper(voice, text, dst)  # noqa: E731
-            sr = int(voice.config.sample_rate)
-        elif backend == "say":
-            voice_name = f"say:{HI_SAY_VOICE}"
-            sr = 22050
-            synth = lambda text, dst: _synth_say(text, dst, voice=HI_SAY_VOICE, sr=sr)  # noqa: E731
-        else:
-            raise HindiVoiceUnavailable(
-                f"no Hindi voice: Piper {HI_VOICE} is not cached and macOS `say -v {HI_SAY_VOICE}` "
-                "is unavailable (the benchmark never downloads a voice)")
+def piper_voice_available(name: str = EN_VOICE) -> bool:
+    """The Piper voice is cached locally (never triggers `ensure_voice`)."""
+    return _tts.voice_paths(name)[0].exists()
 
+
+# --------------------------------------------------------------------------
+# voices (EB1-A): one callable per synthesizer, shared by the bench narration
+# and the brain fixtures. `synth(text, dst, length_scale=None) -> (pcm, sr)`.
+# --------------------------------------------------------------------------
+
+class PiperSynth:
+    """Piper voice. With `deterministic=False` (the bench's setting) every
+    call is exactly `_synth_piper` — VITS samples its noise, so two runs
+    differ in bytes. `deterministic=True` zeroes `noise_scale`/`noise_w_scale`
+    (measured byte-identical run to run on this Mac; `onnxruntime.set_seed`
+    does NOT make it so) — the brain fixtures need two builds byte-equal."""
+
+    def __init__(self, name: str, *, deterministic: bool = False) -> None:
+        self.name = name
+        self.voice = _piper_voice(name)
+        self.sr = int(self.voice.config.sample_rate)
+        self.deterministic = deterministic
+
+    def __call__(self, text: str, dst: Path, *, length_scale: float | None = None) -> tuple[np.ndarray, int]:
+        if not self.deterministic and length_scale is None:
+            return _synth_piper(self.voice, text, dst)
+        from piper.config import SynthesisConfig
+        cfg = SynthesisConfig(length_scale=length_scale,
+                              noise_scale=0.0 if self.deterministic else None,
+                              noise_w_scale=0.0 if self.deterministic else None)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(dst), "wb") as wf:
+            self.voice.synthesize_wav(text, wf, syn_config=cfg)
+        return _read_wav(dst)
+
+
+class SaySynth:
+    """macOS `say` (deterministic: same text → same bytes, measured).
+    `length_scale` maps onto `-r` words per minute around `rate`."""
+
+    def __init__(self, voice: str, *, sr: int = 22050, rate: int | None = None) -> None:
+        self.name = f"say:{voice}"
+        self.voice = voice
+        self.sr = sr
+        self.rate = rate
+
+    def __call__(self, text: str, dst: Path, *, length_scale: float | None = None) -> tuple[np.ndarray, int]:
+        if length_scale is None and self.rate is None:
+            return _synth_say(text, dst, voice=self.voice, sr=self.sr)
+        rate = int(round((self.rate or 175) / (length_scale or 1.0)))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        aiff = dst.with_suffix(".aiff")
+        subprocess.run(["say", "-v", self.voice, "-r", str(rate), "-o", str(aiff), text], check=True,
+                       capture_output=True, **_pu.SUBPROCESS_FLAGS)
+        subprocess.run([_pu.FFMPEG, "-y", "-i", str(aiff), "-ac", "1", "-ar", str(self.sr),
+                        "-c:a", "pcm_s16le", str(dst)], check=True, capture_output=True,
+                       **_pu.SUBPROCESS_FLAGS)
+        aiff.unlink(missing_ok=True)
+        return _read_wav(dst)
+
+
+def _hindi_synth() -> PiperSynth | SaySynth:
+    backend = hindi_backend()
+    if backend == "piper":
+        return PiperSynth(HI_VOICE)
+    if backend == "say":
+        return SaySynth(HI_SAY_VOICE)
+    raise HindiVoiceUnavailable(
+        f"no Hindi voice: Piper {HI_VOICE} is not cached and macOS `say -v {HI_SAY_VOICE}` "
+        "is unavailable (the benchmark never downloads a voice)")
+
+
+def _silence_seconds(kind: str, text: str) -> float:
+    if kind == "pause":
+        return PAUSE_S
+    if kind == "gap":
+        return GAP_S
+    return float(text)
+
+
+def normalize_rms(pcm: np.ndarray, sr: int, target_db: float) -> np.ndarray:
+    """Scale `pcm` so the RMS over its voiced span is `target_db` dBFS.
+    Piper normalises every call to PEAK 1.0, which makes a three-word line
+    3-4 dB louder in RMS than a long one; the brain fixtures level every
+    spoken part by RMS instead so a planted +6 dB is +6 dB over every other
+    sentence and nothing else stands out (EB1-A)."""
+    b = _voiced_bounds(pcm, sr)
+    seg = pcm if b is None else pcm[int(b[0] * sr):int(b[1] * sr)]
+    ms = float(np.mean(np.square(seg, dtype=np.float64))) if seg.size else 0.0
+    if ms <= 1e-12:
+        return pcm
+    gain = 10.0 ** (target_db / 20.0) / float(np.sqrt(ms))
+    return (pcm * gain).astype(np.float32)
+
+
+def _synth_utterance(synth, kind: str, text: str, parts_dir: Path, index: int, sr: int, *,
+                     gain_db: float, length_scale: float | None, normalize_rms_db: float | None = None) -> np.ndarray:
+    """One spoken utterance: sentence by sentence, trimmed, rejoined with
+    `GAP_S`, then RMS-levelled when asked, then `gain_db` (the bench passes
+    neither — an exact no-op path)."""
+    pieces = _sentences(text) if kind == "speech" else [FILLER_SPOKEN[text]]
+    joined: list[np.ndarray] = []
+    for j, piece in enumerate(pieces):
+        raw, part_sr = synth(piece, parts_dir / f"{index:03d}_{j}.wav", length_scale=length_scale)
+        if part_sr != sr:
+            raise RuntimeError(f"voice sample rate changed mid-script: {part_sr} != {sr}")
+        if joined:
+            joined.append(np.zeros(int(round(GAP_S * sr)), dtype=np.float32))
+        trimmed = _trim_to_voiced(raw, sr)
+        joined.append(trimmed if normalize_rms_db is None else normalize_rms(trimmed, sr, normalize_rms_db))
+    pcm = np.concatenate(joined)
+    if gain_db:
+        pcm = (pcm * (10.0 ** (gain_db / 20.0))).astype(np.float32)
+    return pcm
+
+
+def synthesize_script(script: tuple[tuple[Kind, str], ...], out_dir: Path, *, voice: PiperSynth | SaySynth,
+                      gain_db_by_index: dict[int, float] | None = None,
+                      length_scale_by_index: dict[int, float] | None = None,
+                      lang: str = "en", name: str | None = None,
+                      normalize_rms_db: float | None = None) -> Narration:
+    """Synthesize `script` with `voice` into `out_dir/<name>.wav` (+ `.json`)
+    and return the ground truth by concat offset. `name` defaults to
+    `narration_<lang>` (the bench's files; `synthesize_narration` calls this
+    with no per-index overrides, which is the pre-EB1 code path byte for
+    byte). `gain_db_by_index` / `length_scale_by_index` (EB1-A) plant an
+    emphasised sentence: gain on the trimmed utterance, length scale on the
+    synthesizer call; `normalize_rms_db` levels every spoken piece to that
+    RMS first (`normalize_rms`)."""
+    name = name or f"narration_{lang}"
+    parts_dir = out_dir / f"parts_{lang}" if name == f"narration_{lang}" else out_dir / f"parts_{name}"
+    gains = gain_db_by_index or {}
+    scales = length_scale_by_index or {}
+    sr = voice.sr
     chunks: list[np.ndarray] = []
     utterances: list[Utterance] = []
     cursor = 0.0
     for i, (kind, text) in enumerate(script):
-        if kind in ("pause", "gap"):
-            seconds = PAUSE_S if kind == "pause" else GAP_S
-            n = int(round(seconds * sr))
+        if kind in ("pause", "gap", "silence"):
+            n = int(round(_silence_seconds(kind, text) * sr))
             chunks.append(np.zeros(n, dtype=np.float32))
             utterances.append(Utterance(i, kind, "", cursor, cursor + n / sr, None, None))
             cursor += n / sr
             continue
-        pieces = _sentences(text) if kind == "speech" else [FILLER_SPOKEN[text]]
-        joined: list[np.ndarray] = []
-        for j, piece in enumerate(pieces):
-            raw, part_sr = synth(piece, parts_dir / f"{i:03d}_{j}.wav")
-            if part_sr != sr:
-                raise RuntimeError(f"voice sample rate changed mid-script: {part_sr} != {sr}")
-            if joined:
-                joined.append(np.zeros(int(round(GAP_S * sr)), dtype=np.float32))
-            joined.append(_trim_to_voiced(raw, sr))
-        pcm = np.concatenate(joined)
+        pcm = _synth_utterance(voice, kind, text, parts_dir, i, sr, gain_db=gains.get(i, 0.0),
+                               length_scale=scales.get(i), normalize_rms_db=normalize_rms_db)
         bounds = _voiced_bounds(pcm, sr)
         start = cursor
         end = cursor + len(pcm) / sr
@@ -412,12 +512,21 @@ def synthesize_narration(out_dir: Path, *, lang: str = "en") -> Narration:
         cursor = end
 
     pcm_all = np.concatenate(chunks)
-    wav = out_dir / f"narration_{lang}.wav"
+    wav = out_dir / f"{name}.wav"
     _write_wav(wav, pcm_all, sr)
-    narration = Narration(lang=lang, voice=voice_name, wav=str(wav), sample_rate=sr,
+    narration = Narration(lang=lang, voice=voice.name, wav=str(wav), sample_rate=sr,
                           duration=len(pcm_all) / sr, utterances=tuple(utterances))
-    (out_dir / f"narration_{lang}.json").write_text(narration.to_json(), encoding="utf-8")
+    (out_dir / f"{name}.json").write_text(narration.to_json(), encoding="utf-8")
     return narration
+
+
+def synthesize_narration(out_dir: Path, *, lang: str = "en") -> Narration:
+    """Synthesize the script for `lang` into `out_dir/narration_<lang>.wav`
+    and return the ground truth. Deterministic for a given voice, so the
+    caller may cache the result by content key."""
+    script = SCRIPT_EN if lang == "en" else SCRIPT_HI
+    voice = PiperSynth(EN_VOICE) if lang == "en" else _hindi_synth()
+    return synthesize_script(script, out_dir, voice=voice, lang=lang)
 
 
 def load_narration(out_dir: Path, *, lang: str = "en") -> Narration | None:
@@ -430,5 +539,6 @@ def load_narration(out_dir: Path, *, lang: str = "en") -> Narration | None:
 
 __all__ = ["PAUSE_S", "GAP_S", "VOICED_THRESHOLD", "PART_PAD_S", "EN_VOICE", "HI_VOICE",
            "PLANTED_FILLERS", "FILLER_SPOKEN", "CONTENT_LIKE_SENTENCE", "SCRIPT_EN", "SCRIPT_HI", "HindiVoiceUnavailable",
-           "Utterance", "Narration", "hindi_backend", "piper_voice_available", "say_available",
+           "Utterance", "Narration", "hindi_backend", "say_available", "piper_voice_available",
+           "PiperSynth", "SaySynth", "normalize_rms", "synthesize_script",
            "synthesize_narration", "load_narration"]

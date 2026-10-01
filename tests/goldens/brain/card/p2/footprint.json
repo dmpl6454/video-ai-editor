@@ -1,0 +1,473 @@
+{
+ "dropped": [],
+ "plan_ref": "d_878639b4",
+ "steps": {
+  "camera": [
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0010",
+    "kind": "switch_angle",
+    "src_range": [
+     7.85,
+     22.3
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      7.85,
+      22.3
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_a884d4",
+     "c_308c70dd",
+     "c_308c70dd_ddca80"
+    ],
+    "code": "at_cut",
+    "decision": "k_0011",
+    "kind": "switch_angle",
+    "src_range": [
+     24.75,
+     33.95
+    ],
+    "text": "camera change placed on the jump cut at 00:00:24:08 (one seam, two reasons)",
+    "timeline": [
+     [
+      24.2,
+      28.2
+     ],
+     [
+      28.2,
+      31.45
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_ddca80",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0012",
+    "kind": "switch_angle",
+    "src_range": [
+     35.9,
+     47.0
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      33.4,
+      44.5
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_ddca80",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0013",
+    "kind": "switch_angle",
+    "src_range": [
+     52.45,
+     58.95
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      49.95,
+      56.45
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_acf015",
+     "c_308c70dd"
+    ],
+    "code": "at_cut",
+    "decision": "k_0014",
+    "kind": "switch_angle",
+    "src_range": [
+     62.75,
+     68.25
+    ],
+    "text": "camera change placed on the jump cut at 00:01:02:08 (one seam, two reasons)",
+    "timeline": [
+     [
+      59.7,
+      65.2
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_026633",
+     "c_308c70dd",
+     "c_308c70dd_d1445e"
+    ],
+    "code": "at_cut",
+    "decision": "k_0015",
+    "kind": "switch_angle",
+    "src_range": [
+     77.0,
+     93.95
+    ],
+    "text": "camera change placed on the jump cut at 00:01:16:13 (one seam, two reasons)",
+    "timeline": [
+     [
+      72.6,
+      84.35
+     ],
+     [
+      84.35,
+      88.6
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_0e1dd7",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0016",
+    "kind": "switch_angle",
+    "src_range": [
+     96.9,
+     104.2
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      91.55,
+      97.4
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_a05050",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0017",
+    "kind": "switch_angle",
+    "src_range": [
+     108.85,
+     118.05
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      102.05,
+      111.25
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_a05050",
+     "c_308c70dd",
+     "c_308c70dd_ca113e"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0018",
+    "kind": "switch_angle",
+    "src_range": [
+     120.9,
+     135.1
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      114.1,
+      119.75
+     ],
+     [
+      119.75,
+      127.95
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_ca113e",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0019",
+    "kind": "switch_angle",
+    "src_range": [
+     136.95,
+     141.75
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      129.8,
+      133.1
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_152cc2",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0020",
+    "kind": "switch_angle",
+    "src_range": [
+     143.85,
+     154.3
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      135.2,
+      145.65
+     ]
+    ]
+   },
+   {
+    "angle": "/media/p2_cam_b_5efde3e4/p2_cam_b.normalized.mp4",
+    "clip_ids": [
+     "c_308c70dd_152cc2",
+     "c_308c70dd"
+    ],
+    "code": "speaker_turn",
+    "decision": "k_0021",
+    "kind": "switch_angle",
+    "src_range": [
+     158.95,
+     163.05
+    ],
+    "text": "Guest starts speaking",
+    "timeline": [
+     [
+      150.3,
+      154.4
+     ]
+    ]
+   }
+  ],
+  "cuts": [
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "filler",
+    "decision": "k_0001",
+    "kind": "cut_range",
+    "src_range": [
+     24.2,
+     24.75
+    ],
+    "text": "filler \u201cUm\u201d at 00:00:23:17",
+    "timeline": [
+     [
+      24.2,
+      24.75
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "silence",
+    "decision": "k_0002",
+    "kind": "cut_range",
+    "src_range": [
+     28.75,
+     30.7
+    ],
+    "text": "silence of 2.5 s at 00:00:28:08",
+    "timeline": [
+     [
+      28.75,
+      30.7
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "filler",
+    "decision": "k_0003",
+    "kind": "cut_range",
+    "src_range": [
+     62.2,
+     62.75
+    ],
+    "text": "filler \u201cum\u201d at 00:01:01:17",
+    "timeline": [
+     [
+      62.2,
+      62.75
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "false_start",
+    "decision": "k_0004",
+    "kind": "cut_range",
+    "src_range": [
+     75.65,
+     77.0
+    ],
+    "text": "false start \u201cthe second\u201d before \u201cthe second so the second test was a week\u201d at 00:01:15:06",
+    "timeline": [
+     [
+      75.65,
+      77.0
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "silence",
+    "decision": "k_0005",
+    "kind": "cut_range",
+    "src_range": [
+     88.75,
+     89.3
+    ],
+    "text": "silence of 1.0 s at 00:01:28:08",
+    "timeline": [
+     [
+      88.75,
+      89.3
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "filler",
+    "decision": "k_0006",
+    "kind": "cut_range",
+    "src_range": [
+     93.55,
+     93.95
+    ],
+    "text": "filler \u201cUm\u201d at 00:01:33:04",
+    "timeline": [
+     [
+      93.55,
+      93.95
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "silence",
+    "decision": "k_0007",
+    "kind": "cut_range",
+    "src_range": [
+     102.75,
+     104.2
+    ],
+    "text": "silence of 1.8 s at 00:01:42:08",
+    "timeline": [
+     [
+      102.75,
+      104.2
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "filler",
+    "decision": "k_0008",
+    "kind": "cut_range",
+    "src_range": [
+     126.55,
+     126.9
+    ],
+    "text": "filler \u201cUm\u201d at 00:02:06:04",
+    "timeline": [
+     [
+      126.55,
+      126.9
+     ]
+    ]
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd"
+    ],
+    "code": "silence",
+    "decision": "k_0009",
+    "kind": "cut_range",
+    "src_range": [
+     140.25,
+     141.75
+    ],
+    "text": "silence of 1.8 s at 00:02:19:18",
+    "timeline": [
+     [
+      140.25,
+      141.75
+     ]
+    ]
+   }
+  ],
+  "punch_ins": [
+   {
+    "clip_ids": [
+     "c_308c70dd_ddca80"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0022",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:00:30:07 to hide the jump"
+   },
+   {
+    "clip_ids": [
+     "c_308c70dd_d1445e"
+    ],
+    "code": "jump_cut_hide",
+    "decision": "k_0023",
+    "keyframe_times": [
+     0.0
+    ],
+    "kind": "jump_cut_hide",
+    "text": "scale step at the cut at 00:01:28:19 to hide the jump"
+   }
+  ]
+ }
+}

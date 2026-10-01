@@ -311,6 +311,17 @@ def resolve_live_args(store: EDLStore, tool: str,
     tail cut and a head cut — one step, so one undo)."""
     out = dict(args)
     notices: list[str] = []
+    # Editor Brain (EB1): ONE branch — any `$brain:<kind>` arg hands the whole
+    # step to brain/resolve.py, which maps the frozen EDP's decisions through
+    # agent/timemap against the live tree and answers in this function's own
+    # shape (one dict, a fan-out list, or None). A `plan_ref` that rides
+    # along without a sentinel is dropped: no handler reads it.
+    from ...brain import resolve as _brain
+    if tool in _brain.RERUN_GUARDED_TOOLS:
+        _brain.refuse_if_already_edited(store)       # a re-run on the brain's own output: refuse, never cut
+    if _brain.brain_args(out):
+        return _brain.resolve(store, tool, out)
+    out.pop(_brain.PLAN_REF_ARG, None)
     if tool == "apply_hook_stack" and out.get("text") == HOOK_SENTINEL:
         out["text"], note = live_hook_text(store)
         notices.append(note)

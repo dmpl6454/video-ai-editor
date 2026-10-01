@@ -159,6 +159,11 @@ def cancel(sid: str, body: CancelRequest | None = None):
     if handle is not None:
         handle.cancel()
         cancelled["run"] = handle.run_id
+    # Editor Brain: a footage read the analysis gate started (and the re-plan waiting on it) is part of the run
+    from ..agent.prompt import brain_seams
+    read = brain_seams.cancel_analysis(sid)
+    if read is not None:                       # absent otherwise: the 0.8.0 answer, key for key
+        cancelled["analysis"] = read
     record = _pending.load_pending(store.dir)
     token = body.token if body else None
     if record is not None and (token is None or record.get("token") == token):

@@ -16,6 +16,7 @@
 // stream without a DOM or a network.
 
 import { promptOpRef, type PromptOpRef } from './promptUndo'
+import { cleanText, normalizeBrainCard, type BrainCardInfo } from './brainDecisions'
 import type { Op } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -93,10 +94,74 @@ export interface PreviewInfo {
   hidden?: string[]
   note?: string | null
   nothing_changed?: string
+  /** Editor Brain (EB1): a brain run's decisions and reasons (lib/brainDecisions);
+   *  absent for an ordinary prompt or with `brain.enabled` off. */
+  brain?: BrainCardInfo | null
 }
 export interface ClarifyEvent {
   type: 'clarify'; token: string; plan_id: string; questions: NeedsInput[]; expires_in_s: number
   preview?: PreviewInfo | null
+}
+
+/** Editor Brain (EB1): the footage analysis job's progress frame
+ *  `analysis{layer, pct, eta_s}` (service.py / brain_seams.analysis_event),
+ *  read tolerantly: the optional fields a later backend adds (`job_id`, a
+ *  `layers` list, `fraction`) are used when present and never required. */
+export interface AnalysisLayer { name: string; pct: number | null; state: 'waiting' | 'running' | 'done' | 'failed' }
+export interface AnalysisProgress {
+  /** The layer being read now ('' when the job names none). */
+  layer: string
+  /** 0–100. */
+  pct: number
+  etaS: number | null
+  /** The job to cancel (POST /api/jobs/{id}/cancel); null when the frame carries none. */
+  jobId: string | null
+  layers: AnalysisLayer[]
+}
+
+const finite = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const LAYER_STATES = new Set(['waiting', 'running', 'done', 'failed'])
+
+function analysisLayer(raw: unknown): AnalysisLayer | null {
+  if (typeof raw === 'string') return raw ? { name: raw, pct: null, state: 'waiting' } : null
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const name = typeof r.name === 'string' ? r.name : typeof r.layer === 'string' ? r.layer : ''
+  if (!name) return null
+  const frac = finite(r.fraction)
+  const pct = finite(r.pct) ?? (frac === null ? null : frac * 100)
+  const state = typeof r.state === 'string' && LAYER_STATES.has(r.state) ? (r.state as AnalysisLayer['state'])
+    : pct !== null && pct >= 100 ? 'done' : pct !== null && pct > 0 ? 'running' : 'waiting'
+  return { name, pct: pct === null ? null : Math.max(0, Math.min(100, pct)), state }
+}
+
+/** A wire `analysis` frame → AnalysisProgress (never throws on a partial frame). */
+export function normalizeAnalysis(raw: unknown): AnalysisProgress {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const frac = finite(r.fraction) ?? finite(r.progress)
+  const pct = finite(r.pct) ?? (frac === null ? 0 : frac <= 1 ? frac * 100 : frac)
+  return {
+    layer: typeof r.layer === 'string' ? r.layer : '',
+    pct: Math.max(0, Math.min(100, pct)),
+    etaS: finite(r.eta_s),
+    jobId: typeof r.job_id === 'string' && r.job_id ? r.job_id : typeof r.job === 'string' && r.job ? r.job : null,
+    layers: Array.isArray(r.layers) ? r.layers.map(analysisLayer).filter((l): l is AnalysisLayer => l !== null) : [],
+  }
+}
+
+const LAYER_WORDS: Record<string, string> = {
+  speech: 'speech', semantic: 'meaning', audio: 'sound', sound: 'sound', speakers: 'speakers', scenes: 'scenes',
+  shots: 'shots', energy: 'energy', moments: 'moments', angles: 'camera angles',
+}
+/** "speech" → "speech", "unheard_voice" → "unheard voice" (the layer, as words). */
+export const layerWords = (layer: string): string => LAYER_WORDS[layer] ?? layer.replace(/[_-]+/g, ' ').trim()
+
+/** "Reading the footage — speech · 62% · about 20 s left" (the bar's one line). */
+export function analysisLine(a: AnalysisProgress): string {
+  const where = a.layer ? ` — ${layerWords(a.layer)}` : ''
+  const eta = a.etaS === null || a.pct <= 0 || a.pct >= 100 ? '' : ` · about ${
+    a.etaS < 90 ? `${Math.max(1, Math.round(a.etaS))} s` : `${Math.round(a.etaS / 60)} min`} left`
+  return `Reading the footage${where} · ${a.pct >= 100 ? 'done' : `${Math.round(a.pct)}%`}${eta}`
 }
 
 /** A wire `preview` → PreviewInfo, or null when it is not one (tolerant of
@@ -107,6 +172,9 @@ export function normalizePreview(raw: unknown): PreviewInfo | null {
   const lines = Array.isArray(r.lines) ? r.lines.filter((x): x is string => typeof x === 'string') : []
   if (typeof r.summary !== 'string' || !lines.length) return null
   const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d)
+  // an ordinary card carries no `brain` key at all: with the Editor Brain off
+  // (or a plain prompt) the preview is the 0.8.0 object, field for field
+  const brain = normalizeBrainCard(r.brain)
   return {
     summary: r.summary,
     lines,
@@ -115,7 +183,14 @@ export function normalizePreview(raw: unknown): PreviewInfo | null {
     hidden: Array.isArray(r.hidden) ? r.hidden.filter((x): x is string => typeof x === 'string') : [],
     note: typeof r.note === 'string' && r.note ? r.note : null,
     nothing_changed: typeof r.nothing_changed === 'string' ? r.nothing_changed : 'Nothing has changed yet.',
+    ...(brain ? { brain } : {}),
   }
+}
+
+/** The analysis job's progress frame; every field but `type` is optional on the wire. */
+export interface AnalysisEvent {
+  type: 'analysis'; layer?: string; pct?: number; eta_s?: number | null
+  job_id?: string; fraction?: number; layers?: unknown
 }
 
 export type PromptEvent =
@@ -130,10 +205,14 @@ export type PromptEvent =
   | StepEvent
   | VerifyEvent
   | ClarifyEvent
+  | AnalysisEvent
 
 export const PROMPT_EVENT_TYPES = new Set<string>([
   'text_delta', 'tool_use', 'tool_result', 'op', 'done', 'error',
   'brain', 'plan', 'step', 'verify', 'clarify',
+  // Editor Brain (EB1): the analysis job's progress frame (service.BRAIN_EVENT_TYPES);
+  // known, so a run never counts it as an unknown event.
+  'analysis',
 ])
 
 // Display labels — the same strings `brains/base.py::BRAIN_LABELS` uses in
@@ -156,7 +235,8 @@ export const brainLabel = (id: string | null | undefined): string =>
 export type PromptStatus = 'idle' | 'planning' | 'running' | 'verifying' | 'clarify' | 'done' | 'error' | 'cancelled'
 
 /** The executor's cancel sentence ("Cancelled — timeline unchanged."). */
-export const isPromptCancelMessage = (m: string | null | undefined): boolean => /^Cancelled\b/.test(m ?? '')
+export const isPromptCancelMessage = (m: string | null | undefined): boolean =>
+  /^Cancelled\b|\(cancelled\)\. Nothing was changed/.test(m ?? '')
 
 export interface BrainAttempt {
   status: BrainStatus; brain: string; label: string
@@ -195,12 +275,14 @@ export interface PromptRunState {
   /** The preview found nothing to change (`text_delta.outcome`
    *  "nothing_to_apply"): its dry-run steps are not "done" (final sweep 3 r2). */
   nothingToApply?: boolean
+  /** Editor Brain: the footage analysis while the read is going (null otherwise). */
+  analysis?: AnalysisProgress | null
 }
 
 export const EMPTY_RUN: PromptRunState = {
   status: 'idle', brain: null, attempts: [], plan: null, steps: [], verify: null,
   reply: '', clarify: null, lastError: null, opSeen: false, opRef: null, unknownEvents: 0, children: [],
-  nothingToApply: false,
+  nothingToApply: false, analysis: null,
 }
 
 /** The state a fresh turn starts from: everything cleared, status `planning`. */
@@ -276,6 +358,33 @@ export function createdProjects(state: Pick<PromptRunState, 'steps' | 'children'
   return out
 }
 
+/** A plan the Editor Brain compiled: its sentinel steps carry the EDP's `plan_ref`. */
+export function isBrainPlan(plan: Plan | null | undefined): boolean {
+  return !!plan?.steps?.some((s) => typeof s.args?.plan_ref === 'string')
+}
+
+/** The tools only the Editor Brain's plans carry (a stored run record has no plan to read `plan_ref` from). */
+const BRAIN_ONLY_TOOLS: ReadonlySet<string> = new Set(['cut_source_ranges', 'apply_camera_plan', 'sync_dialogue_lane'])
+export const ranBrainTools = (tools: readonly string[]): boolean => tools.some((t) => BRAIN_ONLY_TOOLS.has(t))
+
+/** A check that only ADVISES ("score is reported, not gated"): a failure is a note, never a miss in the headline. */
+export const ADVISORY_CHECKS: ReadonlySet<string> = new Set(['audit_ok'])
+
+/** The verify event of a brain run with its advisory checks moved out of the headline (`headline:false`
+ *  is how the run log already lists an info check) and the counts over what gates. */
+export function withAdvisoryNotes(e: VerifyEvent): VerifyEvent {
+  if (!e.checks.some((c) => ADVISORY_CHECKS.has(c.check) && c.pass === false)) return e
+  const checks = e.checks.map((c) => (ADVISORY_CHECKS.has(c.check) ? { ...c, headline: false } : c))
+  const gating = checks.filter((c) => c.headline !== false && c.pass !== null)
+  return { ...e, checks, passed: gating.filter((c) => c.pass === true).length, total: gating.length }
+}
+
+/** A step's one-line summary as a person reads it: no ids, no dangling "Reorder v1: , , ,". */
+export function tidySummary(text: string | undefined): string | undefined {
+  if (typeof text !== 'string') return text
+  return cleanText(text).replace(/:\s*(?:,\s*)*$/, '')
+}
+
 /**
  * Fold one event into the run state. Pure: returns a new object, never
  * mutates `state` or `evt`.
@@ -303,14 +412,15 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
       const e = evt as Extract<PromptEvent, { type: 'plan' }>
       // A plan re-sent after a clarification replaces the paused one; the
       // steps it will run start fresh.
-      return { ...state, plan: e.plan, clarify: null,
+      return { ...state, plan: e.plan, clarify: null, analysis: null,
                status: e.plan.steps.length ? 'running' : state.status }
     }
     case 'step': {
       const e = evt as StepEvent
       const row: StepRow = {
         index: e.index, total: e.total, tool: e.tool, status: e.status,
-        progress: e.progress, summary: e.summary, effect: e.effect, error: e.error,
+        progress: e.progress, summary: isBrainPlan(state.plan) ? tidySummary(e.summary) : e.summary,
+        effect: e.effect, error: e.error,
       }
       const verifying = e.tool === VERIFY_RENDER_TOOL
       return { ...state, steps: upsertStep(state.steps, row),
@@ -329,11 +439,11 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
     }
     case 'verify': {
       const e = evt as VerifyEvent
-      return { ...state, verify: e, status: 'verifying' }
+      return { ...state, verify: isBrainPlan(state.plan) ? withAdvisoryNotes(e) : e, status: 'verifying' }
     }
     case 'clarify': {
       const e = evt as ClarifyEvent
-      return { ...state, status: 'clarify',
+      return { ...state, status: 'clarify', analysis: null,
                clarify: { token: e.token, planId: e.plan_id, questions: e.questions, expiresInS: e.expires_in_s,
                           preview: normalizePreview(e.preview) } }
     }
@@ -347,13 +457,18 @@ export function reduce(state: PromptRunState, evt: PromptEvent | { type: string 
       const steps = cancelled
         ? state.steps.map((s) => (s.status === 'running' ? { ...s, status: 'cancelled' as const } : s))
         : state.steps
-      return { ...state, steps, status: cancelled ? 'cancelled' : 'error', lastError: e.message }
+      return { ...state, steps, analysis: null, status: cancelled ? 'cancelled' : 'error', lastError: e.message }
     }
     case 'done':
       // `done` closes the turn; what it means depends on what came before it.
       if (state.status === 'clarify') return state
       if (state.status === 'error' || state.status === 'cancelled') return state
-      return { ...state, status: 'done' }
+      // A card dropped or a run forgotten while its stream was still open (Cancel during the read, then
+      // the late `done`): nothing is running, so nothing finished.
+      if (state.status === 'idle' && !state.plan) return state
+      return { ...state, analysis: null, status: 'done' }
+    case 'analysis':
+      return { ...state, analysis: normalizeAnalysis(evt) }    // the bar's reading line and its Cancel
     default:
       return { ...state, unknownEvents: state.unknownEvents + 1 }
   }

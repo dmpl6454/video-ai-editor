@@ -1,0 +1,867 @@
+{
+ "brain": "recipes",
+ "children": [],
+ "compiled": null,
+ "content_brain": "apple_intelligence",
+ "controls": {
+  "captions": "auto",
+  "content_type": "podcast",
+  "count": 1,
+  "duration_s": null,
+  "energy": 5,
+  "music": "off",
+  "platform": null,
+  "ratio": null
+ },
+ "created": "2026-09-29T18:14:33Z",
+ "decisions": [
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0001",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "filler",
+    "facts": [
+     "w_0009_00"
+    ],
+    "text": "filler \u201cUm\u201d at 00:00:23:17"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 24.2,
+    "t1": 24.75
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0002",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "silence",
+    "facts": [
+     "sil_0008"
+    ],
+    "text": "silence of 2.5 s at 00:00:28:08"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 28.75,
+    "t1": 30.7
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0003",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "filler",
+    "facts": [
+     "w_0016_01"
+    ],
+    "text": "filler \u201cum\u201d at 00:01:01:17"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 62.2,
+    "t1": 62.75
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0004",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "false_start",
+    "facts": [
+     "f_0001",
+     "s_0019"
+    ],
+    "text": "false start \u201cthe second\u201d before \u201cthe second so the second test was a week\u201d at 00:01:15:06"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 75.65,
+    "t1": 77.0
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0005",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "silence",
+    "facts": [
+     "sil_0028"
+    ],
+    "text": "silence of 1.0 s at 00:01:28:08"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 88.75,
+    "t1": 89.3
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0006",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "filler",
+    "facts": [
+     "w_0022_00"
+    ],
+    "text": "filler \u201cUm\u201d at 00:01:33:04"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 93.55,
+    "t1": 93.95
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0007",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "silence",
+    "facts": [
+     "sil_0031"
+    ],
+    "text": "silence of 1.8 s at 00:01:42:08"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 102.75,
+    "t1": 104.2
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0008",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "filler",
+    "facts": [
+     "w_0033_00"
+    ],
+    "text": "filler \u201cUm\u201d at 00:02:06:04"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 126.55,
+    "t1": 126.9
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.95,
+   "id": "k_0009",
+   "kind": "cut_range",
+   "optional": false,
+   "params": {},
+   "produced": null,
+   "reason": {
+    "code": "silence",
+    "facts": [
+     "sil_0043"
+    ],
+    "text": "silence of 1.8 s at 00:02:19:18"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 140.25,
+    "t1": 141.75
+   },
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0010",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     7.5,
+     21.95
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0002",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 7.85,
+    "t1": 22.3
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.8,
+   "id": "k_0011",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     24.4,
+     33.6
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "at_cut",
+    "facts": [
+     "u_0006",
+     "S2",
+     "w_0009_00"
+    ],
+    "text": "camera change placed on the jump cut at 00:00:24:08 (one seam, two reasons)"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 24.75,
+    "t1": 33.95
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0012",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     35.55,
+     46.65
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0009",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 35.9,
+    "t1": 47.0
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0013",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     52.1,
+     58.6
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0012",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 52.45,
+    "t1": 58.95
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.8,
+   "id": "k_0014",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     62.4,
+     67.9
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "at_cut",
+    "facts": [
+     "u_0014",
+     "S2",
+     "w_0016_01"
+    ],
+    "text": "camera change placed on the jump cut at 00:01:02:08 (one seam, two reasons)"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 62.75,
+    "t1": 68.25
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.8,
+   "id": "k_0015",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     76.65,
+     93.6
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "at_cut",
+    "facts": [
+     "u_0018",
+     "S2",
+     "f_0001",
+     "s_0019"
+    ],
+    "text": "camera change placed on the jump cut at 00:01:16:13 (one seam, two reasons)"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 77.0,
+    "t1": 93.95
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0016",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     96.55,
+     103.85
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0023",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 96.9,
+    "t1": 104.2
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0017",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     108.5,
+     117.7
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0025",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 108.85,
+    "t1": 118.05
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0018",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     120.55,
+     134.75
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0029",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 120.9,
+    "t1": 135.1
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0019",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     136.6,
+     141.4
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0034",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 136.95,
+    "t1": 141.75
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0020",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     143.5,
+     153.95
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0036",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 143.85,
+    "t1": 154.3
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.85,
+   "id": "k_0021",
+   "kind": "switch_angle",
+   "optional": false,
+   "params": {
+    "angle": "src_fbfda494c6f4bba36db1cf41",
+    "angle_src": "src_fbfda494c6f4bba36db1cf41",
+    "letter": "B",
+    "ref": [
+     158.6,
+     162.7
+    ],
+    "speaker": "S2"
+   },
+   "produced": null,
+   "reason": {
+    "code": "speaker_turn",
+    "facts": [
+     "u_0040",
+     "S2"
+    ],
+    "text": "Guest starts speaking"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 158.95,
+    "t1": 163.05
+   },
+   "score": 0.9
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.8,
+   "id": "k_0022",
+   "kind": "jump_cut_hide",
+   "optional": true,
+   "params": {
+    "interp": "step",
+    "keys": [
+     {
+      "interp": "step",
+      "t": 30.7,
+      "values": {
+       "scale": 1.08,
+       "x": 0.0,
+       "y": 0.0
+      }
+     }
+    ],
+    "piece": [
+     30.7,
+     33.95
+    ],
+    "props": [
+     "scale",
+     "x",
+     "y"
+    ],
+    "scale": 1.08
+   },
+   "produced": null,
+   "reason": {
+    "code": "jump_cut_hide",
+    "facts": [
+     "sil_0008"
+    ],
+    "text": "scale step at the cut at 00:00:30:07 to hide the jump"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 30.7,
+    "t1": 30.75
+   },
+   "score": 0.7
+  },
+  {
+   "by": "recipes",
+   "confidence": 0.8,
+   "id": "k_0023",
+   "kind": "jump_cut_hide",
+   "optional": true,
+   "params": {
+    "interp": "step",
+    "keys": [
+     {
+      "interp": "step",
+      "t": 89.3,
+      "values": {
+       "scale": 1.08,
+       "x": 0.0,
+       "y": 0.0
+      }
+     }
+    ],
+    "piece": [
+     89.3,
+     93.55
+    ],
+    "props": [
+     "scale",
+     "x",
+     "y"
+    ],
+    "scale": 1.08
+   },
+   "produced": null,
+   "reason": {
+    "code": "jump_cut_hide",
+    "facts": [
+     "sil_0028"
+    ],
+    "text": "scale step at the cut at 00:01:28:19 to hide the jump"
+   },
+   "ref": {
+    "src": "src_9864312b83ae95b3ad85b874",
+    "t0": 89.3,
+    "t1": 89.35
+   },
+   "score": 0.7
+  },
+  {
+   "by": "recipes",
+   "confidence": 1.0,
+   "id": "k_0024",
+   "kind": "captions",
+   "optional": false,
+   "params": {
+    "look": {
+     "background": "#000000AA",
+     "size": 56,
+     "upper": false
+    },
+    "max_chars": 32,
+    "mode": "podcast",
+    "position": "bottom",
+    "style": "default"
+   },
+   "produced": null,
+   "reason": {
+    "code": "caption_mode",
+    "facts": [],
+    "text": "Captions: Podcast (podcast, energy 5)"
+   },
+   "ref": null,
+   "score": 1.0
+  },
+  {
+   "by": "recipes",
+   "confidence": 1.0,
+   "id": "k_0025",
+   "kind": "dialogue",
+   "optional": false,
+   "params": {
+    "lane": "a1",
+    "mute_camera_mics": true,
+    "offsets": {
+     "src_19808d7d4ca6c45a71015520": 0.0,
+     "src_9864312b83ae95b3ad85b874": 0.35,
+     "src_fbfda494c6f4bba36db1cf41": -0.2
+    },
+    "seam_fade_s": 0.005,
+    "src": "src_19808d7d4ca6c45a71015520"
+   },
+   "produced": null,
+   "reason": {
+    "code": "dialogue_lane",
+    "facts": [
+     "src_19808d7d4ca6c45a71015520"
+    ],
+    "text": "dialogue from p2_recorder_541ba464.wav on lane a1; camera microphones muted; 21 seams faded"
+   },
+   "ref": null,
+   "score": 1.0
+  }
+ ],
+ "graph": {
+  "digest": "sha256:audio=sha256:3320d86b545684f180d715101f113e22a3c26fbd569",
+  "id": "g_243d7654fa8b"
+ },
+ "id": "d_878639b4",
+ "planner_version": 1,
+ "previous": null,
+ "scope": null,
+ "score": null,
+ "seed": 0,
+ "style": "premium_podcast",
+ "summary": {
+  "camera": {
+   "angles": 2,
+   "at_cut": 3,
+   "switches": 12
+  },
+  "captions": {
+   "mode": "podcast",
+   "position": "bottom",
+   "style": "default"
+  },
+  "deferred": [
+   {
+    "asked": "pause at 00:01:55:00",
+    "why": "sound the transcript has no word for; left in place"
+   },
+   {
+    "asked": "cold open",
+    "why": "an episode's duplicated cold open and chapters arrive next wave; chronological"
+   },
+   {
+    "asked": "switch rate",
+    "why": "8.5 camera changes a minute follow the speakers; the premium_podcast cap is 6"
+   },
+   {
+    "asked": "wide resets and reactions",
+    "why": "camera rules 3-7 arrive next wave; no wide resets or reactions yet"
+   },
+   {
+    "asked": "music intro/outro",
+    "why": "next wave; no bed under an episode"
+   }
+  ],
+  "dialogue": {
+   "lane": "a1",
+   "offsets": {
+    "src_19808d7d4ca6c45a71015520": 0.0,
+    "src_9864312b83ae95b3ad85b874": 0.35,
+    "src_fbfda494c6f4bba36db1cf41": -0.2
+   },
+   "seams": 21,
+   "src": "src_19808d7d4ca6c45a71015520"
+  },
+  "duration_s": 159.9,
+  "estimated_seconds": 7.09,
+  "hook": null,
+  "music": null,
+  "pauses_kept": 0,
+  "project_type": "podcast",
+  "story": [
+   {
+    "beat": "chronology",
+    "sents": [
+     "s_0001",
+     "s_0002",
+     "s_0003",
+     "s_0004",
+     "s_0005",
+     "s_0006",
+     "s_0007",
+     "s_0008",
+     "s_0009",
+     "s_0010",
+     "s_0011",
+     "s_0012",
+     "s_0013",
+     "s_0014",
+     "s_0015",
+     "s_0016",
+     "s_0017",
+     "s_0018",
+     "s_0019",
+     "s_0020",
+     "s_0021",
+     "s_0022",
+     "s_0023",
+     "s_0024",
+     "s_0025",
+     "s_0026",
+     "s_0027",
+     "s_0028",
+     "s_0029",
+     "s_0030",
+     "s_0031",
+     "s_0032",
+     "s_0033",
+     "s_0034",
+     "s_0035",
+     "s_0036",
+     "s_0037",
+     "s_0038",
+     "s_0039",
+     "s_0040",
+     "s_0041",
+     "s_0042",
+     "s_0043",
+     "s_0044",
+     "s_0045",
+     "s_0046",
+     "s_0047"
+    ]
+   }
+  ],
+  "target": "episode"
+ },
+ "version": 1
+}

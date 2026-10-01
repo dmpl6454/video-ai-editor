@@ -36,6 +36,9 @@ import { PromptPreviewCard } from './PromptPreviewCard'
 import { PREVIEW_CARD_CLASS, previewReplyOf, typedOverCard } from '../lib/previewCard'
 import { cardMayTakeFocusNow } from '../lib/cardFocus'
 import { PromptRunLog } from './PromptRunLog'
+import { AnalysisProgressLine } from './brain/AnalysisProgress'
+import { useBrainEnabled } from '../lib/brainFlag'
+import { api } from '../api'
 import './promptBar.css'
 import { Icon } from './Icon'
 
@@ -68,6 +71,8 @@ export function PromptBar() {
   const cancelling = usePromptStore((s) => s.cancelling)
   const lastPrompt = usePromptStore((s) => s.prompt)
   const nothingToApply = usePromptStore((s) => !!s.nothingToApply)
+  const analysis = usePromptStore((s) => s.analysis ?? null)
+  const brainOn = useBrainEnabled()
   const run = usePromptStore((s) => s.run)
   const answer = usePromptStore((s) => s.answer)
   const applyPreview = usePromptStore((s) => s.applyPreview)
@@ -81,6 +86,9 @@ export function PromptBar() {
   const [example, setExample] = useState(0)
   const [askCancel, setAskCancel] = useState(false)
   const [announce, setAnnounce] = useState('')
+  // Cancel was confirmed: whatever the run still sends (a card its plan reaches after a read that was
+  // stopped) is dropped, never shown (UX-07: 'no preview pops up after a cancel').
+  const [cancelIntent, setCancelIntent] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
   const keepRef = useRef<HTMLButtonElement>(null)
@@ -146,6 +154,23 @@ export function PromptBar() {
     el.style.height = `${Math.max(LINE_PX + 8, h)}px`
   }, [text])
 
+  // A card that arrives after Cancel was confirmed is dropped on the spot (it clears the pending record
+  // too, so a reload cannot bring it back), and the run is over once nothing is busy. Watched on the
+  // store, so the frame that carries the card is caught whether or not React has rendered it.
+  useEffect(() => {
+    if (!cancelIntent) return
+    const watch = (s: { status: typeof status; dropClarify: () => Promise<void> }) => {
+      if (s.status === 'clarify') {
+        void s.dropClarify()
+        setAnnounce('Cancelled — nothing was changed.')
+        setCancelIntent(false)
+      } else if (!isBusy(s.status)) setCancelIntent(false)
+    }
+    const unsubscribe = usePromptStore.subscribe(watch)
+    queueMicrotask(() => watch(usePromptStore.getState()))
+    return unsubscribe
+  }, [cancelIntent])
+
   // Esc during a run opens the confirm; focus moves onto "Keep going" so a
   // second Esc keeps going and Enter on the red button cancels.
   useEffect(() => { if (askCancel) keepRef.current?.focus() }, [askCancel])
@@ -198,6 +223,16 @@ export function PromptBar() {
     if (!inCard() && cardMayTakeFocusNow(formRef.current)) focusCard()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, clarify?.token])
+
+  // Cancel, confirmed. A footage read is a job of its own: name it (the frame carries its id) so the
+  // read really stops, then ask the run to stop too (prompt/cancel reaches the job on a backend that
+  // does not put the id on the frame). The timeline was never touched.
+  const stopRun = () => {
+    const job = usePromptStore.getState().analysis?.jobId
+    if (job) void api.cancelJob(job).catch(() => undefined)
+    if (brainOn) setCancelIntent(true)        // with the brain off the bar behaves exactly as 0.8.0
+    void cancel()
+  }
 
   const submit = () => {
     const open = usePromptStore.getState().clarify
@@ -291,7 +326,8 @@ export function PromptBar() {
     setHistIdx(-1)
   }
 
-  const progress = busy ? runProgress(steps) : null
+  const reading = brainOn && busy && steps.length === 0 ? analysis : null
+  const progress = busy ? (runProgress(steps) ?? (reading ? reading.pct / 100 : null)) : null
   // The counter near the server's 4000-character limit, and the refusal past it (QA-124).
   const lengthNote = promptLengthNote(text)
   const cls = [
@@ -365,22 +401,25 @@ export function PromptBar() {
         <div className="prompt-confirm" role="alertdialog" aria-label="Cancel the run?"
              onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setAskCancel(false); taRef.current?.focus() } }}>
           <span className="grow">Cancel the run? The timeline is unchanged until it finishes.</span>
-          <button type="button" className="danger" onClick={() => { setAskCancel(false); void cancel() }}>Cancel run</button>
+          <button type="button" className="danger" onClick={() => { setAskCancel(false); stopRun() }}>Cancel run</button>
           <button type="button" ref={keepRef} onClick={() => { setAskCancel(false); taRef.current?.focus() }}>Keep going</button>
         </div>
       )}
 
-      {status === 'clarify' && clarify?.preview && (
+      {reading && <AnalysisProgressLine analysis={reading} />}
+
+      {status === 'clarify' && clarify?.preview && !cancelIntent && (
         <PromptPreviewCard
           key={clarify.token}
           preview={clarify.preview}
           onApply={() => void applyPreview()}
           onChange={() => changePreview()}
           onTypeAhead={typeOverCard}
+          onSeek={(t) => useStore.getState().setPlayhead(t)}
         />
       )}
 
-      {status === 'clarify' && clarify && !clarify.preview && (
+      {status === 'clarify' && clarify && !clarify.preview && !cancelIntent && (
         <ClarifyCard
           key={clarify.token}
           questions={clarify.questions}

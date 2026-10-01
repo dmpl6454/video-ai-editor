@@ -58,11 +58,17 @@ from .facts import TimelineFacts
 from .langs import needs_translation
 from . import live as _live
 from .runlog import RunBus, RunLog, RunRecord, new_run_id
-from .schema import CLIP_SENTINELS, PLAN_DENY, SEAM_SENTINEL, Plan, Step
+from .schema import CLIP_SENTINELS, PLAN_DENY, PLAN_REF_ARG, SEAM_SENTINEL, Plan, Step
 from .service import SNAPSHOT_DIR, TRANSCRIPT_WAIT_S
 from . import artefacts as _artefacts
+from ...brain import checks as _brain_checks
+from ...brain import resolve as _brain
 
 _D = importlib.import_module("video_ai_editor.agent.dispatch")
+# Editor Brain (EB1): the two blocking checks live in brain/checks.py and
+# register themselves in verify.CHECKS here, so the K3 net (`safety_net`)
+# and `verify_plan` measure them in every process that can run a plan.
+_brain_checks.install()
 
 Emit = Callable[[dict[str, Any]], None]
 
@@ -73,8 +79,16 @@ EXTRA_PLAN_ARGS: dict[str, frozenset[str]] = {
     "apply_hook_stack": frozenset({"text", "duration", "visual", "audio"}),
     "auto_reframe": frozenset({"subject_track"}),
     "apply_template": frozenset({"with_hook_stack"}),
-    "add_caption_track": frozenset({"chunk_size"}),
+    "add_caption_track": frozenset({"chunk_size", PLAN_REF_ARG}),
     "add_music": frozenset({"loop"}),
+    # Editor Brain (EB1): `plan_ref` on the sentinel-carrying tools (stripped
+    # by the resolver before the guard sees a step) and the frozen arg sets
+    # of lane B's three tools (their advertised schemas win once they land).
+    "split_at": frozenset({PLAN_REF_ARG}), "reorder_clips": frozenset({PLAN_REF_ARG}),
+    "add_keyframe": frozenset({PLAN_REF_ARG}),
+    "cut_source_ranges": frozenset({"track", "ranges", "why", PLAN_REF_ARG}),
+    "apply_camera_plan": frozenset({"switches", "offsets", PLAN_REF_ARG}),
+    "sync_dialogue_lane": frozenset({"src", "lane", "offsets", "seam_fade_s", "mute_camera_mics"}),
 }
 
 #: `add_music(volume_db)` and friends are bounded by the validator; the guard
@@ -142,6 +156,12 @@ def _allowed_arg_names(tool: str) -> set[str] | None:
     return names
 
 
+def _on_timeline(tool: str, resolved: str, facts: TimelineFacts) -> bool:
+    """Editor Brain (EB1): the validator's rule, at the last line too."""
+    from .validate import _on_timeline as rule
+    return rule(tool, resolved, facts)
+
+
 def _check_path_arg(tool: str, arg: str, value: Any, guard: str,
                     facts: TimelineFacts, reasons: list[str]) -> None:
     if guard == "write":
@@ -167,7 +187,7 @@ def _check_path_arg(tool: str, arg: str, value: Any, guard: str,
         except OSError:
             reasons.append(f"{tool}.{arg}: unresolvable path {v!r}")
             continue
-        if resolved not in facts.allowed_paths:
+        if resolved not in facts.allowed_paths and not _on_timeline(tool, resolved, facts):
             reasons.append(f"{tool}.{arg}: path not offered ({Path(v).name})")
             continue
         from ...config import assert_path_allowed, restrict_paths_active
@@ -267,6 +287,14 @@ def guard_step(tool: str, args: dict[str, Any], facts: TimelineFacts, *,
         # QA-032: the last line. A `$ask:` the user never answered must not
         # become the literal watermark / end-card / title text.
         raise StepRefused(f"{tool}: unanswered placeholder(s) {sorted(unresolved)} — the plan must ask first")
+    if _brain.has_brain_value(args):
+        # EB1: the resolver runs BEFORE the guard; a `$brain:` string that
+        # reaches this line was never resolved and must not reach a handler.
+        raise StepRefused(f"{tool}: unresolved $brain sentinel — the plan must be resolved against the live "
+                          "timeline before it runs")
+    ref = args.get(PLAN_REF_ARG)
+    if ref is not None and not (isinstance(ref, str) and _brain.PLAN_REF_RE.fullmatch(ref)):
+        raise StepRefused(f"{tool}: {PLAN_REF_ARG} {ref!r} is not a decisions id")
     if tool not in _D.DISPATCH:
         raise StepRefused(f"{tool}: unknown tool")
     allowed = _allowed_arg_names(tool)
@@ -279,8 +307,22 @@ def guard_step(tool: str, args: dict[str, Any], facts: TimelineFacts, *,
         if arg in args and args[arg] is not None:
             _check_path_arg(tool, arg, args[arg], guard, facts, reasons)
     _check_download_strings(tool, args, reasons, consented)
+    _check_resolved_brain_args(tool, args, facts, reasons)
     if reasons:
         raise StepRefused(reasons)
+
+
+def _check_resolved_brain_args(tool: str, args: dict[str, Any], facts: TimelineFacts, reasons: list[str]) -> None:
+    """SC-05: the nested path rule and bounds of the three brain tools on the
+    values a `$brain:` step RESOLVED to (the top-level `PATH_ARGS` walk cannot
+    see `ranges[].src`, `switches[].angle_src` or `offsets` keys)."""
+    from ...brain import plan_rules as _rules
+    if tool not in _rules.BRAIN_TOOLS:
+        return
+    from . import validate as _validate
+    _rules.check_brain_tool_args(tool, args, facts, reasons, resolve_path=_validate._resolve,
+                                 known_tracks=set(facts.track_ids) | _validate.KNOWN_TRACK_IDS,
+                                 is_placeholder=_validate._is_placeholder)
 
 
 # --------------------------------------------------------------------------
@@ -690,6 +732,13 @@ class _ProgressTicker:
         self._thread.join(timeout=2.0)
 
 
+def plan_decisions_id(steps: list[Step]) -> str | None:
+    """The EDP a brain plan was compiled from — the ONE `plan_ref` its
+    sentinel steps carry (recorded in the commit args, spec §2.2)."""
+    refs = {str(s.args.get(PLAN_REF_ARG)) for s in steps if isinstance(s.args.get(PLAN_REF_ARG), str)}
+    return sorted(refs)[0] if refs else None
+
+
 def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: TimelineFacts,
                    *, emit: Emit, cancel_event: threading.Event | None,
                    plan_id: str, consented: frozenset[str] = frozenset(),
@@ -726,8 +775,11 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     outcome = StepOutcome(index=index, tool=tool, args=arg_sets, notices=notices)
     emit({"type": "step", "index": index, "total": total, "tool": tool, "status": "running",
           "progress": 0.0})
+    brain_step = bool(_brain.brain_args(step.args))
     if len(arg_sets) == 1:
         shown_args = dict(step.args)
+    elif brain_step:
+        shown_args = {**step.args, "resolved": len(arg_sets)}
     elif "clip_id" in arg_sets[0] and step.args.get("clip_id") in CLIP_SENTINELS:
         shown_args = {**step.args, "clip_id": [a["clip_id"] for a in arg_sets]}
     elif "at" not in arg_sets[0]:
@@ -782,7 +834,8 @@ def _dispatch_step(store: EDLStore, step: Step, index: int, total: int, facts: T
     emit({"type": "tool_result", "name": tool, "result": result_payload, "id": call_id})
     summary = _result_summary(outcome.results[0]) if n == 1 else (
         f"{n} seams" if step.args.get("at") == SEAM_SENTINEL
-        else f"{n} cuts" if tool == "cut_range" else f"{n} clips")
+        else f"{n} cuts" if tool == "cut_range"
+        else f"{n} resolved" if brain_step else f"{n} clips")
     for r in outcome.results:
         note = r.get("notice") if isinstance(r, dict) else None
         if isinstance(note, str) and note and note not in outcome.notices:
@@ -828,6 +881,18 @@ _DRY_RUN_SKIP: frozenset[str] = frozenset({"render_preview", "audit_aesthetic"})
 _SHADOW_ENV = "VAI_CONTRACT_SHADOW"
 
 
+def check_failure_message(c: Any) -> str:
+    """The sentence a blocking check that failed puts in front of the user. A scalar
+    measure reads as before ("measured 0.4, expected 0.9"); a check that measures a
+    DICT (the brain's mid-word and sync checks) says only what it found, in plain
+    words: never the dict, which is a machine's record and reached a user as a question."""
+    if isinstance(c.measured, (dict, list)) or isinstance(c.expected, (dict, list)):
+        found = [p.strip() for p in str(c.detail or "").split(";") if p.strip()]
+        more = f" (and {len(found) - 2} more)" if len(found) > 2 else ""
+        return f"{c.human} did not hold" + (f": {'; '.join(found[:2])}{more}" if found else "")
+    return f"{c.human} did not hold (measured {c.measured}, expected {c.expected})"
+
+
 def safety_net(store: EDLStore, plan: Plan, result: "ExecResult", facts: TimelineFacts, prompt: str,
                hint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     """K3: what stops a wrong edit being committed, checked on the LIVE tree
@@ -850,10 +915,16 @@ def safety_net(store: EDLStore, plan: Plan, result: "ExecResult", facts: Timelin
     try:
         from .verify import blocking_failures
         for c in blocking_failures(store, plan, result, facts):
-            reasons.append({"kind": "check", "clause": c.check,
-                            "message": f"{c.human} did not hold (measured {c.measured}, expected {c.expected})"})
+            reasons.append({"kind": "check", "clause": c.check, "message": check_failure_message(c)})
     except Exception as e:  # noqa: BLE001
         _net_log(f"blocking checks failed to run: {type(e).__name__}: {e}")
+    try:
+        # EX-02: a brain plan never removes more picture than its own decisions name
+        from ...brain import checks as _brain_checks
+        reasons.extend(_brain_checks.removal_overrun(store, plan, result))
+        reasons.extend(_brain_checks.moment_played_twice(store, plan, result))
+    except Exception as e:  # noqa: BLE001
+        _net_log(f"removal check failed to run: {type(e).__name__}: {e}")
     # The contract reads the USER's words, so only a run the service started
     # from a prompt carries a hint; a hand-built plan (tests, tools, the
     # shorts finishing pass) is judged by its blocking checks alone.
@@ -1104,8 +1175,10 @@ def run_plan(store: EDLStore, plan: Plan, facts: TimelineFacts, *, emit: Emit,
     # plan still commits nothing.
     if store.edl.hash() != hash_before or result.new_sessions:
         title = validated.title or validated.intent
+        decisions = plan_decisions_id(steps)
         store.commit("prompt", {"prompt": prompt, "plan_id": validated.id,
-                                "steps": [s.tool for s in steps]},
+                                "steps": [s.tool for s in steps],
+                                **({"decisions": decisions} if decisions else {})},
                      f"Prompt: {title} ({result.applied} step{'' if result.applied == 1 else 's'})",
                      record_unchanged=bool(result.new_sessions))
         result.committed = True
@@ -1256,6 +1329,30 @@ def _replays(prompt: str, intent: str, facts: TimelineFacts, sig: list[list[Any]
         return False
 
 
+def _brain_rollback_reply(store: EDLStore, handle: "RunHandle", reasons: list[dict[str, str]], log: RunLog) -> str:
+    """A brain plan the safety net rolled back: ONE honest sentence and a next step, no question. The picker the
+    other plans get ("Which did you mean? trim / speed / title") has nothing to do with a reel that could not be
+    cut cleanly (closer review, UX-12: 'make a 45-second reel' on the podcast ended on it). Nothing is pending."""
+    from . import brain_reply
+    from .service import via
+    from .brains.base import BRAIN_LABELS
+    steps = handle.plan.steps
+    reel = any(s.args.get("ranges") == "$brain:keep" for s in steps)
+    asked = None
+    try:
+        from ...brain import resolve as _r
+        edp = _r.load_edp(_r.brain_dir_for(store), plan_decisions_id(steps) or "")
+        asked = float(edp.controls.duration_s) if edp is not None and edp.controls.duration_s else None
+    except (OSError, ValueError, AttributeError):
+        asked = None
+    text = via(BRAIN_LABELS.get(handle.plan.brain, handle.plan.brain)) + brain_reply.rollback_text(
+        reasons, applied=handle.mode != "preview", reel=reel, asked_s=asked)
+    log.set_reply(text)
+    log.emit({"type": "text_delta", "text": text})
+    log.set_status("done")
+    return text
+
+
 def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResult, facts: TimelineFacts,
                           prompt: str, log: RunLog) -> str:
     """K3: the run was rolled back — the reply is a clarify card that says
@@ -1269,6 +1366,8 @@ def _pause_after_rollback(store: EDLStore, handle: "RunHandle", result: ExecResu
     from .service import CLARIFY_TTL_S, question_text, via
     from .brains.base import BRAIN_LABELS
     reasons = result.rollback or []
+    if plan_decisions_id(handle.plan.steps) is not None:
+        return _brain_rollback_reply(store, handle, reasons, log)
     question = rollback_question([r["message"] for r in reasons], preview=handle.mode == "preview")
     # this turn's own note ("Dropped the earlier preview — nothing from it was
     # applied.") leads the question too (final sweep 3 r2: it was lost here)
