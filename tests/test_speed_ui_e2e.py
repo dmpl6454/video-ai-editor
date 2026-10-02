@@ -125,7 +125,7 @@ def _open(browser, base_url, sid, width, height):  # noqa: F811
     ctx = browser.new_context(viewport={"width": width, "height": height}, accept_downloads=True)
     ctx.add_init_script("try { " + " ".join(
         f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});"
-        for k, v in {"vai.sessionId": sid, "vai.rightTab": "inspect"}.items()) + " } catch (e) {}")
+        for k, v in {"vai.sessionId": sid, "vai.rightTab": "inspect", "aive.onboard.arrange": "1"}.items()) + " } catch (e) {}")
     page = ctx.new_page()
     page.goto(base_url + "/?vae-test")  # lib/testHook.ts: the store, in the built bundle too
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
@@ -296,7 +296,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     page.mouse.click(x + 8, y, button="right")         # on the clip, clear of the playhead line
     menu = page.get_by_role("menu", name="Clip actions")
     expect(menu).to_be_visible()
-    menu.get_by_role("menuitem", name="Freeze frame").click()
+    menu.get_by_role("menuitem", name="Render").click()          # lib/clipContextMenu: the freeze row
     mid = _wait_edl(base_url, sid, lambda e: any(c.get("freeze") for c in _v1(e)), "the context-menu freeze")
     n_hold = tb.frame_of(catalog["freeze_default"], 30)
     exp_mid = _expected(mid)

@@ -45,6 +45,11 @@ export function AssetBrowser() {
   const setTab = useAssetBrowser((s) => s.setTab)
   const setSub = useAssetBrowser((s) => s.setSub)
   const sub = subs[tab] ?? DEFAULT_SUB[tab] ?? SUBNAV[tab][0]
+  // The Audio panel hosts the voiceover recorder, a live process whose take
+  // must stay stoppable from the top bar's activity chip with another tab
+  // showing (LEFT_RAIL_SPEC §2.8): it stays mounted, hidden, like the old
+  // rail kept every panel mounted (§2.7). The other panels mount on demand.
+  const audioSub = subs.Audio ?? SUBNAV.Audio[0]
 
   // The rail's panel chords and deep links (lib/layoutStore) land here.
   const leftTab = useLayoutStore((s) => s.leftTab)
@@ -81,6 +86,10 @@ export function AssetBrowser() {
         {ASSET_TABS.map((t) => (
           <button key={t} type="button" role="tab" id={assetTabId(t)} aria-selected={tab === t} aria-controls={assetPanelId(t)}
                   tabIndex={tab === t ? 0 : -1} className={`ab-tab${tab === t ? ' is-active' : ''}`} title={t}
+                  // A mouse click switches the tab without taking focus, so Space
+                  // still plays and N still snaps afterwards (review RD1); the
+                  // keyboard reaches the strip through its roving tabindex.
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setTab(t)}>
             <Icon name={TAB_ICONS[t]} /><span className="ab-tab-label">{t}</span>
           </button>
@@ -93,9 +102,15 @@ export function AssetBrowser() {
                     onClick={() => setSub(s)}>{s}</button>
           ))}
         </nav>
-        <div className="ab-content" role="tabpanel" id={assetPanelId(tab)} aria-labelledby={assetTabId(tab)} data-panel={tab} data-sub={sub} tabIndex={-1}>
-          {content(tab, sub)}
+        <div className="ab-content" role="tabpanel" id={assetPanelId('Audio')} aria-labelledby={assetTabId('Audio')} data-panel="Audio"
+             data-sub={audioSub} tabIndex={-1} hidden={tab !== 'Audio'}>
+          <AudioTab sub={audioSub} />
         </div>
+        {tab !== 'Audio' && (
+          <div className="ab-content" role="tabpanel" id={assetPanelId(tab)} aria-labelledby={assetTabId(tab)} data-panel={tab} data-sub={sub} tabIndex={-1}>
+            {content(tab, sub)}
+          </div>
+        )}
       </div>
     </div>
   )

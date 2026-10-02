@@ -13,6 +13,7 @@
 .ab-sub:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text); }
 .ab-sub.is-active { background: rgba(255, 255, 255, 0.1); color: var(--text); font-weight: 500; }
 .ab-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; padding: 10px; }
+.ab-content[hidden] { display: none; }
 .ab-toolbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; flex: none; }
 .ab-grow { flex: 1; }
 .ab-search { flex: 1; }

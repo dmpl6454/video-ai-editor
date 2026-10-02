@@ -157,10 +157,17 @@ def test_the_back_chip_goes_away_on_the_next_tab_change(engine, base_url, sessio
 
 
 def test_every_catalogue_card_is_titled_by_its_label(engine, base_url, sessions):  # noqa: F811
+    import httpx
+    # The panel shows a card for every catalogue tool the engine advertises
+    # (/api/tools), so a tool this build leaves out has no card to find.
+    advertised = {t["name"] for t in httpx.get(f"{base_url}/api/tools", timeout=30).json().get("tools", [])}
     page = _open(engine, base_url, sessions["full"], 1440, 900)
     _ai_media(page)
     for tool, name in TOOLS.items():
         head = page.locator(f"button.ai-card-head[aria-controls='ai-body-{tool}']")
+        if advertised and tool not in advertised:
+            assert head.count() == 0, tool
+            continue
         assert head.count() == 1, tool
         assert head.locator(".ai-card-title").inner_text() == name, (tool, name)
     assert page.errors == []

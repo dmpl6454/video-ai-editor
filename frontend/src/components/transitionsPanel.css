@@ -174,7 +174,7 @@
   /* Two DIFFERENT hues of the palette (the design's accent and its purple
      lane colour): with one hue for both, every crossfade look is one flat
      swatch at its midpoint (QA-119 came back with the single-accent tokens). */
-  --ca: color-mix(in srgb, var(--track-music, #BF5AF2) 58%, var(--bg-3));
+  --ca: color-mix(in srgb, var(--warn, #FF9F0A) 58%, var(--bg-3));
   --cb: color-mix(in srgb, var(--accent) 58%, var(--bg-3));
   --tp-dur: 1.3s;
   position: relative;

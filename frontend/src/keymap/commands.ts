@@ -10,10 +10,10 @@ import { chordLabel, useKeymapStore } from './engine'
 import { openSettings } from '../lib/settingsOpen'
 import { useLayoutStore } from '../lib/layoutStore'
 import { RAIL_ITEMS, railPanelId } from '../components/rail/railModel'
-import { RAIL_TO_TAB, assetPanelId } from '../lib/assetTabs'
+import { RAIL_TO_TAB, assetPanelId, useAssetBrowser } from '../lib/assetTabs'
 import { useInspector } from '../components/inspector/inspectorStore'
 import { cycleRegion } from './regions'
-import { pressControl, type UiTarget } from './uiTargets'
+import { UI_TARGETS, pressControl, type UiTarget } from './uiTargets'
 import { adjacentClip, clipAtPlayhead, type ClipPick } from '../lib/clipSelect'
 import { announce } from '../lib/announce'
 import { focusTextField, textClipId, type TextFieldEnv } from '../lib/textEdit'
@@ -254,7 +254,18 @@ export const COMMANDS: Command[] = [
   // ⌥T: the Text tool's own "add text" button (the default style at the
   // playhead, selected). 'global' like the panel chords.
   { id: 'addText', label: 'Add text at the playhead', category: 'Editing', scope: 'global',
-    run: (s) => { const before = s.selection; press('addText'); void focusNewText(before) } },
+    run: (s) => {
+      const before = s.selection
+      // The desktop shell mounts a panel only while its tab shows: the Text
+      // control may not be in the document yet, so show Text › Add text and
+      // press it once that has committed (the rail kept every panel mounted).
+      if (typeof document !== 'undefined' && !document.querySelector(UI_TARGETS.addText)) {
+        useAssetBrowser.getState().setTab('Text', 'Add text')
+        requestAnimationFrame(() => { press('addText'); void focusNewText(before) })
+        return
+      }
+      press('addText'); void focusNewText(before)
+    } },
 
   // ---------- Marks ----------
   { id: 'markIn', label: 'Mark in', category: 'Marks', run: (s) => s.setInMark(s.playhead) },

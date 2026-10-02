@@ -218,8 +218,7 @@ def test_voice_effects_in_the_inspector(engine, base_url, voice_src):  # noqa: F
         # Reset takes it off; ⌘Z brings it back
         page.locator("button[title='Reset voice effects to default']").click()
         _wait(base_url, sid, lambda e: _fx(e, "vo")[0] is None, "the VO effect removed")
-        page.locator("body").click(position={"x": 640, "y": 40})
-        page.keyboard.press("Meta+z")
+        page.get_by_role("button", name="Undo", exact=True).click()
         _wait(base_url, sid, lambda e: _fx(e, "vo")[0] == "reverb", "undo brings Hall back")
         assert not errors, errors
     finally:

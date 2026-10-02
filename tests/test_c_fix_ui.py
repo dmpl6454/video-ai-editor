@@ -54,15 +54,20 @@ def _open(browser, base_url, sid, width=1440, height=900, tab="inspect"):  # noq
 
 @pytest.fixture(scope="module")
 def overlays(base_url, sessions, tmp_path_factory):  # noqa: F811
-    """A project with a clip on v1, a text overlay and a sticker; returns ids."""
+    """A project with a clip on v1, a text overlay and a sticker; returns ids.
+    The sticker is a PNG (emoji artwork is fetched, and this harness may be
+    offline)."""
     import httpx
+    from PIL import Image
+    png = tmp_path_factory.mktemp("cfix-sticker") / "dot.png"
+    Image.new("RGBA", (96, 96), (255, 64, 64, 255)).save(png)
     sid = sessions["full"]
     with httpx.Client(base_url=base_url, timeout=60) as c:
         r = c.post(f"/api/sessions/{sid}/dispatch", json={"tool": "add_text", "args": {
             "text": "HELLO THERE", "start": 0.5, "end": 3.0}})
         assert r.status_code == 200, r.text
         r = c.post(f"/api/sessions/{sid}/dispatch", json={"tool": "add_sticker", "args": {
-            "emoji": "😀", "start": 0.5, "end": 3.0}})
+            "src": str(png), "start": 0.5, "end": 3.0}})
         assert r.status_code == 200, r.text
         edl = c.get(f"/api/sessions/{sid}/edl").json()
     text_id = next(cl["id"] for t in edl["tracks"] for cl in t["clips"] if "text" in cl and "style" in cl)
