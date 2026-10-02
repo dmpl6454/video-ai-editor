@@ -117,6 +117,7 @@ def _ai_media(page):
     page.locator(".ab-tabs").get_by_role("tab", name="Media", exact=True).click()
     page.get_by_role("button", name="AI media", exact=True).click()
     page.locator(".ai-search").wait_for(timeout=5000)
+    page.locator("button.ai-card-head").first.wait_for(timeout=15000)   # the cards follow /api/tools
 
 
 def _open_tool(page, tool: str):

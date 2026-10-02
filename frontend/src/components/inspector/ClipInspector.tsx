@@ -43,8 +43,11 @@ export function ClipInspector() {
     : ['audio', 'music', 'vo'].includes(found.t.type) ? 'audio' : 'video'
   const tabs = useMemo<ClipTab[]>(() => kind === 'video' ? VIDEO_TABS : kind === 'audio' ? AUDIO_TABS : kind === 'text' ? ['Text'] : ['Sticker'], [kind])
   const active: ClipTab = tab && tabs.includes(tab) ? tab : tabs[0]
-  // A tab that the new clip kind does not have falls back to its first.
-  useEffect(() => { if (tab && !tabs.includes(tab)) setTab(null) }, [tab, tabs, setTab])
+  // A tab that the new clip kind does not have falls back to its first — only
+  // once the clip is known: a selection that briefly names a clip the local
+  // EDL has not received yet (a freeze or split selects its new piece before
+  // the refresh lands) must not throw the Speed tab away.
+  useEffect(() => { if (found && tab && !tabs.includes(tab)) setTab(null) }, [found, tab, tabs, setTab])
 
   if (!found || !kind) {
     return <div className="in"><div className="ed-panel-head">Clip</div><PanelState kind="empty" title="Clip not found" /></div>

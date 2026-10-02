@@ -89,7 +89,8 @@ def _select(page, clip_id):
     inspector shows it at once."""
     page.evaluate("async (id) => { const s = (await (window.__vaeTest ?? import('/src/store.ts'))).useStore.getState();"
                   " s.setSelection(id) }", clip_id)
-    page.locator(f".props[data-clip-id='{clip_id}']").wait_for(timeout=5000)
+    page.locator(f".in-clip[data-clip-id='{clip_id}']").wait_for(timeout=5000)
+    page.locator(".props").first.wait_for(timeout=5000)
     page.wait_for_timeout(300)
 
 

@@ -76,8 +76,8 @@ export function EditorTopBar() {
           <span className="ed-project-name">{shown}</span>
         </button>
       )}
-      <span className={`ed-save-status is-${status.icon}`} role="status" title={status.title}>
-        <Icon name={status.icon} className={status.icon === 'loading' ? 'icon-spin' : undefined} />{status.text}
+      <span className={`ed-save-status is-${status.icon}`} role="status" title={status.title} aria-label={status.text}>
+        <Icon name={status.icon} className={status.icon === 'loading' ? 'icon-spin' : undefined} /><span className="ed-status-word">{status.text}</span>
       </span>
       <ActivityChip />
       <span className="ed-grow" />
@@ -106,7 +106,7 @@ export function EditorTopBar() {
               aria-pressed={mode === 'chat'} title="Chat — ask the assistant to edit for you" onClick={toggleChat}>
         <Icon name="chat" />
       </button>
-      <button type="button" className="ui-btn-secondary" onClick={openShare} title="Export and share"><Icon name="share" />Share</button>
+      <button type="button" className="ui-btn-secondary" onClick={openShare} title="Export and share" aria-label="Share"><Icon name="share" /><span className="ed-share-word">Share</span></button>
       <span className="topbar-pinned"><ExportButton /></span>
     </header>
   )
