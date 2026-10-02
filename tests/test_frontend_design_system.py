@@ -54,7 +54,6 @@ def _select_first_clip(page):
     bb = cv.bounding_box()
     # The main-video lane is the first lane under the ruler on this project.
     page.mouse.click(bb["x"] + 140, bb["y"] + 40)
-    page.get_by_role("tab", name="Inspector", exact=True).click()
     page.wait_for_timeout(600)
 
 
@@ -79,7 +78,6 @@ def _select_new_text_clip(page) -> bool:
     }""")
     if not ok:
         return False
-    page.get_by_role("tab", name="Inspector", exact=True).click()
     page.wait_for_timeout(600)
     return page.locator("[role=radiogroup][aria-label=Alignment]").count() == 1
 
@@ -88,8 +86,14 @@ def _open_media_panels(page):
     # The rail's Effects and Stickers panels (LEFT_RAIL_SPEC R1). Stickers is
     # last: _surfaces then fills its search box, which must be on screen.
     for tab in ("Effects", "Stickers"):
-        page.get_by_role("tab", name=tab, exact=True).click()
+        _asset_tab(page, tab)
         page.wait_for_timeout(300)
+
+
+def _asset_tab(page, name):
+    # The asset browser's tab strip (design handoff 2026-10-02): the strip is
+    # scoped because the clip inspector has tabs of the same names.
+    page.locator(".ab-tabs").get_by_role("tab", name=name, exact=True).click()
 
 
 def _surfaces(page):
@@ -105,19 +109,22 @@ def _surfaces(page):
         yield "text inspector"
     # The Text and Captions panels hold the old Text presets popover and CC
     # menu since R2 (LEFT_RAIL_SPEC §8.1).
-    for tab in ("Audio", "Text", "Transitions", "Captions", "AI"):
-        page.get_by_role("tab", name=tab, exact=True).click()
+    for tab in ("Audio", "Text", "Transitions", "Captions"):
+        _asset_tab(page, tab)
         page.wait_for_timeout(400)
         yield f"{tab} tab"
-    page.get_by_role("tab", name="Media", exact=True).click()
-    page.get_by_role("tab", name="Chat", exact=True).click()
+    _asset_tab(page, "Media")
+    page.get_by_role("button", name="AI media", exact=True).click()
+    page.wait_for_timeout(400)
+    yield "AI media"
+    page.locator("button[aria-label='Chat with the assistant']").click()
     page.wait_for_timeout(300)
     yield "chat"
-    page.get_by_role("tab", name="Inspector", exact=True).click()
+    page.locator("button[aria-label='Chat with the assistant']").click()
     for trigger, name in ((".topbar-pinned button.primary", "export dialog"),
-                          ("button[aria-label='Keyboard shortcuts']", "help"),
-                          ("button.topbar-session", "project menu"),
-                          ("button.ratio-trigger", "ratio menu")):
+                          ("button[aria-label='Help']", "help"),
+                          ("button[aria-label='Layout']", "layout menu"),
+                          ("button[aria-label='Ratio']", "ratio menu")):
         page.locator(trigger).click()
         page.wait_for_timeout(400)
         yield name
@@ -247,7 +254,7 @@ async () => {
 @pytest.mark.parametrize("motion", ["reduce", "no-preference"])
 def test_reduced_motion_is_honoured_everywhere(browser, base_url, sessions, motion):  # noqa: F811
     page = _open(browser, base_url, sessions["full"], reduced_motion=motion)
-    page.get_by_role("tab", name="Transitions", exact=True).click()
+    _asset_tab(page, "Transitions")
     page.wait_for_timeout(300)
     page.locator(".trp-tile").first.hover()
     page.wait_for_timeout(150)
@@ -312,51 +319,41 @@ FAKE_VO_BRIDGE = """window.pywebview = { api: {
 
 
 def test_top_bar_controls_share_one_height_and_type_size(browser, base_url, sessions):  # noqa: F811
-    """R3 (LEFT_RAIL_SPEC §8.1): at 900, 1024, 1280 and 1440 — every density
-    step — with the recording chip seeded (its body and Stop are top-bar
-    buttons) and a saved .vae link (an <a>), every control is 28 px tall at
-    one 12 px size; the project chip keeps the pills' 11 px."""
+    """The redesigned top bar (design handoff 2026-10-02 §2): at 900, 1024,
+    1280 and 1440, with the recording chip seeded (its body and Stop are
+    top-bar buttons), every control is 28 px tall at one 12 px size."""
     for width, height in ((1440, 900), (1280, 800), (1024, 768), (900, 724)):
         ctx = browser.new_context(viewport={"width": width, "height": height})
         ctx.add_init_script(FAKE_VO_BRIDGE)
-        ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sessions['full']!r}); localStorage.setItem('vai.rightTab', 'inspect') }} catch (e) {{}}")
+        ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sessions['full']!r}) }} catch (e) {{}}")
         page = ctx.new_page()
         page.goto(base_url + "/")
-        page.get_by_role("tab", name="Media", exact=True).wait_for()
+        page.locator(".ab-tabs").get_by_role("tab", name="Media", exact=True).wait_for()
         page.locator(".timeline-canvas-wrap canvas").first.wait_for()
         page.wait_for_timeout(800)
-        page.get_by_role("button", name="Save", exact=True).click()
-        page.locator(".topbar a.tb-dl").wait_for(timeout=30_000)
-        page.get_by_role("tab", name="Audio", exact=True).click()
+        page.locator(".ab-tabs").get_by_role("tab", name="Audio", exact=True).click()
         page.get_by_role("button", name="Record voiceover").click()
         page.get_by_role("button", name="Stop recording").wait_for(timeout=10_000)
-        rows = page.evaluate("""() => [...document.querySelectorAll('.topbar button, .topbar select, .topbar a')]
+        rows = page.evaluate("""() => [...document.querySelectorAll('.ed-topbar button, .ed-topbar select, .ed-topbar a')]
           .filter(e => e.getBoundingClientRect().width).map(e => ({
             name: e.getAttribute('aria-label') || e.textContent.trim().slice(0, 20),
             h: Math.round(e.getBoundingClientRect().height * 10) / 10,
-            fs: getComputedStyle(e).fontSize,
-            pill: e.classList.contains('pill'),
-            icon: e.classList.contains('icon-btn') ? Math.round(e.getBoundingClientRect().width) : null }))""")
+            fs: getComputedStyle(e).fontSize }))""")
         page.screenshot(path=str(SHOTS / f"design_topbar_{width}.png"), clip={"x": 0, "y": 0, "width": width, "height": 44})
         page.get_by_role("button", name="Stop recording").click()
         ctx.close()
         names = {r["name"] for r in rows}
-        # Project, Ratio, Save, Open, Export — plus the seeded chip and link.
-        assert len(rows) >= 5, rows
-        assert {"Save", "Open", "Stop recording"} <= names, rows
-        assert any(n.startswith("Canvas ratio") for n in names), rows
-        assert any(n.startswith("Download the saved .vae") for n in names), rows
+        assert len(rows) >= 6, rows
+        assert {"Home", "Layout", "Stop recording", "Share"} <= names, rows
         assert {r["h"] for r in rows} == {28.0}, (width, rows)
-        # One type size for the controls; the project-name pill keeps the pills' 11 px.
-        assert {r["fs"] for r in rows if not r["pill"]} == {"12px"}, (width, rows)
-        assert {r["icon"] for r in rows if r["icon"] is not None} <= {28}, (width, rows)
+        assert {r["fs"] for r in rows} == {"12px"}, (width, rows)
 
 
 # ----------------------------------------------------------- font licences ----
 
 def test_help_lists_every_bundled_font_and_the_ofl_text(browser, base_url, sessions):  # noqa: F811
     page = _open(browser, base_url, sessions["full"])
-    page.locator("button[aria-label='Keyboard shortcuts']").click()
+    page.locator("button[aria-label='Help']").click()
     section = page.locator(".help-licences")
     section.get_by_text("Anton").first.wait_for(timeout=10_000)
     families = page.locator("[data-font-licence]").evaluate_all("els => els.map(e => e.dataset.fontLicence)")

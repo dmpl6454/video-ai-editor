@@ -879,6 +879,13 @@ AUDIO_TOOLS = [
        {"clip_id": {"type": "string"},
         "track": {"type": "string", "description": "Audio lane id, e.g. 'a1'"}},
        ["clip_id"]),
+    _t("reattach_audio",
+       "Undo a detach_audio: remove the extracted audio clip and unmute the video clip it "
+       "came from, so the sound plays from the picture again (\"Recover audio\"). `clip_id` "
+       "is the AUDIO clip.",
+       "audio",
+       {"clip_id": {"type": "string"}},
+       ["clip_id"]),
     _t("add_fade",
        "Add audio fade in / fade out to a clip.",
        "audio",

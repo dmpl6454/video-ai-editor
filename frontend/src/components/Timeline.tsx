@@ -49,10 +49,15 @@ import { claimFileDrop, isFileDrag, setTimelineFileDragOver } from '../lib/fileD
 import { dropFilesOnLane } from '../lib/laneDrop'
 import { COMMAND_BY_ID, editTextClip } from '../keymap/commands'
 import { TimelineIcon } from './TimelineIcons'
+import { clipMenuRows, type MenuRow } from '../lib/clipContextMenu'
+import { ctxStyle } from '../lib/contextMenuPlace'
+import { pasteAttributes, readAttributes, writeAttributes } from '../lib/clipAttributes'
+import { useLayoutStore } from '../lib/layoutStore'
+import { useAssetBrowser } from '../lib/assetTabs'
+import { useInspector, type ClipTab } from './inspector/inspectorStore'
 import { drawIcon } from '../lib/icons'
 import { curveClockOf } from '../lib/clipTiming'
 import { Icon } from './Icon'
-import { TimecodeField } from './TimecodeField'
 
 // Lane compatibility: which track TYPES a given clip kind may live on. Media
 // clips (video/audio files) belong on video-family or audio-family tracks;
@@ -257,8 +262,6 @@ export function Timeline() {
   // Undo/Redo + transport now live in this toolbar (see the JSX below).
   const undoDepth = useStore((s) => s.undoDepth)
   const redoAvailable = useStore((s) => s.redoAvailable)
-  const isPlaying = useStore((s) => s.isPlaying)
-  const setPlaying = useStore((s) => s.setPlaying)
   const [dpr] = useState(window.devicePixelRatio || 1)
   const [size, setSize] = useState({ w: 800, h: 240 })
   const [waveTick, setWaveTick] = useState(0)  // bump to force redraw when peaks arrive
@@ -2419,8 +2422,54 @@ export function Timeline() {
       menuTrack.type as 'video' | 'audio' | 'music' | 'vo')
   // The clip under the menu's own mute flag (`audio.mute`), so the item states
   // its direction: Mute clip / Unmute clip (QA-080).
+  void menuTrackHasAudio   // the design's menu lists Deactivate on every lane (lib/clipContextMenu)
   const menuClip = contextMenu ? menuTrack?.clips.find((c) => c.id === contextMenu.clipId) : undefined
   const menuClipMuted = !!(menuClip as unknown as { audio?: { mute?: boolean } } | undefined)?.audio?.mute
+  // The selected main-track / video clip the toolbar's Mirror and Crop act on.
+  const selectedVideoClip = (() => {
+    if (!edl || !selection) return null
+    for (const t of edl.tracks) { if (t.type !== 'video') continue; const c = t.clips.find((x) => x.id === selection); if (c && isMediaClip(c)) return c }
+    return null
+  })()
+  const selectedV1Clip = selectedVideoClip && edl?.tracks.find((t) => t.id === 'v1')?.clips.some((c) => c.id === selectedVideoClip.id) ? selectedVideoClip : null
+
+  // The design's clip menu (lib/clipContextMenu): the observed order, every
+  // row a real command or disabled with its reason.
+  const ctxRows: MenuRow[] = (() => {
+    if (!contextMenu || !edl || !menuTrack || !menuClip) return []
+    const st = useStore.getState()
+    const ids = Array.from(new Set([contextMenu.clipId, selection, ...multiSelection].filter(Boolean) as string[]))
+    const clipId = contextMenu.clipId
+    const openAi = (tool: string) => useLayoutStore.getState().jumpToAi({ tool, from: 'media' })
+    const openInspector = (tab: ClipTab) => { st.setSelection(clipId); useInspector.getState().setClipTab(tab) }
+    return clipMenuRows({
+      edl, track: menuTrack, clip: menuClip, selectedCount: ids.length, clipboardCount: st.clipboard.length,
+      hasAttributes: !!readAttributes(), playhead,
+      key: chordLabel,
+      do: {
+        copy: () => { st.setSelection(clipId); st.copySelection() },
+        cut: () => { st.setSelection(clipId); st.copySelection(); void dispatch(ids.length > 1 ? 'bulk_delete' : 'ripple_delete', ids.length > 1 ? { clip_ids: ids } : { clip_id: clipId }) },
+        copyAttributes: () => { writeAttributes(menuClip); toast.info('Attributes copied — Paste attributes on another clip applies them') },
+        pasteAttributes: () => { void pasteAttributes(clipId, dispatch) },
+        remove: () => { void dispatch(ids.length > 1 ? 'bulk_delete' : 'ripple_delete', ids.length > 1 ? { clip_ids: ids } : { clip_id: clipId }) },
+        split: () => st.splitTrackAt(contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead, soundClipUnder(edl, contextMenu.trackId, playhead))),
+        splitScenes: () => openAi('find_moments'),
+        transcript: () => { useAssetBrowser.getState().setTab('Captions', 'Auto captions') },
+        isolateVoice: () => openAi('vocal_isolate'),
+        extractAudio: () => { void dispatch('detach_audio', { clip_id: clipId }) },
+        recoverAudio: () => { void dispatch('reattach_audio', { clip_id: clipId }) },
+        deactivate: () => { void dispatch('set_clip_muted', { clip_id: clipId, muted: !menuClipMuted }) },
+        trim: () => openInspector('Video'),
+        replace: () => { useAssetBrowser.getState().setTab('Media', 'Media'); toast.info('Pick a file in Media and drop it onto this clip to replace it') },
+        openFile: () => { useAssetBrowser.getState().setTab('Media', 'Media') },
+        editEffects: () => { st.setSelection(clipId); useAssetBrowser.getState().setTab('Effects', 'Video effects') },
+        freeze: () => { void freezeAtPlayhead(useStore.getState(), toast.info, clipId) },
+        duplicate: () => { void dispatch('duplicate_clip', { clip_id: clipId }) },
+        muteTrack: () => { void dispatch('set_track_muted', { track: contextMenu.trackId }) },
+        lockTrack: () => { void dispatch('set_track_locked', { track: contextMenu.trackId }) },
+      },
+    })
+  })()
 
   return (
     <>
@@ -2440,8 +2489,23 @@ export function Timeline() {
           control), so it takes `min-width: 0` + ellipsis and gives way first on
           a narrow window; the buttons and the clock never shrink. */}
       <div className="timeline-toolbar">
-        {/* Icons, like the rest of the toolbar (wave-B review): the two text
-            buttons took the room that kept the zoom steps visible at 1024. */}
+        {/* The design's toolbar (handoff §2d; brief §6): Select · Split ·
+            Delete | Undo · Redo | Marker · Freeze · Mirror · Crop · the
+            multi-select badge … Magnet · Linkage · Preview axis | zoom. Every
+            button is the same keymap command as its shortcut and the context
+            menu; the transport and the clock moved to the Player's footer.
+            Linkage and Preview axis are not in this build and say so. */}
+        <button className="tb-icon is-active" aria-label="Select" aria-pressed="true" title="Select (A) — click a clip to select it, shift-click for more, drag on empty lane space for a box">
+          <TimelineIcon name="select" /></button>
+        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.split.run(useStore.getState())}
+          disabled={!hasClips}
+          title={`Split at playhead (${chordLabel('Mod+KeyB')})`} aria-label="Split at playhead">
+          <TimelineIcon name="split" /></button>
+        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.rippleDelete.run(useStore.getState())}
+          disabled={!selection && multiSelection.length === 0}
+          title={`Delete selection${rippleKeys ? ` (${rippleKeys})` : ''} — Main video closes the gap; other lanes keep their times`}
+          aria-label="Delete selection"><TimelineIcon name="delete" /></button>
+        <span className="tb-sep" />
         <button
           className="tb-icon"
           onClick={() => dispatch('undo')}
@@ -2457,65 +2521,52 @@ export function Timeline() {
           aria-label="Redo" aria-keyshortcuts="Meta+Shift+Z"
         ><TimelineIcon name="redo" /></button>
         <span className="tb-sep" />
-        <button
-          onClick={() => {
-            // Same two store actions the floating transport used. The third
-            // thing it did — writing <video>.currentTime and the rAF clock
-            // directly — was documented there as "defense in depth" on top of
-            // the playback effect's own proximity check, and it is not reachable
-            // from here: the element belongs to Preview. replayFromStart() moves
-            // the playhead through the store, which is what that effect follows.
-            useStore.getState().replayFromStart()
-            setPlaying(!isPlaying)
-          }}
-          title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-          style={{ minWidth: 30 }}
-          aria-label={isPlaying ? 'Pause' : 'Play'}
-          aria-keyshortcuts="Space"
-          className="tb-icon"
-        ><TimelineIcon name={isPlaying ? 'pause' : 'play'} /></button>
-        {/* SMPTE clock (QA-048): the playhead's timecode, typed into to jump. */}
-        <span className="tb-clock">
-          <TimecodeField value={playhead} fps={fps} min={0} max={edl?.duration ?? undefined}
-            ariaLabel="Playhead timecode" className="tb-clock-field"
-            title="Playhead — type a timecode (HH:MM:SS:FF), seconds or frames and press Enter to jump"
-            onCommit={(t) => { setPlaying(false); setPlayhead(t) }} />
-          <span className="tb-clock-dur" aria-label="Duration">/ {formatTimecode(edl?.duration ?? 0, fps)}</span>
-        </span>
-        <span className="tb-sep" />
-        {/* The icon toolbar (QA-053): the edit actions as buttons, wired to the
-            same keymap commands as their shortcuts. */}
-        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.split.run(useStore.getState())}
+        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.addMarker.run(useStore.getState())}
           disabled={!hasClips}
-          title={`Split at playhead (${chordLabel('Mod+KeyB')})`} aria-label="Split at playhead">
-          <TimelineIcon name="split" /></button>
+          title={`Add marker at the playhead (${chordLabel('KeyM')})`} aria-label="Add marker">
+          <TimelineIcon name="marker" /></button>
         <button className="tb-icon" onClick={() => void COMMAND_BY_ID.freezeFrame.run(useStore.getState())}
           disabled={freezePlan.kind !== 'freeze'}
           title={freezePlan.kind === 'freeze'
             ? `Freeze frame — hold the frame at the playhead${freezeHold}`
             : `Freeze frame — ${freezePlan.message}`}
           aria-label="Freeze frame"><TimelineIcon name="freeze" /></button>
-        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.rippleDelete.run(useStore.getState())}
-          disabled={!selection && multiSelection.length === 0}
-          title={`Delete selection${rippleKeys ? ` (${rippleKeys})` : ''} — Main video closes the gap; other lanes keep their times`}
-          aria-label="Delete selection"><TimelineIcon name="delete" /></button>
-        <button className="tb-icon" onClick={() => void COMMAND_BY_ID.duplicate.run(useStore.getState())}
-          disabled={!selection && multiSelection.length === 0}
-          title={`Duplicate selection (${chordLabel('Mod+KeyD')})`} aria-label="Duplicate selection">
-          <TimelineIcon name="duplicate" /></button>
-        <span className="tb-sep" />
+        <button className="tb-icon" onClick={() => { if (selection) void dispatch('flip_clip', { clip_id: selection, axis: 'horizontal' }) }}
+          disabled={!selectedVideoClip}
+          title={selectedVideoClip ? 'Mirror — flip the selected clip left to right' : 'Mirror — select a video clip first'}
+          aria-label="Mirror"><TimelineIcon name="mirrorH" /></button>
+        <button className="tb-icon" onClick={() => {
+            const st = useStore.getState()
+            const c = selectedVideoClip
+            if (!c || !st.edl) return
+            const fitCover = (c as unknown as { fit?: string }).fit === 'cover'
+            const tx = (c as unknown as { transform?: { x?: number; y?: number; scale?: number } }).transform ?? {}
+            st.setFraming({ clipId: c.id, before: { fit: fitCover ? 'cover' : 'contain', x: typeof tx.x === 'number' ? tx.x : 0, y: typeof tx.y === 'number' ? tx.y : 0, scale: typeof tx.scale === 'number' ? tx.scale : 1 } })
+            if (!fitCover) void dispatch('set_clip_fit', { clip_id: c.id, fit: 'cover' })
+          }}
+          disabled={!selectedV1Clip}
+          title={selectedV1Clip ? 'Crop — fill the frame and choose which part of the picture shows (the crop view opens over the Player)' : 'Crop — select a main-track clip first'}
+          aria-label="Crop"><TimelineIcon name="crop" /></button>
+        {(selection ? 1 : 0) + multiSelection.length > 1 && (
+          <span className="tb-badge">{(selection ? 1 : 0) + multiSelection.length} clips selected</span>
+        )}
+        <div style={{ flex: 1, minWidth: 8 }} />
         {/* Snap with visible state (QA-050): N used to flip it silently. */}
         <button className={`tb-icon tb-toggle${snapEnabled ? ' is-on' : ''}`} aria-pressed={snapEnabled}
           onClick={() => useStore.getState().toggleSnap()}
-          title={`Snapping ${snapEnabled ? 'on' : 'off'} — clips snap to the playhead, markers and clip edges (N)`}
-          aria-label="Snapping"><TimelineIcon name="snap" /></button>
-        <div style={{ flex: 1, minWidth: 8 }} />
+          title={`Main-track magnet (P): snapping ${snapEnabled ? 'on' : 'off'} — clips snap to the playhead, markers and clip edges`}
+          aria-label="Main-track magnet"><TimelineIcon name="snap" /></button>
+        <button className="tb-icon" disabled aria-label="Linkage"
+          title="Linkage (~) — not available in this build: picture and sound are linked until Extract audio separates them"><TimelineIcon name="link" /></button>
+        <button className="tb-icon" disabled aria-label="Preview axis"
+          title="Preview axis (S) — not available in this build"><TimelineIcon name="previewAxis" /></button>
+        <span className="tb-sep" />
         <button className="tb-icon tb-zoomstep" onClick={() => zoomBy(1 / 1.25)} title="Zoom out" aria-label="Zoom out">
           <TimelineIcon name="zoomOut" /></button>
         <input type="range" className="tb-zoom" min={0} max={SLIDER_STEPS} value={zoomToSlider(zoom)}
           onChange={(e) => zoomTo(sliderToZoom(Number(e.target.value)))}
           aria-label="Timeline zoom" aria-valuetext={`${visibleSpanLabel(zoom, laneW)} visible`}
-          title={`${visibleSpanLabel(zoom, laneW)} visible`} />
+          title={`${visibleSpanLabel(zoom, laneW)} visible (⌘+ / ⌘−)`} />
         <button className="tb-icon tb-zoomstep" onClick={() => zoomBy(1.25)} title="Zoom in" aria-label="Zoom in">
           <TimelineIcon name="zoomIn" /></button>
         <button className="tb-icon" onClick={() => void COMMAND_BY_ID.zoomFit.run(useStore.getState())}
@@ -2635,102 +2686,28 @@ export function Timeline() {
           role="menu"
           aria-label="Clip actions"
           data-keymap-ignore
+          className="tl-ctx"
           onKeyDown={ctxA11y.onKeyDown}
           onMouseDown={(e) => e.stopPropagation()}
-          style={{
-            position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 100,
-            background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 6,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.5)', minWidth: 180, padding: 4,
-          }}
+          style={ctxStyle(contextMenu.x, contextMenu.y)}
         >
-          {[
-            // "Split here" actually split at the PLAYHEAD, not the click point
-            // — name it what it does and say so in the tooltip.
-            { label: 'Split at playhead',
-              title: `Cut the clip under the playhead in two (${chordLabel('Mod+KeyB')}). Move the playhead to where you want the cut first.`,
-              // Decoded per lane (lib/splitTargets): `split_at` takes layout
-              // time and the playhead is render time — same path as ⌘B.
-              // A sound clip decodes through its own pull (it plays whole).
-              action: () => useStore.getState().splitTrackAt(
-                contextMenu.trackId, splitTimeFor(edl, contextMenu.trackId, playhead,
-                  soundClipUnder(edl, contextMenu.trackId, playhead))) },
-            // v1 and overlay (PIP) video lanes (wave D3, E2: an overlay freeze
-            // opens only its own lane — lib/freezeFrame).
-            ...(edl?.tracks.find((t) => t.id === contextMenu.trackId)?.type === 'video' && menuClip && isMediaClip(menuClip)
-              ? [{ label: 'Freeze frame',
-                   title: `Hold the frame at the playhead${freezeHold}; the rest of the clip follows it`,
-                   action: () => { void freezeAtPlayhead(useStore.getState(), toast.info, contextMenu.clipId) } }]
-              : []),
-            { label: 'Duplicate',
-              title: `Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`,
-              action: () => dispatch('duplicate_clip', { clip_id: contextMenu.clipId }) },
-            { label: 'Delete',
-              title: contextMenu.trackId === 'v1'
-                ? `Remove this clip and close the gap${rippleKeys ? ` (${rippleKeys})` : ''}`
-                : `Remove this clip — the clips around it keep their times${rippleKeys ? ` (${rippleKeys})` : ''}`,
-              action: () => dispatch('ripple_delete', { clip_id: contextMenu.clipId }) },
-            ...(menuTrackHasAudio
-              ? [
-                  // The real clip mute flag (QA-080): set_volume −60 dB threw
-                  // away the clip's gain and could never be undone from here.
-                  { label: menuClipMuted ? 'Unmute clip' : 'Mute clip',
-                    title: menuClipMuted ? 'Bring this clip\'s sound back (its volume is unchanged)'
-                      : 'Silence just this clip — its volume setting is kept',
-                    action: () => dispatch('set_clip_muted', { clip_id: contextMenu.clipId, muted: !menuClipMuted }) },
-                  // QA-086: J/L cuts — the picture keeps playing, its sound
-                  // becomes an audio clip that trims and moves on its own.
-                  ...(menuTrack?.type === 'video' && !menuClipMuted && menuClip && isMediaClip(menuClip)
-                    ? [{ label: 'Detach audio',
-                         title: 'Move this clip\'s sound to an audio track so picture and sound can be cut separately (J and L cuts)',
-                         action: () => dispatch('detach_audio', { clip_id: contextMenu.clipId }) }]
-                    : []),
-                  { sep: true },
-                  { label: menuTrack?.muted ? 'Unmute track' : 'Mute track',
-                    title: 'Toggle sound for the whole track — the M box on its label does the same',
-                    action: () => dispatch('set_track_muted', { track: contextMenu.trackId }) },
-                  { label: menuTrack?.solo ? 'Unsolo track' : 'Solo track',
-                    title: 'Hear only soloed tracks — the S box on its label does the same',
-                    action: () => dispatch('set_track_solo', { track: contextMenu.trackId }) },
-                ]
-              : [{ sep: true }]),
-            { label: menuTrack && isTrackLocked(menuTrack) ? 'Unlock track' : 'Lock track',
-              title: 'Mark the track locked — a padlock appears on its label',
-              action: () => dispatch('set_track_locked', { track: contextMenu.trackId }) },
-            ...(multiSelection.length || (selection && selection !== contextMenu.clipId)
-              ? [
-                  { sep: true },
-                  { label: `Delete ${(selection ? 1 : 0) + multiSelection.length + (selection === contextMenu.clipId ? 0 : 1)} selected`,
-                    title: 'Remove every selected clip (shift-click selects more)',
-                    action: () => {
-                      const ids = Array.from(new Set([
-                        contextMenu.clipId, selection, ...multiSelection,
-                      ].filter(Boolean) as string[]))
-                      dispatch('bulk_delete', { clip_ids: ids })
-                  } },
-                  { label: 'Duplicate selected',
-                    title: 'Add a copy of every selected clip',
-                    action: () => {
-                      const ids = Array.from(new Set([
-                        contextMenu.clipId, selection, ...multiSelection,
-                      ].filter(Boolean) as string[]))
-                      dispatch('bulk_duplicate', { clip_ids: ids })
-                  } },
-                ]
-              : []),
-          ].map((item, i) => (
-            'sep' in item ? (
-              <div key={`sep-${i}`} role="separator" style={{ height: 1, background: 'var(--line)', margin: '4px 0' }} />
+          {ctxRows.map((item, i) => (
+            item.sep ? (
+              <div key={`sep-${i}`} role="separator" className="tl-ctx-sep" />
             ) : (
-              // <button role="menuitem"> (QA-102): these were click-only <div>s.
               <button
                 type="button"
                 role="menuitem"
-                className="menu-item"
+                className="tl-ctx-item"
                 key={item.label}
                 title={item.title}
-                onClick={() => { item.action(); ctxA11y.close() }}
+                disabled={item.disabled || !item.action}
+                aria-disabled={item.disabled || !item.action ? true : undefined}
+                onClick={() => { if (item.action && !item.disabled) { item.action(); ctxA11y.close() } }}
               >
-                {item.label}
+                <span className="tl-ctx-label">{item.label}</span>
+                {item.key && <span className="tl-ctx-key">{item.key}</span>}
+                {item.submenu && <span className="tl-ctx-arrow" aria-hidden="true">›</span>}
               </button>
             )
           ))}

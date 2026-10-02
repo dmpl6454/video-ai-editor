@@ -108,7 +108,9 @@ def test_frontend_loads_without_console_errors():
             # Sanity: page rendered some content. Look for the Properties or
             # MediaBin labels we always show.
             html = page.content()
-            assert "Properties" in html or "Media" in html or "Loading" in html, html[:500]
+            # The redesign (2026-10-02) opens on the Home / projects screen on a
+            # first run; the editor shows its asset tabs ("Media").
+            assert "Projects" in html or "Properties" in html or "Media" in html or "Loading" in html, html[:500]
             # No fatal page errors (uncaught exceptions during render).
             # Only flag exceptions that bubbled up to React's error boundary
             # path. A 404 from a missing stub endpoint isn't fatal as long as

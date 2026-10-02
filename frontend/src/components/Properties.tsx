@@ -32,6 +32,7 @@ import { AnimationSection } from './anim/AnimationSection'
 import type { AnimFields } from '../lib/anim/clipAnim'
 import { FlipButtons } from './transform/FlipButtons'
 import { SectionIndex, sectionId } from './inspector/SectionIndex'
+import type { MediaSection } from '../lib/mediaSections'
 
 /** Number input that re-seeds from the EDL but never stomps in-progress typing,
  *  and commits at most one dispatch per real change.
@@ -204,24 +205,30 @@ function keyAt(v: unknown, t: number, fps?: number): boolean {
 // disabled (a <fieldset disabled> reaches every nested input/select/button)
 // and a banner says why — the backend refuses the edit anyway, and a panel
 // full of live controls that each answer with an error toast reads as broken.
-export function Properties() {
+/** The media-clip sections, by name, in the order they render. The redesigned
+ *  clip inspector (components/inspector/ClipInspector) shows a SUBSET per tab
+ *  through `sections`; omitted = every section, the pre-redesign panel. */
+export type { MediaSection }
+
+export function Properties({ sections, bare = false }: { sections?: readonly MediaSection[]; bare?: boolean } = {}) {
   const edl = useStore((s) => s.edl)
   const sel = useStore((s) => s.selection)
   const locked = lockedTrackOf(edl, sel)
   // SliderScope: a slider commit still waiting on its idle delay lands on the
   // clip it was made on, not on the next selection (lib/useSliderCommit).
-  if (!locked) return <SliderScope.Provider value={sel ?? ''}><PropertiesPanel /></SliderScope.Provider>
+  if (!locked) return <SliderScope.Provider value={sel ?? ''}><PropertiesPanel sections={sections} bare={bare} /></SliderScope.Provider>
   return (
     <div className="props-locked">
       <div className="props-locked-note" role="status"><Icon name="lock" /> {lockedNotice(locked)}</div>
       <fieldset disabled aria-disabled="true">
-        <PropertiesPanel />
+        <PropertiesPanel sections={sections} bare={bare} />
       </fieldset>
     </div>
   )
 }
 
-function PropertiesPanel() {
+function PropertiesPanel({ sections, bare }: { sections?: readonly MediaSection[]; bare: boolean }) {
+  const show = (name: MediaSection) => !sections || sections.includes(name)
   const edl = useStore((s) => s.edl)
   const sel = useStore((s) => s.selection)
   const dispatch = useStore((s) => s.dispatch)
@@ -410,7 +417,7 @@ function PropertiesPanel() {
   const kfAnimated = kfTimes.length > 0
   const kfHere = KF_PROPS.some((p) => keyAt(kfValues[p], localT, edl.canvas.fps))
 
-  const KeyframeButton = () => (
+  const keyframeButton = (
     <button
       aria-label={`${kfHere ? 'Remove' : 'Add'} keyframe`}
       title={kfHere
@@ -443,12 +450,14 @@ function PropertiesPanel() {
     // unmounts this whole subtree, so no field — present or future — can carry
     // one clip's value across to another clip.
     <div className="props" key={c.id} data-clip-id={c.id}>
-      <h2>Properties</h2>
+      {!bare && <h2>Properties</h2>}
+      {!bare && (
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>
         {isAudioLane ? 'Audio clip · ' : ''}{clip.t.label} · <MediaName src={c.src} />
       </div>
+      )}
       {/* review RE: a jump list — the media Inspector is ~2,200 px tall */}
-      <SectionIndex clipId={c.id} />
+      {!bare && <SectionIndex clipId={c.id} />}
       {/* Timeline footprint = source duration / speed (effective_duration
           server-side); a 2x clip ends halfway through its source length. */}
       <ClipWindowNotice
@@ -458,16 +467,19 @@ function PropertiesPanel() {
 
       {/* ONE timing model for every clip (QA-048, components/TimingSection):
           Start moves, End and Duration trim; plus the source In / Out. */}
-      <Section label="Timing">
+      {show('Timing') && (
+<Section label="Timing">
         <MediaTiming clipId={c.id} span={{ in: c.in, out: c.out, start: c.start, speed: meanSpeed, curve: curveClockOf(c) }}
                      clock={timingClockOf(edl, clip.t.id, c as AnyClip)} send={dispatch} />
       </Section>
+)}
 
       {/* Audio lanes too (QA-086, wave C): the audio mix retimes a music/VO
           clip with the v1 rule, so the control is real on every lane — and
           overlay (PIP) lanes since wave D3 (E2): speed, curves, freeze and
           reverse render there like on v1. */}
-        <Section label="Speed" onReset={freeze === null ? () => dispatch('set_speed', { clip_id: c.id, factor: 1 }) : undefined}>
+        {show('Speed') && (
+<Section label="Speed" onReset={freeze === null ? () => dispatch('set_speed', { clip_id: c.id, factor: 1 }) : undefined}>
           {/* Wave D S2 (components/speed): Normal | Curve, the CapCut curve
               presets, an editable curve, the resulting length and Keep pitch
               (QA-039 residual: time-stretching moves transients by up to
@@ -502,19 +514,20 @@ function PropertiesPanel() {
           </label>
           )}
         </Section>
+)}
 
-      {!isAudioLane && (
+      {!isAudioLane && show('Animation') && (
         // CapCut Animation (wave E, F1): In | Out | Combo on v1 and overlay
         // lanes — render/compositor.py and pip.py bake it, the engine and
         // pipDraw draw it live.
-        <Section label="Animation" onReset={() => dispatch('set_animation', {
+<Section label="Animation" onReset={() => dispatch('set_animation', {
           clip_id: c.id, in: 'none', out: 'none', combo: 'none' })}>
           <AnimationSection key={c.id} clipId={c.id} anim={c as unknown as AnimFields} clipSeconds={clipLen}
             send={dispatch} />
         </Section>
       )}
 
-      {!isAudioLane && (
+      {!isAudioLane && show('Color') && (
         <Section label="Color" onReset={() => dispatch('color_grade', {
           clip_id: c.id, brightness: 0, contrast: 1, saturation: 1, temp: 0, tint: 0,
         })}>
@@ -522,12 +535,12 @@ function PropertiesPanel() {
         </Section>
       )}
 
-      {clip.t.id === 'v1' && (
+      {clip.t.id === 'v1' && show('Video fade') && (
         // v1-only, mirroring the backend: set_video_fade rejects audio lanes
         // AND v2/PIP clips (the pip overlay chain has no setpts shift and
         // would need an alpha-fade, not fade-to-black — see dispatch.py).
         // Showing the section on a v2 clip would just 400 with a toast.
-        <Section label="Video fade" onReset={() => dispatch('set_video_fade', { clip_id: c.id, in_s: 0, out_s: 0 })}>
+<Section label="Video fade" onReset={() => dispatch('set_video_fade', { clip_id: c.id, in_s: 0, out_s: 0 })}>
           {/* The visual fade the tester expected from the (audio-only) fade
               fields below. NumberField re-seeds on undo/chat edits; its
               same-value guard compares against the SEEDED (2-dp) display
@@ -580,7 +593,8 @@ function PropertiesPanel() {
         </Section>
       )}
 
-      <Section label="Audio" onReset={() => {
+      {show('Audio') && (
+<Section label="Audio" onReset={() => {
         dispatch('set_volume', { target: c.id, db: 0 })
         dispatch('add_fade', { clip_id: c.id, in_s: 0, out_s: 0 })
       }}>
@@ -656,16 +670,19 @@ function PropertiesPanel() {
         {/* QA-122: which side(s) the clip's sound plays from. */}
         <ChannelModeField clipId={c.id} src={c.src} audio={audio} />
       </Section>
+)}
 
       {/* Wave E (F3): CapCut's voice changer on this clip's sound — every
           lane with sound (components/voice, edl/voice_effects.py). */}
-      <Section label="Voice effects" onReset={audio?.voice_effect
+      {show('Voice effects') && (
+<Section label="Voice effects" onReset={audio?.voice_effect
         ? () => dispatch('set_voice_effect', { clip_id: c.id, effect: 'none' }) : undefined}>
         <VoiceEffectsSection sessionId={sessionId} clipId={c.id} effect={audio?.voice_effect}
           intensity={audio?.voice_intensity} localT={localT} freeze={freeze !== null} src={c.src} send={dispatch} />
       </Section>
+)}
 
-      {!isAudioLane && (
+      {!isAudioLane && show('Framing') && (
       <Section label="Framing">
         {/* The only framing control used to be the toolbar's aspect buttons,
             which just resize the canvas — so a landscape clip on a vertical
@@ -772,7 +789,7 @@ function PropertiesPanel() {
 
       {/* CapCut Canvas (wave E, F2): what fills a letterboxed main-track
           clip's bars — components/canvas/CanvasSection. */}
-      {!isAudioLane && clip.t.id === 'v1' && (
+      {!isAudioLane && clip.t.id === 'v1' && show('Canvas') && (
       <Section label="Canvas" onReset={(c as unknown as { canvas_bg?: unknown }).canvas_bg
         ? () => dispatch('set_canvas_background', { clip_id: c.id, type: 'none' }) : undefined}>
         <CanvasSection clipId={c.id} clip={c} sessionId={sessionId} send={dispatch} />
@@ -791,7 +808,7 @@ function PropertiesPanel() {
           heart/star/mirror, which render_mask_png falls through to "fully
           visible" — a pre-existing no-op, and not something to surface as a
           button until it draws something. */}
-      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && (
+      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && show('PIP shape') && (
       <Section label="PIP shape">
         <div className="row" style={{ gap: 6 }}>
           {([
@@ -881,14 +898,14 @@ function PropertiesPanel() {
       )}
 
       {/* Blend mode of an overlay clip (wave E, F2): components/canvas/BlendSection. */}
-      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && (
+      {!isAudioLane && clip.t.type === 'video' && clip.t.id !== 'v1' && show('Blend') && (
       <Section label="Blend" onReset={(c as unknown as { blend?: string }).blend && (c as unknown as { blend?: string }).blend !== 'normal'
         ? () => dispatch('set_blend_mode', { clip_id: c.id, mode: 'normal' }) : undefined}>
         <BlendSection clipId={c.id} clip={c} send={dispatch} />
       </Section>
       )}
 
-      {!isAudioLane && (
+      {!isAudioLane && show('Transform') && (
       <Section label="Transform" onReset={() => dispatch('set_clip_transform', {
         clip_id: c.id, x: 0, y: 0, scale: 1, rotation: 0, opacity: 1,
       })}>
@@ -896,7 +913,7 @@ function PropertiesPanel() {
             timeline draws them on the clip too, but the panel is where you are
             looking when you press it ("I can't see any keyframe added"). */}
         <div className="row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <KeyframeButton />
+          {keyframeButton}
           {kfAnimated ? (
             <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
               {kfTimes.length} key{kfTimes.length === 1 ? '' : 's'} ·{' '}
@@ -966,6 +983,7 @@ function PropertiesPanel() {
       </Section>
       )}
 
+      {!bare && (
       <div className="row" style={{ marginTop: 8 }}>
         <button
           title={`Add a copy of this clip right after it (${chordLabel('Mod+KeyD')})`}
@@ -976,6 +994,7 @@ function PropertiesPanel() {
           onClick={() => dispatch('ripple_delete', { clip_id: c.id })}
         >Delete</button>
       </div>
+      )}
     </div>
   )
 }

@@ -1,65 +1,78 @@
 /* Dark, CapCut-ish editor shell. */
 * { box-sizing: border-box; }
 :root {
-  --bg-0: #0e0e10;
-  --bg-1: #16161a;
-  --bg-2: #1d1d22;
-  --bg-3: #25252c;
-  --line: #2c2c34;
-  --text: #e6e6eb;
-  --text-dim: #9b9ba5;
-  /* Tertiary text (muted/locked lane names, counts, empty-state hints). The
-     dimmest text colour allowed: >= 4.5:1 on every surface --bg-0..--bg-3.
-     Dimming text with `opacity` instead is how the version badge and the
-     empty-timeline hint fell below AA (QA-103); use this token. */
-  --text-faint: #8e8e98;
-  /* --accent / --accent-2 are for TEXT, outlines and indicators on the dark
-     surfaces (>= 4.5:1 on --bg-0..--bg-3). White text on them fails (3.21:1
-     and 3.13:1), so a FILLED control uses the -fill pair with --on-accent
-     (4.87:1 and 5.22:1; the hover darkens, never lightens). QA-103. The
-     contract is pinned by lib/contrast.test.ts. */
-  --accent: #ff4d6d;
-  --accent-fill: #d9254a;
-  --accent-fill-hover: #c81e41;
-  --accent-2: #5b8dff;
-  --accent-2-fill: #3566d6;
-  --accent-2-fill-hover: #2f5fcc;
+  /* Apple dark-mode palette (design handoff 2026-10-02, README "Design
+     tokens"): near-black canvas, charcoal panels, raised inputs, system blue.
+     The token NAMES are the ones every component already draws with, so a
+     re-theme is this block; the design's own names are the comments. */
+  --bg-0: #000000;                 /* canvas */
+  --bg-1: #1c1c1e;                 /* panel */
+  --bg-2: #2c2c2e;                 /* input / raised */
+  --bg-3: #3a3a3c;                 /* hover raised */
+  --seg-active: #636366;           /* segmented control's active option */
+  --line: rgba(255, 255, 255, 0.08);
+  --hairline: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.14);
+  --text: #f5f5f7;
+  --text-dim: rgba(235, 235, 245, 0.6);
+  /* The design's tertiary text is 45–50 % white; 60 % is the least that
+     reads at AA (4.5:1) on the raised surface, so both tertiary tokens sit
+     there (tests/test_frontend_a11y.py measures the rendered text). */
+  --text-faint: rgba(235, 235, 245, 0.6);
+  --text-tertiary: rgba(235, 235, 245, 0.6);
+  /* The accent is the system blue everywhere: text, outlines AND fills (white
+     on it). It is 3.65:1 against white — WCAG 1.4.11's non-text minimum, the
+     ratio Apple's own system controls ship with; lib/contrast.test.ts pins
+     the text tokens at AA and the accent pairs at that 3:1 floor. */
+  --accent: #0A84FF;
+  --accent-fill: #0A84FF;
+  --accent-fill-hover: #3395ff;
+  --accent-pressed: #0a6fd6;
+  --accent-2: #0A84FF;
+  --accent-2-fill: #0A84FF;
+  --accent-2-fill-hover: #3395ff;
+  --accent-tint: rgba(10, 132, 255, 0.18);
+  --accent-tint-soft: rgba(10, 132, 255, 0.15);
   --on-accent: #ffffff;
-  /* Keyboard focus ring (QA-102): visible on every surface. */
-  --focus-ring: #5b8dff;
-  --good: #4ade80;
-  --warn: #fbbf24;
-  --track-v: #5b8dff;
-  --track-a: #4ade80;
-  --track-music: #a78bfa;
-  --track-text: #fbbf24;
-  --track-captions: #f472b6;
+  --focus-ring: #0A84FF;
+  --good: #30d158;
+  --warn: #FF9F0A;
+  --tooltip: #FFD60A;
+  --tooltip-ink: #1c1c1e;
+  --brand-gradient: linear-gradient(135deg, #0A84FF, #5E5CE6);
+  --banner-gradient: linear-gradient(120deg, #0A84FF 0%, #5E5CE6 55%, #BF5AF2 100%);
+  --menu-bg: rgba(44, 44, 46, 0.96);
+  --menu-border: rgba(255, 255, 255, 0.1);
+  --menu-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --context-shadow: 0 14px 48px rgba(0, 0, 0, 0.65);
+  --modal-bg: #2c2c2e;
+  --modal-shadow: 0 30px 80px rgba(0, 0, 0, 0.7);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --track-v: #5E5CE6;
+  --track-a: #30d158;
+  --track-music: #BF5AF2;
+  --track-text: #FFD60A;
+  --track-captions: #FF375F;
   --selection: #ffffff;
-  /* Errors in a panel (upload/record/effects failures): light-red text on a
-     dark-red well (>= 4.5:1, pinned by lib/contrast.test.ts). */
   --error-text: #ffb3bd;
   --error-bg: #2a1216;
   --error-line: #5a2a32;
-  /* THE disabled state (every control, wave C): neutral grey, never a faded
-     accent. --text-disabled is dimmer than --text/--text-dim so a disabled
-     control reads as off at a glance, yet stays >= 4.5:1 on --bg-disabled. */
-  --text-disabled: #8e8e98;
-  --bg-disabled: #1d1d22;
-  /* An ICON-ONLY disabled button (the timeline toolbar): no text to keep
-     legible, so it dims well below --text-dim — a disabled Split / Freeze /
-     Delete must not look usable (review RD2; its name and tooltip still say
-     why, and WCAG exempts disabled controls from contrast). */
-  --icon-disabled: #5c5c66;
-  /* Control rhythm: every top-bar control and every full-width panel button
-     is one of these heights; icons are 16 px (components/Icon.tsx). */
+  --text-disabled: rgba(235, 235, 245, 0.5);
+  --bg-disabled: #2c2c2e;
+  --icon-disabled: rgba(235, 235, 245, 0.3);
   --control-h: 28px;
-  --panel-btn-h: 30px;
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
-  /* The editor shell (wave D, LEFT_RAIL_SPEC §1): the tool rail, the side
-     panels' width budget and the shell's motion. --left-w / --right-w are the
-     first-run widths by viewport (the media queries below); a width the user
-     dragged is written inline on .app and wins. */
-  --rail-w: 64px;
+  --control-h-modal: 30px;
+  --control-h-compact: 24px;
+  --panel-btn-h: 28px;
+  --r-menu-item: 5px;
+  --r-input: 6px;
+  --r-button: 7px;
+  --r-card: 8px;
+  --r-panel: 10px;
+  --r-modal: 14px;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Inter', sans-serif;
+  --rail-w: 0px;
   --rail-item-h: 52px;
   --rail-foot-btn: 36px;
   --left-w: 280px;
@@ -69,7 +82,7 @@
   --right-min: 220px;
   --right-rail-w: 36px;
   --topbar-h: 44px;
-  --panel-head-h: 36px;
+  --panel-head-h: 34px;
   --dur-fast: 120ms;
   --dur-normal: 220ms;
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -87,13 +100,13 @@
    set on .dialog only, so every <select> in Properties rendered white (QA-100
    look, wave-B review). */
 html { color-scheme: dark; }
-html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var(--text); font-family: var(--font-ui); font-size: 13px; -webkit-font-smoothing: antialiased; }
+html, body, #root { height: 100%; margin: 0; background: var(--bg-0); color: var(--text); font-family: var(--font-ui); font-size: 12px; -webkit-font-smoothing: antialiased; }
 /* Below the editor's minimum width the 3-pane layout scrolls horizontally here
    rather than collapsing. The .app holds the 900px floor; #root is the viewport-
    width scroll container that lets you pan to it. */
 #root { overflow-x: auto; }
-button { font: inherit; color: inherit; background: var(--bg-3); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
-button:hover:not(:disabled) { background: #2f2f37; }
+button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: var(--r-button); padding: 0 12px; min-height: var(--control-h); cursor: pointer; font-weight: 600; font-size: 12px; }
+button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
 /* ONE disabled state for every control (wave C): full opacity, the neutral
    --text-disabled colour (icons follow via currentColor), not-allowed cursor.
    `!important` because a state must beat per-component opacity hacks
@@ -121,10 +134,11 @@ button.primary:disabled { opacity: 1; background: var(--bg-disabled); border-col
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
-input, textarea { font: inherit; color: inherit; background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+input, textarea { font: inherit; color: inherit; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-input); padding: 5px 8px; font-size: 12px; }
+input::placeholder, textarea::placeholder { color: var(--text-faint); }
 /* ONE select style, on the tokens (the Font, Letter case, Animate and Shadow
    selects rendered as white native controls next to dark inputs). */
-select { font: inherit; color: var(--text); background-color: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+select { font: inherit; color: var(--text); background-color: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-button); padding: 0 8px; height: var(--control-h); font-size: 12px; }
 select:hover:not(:disabled) { border-color: var(--text-faint); }
 /* The app icon set (components/Icon.tsx) sits on the text baseline of the
    control that holds it. */
@@ -165,7 +179,19 @@ button.emoji-group-toggle:hover:not(:disabled) { background: none; color: var(--
 .music-panel-head { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
 .music-panel-head .icon { margin-right: 0; }
 /* Sliders, checkboxes and radios take the app accent, not the browser blue. */
-input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-2); }
+input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
+/* ONE slider look (design: 3 px track, 14 px white thumb). */
+input[type="range"] { -webkit-appearance: none; appearance: none; height: 16px; background: transparent; margin: 0; cursor: pointer; padding: 0; border: none; }
+input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.18); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #fff; margin-top: -5.5px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
+input[type="range"]::-moz-range-track { height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.18); }
+input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: none; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
+input[type="range"]:disabled::-webkit-slider-thumb { background: #8e8e93; }
+/* Quiet scrollbars (design). */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
 
 .app {
   /* Each state changes ONLY its own column variables (critique H3): two
@@ -1127,3 +1153,25 @@ button.dropzone:hover:not(:disabled) { background: var(--bg-2); color: var(--tex
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- the redesigned timeline toolbar and clip menu (design §2d, §3) ---- */
+.ed .timeline-toolbar { height: 36px; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--hairline); background: var(--bg-1); }
+.ed .timeline-toolbar .tb-icon { width: 28px; height: 28px; min-height: 0; padding: 0; border: none; border-radius: var(--r-button); background: transparent; color: var(--text); display: inline-grid; place-items: center; }
+.ed .timeline-toolbar .tb-icon:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.ed .timeline-toolbar .tb-icon.is-active { background: rgba(255, 255, 255, 0.1); }
+.ed .timeline-toolbar .tb-icon:disabled { color: var(--icon-disabled) !important; }
+.ed .timeline-toolbar .tb-toggle.is-on { color: var(--accent); background: transparent; }
+.ed .timeline-toolbar .tb-sep { width: 1px; height: 16px; background: rgba(255, 255, 255, 0.1); margin: 0 4px; }
+.ed .timeline-toolbar .tb-badge { margin-left: 8px; font-size: 11px; color: var(--accent); background: var(--accent-tint-soft); padding: 3px 8px; border-radius: 5px; white-space: nowrap; }
+.ed .timeline-toolbar .tb-zoom { width: 110px; }
+.tl-ctx { background: rgba(44, 44, 46, 0.97); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border: 1px solid var(--menu-border); border-radius: var(--r-panel);
+  padding: 5px; box-shadow: var(--context-shadow); display: flex; flex-direction: column; overflow: auto; }
+.tl-ctx-item { height: 24px; min-height: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: var(--r-menu-item); border: none; background: transparent;
+  color: var(--text); font-size: 12px; font-weight: 400; text-align: left; width: 100%; cursor: default; }
+.tl-ctx-item:hover:not(:disabled), .tl-ctx-item:focus-visible { background: var(--accent); color: #fff; outline: none; }
+.tl-ctx-item:hover:not(:disabled) .tl-ctx-key, .tl-ctx-item:focus-visible .tl-ctx-key { color: rgba(255, 255, 255, 0.75); }
+.tl-ctx-item:disabled { color: rgba(235, 235, 245, 0.3) !important; cursor: default; }
+.tl-ctx-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-ctx-key { font-size: 11px; color: rgba(235, 235, 245, 0.6); font-variant-numeric: tabular-nums; }
+.tl-ctx-arrow { color: rgba(235, 235, 245, 0.6); }
+.tl-ctx-sep { height: 1px; background: rgba(255, 255, 255, 0.1); margin: 4px 8px; }

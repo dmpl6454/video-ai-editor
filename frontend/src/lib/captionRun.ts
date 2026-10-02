@@ -115,10 +115,27 @@ export function formatEta(sec: number): string {
 /** auto_caption's args. 'as-spoken' sends no target (the backend default every
  *  pre-existing caller relies on); 'quality' sends no model, so it rides
  *  WHISPER_CAPTION_MODEL (default large-v3) exactly as before. */
-export function captionArgs(target: Target, speed: Speed): Record<string, unknown> {
+/** `language`: the SPOKEN language hint (design §2a "Auto captions" ›
+ *  Spoken language); '' / 'auto' leaves Whisper to detect it, as before. */
+export function captionArgs(target: Target, speed: Speed, language = ''): Record<string, unknown> {
   const args: Record<string, unknown> = target === 'as-spoken' ? {} : { target }
   if (speed === 'fast') args.model = TURBO_MODEL
+  if (language && language !== 'auto') args.language = language
   return args
+}
+
+export const LANGUAGE_KEY = 'vai.captionLanguage'
+/** The spoken-language choices the Auto captions form offers. */
+export const SPOKEN_LANGUAGES: readonly { id: string; label: string }[] = [
+  { id: 'auto', label: 'Auto-detect' }, { id: 'en', label: 'English' }, { id: 'hi', label: 'Hindi' },
+  { id: 'ur', label: 'Urdu' }, { id: 'es', label: 'Spanish' }, { id: 'fr', label: 'French' }, { id: 'de', label: 'German' },
+  { id: 'pt', label: 'Portuguese' }, { id: 'ja', label: 'Japanese' }, { id: 'zh', label: 'Chinese' }, { id: 'ar', label: 'Arabic' },
+]
+export function loadLanguage(kv: KV | null): string {
+  try {
+    const v = kv?.getItem(LANGUAGE_KEY)
+    return v && SPOKEN_LANGUAGES.some((l) => l.id === v) ? v : 'auto'
+  } catch { return 'auto' }
 }
 
 /** What a speed choice would download first, or null (cached or unknown). */
@@ -148,6 +165,8 @@ export function doneMessage(result: unknown, speed: Speed): string {
 export interface CaptionRunState {
   target: Target
   speed: Speed
+  /** The spoken-language hint ('auto' = detect). */
+  language: string
   /** GET /api/downloads, or null until it answers. */
   downloads: DownloadReport | null
   /** The download a run is waiting on the user's yes for. */
@@ -160,6 +179,7 @@ export interface CaptionRunState {
   jobId: string | null
   pickTarget(t: Target): void
   pickSpeed(s: Speed): void
+  pickLanguage(l: string): void
   refreshDownloads(): Promise<DownloadReport | null>
   /** Generate captions: asks first when a model would download, else starts. */
   run(): Promise<void>
@@ -205,10 +225,10 @@ export function createCaptionRun(deps: CaptionRunDeps): UseBoundStore<StoreApi<C
       stopTicker = deps.every(() => {
         set({ elapsed: Math.floor((deps.now() - get().startedAt) / 1000) })
       }, TICK_MS)
-      const { target, speed } = get()
+      const { target, speed, language } = get()
       let outcome: CaptionsOutcome = 'failed'
       try {
-        const res = await deps.dispatch('auto_caption', captionArgs(target, speed), {
+        const res = await deps.dispatch('auto_caption', captionArgs(target, speed, language), {
           onProgress: ({ jobId, progress }) => set({ jobId, progress }),
         })
         if (res) {
@@ -231,6 +251,7 @@ export function createCaptionRun(deps: CaptionRunDeps): UseBoundStore<StoreApi<C
     return {
       target: loadTarget(deps.storage),
       speed: loadSpeed(deps.storage),
+      language: loadLanguage(deps.storage),
       downloads: null,
       consent: null,
       busy: false,
@@ -247,12 +268,16 @@ export function createCaptionRun(deps: CaptionRunDeps): UseBoundStore<StoreApi<C
         set({ speed: s })
         try { deps.storage?.setItem(SPEED_KEY, s) } catch { /* not worth failing over */ }
       },
+      pickLanguage: (l) => {
+        set({ language: l })
+        try { deps.storage?.setItem(LANGUAGE_KEY, l) } catch { /* not worth failing over */ }
+      },
       refreshDownloads,
       run: async () => {
         if (get().busy || !deps.hasFootage()) return
         const report = await refreshDownloads()
-        const { target, speed } = get()
-        const need = pendingDownload(report, downloadKeyFor('auto_caption', captionArgs(target, speed)))
+        const { target, speed, language } = get()
+        const need = pendingDownload(report, downloadKeyFor('auto_caption', captionArgs(target, speed, language)))
         if (need) { set({ consent: need }); return }
         await start()
       },

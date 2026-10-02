@@ -103,8 +103,55 @@ def list_sessions() -> list[dict]:
             # project is known to have nothing to show. A stat and a tiny
             # sidecar read — never the EDL (see poster_url).
             "poster": poster_url(d),
+            # Home / projects screen (design handoff 2026-10-02, S01): the
+            # card's duration pill and storage-size line. Both are cheap:
+            # the duration is one field of edl.json (a bounded read, never a
+            # parse of the tree), the size a stat of each imported file.
+            "duration": _edl_duration(d),
+            "size_bytes": _session_size(d),
         })
     return sessions
+
+
+_DURATION_RE = re.compile(r'"duration"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
+
+
+def _edl_duration(d: Path) -> float | None:
+    """The project's timeline length from edl.json, or None when there is no
+    EDL yet. Reads the file's head only: `duration` is a top-level field the
+    serializer writes early, so a 130-clip project costs one small read."""
+    p = d / "edl.json"
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return None
+    m = _DURATION_RE.search(head)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _session_size(d: Path) -> int:
+    """Bytes of imported media under the session (uploads only — caches and
+    previews regenerate and are not the project's storage)."""
+    total = 0
+    root = d / "uploads"
+    if not root.is_dir():
+        return 0
+    try:
+        for p in root.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
 
 
 # --- QA-099-THUMBS: a cached per-project poster frame -------------------------

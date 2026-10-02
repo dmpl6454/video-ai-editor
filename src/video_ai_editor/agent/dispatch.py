@@ -5148,6 +5148,35 @@ def detach_audio(store: EDLStore, args: dict) -> dict:
     return {"summary": summary, "audio_clip_id": sound.id, "track": lane.id}
 
 
+def reattach_audio(store: EDLStore, args: dict) -> dict:
+    """The inverse of detach_audio ("Recover audio" on the extracted audio
+    clip — design handoff 2026-10-02 §3, brief §6 "Extract audio transition"):
+    the audio clip is removed and the picture clip it was detached from
+    (`linked_to`) is unmuted, so the sound plays from the video clip again.
+    One commit, so Undo returns to the separated state. Refused when the
+    audio clip was not extracted from a video clip, or when its picture is
+    gone (deleting the video clip orphaned it — the sound is still usable on
+    its own lane, so it is left alone)."""
+    cid = str(args["clip_id"])
+    res = store.edl.get_clip(cid)
+    if not res:
+        raise ValueError(f"clip {cid} not found")
+    lane, sound = res
+    if not isinstance(sound, Clip) or lane.type not in _AUDIO_LANE_TYPES:
+        raise ValueError("reattach_audio needs the extracted audio clip (on an audio lane)")
+    if not sound.linked_to:
+        raise ValueError(f"clip {cid} was not extracted from a video clip")
+    pic = store.edl.get_clip(str(sound.linked_to))
+    if not pic or not isinstance(pic[1], Clip) or pic[0].type != "video":
+        raise ValueError(f"the video clip {cid} was extracted from is no longer on the timeline")
+    _, video = pic
+    lane.clips = [o for o in lane.clips if o.id != sound.id]
+    video.audio.mute = False
+    summary = f"Recovered {cid}'s audio into {video.id}"
+    store.commit("reattach_audio", args, summary)
+    return {"summary": summary, "video_clip_id": video.id}
+
+
 #: Lanes whose clips carry sound a voice effect can change (v1, overlays,
 #: music / voice-over / audio lanes).
 _VOICE_LANES = ("video", "audio", "music", "vo")
@@ -8946,6 +8975,7 @@ DISPATCH: dict[str, DispatchFn] = {
     "set_track_locked": set_track_locked,
     "set_track_solo": set_track_solo,
     "detach_audio": detach_audio,
+    "reattach_audio": reattach_audio,
     "set_speed": set_speed,
     "freeze_frame": freeze_frame,
     "set_voice_effect": set_voice_effect,

@@ -61,7 +61,12 @@ function chipLabel(e: EffectEntry): string {
 /** The Effects tool panel's content. Always open (the rail tab is the
  *  disclosure now, LEFT_RAIL_SPEC §2.7); `active` is whether the panel is on
  *  screen, and the look list is fetched on its first show. */
-export function EffectsPanel({ active = true }: { active?: boolean }) {
+/** `show`: the redesigned asset browser splits this panel across two tabs —
+ *  Filters (the LUT looks) and Effects › Video effects (the effect presets);
+ *  'all' is the pre-redesign panel. */
+export function EffectsPanel({ active = true, show = 'all' }: { active?: boolean; show?: 'all' | 'effects' | 'luts' }) {
+  const showLuts = show !== 'effects'
+  const showEffects = show !== 'luts'
   const sid = useStore((s) => s.sessionId)
   const edl = useStore((s) => s.edl)
   const selection = useStore((s) => s.selection)
@@ -249,6 +254,7 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
         </div>
       )}
 
+      {showLuts && (<>
       <div className="fx-subhead section-label">Filters · LUT looks</div>
       <div className="fx-slider-row">
         <label>Intensity</label>
@@ -304,7 +310,9 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
           Apply look to all clips
         </button>
       </div>
+      </>)}
 
+      {showEffects && (<>
       <div className="fx-subhead section-label" style={{ marginTop: 10 }}>Effects</div>
       <div className="fx-grid">
         {presets.map((p) => (
@@ -322,6 +330,7 @@ export function EffectsPanel({ active = true }: { active?: boolean }) {
           </button>
         ))}
       </div>
+      </>)}
 
       {clip && effects.length > 0 && (
         <>

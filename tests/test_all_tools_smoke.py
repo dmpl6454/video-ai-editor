@@ -197,6 +197,7 @@ def _args_for(tool: str, store: EDLStore, tmp_path: Path) -> dict | None:
         "set_track_muted": {"track": "music", "muted": True},
         "set_track_solo": {"track": "music"},
         "detach_audio": {"clip_id": "c1"},
+        "reattach_audio": {"clip_id": "c1"},
         "set_track_locked": {"track": "v1", "locked": True},
         "remove_silences": {"clip_id": "c1", "min_silence_s": 0.5, "noise_db": -35},
         "remove_fillers": {"clip_id": "c1"},
@@ -315,6 +316,13 @@ def test_tool_smoke(tool: str, session: EDLStore, tmp_path: Path):
         cid = dispatch(session, "add_clip", {"track": "v2", "src": src, "in": 0.0, "out": 1.0,
                                              "start": 0.0})["clip_id"]
         args = {**args, "clip_id": cid}
+    if tool == "reattach_audio":
+        # Recover audio needs an extracted audio clip to put back.
+        try:
+            r = dispatch(session, "detach_audio", {"clip_id": "c1"})
+        except ValueError as e:
+            pytest.skip(f"detach_audio refused here: {e}")
+        args = {"clip_id": r["audio_clip_id"]}
     if tool == "remove_effects":
         dispatch(session, "apply_lut", {"clip_id": "c1", "src": "warm.cube"})
     if tool == "remove_effect":
