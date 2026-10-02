@@ -295,15 +295,21 @@ def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser,
     _tab(page, "Stickers").click()
     emoji = page.locator(".sticker-picker button[draggable='true']").nth(2)
     emoji.wait_for()
+    # Every toast while we wait: the artwork is FETCHED on the first click,
+    # and a harness without that network answers "no sticker artwork".
+    page.evaluate("""() => { window.__toasts = []
+      new MutationObserver(() => { for (const t of document.querySelectorAll('.toast-msg')) {
+        if (!window.__toasts.includes(t.textContent)) window.__toasts.push(t.textContent) } })
+        .observe(document.body, { subtree: true, childList: true }) }""")
     emoji.click()
     # QA-128: selected at once — the Inspector is on the sticker.
     try:
-        # The first click fetches the emoji's artwork (a network round trip).
         page.locator(".in-clip[data-clip-kind='sticker']").first.wait_for(timeout=20000)
     except Exception:  # noqa: BLE001
-        if "no sticker artwork" in page.inner_text("body"):
-            pytest.skip("emoji artwork is fetched and this harness is offline")
-        raise
+        toasts = page.evaluate("window.__toasts")
+        if any("no sticker artwork" in t for t in toasts):
+            pytest.skip(f"emoji artwork is fetched and this harness cannot: {toasts}")
+        raise AssertionError(f"no sticker selected; toasts: {toasts}")
     stickers = [c for t in _edl(base_url, sid)["tracks"] if t["id"] == "stickers" for c in t["clips"]]
     assert len(stickers) == 1
     # QA-126: one click on Effects shows it, hiding Stickers. The rail keeps

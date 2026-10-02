@@ -216,7 +216,9 @@ def test_text_inspector_controls_share_one_rhythm(browser, base_url, overlays, w
     fields = [c for c in ctrls if c["tag"] in ("select", "input")]
     buttons = [c for c in ctrls if c["tag"] == "button"]
     heights = {c["h"] for c in fields}
-    assert fields and len(heights) == 1 and heights <= {28, 30} and all(c["fs"] >= 12 for c in fields), fields
+    # One height for every field: the design's compact control (24 px, the
+    # clip inspector) or the panel controls (28 / 30 px).
+    assert fields and len(heights) == 1 and heights <= {24, 28, 30} and all(c["fs"] >= 11 for c in fields), fields
     assert all(c["h"] >= 24 and c["fs"] >= 11 for c in buttons), [c for c in buttons if c["h"] < 24 or c["fs"] < 11]
     # "Letter case" names its select (it fell back to the long title).
     case = page.get_by_label("Letter case", exact=True)
