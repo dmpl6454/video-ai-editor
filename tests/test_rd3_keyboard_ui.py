@@ -104,7 +104,7 @@ def test_shift_arrow_moves_the_playhead_with_a_button_focused(engine, base_url, 
     name = engine.engine_name
     sid = _project(base_url, bars, f"rd3 arrows {name}")
     page = _open(engine, base_url, sid, 1280, 800)
-    for sel in ('button[aria-label^="Split"]', ".ab-toolbar .ui-btn-primary"):
+    for sel in ('button[aria-label^="Split"]', ".ab-content:not([hidden]) .ab-toolbar .ui-btn-primary"):
         page.evaluate("async () => { const s = (await (window.__vaeTest ?? import('/src/store.ts'))).useStore.getState(); s.setPlaying(false);"
                       " s.setPlayhead(0) }")
         _keyboard_focus(page, sel)
