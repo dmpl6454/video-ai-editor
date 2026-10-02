@@ -298,7 +298,8 @@ def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser,
     emoji.click()
     # QA-128: selected at once — the Inspector is on the sticker.
     try:
-        page.locator(".in-clip[data-clip-kind='sticker']").first.wait_for(timeout=5000)
+        # The first click fetches the emoji's artwork (a network round trip).
+        page.locator(".in-clip[data-clip-kind='sticker']").first.wait_for(timeout=20000)
     except Exception:  # noqa: BLE001
         if "no sticker artwork" in page.inner_text("body"):
             pytest.skip("emoji artwork is fetched and this harness is offline")

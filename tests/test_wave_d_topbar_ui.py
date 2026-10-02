@@ -189,7 +189,8 @@ def test_everyday_bar_matches_the_baseline(engine, base_url, sessions, size):  #
     m = page.evaluate(MEASURE_JS)
     _check(m, size[0], ("everyday", size))
     assert page.locator(".ed-save-status").get_attribute("role") == "status"
-    assert page.locator(".ed-save-status").inner_text().strip() in ("Saved", "Saving…", "Offline")
+    # The word hides at narrow widths; the status's name always carries it.
+    assert page.locator(".ed-save-status").get_attribute("aria-label") in ("Saved", "Saving…", "Offline")
     assert page.locator(".topbar-pinned button.primary").inner_text().strip() == "Export"
     page.screenshot(path=str(SHOTS / f"rail-r3-{engine.engine_name}-{size[0]}x{size[1]}.png"))
     page.context.close()

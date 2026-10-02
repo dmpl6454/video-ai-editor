@@ -25,6 +25,10 @@
   .ed-topbar .ed-save-status { gap: 0; }
   .ed-topbar .ed-project { max-width: 160px; }
 }
+@media (max-width: 1000px) {
+  .ed-topbar .ed-slash, .ed-topbar .act-num { display: none; }
+  .ed-topbar .ed-project { max-width: 100px; }
+}
 .ed-topbar .topbar-pinned { display: inline-flex; }
 .ed-topbar .topbar-pinned button.primary { height: var(--control-h); min-height: 0; padding: 0 14px; border-radius: var(--r-button); border: none;
   background: var(--accent-fill); color: var(--on-accent); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
