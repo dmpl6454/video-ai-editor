@@ -3,6 +3,31 @@
 All notable changes to Video AI Editor. Versioning follows the `VERSION` file
 at the repo root, surfaced at `/api/version` and in the editor's top bar.
 
+## 0.8.2
+
+A fix-and-foundation release on top of 0.8.0. Opening a video now just works,
+Windows exports and cancels behave, and the first piece of the Editor Brain
+ships switched off. Nothing changes in the editor unless you turn that
+switch on. (0.8.1 was never published; everything in it is here.) Projects
+from 0.8.0 open unchanged.
+
+### Open and import
+- Picking a video, audio or picture file in **Open** now imports it into the Media panel and says so ("IMG_0623.MOV is a video, not a project"), instead of refusing it as a bad `.vae` project.
+- The project menu has an **Import media…** entry that opens a media picker. A saved `.vae` still opens as a project, and anything else still gets its plain explanation.
+
+### Export and sound
+- Hall voice effect: previews and exports no longer fail on ffmpeg 6.1.
+- NTSC (29.97 fps) exports deliver exactly the planned length of sound; a one-sample shortfall that ffmpeg 9 exposed is padded with silence, and no placed sound moves.
+- A timeline with very many clips no longer fails to export on Windows ("command line too long"); the filter graph is passed in a file when it would not fit.
+- Windows: cancelling a preview, proxy build or export now stops the whole ffmpeg process tree. Before, the encoder could keep running at full CPU after a cancel.
+- VideoToolbox export: if the delivered bitrate lands more than 10 % under the target, one corrective pass runs and the closer result is kept. Deliveries already within 10 % are unchanged.
+- ffmpeg 8 and 9 are the supported versions; the README says so.
+
+### Editor Brain (off by default)
+The first piece of an editing brain that plans from what is actually in your footage, on your Mac, with no key and nothing leaving the machine. Ask the Prompt bar for "a 45-second reel" or "tighten this podcast" and get one reviewable plan: fillers and dead air removed on quiet moments, camera cuts to whoever speaks next, hidden jump cuts, captions for every speaker, and a Plan tab that explains each step. Apply is one step and one Undo; each run is saved as a version you can restore, and versions travel with the project.
+
+It is off until you turn it on. There is no Settings switch yet: set `VAI_BRAIN_ENABLED=1` before starting the app, or `"brain": {"enabled": true}` in the settings file. With it off, the Prompt bar behaves exactly as in 0.8.0.
+
 ## 0.8.0
 
 The pro-editor release. Working editors drove the app the way they cut every
