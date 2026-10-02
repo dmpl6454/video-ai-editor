@@ -13,7 +13,8 @@ Now (frontend/src/lib/openPick.ts):
   * a real .vae still opens as a new project;
   * anything unrecognised still reaches the project loader and gets its
     explanation (that path also serves `<sid>.vae.txt`, see v0.7.2);
-  * the project menu has an "Import media…" entry that opens a media picker.
+  * the File menu (the project menu, since the 2026-10-02 shell) has an
+    "Import media…" entry that opens a media picker.
 
 Harness (test_frontend_a11y's): VAE_A11Y_BASE_URL = a Vite dev server proxying
 /api to a backend, otherwise the suite starts its own over frontend/dist
@@ -80,7 +81,7 @@ def _open(engine, base_url, sid: str):  # noqa: F811
     ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sid!r}) }} catch (e) {{}}")
     page = ctx.new_page()
     page.goto(base_url + "/")
-    page.get_by_role("tab", name="Media").wait_for()
+    page.locator(".ab-tabs").get_by_role("tab", name="Media", exact=True).wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1000)
     return page
@@ -148,8 +149,8 @@ def test_open_still_explains_a_file_it_cannot_use(engine, base_url, tmp_path):  
 def test_import_media_is_in_the_project_menu(engine, base_url, phone_video):  # noqa: F811
     sid = _new_project(base_url, "import from the menu")
     page = _open(engine, base_url, sid)
-    page.locator("button.topbar-session").click()
-    menu = page.locator("[role=menu][aria-label=Projects]")
+    page.locator("button[aria-label='File']").click()
+    menu = page.locator("[role=menu][aria-label=File]")
     item = menu.get_by_role("menuitem", name="Import media…")
     item.wait_for()
     assert item.locator("svg[data-icon]").count() == 1

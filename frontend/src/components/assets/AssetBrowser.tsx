@@ -93,7 +93,7 @@ export function AssetBrowser() {
                     onClick={() => setSub(s)}>{s}</button>
           ))}
         </nav>
-        <div className="ab-content" role="tabpanel" id={assetPanelId(tab)} aria-labelledby={assetTabId(tab)} data-panel={tab} data-sub={sub}>
+        <div className="ab-content" role="tabpanel" id={assetPanelId(tab)} aria-labelledby={assetTabId(tab)} data-panel={tab} data-sub={sub} tabIndex={-1}>
           {content(tab, sub)}
         </div>
       </div>

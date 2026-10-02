@@ -92,6 +92,9 @@ def _project(base_url, bars: Path, png: Path, name: str) -> tuple[str, str, str,
 
 def _select(page, cid: str) -> None:
     page.evaluate("id => window.__vaeTest.useStore.getState().setSelection(id)", cid)
+    page.locator(f'.in-clip[data-clip-id="{cid}"]').wait_for()
+    # The clip inspector (2026-10-02 shell) keeps the Animation section on its own tab.
+    page.locator(".in-tabs").get_by_role("tab", name="Animation", exact=True).click()
     page.locator(f'.props[data-clip-id="{cid}"]').wait_for()
 
 

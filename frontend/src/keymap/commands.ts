@@ -10,6 +10,8 @@ import { chordLabel, useKeymapStore } from './engine'
 import { openSettings } from '../lib/settingsOpen'
 import { useLayoutStore } from '../lib/layoutStore'
 import { RAIL_ITEMS, railPanelId } from '../components/rail/railModel'
+import { RAIL_TO_TAB, assetPanelId } from '../lib/assetTabs'
+import { useInspector } from '../components/inspector/inspectorStore'
 import { cycleRegion } from './regions'
 import { pressControl, type UiTarget } from './uiTargets'
 import { adjacentClip, clipAtPlayhead, type ClipPick } from '../lib/clipSelect'
@@ -122,7 +124,7 @@ function textFieldEnv(): TextFieldEnv | null {
     frame: () => new Promise((r) => requestAnimationFrame(() => r(null))),
     selection: () => useStore.getState().selection,
     inspectorOpen: () => useLayoutStore.getState().rightTab === 'inspect' && useLayoutStore.getState().rightOpen,
-    openInspector: () => useLayoutStore.getState().showRight('inspect'),
+    openInspector: () => { useLayoutStore.getState().showRight('inspect'); useInspector.getState().closeChat() },
     field: () => document.querySelector<HTMLTextAreaElement>('.props textarea[aria-label="Text"]'),
   }
 }
@@ -145,7 +147,10 @@ export function editTextClip(id: string): boolean {
 function focusPanel(id: (typeof RAIL_ITEMS)[number]['id']): void {
   if (typeof requestAnimationFrame !== 'function' || typeof document === 'undefined') return
   requestAnimationFrame(() => {
-    const panel = document.getElementById(railPanelId(id))
+    // The rail's own panel, or (desktop shell, 2026-10-02) the asset
+    // browser's content panel the rail id maps onto (a discrete key event's
+    // store update commits in a microtask, before this frame).
+    const panel = document.getElementById(railPanelId(id)) ?? document.getElementById(assetPanelId(RAIL_TO_TAB[id].tab))
     if (!panel || panel.hidden || panel.contains(document.activeElement)) return
     panel.focus({ preventScroll: true })
   })
@@ -158,6 +163,10 @@ function showRightPanel(tab: 'inspect' | 'chat'): void {
   // Inspector tab rather than into a hidden field
   const fromChat = !!document.activeElement?.closest?.('#right-panel-chat')
   useLayoutStore.getState().showRight(tab)
+  // The desktop shell (2026-10-02) shows the Chat in the inspector column
+  // from the top bar's toggle; the chords drive the same state.
+  if (tab === 'chat') useInspector.getState().openChat()
+  else useInspector.getState().closeChat()
   if (tab !== 'chat') {
     if (fromChat) requestAnimationFrame(() => document.getElementById('right-tab-inspect')?.focus())
     return

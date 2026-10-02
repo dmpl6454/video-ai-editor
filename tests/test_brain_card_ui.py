@@ -183,6 +183,14 @@ def _seed_version(base_url, workdir: Path, sid: str, label: str) -> dict:
     return {"row": row, "edl": edl}
 
 
+def _open_history(page) -> None:
+    """History (and the Versions strip above it) is a disclosure under the
+    inspector's Details since the 2026-10-02 shell."""
+    page.locator(".in-history summary").wait_for(timeout=20000)
+    if page.locator(".in-history[open]").count() == 0:
+        page.locator(".in-history summary").click()
+
+
 def _card_open_on_apply(page) -> None:
     page.locator(CARD).wait_for(timeout=20000)
     page.wait_for_function(
@@ -303,6 +311,7 @@ def test_versions_strip_restore_is_an_op(engine, harness, clip):  # noqa: F811
     ops0 = _tools(base_url, sid)
     page = _open(engine, base_url, sid, 1440, 900)
     try:
+        _open_history(page)
         strip = page.locator(STRIP)
         strip.wait_for(timeout=20000)
         assert strip.get_attribute("role") == "radiogroup"
@@ -418,6 +427,7 @@ def test_restore_by_keyboard_keeps_focus_and_says_so(engine, harness, clip):  # 
     ops0 = _tools(base_url, sid)
     page = _open(engine, base_url, sid, 1440, 900)
     try:
+        _open_history(page)
         strip = page.locator(STRIP)
         strip.wait_for(timeout=20000)
         strip.get_by_role("button", name="Restore V1 Reel").focus()

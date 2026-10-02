@@ -11,7 +11,7 @@ WebKit, with screenshots:
   clip 1 then works;
 * ⌥T puts focus in the new text's field with its words selected; typing
   replaces them, Escape returns to the timeline;
-* ⌥7 puts focus on the Captions panel, one Tab from its first control;
+* ⌥7 puts focus on the Captions tab's panel, one Tab from its first control;
 * a Hero clip's Inspector Duration trims through the curve (00:00:01:00 is
   one second, not 00:00:01:07), and an edge drag keeps the frame under it;
 * History never shows a split piece's id.
@@ -83,7 +83,7 @@ def test_space_on_a_keyboard_focused_checkbox_toggles_it_and_does_not_play(engin
     _shot(page, f"space_checkbox_{name}")
     # the keyboard user's Space on a focused BUTTON presses it too; a mouse
     # user's Space after clicking one still plays (Chromium keeps focus there)
-    page.locator(".props h2").first.click()          # focus leaves the box first
+    page.locator(".pl .ed-panel-head").first.click()  # focus leaves the box first
     was = page.locator(box).is_checked()
     page.locator(box).click()
     cid = _v1(_edl(base_url, sid))[1]["id"]
@@ -103,7 +103,7 @@ def test_shift_arrow_moves_the_playhead_with_a_button_focused(engine, base_url, 
     name = engine.engine_name
     sid = _project(base_url, bars, f"rd3 arrows {name}")
     page = _open(engine, base_url, sid, 1280, 800)
-    for sel in ('button[aria-label^="Split"]', ".dropzone"):
+    for sel in ('button[aria-label^="Split"]', ".ab-toolbar .ui-btn-primary"):
         page.evaluate("async () => { const s = (await (window.__vaeTest ?? import('/src/store.ts'))).useStore.getState(); s.setPlaying(false);"
                       " s.setPlayhead(0) }")
         _keyboard_focus(page, sel)
@@ -178,12 +178,12 @@ def test_alt_7_puts_focus_on_the_captions_panel(engine, base_url, bars):  # noqa
     page = _open(engine, base_url, sid, 1280, 800)
     _timeline(page).focus()
     page.keyboard.press("Alt+Digit7")
-    page.wait_for_function("() => document.activeElement?.id === 'tool-panel-captions'", timeout=5000)
+    page.wait_for_function("() => document.activeElement?.id === 'asset-panel-captions'", timeout=5000)
     # its first control is one Tab away (WebKit tabs to buttons with ⌥, like
     # Safari; the packaged app turns full Tab on: test_wk_tab_focus.py)
     page.keyboard.press("Tab" if name == "chromium" else "Alt+Tab")
-    focused = page.evaluate("() => document.activeElement?.textContent?.trim() ?? ''")
-    assert "Generate captions" in focused, focused
+    assert page.evaluate("() => !!document.activeElement?.closest('[data-auto-captions]')"), \
+        page.evaluate("() => document.activeElement?.outerHTML.slice(0, 120)")
     _shot(page, f"alt7_{name}")
     page.context.close()
 
@@ -247,6 +247,8 @@ def test_history_never_shows_a_split_pieces_id(engine, base_url, bars):  # noqa:
                            ("freeze_frame", {"time": 0.5, "duration": 1.0})):
             assert c.post(f"/api/sessions/{sid}/dispatch", json={"tool": tool, "args": args}).status_code == 200
     page = _open(engine, base_url, sid, 1280, 800)
+    page.locator(".in-history summary").click()      # History is a disclosure under Details
+    page.locator(".ops-log .op").first.wait_for()
     rows = page.locator(".ops-log .op").all_text_contents()
     assert rows and not [r for r in rows if re.search(r"\b[a-z]{1,3}_[0-9a-f]{6,}", r) or "()" in r or "— →" in r], rows
     _shot(page, f"history_{name}")

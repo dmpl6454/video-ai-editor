@@ -1,4 +1,6 @@
-"""C2-panels lane, measured in a real browser against the real app.
+"""C2-panels lane, measured in a real browser against the real app (ported
+to the 2026-10-02 desktop shell: the asset browser's tabs and sub-nav, the
+clip inspector, Home for a new project).
 
 What 0.7.2 shipped, and what each test pins:
 
@@ -157,16 +159,22 @@ def _contrast_failures(page, root: str) -> list:
     return page.evaluate(js)
 
 
+def _tab(page, name):
+    """An asset-browser tab, scoped to the strip (the clip inspector has tabs
+    of the same names)."""
+    return page.locator(".ab-tabs").get_by_role("tab", name=name, exact=True)
+
+
 def _open(browser, base_url, sid, *, keymap: dict | None = None, width=1440, height=900):
     ctx = browser.new_context(viewport={"width": width, "height": height})
     script = f"try {{ localStorage.setItem('vai.sessionId', {sid!r});"
     if keymap is not None:
         script += f" localStorage.setItem('vae.keymap.v1', {json.dumps(json.dumps(keymap))});"
-    script += " } catch (e) {}"
+    script += " localStorage.setItem('aive.assetTab', 'Media'); } catch (e) {}"
     ctx.add_init_script(script)
     page = ctx.new_page()
-    page.goto(base_url + "/")
-    page.get_by_role("tab", name="Media").wait_for()
+    page.goto(base_url + "/?vae-test")
+    _tab(page, "Media").wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)
     return page
@@ -211,7 +219,7 @@ def test_transition_tiles_have_whole_names_and_distinct_stills(browser, base_url
     from PIL import Image, ImageChops, ImageStat
     sid = _session(base_url, media, "c2 transitions", clips=3)
     page = _open(browser, base_url, sid)
-    page.get_by_role("tab", name="Transitions").click()
+    _tab(page, "Transitions").click()
     page.locator(".trp-tile").first.wait_for()
     page.mouse.move(700, 400)
     for tab in page.locator(".trp-tab").all():
@@ -284,18 +292,18 @@ def test_an_over_long_prompt_is_counted_refused_and_kept(browser, base_url, medi
 def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser, base_url, media):
     sid = _session(base_url, media, "c2 stickers", clips=1)
     page = _open(browser, base_url, sid)
-    page.get_by_role("tab", name="Stickers", exact=True).click()
+    _tab(page, "Stickers").click()
     emoji = page.locator(".sticker-picker button[draggable='true']").nth(2)
     emoji.wait_for()
     emoji.click()
     # QA-128: selected at once — the Inspector is on the sticker.
-    page.locator(".props", has_text="Stickers").first.wait_for(timeout=5000)
+    page.locator(".in-clip[data-clip-kind='sticker']").first.wait_for(timeout=5000)
     stickers = [c for t in _edl(base_url, sid)["tracks"] if t["id"] == "stickers" for c in t["clips"]]
     assert len(stickers) == 1
     # QA-126: one click on Effects shows it, hiding Stickers. The rail keeps
     # every panel mounted (LEFT_RAIL_SPEC §2.7), so the picker is hidden,
     # not gone: assert visibility, not count.
-    effects = page.get_by_role("tab", name="Effects", exact=True)
+    effects = _tab(page, "Effects")
     effects.click()
     page.wait_for_timeout(300)
     assert effects.get_attribute("aria-selected") == "true"
@@ -306,30 +314,31 @@ def test_effects_opens_on_the_first_click_and_a_new_sticker_is_selected(browser,
 
 # ---- QA-129 -----------------------------------------------------------------
 
-def test_panel_chrome_icon_toggle_and_in_app_remove_confirm(browser, base_url, media):
+def test_chat_toggle_is_an_icon_and_remove_confirms_in_app(browser, base_url, media):
     sid = _session(base_url, media, "c2 chrome", clips=1)
     page = _open(browser, base_url, sid)
     native = []
     page.on("dialog", lambda d: (native.append(d.message), d.dismiss()))
-    toggle = page.get_by_role("button", name="Hide the Inspector and Chat panel")
+    # The right column has no collapse rail any more; its one toggle (the
+    # Chat) is an icon button, not a bar.
+    toggle = page.get_by_role("button", name="Chat with the assistant")
     box = toggle.bounding_box()
-    assert box["width"] <= 32 and box["height"] <= 32, box      # an icon button, not a bar
+    assert box["width"] <= 32 and box["height"] <= 32, box
     assert toggle.locator("svg").count() == 1
     toggle.click()
-    # Collapsed, the 36 px rail also jumps straight to either tab (§2.9).
-    assert page.get_by_role("button", name="Show the Inspector", exact=True).is_visible()
-    assert page.get_by_role("button", name="Show the Chat", exact=True).is_visible()
-    page.get_by_role("button", name="Show the Inspector and Chat panel").click()
+    assert page.locator("#right-panel-chat").is_visible()
+    toggle.click()
+    assert page.locator("#right-panel-chat").count() == 0
 
     page.locator("[data-media-row]").first.hover()
-    page.locator("[data-media-row] .media-remove").first.click()
+    page.locator("[data-media-row] .ab-card-x").first.click()
     dlg = page.get_by_role("alertdialog")
     dlg.wait_for()
     assert "Its clip is deleted from the timeline too" in dlg.inner_text()
     page.keyboard.press("Escape")
     assert page.get_by_role("alertdialog").count() == 0 and page.locator("[data-media-row]").count() == 1
     page.locator("[data-media-row]").first.hover()
-    page.locator("[data-media-row] .media-remove").first.click()
+    page.locator("[data-media-row] .ab-card-x").first.click()
     page.get_by_role("alertdialog").get_by_role("button", name="Remove").click()
     page.wait_for_timeout(800)
     assert native == []
@@ -339,8 +348,10 @@ def test_panel_chrome_icon_toggle_and_in_app_remove_confirm(browser, base_url, m
     # with the previous project's hash — fixed by QA-026's resetTransient).
     bad = []
     page.on("response", lambda r: bad.append((r.status, r.url)) if r.status >= 400 else None)
-    page.locator("[data-session-picker] button").first.click()
-    page.get_by_role("menuitem", name="New project").click()
+    page.locator("button[aria-label='Home']").click()
+    page.locator(".home-banner").wait_for()
+    page.locator(".home-banner").click()
+    page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(2500)
     assert bad == [], bad
     page.context.close()
@@ -361,8 +372,9 @@ def test_one_timing_model_start_moves_end_and_duration_trim(browser, base_url, m
     page = _open(browser, base_url, sid)
     # A new text clip is selected at once (the Text panel's "Add text at
     # playhead", LEFT_RAIL_SPEC R2): Start / End / Duration.
-    page.get_by_role("tab", name="Text", exact=True).click()
-    page.get_by_role("button", name="Add text at playhead").click()
+    _tab(page, "Text").click()
+    page.get_by_role("button", name="Add text", exact=True).click()
+    page.locator("[data-text-presets] > button").first.click()
     page.locator(".props").get_by_role("textbox", name="Duration", exact=True).wait_for()
 
     def text_clip():

@@ -1,4 +1,6 @@
-"""Wave C review fixes, measured in a real browser against the real app.
+"""Wave C review fixes, measured in a real browser against the real app
+(ported to the 2026-10-02 desktop shell: the asset browser's tabs, the top
+bar's File menu and dialog openers, the clip inspector's bare Properties).
 
 Each test pins one reviewed defect of the wave C UI:
 
@@ -41,10 +43,10 @@ SHOTS = Path(os.environ.get("VAE_A11Y_SHOTS", "/tmp"))
 def _open(browser, base_url, sid, width=1440, height=900, tab="inspect"):  # noqa: F811
     ctx = browser.new_context(viewport={"width": width, "height": height})
     ctx.add_init_script(f"try {{ localStorage.setItem('vai.sessionId', {sid!r}); "
-                        f"localStorage.setItem('vai.rightTab', {tab!r}) }} catch (e) {{}}")
+                        f"localStorage.setItem('vai.rightTab', {tab!r}); localStorage.setItem('aive.assetTab', 'Media') }} catch (e) {{}}")
     page = ctx.new_page()
-    page.goto(base_url + "/")
-    page.get_by_role("tab", name="Media").wait_for()
+    page.goto(base_url + "/?vae-test")  # lib/testHook.ts: the store, in the built bundle too
+    _tab(page, "Media").wait_for()
     page.locator(".timeline-canvas-wrap canvas").first.wait_for()
     page.wait_for_timeout(1200)
     return page
@@ -68,17 +70,22 @@ def overlays(base_url, sessions, tmp_path_factory):  # noqa: F811
     return {"sid": sid, "text": text_id, "sticker": sticker_id}
 
 
+def _tab(page, name):
+    """An asset-browser tab, scoped to the strip; "AI" is Media › AI media."""
+    if name == "AI":
+        page.locator(".ab-tabs").get_by_role("tab", name="Media", exact=True).click()
+        page.get_by_role("button", name="AI media", exact=True).click()
+        return page.locator(".ab-content[data-sub='AI media']")
+    return page.locator(".ab-tabs").get_by_role("tab", name=name, exact=True)
+
+
 def _select(page, clip_id):
-    """Select a clip through the app's own store. Against a Vite dev server
-    `/src/store.ts` is the very module instance the app runs on; a built
-    bundle has no such URL, and the test skips."""
-    ok = page.evaluate("""async (id) => {
-      try { const m = await import('/src/store.ts'); m.useStore.getState().setSelection(id); return true }
-      catch (e) { return false } }""", clip_id)
-    if not ok:
-        pytest.skip("selecting by id needs a Vite dev server (VAE_A11Y_BASE_URL)")
-    page.get_by_role("tab", name="Inspector").click()
-    page.wait_for_timeout(600)
+    """Select a clip through the app's own store (lib/testHook.ts); the
+    inspector shows it at once."""
+    page.evaluate("async (id) => { const s = (await (window.__vaeTest ?? import('/src/store.ts'))).useStore.getState();"
+                  " s.setSelection(id) }", clip_id)
+    page.locator(f".props[data-clip-id='{clip_id}']").wait_for(timeout=5000)
+    page.wait_for_timeout(300)
 
 
 # ------------------------------------------------------------- shortcuts dialog
@@ -91,33 +98,34 @@ def test_shortcut_settings_is_the_app_dialog(browser, base_url, sessions):  # no
     dlg = page.locator("[role=dialog][aria-modal=true]")
     assert dlg.count() == 1
     assert dlg.get_attribute("aria-labelledby")
-    assert page.locator("#shortcuts-dialog-title").inner_text() == "Keyboard shortcuts"
+    assert page.locator(f"#{dlg.get_attribute('aria-labelledby')}").inner_text() == "Shortcuts"
     assert page.evaluate("document.getElementById('root').inert") is True
     assert page.evaluate("!!document.activeElement.closest('[role=dialog]')")
-    # The X of every other dialog, not a text "Close".
-    assert dlg.locator("button.dialog-x[aria-label='Close'] svg[data-icon=close]").count() == 1
+    # The design's footer actions, no text "Close".
+    assert dlg.get_by_role("button", name="Cancel", exact=True).count() == 1
+    assert dlg.get_by_role("button", name="Close", exact=True).count() == 0
     escaped = 0
     for _ in range(60):
         page.keyboard.press("Tab")
         if not page.evaluate("!!document.activeElement.closest('[role=dialog]')"):
             escaped += 1
     assert escaped == 0, f"focus left the dialog {escaped} times"
-    # The preset picker is the shared segmented control: grey selection, not the red primary fill.
-    checked = dlg.locator("[role=radiogroup] [role=radio][aria-checked=true]")
-    assert checked.count() == 1
-    bg = checked.evaluate("el => getComputedStyle(el).backgroundColor")
+    # The profile picker is the shared dropdown (the keymap presets), not a red fill.
+    profile = dlg.locator("button[aria-label='Shortcut profile']")
+    assert profile.count() == 1
+    bg = profile.evaluate("el => getComputedStyle(el).backgroundColor")
     tokens = page.evaluate("""() => { const cs = getComputedStyle(document.documentElement)
       const probe = document.createElement('div'); document.body.appendChild(probe)
       const col = (v) => { probe.style.backgroundColor = cs.getPropertyValue(v).trim(); return getComputedStyle(probe).backgroundColor }
-      const out = { bg3: col('--bg-3'), accent: col('--accent-fill') }; probe.remove(); return out }""")
-    assert bg == tokens["bg3"] and bg != tokens["accent"], (bg, tokens)
+      const out = { accent: col('--accent-fill') }; probe.remove(); return out }""")
+    assert bg != tokens["accent"], (bg, tokens)
     page.screenshot(path=str(SHOTS / "cfix_shortcuts_dialog.png"))
     # Escape while capturing a chord cancels the capture, not the dialog.
     dlg.locator("button[data-keycap]").first.click()
-    assert dlg.locator(".shortcuts-cap.capturing").count() == 1
+    assert dlg.locator(".dlg-cap.is-capturing").count() == 1
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
-    assert dlg.count() == 1 and dlg.locator(".shortcuts-cap.capturing").count() == 0
+    assert dlg.count() == 1 and dlg.locator(".dlg-cap.is-capturing").count() == 0
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
     assert page.locator("[role=dialog]").count() == 0
@@ -155,7 +163,7 @@ def test_missing_ffmpeg_banner_sits_in_flow_and_can_be_hidden(browser, base_url,
     page.screenshot(path=str(SHOTS / f"cfix_banner_{width}.png"))
     assert page.evaluate("el => getComputedStyle(el).position", banner.element_handle()) != "fixed"
     covered = []
-    for sel in ("[role=tab]", ".sidebar.right", "nav.rail", "#tool-panel", "form[aria-label='Prompt editor'] button"):
+    for sel in (".ab-tabs [role=tab]", "#right-panel", ".ab-subnav button", "form[aria-label='Prompt editor'] button"):
         for i in range(page.locator(sel).count()):
             el = page.locator(sel).nth(i)
             if not el.is_visible():
@@ -170,7 +178,7 @@ def test_missing_ffmpeg_banner_sits_in_flow_and_can_be_hidden(browser, base_url,
     page.wait_for_timeout(200)
     assert banner.count() == 0
     page.reload()
-    page.get_by_role("tab", name="Media").wait_for()
+    page.locator(".ab-tabs").get_by_role("tab", name="Media", exact=True).wait_for()
     page.wait_for_timeout(800)
     assert page.locator("[data-media-tools-banner]").count() == 0      # hidden for the session
     # Settings keeps it reachable.
@@ -201,7 +209,8 @@ def test_text_inspector_controls_share_one_rhythm(browser, base_url, overlays, w
     assert ctrls
     fields = [c for c in ctrls if c["tag"] in ("select", "input")]
     buttons = [c for c in ctrls if c["tag"] == "button"]
-    assert fields and all(c["h"] == 30 and c["fs"] >= 12 for c in fields), fields
+    heights = {c["h"] for c in fields}
+    assert fields and len(heights) == 1 and heights <= {28, 30} and all(c["fs"] >= 12 for c in fields), fields
     assert all(c["h"] >= 24 and c["fs"] >= 11 for c in buttons), [c for c in buttons if c["h"] < 24 or c["fs"] < 11]
     # "Letter case" names its select (it fell back to the long title).
     case = page.get_by_label("Letter case", exact=True)
@@ -257,9 +266,9 @@ def test_brain_popover_and_settings_speak_one_language(browser, base_url, sessio
 
 def test_every_summary_carries_the_app_chevron(browser, base_url, sessions):  # noqa: F811
     page = _open(browser, base_url, sessions["full"])
-    page.get_by_role("tab", name="AI").click()
+    _tab(page, "AI")
     page.wait_for_timeout(600)
-    page.locator("button[aria-label='Keyboard shortcuts']").click()
+    page.locator("button[aria-label='Help']").click()
     page.wait_for_timeout(500)
     summaries = page.evaluate("""() => [...document.querySelectorAll('summary')].map(s => ({
       text: s.textContent.trim().slice(0, 40), icon: !!s.querySelector(':scope > svg[data-icon]'),
@@ -298,18 +307,20 @@ def test_lane_mute_and_solo_are_keyboard_buttons(browser, base_url, sessions):  
 # ------------------------------------------------------------- project menu
 
 def test_project_menu_items_line_up_and_speak_plainly(browser, base_url, sessions):  # noqa: F811
+    """The File menu (the project menu's successor in the top bar)."""
     page = _open(browser, base_url, sessions["full"])
-    page.locator("button.topbar-session").click()
+    page.locator("button[aria-label='File']").click()
     page.wait_for_timeout(400)
-    menu = page.locator("[role=menu][aria-label=Projects]")
-    items = [menu.get_by_role("menuitem", name=n) for n in ("New project", "Import media…", "Open project file…", "Rename this project…")]
+    menu = page.locator("[role=menu][aria-label=File]")
+    items = [menu.get_by_role("menuitem", name=n) for n in ("Save project file (.vae)", "Import media…", "Open project file…", "Rename project…")]
     xs = []
     for it in items:
         assert it.count() == 1
         assert it.locator("svg[data-icon]").count() == 1
         xs.append(it.evaluate("el => { const r = document.createRange(); const t = [...el.childNodes].find(n => n.nodeType === 3 && n.textContent.trim()); r.selectNodeContents(t); return Math.round(r.getBoundingClientRect().left) }"))
     assert max(xs) - min(xs) <= 1, xs
-    assert ".vae" not in menu.inner_text()
+    # The format is named once, on the save row the design keeps it on; no bare extension elsewhere.
+    assert menu.inner_text().count(".vae") == 1, menu.inner_text()
     page.context.close()
 
 
@@ -317,7 +328,7 @@ def test_project_menu_items_line_up_and_speak_plainly(browser, base_url, session
 
 def test_effects_panel_names_the_clip_like_the_media_panel(browser, base_url, sessions):  # noqa: F811
     page = _open(browser, base_url, sessions["full"])
-    page.get_by_role("tab", name="Effects", exact=True).click()
+    _tab(page, "Effects").click()
     page.wait_for_timeout(500)
     tgt = page.locator(".fx-target")
     text = tgt.inner_text().strip()
@@ -330,7 +341,7 @@ def test_effects_panel_names_the_clip_like_the_media_panel(browser, base_url, se
 def test_ai_form_choices_are_words(browser, base_url, sessions):  # noqa: F811
     import re
     page = _open(browser, base_url, sessions["full"])
-    page.get_by_role("tab", name="AI").click()
+    _tab(page, "AI")
     page.wait_for_timeout(600)
     raw = re.compile(r"^[a-z0-9_]+$")
     seen = {}

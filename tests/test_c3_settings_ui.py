@@ -244,17 +244,18 @@ def test_gear_opens_settings_and_clear_render_cache_frees_space(browser, server,
     page.context.close()
 
 
-def test_project_picker_shows_a_poster_frame_per_project(browser, server, projects):
+def test_home_shows_a_poster_frame_per_project(browser, server, projects):
+    """Home's project cards (the project picker since the 2026-10-02 shell)."""
     from playwright.sync_api import expect
     page = _open(browser, server["url"], projects["full"])
-    page.locator(".topbar-session").click()
-    menu = page.get_by_role("menu", name="Projects")
-    expect(menu).to_be_visible()
-    full_row = menu.get_by_role("menuitemradio", name=projects["names"]["full"])
-    empty_row = menu.get_by_role("menuitemradio", name=projects["names"]["empty"])
-    img = full_row.locator(".project-poster img")
+    page.locator("button[aria-label='Home']").click()
+    cards = page.locator("[data-project-card]")
+    expect(cards.first).to_be_visible()
+    full_row = cards.filter(has=page.get_by_role("button", name=f"Open {projects['names']['full']}"))
+    empty_row = cards.filter(has=page.get_by_role("button", name=f"Open {projects['names']['empty']}"))
+    img = full_row.locator(".home-thumb img")
     expect(img).to_have_count(1)
     page.wait_for_function("(el) => el.complete && el.naturalWidth > 0", arg=img.element_handle(), timeout=15000)
-    # The empty project draws the placeholder (its poster answers 204).
-    expect(empty_row.locator(".project-poster svg")).to_have_count(1, timeout=15000)
+    # The empty project draws the placeholder gradient (its poster is null).
+    expect(empty_row.locator(".home-thumb img")).to_have_count(0, timeout=15000)
     page.context.close()
