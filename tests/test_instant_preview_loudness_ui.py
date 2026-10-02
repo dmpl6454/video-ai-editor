@@ -135,7 +135,7 @@ def test_instant_preview_plays_at_the_server_previews_loudness(engine, base_url,
         chip = page.locator('[data-fidelity="approx"]')
         assert chip.count() == 0 or "Loudness" not in (chip.first.get_attribute("aria-label") or "")
 
-        transport = page.locator(".timeline-toolbar button[aria-keyshortcuts=Space]")
+        transport = page.locator(".pl-play")
         page.evaluate("window.__lv.on = true")
         transport.click()
         page.wait_for_timeout(4500)

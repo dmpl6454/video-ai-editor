@@ -100,6 +100,15 @@ def _select(page, clip_id: str) -> None:
     page.locator(f".props[data-clip-id='{clip_id}']").wait_for(timeout=10000)
 
 
+def _open_group(page, key: str) -> None:
+    """Expand a feature row of the clip inspector's Video › Basic tab (the
+    2026-10-02 shell): 'canvas' holds the Canvas section, 'blend' the Blend menu."""
+    row = page.locator(f"[data-feature='{key}'] .in-group-name")
+    row.wait_for(timeout=10000)
+    if row.get_attribute("aria-expanded") != "true":
+        row.click()
+
+
 def _seek(page, t: float) -> None:
     page.evaluate("""async (t) => {
       const m = window.__vaeTest ?? await import('/src/store.ts')
@@ -123,6 +132,7 @@ def test_canvas_section_sets_blur_colour_image_and_apply_to_all(engine, base_url
     page = _open(engine, base_url, sid, 1400, 900)
     try:
         _select(page, v1[0])
+        _open_group(page, "canvas")
         sec = page.locator(".canvas-section")
         sec.wait_for()
         group = page.get_by_role("radiogroup", name="Canvas background")
@@ -149,6 +159,7 @@ def test_canvas_section_sets_blur_colour_image_and_apply_to_all(engine, base_url
         _wait_edl(base_url, sid, lambda e: _bg(e, v1[1]) is None and _bg(e, v1[0])["blur"] == 3, "undo")
         # colour: the kind, then a swatch
         _select(page, v1[1])
+        _open_group(page, "canvas")
         page.get_by_role("radiogroup", name="Canvas background").get_by_role("radio", name="Colour").click()
         _wait_edl(base_url, sid, lambda e: (_bg(e, v1[1]) or {}).get("type") == "color", "colour kind")
         page.get_by_role("radio", name="Colour #FFFFFF").click()
@@ -169,8 +180,8 @@ def test_canvas_section_sets_blur_colour_image_and_apply_to_all(engine, base_url
         e = _wait_edl(base_url, sid, lambda e: (_bg(e, v1[1]) or {}).get("type") == "image", "picture")
         assert "/uploads/images/" in _bg(e, v1[1])["image"].replace("\\", "/")
         assert page.locator(".canvas-image-name").inner_text().startswith("sunset")
-        # Reset: black bars
-        page.locator(".props button[title='Reset canvas to default']").click()
+        # None: black bars (the feature row has no Reset of its own)
+        page.get_by_role("radiogroup", name="Canvas background").get_by_role("radio", name="None", exact=True).click()
         _wait_edl(base_url, sid, lambda e: _bg(e, v1[1]) is None, "reset")
     finally:
         page.context.close()
@@ -182,6 +193,7 @@ def test_blend_menu_sets_the_mode_and_the_preview_blends_live(engine, base_url, 
     try:
         _seek(page, 1.0)
         _select(page, pip)
+        _open_group(page, "blend")
         menu = page.get_by_role("combobox", name="Blend mode")
         menu.wait_for()
         assert menu.locator("option").count() == 14

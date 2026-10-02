@@ -32,7 +32,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 import frame_map_golden_lib as G  # noqa: E402
 from test_frontend_a11y import base_url  # noqa: E402,F401  (fixture)
-from test_speed_ui_e2e import (  # noqa: E402,F401  (fixtures + helpers)
+from test_speed_ui_e2e import (
+    _inspector_tab, _speed_mode,  # noqa: E402,F401  (fixtures + helpers)
     FIT_MARGIN, LABEL_W, _client, _edl, _open, _timecode, _wait_edl, engine, pw,
 )
 
@@ -168,6 +169,7 @@ def test_overlay_speed_curve_and_freeze_through_the_ui_export_as_the_model(
 
     # 1. 2x on the first overlay: the Inspector's Speed slider, from the keyboard.
     _select(page, base_url, sid, p_fast)
+    _inspector_tab(page, "Speed")
     slider = props.get_by_role("slider", name="Speed")
     slider.focus()
     for _ in range(20):                                       # 1.00 → 2.00 in 0.05 steps
@@ -179,7 +181,7 @@ def test_overlay_speed_curve_and_freeze_through_the_ui_export_as_the_model(
 
     # 2. Hero on the second overlay: Curve, then the preset's radio.
     _select(page, base_url, sid, p_hero)
-    page.get_by_role("radio", name="Curve", exact=True).click()
+    _speed_mode(page, "Curve")
     props.get_by_role("radiogroup", name="Speed curve").wait_for()
     props.get_by_role("radio", name="Hero", exact=True).click()
     e = _wait_edl(base_url, sid, lambda e: (_track(e, "v2")[1].get("speed") or {}).get("name") == "hero",

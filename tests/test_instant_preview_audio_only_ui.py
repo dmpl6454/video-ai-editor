@@ -155,7 +155,7 @@ def test_an_audio_only_bed_plays_in_instant_preview(engine, base_url, session): 
         page.wait_for_function("""() => { const v = window.__vaeTest.useStore.getState().clientView
             return !!v && v.live && !v.wait && v.loudness === 'measured'
               && !v.reasons.includes('audio:pending') }""", timeout=90000)
-        transport = page.locator(".timeline-toolbar button[aria-keyshortcuts=Space]")
+        transport = page.locator(".pl-play")
         page.evaluate("window.__cap.on = true")
         transport.click()
         page.wait_for_timeout(4500)

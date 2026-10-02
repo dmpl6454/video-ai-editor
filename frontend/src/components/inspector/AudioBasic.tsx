@@ -22,7 +22,9 @@ export function AudioBasic({ clipId, kind }: { clipId?: string; kind: 'video' | 
   const filled = clip?.audio?.channels === 'mono'
   return (
     <div className="in-stack">
-      <div className="in-pad in-legacy"><Properties bare sections={['Audio']} /></div>
+      {/* A sound clip's own tab row has no Video tab, so its timing (start,
+          end, duration, source in/out) lives here with its sound controls. */}
+      <div className="in-pad in-legacy"><Properties bare sections={kind === 'audio' ? ['Timing', 'Audio'] : ['Audio']} /></div>
       <div className="ui-hairline in-mx" />
       <div className="in-pad in-stack">
         <div className="ui-row-between"><span>Normalize loudness</span>

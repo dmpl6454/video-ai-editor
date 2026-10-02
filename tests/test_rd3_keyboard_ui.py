@@ -31,8 +31,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from test_frontend_a11y import base_url  # noqa: E402,F401  (fixture)
 from test_speed_ui_e2e import (  # noqa: E402,F401  (fixtures + helpers)
-    FIT_MARGIN, LABEL_W, TimelineGeometry, _client, _edl, _open, _project, _timecode, _v1, _wait_edl, bars,
-    engine, expect, pw,
+    FIT_MARGIN, LABEL_W, TimelineGeometry, _client, _edl, _inspector_tab, _open, _project, _timecode, _v1, _wait_edl,
+    bars, engine, expect, pw,
 )
 
 from video_ai_editor.edl.schema import Clip  # noqa: E402
@@ -73,6 +73,7 @@ def test_space_on_a_keyboard_focused_checkbox_toggles_it_and_does_not_play(engin
     sid = _project(base_url, bars, f"rd3 space {name}")
     page = _open(engine, base_url, sid, 1280, 800)
     TimelineGeometry(page).select(base_url, sid, _v1(_edl(base_url, sid))[1]["id"])
+    _inspector_tab(page, "Speed")
     box = '.props input[aria-label="Play backwards"]'
     before = page.locator(box).is_checked()
     _keyboard_focus(page, box)
@@ -140,6 +141,7 @@ def test_c_and_the_arrows_select_a_particular_clip(engine, base_url, bars):  # n
     page.keyboard.press("ArrowUp")
     page.wait_for_timeout(300)
     assert _state(page)["sel"] == clips[0]["id"]
+    _inspector_tab(page, "Speed")
     speed = page.locator('.props input[type="range"][aria-label*="peed"]').first
     _keyboard_focus(page, '.props input[type="range"][aria-label*="peed"]')
     speed.press("ArrowRight")
@@ -200,6 +202,7 @@ def test_a_hero_clips_duration_and_edge_drag_trim_through_the_curve(engine, base
     page = _open(engine, base_url, sid, 1280, 800)
     geo = TimelineGeometry(page)
     geo.select(base_url, sid, last["id"])
+    _inspector_tab(page, "Video")
     field = page.locator('.props input[aria-label="Duration"]').first
     field.click()
     field.fill("00:00:01:00")

@@ -143,6 +143,10 @@ def test_voice_effects_in_the_inspector(engine, base_url, voice_src):  # noqa: F
         page.goto(base_url + "/?vae-test")
         page.locator(".timeline-canvas-wrap canvas").first.wait_for()
         _select(page, v1_id)
+        # The clip inspector (2026-10-02 shell): a video clip's voice effects
+        # are Audio › Voice changer; a sound clip's are its Voice changer tab.
+        page.locator(".in-tabs").get_by_role("tab", name="Audio", exact=True).click()
+        page.get_by_role("radiogroup", name="Audio").get_by_role("radio", name="Voice changer", exact=True).click()
         grid = page.get_by_role("radiogroup", name="Voice effect")
         grid.wait_for(timeout=15000)
         grid.scroll_into_view_if_needed()
@@ -205,6 +209,7 @@ def test_voice_effects_in_the_inspector(engine, base_url, voice_src):  # noqa: F
 
         # the voice-over lane: its own clip, its own effect
         _select(page, vo_id)
+        page.locator(".in-tabs").get_by_role("tab", name="Voice changer", exact=True).click()
         grid.wait_for()
         page.wait_for_function("() => document.querySelector('[data-effect=none]')?.getAttribute('aria-checked') === 'true'")
         grid.get_by_role("radio", name="Hall").click()

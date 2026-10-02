@@ -179,6 +179,23 @@ def _footprint(clip: dict) -> float:
     return s / (sp if isinstance(sp, (int, float)) and sp > 0 else 1.0)
 
 
+def _inspector_tab(page, name: str) -> None:
+    """The clip inspector's tab holding a Properties section (2026-10-02 shell):
+    Speed for the speed section, Animation for animations, Audio for sound."""
+    tab = page.locator(".in-tabs").get_by_role("tab", name=name, exact=True)
+    tab.wait_for(timeout=5000)
+    if tab.get_attribute("aria-selected") != "true":
+        tab.click()
+    page.locator(".props[data-clip-id]").wait_for(timeout=5000)
+
+
+def _speed_mode(page, mode: str) -> None:
+    """Normal | Curve inside the Speed section (scoped: the inspector's own
+    Standard | Curve segmented control shares the name)."""
+    _inspector_tab(page, "Speed")
+    page.locator(".props").get_by_role("radiogroup", name="Speed mode").get_by_role("radio", name=mode, exact=True).click()
+
+
 def _timecode(t: float, fps: int = 30) -> str:
     f = tb.frame_of(t, fps)
     return f"{f // (3600 * fps):02d}:{f // (60 * fps) % 60:02d}:{f // fps % 60:02d}:{f % fps:02d}"
@@ -208,7 +225,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     # 1. Every CapCut preset, each on its own clip, through its radio.
     for cid, preset in zip(clips, menu):
         geo.select(base_url, sid, cid)
-        page.get_by_role("radio", name="Curve", exact=True).click()
+        _speed_mode(page, "Curve")
         props.get_by_role("radiogroup", name="Speed curve").wait_for()
         props.get_by_role("radio", name=preset["label"], exact=True).click()
         _wait_edl(base_url, sid, lambda e, cid=cid, p=preset: (next(c for c in _v1(e) if c["id"] == cid).get("speed") or {})
@@ -233,7 +250,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     #    three steps up the log axis: 1 → 1.12 → 1.26 → 1.41.
     last = clips[6]
     geo.select(base_url, sid, last)
-    page.get_by_role("radio", name="Curve", exact=True).click()
+    _speed_mode(page, "Curve")
     props.get_by_role("radio", name="Custom", exact=True).click()
     _wait_edl(base_url, sid, lambda e: (next(c for c in _v1(e) if c["id"] == last).get("speed") or {})
               .get("name") == "custom", "a custom curve")
@@ -269,6 +286,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     k2 = tb.frame_of(t2, 30)
     exp_pre = _expected(pre)
     geo.select(base_url, sid, bullet["id"])
+    _inspector_tab(page, "Speed")
     clock = page.get_by_role("textbox", name="Playhead timecode")
     clock.click()
     clock.fill(_timecode(t2))
@@ -294,6 +312,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     exp_before = _expected(before)
     # CapCut's rule: a selected clip must be the one under the playhead.
     geo.select(base_url, sid, hero["id"])
+    _inspector_tab(page, "Speed")
     clock = page.get_by_role("textbox", name="Playhead timecode")
     clock.click()
     clock.fill(_timecode(t))
@@ -311,7 +330,7 @@ def test_presets_custom_and_freeze_through_the_ui_export_as_the_program_map(
     page.wait_for_timeout(400)
     page.screenshot(path=str(SHOTS / f"speed_{name}_freeze_1440x900.png"))
     geo.select(base_url, sid, last)
-    page.get_by_role("radio", name="Curve", exact=True).click()
+    _speed_mode(page, "Curve")
     page.wait_for_timeout(300)
     page.screenshot(path=str(SHOTS / f"speed_{name}_custom_1440x900.png"))
 
